@@ -165,6 +165,9 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"RBE_HOT_EVERY": "${{ vars.RBE_FORK_HOT_EVERY || '1' }}",
 			// The local CAS cap: empty is the script's 150 GB default.
 			"CAS_MAX_BYTES": "${{ vars.RBE_FORK_CAS_MAX_BYTES || '' }}",
+			// The setup downloads' mirror (rbe-fetch; every file checked
+			// against the pin's sha256): off unless the variable names it.
+			"RBE_DIST_MIRROR": "${{ vars.RBE_FORK_DIST_MIRROR || '' }}",
 		}
 		for k, v := range want {
 			if step.Env[k] != v {
@@ -185,8 +188,9 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD,
 	// RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL, RBE_FORK_WARM_EVERY,
 	// RBE_FORK_HOT_URL, RBE_FORK_HOT_EVERY and RBE_FORK_CAS_MAX_BYTES (pinned
-	// above): none can turn isolation down, and none picks the worker code
-	// (always the pin).
+	// above), and RBE_FORK_DIST_MIRROR (the measure and worker steps, twice):
+	// none can turn isolation down, and none picks the worker code (always
+	// the pin).
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -194,11 +198,11 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if n := strings.Count(text, "vars."); n != 7 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
+	if n := strings.Count(text, "vars."); n != 9 || strings.Count(text, "vars.RBE_FORK_DIST_MIRROR ") != 2 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
 		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") || !strings.Contains(text, "vars.RBE_FORK_WARM_URL ") ||
 		!strings.Contains(text, "vars.RBE_FORK_WARM_EVERY ") || !strings.Contains(text, "vars.RBE_FORK_HOT_URL ") ||
 		!strings.Contains(text, "vars.RBE_FORK_HOT_EVERY ") || !strings.Contains(text, "vars.RBE_FORK_CAS_MAX_BYTES ") {
-		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL, RBE_FORK_WARM_EVERY, RBE_FORK_HOT_URL, RBE_FORK_HOT_EVERY and RBE_FORK_CAS_MAX_BYTES once each, nothing else", rbeForkPoolWorkflow, n)
+		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL, RBE_FORK_WARM_EVERY, RBE_FORK_HOT_URL, RBE_FORK_HOT_EVERY and RBE_FORK_CAS_MAX_BYTES once each and RBE_FORK_DIST_MIRROR twice, nothing else", rbeForkPoolWorkflow, n)
 	}
 }
 

@@ -130,6 +130,11 @@ var builtinAuthorship = map[string]Authorship{
 	// rows' post-images (DES-O1 D18), never the writer.
 	OpChanged:    AuthorLedger,
 	FactRecorded: AuthorLedger,
+	// The controller's bead event watcher derives both from session beads'
+	// bead.* notifications (cmd/gc session_list_events.go); a writer records
+	// only the bead.* event.
+	SessionCreated: AuthorLedger,
+	SessionClosed:  AuthorLedger,
 
 	// Worker: emitted by session and agent-facing command processes (the
 	// claim hook, mail, handoff, runtime drain, the control-dispatcher
@@ -204,6 +209,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionPendingCleared:                 AuthorController,
 	ReconcilerAlert:                       AuthorController,
 	ProviderHealthGateAlert:               AuthorController,
+	SessionStartupHealthAlert:             AuthorController,
 	ProviderSwapped:                       AuthorController,
 
 	// Controller: bead repairs and graph execution facts the controller
@@ -288,6 +294,7 @@ var builtinAuthorship = map[string]Authorship{
 	StorageBindingUnconverged:       AuthorController,
 	StorageBindingUncheckable:       AuthorController,
 	StorageBindingNotConfigured:     AuthorController,
+	StorageBindingStranded:          AuthorController,
 	StorageRigImport:                AuthorController,
 	StorageRigResidue:               AuthorController,
 }

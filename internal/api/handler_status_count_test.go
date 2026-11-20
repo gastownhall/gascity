@@ -324,10 +324,10 @@ func TestStatusStoreWorkCountsPreservesReadyWhenCounterTimesOut(t *testing.T) {
 		t.Fatalf("Create ready survivor: %v", err)
 	}
 	state := newFakeState(t)
-	result := statusStoreWorkCounts(context.Background(), state, "myrig", &contextBlockingCounterStore{
+	result := statusStoreWorkCountsFor(context.Background(), state, "rig myrig", testWorkLeg(t, &contextBlockingCounterStore{
 		Store: store,
 		t:     t,
-	})
+	}), true, true)
 
 	if result.wc.Ready != 1 {
 		t.Fatalf("Ready = %d, want 1 even when persisted Count consumes the deadline", result.wc.Ready)
@@ -362,7 +362,7 @@ func TestStatusStoreWorkCountsBoundsContextIgnoringCounter(t *testing.T) {
 	state := newFakeState(t)
 	resultDone := make(chan statusWorkResult, 1)
 	go func() {
-		resultDone <- statusStoreWorkCounts(context.Background(), state, "myrig", blocking)
+		resultDone <- statusStoreWorkCountsFor(context.Background(), state, "rig myrig", testWorkLeg(t, blocking), true, true)
 	}()
 	select {
 	case <-blocking.entered:
@@ -374,7 +374,7 @@ func TestStatusStoreWorkCountsBoundsContextIgnoringCounter(t *testing.T) {
 	select {
 	case result = <-resultDone:
 	case <-time.After(time.Second):
-		t.Fatal("statusStoreWorkCounts did not honor its outer deadline")
+		t.Fatal("statusStoreWorkCountsFor did not honor its outer deadline")
 	}
 	if result.wc.Ready != 1 {
 		t.Fatalf("Ready = %d, want completed Ready survivor", result.wc.Ready)
@@ -397,7 +397,7 @@ func TestStatusStoreWorkCountsPreservesPartialCounterBuckets(t *testing.T) {
 	if _, err := store.Create(beads.Bead{Type: "task", Title: "ready survivor"}); err != nil {
 		t.Fatalf("Create ready survivor: %v", err)
 	}
-	result := statusStoreWorkCounts(context.Background(), newFakeState(t), "myrig", &partialCounterStore{Store: store})
+	result := statusStoreWorkCountsFor(context.Background(), newFakeState(t), "rig myrig", testWorkLeg(t, &partialCounterStore{Store: store}), true, true)
 
 	if result.wc.Open != 7 || result.wc.Ready != 1 {
 		t.Fatalf("Work = %+v, want open=7 and ready=1 survivors", result.wc)

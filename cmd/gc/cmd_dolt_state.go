@@ -37,6 +37,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		cityPath      string
 		hostText      string
 		userText      string
+		databaseName  string
 		checkReadOnly bool
 		checkDeleted  bool
 		forceReset    bool
@@ -55,6 +56,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc dolt-state write-provider: %v\n", err) //nolint:errcheck
 				return errExit
 			}
+			state = keepRecordedInfraScope(stateFile, state)
 			if err := writeDoltRuntimeStateFile(stateFile, state); err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state write-provider: %v\n", err) //nolint:errcheck
 				return errExit
@@ -334,7 +336,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			report, err := managedDoltHealthCheck(hostText, portText, userText, checkReadOnly)
+			report, err := managedDoltHealthCheckFor(hostText, portText, userText, checkReadOnly, managedDoltHealthTarget{
+				Database: databaseName,
+				DataDir:  dataDir,
+			})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state health-check: %v\n", err) //nolint:errcheck
 				return errExit
@@ -352,6 +357,8 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	healthCheck.Flags().StringVar(&portText, "port", "", "Dolt port")
 	healthCheck.Flags().StringVar(&userText, "user", "", "Dolt user")
 	healthCheck.Flags().BoolVar(&checkReadOnly, "check-read-only", false, "include read-only status")
+	healthCheck.Flags().StringVar(&databaseName, "database", "", "scope database that must exist, resolve its default branch head, and accept a sample write and read")
+	healthCheck.Flags().StringVar(&dataDir, "data-dir", "", "managed Dolt data dir that must hold the --database repository")
 	_ = healthCheck.MarkFlagRequired("port")
 	cmd.AddCommand(healthCheck)
 
@@ -635,6 +642,23 @@ func parseDoltRuntimeStateFlags(pidText, runText, portText, dataDir, startedAt s
 		DataDir:   dataDir,
 		StartedAt: startedAt,
 	}, nil
+}
+
+// keepRecordedInfraScope carries the infra scope recorded in the existing
+// state file into state when both name the same server PID. The provider
+// script rewrites its state from flags alone on every start or ensure-ready
+// against a live server; without this the scope gc recorded when it started
+// that server would be lost before the server ever exits.
+func keepRecordedInfraScope(stateFile string, state doltRuntimeState) doltRuntimeState {
+	if state.InfraScope != "" {
+		return state
+	}
+	existing, err := readDoltRuntimeStateFile(stateFile)
+	if err != nil || existing.PID != state.PID {
+		return state
+	}
+	state.InfraScope = existing.InfraScope
+	return state
 }
 
 func doltRuntimeStateField(state doltRuntimeState, field string) (string, error) {

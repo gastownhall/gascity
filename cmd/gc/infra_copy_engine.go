@@ -37,7 +37,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // The batch sizes. Variables only so a test can cut a small city into many
@@ -289,10 +288,7 @@ func withInfraCrossEdgeRecords(b beads.Bead, records []rigCrossEdgeRecord) beads
 	if err != nil {
 		return b
 	}
-	metadata := make(beads.StringMap, len(b.Metadata)+1)
-	for key, value := range b.Metadata {
-		metadata[key] = value
-	}
+	metadata := cloneBeadMetadata(b.Metadata)
 	metadata[beadmeta.MigratedCrossEdgesMetadataKey] = string(raw)
 	b.Metadata = metadata
 	return b
@@ -418,7 +414,8 @@ func infraBackupEntriesFrom(rows []beads.Bead, down map[string][]beads.Dep, payl
 	}
 	out := make([]infraBackupEntry, 0, len(rows))
 	for _, b := range rows {
-		entry := infraBackupEntry{Bead: b, Class: coordclass.Classify(b).String(), Dependents: dependents[b.ID]}
+		entry := newInfraBackupEntry(b)
+		entry.Dependents = dependents[b.ID]
 		for _, d := range down[b.ID] {
 			entry.Deps = append(entry.Deps, edge(d))
 		}

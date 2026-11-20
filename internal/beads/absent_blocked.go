@@ -61,7 +61,7 @@ type AbsentBlockedReader interface {
 // has none (StrandsAbsentTargets). Like DepListBatchFor it sees through class
 // handles by walking the class layers itself, not through As, which answers
 // this capability by calling here.
-func ReadyBlockedByAbsentFor(store Store) (AbsentBlockedReader, bool) {
+func ReadyBlockedByAbsentFor(store StoreReader) (AbsentBlockedReader, bool) {
 	reader, ok := physicalStore(store).(AbsentBlockedReader)
 	if !ok || !reader.StrandsAbsentTargets() {
 		return nil, false

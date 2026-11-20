@@ -28,6 +28,10 @@
 //     this binary must refuse and name the repair command; running it repairs
 //     the city.
 //   - BornSplit: a city with [storage] from its first boot. The control.
+//   - RawBdStrandAfterCutover / RawBdStrandAfterFreshMigration: a born-split
+//     city, and a freshly migrated one, stranded mid-formula by a plain
+//     `bd create` carrying gc.root_bead_id (substrate 2026-11-09). Each serves
+//     degraded, finishes the formula, and is repaired in place.
 //
 // Requires: bd >= 1.3.0, dolt, jq. The work store is a bd city bound to an
 // external Dolt server the test owns (the --dolt-host canonical-endpoint
@@ -211,6 +215,122 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 		root := c.runFirstHalf()
 		c.finishAndAssert(root)
 	})
+
+	// RawBdStrandAfterCutover is substrate 2026-11-09: mid-formula, an
+	// agent's plain `bd create` stamps the workflow root as provenance on
+	// ordinary work, which makes it graph class and stranded. The city must
+	// keep serving (degraded) — boot included — and the in-place repair must
+	// clear it on the running city.
+	t.Run("RawBdStrandAfterCutover", func(t *testing.T) {
+		c := newSplitE2ECity(t, bdPath, doltPath, true, "")
+		root := c.runFirstHalf()
+		c.strandServeDegradedAndRepair(bdPath, root)
+	})
+
+	// The same on a city that ran its first half unsplit and was migrated
+	// with this binary (the FreshMigration shape).
+	t.Run("RawBdStrandAfterFreshMigration", func(t *testing.T) {
+		c := newSplitE2ECity(t, bdPath, doltPath, false, "")
+		root := c.runFirstHalf()
+		c.authorSplit()
+		c.migrate()
+		c.strandServeDegradedAndRepair(bdPath, root)
+	})
+}
+
+// strandServeDegradedAndRepair strands a task and a bug carrying
+// gc.root_bead_id=root with raw bd on the stopped city, then requires it to
+// serve degraded, finish the formula, take the in-place repair, and finish
+// clean.
+func (c *splitE2ECity) strandServeDegradedAndRepair(bdPath, root string) {
+	c.t.Helper()
+	ids := []string{
+		c.rawBdCreateStrand(bdPath, root, "task"),
+		c.rawBdCreateStrand(bdPath, root, "bug"),
+	}
+	c.assertStatusDegraded(ids)
+	c.finishDegradedAndRepair(root, ids)
+	c.stop()
+	c.finishAndAssert(root)
+}
+
+// rawBdCreateStrand writes, with the bd binary itself from the city
+// directory (no gc judge), a bead of beadType carrying gc.root_bead_id=root,
+// and returns its id. It is the incident's write.
+func (c *splitE2ECity) rawBdCreateStrand(bdPath, root, beadType string) string {
+	c.t.Helper()
+	cmd := exec.Command(bdPath, "create", "--json", "--type", beadType,
+		"--metadata", fmt.Sprintf(`{"gc.root_bead_id":%q}`, root),
+		"raw bd finding that names its workflow")
+	cmd.Dir = c.dir
+	cmd.Env = c.city.Env.List()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		c.t.Fatalf("raw bd create: %v\n%s", err, out)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	payload := strings.TrimSpace(string(out))
+	if i := strings.Index(payload, "{"); i >= 0 {
+		payload = payload[i:]
+	}
+	if err := json.Unmarshal([]byte(payload), &created); err != nil || created.ID == "" {
+		c.t.Fatalf("decode bd create --json: %v\n%s", err, out)
+	}
+	return created.ID
+}
+
+// assertStatusDegraded requires gc storage status to exit non-zero, name
+// every id, say the city serves degraded and spell the in-place repair.
+func (c *splitE2ECity) assertStatusDegraded(ids []string) {
+	c.t.Helper()
+	out, err := c.city.GC("storage", "status")
+	if err == nil {
+		c.t.Fatalf("gc storage status exited 0 with %v stranded:\n%s", ids, out)
+	}
+	if !strings.Contains(out, "serving:     degraded") {
+		c.t.Errorf("gc storage status does not say the city serves degraded:\n%s", out)
+	}
+	for _, id := range ids {
+		if !strings.Contains(out, "gc bd update "+id+" --unset-metadata gc.root_bead_id") {
+			c.t.Errorf("gc storage status does not spell the in-place repair for %s:\n%s", id, out)
+		}
+	}
+}
+
+// finishDegradedAndRepair starts the stranded city (before the degraded
+// verdict, a refused boot), lets the worker finish the formula through gc hook
+// --claim and gc bd update (each refused before), reads and comments on a
+// stranded row through gc bd, then repairs every row in place on the running
+// city and requires gc storage status to exit 0.
+func (c *splitE2ECity) finishDegradedAndRepair(root string, ids []string) {
+	c.t.Helper()
+	if err := os.Remove(c.path(".gc", "split-e2e-budget")); err != nil && !os.IsNotExist(err) {
+		c.t.Fatalf("lift worker budget: %v", err)
+	}
+	c.start()
+	if !c.city.WaitForCondition(func() bool { return c.status(root) == "closed" }, splitPhaseTimeout()) {
+		c.dumpDiagnostics(root)
+		c.t.Fatalf("workflow root %s did not close on the degraded city within %s", root, splitPhaseTimeout())
+	}
+	if n := c.events().counts["storage.binding.stranded"]; n == 0 {
+		c.t.Errorf("the degraded boot published no storage.binding.stranded event")
+	}
+	if got := c.show(ids[0]).Status; got != "open" {
+		c.t.Errorf("gc bd show %s = %q, want the work row (open)", ids[0], got)
+	}
+	if out, err := c.city.GC("bd", "comments", "add", ids[0], "triage note"); err != nil {
+		c.t.Errorf("gc bd comments add on the stranded work row: %v\n%s", err, out)
+	}
+	for _, id := range ids {
+		if out, err := c.city.GC("bd", "update", id, "--unset-metadata", "gc.root_bead_id"); err != nil {
+			c.t.Fatalf("the in-place repair of %s was refused: %v\n%s", id, err, out)
+		}
+	}
+	if out, err := c.city.GC("storage", "status"); err != nil {
+		c.t.Fatalf("gc storage status exited non-zero after the in-place repair: %v\n%s", err, out)
+	}
 }
 
 // splitPhaseTimeout is splitPhaseTimeoutDefault, or the duration in

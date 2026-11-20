@@ -54,7 +54,8 @@ type StoreHandles struct {
 // HandlesFor returns explicit cached/live reader and writer handles for a
 // store. Stores with a native handle implementation keep their stronger
 // guarantees; plain stores use logical wrappers that hide tier selection from
-// callers.
+// callers. A typed class handle, a ResidentStore or a leg layer answers its
+// store's handles with itself as the writer (class_store_handles.go).
 func HandlesFor(store Store) StoreHandles {
 	if provider, ok := store.(interface {
 		Handles() StoreHandles

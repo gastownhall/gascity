@@ -317,9 +317,10 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		held   []string
 	)
 	blocked := make(map[string]string)
+	rt := cityMaterializationRuntime(cfg, cityPath)
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
-		if !canStage1Materialize(cfg.Session.Provider, agent) {
+		if !canStage1Materialize(rt, agent) {
 			continue
 		}
 		view, err := resolveConfiguredAgentMCPProjectionWith(cityPath, cfg, agent, lookPath, pathOnly)
@@ -343,7 +344,7 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		}
 	}
 	if claims.conflict != nil {
-		return stage1MCPTargets{}, claims.conflict.stage1Error(cfg.Session.Provider)
+		return stage1MCPTargets{}, claims.conflict.stage1Error(cityMaterializationRuntime(cfg, cityPath))
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
@@ -427,8 +428,8 @@ func (c *mcpTargetClaim) agents(hashes ...string) []string {
 
 // stage1Error is gc start's error for a conflicting target: the claimants of
 // its first two payloads and, when two claimants have that shape, the
-// agent-local cause (agentLocalCause) for a city of sessionProvider.
-func (c *mcpTargetClaim) stage1Error(sessionProvider string) error {
+// agent-local cause (agentLocalCause) for a city whose session runtime is rt.
+func (c *mcpTargetClaim) stage1Error(rt materializationRuntime) error {
 	target := c.first().Projection
 	msg := fmt.Sprintf(
 		"MCP target conflict at %s (%s): %s projects %s but %s projects %s",
@@ -439,7 +440,7 @@ func (c *mcpTargetClaim) stage1Error(sessionProvider string) error {
 		strings.Join(c.agents(c.hashes[1]), ", "),
 		c.hashes[1],
 	)
-	if cause := c.agentLocalCause(sessionProvider); cause != "" {
+	if cause := c.agentLocalCause(rt); cause != "" {
 		msg += "; " + cause
 	}
 	return errors.New(msg)
@@ -448,10 +449,10 @@ func (c *mcpTargetClaim) stage1Error(sessionProvider string) error {
 // agentLocalCause returns the agent-local cause (mcpAgentLocalConflictCause)
 // of the first two claimants with different payloads that have that shape,
 // or "".
-func (c *mcpTargetClaim) agentLocalCause(sessionProvider string) string {
+func (c *mcpTargetClaim) agentLocalCause(rt materializationRuntime) string {
 	for i, hash := range c.hashes {
 		for _, other := range c.hashes[i+1:] {
-			if cause := mcpAgentLocalConflictCauseAmong(c.views[hash], c.views[other], sessionProvider); cause != "" {
+			if cause := mcpAgentLocalConflictCauseAmong(c.views[hash], c.views[other], rt); cause != "" {
 				return cause
 			}
 		}
@@ -464,9 +465,9 @@ func (c *mcpTargetClaim) agentLocalCause(sessionProvider string) string {
 // that project different payloads, when one is the implicit agent gc adds for
 // a provider and the other has servers from its own mcp/ directory (MCPDir),
 // which the implicit agent never receives. Any other pair returns "". The
-// remedy offers the agent its own work_dir only where a session of
-// sessionProvider receives MCP there, at stage 2.
-func mcpAgentLocalConflictCause(a, b resolvedMCPProjection, sessionProvider string) string {
+// remedy offers the agent its own work_dir only where the session runtime rt
+// delivers MCP there, at stage 2.
+func mcpAgentLocalConflictCause(a, b resolvedMCPProjection, rt materializationRuntime) string {
 	if a.Agent == nil || b.Agent == nil || a.Agent.Implicit == b.Agent.Implicit ||
 		a.Delivery != "stage1" || b.Delivery != "stage1" {
 		return ""
@@ -480,7 +481,7 @@ func mcpAgentLocalConflictCause(a, b resolvedMCPProjection, sessionProvider stri
 	}
 	name := mcpAgentLabel(local.Agent)
 	remedy := "move its servers to an mcp/ directory both receive: the city's mcp/, or for a rig root, a pack the rig imports"
-	if isStage2EligibleSession(sessionProvider, local.Agent) {
+	if isStage2EligibleSession(rt, local.Agent) {
 		remedy = fmt.Sprintf("give %s its own work_dir, or %s", name, remedy)
 	}
 	return fmt.Sprintf(
@@ -494,10 +495,10 @@ func mcpAgentLocalConflictCause(a, b resolvedMCPProjection, sessionProvider stri
 
 // mcpAgentLocalConflictCauseAmong returns the first agent-local conflict
 // cause between a claimant of one payload and a claimant of the other.
-func mcpAgentLocalConflictCauseAmong(left, right []resolvedMCPProjection, sessionProvider string) string {
+func mcpAgentLocalConflictCauseAmong(left, right []resolvedMCPProjection, rt materializationRuntime) string {
 	for _, a := range left {
 		for _, b := range right {
-			if cause := mcpAgentLocalConflictCause(a, b, sessionProvider); cause != "" {
+			if cause := mcpAgentLocalConflictCause(a, b, rt); cause != "" {
 				return cause
 			}
 		}
@@ -1104,8 +1105,9 @@ func resolveProjectedMCPForTarget(
 		return resolvedMCPProjection{}, err
 	}
 	canonWorkDir := canonicaliseFilePath(workDir, cityPath)
-	stage1 := canStage1Materialize(cfg.Session.Provider, agent) && canonWorkDir == scopeRoot
-	stage2 := isStage2EligibleSession(cfg.Session.Provider, agent) && canonWorkDir != scopeRoot
+	rt := cityMaterializationRuntime(cfg, cityPath)
+	stage1 := canStage1Materialize(rt, agent) && canonWorkDir == scopeRoot
+	stage2 := isStage2EligibleSession(rt, agent) && canonWorkDir != scopeRoot
 	if len(mcp.Catalog.Servers) > 0 && !stage1 && !stage2 && !inBand {
 		return resolvedMCPProjection{}, fmt.Errorf(
 			"effective MCP cannot be delivered to workdir %q with session provider %q",
