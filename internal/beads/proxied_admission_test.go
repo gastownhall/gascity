@@ -2871,3 +2871,16 @@ func TestProxiedOpenUnmovedChecksThePlaneUnderAForeignWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestProxiedOpenUnmovedKeepsAForeignWindow is AC-1's unit half: a moved HEAD
+// whose window shows only another client's ordinary writes — no schema:
+// prefix, data-only changes to tables the open never writes — is no verdict.
+func TestProxiedOpenUnmovedKeepsAForeignWindow(t *testing.T) {
+	window := &proxyendpoint.PostOpenWindow{
+		Commits: []string{"bd: update ga-1", "bd: create ga-2"},
+		Tables:  []proxyendpoint.WindowTable{{Name: "issues"}, {Name: "events"}, {Name: "labels"}},
+	}
+	if err := ProxiedOpenUnmoved(movedHeadPin(), movedHeadReport(window)); err != nil {
+		t.Fatalf("another client's ordinary commit was read as the open's: %v", err)
+	}
+}

@@ -251,23 +251,35 @@ func CursorsMatchPinned(c proxyendpoint.Cursors, reality proxyendpoint.CursorRea
 // not a new hole: detecting that write, rather than its leftovers, needs the
 // read-only open from beads.
 //
-// # Why it is not terminal, and what it therefore does NOT claim
+// # Whose move it was: the window
 //
-// gc cannot tell a commit ITS open minted from one another bd client made in the
-// same window: bd writes to this database constantly, and the schema commits
-// carry no author gc could recognize. Demoting terminally on that would let
-// another process's ordinary `bd update` permanently pin a scope to the bd front
-// door. So the verdict is non-terminal: this open stands down loudly (every
-// site that meets the verdict logs it at WARN with both hashes — the factory,
-// the read path's reopen and the guard's recovery, proxied_incident_log.go),
-// the opener forgets the memoized admission so the next open re-probes and is
-// checked again, and a genuine per-open write shows up as a per-open demotion
-// rather than as silence.
+// bd writes to this database constantly, so a HEAD that moved between the
+// probe and the re-read is usually another client's commit, and refusing every
+// such open would demote a busy city's scopes to the bd front door for no
+// reason. So a moved HEAD is attributed by the window between the two hashes
+// (proxyendpoint.PostOpenWindow, read on the observation's own pinned
+// connection), and it is let through only on positive evidence:
 //
-// The price of that choice is stated rather than hidden: on a city whose bd
-// clients commit inside the probe-to-re-read window, an open that wrote nothing
-// is demoted to the bd front door it would otherwise have replaced. That is the
-// pre-PR2 path, so it costs forks, never correctness.
+//   - A window that was not read, could not be read, holds more commits than
+//     were read, or lists none is no evidence. It is head_moved, with the
+//     reason in the detail (proxiedWindowUnattributable).
+//   - A window carrying a library open's shape is head_moved naming the commit
+//     or table that decided it (proxiedWindowOpenShape): a commit under the
+//     open path's schema: label, a schema change on any table, or a change to
+//     one of the tables only the open path writes. The table half is what
+//     catches the open's uncommitted write swept into another client's -Am
+//     commit, whose message says nothing.
+//   - Anything else is another client's ordinary write. It is no verdict; the
+//     memoized admission stands, and the ignored-plane check below still runs,
+//     because a window of committed writes says nothing about the plane HEAD
+//     cannot see.
+//
+// The verdict stays non-terminal. A window can be misread — a release that
+// renames a schema: commit would hide it, which is what the pinned-module
+// drift guard exists to catch — and a non-terminal stand-down re-probes on the
+// next open, so a per-open write shows up as a per-open demotion rather than
+// as a scope pinned to the bd front door for the process. Every site that
+// meets the verdict logs it at WARN with both hashes (proxied_incident_log.go).
 //
 // # An unobserved HEAD declines rather than agrees
 //
@@ -307,16 +319,6 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 				"cannot see it, and a plane the next writable open would replay is not one this leaf may serve; "+
 				"this open takes bd's front door and the next open re-probes",
 			pin.Database(), after, now, admitted, observed.IgnoredPlaneReason()), nil)
-	}
-	if before != after {
-		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
-			"opening the linked library against database %q moved HEAD from %s to %s: "+
-				"PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database "+
-				"(a writable library open can seed dolt_ignore, heal the tracked cursor table, or add a "+
-				"content_hash column, each ending in a DOLT_COMMIT); this open takes bd's front door. "+
-				"If another bd client committed in the same window this is that write and not gc's, "+
-				"which is why the verdict is non-terminal and the next open re-probes",
-			pin.Database(), before, after), nil)
 	}
 	return nil
 }
