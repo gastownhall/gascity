@@ -399,7 +399,7 @@ func AppendRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City
 		return fmt.Errorf("reading %s: %w", writePath, err)
 	}
 
-	snapshot, err := snapshotCityAndSiteFiles(fs, writePath, SiteBindingPath(cityRoot))
+	snapshot, err := snapshotCityEdit(fs, writePath, cityRoot)
 	if err != nil {
 		return err
 	}
@@ -443,17 +443,7 @@ func writeCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, 
 	if err != nil {
 		return err
 	}
-	// Snapshot the .gc/site.toml target persistSiteBinding actually writes,
-	// not the link itself: resolve-only (no key-loss guard, the rollback
-	// rewrites snapshotted bytes), mirroring the resolved forward write so a
-	// post-city.toml binding failure restores the target instead of renaming
-	// over (or removing) a symlinked site binding.
-	sitePath := SiteBindingPath(cityRoot)
-	resolvedSitePath, err := fsys.ResolveSymlinks(fs, sitePath)
-	if err != nil {
-		return fmt.Errorf("resolving site binding %q for rewrite: %w", sitePath, err)
-	}
-	snapshot, err := snapshotCityAndSiteFiles(fs, writePath, resolvedSitePath)
+	snapshot, err := snapshotCityEdit(fs, writePath, cityRoot)
 	if err != nil {
 		return err
 	}
@@ -620,6 +610,22 @@ type configFileSnapshot struct {
 	data    []byte
 	mode    os.FileMode
 	existed bool
+}
+
+// snapshotCityEdit snapshots city.toml at writePath and the city's
+// .gc/site.toml for a city edit to restore if its site-binding write fails.
+// It snapshots the .gc/site.toml target persistSiteBinding actually writes,
+// not the link itself: resolve-only (no key-loss guard, the rollback rewrites
+// snapshotted bytes), mirroring the resolved forward write so a
+// post-city.toml binding failure restores the target instead of renaming
+// over (or removing) a symlinked site binding.
+func snapshotCityEdit(fs fsys.FS, writePath, cityRoot string) (*configFileRestoreSnapshot, error) {
+	sitePath := SiteBindingPath(cityRoot)
+	resolvedSitePath, err := fsys.ResolveSymlinks(fs, sitePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving site binding %q for edit: %w", sitePath, err)
+	}
+	return snapshotCityAndSiteFiles(fs, writePath, resolvedSitePath)
 }
 
 func snapshotCityAndSiteFiles(fs fsys.FS, paths ...string) (*configFileRestoreSnapshot, error) {

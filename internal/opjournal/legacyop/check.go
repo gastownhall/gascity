@@ -25,7 +25,7 @@ func (r *Recorder) Check(req Request) error {
 		return nil
 	}
 	if req.Key != "" {
-		if err := opjournal.ValidateClientKey(req.Key); err != nil {
+		if err := ValidateKey(req.Kind, req.KeyNamespace, req.Key); err != nil {
 			r.count(req.Kind, StageAdmit, ResultRefused, ReasonInvalidKey)
 			return err
 		}

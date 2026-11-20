@@ -325,7 +325,7 @@ func configDriftRevertWindow(t *testing.T, mode gate.Mode, otherReason string) (
 	if !ok {
 		t.Fatalf("store under the claim hook = %T, want *beads.MemStore", claim.Store)
 	}
-	if err := beads.StampOpenedStore(mem, "MemStore", mode, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", mode, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore(%s): %v", mode, err)
 	}
 	w := &revertWindowStore{claimAtDrainMarkStore: claim, mem: mem}

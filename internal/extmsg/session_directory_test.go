@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -45,7 +46,7 @@ func TestSessionDirectorySplitKeepsExtmsgRecordsInMessaging(t *testing.T) {
 	messaging := beads.NewMemStore()
 	sessionsStore := beads.NewMemStore()
 	directory := session.NewStore(beads.SessionStore{Store: sessionsStore})
-	fabric, err := NewServicesWithSessionDirectory(messaging, directory)
+	fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), directory)
 	if err != nil {
 		t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestSessionDirectorySplitKeepsExtmsgRecordsInMessaging(t *testing.T) {
 	}
 	newID := respawn(t, sessionsStore, oldID, "gc-split")
 
-	stats, err := ReapStaleBindingsWithSessionDirectory(context.Background(), messaging, directory, testNow())
+	stats, err := ReapStaleBindingsWithSessionDirectory(context.Background(), beadstest.Mail(messaging), directory, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindingsWithSessionDirectory: %v", err)
 	}
@@ -80,7 +81,7 @@ func TestSessionDirectorySplitHealsParticipantsInMessaging(t *testing.T) {
 	messaging := beads.NewMemStore()
 	sessionsStore := beads.NewMemStore()
 	directory := session.NewStore(beads.SessionStore{Store: sessionsStore})
-	fabric, err := NewServicesWithSessionDirectory(messaging, directory)
+	fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), directory)
 	if err != nil {
 		t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestSessionDirectorySplitHealsParticipantsInMessaging(t *testing.T) {
 	}
 	newID := respawn(t, sessionsStore, oldID, "gc-participant")
 
-	stats, err := ReapStaleParticipantsWithSessionDirectory(context.Background(), messaging, directory)
+	stats, err := ReapStaleParticipantsWithSessionDirectory(context.Background(), beadstest.Mail(messaging), directory)
 	if err != nil {
 		t.Fatalf("ReapStaleParticipantsWithSessionDirectory: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestSessionDirectorySplitHealsParticipantsInMessaging(t *testing.T) {
 
 func TestNewServicesWithSessionDirectoryRejectsTypedNil(t *testing.T) {
 	var directory *session.Store
-	if _, err := NewServicesWithSessionDirectory(beads.NewMemStore(), directory); err == nil {
+	if _, err := NewServicesWithSessionDirectory(beadstest.Mail(beads.NewMemStore()), directory); err == nil {
 		t.Fatal("NewServicesWithSessionDirectory accepted typed-nil directory")
 	}
 }
@@ -131,7 +132,7 @@ func TestSessionDirectorySameStorePreservesBindingReap(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	directory := session.NewStore(beads.SessionStore{Store: store})
-	fabric, err := NewServicesWithSessionDirectory(store, directory)
+	fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(store), directory)
 	if err != nil {
 		t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 	}
@@ -145,7 +146,7 @@ func TestSessionDirectorySameStorePreservesBindingReap(t *testing.T) {
 		t.Fatalf("Bind: %v", err)
 	}
 	newID := respawn(t, store, oldID, "gc-same-store")
-	stats, err := ReapStaleBindingsWithSessionDirectory(context.Background(), store, directory, testNow())
+	stats, err := ReapStaleBindingsWithSessionDirectory(context.Background(), beadstest.Mail(store), directory, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindingsWithSessionDirectory: %v", err)
 	}
@@ -163,7 +164,7 @@ func TestBindPropagatesSessionDirectoryFailureWithoutMessagingMutation(t *testin
 	messaging := beads.NewMemStore()
 	const sensitiveSelector = "sensitive-bind-selector"
 	directory := &switchableSessionDirectory{err: unsafeSessionDirectoryError(sensitiveSelector)}
-	fabric, err := NewServicesWithSessionDirectory(messaging, directory)
+	fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), directory)
 	if err != nil {
 		t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestUpsertParticipantPropagatesSessionDirectoryFailureWithoutMessagingMutat
 	directory := &switchableSessionDirectory{
 		delegate: session.NewStore(beads.SessionStore{Store: beads.NewMemStore()}),
 	}
-	fabric, err := NewServicesWithSessionDirectory(messaging, directory)
+	fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), directory)
 	if err != nil {
 		t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 	}
@@ -219,7 +220,7 @@ func TestLiveSessionOverlayPropagatesSessionDirectoryFailure(t *testing.T) {
 		directory := &switchableSessionDirectory{
 			delegate: session.NewStore(beads.SessionStore{Store: sessionsStore}),
 		}
-		fabric, err := NewServicesWithSessionDirectory(messaging, directory)
+		fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), directory)
 		if err != nil {
 			t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 		}
@@ -273,7 +274,7 @@ func TestBindingReaperPropagatesSessionDirectoryFailureWithoutMessagingMutation(
 	directory := &switchableSessionDirectory{
 		delegate: session.NewStore(beads.SessionStore{Store: sessionsStore}),
 	}
-	fabric, err := NewServicesWithSessionDirectory(messaging, directory)
+	fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), directory)
 	if err != nil {
 		t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 	}
@@ -289,7 +290,7 @@ func TestBindingReaperPropagatesSessionDirectoryFailureWithoutMessagingMutation(
 	before := snapshotMessagingRows(t, messaging)
 	directory.err = unsafeSessionDirectoryError(sensitiveName, sessionID)
 
-	_, err = ReapStaleBindingsWithSessionDirectory(context.Background(), messaging, directory, testNow())
+	_, err = ReapStaleBindingsWithSessionDirectory(context.Background(), beadstest.Mail(messaging), directory, testNow())
 
 	requireSessionDirectoryFailure(t, err, "resolve stale binding live session", sensitiveName, sessionID)
 	requireMessagingRowsUnchanged(t, messaging, before)
@@ -300,7 +301,7 @@ func TestParticipantReaperPropagatesSessionDirectoryFailureWithoutMessagingMutat
 	before := snapshotMessagingRows(t, messaging)
 	directory.err = unsafeSessionDirectoryError(sensitiveName, sessionID)
 
-	_, err := ReapStaleParticipantsWithSessionDirectory(context.Background(), messaging, directory)
+	_, err := ReapStaleParticipantsWithSessionDirectory(context.Background(), beadstest.Mail(messaging), directory)
 
 	requireSessionDirectoryFailure(t, err, "resolve stale participant live session", sensitiveName, sessionID)
 	requireMessagingRowsUnchanged(t, messaging, before)
@@ -320,7 +321,7 @@ func TestReapersRejectMissingSessionDirectoryWithoutMessagingMutation(t *testing
 			messaging := beads.NewMemStore()
 			sessionsStore := beads.NewMemStore()
 			healthy := session.NewStore(beads.SessionStore{Store: sessionsStore})
-			fabric, err := NewServicesWithSessionDirectory(messaging, healthy)
+			fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), healthy)
 			if err != nil {
 				t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 			}
@@ -334,7 +335,7 @@ func TestReapersRejectMissingSessionDirectoryWithoutMessagingMutation(t *testing
 			}
 			before := snapshotMessagingRows(t, messaging)
 
-			_, err = ReapStaleBindingsWithSessionDirectory(context.Background(), messaging, test.directory, testNow())
+			_, err = ReapStaleBindingsWithSessionDirectory(context.Background(), beadstest.Mail(messaging), test.directory, testNow())
 
 			if err == nil || !strings.Contains(err.Error(), "sessions directory") {
 				t.Fatalf("ReapStaleBindingsWithSessionDirectory() error = %v, want missing Sessions authority", err)
@@ -346,7 +347,7 @@ func TestReapersRejectMissingSessionDirectoryWithoutMessagingMutation(t *testing
 			_, messaging, _, _, _ := sessionDirectoryGroupFixture(t)
 			before := snapshotMessagingRows(t, messaging)
 
-			_, err := ReapStaleParticipantsWithSessionDirectory(context.Background(), messaging, test.directory)
+			_, err := ReapStaleParticipantsWithSessionDirectory(context.Background(), beadstest.Mail(messaging), test.directory)
 
 			if err == nil || !strings.Contains(err.Error(), "sessions directory") {
 				t.Fatalf("ReapStaleParticipantsWithSessionDirectory() error = %v, want missing Sessions authority", err)
@@ -363,7 +364,7 @@ func TestReapersRedactWrappedPersistenceFailures(t *testing.T) {
 		messaging := &failingExtmsgUpdateStore{Store: base}
 		sessionsStore := beads.NewMemStore()
 		directory := session.NewStore(beads.SessionStore{Store: sessionsStore})
-		fabric, err := NewServicesWithSessionDirectory(messaging, directory)
+		fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), directory)
 		if err != nil {
 			t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 		}
@@ -379,7 +380,7 @@ func TestReapersRedactWrappedPersistenceFailures(t *testing.T) {
 		newID := respawn(t, sessionsStore, oldID, sensitiveName)
 		messaging.err = unsafeMessagingPersistenceError(sensitiveName, oldID, newID)
 
-		_, err = ReapStaleBindingsWithSessionDirectory(context.Background(), messaging, directory, testNow())
+		_, err = ReapStaleBindingsWithSessionDirectory(context.Background(), beadstest.Mail(messaging), directory, testNow())
 
 		requireRedactedExtmsgError(t, err, errTestMessagingPersistence, "reassign stale session bindings", sensitiveName, oldID, newID)
 	})
@@ -389,7 +390,7 @@ func TestReapersRedactWrappedPersistenceFailures(t *testing.T) {
 		newID := respawn(t, sessionsStore, oldID, sensitiveName)
 		messaging.err = unsafeMessagingPersistenceError(sensitiveName, oldID, newID)
 
-		_, err := ReapStaleParticipantsWithSessionDirectory(context.Background(), messaging, directory)
+		_, err := ReapStaleParticipantsWithSessionDirectory(context.Background(), beadstest.Mail(messaging), directory)
 
 		requireRedactedExtmsgError(t, err, errTestMessagingPersistence, "reassign stale session participants", sensitiveName, oldID, newID)
 	})
@@ -409,7 +410,7 @@ func TestReapersRedactWrappedPersistenceFailures(t *testing.T) {
 		}
 		messaging.err = unsafeMessagingPersistenceError(sensitiveName, oldID, newID)
 
-		_, err = ReapStaleParticipantsWithSessionDirectory(context.Background(), messaging, directory)
+		_, err = ReapStaleParticipantsWithSessionDirectory(context.Background(), beadstest.Mail(messaging), directory)
 
 		requireRedactedExtmsgError(t, err, errTestMessagingPersistence, "finish pending stale session participant cleanup", sensitiveName, oldID, newID)
 	})
@@ -435,7 +436,7 @@ func persistenceParticipantFixture(t *testing.T) (*failingExtmsgUpdateStore, *be
 	messaging := &failingExtmsgUpdateStore{Store: beads.NewMemStore()}
 	sessionsStore := beads.NewMemStore()
 	directory := session.NewStore(beads.SessionStore{Store: sessionsStore})
-	fabric, err := NewServicesWithSessionDirectory(messaging, directory)
+	fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), directory)
 	if err != nil {
 		t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 	}
@@ -475,7 +476,7 @@ func sessionDirectoryGroupFixture(t *testing.T) (Services, *beads.MemStore, *swi
 	directory := &switchableSessionDirectory{
 		delegate: session.NewStore(beads.SessionStore{Store: sessionsStore}),
 	}
-	fabric, err := NewServicesWithSessionDirectory(messaging, directory)
+	fabric, err := NewServicesWithSessionDirectory(beadstest.Mail(messaging), directory)
 	if err != nil {
 		t.Fatalf("NewServicesWithSessionDirectory: %v", err)
 	}

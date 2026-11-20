@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -244,7 +245,7 @@ func TestChatAutoSuspendNeverWaits(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
-	info, err := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir())).CreateSession(context.Background(), sessionpkg.CreateOptions{
+	info, err := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir())).CreateSession(context.Background(), sessionpkg.CreateOptions{
 		Template: "default", Title: "S1", Command: "echo s1", WorkDir: t.TempDir(), Provider: "test",
 		ExtraMeta: map[string]string{"session_origin": "manual"},
 	})

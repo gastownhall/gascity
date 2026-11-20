@@ -37,6 +37,7 @@ export async function createAndSlingSupervisorBead(
   const cityName = activeCityOrThrow('create and sling supervisor bead');
   const createBody: BeadCreateInputBody = { title };
   if (description.length > 0) createBody.description = description;
+  if (rig.length > 0) createBody.rig = rig;
 
   const bead = await supervisorApi().createBead(cityName, createBody);
   const slingBody: SlingInputBody = { bead: bead.id, target };

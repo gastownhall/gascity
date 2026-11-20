@@ -40,8 +40,9 @@ type LifecycleHandle interface {
 	Stop(context.Context, sessionpkg.Actor) error
 	// StopForShutdown is Stop with CITY-SHUTDOWN intent (an ActorSweep), for
 	// the `gc stop` / `gc restart` sweep only. It carries latitude on lifecycle
-	// states that have no live turn to suspend (notably draining), which a
-	// targeted operator Stop must keep rejecting.
+	// states that have no live turn to suspend (a draining row, and a creating
+	// row whose start has not committed), which a targeted operator Stop must
+	// keep rejecting: it tears their runtime down and writes nothing to the row.
 	StopForShutdown(context.Context) error
 	// StopIdle is Stop for the chat idle auto-suspend: the operator's
 	// transition rules, no operator hold.
@@ -61,6 +62,21 @@ type FencedKillHandle interface {
 	// KillRuntimeGone is KillFenced's "runtime already gone" verdict taken
 	// without the lease (session.Manager.KillRuntimeGone).
 	KillRuntimeGone(context.Context) (bool, error)
+}
+
+// FencedResetHandle exposes a fresh-restart request made from inside the
+// session, recorded only while the session row still records the caller's
+// incarnation (SG-3). A handle bound to a session bead implements it; a bare
+// runtime handle has no row to record the request on.
+type FencedResetHandle interface {
+	// ResetFenced records the restart request when the row's instance token
+	// is instanceToken (session.Manager.RequestFreshRestartFenced). casOnly
+	// reports whether the city records only by compare-and-swap (a v2 city);
+	// nil allows the checked write.
+	ResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) error
+	// CheckResetFenced is ResetFenced's decision taken now, with nothing
+	// written (session.Manager.CheckFreshRestartFenced).
+	CheckResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) error
 }
 
 // MessagingHandle exposes live input delivery operations.
@@ -149,6 +165,11 @@ type State struct {
 	Provider    string              `json:"provider,omitempty"`
 	Detail      string              `json:"detail,omitempty"`
 	Pending     *PendingInteraction `json:"pending,omitempty"`
+	// Program is the session program's own judged OSC 7501 status, read
+	// while the runtime is live. The zero (Unread) reading means unknown,
+	// never idle. It decides Phase only when Program.Decides()
+	// (ProgramPhase); its counters, nonce and annotations stay internal.
+	Program runtime.ProgramStatus `json:"-"`
 }
 
 // DeliveryIntent controls how a message should be delivered.
@@ -180,6 +201,16 @@ type MessageRequest struct {
 	// turn sighting, interrupt, start or send, and the result is Replayed.
 	// Ignored without a DeliveryKey.
 	Redelivery bool `json:"redelivery,omitempty"`
+	// QueueBehindPending is set by a caller that has already accepted the
+	// message, such as a session create's initial message: a session waiting
+	// on a pending interaction gets the message queued as a user turn for
+	// after the interaction is answered (Queued), where a plain request is
+	// refused with session.ErrPendingInteraction. A runtime-only handle has
+	// no queue and refuses either way. A deliver-now whose interrupt went
+	// out but whose replacement the interaction kept from being prepared
+	// (session.ErrReplacementNotPrepared) is refused all the same: the queue
+	// would deliver it as a plain message.
+	QueueBehindPending bool `json:"queue_behind_pending,omitempty"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
@@ -254,12 +285,14 @@ type InterruptRequest struct {
 	// runtime not running by a fresh liveness read, nothing sent; an error
 	// wrapping runtime.ErrTurnNotEnded when it was interrupted but not seen
 	// to end, which wraps no other sentinel (the last failure is in its text
-	// only), so "sent" is never misread as unknown; and an error wrapping
-	// runtime.ErrRuntimeUnavailable when it is unknown whether anything was
-	// sent, which then wraps session.ErrInterruptOutcomeUnknown too, or when
-	// the turn could not be checked before ctx ended or its idle state could
-	// not be read (nothing sent then). ctx bounds the wait for the session
-	// mutation lock and the check before the keys.
+	// only), so "sent" is never misread as unknown, unless a restart on
+	// failure was withheld behind a pending interaction (OnFailure); and an
+	// error wrapping runtime.ErrRuntimeUnavailable when it is unknown
+	// whether anything was sent, which then wraps
+	// session.ErrInterruptOutcomeUnknown too, or when the turn could not be
+	// checked before ctx ended or its idle state could not be read (nothing
+	// sent then). ctx bounds the wait for the session mutation lock and the
+	// check before the keys.
 	Turn string `json:"turn,omitempty"`
 	// OnFailure is what the interrupt does when it was sent and its turn was
 	// not seen to end. Empty and InterruptOnFailureFail return that error
@@ -274,11 +307,16 @@ type InterruptRequest struct {
 	// ctx ended, a check refused the follow-up interrupt, or nothing showed
 	// the interrupted turn still running: no read of it answered) an error
 	// wrapping session.ErrInterruptOutcomeUnknown, as
-	// session.StopTurnOptions.Restart documents. A restart applies to a
-	// keystroke runtime on a SessionHandle, whatever its turn source: a
-	// turn-scoped interrupt on a protocol turn source whose runtime
-	// interrupts by keystroke (ACP) interrupts the turn by protocol first
-	// and restarts only once it is not seen to end
+	// session.StopTurnOptions.Restart documents. A restart is withheld too,
+	// on either scope, when the idle wait after the keys ended on a pending
+	// interaction (under program_status "on", a dialog the interrupted
+	// program raised since the interrupt), which it would discard: that
+	// error wraps session.ErrPendingInteraction beside
+	// runtime.ErrTurnNotEnded, since the dialog holds the turn. A restart
+	// applies to a keystroke runtime on a SessionHandle, whatever its turn
+	// source: a turn-scoped interrupt on a protocol turn source whose
+	// runtime interrupts by keystroke (ACP) interrupts the turn by protocol
+	// first and restarts only once it is not seen to end
 	// (session.Manager.InterruptTurn). A protocol runtime's stop may leave
 	// it running, so its not-ended error is returned as with fail, and a
 	// RuntimeHandle, which has no session row to restart from, refuses it,
@@ -294,7 +332,8 @@ type InterruptRequest struct {
 	// (TurnCapabilities.Replace restart or none), which is always so on a
 	// RuntimeHandle. A preparation that fails is an error wrapping
 	// session.ErrReplacementNotPrepared: the interrupt was sent and its
-	// turn settled.
+	// turn settled. So is one a pending interaction holds off, which sends
+	// none of its keys and also wraps session.ErrPendingInteraction.
 	ForReplacement bool `json:"for_replacement,omitempty"`
 	// AllowUnfenced lets a fenced request (Fence) go out without its fence
 	// where it cannot carry it, instead of being refused with
@@ -524,8 +563,10 @@ const (
 	// it; the caller must not queue it again.
 	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
 	// NudgeQueued means the session could not take the nudge now (it is held,
-	// (ActorBackground) not running, or its agent is dead in a pane still up)
-	// and queued it itself; the caller must not queue it again.
+	// (ActorBackground) not running, its agent is dead in a pane still up, it
+	// runs a turn the nudge's submit keys would interrupt, or it waits on a
+	// pending interaction) and queued it itself; the caller must not queue
+	// it again.
 	NudgeQueued NudgeUndeliveredReason = "queued"
 	// NudgeUndeliveredAgentDead means the pane is up but its agent is dead (a
 	// crash the controller has not healed), or a fresh read could not vouch

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -15,10 +14,6 @@ import (
 
 // casAttempts bounds a revision-fenced read-decide-write loop.
 const casAttempts = 8
-
-// prefixHops bounds the walk through declared resolve targets when looking
-// for the store's mint prefix.
-const prefixHops = 8
 
 // Store is the shadow op store over the sessions-class beads store that holds
 // the conversation rows. It writes ops and moves their status under revision
@@ -57,7 +52,7 @@ func WithIDPrefix(prefix string) Option {
 // without --if-revision is refused here rather than on the first Transition —
 // and one whose mint prefix cannot be resolved.
 func NewStore(store beads.SessionStore, clk clock.Clock, opts ...Option) (*Store, error) {
-	if isNilStore(store.Store) {
+	if beads.IsNilStore(store) {
 		return nil, errors.New("opening op store: store is required")
 	}
 	if clk == nil {
@@ -76,7 +71,7 @@ func NewStore(store beads.SessionStore, clk clock.Clock, opts ...Option) (*Store
 	}
 	prefix := o.prefix
 	if prefix == "" {
-		prefix = discoverPrefix(store)
+		prefix = beads.IDPrefixFor(store)
 	}
 	if prefix == "" {
 		return nil, fmt.Errorf("opening op store: %w", ErrNoNamespace)
@@ -85,37 +80,6 @@ func NewStore(store beads.SessionStore, clk clock.Clock, opts ...Option) (*Store
 		return nil, fmt.Errorf("opening op store: %w", err)
 	}
 	return &Store{store: store, writer: writer, clk: clk, prefix: prefix}, nil
-}
-
-func isNilStore(s beads.Store) bool {
-	if s == nil {
-		return true
-	}
-	v := reflect.ValueOf(s)
-	return v.Kind() == reflect.Pointer && v.IsNil()
-}
-
-// discoverPrefix returns the first non-empty IDPrefix() along the store's
-// declared resolve targets.
-func discoverPrefix(store beads.Store) string {
-	cur := store
-	for range prefixHops {
-		if p, ok := cur.(interface{ IDPrefix() string }); ok {
-			if prefix := p.IDPrefix(); prefix != "" {
-				return prefix
-			}
-		}
-		t, ok := cur.(beads.ConditionalWritesResolveTargeter)
-		if !ok {
-			return ""
-		}
-		next := t.ConditionalWritesResolveTarget()
-		if isNilStore(next) {
-			return ""
-		}
-		cur = next
-	}
-	return ""
 }
 
 // Prefix returns the namespace prefix of the ids this store pins.
@@ -241,8 +205,9 @@ func (s *Store) Get(id string) (Op, error) {
 	return DecodeOp(b)
 }
 
-// QuarantinedRow is an open row ListOpenTolerant could not serve: one that
-// does not decode (an unknown kind, schema or value from a newer build, or
+// QuarantinedRow is a row a tolerant read could not serve, an open one
+// ListOpenTolerant read or a closed one RecentClosed read: one that does not
+// decode (an unknown kind, schema or value from a newer build, or
 // corruption) or that is keyed to another conversation. Err says why. A
 // reader reports it and never writes it.
 type QuarantinedRow struct {
@@ -309,7 +274,7 @@ func (s *Store) ListOpenTolerant(conversation string) ([]Op, []QuarantinedRow, e
 // to sweep without paying NewStore's capability probe. Like NewStore it
 // refuses a nil store with an error rather than panicking.
 func HasSubmittedOps(store beads.SessionStore) (bool, error) {
-	if isNilStore(store.Store) {
+	if beads.IsNilStore(store) {
 		return false, errors.New("probing for submitted ops: store is required")
 	}
 	rows, err := store.List(beads.ListQuery{
@@ -438,6 +403,45 @@ func (s *Store) Adopt(id string, expectAttempt int, by string, finishBy time.Tim
 		next.Attempt = cur.Attempt + 1
 		next.FinishBy = utc(finishBy)
 		next.Transitions = appendTransition(cur.Transitions, Transition{Status: cur.Status, At: utc(s.clk.Now()), By: by})
+		return next, true, nil
+	})
+}
+
+// SetCausation sets the causation of op id, an open legacy:api op at attempt
+// expectAttempt (the attempt its adopter holds), to causation: one revision
+// CAS that writes the causation and nothing else, outside the request
+// digest. An adopter that hands the op's effect to another op names what
+// answers it before that op exists (the API's lane /respond names the
+// interaction occurrence whose lane op answers OJ-4's adopted respond), so a
+// reader follows the op there while it stays open, and after the sweeper
+// closes it. A causation is set once: the same one again writes nothing, and
+// another is ErrIllegalTransition. It refuses a closed op
+// (ErrAlreadyTerminal), any op whose executor is not legacy:api
+// (ErrIllegalTransition), an attempt other than expectAttempt
+// (ErrAttemptMoved: another adopter took the op) and a causation, or a by,
+// the journal cannot store (ErrInvalidRequest).
+func (s *Store) SetCausation(id string, expectAttempt int, causation, by string) (Op, error) {
+	if err := validateText("set causation by", by, maxPrincipalLen); err != nil {
+		return Op{}, err
+	}
+	if err := errors.Join(validateText("causation", causation, maxFreeTextLen), validateUpdateText("causation", causation)); err != nil {
+		return Op{}, err
+	}
+	return s.mutate(id, by, func(cur Op, _ Spec) (Op, bool, error) {
+		switch {
+		case cur.Status == StatusClosed:
+			return Op{}, false, fmt.Errorf("%w: op %s closed %s{%s}", ErrAlreadyTerminal, id, cur.Outcome.Arm, cur.Outcome.Reason)
+		case cur.Executor != ExecutorLegacyAPI:
+			return Op{}, false, fmt.Errorf("%w: op %s has executor %s; only a %s op's causation is set", ErrIllegalTransition, id, cur.Executor, ExecutorLegacyAPI)
+		case cur.Attempt != expectAttempt:
+			return Op{}, false, fmt.Errorf("%w: op %s is at attempt %d, expected %d", ErrAttemptMoved, id, cur.Attempt, expectAttempt)
+		case cur.Causation == causation:
+			return cur, false, nil
+		case cur.Causation != "":
+			return Op{}, false, fmt.Errorf("%w: op %s names causation %q already, not %q", ErrIllegalTransition, id, cur.Causation, causation)
+		}
+		next := cur
+		next.Causation = causation
 		return next, true, nil
 	})
 }

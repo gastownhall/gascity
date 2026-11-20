@@ -242,6 +242,10 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 		return res, true
 	case err != nil:
 		res.FixError = err.Error()
+		var hinted *FixHintError
+		if errors.As(err, &hinted) && hinted.Hint != "" {
+			res.FixHint = hinted.Hint
+		}
 		res.FixAttempted = true
 		return res, false
 	}

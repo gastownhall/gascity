@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import {
   ActivityTrace,
   Gauge,
@@ -32,7 +32,7 @@ describe('cockpit instruments', () => {
 
   it('keeps the full gauge scale inside its SVG viewport', () => {
     const { container } = render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <Gauge label="active sessions" value={2} max={10} formatted="2" href="/agents" />
       </MemoryRouter>,
     );
@@ -57,7 +57,7 @@ describe('cockpit instruments', () => {
 
   it('keeps one comfortably-sized pipeline control per state', () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <PipelineBar
           segments={[
             { key: 'pending', label: 'queued', count: 2, href: '/runs' },
@@ -73,7 +73,7 @@ describe('cockpit instruments', () => {
 
   it('announces unavailable traces and pipeline counts without inventing zero readings', () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <ActivityTrace samples={[]} available={false} note="usage unavailable" />
         <PipelineBar
           available={false}
@@ -103,7 +103,7 @@ describe('cockpit instruments', () => {
 
   it('announces variable stage totals and retries', () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <RunRings
           runs={[
             {
@@ -126,7 +126,7 @@ describe('cockpit instruments', () => {
 
   it('announces lamp health without relying on color', () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <StatusLamps
           lamps={[
             {
