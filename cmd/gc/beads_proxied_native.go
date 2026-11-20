@@ -393,7 +393,30 @@ func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (bead
 
 	native, err := o.openNativeLeaf(ctx, pin, longLived, beads.ProxiedIncidentSiteOpen)
 	if err != nil {
-		return nil, pin.Report(), err
+		verdict, ok := beads.ProxiedVerdictOf(err)
+		if !ok || !longLived || verdict.Terminal() {
+			return nil, pin.Report(), err
+		}
+		// A long-lived open whose admission passed and whose leaf refused
+		// non-terminally. The leaf is already closed; the store starts on the
+		// bd leaf, carrying the pin and the verdict, with the guard armed to
+		// re-pin it. Without this the open was a plain bd store for the life
+		// of the process: only a fresh open brought the native leaf back, and
+		// a long-lived store is never reopened. The report is the pin's,
+		// exactly as the bd fallback for the same verdict returns it, so the
+		// factory's diagnostic does not change with the store.
+		bd, bdErr := o.openBd()
+		if bdErr != nil {
+			return nil, pin.Report(), bdErr
+		}
+		demoted, demoteErr := beads.NewDemotedProxiedStore(bd, pin, verdict,
+			beads.WithNativeLeafReopener(o.recoverNativeLeaf()))
+		if demoteErr != nil {
+			closeProxiedLeafQuietly(bd)
+			return nil, pin.Report(), demoteErr
+		}
+		demoted.StartGuard()
+		return demoted, pin.Report(), nil
 	}
 
 	bd, err := o.openBd()

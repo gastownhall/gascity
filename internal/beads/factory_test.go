@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1538,5 +1539,80 @@ func TestOpenStoreAtForCityForceProxiedNativeTakesTheLaneForThatOpenAlone(t *tes
 	}
 	if got := open(false); got.Store != Store(fallback) {
 		t.Fatalf("unforced open with the flag off = %T, want the bd fallback", got.Store)
+	}
+}
+
+// TestOpenStoreAtForCityServesADemotedProxiedStore is the factory half of a
+// long-lived open whose leaf answered a non-terminal verdict: the opener now
+// hands back a ProxiedStore that starts on the bd leaf, and the factory serves
+// it. What the caller and the operator see must not change: the diagnostic
+// and the log lines are today's bd fallback for the same verdict, so the store
+// differs only in being able to re-pin.
+func TestOpenStoreAtForCityServesADemotedProxiedStore(t *testing.T) {
+	for _, verdict := range []*ProxiedVerdictError{
+		NewNonTerminalProxiedVerdictError(ProxiedVerdictHeadMoved, "moved HEAD from before0000 to after11111", nil),
+		NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining, "the proxy is still refusing", nil),
+	} {
+		t.Run(string(verdict.Verdict), func(t *testing.T) {
+			t.Setenv(nativeForceFallbackEnv, "")
+			t.Setenv(proxiedNativeEnv, "1")
+			scope := proxiedScopeFixture(t)
+			open := func(t *testing.T, opener func(bd Store) (Store, error)) (StoreOpenResult, Store, string) {
+				t.Helper()
+				bd := NewMemStore()
+				var logged bytes.Buffer
+				logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{
+					Level: slog.LevelDebug,
+					ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+						if a.Key == slog.TimeKey {
+							return slog.Attr{}
+						}
+						return a
+					},
+				}))
+				result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+					ScopeRoot:        scope,
+					Provider:         "bd",
+					Logger:           logger,
+					PreflightChecker: refusingPreflightChecker(t),
+					OpenBdStore:      func() (Store, error) { return bd, nil },
+					OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+						store, err := opener(bd)
+						return store, proxiedOpenReportFixture(), err
+					},
+					LongLived: true,
+				})
+				if err != nil {
+					t.Fatalf("OpenStoreAtForCity: %v", err)
+				}
+				return result, bd, logged.String()
+			}
+
+			fallback, fallbackBd, fallbackLog := open(t, func(Store) (Store, error) { return nil, verdict })
+			if fallback.Store != fallbackBd {
+				t.Fatalf("the refusal served %T, want the bd fallback", fallback.Store)
+			}
+
+			guard := newGuardFixture(t)
+			var demoted *ProxiedStore
+			served, _, servedLog := open(t, func(bd Store) (Store, error) {
+				store, err := NewDemotedProxiedStore(bd, guard.store.Pin(), verdict, WithNativeLeafReopener(
+					func(context.Context) (*NativeDoltStore, Pin, error) {
+						return nil, Pin{}, verdict
+					}))
+				demoted = store
+				return store, err
+			})
+			if served.Store != Store(demoted) {
+				t.Fatalf("the factory served %T, want the demoted ProxiedStore", served.Store)
+			}
+			if !reflect.DeepEqual(served.Diagnostic, fallback.Diagnostic) {
+				t.Fatalf("the demoted store's diagnostic differs from today's fallback:\n served:   %+v\n fallback: %+v\n proxied served: %+v\n proxied fallback: %+v",
+					served.Diagnostic, fallback.Diagnostic, served.Diagnostic.Proxied, fallback.Diagnostic.Proxied)
+			}
+			if servedLog != fallbackLog {
+				t.Fatalf("the demoted store's log differs from today's fallback:\n served:\n%s\n fallback:\n%s", servedLog, fallbackLog)
+			}
+		})
 	}
 }
