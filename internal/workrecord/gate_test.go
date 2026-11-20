@@ -151,6 +151,16 @@ func TestGated(t *testing.T) {
 			want: false,
 		},
 		{name: "convoy is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
+		{
+			name: "operator gc.kind=work is gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "work"}},
+			want: true,
+		},
+		{
+			name: "operator gc.kind=review is gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "review"}},
+			want: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
