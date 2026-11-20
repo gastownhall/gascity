@@ -294,3 +294,39 @@ func TestKillServerReportsListenerThatStaysLive(t *testing.T) {
 		})
 	}
 }
+
+// TestKillServerAlreadyGoneSkipsSettle verifies that KillServer waits for the
+// listener only after an acknowledged kill-server on a named socket: an
+// already-gone server, a failed kill-server and the default socket return
+// kill-server's own result without observing the socket.
+func TestKillServerAlreadyGoneSkipsSettle(t *testing.T) {
+	killFailed := errors.New("kill-server: permission denied")
+	for _, tc := range []struct {
+		name    string
+		cfg     Config
+		killErr error
+		wantErr error
+	}{
+		{name: "named socket already gone", cfg: Config{SocketName: "gc-settle"}, killErr: ErrNoServer},
+		{name: "named socket kill-server fails", cfg: Config{SocketName: "gc-settle"}, killErr: killFailed, wantErr: killFailed},
+		{name: "default socket", cfg: DefaultConfig()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{err: tc.killErr}
+			observations := 0
+			tm := &Tmux{cfg: tc.cfg, exec: fe}
+			tm.serverSocketObserver = func(context.Context, string) error {
+				observations++
+				return errors.New("peer_pid=42 reason=live-unix-socket")
+			}
+
+			err := tm.KillServer()
+			if err != tc.wantErr { //nolint:errorlint // the error must be kill-server's own, unchanged
+				t.Errorf("KillServer() error = %v, want %v", err, tc.wantErr)
+			}
+			if observations != 0 {
+				t.Errorf("KillServer observed the socket %d times, want 0", observations)
+			}
+		})
+	}
+}
