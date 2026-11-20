@@ -301,7 +301,7 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE '(^|[^0-9A-Za-z])ga-((mol|wisp)-)?[0-9a-z]{3,}(\.[0-9]+)*' <<<"$branch" | head -1 | sed -E 's/^[^0-9A-Za-z]//' || true)"
+        branch_id="$(grep -oE '(^|[^0-9A-Za-z])ga-((mol|wisp)-)?[0-9a-z]{3,}(\.[0-9]+)*' <<<"$branch" | sed -n '1p' | sed -E 's/^[^0-9A-Za-z]//' || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
