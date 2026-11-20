@@ -5131,7 +5131,11 @@ op_recover() {
     # floor (see dolt-enospc.sh). See gastownhall/gascity#2158.
     if recovery_should_skip_due_to_enospc; then
         echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
-        echo "  free disk space, then re-run health checks" >&2
+        if [ -n "$ENOSPC_FREE_BYTES" ]; then
+            echo "  $ENOSPC_PROBE_DIR has $ENOSPC_FREE_BYTES bytes free, below the $ENOSPC_FLOOR_BYTES-byte floor (GC_DOLT_WARN_FREE_BYTES); recovery resumes on its own once free space reaches the floor" >&2
+        else
+            echo "  free space on $ENOSPC_PROBE_DIR could not be read; recovery resumes once it can be read and is at least $ENOSPC_FLOOR_BYTES bytes (GC_DOLT_WARN_FREE_BYTES)" >&2
+        fi
         die "dolt recovery skipped: ENOSPC detected"
     fi
 

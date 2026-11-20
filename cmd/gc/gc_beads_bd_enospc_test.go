@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -278,4 +279,105 @@ echo "/dev/fake 999999999 1 ` + availKB + ` 1% /"
 		t.Fatalf("run detector: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.String())
 	}
 	return string(out), stderr.String(), strings.Contains(string(out), "SKIP")
+}
+
+// TestGCBeadsBdRecoverSkipExplainsProbeDirAndLiftsWithSpace pins op_recover's
+// side of the ENOSPC gate: with ENOSPC in the recent log and the data dir
+// short of space, recover dies with the ENOSPC-skip message without ever
+// consulting the gc helper, and the message names the probe directory, its
+// free bytes and the floor; once free space reaches the floor, recover
+// proceeds to the gc recover helper.
+func TestGCBeadsBdRecoverSkipExplainsProbeDirAndLiftsWithSpace(t *testing.T) {
+	const gib = 1 << 20 // in the 1024-byte blocks df -Pk reports
+	for _, tc := range []struct {
+		name       string
+		availKB    int
+		wantRefuse bool
+	}{
+		{name: "disk short refuses without consulting gc", availKB: gib, wantRefuse: true},
+		{name: "space back proceeds to the gc helper", availKB: 3 * gib, wantRefuse: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			materializeBuiltinPacksForTest(t, cityPath)
+			script := gcBeadsBdScriptPath(cityPath)
+
+			binDir := filepath.Join(t.TempDir(), "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+			fakeGC := writeFakeManagedConfigWriterGC(t, binDir, invocationFile)
+
+			// The fake gc answers dolt-state runtime-layout, so the script
+			// takes its projected layout: the data dir is the city's
+			// .beads/dolt and the log lives under the projected pack state
+			// directory.
+			dataDir := filepath.Join(cityPath, ".beads", "dolt")
+			if err := os.MkdirAll(dataDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			logFile := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt-from-gc", "dolt.log")
+			if err := os.MkdirAll(filepath.Dir(logFile), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(logFile, []byte("fatal: no space left on device\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			dfDir := filepath.Join(t.TempDir(), "dfbin")
+			if err := os.MkdirAll(dfDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			dfArgsLog := filepath.Join(t.TempDir(), "df.args")
+			writeExecutable(t, filepath.Join(dfDir, "df"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+echo "/dev/fake 999999999 1 %d 1%% /"
+`, dfArgsLog, tc.availKB))
+
+			env := sanitizedBaseEnv(
+				"GC_CITY_PATH="+cityPath,
+				"GC_BIN="+fakeGC,
+				"PATH="+strings.Join([]string{dfDir, binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+			)
+			stdout, stderr, runErr := runGCBeadsBdCommand(t, env, script, "recover")
+			out := stdout + stderr
+
+			if args := readFile(dfArgsLog); strings.TrimSpace(args) != "-Pk "+dataDir {
+				t.Fatalf("df measured %q, want the data dir %q\nrecover output:\n%s", args, "-Pk "+dataDir, out)
+			}
+
+			if tc.wantRefuse {
+				if runErr == nil {
+					t.Fatalf("recover proceeded despite a short data dir:\n%s", out)
+				}
+				for _, frag := range []string{
+					"dolt recovery skipped: ENOSPC detected",
+					dataDir,
+					strconv.Itoa(gib * 1024), // free bytes on the probe dir
+					strconv.Itoa(2147483648), // default floor
+				} {
+					if !strings.Contains(out, frag) {
+						t.Errorf("refusal message missing %q:\n%s", frag, out)
+					}
+				}
+				// Layout and port helpers run in the prelude; the recover
+				// helper itself must never be reached.
+				if invocation := readFile(invocationFile); strings.Contains(invocation, "recover-managed") {
+					t.Fatalf("recover consulted the gc recover helper despite the ENOSPC refusal:\n%s", invocation)
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatalf("recover with space back failed: %v\n%s", runErr, out)
+			}
+			if invocation := readFile(invocationFile); !strings.Contains(invocation, "recover-managed") {
+				t.Fatalf("recover with space back never reached the gc recover helper; invocation log:\n%s", invocation)
+			}
+		})
+	}
 }
