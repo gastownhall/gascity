@@ -2,6 +2,7 @@ package storebinding
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -117,6 +119,29 @@ func TestClassEmitterReportsClaimsWithThreeOutcomes(t *testing.T) {
 		}
 		if err := seen[index].Validate(); err != nil {
 			t.Errorf("event %d is invalid: %v", index, err)
+		}
+	}
+}
+
+// TestPartialOutcomeReportsAPartialResultAsDelivered pins where a partial
+// answer sits: an error for which beads.IsPartialResult reports true, however
+// it is wrapped, travels beside the items the operation delivered and reports
+// ok, while any other error still reports failed.
+func TestPartialOutcomeReportsAPartialResultAsDelivered(t *testing.T) {
+	partial := &beads.PartialResultError{Op: "nudge queue ClaimDue", Err: errors.New("one record is undecodable")}
+	cases := []struct {
+		name string
+		err  error
+		want ClassOutcome
+	}{
+		{name: "no error", want: ClassOutcomeOK},
+		{name: "a partial result", err: partial, want: ClassOutcomeOK},
+		{name: "a wrapped partial result", err: fmt.Errorf("claiming: %w", partial), want: ClassOutcomeOK},
+		{name: "any other error", err: errors.New("store is down"), want: ClassOutcomeFailed},
+	}
+	for _, testCase := range cases {
+		if got := partialOutcomeFor(testCase.err); got != testCase.want {
+			t.Errorf("partialOutcomeFor(%s) = %s, want %s", testCase.name, got, testCase.want)
 		}
 	}
 }

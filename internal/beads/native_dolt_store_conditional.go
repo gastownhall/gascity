@@ -55,6 +55,7 @@ var (
 // the readback makes this report an error for a close that did commit, and
 // the returned Bead can carry a later writer's revision.
 func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	noteSessionKeysByID(s.Get, id, metadata)
 	if err := s.readOnlyGuard(); err != nil {
 		return Bead{}, err
 	}
@@ -208,6 +209,12 @@ func (s *NativeDoltStore) conditionalLabelsGuarded() bool { return true }
 // UpdateIfMatch applies row-backed opts only while id still has
 // expectedRevision.
 //
+// An assignee edit waives the assignee-transfer guard, and a status edit the
+// close policy, closing edits included, as Update does. BdStore.UpdateIfMatch
+// waives less, deliberately: bd's one --force flag waives both, so a fenced
+// edit that closes carries neither waiver there, and one that reassigns a
+// live claim or closes over open children lands here but is refused there.
+//
 // Both doors below send opts.Metadata to the role as a patch, so the role
 // checks each of its keys against the metadata-key rule it applies to
 // standalone Update, which beadmeta.ValidKeyPattern mirrors, and a
@@ -215,6 +222,7 @@ func (s *NativeDoltStore) conditionalLabelsGuarded() bool { return true }
 // TestNativeDoltStoreMetadataKeyRuleSplitsByRoute pins this beside the
 // routes that accept such a key.
 func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
@@ -635,6 +643,7 @@ func (s *NativeDoltStore) conditionalWriteError(
 //     value is retried once with the stored bytes when, and only when, its
 //     rendering equals expected.
 func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	noteSessionKeysByID(s.Get, id, map[string]string{key: next})
 	if err := s.readOnlyGuard(); err != nil {
 		return false, err
 	}

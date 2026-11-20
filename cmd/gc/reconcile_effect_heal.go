@@ -8,6 +8,10 @@ package main
 // would let the heal orphan it. The awake heal rests on the inventory reading
 // the row's own runtime alive.
 //
+// A21's parked clear (ga-ylpbsy.16) is one too: it rests on A21's closable
+// read (freshClosable), so it clears a parked seat's stranded marker only
+// while the fresh read still finds nothing live under the row's name.
+//
 // So the heal is a transaction (runTx) that needs the runtime: under the
 // runtime name lock, which a v2 start holds across its provider Start (an
 // abandoned start until that call returns, P3), and the row's session
@@ -16,7 +20,8 @@ package main
 // when that read still proves it: nothing present on the leaf or any
 // fall-through backend for an asleep heal (rtAbsent; no corpse until A12's
 // classification lands), the row's own Current runtime alive for the awake
-// heal. The default premise refuses a fresh row whose lifecycle facts
+// heal, a present runtime that is not the row's (squatter: Foreign, or
+// Ownerless under a tokened row) for the squatter heal. The default premise refuses a fresh row whose lifecycle facts
 // differ from the pass's (legacy's ApplyPatchIfLifecycleUnchanged), so a
 // wake request that lands before the CAS stops it.
 //
@@ -30,37 +35,49 @@ package main
 // repeated ones alert (alertHealRefused).
 const (
 	causeLivenessUnsupported = "liveness-unsupported"
-	causeRuntimePresent      = "runtime-present" // an asleep heal over a present runtime
-	causeRuntimeNotOwn       = "runtime-not-own" // the awake heal over a runtime not alive and Current
+	causeRuntimePresent      = "runtime-present"      // an asleep heal over a present runtime
+	causeRuntimeNotOwn       = "runtime-not-own"      // the awake heal over a runtime not alive and Current
+	causeRuntimeNotSquatter  = "runtime-not-squatter" // the squatter heal over a runtime that is not one
 )
 
-// healSections are the fresh heal's one section: the runtime proof, then the
-// row write's decision on the fresh row, with the A6 items decideRow folds
-// into it (C5d2's one CAS per row), so the merged patch lands in one CAS.
+// healSections are the fresh heal's one section: its arm decided again on
+// the fresh row and the fresh runtime read (redecideRow; the rule, once),
+// a refusal named by what that read found (healCause). Only the heal's own
+// arm lands: a fresh read that moves the row to another heal's arm (a
+// squatter gone since the pass, a dead runtime replaced by one) refuses, and
+// the next pass proposes that heal.
 var healSections = []section{{Decide: func(v txView) txStep {
-	if cause := healRefusal(v); cause != "" {
-		return txStep{Refuse: cause}
+	step, fresh := redecideRowIntent(v)
+	if step.Refuse == "" && fresh.Reason != v.It.Reason { // another heal's arm: its own pass proposes it
+		step = txStep{Refuse: causeRedecided}
 	}
-	return redecideRow(v)
+	if step.Refuse == causeRedecided {
+		step.Refuse = healCause(v)
+	}
+	if v.It.Reason == decideDeadRuntimeHeal && step.Class.Get("quarantined_until") != "" { // the death's accrual quarantines
+		step.Facts.Quarantined = sessionAgentMetricIdentityInfo(v.Row, v.World.Env.Cfg)
+	}
+	return mintRepairKey(v, step)
 }}}
 
-// healRefusal is the cause that stops the heal on its fresh read, or "".
-// An asleep heal needs the name proven absent through the composite, so a
-// stale route cannot fake it; the awake heal needs the routed leaf's own
-// Current runtime alive across the identity read (AdoptLive's bracket: an
-// acp or subprocess sidecar can outlive its runtime).
-func healRefusal(v txView) string {
+// healCause names a fresh heal's refusal by its fresh read: a backend that
+// cannot read fresh, a read that proved nothing, the awake heal's runtime
+// not its own and alive, an asleep heal's runtime present; or redecided
+// when the read stands and the row moved on.
+func healCause(v txView) string {
 	switch rt := v.RT; {
 	case rt.Class == rtUnsupported:
 		return causeLivenessUnsupported
-	case v.It.Reason == decideAwakeHeal:
-		if !rt.Alive() || compareIdentity(v.Row, rt.Identity) != identityCurrent {
-			return causeRuntimeNotOwn
-		}
+	case (v.It.Reason == decideAwakeHeal || v.It.Reason == decideSatisfiedWake) && (!rt.Alive() || compareIdentity(v.Row, rt.Identity) != identityCurrent):
+		return causeRuntimeNotOwn
+	case v.It.Reason == decideAwakeHeal || v.It.Reason == decideSatisfiedWake:
 	case rt.Class == rtUnknown:
 		return causeLivenessUnknown
+	case v.It.Reason == decideSquatterHeal && !squatterProven(v.Row, rt):
+		return causeRuntimeNotSquatter
+	case v.It.Reason == decideSquatterHeal:
 	case rt.Class != rtAbsent:
 		return causeRuntimePresent
 	}
-	return ""
+	return causeRedecided
 }

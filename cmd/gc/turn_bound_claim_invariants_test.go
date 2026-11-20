@@ -43,16 +43,22 @@ import (
 //     and without it the whole CachingStore -> beadPolicyStore -> NativeDoltStore
 //     chain would degrade the two-argument claim capability to "unsupported"
 //     for every caller behind the policy layer, worker pull paths included.
+//   - hook_claim_bead_events.go FORWARDS the hook's own claim seam. Its
+//     wrapper calls the hookClaimOps.Claim it was handed and then announces
+//     the landed claim to the city event log; it holds no candidate, no
+//     assignee and no policy of its own, and claimHookWork (the fenced worker
+//     pull path above) is the only place it is composed.
 //
 // Adding a file here is a design decision about pull semantics; make it
 // deliberately.
 var claimCASAllowedFiles = map[string]bool{
-	"cmd_hook_claim.go":    true,
-	"claim_class_route.go": true,
-	"cmd_bd_by_id.go":      true,
-	"cmd_agent_script.go":  true,
-	"class_store_emit.go":  true,
-	"bead_policy_store.go": true,
+	"cmd_hook_claim.go":         true,
+	"claim_class_route.go":      true,
+	"cmd_bd_by_id.go":           true,
+	"cmd_agent_script.go":       true,
+	"class_store_emit.go":       true,
+	"bead_policy_store.go":      true,
+	"hook_claim_bead_events.go": true,
 }
 
 // claimCASMarkers are the two shapes a claim compare-and-swap takes in this

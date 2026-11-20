@@ -1,6 +1,9 @@
 package events
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Domain payload types shared across packages. Payloads specific to one
 // package live with their emitter (see internal/api/event_payloads.go and
@@ -9,8 +12,10 @@ import "encoding/json"
 // loop and its CLI/API projections (beads ga-e3s, ga-zn8, ga-p5n).
 
 // StoreMaintenanceDonePayload is the typed payload for
-// gc.store.maintenance.done events. Emitted after a successful
-// maintenance cycle (backup snapshot + CALL DOLT_GC + smoke test).
+// gc.store.maintenance.done events. Emitted when a maintenance cycle
+// finishes without error, including a cycle the disk pre-flight skipped.
+// The production loop is observe-only for now (no backup snapshot, no
+// CALL DOLT_GC), so the event does not mean the store was compacted.
 type StoreMaintenanceDonePayload struct {
 	DurationSeconds float64 `json:"duration_s"`
 	BeforeBytes     int64   `json:"before_bytes"`
@@ -92,6 +97,40 @@ type BeadClaimReleasedPayload struct {
 // IsEventPayload marks BeadClaimReleasedPayload as an events.Payload variant.
 func (BeadClaimReleasedPayload) IsEventPayload() {}
 
+// BeadClaimFailedPayload is the typed payload for bead.claim_failed events. The
+// envelope's Subject is the routed bead a seat of Template could not claim.
+// SessionID and RuntimeEpoch name the seat: a session bead keeps its id across
+// restarts, and the epoch advances on each one, so together they tell a seat
+// retrying from a new seat. Error is the claim write's own error text without a
+// server request id, bounded in length: the form the claim-loop guard compares
+// to tell one failure repeating from unrelated ones. The envelope's Message
+// keeps the request id, an operator's handle on the server's log line.
+type BeadClaimFailedPayload struct {
+	Template     string `json:"template"`
+	SessionID    string `json:"session_id,omitempty"`
+	RuntimeEpoch int64  `json:"runtime_epoch,omitempty"`
+	Error        string `json:"error"`
+}
+
+// IsEventPayload marks BeadClaimFailedPayload as an events.Payload variant.
+func (BeadClaimFailedPayload) IsEventPayload() {}
+
+// BeadClaimLoopHeldPayload is the typed payload for bead.claim_loop_held
+// events. The envelope's Subject is the held bead. Failures is how many
+// distinct seats of Template have failed to claim it in this streak; Error (a
+// server request id removed) is the error they repeated when the hold began,
+// or the probe's when a failed probe extended it. HeldUntil is when the next
+// probe seat may be spawned for the bead if nothing changes before then.
+type BeadClaimLoopHeldPayload struct {
+	Template  string    `json:"template"`
+	Error     string    `json:"error"`
+	Failures  int       `json:"failures"`
+	HeldUntil time.Time `json:"held_until"`
+}
+
+// IsEventPayload marks BeadClaimLoopHeldPayload as an events.Payload variant.
+func (BeadClaimLoopHeldPayload) IsEventPayload() {}
+
 // HookClaimReclaimedStalePayload is the typed payload for hook.claim.reclaimed_stale
 // events (ga-7rj87d). Emitted when a scoped `bd reclaim --id BeadID` recovers a
 // candidate from PreviousOwner's stale lease and the retried claim in the same
@@ -110,6 +149,8 @@ func init() {
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
 	RegisterPayload(BeadClaimReleased, BeadClaimReleasedPayload{})
+	RegisterPayload(BeadClaimFailed, BeadClaimFailedPayload{})
+	RegisterPayload(BeadClaimLoopHeld, BeadClaimLoopHeldPayload{})
 	RegisterPayload(HookClaimReclaimedStale, HookClaimReclaimedStalePayload{})
 	RegisterPayload(BeadsBlockedRecomputed, BlockedRecomputedPayload{})
 }

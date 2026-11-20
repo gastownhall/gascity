@@ -1,13 +1,17 @@
 package main
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -18,24 +22,42 @@ import (
 // are wire names (mdash). Alerts go to stderr and to the event log as
 // reconciler.alert, and the record counts them.
 
-// stopOutstandingAge is when a signaled stop counts as outstanding (v5 D6).
-const stopOutstandingAge = 30 * time.Minute
+// stopOutstandingAge is when a signaled stop counts as outstanding (v5 D6);
+// stopEscalationRepeat how often its alert repeats while it lasts.
+const (
+	stopOutstandingAge    = 30 * time.Minute
+	stopEscalationRepeat  = 15 * time.Minute
+	stopEscalationReason  = "stop_outstanding"
+	stopEscalationNoCause = "none" // no refusal recorded: the verb has not run
+)
 
 // Alert kinds: reconciler.alert's "alert" and the record's "alerts" keys.
 const (
 	alertNamedDuplicate = "named-duplicate"        // a named identity with more than one open row (B3)
 	alertAmbiguousBound = "ambiguous-create-bound" // P5's hard bound cleared an ambiguous create
-	alertBootRefused    = "boot-refused"           // C11, or C0.7 (C4b)
+	alertBootRefused    = "boot-refused"           // C11, C0.7 (C4b), or C0.8 (PAR-EXEC)
 	alertBootGateClosed = "boot-gate-closed"       // P2's gate closed for longer than 2 × patrol
 	alertPassPanic      = "pass-panic"             // P6
 	alertEffectDeadline = "effect-deadline"        // an effect settled at its deadline
 	alertUnknownState   = "unknown-state"          // a state legacy does not know was written (I-legacy broke)
 	alertHealRefused    = "heal-refused"           // an A6 heal refused until its backoff reached the cap
+	// alertPeekHeld: a start's recycle or A12's classification held on a
+	// dead box's screen it cannot read (peek-error) until its backoff
+	// reached the cap. The hold has no deadline: this is what reports it.
+	alertPeekHeld = "peek-held"
+	// alertWorktreeRefused: the allocation refuses a pool work item whose
+	// worktree evidence it found unusable (C6.5(a)); no create effect ever
+	// sees the request, so this alert is all that reports the starved item.
+	alertWorktreeRefused = "worktree-refused"
 )
 
 // healRefusalsBeforeAlert is how many backed-off refusals in a row an A6 heal
 // takes before it alerts: the sixth reaches P4's 5-minute cap.
 const healRefusalsBeforeAlert = 6
+
+// peekHeldRepeat is how many more refusals in a row, at the cap, a peek
+// hold takes before its alert repeats: about every 30 minutes.
+const peekHeldRepeat = 6
 
 // passObserver is the planner's memory for alerting once and emitting on
 // change.
@@ -44,9 +66,24 @@ type passObserver struct {
 	gateAlerted     bool
 	duplicates      map[string]bool   // the last pass's named-duplicate alerts
 	unknown         map[rowKey]string // rows alerted for an unknown state, with it
+	worktreeRefused map[string]string // work items alerted for unusable worktree evidence, with the alert
 	lastKey         string
 	lastEmit        time.Time
 	identity        identityObserver // arm A3's alerts (reconcile_observe_identity.go)
+	// escalated is each outstanding stop's last alert, by (row, incarnation)
+	// (v5 D6): kept while the stop stays outstanding.
+	escalated map[stopEscalationKey]time.Time
+	// claimedCut is the last pass's claimed-demand cut, as template/bead keys
+	// (observeClaimedDemand).
+	claimedCut map[string]struct{}
+	// peekHeld is each held row's refusal count at its last peek-held alert.
+	peekHeld map[rowKey]int
+}
+
+// stopEscalationKey is one row incarnation's stop request.
+type stopEscalationKey struct {
+	k   rowKey
+	inc int64
 }
 
 // alert writes an operator alert to stderr, records it as a
@@ -81,16 +118,46 @@ func (p *planner) observeSettlement(s settlement) {
 	}
 	p.metrics.count(&p.metrics.settled, settledKey(s))
 	p.observeRekeySettlement(s)
-	if phase := idleRespawnPhases[s.Kind]; phase != "" && s.Outcome == settledLanded && s.Reason == idleRespawnDrainReason {
+	if phase := idleRespawnPhase(s); phase != "" {
 		p.metrics.count(&p.metrics.series, phase)
 	}
-	if (s.Kind == intentRowHeal || s.Kind == intentRowHealFresh) && (s.Outcome == settledRefused || s.Outcome == settledFailed) &&
+	if (s.Kind == intentRowHeal || s.Kind == intentRowHealFresh || s.Kind == intentDriftRepair) && (s.Outcome == settledRefused || s.Outcome == settledFailed) &&
 		p.backoff.Record(rowBackoffKey(s.Key)).Consecutive == healRefusalsBeforeAlert {
 		p.alert(alertHealRefused, s.Key.ID, fmt.Sprintf("%s effect for %s refused %d times in a row, last with cause %q", s.Kind, s.Key.ID, healRefusalsBeforeAlert, s.Cause))
 	}
+	p.observePeekHold(s)
 	if (s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && strings.TrimPrefix(s.Cause, causeFinalizePrefix) == causeDeadline {
 		p.alert(alertEffectDeadline, s.Key.ID+s.Token, fmt.Sprintf("%s effect for %s settled at its deadline", s.Kind, s.Key.ID+s.Token))
 	}
+}
+
+// observePeekHold alerts on a start's recycle or A12's classification held
+// on a dead runtime's screen it cannot read (peek-error): once the row's
+// refusals in a row reach the backoff's cap with the latest a peek-error,
+// whatever the causes before it, and again every peekHeldRepeat refusals
+// while the latest stays one. A row whose refusals restart counts afresh.
+func (p *planner) observePeekHold(s settlement) {
+	if s.Kind != intentStart && s.Kind != intentZombie {
+		return
+	}
+	if s.Outcome != settledRefused || s.Cause != causePeekError {
+		if s.Outcome != settledRefused {
+			delete(p.obs.peekHeld, s.Key)
+		}
+		return
+	}
+	n := p.backoff.Record(rowBackoffKey(s.Key)).Consecutive
+	last, alerted := p.obs.peekHeld[s.Key]
+	if n < healRefusalsBeforeAlert || alerted && n >= last && n-last < peekHeldRepeat {
+		return
+	}
+	if p.obs.peekHeld == nil {
+		p.obs.peekHeld = map[rowKey]int{}
+	}
+	p.obs.peekHeld[s.Key] = n
+	p.alert(alertPeekHeld, s.Key.ID, fmt.Sprintf("%s effect for session %s held %d times in a row: the screen of its dead runtime cannot be read (%v); "+
+		"it is not recycled until the screen reads; suspending the session (gc session suspend %s) stops it, and the stop removes the dead runtime by its object without reading its screen",
+		s.Kind, s.Key.ID, n, s.Err, s.Key.ID))
 }
 
 // settledKey is a settlement's "settled" key: kind/outcome[/cause].
@@ -107,15 +174,58 @@ var settleOutcomeNames = map[settleOutcome]string{
 }
 
 // idleRespawnPhases are the idle-respawn series (C6d, Gate S) a landed
-// settlement counts in by kind, when it carries the legacy drain reason
-// C6d's begin, void and stop intents carry.
+// settlement counts in by kind, when its intent's reason names the
+// idle-respawn drain after its arm's prefix (drain-begin:, drain-void:,
+// drain-cancel:, stop:, stop-finalize:). Ends the series do not count, so
+// begun less voided and completed is not what is outstanding: the residue
+// void of a request an operator ended (reason residue), A15's stop
+// pre-empting a requested respawn (its own reason), and a PreWake clearing
+// the request of a row its runtime left.
 var idleRespawnPhases = map[string]string{
 	intentDrainBegin: "idle_respawn_begun", intentDrainBeginFresh: "idle_respawn_begun",
-	intentDrainVoid: "idle_respawn_voided", intentStop: "idle_respawn_completed",
+	intentDrainVoid: "idle_respawn_voided", intentDrainCancel: "idle_respawn_voided", intentStop: "idle_respawn_completed",
+}
+
+// idleRespawnPhase is the series a landed settlement counts in: by kind, or
+// voided for a signal whose revalidation voided the drain instead.
+func idleRespawnPhase(s settlement) string {
+	if _, reason, _ := strings.Cut(s.Reason, ":"); s.Outcome != settledLanded || reason != idleRespawnDrainReason {
+		return ""
+	}
+	if s.Kind == intentSignalFresh && strings.HasPrefix(s.Cause, causeIdleRespawnVoid) {
+		return "idle_respawn_voided"
+	}
+	return idleRespawnPhases[s.Kind]
 }
 
 // soakSeries are passMetrics.series' counters, always in the record.
-var soakSeries = []string{"idle_respawn_begun", "idle_respawn_voided", "idle_respawn_completed", "stop_escalations"}
+var soakSeries = []string{"idle_respawn_begun", "idle_respawn_voided", "idle_respawn_completed", "stop_escalations", claimedDemandSeries}
+
+// claimedDemandSeries counts the default-probe rows gather dropped as work
+// the pass already reads as claimed (demandView.ClaimedDemand): new demand the
+// pass would otherwise have counted for work a seat holds.
+const claimedDemandSeries = "claimed_demand_cut"
+
+// observeClaimedDemand counts each row v cuts on the first pass that cuts it.
+// A row the probe keeps listing until its read catches up with the claim
+// counts once, so the series tracks lagging claims rather than passes, and
+// moves the record's content key only when a new one appears.
+func (p *planner) observeClaimedDemand(v demandView) {
+	var cut map[string]struct{}
+	for template, c := range v.ClaimedDemand {
+		for _, id := range c.WorkBeadIDs {
+			key := template + "/" + id
+			if cut == nil {
+				cut = make(map[string]struct{})
+			}
+			cut[key] = struct{}{}
+			if _, seen := p.obs.claimedCut[key]; !seen {
+				p.metrics.count(&p.metrics.series, claimedDemandSeries)
+			}
+		}
+	}
+	p.obs.claimedCut = cut
+}
 
 // observeWorld fills c's gauges from w, and alerts once on each named
 // duplicate the allocation reports and each row with a state legacy does
@@ -124,9 +234,12 @@ func (p *planner) observeWorld(w *World, duplicates []string, c *passCounts) {
 	rows := w.Census.Canonical()
 	c.Rows, c.InputAges = len(rows), w.InputAges
 	unknown := make(map[rowKey]string)
+	escalated := make(map[stopEscalationKey]time.Time)
+	own := w.Census.sessionsLeg() // a rig leg's rows are other cities' too, which v2 never stops (A1)
 	for _, row := range rows {
-		if stopOutstanding(row.Info, w.Now) {
+		if row.Key.Leg == own && stopOutstanding(row.Info, w.Now) {
 			c.StopOutstanding++
+			p.escalateStop(w, row, escalated)
 		}
 		if !row.UnknownState {
 			continue
@@ -138,6 +251,7 @@ func (p *planner) observeWorld(w *World, duplicates []string, c *passCounts) {
 		}
 	}
 	p.obs.unknown = unknown
+	p.obs.escalated = escalated
 	dups := make(map[string]bool, len(duplicates))
 	for _, d := range duplicates {
 		dups[d] = true
@@ -146,6 +260,86 @@ func (p *planner) observeWorld(w *World, duplicates []string, c *passCounts) {
 		}
 	}
 	p.obs.duplicates = dups
+}
+
+// observeWorktreeRefusals alerts once on each work item the allocation
+// refused for unusable worktree evidence (allocTraceRecord.WorkBeadID), for
+// as long as the refusal lasts: a changed pool or cause alerts again, and an
+// item the pass no longer refuses is forgotten, so a relapse alerts again.
+func (p *planner) observeWorktreeRefusals(trace []allocTraceRecord) {
+	refused := make(map[string]string)
+	for _, r := range trace {
+		if r.WorkBeadID == "" {
+			continue
+		}
+		if _, seen := refused[r.WorkBeadID]; seen {
+			continue
+		}
+		msg := fmt.Sprintf("work bead %s gets no %q session while its worktree evidence is unusable: %s", r.WorkBeadID, r.Template, r.Detail)
+		refused[r.WorkBeadID] = msg
+		if p.obs.worktreeRefused[r.WorkBeadID] != msg {
+			p.alert(alertWorktreeRefused, r.WorkBeadID, msg)
+		}
+	}
+	p.obs.worktreeRefused = refused
+}
+
+// escalateStop is D6's stop-outstanding alert for row, whose signaled stop
+// is outstanding: session.drain_stop_escalated, in legacy's payload shape
+// (recordDrainAckEscalation) with reason stop_outstanding/<the stop verb's
+// last refusing cause>, at once and then at most every
+// stopEscalationRepeat per (row, incarnation), and never under legacy's
+// quiet hold (stopQuietHold), which keeps the memory: once the hold clears,
+// a stop past either threshold alerts at once. It is never force_terminated:
+// v2 has no force path (§12.2 #1). The memory is the planner's, so a restart
+// alerts again at once.
+func (p *planner) escalateStop(w *World, row censusRow, escalated map[stopEscalationKey]time.Time) {
+	k := stopEscalationKey{k: row.Key, inc: row.Incarnation}
+	last, alerted := p.obs.escalated[k]
+	if alerted {
+		escalated[k] = last
+	}
+	if alerted && w.Now.Sub(last) < stopEscalationRepeat || stopQuietHold(w, row) {
+		return
+	}
+	escalated[k] = w.Now
+	reason := stopEscalationReason + "/" + cmp.Or(p.backoff.Record(rowBackoffKey(row.Key)).Cause, stopEscalationNoCause)
+	var cfg *config.City
+	if w.Env != nil {
+		cfg = w.Env.Cfg
+	}
+	info := row.Info
+	template := cmp.Or(normalizedSessionTemplateInfo(info, cfg), info.Template)
+	recordDrainTransition(context.Background(), info.SessionNameMetadata, reason, "escalate")
+	ev := events.Event{
+		Type: events.SessionDrainStopEscalated, Ts: w.Now.UTC(), Actor: "gc", Subject: template, SessionID: info.ID,
+		Message: fmt.Sprintf("drain-ack stop-pending escalation (%s): the stop is still outstanding", reason),
+		Payload: api.SessionLifecyclePayloadJSON(info.ID, template, reason),
+	}
+	if p.rec == nil {
+		p.metrics.count(&p.metrics.series, "stop_escalations")
+		return
+	}
+	p.record(ev)
+}
+
+// stopQuietHold is legacy's quiet hold on its escalation
+// (drainAckEscalationQuietHold) as the pass observes the row: a human
+// attached, or the pane active within drainAckEscalationQuietGrace, or
+// activity the pass cannot read, which may be a busy pane. Legacy stays
+// silent then, and so does D6's alert (owner rulings at the C6b2c review).
+// Legacy escalates only a runtime still alive, so a row whose runtime reads
+// gone, which has no pane to be busy, never holds.
+func stopQuietHold(w *World, row censusRow) bool {
+	o := w.Observed[row.Key]
+	if o.Liveness == livenessGone {
+		return false
+	}
+	if o.Attached {
+		return true
+	}
+	obs := readRuntimeName(w.Obs, row.Info.SessionName, w.Now, w.ObsMaxAge).obs
+	return !obs.LastActivityKnown || w.Now.Sub(obs.LastActivity) < drainAckEscalationQuietGrace
 }
 
 // stopOutstanding reports a signaled stop (legacy's stop-pending projection)

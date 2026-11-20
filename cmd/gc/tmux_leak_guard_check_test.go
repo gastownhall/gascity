@@ -224,7 +224,7 @@ func TestDiscoverTmuxProcessesWithSocketRootEnv_FindsDeletedSocketZombie(t *test
 		t.Fatalf("delete socket file: %v", err)
 	}
 
-	found := discoverTmuxProcessesWithSocketRootEnv(func(root string) bool { return root == socketRoot })
+	found := discoverTmuxProcessesWithSocketRootEnv(func(_ int, root string) bool { return root == socketRoot })
 	var hit *tmuxProcInfo
 	for i := range found {
 		if found[i].PID == pid {

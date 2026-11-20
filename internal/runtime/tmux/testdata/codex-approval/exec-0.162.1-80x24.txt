@@ -1,0 +1,24 @@
+  b955b7.txt
+
+
+• The environment is read-only, so writing to /tmp needs an escalation approval.
+
+• Running printf "%s\n" one two > /tmp/codex-approval-b955b7.txt
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: May I write the requested two-line file to
+  /tmp/codex-approval-b955b7.txt? The current environment is read-only.
+
+  $ printf "%s\n" one two > /tmp/codex-approval-b955b7.txt
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `printf "%s\n" one
+     two > /tmp/codex-approval-b955b7.txt` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

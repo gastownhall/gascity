@@ -19,8 +19,10 @@ import (
 	"github.com/gastownhall/gascity/internal/execenv"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type slingBody struct {
@@ -42,20 +44,83 @@ type slingBody struct {
 }
 
 type slingResponse struct {
-	Status         string             `json:"status"`
-	Target         string             `json:"target"`
-	Formula        string             `json:"formula,omitempty"`
-	Bead           string             `json:"bead,omitempty"`
-	WorkflowID     string             `json:"workflow_id,omitempty"`
-	RootBeadID     string             `json:"root_bead_id,omitempty"`
-	AttachedBeadID string             `json:"attached_bead_id,omitempty"`
-	Mode           string             `json:"mode,omitempty"`
-	Warnings       []string           `json:"warnings,omitempty"`
-	DashboardURL   string             `json:"dashboard_url,omitempty" doc:"Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it."`
-	Run            *RunRef            `json:"run,omitempty" doc:"Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."`
-	MoleculeID     string             `json:"molecule_id,omitempty" doc:"Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id."`
-	ConvoyID       string             `json:"convoy_id,omitempty" doc:"Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id."`
-	Batch          *SlingBatchSummary `json:"batch,omitempty" doc:"Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch."`
+	Status         string              `json:"status" enum:"slung,partial" doc:"slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures."`
+	Target         string              `json:"target"`
+	Formula        string              `json:"formula,omitempty"`
+	Bead           string              `json:"bead,omitempty"`
+	WorkflowID     string              `json:"workflow_id,omitempty"`
+	RootBeadID     string              `json:"root_bead_id,omitempty"`
+	AttachedBeadID string              `json:"attached_bead_id,omitempty"`
+	Mode           string              `json:"mode,omitempty"`
+	Warnings       []string            `json:"warnings,omitempty"`
+	DashboardURL   string              `json:"dashboard_url,omitempty" doc:"Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it."`
+	Run            *RunRef             `json:"run,omitempty" doc:"Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."`
+	MoleculeID     string              `json:"molecule_id,omitempty" doc:"Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id."`
+	ConvoyID       string              `json:"convoy_id,omitempty" doc:"Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id."`
+	Batch          *SlingBatchSummary  `json:"batch,omitempty" doc:"Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch."`
+	Children       []SlingChildOutcome `json:"children,omitempty" doc:"One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is."`
+}
+
+// Sling response statuses (slingResponse.Status).
+const (
+	// SlingStatusSlung is a sling that completed.
+	SlingStatusSlung = "slung"
+	// SlingStatusPartial is a convoy sling that routed some children and
+	// failed others.
+	SlingStatusPartial = "partial"
+)
+
+// SlingChildOutcome is the outcome of one child of a convoy sling. It mirrors
+// the per-child lines gc sling prints for a convoy.
+type SlingChildOutcome struct {
+	BeadID     string              `json:"bead_id" doc:"Child bead ID."`
+	Outcome    string              `json:"outcome" enum:"routed,failed,skipped" doc:"routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status)."`
+	Status     string              `json:"status,omitempty" doc:"The child's bead status when it was skipped because it was not open."`
+	Reason     string              `json:"reason,omitempty" doc:"Why routing the child failed. Present only for outcome failed."`
+	Formula    string              `json:"formula,omitempty" doc:"Formula attached to the child, when one was."`
+	WorkflowID string              `json:"workflow_id,omitempty" doc:"Graph workflow launched for the child, when one was."`
+	MoleculeID string              `json:"molecule_id,omitempty" doc:"Root of the formula wisp attached to the child, when a non-graph formula was attached."`
+	Conflict   *SlingChildConflict `json:"conflict,omitempty" doc:"Set when the child failed because its source bead already has a live workflow."`
+}
+
+// SlingChildConflict names the live workflows that refused a convoy child's
+// launch: the per-child form of the sling-source-workflow-conflict problem.
+type SlingChildConflict struct {
+	SourceBeadID        string   `json:"source_bead_id" doc:"Source bead whose live workflow refused the launch."`
+	BlockingWorkflowIDs []string `json:"blocking_workflow_ids" doc:"Live workflow roots that refused the launch."`
+	Hint                string   `json:"hint" doc:"Command that deletes the blocking workflows. Re-slinging with force launches beside them instead."`
+}
+
+// slingChildOutcomes projects the domain's per-child results onto the wire.
+// storeRef scopes the cleanup hint of a child refused on a source-workflow
+// conflict, as it does for a whole-request conflict.
+func slingChildOutcomes(children []sling.SlingChildResult, storeRef string) []SlingChildOutcome {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]SlingChildOutcome, 0, len(children))
+	for _, child := range children {
+		outcome := SlingChildOutcome{
+			BeadID:     child.BeadID,
+			Outcome:    child.Outcome(),
+			Status:     child.Status,
+			Formula:    child.FormulaName,
+			WorkflowID: child.WorkflowID,
+			MoleculeID: child.WispRootID,
+		}
+		if child.Failed {
+			outcome.Reason = child.FailReason
+		}
+		if c := child.Conflict; c != nil {
+			outcome.Conflict = &SlingChildConflict{
+				SourceBeadID:        c.SourceBeadID,
+				BlockingWorkflowIDs: append([]string{}, c.WorkflowIDs...),
+				Hint:                sourceWorkflowCleanupHint(c.SourceBeadID, storeRef),
+			}
+		}
+		out = append(out, outcome)
+	}
+	return out
 }
 
 // SlingBatchSummary counts the outcome of a convoy sling that routed each
@@ -94,13 +159,14 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	storeBeadID := slingStoreBeadID(body)
 
 	// Build deps and construct Sling instance.
-	store := s.findSlingStore(body.Rig, agentCfg, storeBeadID)
+	st := s.state.Stores()
+	store, scope := s.findSlingStore(st, body.Rig, agentCfg, storeBeadID)
 	storeRef := s.slingStoreRef(body.Rig, agentCfg, storeBeadID)
-	if store == nil && allowsForceStoreFallback(body, agentCfg) {
-		store = s.findSlingStore(body.Rig, agentCfg, "")
+	if store == (beads.WorkStore{}) && allowsForceStoreFallback(body, agentCfg) {
+		store, scope = s.findSlingStore(st, body.Rig, agentCfg, "")
 		storeRef = s.slingStoreRef(body.Rig, agentCfg, "")
 	}
-	if store == nil {
+	if store == (beads.WorkStore{}) {
 		message := fmt.Sprintf("bead prefix store %s is not registered; cannot verify bead %q", storeRef, storeBeadID)
 		return nil, http.StatusBadRequest, "missing_bead", message, nil
 	}
@@ -123,12 +189,13 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		Cfg:      s.state.Config(),
 		SP:       s.state.SessionProvider(),
 		Store:    store,
-		// Only a relocated graph binding; with nil the sling domain cooks the
-		// workflow in the sling's selected work store, next to its source
-		// bead, the rule `gc sling` applies through resolveGraphStore.
-		// Passing the non-relocated graph store (the city store) put a rig
-		// bead's workflow where the rig's pool workers never look.
-		GraphStore: relocatedGraphStore(s.state),
+		// The graph store at the sling's scope: the relocated graph binding,
+		// else the selected work store itself, so the workflow is cooked next
+		// to its source bead, the rule `gc sling` applies. The city's graph
+		// store on a city that relocates nothing is the city store, which put
+		// a rig bead's workflow where the rig's pool workers never look.
+		GraphStore: graphAt(st, scope),
+		Sessions:   st.Sessions(),
 		Events:     s.state.EventProvider(),
 		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
@@ -147,7 +214,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			fmt.Fprintf(apiSlingStderr(), "warning: %s\n", message) //nolint:errcheck
 		},
 		Runner:   s.slingRunner(),
-		Router:   apiBeadRouter{server: s, store: store},
+		Router:   apiBeadRouter{server: s, store: store, binding: graphBinding(st)},
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
 		Notify:   &apiNotifier{state: s.state},
@@ -190,6 +257,9 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		ScopeKind: body.ScopeKind,
 		ScopeRef:  body.ScopeRef,
 	}
+	// Who launched this is server fact from the verified write grant, never
+	// a client field or var.
+	opts.Initiator, _ = VerifiedPrincipal(ctx)
 	mode := "direct"
 	switch {
 	case attachedBeadID != "":
@@ -204,10 +274,31 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		opts.BeadOrFormula = strings.TrimSpace(body.Bead)
 	}
 	result, err := sl.Dispatch(ctx, opts, store)
+	partial := err != nil && result.PartialFailure()
+	if partial {
+		// Some children were routed before others failed. A bare error would
+		// hide which ones, and a client retrying the whole request would route
+		// them again; answer with the per-child outcomes instead, as gc sling
+		// prints them.
+		fmt.Fprintf(apiSlingStderr(), "gc api sling: %s partially failed: %v\n", opts.BeadOrFormula, err) //nolint:errcheck
+		err = nil
+	}
 	if err != nil {
+		// A probe that could not read an attachment is a store fault: the
+		// guard cannot tell whether a live molecule is attached. It is checked
+		// before the conflicts, which it may accompany in a batch.
+		var probeErr *sling.AttachmentProbeError
+		if errors.As(err, &probeErr) {
+			fmt.Fprintf(apiSlingStderr(), "gc api sling: %v\n", err) //nolint:errcheck
+			return nil, http.StatusInternalServerError, "attachment_probe_failed", probeErr.Error(), nil
+		}
 		var conflictErr *sourceworkflow.ConflictError
 		if errors.As(err, &conflictErr) {
 			return nil, http.StatusConflict, "conflict", err.Error(), conflictErr
+		}
+		var attachedErr *sling.MoleculeAttachedError
+		if errors.As(err, &attachedErr) {
+			return nil, http.StatusConflict, "molecule_attached", err.Error(), nil
 		}
 		var lookupErr *sling.BeadLookupError
 		if errors.As(err, &lookupErr) {
@@ -237,8 +328,12 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	if len(sourceWorkflowScanMessages) > 0 {
 		warnings = append(append([]string(nil), result.MetadataErrors...), sourceWorkflowScanMessages...)
 	}
+	status := SlingStatusSlung
+	if partial {
+		status = SlingStatusPartial
+	}
 	resp := &slingResponse{
-		Status:     "slung",
+		Status:     status,
 		Target:     body.Target,
 		Bead:       body.Bead,
 		Mode:       mode,
@@ -255,6 +350,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			Skipped:       result.Skipped,
 			Idempotent:    result.IdempotentCt,
 		}
+		resp.Children = slingChildOutcomes(result.Children, storeRef)
 	}
 	explicitFormula := opts.IsFormula || opts.OnFormula != ""
 	// The domain names the formula it cooked. On a plain bead that is the
@@ -310,26 +406,35 @@ func sourceWorkflowCleanupHint(sourceBeadID, storeRef string) string {
 	return strings.Join(args, " ")
 }
 
-// findSlingStore returns the bead store for sling operations.
-func (s *Server) findSlingStore(rig string, agentCfg config.Agent, beadID string) beads.Store {
+// findSlingStore returns st's work store for sling operations and the scope
+// it is the work store of: the city's, or a rig's. The store is zero when the
+// scope the bead's prefix names has none open.
+func (s *Server) findSlingStore(st storeref.Stores, rig string, agentCfg config.Agent, beadID string) (beads.WorkStore, storeref.StoreRef) {
 	// Match the CLI's bead-prefix-first resolution so existence checks consult
 	// the bead's home store before any cross-rig guard runs.
 	if resolvedRig, cityScope := s.slingStoreScopeForBead(beadID); cityScope {
-		return s.state.CityBeadStore()
+		return st.Work(), storeref.WorkRef
 	} else if resolvedRig != "" {
-		return s.state.BeadStore(resolvedRig)
+		store, _ := st.Rig(resolvedRig)
+		return store, storeref.RigRef(resolvedRig)
 	}
 	if rig != "" {
-		if store := s.state.BeadStore(rig); store != nil {
-			return store
+		if store, ok := st.Rig(rig); ok {
+			return store, storeref.RigRef(rig)
 		}
 	}
 	if agentCfg.Dir != "" {
-		if store := s.state.BeadStore(agentCfg.Dir); store != nil {
-			return store
+		if store, ok := st.Rig(agentCfg.Dir); ok {
+			return store, storeref.RigRef(agentCfg.Dir)
 		}
 	}
-	return s.state.CityBeadStore()
+	return st.Work(), storeref.WorkRef
+}
+
+// graphAt is st's graph store at scope, a scope findSlingStore named.
+func graphAt(st storeref.Stores, scope storeref.StoreRef) beads.GraphStore {
+	graph, _ := st.GraphFor(scope)
+	return graph
 }
 
 // slingStoreRef returns a store ref string for the sling context.
@@ -380,16 +485,16 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 // refuses the sling instead of degrading to the tolerated non-source-store
 // warning, because a binding fault is an error, never absence.
 //
-// It is skipped on a default (non-relocated) city, where GraphBeadStore() ==
-// CityBeadStore(), so the single-store enumeration stays byte-identical and no
-// store is scanned twice. Its ref reuses workflowStores()'s "graph:<city>"
-// spelling so the store_ref round trip has one parse, not two.
+// It is skipped on a default (non-relocated) city, where Stores().Graph()
+// wraps CityBeadStore(), so the single-store enumeration stays byte-identical
+// and no store is scanned twice. Its ref reuses workflowStores()'s
+// "graph:<city>" spelling so the store_ref round trip has one parse, not two.
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
 	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+2)
 	cityStore := s.state.CityBeadStore()
-	if graphStore := relocatedGraphStore(s.state); graphStore != nil {
+	if graph, ok := relocatedGraphStore(s.state); ok {
 		stores = append(stores, sling.SourceWorkflowStore{
-			Store:    graphStore,
+			Store:    graph,
 			StoreRef: sourceworkflow.GraphStoreRef(s.state.CityName()),
 			Strict:   true,
 		})
@@ -419,9 +524,15 @@ func (s *Server) slingRunner() sling.SlingRunner {
 		return s.SlingRunnerFunc
 	}
 	return func(dir, command string, env map[string]string) (string, error) {
+		if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+			return "", fmt.Errorf("sling query refused: %s", reason)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "sh", "-c", command)
+		cmd, err := runtime.ShellCommandContext(ctx, command)
+		if err != nil {
+			return "", fmt.Errorf("running %q: %w", command, err)
+		}
 		if dir != "" {
 			cmd.Dir = dir
 		}
@@ -524,7 +635,20 @@ func (n *apiNotifier) PokeControlDispatch(_ string) {
 
 type apiBeadRouter struct {
 	server *Server
-	store  beads.Store
+	store  beads.WorkStore
+	// binding is the request's relocated graph binding, zero on a city that
+	// does not relocate graph (graphBinding).
+	binding beads.GraphStore
+}
+
+// graphBinding is st's graph store when the city relocates the graph class,
+// else the zero handle: on a city that relocates nothing the graph store is
+// the city's work store.
+func graphBinding(st storeref.Stores) beads.GraphStore {
+	if beads.SameStore(st.Graph(), st.Work()) {
+		return beads.GraphStore{}
+	}
+	return st.Graph()
 }
 
 func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
@@ -538,6 +662,9 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			if runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
 			}
+			if err := sling.CheckSlingQueryBeadID(req.BeadID); err != nil {
+				return err
+			}
 			slingCmd, slingWarn := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.server.state.CityPath(), r.server.state.CityName(), agentCfg, cfg.Rigs)
 			if slingWarn != "" {
 				fmt.Fprintf(apiSlingStderr(), "gc api sling: %s\n", slingWarn) //nolint:errcheck
@@ -549,9 +676,14 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	// The core names the store that holds the bead. Honor it only when it is
 	// the relocated graph binding (a --formula wisp root minted there, #6054);
 	// on a city that relocates nothing the request keeps routing through the
-	// sling's own store, unchanged.
-	store := r.store
-	if req.Store != nil && req.Store == relocatedGraphStore(r.server.state) {
+	// sling's own store, unchanged. Identity is SameStore's: a class handle
+	// over the binding is the binding, where == between a handle and the raw
+	// store would be false.
+	var store beads.Writer
+	if r.store != (beads.WorkStore{}) {
+		store = r.store
+	}
+	if beads.SameStore(req.Store, r.binding) {
 		store = req.Store
 	}
 	if store == nil {

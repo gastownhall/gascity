@@ -21,9 +21,9 @@ type storeStampingRouter struct {
 
 func (r *storeStampingRouter) Route(_ context.Context, req RouteRequest) error {
 	r.routed = append(r.routed, req)
-	store := req.Store
-	if store == nil {
-		store = r.fallback
+	store := r.fallback
+	if !req.Store.Absent() {
+		store = req.Store
 	}
 	return store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, req.Target)
 }
@@ -34,8 +34,15 @@ func (r *storeStampingRouter) Route(_ context.Context, req RouteRequest) error {
 // in that store, not in the work store the sling was configured with. On a
 // split city the work store has never held the root and the stamp failed with
 // "bead not found", leaking an unrouted wisp into the graph binding.
+//
+// The formula is a root-only (vapor) wisp, which is graph class. A v1 poured
+// formula is work class and is poured into the work store instead
+// (TestSplitSlingPoursEachRecipeIntoTheStoreOfItsClass).
 func TestSlingFormulaRoutesTheWispRootThroughTheStoreThatMintedIt(t *testing.T) {
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{splitAttachFormulaDir(t)}},
+	}
 	deps, work, graph := splitSlingDeps(t, cfg)
 	router := &storeStampingRouter{fallback: work}
 	deps.Router = router
@@ -43,7 +50,7 @@ func TestSlingFormulaRoutesTheWispRootThroughTheStoreThatMintedIt(t *testing.T) 
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	result, err := DoSling(SlingOpts{
 		Target:        a,
-		BeadOrFormula: "code-review",
+		BeadOrFormula: splitAttachVaporA,
 		IsFormula:     true,
 		Merge:         "mr",
 	}, deps, nil)
@@ -65,8 +72,8 @@ func TestSlingFormulaRoutesTheWispRootThroughTheStoreThatMintedIt(t *testing.T) 
 	if len(router.routed) != 1 {
 		t.Fatalf("router calls = %d, want 1", len(router.routed))
 	}
-	if got := router.routed[0]; got.BeadID != root.ID || got.Store != graph {
-		t.Errorf("route request = {BeadID:%q Store:%T(%p)}, want {BeadID:%q Store: the graph store %p}", got.BeadID, got.Store, got.Store, root.ID, graph)
+	if got := router.routed[0]; got.BeadID != root.ID || !beads.SameStore(got.Store, graph) || !got.Store.IsGraph() {
+		t.Errorf("route request = {BeadID:%q Store graph target:%t over the graph store:%t}, want {BeadID:%q Store: a graph target over the graph store}", got.BeadID, got.Store.IsGraph(), beads.SameStore(got.Store, graph), root.ID)
 	}
 	if got := root.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
 		t.Errorf("graph-resident root gc.routed_to = %q, want worker", got)
@@ -77,8 +84,9 @@ func TestSlingFormulaRoutesTheWispRootThroughTheStoreThatMintedIt(t *testing.T) 
 }
 
 // TestSlingFormulaRouteStoreIsTheWorkStoreOnASingleStoreCity pins the
-// single-store collapse: with no GraphStore the root is minted in, and routed
-// through, the one store the sling was configured with.
+// single-store collapse: with the graph store collapsed onto the work store
+// the root is minted in, and routed through, the one store the sling was
+// configured with.
 func TestSlingFormulaRouteStoreIsTheWorkStoreOnASingleStoreCity(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	deps := testDeps(cfg, nil, newFakeRunner().run)
@@ -90,7 +98,7 @@ func TestSlingFormulaRouteStoreIsTheWorkStoreOnASingleStoreCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoSling --formula: %v", err)
 	}
-	if len(router.routed) != 1 || router.routed[0].Store != deps.Store {
+	if len(router.routed) != 1 || !beads.SameStore(router.routed[0].Store, deps.Store) {
 		t.Fatalf("route requests = %+v, want one naming the single store", router.routed)
 	}
 	root, err := deps.Store.Get(result.BeadID)

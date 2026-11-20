@@ -351,11 +351,21 @@ func TestConditionalWritesRequiredErrorIdentity(t *testing.T) {
 	}
 }
 
+// valueKindStore is a non-pointer Store, so the type-name fallback is pinned
+// for value types as well as pointers.
+type valueKindStore struct{ Store }
+
 func TestConditionalStoreKindFallsBackToTypeName(t *testing.T) {
 	t.Parallel()
-	s := &stampedNoCASStore{Store: NewMemStore()}
-	if got := conditionalStoreKind(s); !strings.Contains(got, "stampedNoCASStore") {
-		t.Fatalf("conditionalStoreKind = %q, want the %%T fallback naming the concrete type", got)
+	for _, s := range []Store{
+		&stampedNoCASStore{Store: NewMemStore()},
+		valueKindStore{Store: NewMemStore()},
+	} {
+		// Exactly the %T spelling: cmd/gc's conditionalWritesEventStoreKind
+		// matches it verbatim for the build-tagged *beads.DoltliteReadStore.
+		if got, want := conditionalStoreKind(s), fmt.Sprintf("%T", s); got != want {
+			t.Fatalf("conditionalStoreKind = %q, want the %%T spelling %q", got, want)
+		}
 	}
 }
 
@@ -571,7 +581,7 @@ func sourcedOver(source Store) *modeSourcedWrapper {
 func TestResolveConditionalWriterReadsTheModeSourceAndReturnsTheWrapper(t *testing.T) {
 	t.Run("auto over a capable source resolves the wrapper", func(t *testing.T) {
 		engine := openSQLiteLayoutForTest(t, true, false)
-		if err := StampOpenedStore(engine, "SQLiteStore", gate.Auto, nil, nil); err != nil {
+		if err := StampOpenedStore(engine, "SQLiteStore", gate.Auto, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		w := sourcedOver(engine)
@@ -605,7 +615,7 @@ func TestResolveConditionalWriterReadsTheModeSourceAndReturnsTheWrapper(t *testi
 
 	t.Run("require over an incapable source refuses with the source's reason", func(t *testing.T) {
 		engine := openSQLiteLayoutForTest(t, false, false)
-		if err := StampOpenedStore(engine, "SQLiteStore", gate.Require, nil, nil); err != nil {
+		if err := StampOpenedStore(engine, "SQLiteStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		writer, diag, err := ResolveConditionalWriter(sourcedOver(engine))
@@ -656,7 +666,7 @@ func TestResolveConditionalWriterReadsTheModeSourceAndReturnsTheWrapper(t *testi
 		for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
 			engine := openSQLiteLayoutForTest(t, true, false)
 			degrades := 0
-			if err := StampOpenedStore(engine, "SQLiteStore", mode, func(ConditionalWritesDegrade) { degrades++ }, nil); err != nil {
+			if err := StampOpenedStore(engine, "SQLiteStore", mode, false, func(ConditionalWritesDegrade) { degrades++ }, nil); err != nil {
 				t.Fatalf("StampOpenedStore: %v", err)
 			}
 			w := sourcedOver(engine)
@@ -715,4 +725,82 @@ func TestResolveConditionalWriterNeverComparesAnUndeclaredStore(t *testing.T) {
 	if err != nil || diag != nil || writer == nil {
 		t.Fatalf("ResolveConditionalWriter(value store) = (%T, %v, %v), want its writer", writer, diag, err)
 	}
+}
+
+// prefixStore reports an IDPrefix.
+type prefixStore struct {
+	*MemStore
+	prefix string
+}
+
+func (s prefixStore) IDPrefix() string { return s.prefix }
+
+// targetingWrapper embeds a store and declares a resolve target, as the
+// cmd/gc policy store does.
+type targetingWrapper struct {
+	Store
+	target Store
+}
+
+func (w targetingWrapper) ConditionalWritesResolveTarget() Store { return w.target }
+
+// ptrPrefixStore reports a prefix through a pointer receiver that reads its
+// fields, so calling IDPrefix on a nil one panics.
+type ptrPrefixStore struct {
+	*MemStore
+	prefix string
+}
+
+func (s *ptrPrefixStore) IDPrefix() string { return s.prefix }
+
+// reportingWrapper reports a prefix of its own and declares a target.
+type reportingWrapper struct{ targetingWrapper }
+
+func (reportingWrapper) IDPrefix() string { return "outer" }
+
+// selfTargeting declares itself as its resolve target.
+type selfTargeting struct{ *MemStore }
+
+func (s *selfTargeting) ConditionalWritesResolveTarget() Store { return s }
+
+func TestIDPrefixFor(t *testing.T) {
+	gc := prefixStore{MemStore: NewMemStore(), prefix: "gc"}
+	// A typed nil whose IDPrefix dereferences its receiver: the walk must stop
+	// at it rather than call it.
+	var typedNilPrefix *ptrPrefixStore
+	self := &selfTargeting{MemStore: NewMemStore()}
+	for name, tc := range map[string]struct {
+		s    Store
+		want string
+	}{
+		"nil":                             {nil, ""},
+		"a store that reports one":        {gc, "gc"},
+		"a store that reports none":       {NewMemStore(), ""},
+		"through a class handle":          {SessionStore{gc}, "gc"},
+		"through nested handles":          {GraphStore{SessionStore{gc}}, "gc"},
+		"through a declared target":       {SessionStore{targetingWrapper{Store: NewMemStore(), target: gc}}, "gc"},
+		"the outermost reporter wins":     {reportingWrapper{targetingWrapper{Store: NewMemStore(), target: gc}}, "outer"},
+		"an empty prefix walks on":        {targetingWrapper{Store: NewMemStore(), target: prefixStore{MemStore: NewMemStore(), prefix: ""}}, ""},
+		"a zero handle":                   {SessionStore{}, ""},
+		"a handle over a typed nil":       {SessionStore{typedNilPrefix}, ""},
+		"a self-targeting wrapper":        {self, ""},
+		"a target chain past the bound":   {deepTargets(prefixHopsForTest+1, gc), ""},
+		"a target chain within the bound": {deepTargets(prefixHopsForTest-1, gc), "gc"},
+	} {
+		if got := IDPrefixFor(tc.s); got != tc.want {
+			t.Errorf("%s: IDPrefixFor = %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// prefixHopsForTest is IDPrefixFor's walk bound.
+const prefixHopsForTest = idPrefixMaxHops
+
+// deepTargets is n targeting wrappers, each declaring the next, over leaf.
+func deepTargets(n int, leaf Store) Store {
+	s := leaf
+	for range n {
+		s = targetingWrapper{Store: NewMemStore(), target: s}
+	}
+	return s
 }

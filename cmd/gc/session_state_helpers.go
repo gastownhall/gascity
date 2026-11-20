@@ -51,9 +51,20 @@ func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
 // state where the pool slot it occupies can be freed: explicitly drained, or
 // asleep with sleep_reason one of idle, idle-timeout, city-stop,
 // failed-create, runtime-missing, provider-terminal-error, max-session-age,
-// or killed (without an honored kill fence). Sessions parked via `gc session
-// wait` (sleep_reason=wait-hold), held by context-churn quarantine, or
-// otherwise signaling "don't touch me" keep their slot.
+// config-drift, or killed (without an honored kill fence). Sessions parked
+// via `gc session wait` (sleep_reason=wait-hold), held by context-churn
+// quarantine, or otherwise signaling "don't touch me" keep their slot.
+//
+// A session parked with sleep_reason=config-drift is also freeable: the
+// reconciler already refuses to wake a config-drifted pool session in place
+// (waking would run the agent on its stale config), but with no retirement
+// path a pool whose every slot drifts goes dark indefinitely even with real
+// ready demand — nothing else ever closes the bead to free the slot for a
+// fresh seat against the current config (srvcity sr-sxbc7: st/support.dispatch
+// dark 17.5h, both pool slots asleep-for-drift, 59 ready routed steps
+// queued). Scoped to pool-managed, non-named sessions by the callers below;
+// a named/singleton session's config drift is handled in place by the
+// restart-in-place path and never reaches here.
 //
 // Distinct from `isDrainedSessionBead` because drain-ack can land pool
 // workers in state=asleep+sleep_reason=idle when the pre-close ownership
@@ -81,7 +92,13 @@ func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
 // looks like once re-projected to asleep by the wake path --
 // ClearWakeBlockersPatch clears the recognized reason and stamps none -- and
 // it is a genuine ordinary sleep, not a legacy/regression/write-race record.
+//
+// A row an operator holds (`gc session suspend`: Disposition.KeepsSlot) is
+// never freeable, whatever its reason: its slot and its work stay with it.
 func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
+	if sessionpkg.DecodeDisposition(session.Metadata).KeepsSlot() {
+		return false
+	}
 	if isDrainedSessionBead(session) {
 		return true
 	}
@@ -93,7 +110,7 @@ func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
 	case string(sessionpkg.SleepReasonIdle), string(sessionpkg.SleepReasonIdleTimeout),
 		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
 		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError),
-		string(sessionpkg.SleepReasonMaxSessionAge):
+		string(sessionpkg.SleepReasonMaxSessionAge), string(sessionpkg.SleepReasonConfigDrift):
 		return true
 	case string(sessionpkg.SleepReasonKilled):
 		return !sessionpkg.KillPendingMetadata(session.Metadata["state"], session.Metadata["state_reason"], reason, session.Metadata["slept_at"], now)
@@ -112,6 +129,9 @@ func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
 
 // isPoolSessionSlotFreeableInfo is the session.Info mirror of isPoolSessionSlotFreeable.
 func isPoolSessionSlotFreeableInfo(i sessionpkg.Info, now time.Time) bool {
+	if sessionpkg.DispositionOfInfo(i).KeepsSlot() {
+		return false
+	}
 	if isDrainedSessionInfo(i) {
 		return true
 	}
@@ -123,7 +143,7 @@ func isPoolSessionSlotFreeableInfo(i sessionpkg.Info, now time.Time) bool {
 	case string(sessionpkg.SleepReasonIdle), string(sessionpkg.SleepReasonIdleTimeout),
 		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
 		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError),
-		string(sessionpkg.SleepReasonMaxSessionAge):
+		string(sessionpkg.SleepReasonMaxSessionAge), string(sessionpkg.SleepReasonConfigDrift):
 		return true
 	case string(sessionpkg.SleepReasonKilled):
 		return !sessionpkg.IsKillPendingInfo(i, now)

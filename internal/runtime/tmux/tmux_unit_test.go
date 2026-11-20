@@ -30,7 +30,7 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 	}
 
 	t.Run("tmux observes PID and dead state atomically", func(t *testing.T) {
-		executor := &fakeExecutor{out: "100\t0\n"}
+		executor := &fakeExecutor{out: "pane\t100\t0\n"}
 		tmux := NewTmux()
 		tmux.exec = executor
 		state, err := tmux.paneProcessState("session")
@@ -43,7 +43,7 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 		if len(executor.calls) != 1 {
 			t.Fatalf("tmux calls = %d, want one atomic observation", len(executor.calls))
 		}
-		want := []string{"-u", "display-message", "-t", "=session:^.0", "-p", "#{pane_pid}\t#{pane_dead}"}
+		want := []string{"-u", "list-panes", "-s", "-t", "=session:", "-F", agentPaneMarkerFormat + "\t#{pane_pid}\t#{pane_dead}"}
 		if !slices.Equal(executor.calls[0], want) {
 			t.Fatalf("tmux args = %q, want atomic pid/dead format %q", executor.calls[0], want)
 		}
@@ -58,6 +58,18 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 				t.Errorf("parsePaneProcessState(%q) error = %v; malformed output must not claim target disappearance", output, err)
 			}
+		}
+	})
+
+	t.Run("dead pane with an empty PID (tmux 3.8) is dead, not malformed", func(t *testing.T) {
+		for _, output := range []string{"\t1", "1"} {
+			state, err := parsePaneProcessState(output, "session")
+			if err != nil || !state.Dead {
+				t.Errorf("parsePaneProcessState(%q) = %+v, %v; want Dead", output, state, err)
+			}
+		}
+		if state, err := parsePaneProcessState("0", "session"); err == nil {
+			t.Errorf("parsePaneProcessState(%q) = %+v, nil; an empty PID on a live pane must stay an error", "0", state)
 		}
 	})
 
@@ -1107,5 +1119,46 @@ bind-key    -T prefix n  next-window`
 	userLine := selectBindingLine(table, "n")
 	if strings.Contains(userLine, "if-shell") || strings.Contains(userLine, "gt ") {
 		t.Errorf("the n row must not inherit the g row's Gas Town markers, got %q", userLine)
+	}
+}
+
+// TestBuildProcessKillPlanSweepsGroupsLedByCapturedDescendants: the
+// program-status relay runs its program in a session and process group of
+// its own, so a process the program left behind (reparented away from the
+// tree) shares the program's group, not the pane leader's. A captured
+// descendant that leads its group proves ownership of that group as the
+// pane leader does of its own, so the plan sweeps it; a foreign group and an
+// excluded descendant's group stay untouched.
+func TestBuildProcessKillPlanSweepsGroupsLedByCapturedDescendants(t *testing.T) {
+	const (
+		relayPID    = 100 // the pane leader: gc-osc7501 relay
+		programPID  = 101 // the relay's program, setsid'd: leads group 101
+		childPID    = 102
+		escapedPID  = 150 // the program's daemon, reparented to init, still in group 101
+		excludedPID = 103 // an excluded descendant leading its own group
+		keptPID     = 160 // a member of the excluded descendant's group
+		foreignPID  = 170 // a foreign group
+	)
+	records := []proctable.ProcessRecord{
+		{PID: relayPID, PPID: 1, PGID: relayPID, StartTime: "relay"},
+		{PID: programPID, PPID: relayPID, PGID: programPID, StartTime: "program"},
+		{PID: childPID, PPID: programPID, PGID: programPID, StartTime: "child"},
+		{PID: escapedPID, PPID: 1, PGID: programPID, StartTime: "escaped"},
+		{PID: excludedPID, PPID: relayPID, PGID: excludedPID, StartTime: "excluded"},
+		{PID: keptPID, PPID: 1, PGID: excludedPID, StartTime: "kept"},
+		{PID: foreignPID, PPID: 1, PGID: foreignPID, StartTime: "foreign"},
+	}
+
+	plan := buildProcessKillPlan(relayPID, records, map[int]bool{excludedPID: true})
+	want := []processTarget{
+		{PID: childPID, StartTime: "child"},
+		{PID: programPID, StartTime: "program"},
+		{PID: escapedPID, StartTime: "escaped"},
+	}
+	if !slices.Equal(plan.Descendants, want) {
+		t.Fatalf("descendants = %v, want the program's tree then its escaped group member %v", plan.Descendants, want)
+	}
+	if plan.Leader == nil || plan.Leader.PID != relayPID {
+		t.Fatalf("leader = %v, want the relay %d", plan.Leader, relayPID)
 	}
 }

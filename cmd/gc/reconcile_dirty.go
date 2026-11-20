@@ -23,6 +23,8 @@ import (
 type relevantSet map[string]bool
 
 // newRelevantSet is the relevant set of v's work.
+//
+//gc:pure
 func newRelevantSet(v demandView) *relevantSet {
 	s := make(relevantSet, len(v.AssignedWork)+len(v.Collected.UnassignedRouted))
 	for _, b := range append(slices.Clip(v.AssignedWork), v.Collected.UnassignedRouted...) {
@@ -37,6 +39,8 @@ func newRelevantSet(v demandView) *relevantSet {
 // last pass read as demand (recent), which covers an unroute or an unassign.
 // An undecodable payload is relevant. Any other work event waits for the
 // patrol pass.
+//
+//gc:pure
 func beadEventRelevant(evt events.Event, recent relevantSet) bool {
 	b, ok := beads.DecodeBeadEventPayload(evt.Payload)
 	if !ok {
@@ -52,6 +56,8 @@ func beadEventRelevant(evt events.Event, recent relevantSet) bool {
 // pass reads: a name's facts, incarnation or owner, a name the cache stopped
 // tracking, a backend's primed bit or its health. The cache already applies
 // the partial-list rule, so a partial pass yields no absence flip (R14).
+//
+//gc:pure
 func inventoryChanged(prev, next *ObservationSnapshot) bool {
 	if next == nil {
 		return false
@@ -72,6 +78,8 @@ func inventoryChanged(prev, next *ObservationSnapshot) bool {
 	return primedChanged(prev.Primed, next.Primed) || healthChanged(prev.Health, next.Health)
 }
 
+//
+//gc:pure
 func healthChanged(prev, next map[string]BackendHealth) bool {
 	if len(prev) != len(next) {
 		return true

@@ -7,21 +7,51 @@ import (
 	"testing"
 )
 
+// An override under another file name (bazel's //cmd/gc:gc_testhooks) comes
+// back as a gc in dir: gc's exec orders and pack scripts run bare `gc` through
+// the PATH NewEnv builds from it.
 func TestBuildGCUsesOverrideBinary(t *testing.T) {
-	t.Helper()
-
-	tmpDir := t.TempDir()
-	override := filepath.Join(tmpDir, "gc-external")
-	if err := os.WriteFile(override, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write override binary: %v", err)
-	}
-
+	override := writeFakeGC(t, filepath.Join(t.TempDir(), "gc-external"))
 	t.Setenv("GC_ACCEPTANCE_GC_BIN", override)
 
-	got := BuildGC(t.TempDir())
-	if got != override {
+	dir := t.TempDir()
+	got := BuildGC(dir)
+	if want := filepath.Join(dir, "gc"); got != want {
+		t.Fatalf("BuildGC() = %q, want %q", got, want)
+	}
+	if !sameFile(t, got, override) {
+		t.Fatalf("BuildGC() = %q is not the override %q", got, override)
+	}
+}
+
+func TestBuildGCReturnsAnOverrideNamedGCUnchanged(t *testing.T) {
+	override := writeFakeGC(t, filepath.Join(t.TempDir(), "gc"))
+	t.Setenv("GC_ACCEPTANCE_GC_BIN", override)
+
+	if got := BuildGC(t.TempDir()); got != override {
 		t.Fatalf("BuildGC() = %q, want %q", got, override)
 	}
+}
+
+func writeFakeGC(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake gc: %v", err)
+	}
+	return path
+}
+
+func sameFile(t *testing.T, a, b string) bool {
+	t.Helper()
+	ai, err := os.Stat(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return os.SameFile(ai, bi)
 }
 
 func TestRunGCUsesExactBinaryOverridePath(t *testing.T) {

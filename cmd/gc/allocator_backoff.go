@@ -34,12 +34,46 @@ func vetoBackoff(n int) time.Duration {
 }
 
 // Backoff keys (C5.11): "row:<leg>/<id>" for a session key's refusal;
+// "drift:<leg>/<id>" for its drift kinds' (D3 amendment: a drift deferral
+// paces only the drift, not the row's other intents); "idle:<leg>/<id>"
+// for its idle stops' (v5.9s, likewise);
 // "create:<template>/<instance>" or "named:<identity>" for a create that
 // failed without writing (AM-N8), fingerprinted by its ConfigRev; and
 // "work:<bead>" for worktree evidence that failed verification (C6.5(a)),
 // fingerprinted by the evidence.
 
 func rowBackoffKey(k rowKey) string { return "row:" + k.Leg + "/" + k.ID }
+
+// driftBackoffKey is the key A14's drift kinds settle on.
+func driftBackoffKey(k rowKey) string { return "drift:" + k.Leg + "/" + k.ID }
+
+// idleBackoffKey is the key A15's idle stops settle on.
+func idleBackoffKey(k rowKey) string { return "idle:" + k.Leg + "/" + k.ID }
+
+// markerClearBackoffKey is the key A13's pinned marker clear settles on: a
+// clear that keeps failing holds only itself, never the row's suspend or
+// reset (the #7893 review).
+func markerClearBackoffKey(k rowKey) string { return "marker-clear:" + k.Leg + "/" + k.ID }
+
+// freshCycleBackoffKey is the key SESS-612's fresh cycle settles on: a
+// deferred cycle holds only itself, never the row's other intents.
+func freshCycleBackoffKey(k rowKey) string { return "fresh-cycle:" + k.Leg + "/" + k.ID }
+
+// settledBackoffKey is the key a row's settlement of kind, for reason,
+// backs off.
+func settledBackoffKey(kind, reason string, k rowKey) string {
+	switch {
+	case kind == intentDriftRestart || kind == intentDriftRelaunch:
+		return driftBackoffKey(k)
+	case kind == intentStop && isIdleReason(reason):
+		return idleBackoffKey(k)
+	case kind == intentStop && reason == decideFreshCycle:
+		return freshCycleBackoffKey(k)
+	case kind == intentMarkerClear:
+		return markerClearBackoffKey(k)
+	}
+	return rowBackoffKey(k)
+}
 
 // createBackoffKey is a create identity's backoff key, from
 // createIdentity.key or allocPlan.identity.
@@ -114,18 +148,19 @@ func (t *backoffTable) Succeed(k string) {
 // stays bounded: a create record reserved under a ConfigRev other than
 // configRev (config is fixed per revision, so this also drops an identity
 // config no longer holds), a work record for a bead not in demand, and a row
-// record whose row the census rows no longer hold. Bead IDs hold no "/", so
-// a row key splits at its last one.
-func (t *backoffTable) Prune(configRev string, rows map[rowKey]censusRow, demand map[string]bool) {
+// record whose row census, when complete, holds closed; with no complete
+// census every row record stays. Bead IDs hold no "/", so a row key splits
+// at its last one.
+func (t *backoffTable) Prune(configRev string, census *sessionCensus, demand map[string]bool) {
+	complete, _ := census.complete()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for k, r := range t.recs {
 		var drop bool
 		switch kind, rest, _ := strings.Cut(k, ":"); kind {
-		case "row":
+		case "row", "drift", "idle":
 			i := strings.LastIndex(rest, "/")
-			_, open := rows[rowKey{Leg: rest[:max(i, 0)], ID: rest[i+1:]}]
-			drop = !open
+			drop = complete.Closed(rowKey{Leg: rest[:max(i, 0)], ID: rest[i+1:]})
 		case "work":
 			drop = !demand[rest]
 		default: // create and named

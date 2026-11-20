@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -587,7 +588,7 @@ func TestReconcileTraceResultsObservePostTickValues(t *testing.T) {
 	loserName := spec.SessionName + "-stale"
 	loserID := mk("3", loserName)
 
-	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	all, err := session.ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -600,7 +601,7 @@ func TestReconcileTraceResultsObservePostTickValues(t *testing.T) {
 
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(), cityDir, snap.OpenForReconcile(), snap, nil, map[string]bool{},
-		cfg, runtime.NewFake(), beads.SessionStore{Store: store}, nil, nil, nil, nil,
+		cfg, runtime.NewFake(), beads.SessionStore{Store: store}, testSeatWork(cityDir, cfg, beads.SessionStore{Store: store}, nil), nil, nil, nil, nil,
 		newDrainTracker(), nil, nil, nil, nil, false, nil, cityName, nil, clock.Real{},
 		events.Discard, 0, 0, io.Discard, io.Discard, cycle,
 	)
@@ -653,7 +654,7 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 		nil,
 		&config.City{},
 		nil,
-		beads.SessionStore{},
+		beads.SessionStore{}, testSeatWork(cityDir, &config.City{}, beads.SessionStore{}, nil),
 		nil,
 		nil,
 		nil,
@@ -737,7 +738,7 @@ func (s livenessGetErrStore) Get(id string) (beads.Bead, error) {
 func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 	run := func(t *testing.T, injectStoreLivenessErr bool, sp runtime.Provider) (got beads.Bead, before map[string]string, stderr string) {
 		t.Helper()
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		env.cfg = &config.City{}
 		// An active, resumable, undesired session with a dead runtime is the plain
 		// orphan-close case. Its metadata exposes absence-derived healing that
@@ -764,8 +765,9 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 		}
 
 		var stderrBuf bytes.Buffer
-		reconcileSessionBeads(
+		reconcileSessionBeadsAtPath(
 			context.Background(),
+			env.city,
 			[]beads.Bead{session},
 			nil, // desiredState — empty ⇒ orphan
 			nil, // configuredNames
@@ -774,7 +776,8 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 			store, // store
 			nil,   // dops
 			nil,   // assignedWorkBeads
-			nil,   // readyWaitSet
+			nil,
+			nil, // readyWaitSet
 			newDrainTracker(),
 			nil,   // poolDesired
 			false, // storeQueryPartial
@@ -785,6 +788,7 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 			events.Discard,
 			0, 0,
 			io.Discard, &stderrBuf,
+			withAsyncDrainAckStopTracker(env.stops),
 		)
 
 		stored, err := env.store.Get(session.ID)

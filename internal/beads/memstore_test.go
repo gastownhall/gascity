@@ -18,6 +18,7 @@ func TestMemStore(t *testing.T) {
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
 	beadstest.RunCloseReasonTests(t, factory)
+	beadstest.RunCloseNotificationTests(t, func(*testing.T) beads.Store { return beads.NewMemStore() })
 	beadstest.RunCloseReasonAfterReopenTests(t, factory)
 	beadstest.RunFenceConformance(t, factory)
 }
@@ -870,4 +871,8 @@ func TestMemStoreEphemeralTierPartitioning(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMemStoreGuardedBatchConformance(t *testing.T) {
+	beadstest.RunGuardedBatchConformance(t, "MemStore", func(*testing.T) beads.Store { return beads.NewMemStore() })
 }

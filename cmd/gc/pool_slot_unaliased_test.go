@@ -44,7 +44,7 @@ func transientSlotPoolConfig() *config.City {
 			Dir:               "rig",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(3),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 }
@@ -260,7 +260,7 @@ func TestCanonicalSingletonPoolKeepsStableAlias(t *testing.T) {
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -329,7 +329,7 @@ func TestReleaseOrphanedPoolAssignmentsReopensStaleSlotFormClaim(t *testing.T) {
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if len(released) != 1 || released[0].ID != work.ID {
 		t.Fatalf("released = %v, want [%s] — a stale slot-form assignee names no live session once pool beads are unaliased", released, work.ID)

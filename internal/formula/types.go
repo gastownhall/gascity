@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -140,6 +141,8 @@ type Formula struct {
 
 	// ContentHash is the SHA-256 hex digest of the raw formula file bytes.
 	// Set by ParseFile; empty for formulas parsed from in-memory bytes.
+	// Resolve keeps the child's hash for an extends-based formula, so it
+	// always identifies the Source file and does not cover the parents.
 	ContentHash string `json:"content_hash,omitempty"`
 
 	compilerRequirementSources []formulaCompilerConstraint
@@ -450,13 +453,13 @@ func (s *Step) normalizeCheckAlias(hasCheck bool, rawCheck interface{}, hasRalph
 
 	switch {
 	case hasCheck:
-		spec, err := decodePublicCheckSpec(rawCheck)
+		spec, err := decodePublicCheckSpec(rawCheck, true)
 		if err != nil {
 			return err
 		}
 		s.Ralph = spec
 	case hasRalph:
-		if err := validatePublicCheckSpecShape(rawRalph); err != nil {
+		if err := validatePublicCheckSpecShape(rawRalph, false); err != nil {
 			return err
 		}
 	}
@@ -529,13 +532,13 @@ func (a stepTOMLAlias) toStep() (Step, error) {
 	var ralph *RalphSpec
 	switch {
 	case hasCheck:
-		spec, err := decodePublicCheckSpec(a.Check)
+		spec, err := decodePublicCheckSpec(a.Check, true)
 		if err != nil {
 			return Step{}, err
 		}
 		ralph = spec
 	case hasRalph:
-		spec, err := decodePublicCheckSpec(a.Ralph)
+		spec, err := decodePublicCheckSpec(a.Ralph, false)
 		if err != nil {
 			return Step{}, err
 		}
@@ -601,8 +604,8 @@ func (a *loopTOMLAlias) toLoopSpec() (*LoopSpec, error) {
 	}, nil
 }
 
-func decodePublicCheckSpec(raw interface{}) (*RalphSpec, error) {
-	if err := validatePublicCheckSpecShape(raw); err != nil {
+func decodePublicCheckSpec(raw interface{}, rejectUnknown bool) (*RalphSpec, error) {
+	if err := validatePublicCheckSpecShape(raw, rejectUnknown); err != nil {
 		return nil, err
 	}
 
@@ -621,7 +624,7 @@ func decodePublicCheckSpec(raw interface{}) (*RalphSpec, error) {
 	return &spec, nil
 }
 
-func validatePublicCheckSpecShape(raw interface{}) error {
+func validatePublicCheckSpecShape(raw interface{}, rejectUnknown bool) error {
 	if raw == nil {
 		return nil
 	}
@@ -644,20 +647,22 @@ func validatePublicCheckSpecShape(raw interface{}) error {
 		case "max_attempts":
 			continue
 		case "check":
-			if err := validatePublicCheckBodyShape(value); err != nil {
+			if err := validatePublicCheckBodyShape(value, rejectUnknown); err != nil {
 				return err
 			}
 		case "exec", "inference":
 			return fmt.Errorf("step.check: unsupported key %q (expected max_attempts or check)", key)
 		default:
-			continue
+			if rejectUnknown {
+				return fmt.Errorf("step.check: unsupported key %q (expected max_attempts or check)", key)
+			}
 		}
 	}
 
 	return nil
 }
 
-func validatePublicCheckBodyShape(raw json.RawMessage) error {
+func validatePublicCheckBodyShape(raw json.RawMessage, rejectUnknown bool) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
@@ -669,10 +674,14 @@ func validatePublicCheckBodyShape(raw json.RawMessage) error {
 
 	for key := range body {
 		switch key {
+		case "mode", "path", "timeout":
+			continue
 		case "exec", "inference":
 			return fmt.Errorf("step.check.check: unsupported key %q (expected mode, path, or timeout)", key)
 		default:
-			continue
+			if rejectUnknown {
+				return fmt.Errorf("step.check.check: unsupported key %q (expected mode, path, or timeout)", key)
+			}
 		}
 	}
 
@@ -698,8 +707,71 @@ type RalphSpec struct {
 	// MaxAttempts bounds the total number of run/check attempts, including the first.
 	MaxAttempts int `json:"max_attempts,omitempty" toml:"max_attempts,omitempty"`
 
+	// MaxAttemptsVar names the formula var that supplies MaxAttempts when the
+	// formula writes max_attempts = "{{name}}". Compile resolves it to
+	// MaxAttempts and clears it before the check is expanded.
+	MaxAttemptsVar string `json:"-" toml:"-"`
+
+	// maxAttemptsVarValue is MaxAttemptsVar's value in the var scope of the
+	// expansion that defines the step, recorded when that expansion is
+	// applied; maxAttemptsVarBound reports that it was. Compile resolves an
+	// unbound var against the vars it compiles with.
+	maxAttemptsVarValue string
+	maxAttemptsVarBound bool
+
 	// Check defines how each attempt is validated.
 	Check *RalphCheckSpec `json:"check,omitempty" toml:"check,omitempty"`
+}
+
+// maxAttemptsVarPattern matches a max_attempts value that is exactly one
+// {{name}} formula-var placeholder.
+var maxAttemptsVarPattern = regexp.MustCompile(`^\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}$`)
+
+// UnmarshalJSON accepts max_attempts as an integer or as a single
+// "{{name}}" formula-var placeholder.
+func (r *RalphSpec) UnmarshalJSON(data []byte) error {
+	type ralphAlias RalphSpec
+	var decoded struct {
+		ralphAlias
+		MaxAttempts json.RawMessage `json:"max_attempts,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*r = RalphSpec(decoded.ralphAlias)
+	raw := decoded.MaxAttempts
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	if raw[0] != '"' {
+		if err := json.Unmarshal(raw, &r.MaxAttempts); err != nil {
+			return fmt.Errorf("max_attempts: expected an integer or a \"{{var}}\" placeholder: %w", err)
+		}
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return fmt.Errorf("max_attempts: %w", err)
+	}
+	match := maxAttemptsVarPattern.FindStringSubmatch(text)
+	if match == nil {
+		return fmt.Errorf("max_attempts: string value %q must be a single \"{{var}}\" placeholder; write a literal count as an integer", text)
+	}
+	r.MaxAttemptsVar = match[1]
+	return nil
+}
+
+// MarshalJSON writes an unresolved MaxAttemptsVar back as its "{{name}}"
+// placeholder so a parsed formula round-trips.
+func (r RalphSpec) MarshalJSON() ([]byte, error) {
+	type ralphAlias RalphSpec
+	if r.MaxAttemptsVar == "" {
+		return json.Marshal(ralphAlias(r))
+	}
+	return json.Marshal(struct {
+		ralphAlias
+		MaxAttempts string `json:"max_attempts"`
+	}{ralphAlias: ralphAlias(r), MaxAttempts: "{{" + r.MaxAttemptsVar + "}}"})
 }
 
 // RalphCheckSpec defines the validation step for a Ralph attempt.
@@ -1102,6 +1174,143 @@ func validateEngineMintedKindMetadata(steps []*Step, errs *[]string, prefix stri
 	}
 }
 
+// sessionStepType, sessionStepLabel, startupHealthStepType,
+// convergenceStepType and opStepType are the marks of a controller-owned row
+// (a test pins the check against coordclass.ControllerOwned): a session row,
+// which only the session verbs mint, a startup-health episode, which only the
+// controller records, a convergence root, which only the convergence handler
+// creates, and an operation-journal row, which only the operation journal
+// writes.
+const (
+	sessionStepType       = "session"
+	sessionStepLabel      = "gc:session"
+	startupHealthStepType = "startup-health-episode"
+	convergenceStepType   = "convergence"
+	opStepType            = "op"
+)
+
+// sessionVerbs names the session verbs that create a session row.
+const sessionVerbs = "gc session new, POST /v0/city/{cityName}/sessions"
+
+// controllerOnlyType is why a step of type typ may not be compiled, or "":
+// compile copies a step's type onto its bead, so a formula would mint a
+// session row (mc-okw9n), a startup-health episode, which holds its session
+// down (mc-lp7zb), a convergence root or an operation-journal row
+// (architecture B).
+func controllerOnlyType(typ string) string {
+	switch t := strings.TrimSpace(typ); {
+	case strings.EqualFold(t, sessionStepType):
+		return "makes a session row, which only the session verbs create (" + sessionVerbs + ")"
+	case strings.EqualFold(t, startupHealthStepType):
+		return "makes a startup-health episode, which only the controller records"
+	case strings.EqualFold(t, convergenceStepType):
+		return "makes a convergence root, which only the convergence handler creates"
+	case strings.EqualFold(t, opStepType):
+		return "makes an operation-journal row, which only the operation journal writes"
+	case strings.EqualFold(t, messageStepType):
+		return "makes a mail message, which only the mail routes create (POST /v0/city/{cityName}/mail, gc mail)"
+	}
+	return ""
+}
+
+// The coordination rows' marks (coordclass.CoordinationOwned, mirrored as
+// the controller-owned marks are; a test pins the check against it).
+const (
+	messageStepType       = "message"
+	waitStepType          = "gate"
+	legacyWaitStepType    = "wait"
+	waitStepLabel         = "gc:wait"
+	nudgeStepLabel        = "gc:nudge"
+	nudgeQueueStepLabel   = "gc:nudge-queue"
+	orderTrackingLabel    = "order-tracking"
+	orderRunLabelPrefix   = "order-run:"
+	extmsgStepLabelPrefix = "gc:extmsg-"
+)
+
+// coordinationLabel is why a step's label l, on a step of type typ and
+// metadata meta, may not be compiled, or "": compile copies labels onto
+// the bead, so a formula would mint a coordination row its owner alone
+// writes, a wait that wakes its session, a nudge an agent is handed, an
+// order's run record that holds its cooldown and single-flight, or an
+// extmsg row (architecture B v2, the #7766 review).
+func coordinationLabel(l, typ string, meta map[string]string) string {
+	label := strings.ToLower(strings.TrimSpace(l))
+	t := strings.TrimSpace(typ)
+	switch {
+	case label == waitStepLabel:
+		return "marks a session wait, which only gc session wait and the controller's waits step create"
+	case (strings.EqualFold(t, waitStepType) || strings.EqualFold(t, legacyWaitStepType)) &&
+		strings.TrimSpace(meta["session_id"]) != "" && label == strings.ToLower("session:"+strings.TrimSpace(meta["session_id"])):
+		return "marks a session wait (a gate carrying its session_id), which only gc session wait and the controller's waits step create"
+	case label == nudgeStepLabel, label == nudgeQueueStepLabel:
+		return "marks a queued nudge, which only the nudge queue creates"
+	case label == orderTrackingLabel, strings.HasPrefix(label, orderRunLabelPrefix):
+		return "marks an order's run record, which only order dispatch creates"
+	case strings.HasPrefix(label, extmsgStepLabelPrefix):
+		return "marks an external-messaging row, which only the extmsg routes create"
+	}
+	return ""
+}
+
+// validateNoSessionSteps refuses a step that would make an owned row: one
+// typed session, startup-health-episode, convergence or message, tagged
+// gc:session, or tagged as a coordination row (coordinationLabel; mc-okw9n,
+// mc-lp7zb, architecture B):
+// compile copies a step's type, labels and metadata straight onto its bead,
+// so a formula would mint a session row with hand-written hold keys past
+// the session verbs, or an episode quarantining a session.
+func validateNoSessionSteps(steps []*Step, errs *[]string, prefix string) {
+	for i, step := range steps {
+		if step == nil {
+			continue
+		}
+		stepPrefix := fmt.Sprintf("%s[%d] (%s)", prefix, i, step.ID)
+		if why := controllerOnlyType(step.Type); why != "" {
+			*errs = append(*errs, fmt.Sprintf("%s: type %q %s", stepPrefix, step.Type, why))
+		}
+		for _, l := range step.Labels {
+			if strings.EqualFold(strings.TrimSpace(l), sessionStepLabel) {
+				*errs = append(*errs, fmt.Sprintf("%s: tag %q marks a session row, which only the session verbs create (%s)", stepPrefix, l, sessionVerbs))
+			} else if why := coordinationLabel(l, step.Type, step.Metadata); why != "" {
+				*errs = append(*errs, fmt.Sprintf("%s: tag %q %s", stepPrefix, l, why))
+			}
+		}
+		if step.Loop != nil {
+			validateNoSessionSteps(step.Loop.Body, errs, stepPrefix+".loop.body")
+		}
+		validateNoSessionSteps(step.Children, errs, stepPrefix+".children")
+	}
+}
+
+// validateNoSessionAdvice is validateNoSessionSteps over an aspect's advice
+// steps, which compile inserts with their own type.
+func validateNoSessionAdvice(rules []*AdviceRule, errs *[]string) {
+	for i, rule := range rules {
+		if rule == nil {
+			continue
+		}
+		prefix := fmt.Sprintf("advice[%d] (%s)", i, rule.Target)
+		check := func(where string, step *AdviceStep) {
+			if step == nil {
+				return
+			}
+			if why := controllerOnlyType(step.Type); why != "" {
+				*errs = append(*errs, fmt.Sprintf("%s.%s (%s): type %q %s", prefix, where, step.ID, step.Type, why))
+			}
+		}
+		check("before", rule.Before)
+		check("after", rule.After)
+		if rule.Around != nil {
+			for j, step := range rule.Around.Before {
+				check(fmt.Sprintf("around.before[%d]", j), step)
+			}
+			for j, step := range rule.Around.After {
+				check(fmt.Sprintf("around.after[%d]", j), step)
+			}
+		}
+	}
+}
+
 // Validate checks the formula for structural errors.
 func (f *Formula) Validate() error {
 	var errs []string
@@ -1120,6 +1329,9 @@ func (f *Formula) Validate() error {
 	}
 	validateEngineMintedKindMetadata(f.Steps, &errs, "steps")
 	validateEngineMintedKindMetadata(f.Template, &errs, "template")
+	validateNoSessionSteps(f.Steps, &errs, "steps")
+	validateNoSessionSteps(f.Template, &errs, "template")
+	validateNoSessionAdvice(f.Advice, &errs)
 
 	if f.Type != "" && !f.Type.IsValid() {
 		errs = append(errs, fmt.Sprintf("type: invalid value %q (must be workflow, expansion, or aspect)", f.Type))
@@ -1489,7 +1701,7 @@ func validateOnComplete(oc *OnCompleteSpec, errs *[]string, prefix string) {
 }
 
 func validateRalph(spec *RalphSpec, errs *[]string, prefix string, step *Step) {
-	if spec.MaxAttempts < 1 {
+	if spec.MaxAttemptsVar == "" && spec.MaxAttempts < 1 {
 		*errs = append(*errs, fmt.Sprintf("%s.check: max_attempts must be >= 1", prefix))
 	}
 	if spec.Check == nil {

@@ -138,11 +138,11 @@ func TestCloseAcrossBackendsKeepsTerminalMetadataWithTheClose(t *testing.T) {
 				if tracing.atomicCalls != 2 || tracing.plainCloseCalls != 0 {
 					t.Fatalf("atomic/plain close calls = %d/%d, want 2/0 (the refused attempt, then the next pass, no split write)", tracing.atomicCalls, tracing.plainCloseCalls)
 				}
-			} else if tracing.atomicCalls != 1 || tracing.plainCloseCalls != 1 {
+			} else if tracing.atomicCalls != 1 || tracing.plainCloseCalls != 0 {
 				// The tracing wrapper itself carries the method, so it is
 				// asked once, answers unsupported (the backing lacks the
-				// capability), and the front door falls back.
-				t.Fatalf("atomic/plain close calls = %d/%d, want 1/1 (unsupported, then the fallback)", tracing.atomicCalls, tracing.plainCloseCalls)
+				// capability), and the front door falls back to its Tx.
+				t.Fatalf("atomic/plain close calls = %d/%d, want 1/0 (unsupported, then the Tx)", tracing.atomicCalls, tracing.plainCloseCalls)
 			}
 
 			again, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)

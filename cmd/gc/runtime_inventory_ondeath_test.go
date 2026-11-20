@@ -1021,29 +1021,6 @@ func TestRuntimeInventoryLane_StartsAndJoinsOnDeathWorker(t *testing.T) {
 	})
 }
 
-// Kills: the API never learning the runtime's start interlock. Starting the
-// lane publishes its gate to the controller state the API reads.
-func TestInitRuntimeInventoryLane_PublishesOnDeathGateToAPIState(t *testing.T) {
-	cs := &controllerState{cityBeadStore: beads.NewMemStore()}
-	cr := &CityRuntime{
-		cfg:                 &config.City{Daemon: config.DaemonConfig{PatrolInterval: inventoryLaneInterval.String()}},
-		sp:                  newScriptedInventoryProvider(),
-		standaloneCityStore: beads.NewMemStore(),
-		stderr:              io.Discard,
-	}
-	cr.setControllerState(cs)
-	if cs.OnDeathHookPending("worker-1") {
-		t.Fatal("pending before any lane")
-	}
-	if cr.initRuntimeInventoryLane() == nil {
-		t.Fatal("no lane")
-	}
-	cr.onDeathGate().enqueue([]deathEdge{{name: "worker-1"}})
-	if !cs.OnDeathHookPending("worker-1") {
-		t.Fatal("the API state does not see the lane's held name")
-	}
-}
-
 // Kills: a city whose handler names live only on an unattested backend
 // losing on_death silently, and a notice repeated every pass.
 func TestInventoryOnDeath_NoticesUnattestedHandlerBackendOnce(t *testing.T) {
@@ -1318,7 +1295,7 @@ func TestCityRuntimePublishesPoolDeathHandlersAtStartAndReload(t *testing.T) {
 		t.Fatalf("published handlers = %v, want the startup map", cr.publishedPoolDeathHandlers())
 	}
 
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
 	f, err := os.OpenFile(tomlPath, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)

@@ -74,6 +74,23 @@ func refuseProviderOwnedEndpointScope(cityPath, scopeRoot string) error {
 	return nil
 }
 
+// refuseEmbeddedEndpointScope keeps the rig endpoint door off a rig whose
+// metadata.json records embedded Dolt storage (ga-p9iuv). Such a rig serves
+// its own store, so no endpoint written for it can take effect: the recorded
+// mode stays authoritative, the next boot takes the config.yaml claims back
+// off, and city.toml is left naming a server the rig never reaches. A
+// classification error refuses too, as in refuseProviderOwnedEndpointScope.
+func refuseEmbeddedEndpointScope(fs fsys.FS, rigName, scopeRoot string) error {
+	embedded, err := scopeMetadataRecordsEmbeddedDolt(fs, scopeRoot)
+	if err != nil {
+		return fmt.Errorf("classify beads storage mode for %s: %w", scopeRoot, err)
+	}
+	if embedded {
+		return fmt.Errorf("rig %q keeps its beads in embedded Dolt (%s records dolt_mode: embedded) and serves its own store, so it has no server endpoint to set; its storage mode is bd's to change", rigName, scopeMetadataPath(scopeRoot))
+	}
+	return nil
+}
+
 func newRigSetEndpointCmd(stdout, stderr io.Writer) *cobra.Command {
 	var opts rigEndpointOptions
 	var jsonOutput bool
@@ -91,7 +108,9 @@ will no longer track the managed city Dolt.
 
 This command owns the rig's canonical .beads/config.yaml topology state. It
 refuses a rig whose store the beads provider owns: that rig's endpoint lives in
-bd's own files and is bd's to change.`,
+bd's own files and is bd's to change. It also refuses a rig whose
+.beads/metadata.json records embedded Dolt storage: that rig serves its own
+store and has no server endpoint.`,
 		Example: `  gc rig set-endpoint frontend --inherit
   gc rig set-endpoint frontend --external --host db.example.com --port 3307
   gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
@@ -179,6 +198,10 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 	// Before --dry-run, too: a plan for a change the command will never make is
 	// worse than no plan.
 	if err := refuseProviderOwnedEndpointScope(cityPath, rig.Path); err != nil {
+		fmt.Fprintf(stderr, "gc rig set-endpoint: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := refuseEmbeddedEndpointScope(fs, rig.Name, rig.Path); err != nil {
 		fmt.Fprintf(stderr, "gc rig set-endpoint: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

@@ -1,11 +1,7 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"slices"
 	"testing"
 
@@ -45,7 +41,7 @@ func createRoutedControl(t *testing.T, store beads.Store, kind string) beads.Bea
 
 func scanControlReadyIDs(t *testing.T, cityDir string) []string {
 	t.Helper()
-	queue, handled, err := tryControlReadyFromCacheOrFallback(workflowServeControlReadyQuery(freshnessControlAgent()), cityDir, nil)
+	queue, handled, err := tryControlReadyScan(workflowServeControlReadyQuery(freshnessControlAgent()), cityDir, nil)
 	if err != nil {
 		t.Fatalf("control-ready scan: %v", err)
 	}
@@ -59,42 +55,12 @@ func scanControlReadyIDs(t *testing.T, cityDir string) []string {
 	return ids
 }
 
-// installLiveReadyFakeBD puts a fake bd on PATH whose `ready` answers whatever
-// the returned publish func last recorded as the ledger's live ready set. The
-// cached snapshot declines a bead blocked on a dependency it cannot see (a
-// closed step is not in an active-only prime), so that scan is answered by the
-// live fallback; this fake stands in for bd there.
-func installLiveReadyFakeBD(t *testing.T, store beads.Store) (publish func()) {
-	t.Helper()
-	tmp := t.TempDir()
-	readyPath := filepath.Join(tmp, "ready.json")
-	script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *\" ready \"*) cat %q ;;\n  *) printf '[]' ;;\nesac\n", readyPath)
-	if err := os.WriteFile(filepath.Join(tmp, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
-	publish = func() {
-		t.Helper()
-		ready, err := store.Ready()
-		if err != nil {
-			t.Fatalf("live ready: %v", err)
-		}
-		data, err := json.Marshal(ready)
-		if err != nil {
-			t.Fatalf("marshal live ready: %v", err)
-		}
-		if err := os.WriteFile(readyPath, data, 0o644); err != nil {
-			t.Fatalf("publish live ready: %v", err)
-		}
-	}
-	publish()
-	return publish
-}
-
 // TestControlReadyScanObservesWorkerCloseImmediately is hop-latency cause (1):
 // a worker closes the step a retry control is blocked on, and the very next
 // scan must offer that control instead of answering from a snapshot taken
-// before the close.
+// before the close. No bd is on PATH: the scan answers from the leg's own
+// Ready read, with no shell fallback for a control whose blocker is closed
+// (the read the primed snapshot used to decline and repeat live).
 func TestControlReadyScanObservesWorkerCloseImmediately(t *testing.T) {
 	cityDir, store := setUpControlReadyFileStoreCity(t)
 
@@ -106,7 +72,7 @@ func TestControlReadyScanObservesWorkerCloseImmediately(t *testing.T) {
 	if err := store.DepAdd(retry.ID, step.ID, "blocks"); err != nil {
 		t.Fatalf("block retry on step: %v", err)
 	}
-	publishLiveReady := installLiveReadyFakeBD(t, store)
+	noBDOnPathForTest(t)
 
 	if got := scanControlReadyIDs(t, cityDir); len(got) != 0 {
 		t.Fatalf("queue before the step closed = %v, want empty (retry is blocked)", got)
@@ -115,7 +81,6 @@ func TestControlReadyScanObservesWorkerCloseImmediately(t *testing.T) {
 	if err := store.Close(step.ID); err != nil {
 		t.Fatalf("close step: %v", err)
 	}
-	publishLiveReady()
 
 	if got, want := scanControlReadyIDs(t, cityDir), []string{retry.ID}; !slices.Equal(got, want) {
 		t.Fatalf("queue after the step closed = %v, want %v: the scan answered from a snapshot taken before the worker's close", got, want)
@@ -167,7 +132,7 @@ func TestDrainWorkflowServeWorkProcessesEachControlOnceAndSeesItsSuccessors(t *t
 
 	var processed []string
 	var scopeCheck beads.Bead
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		processed = append(processed, beadID)
 		if len(processed) > 10 {
 			t.Fatalf("drain re-processed control beads %v: a closed control bead keeps being re-offered", processed)

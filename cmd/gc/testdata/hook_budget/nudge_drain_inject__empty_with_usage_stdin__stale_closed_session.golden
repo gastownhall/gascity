@@ -1,0 +1,3 @@
+Current time: <now>
+--- stderr ---
+gc nudge drain: the hook's own session is closed: session "tc-2" (GC_SESSION_ID); not draining its nudges

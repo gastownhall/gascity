@@ -20,7 +20,7 @@ import (
 // the created session bead.
 func setupLaunchDriftResumeEnv(t *testing.T) (*reconcilerTestEnv, TemplateParams, beads.Bead) {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	tp, session := seedLaunchDriftResumeSession(t, env, forkClaude(), nil)
 	return env, tp, session
 }
@@ -116,7 +116,7 @@ func TestReconcileSessionBeads_LaunchDriftRelaunchResumesTrackedConversation(t *
 // relaunched, and rebaselined, on provider defaults that no later tick revisits.
 func TestReconcileSessionBeads_LaunchDriftRelaunchAppliesRigResidentTriggerPins(t *testing.T) {
 	const triggerID = "fe-42"
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.store = &beads.MemStore{HonorExplicitIDs: true}
 	rigStore := &beads.MemStore{HonorExplicitIDs: true}
 	newTriggerOptionBead(t, rigStore, triggerID, map[string]string{"effort": "low"})
@@ -227,7 +227,7 @@ func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.
 	// Returns the drift hashes the caller passes through.
 	newDriftEnv := func(t *testing.T, priorSessionKey string, injectRelaunchErr bool) (*reconcilerTestEnv, TemplateParams, beads.Bead, string, string, string, string) {
 		t.Helper()
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 		tp := TemplateParams{
 			Command:          "claude",
@@ -273,7 +273,7 @@ func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.
 	callRelaunch := func(env *reconcilerTestEnv, tp TemplateParams, session *beads.Bead, storedHash, currentHash, storedProvision, storedLaunch string) (bool, map[string]string) {
 		return relaunchAgentForLaunchDrift(
 			context.Background(), env.sp, sessionFrontDoor(env.store), env.sessionInfo(session.ID), "worker",
-			tp, "", env.cfg, env.store, dispatchOptionSources{}, storedHash, currentHash, storedProvision, storedLaunch,
+			tp, env.city, env.cfg, env.store, dispatchOptionSources{}, storedHash, currentHash, storedProvision, storedLaunch,
 			[]string{"Command"}, env.rec, nil, &env.stdout, &env.stderr,
 		)
 	}

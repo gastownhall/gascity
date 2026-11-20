@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // WakeReason describes why a session should be awake.
@@ -56,8 +57,12 @@ type drainState struct {
 	deadline   time.Time
 	reason     string // "idle", "pool-excess", "config-drift", "user"
 	generation int    // generation at drain start — fence for Stop
-	ackSet     bool   // true after GC_DRAIN_ACK has been set by the reconciler
-	followUp   bool   // true when the controller should trigger one more immediate tick
+	// basis is the row the drain began on: its stop-pending mark and its
+	// timeout kill act only while the row still carries the basis's facts
+	// (sessionpkg.FactsLegacyStopPending).
+	basis    sessionpkg.Decided
+	ackSet   bool // true after GC_DRAIN_ACK has been set by the reconciler
+	followUp bool // true when the controller should trigger one more immediate tick
 }
 
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
@@ -356,6 +361,23 @@ const (
 	// defaultMaxWakeAttempts is how many consecutive wake failures before
 	// quarantine.
 	defaultMaxWakeAttempts = 5
+
+	// defaultStartupBackoffBase and defaultStartupBackoffCap bound the retry
+	// cadence for a session whose cold start keeps failing. The FIRST failure
+	// gets no hold at all — a single transient spawn flake must still retry on
+	// the next tick — and from the second the hold doubles from the base up to
+	// the cap. Without this the reconciler retried a wedged start every ~65s
+	// forever: 2,306 identical cold_start_timeout failures over 42 hours, at
+	// 53-56/hour, with no backoff and no give-up (sr-xf2xj).
+	//
+	// The cap is deliberately a ceiling on the RATE, not a permanent stop.
+	// Both observed incidents ended with a start that simply succeeded on the
+	// unchanged path (attempt 2,307 after 42h; attempt 6 after 5min), so a
+	// hard "never retry again" would have blocked a recovery that did in fact
+	// happen. At the cap a wedged template costs two start attempts an hour
+	// instead of 55, and the escalation alert has already fired.
+	defaultStartupBackoffBase = 30 * time.Second
+	defaultStartupBackoffCap  = 30 * time.Minute
 
 	// rateLimitPeekLines is the amount of pane scrollback inspected before a
 	// rapid dead process is classified as a crash. Known provider rate-limit

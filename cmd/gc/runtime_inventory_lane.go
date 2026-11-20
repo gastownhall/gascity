@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -91,6 +92,12 @@ type runtimeInventoryLane struct {
 	envWindowRefreshes int
 	lastSignature      string
 	alerted            map[string]time.Time
+	// captureSweptCfg is the config the last finished program-capture
+	// disarm sweep ran under (healProgramCaptures): one finished sweep per
+	// config load. captureSweep paces the sweeps of one that has not
+	// finished.
+	captureSweptCfg *config.City
+	captureSweep    captureSweepRetry
 	// poolDeathPrev holds the on_death handler names listed and not yet
 	// proven gone (detectPoolDeathEdges).
 	poolDeathPrev map[string]poolDeathSighting
@@ -192,12 +199,18 @@ type inventoryIdentity struct {
 
 // inventoryBackend is one leaf backend's listing. confirmedDead is a
 // server-absent listing whose server the backend confirmed dead right after.
+// attested is the listing's attestation, read around it
+// (runtime.ListInventoryWithAttestation). inventory is the batched
+// inventory the listing carried (runtime.InventoryLister), nil when the
+// leaf's inventory is read separately or not at all.
 type inventoryBackend struct {
 	label         string
 	provider      runtime.Provider
 	names         []string
 	err           error
 	confirmedDead bool
+	attested      bool
+	inventory     map[string]runtime.InventoryEntry
 }
 
 // inventoryListing is one listing of every leaf backend, with the merged
@@ -241,9 +254,6 @@ func (cr *CityRuntime) initRuntimeInventoryLane() *runtimeInventoryLane {
 		return nil
 	}
 	cr.inventoryLane = newRuntimeInventoryLane(cfg.Daemon.PatrolIntervalDuration(), cr.stderr, cr.logPrefix)
-	if cr.cs != nil {
-		cr.cs.onDeathGate.Store(cr.inventoryLane.onDeath)
-	}
 	return cr.inventoryLane
 }
 
@@ -357,12 +367,17 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 	if report.snapshot != nil {
 		cr.detectPoolDeaths(lane, &report)
 	}
+	if result == inventoryResultPublished {
+		cr.healProgramCaptures(lane, cfg, sp, &report)
+	}
 	finished := lane.clock.Now()
 	report.duration = finished.Sub(started)
 
 	lane.statusMu.Lock()
 	lane.status = inventoryLaneStatus{at: finished, reason: reason, ran: true, seq: report.seq, result: result, duration: report.duration, v2Fields: map[string]any{
 		"process_probe_ms": report.processProbe.Milliseconds(), "process_probes": report.processProbes,
+		"activity_read_ms": report.activityRead.Milliseconds(), "activity_reads": report.activityReads,
+		"content_read_ms": report.contentRead.Milliseconds(), "content_reads": report.contentReads,
 		"env_reads": report.envReads, "env_read_backlog": report.envBacklog,
 	}}
 	lane.statusMu.Unlock()
@@ -388,13 +403,17 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 		backends[i] = classifyInventoryBackend(leaf)
 	}
 
-	// The batched inventory reads and the process probes share one bound.
-	enrichCtx, cancel := context.WithTimeout(ctx, inventoryEnrichBound)
+	// The batched inventory reads and the process probes share one bound,
+	// less the content reads' reserved share.
+	want := l.cache.contentWanted()
+	reserve := contentReserve(want)
+	enrichCtx, cancel := context.WithTimeout(ctx, inventoryEnrichBound-reserve)
 	defer cancel()
 	phase := l.clock.Now()
-	attrs, hosts, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
+	attrs, hosts, programs, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
 	report.enrich = l.clock.Now().Sub(phase)
 	report.enrichErrors = enrichErrs
+	report.programs = programs
 
 	phase = l.clock.Now()
 	report.envReads, report.envBacklog = l.readIdentities(ctx, attrs, hosts)
@@ -403,6 +422,17 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	phase = l.clock.Now()
 	report.processProbes = probeProcesses(enrichCtx, attrs, hosts, concurrency)
 	report.processProbe = l.clock.Now().Sub(phase)
+
+	readSidecarRestartMarkers(enrichCtx, attrs, hosts, concurrency)
+
+	phase = l.clock.Now()
+	report.activityReads = readActivities(enrichCtx, attrs, hosts, concurrency)
+	report.activityRead = l.clock.Now().Sub(phase)
+	phase = l.clock.Now()
+	contentCtx, cancelContent := context.WithTimeout(ctx, reserve+remaining(enrichCtx))
+	report.contentReads = readContents(contentCtx, attrs, hosts, want, concurrency)
+	cancelContent()
+	report.contentRead = l.clock.Now().Sub(phase)
 
 	pass := InventoryPass{
 		Epoch:       l.cache.epoch,
@@ -425,7 +455,10 @@ func (l *runtimeInventoryLane) publishListingFailure(sp runtime.Provider, starte
 	leaves := inventoryLeaves(sp, "")
 	backends := make([]BackendPass, len(leaves))
 	for i, leaf := range leaves {
-		leaf.err = err
+		// No listing answered, so none can be read as proof of absence: the
+		// attestation here only tells health an unattested backend from a
+		// failing one.
+		leaf.err, leaf.attested = err, runtime.ListRunningAttested(leaf.provider)
 		backends[i] = classifyInventoryBackend(leaf)
 	}
 	pass := InventoryPass{
@@ -535,14 +568,14 @@ func (l *runtimeInventoryLane) listBounded(ctx context.Context, sp runtime.Provi
 func listInventoryBackends(sp runtime.Provider, label string) inventoryListing {
 	composite, ok := sp.(runtime.BackendsProvider)
 	if !ok {
-		names, err := sp.ListRunning("")
+		names, inventory, attested, err := runtime.ListInventoryWithAttestation(sp, "")
 		// Asked right after the failing listing, and kept for this pass only.
 		dead := false
 		if confirmer, ok := sp.(runtime.ServerDeathConfirmer); ok && runtime.IsRuntimeServerAbsent(err) {
 			dead = confirmer.ServerConfirmedDead()
 		}
 		return inventoryListing{
-			leaves:      []inventoryBackend{{label: label, provider: sp, names: names, err: err, confirmedDead: dead}},
+			leaves:      []inventoryBackend{{label: label, provider: sp, names: names, err: err, confirmedDead: dead, attested: attested, inventory: inventory}},
 			mergedNames: names,
 			mergedErr:   err,
 		}
@@ -583,7 +616,7 @@ func joinInventoryLabel(parent, label string) string {
 func classifyInventoryBackend(leaf inventoryBackend) BackendPass {
 	b := BackendPass{
 		Label:    leaf.label,
-		Attested: runtime.ListRunningAttested(leaf.provider),
+		Attested: leaf.attested,
 		Names:    leaf.names,
 		Err:      leaf.err,
 	}
@@ -602,16 +635,23 @@ func classifyInventoryBackend(leaf inventoryBackend) BackendPass {
 	return b
 }
 
-// enrich reads the batched inventory of every backend that offers one, in
-// one call per backend under ctx's bound. A name belongs to the first backend
-// that listed it. Names on a backend without an inventory get empty attrs,
-// which record their enrichment facts as unsupported; names whose backend's
-// inventory failed, or that the inventory omits, get none and keep theirs.
-// hosts maps each enriched name to its backend, for the identity read and
-// the process probe.
-func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBackend, backends []BackendPass) (attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, errs []string) {
+// enrich reads the batched inventory of every backend that offers one
+// (runtime.InventoryFor, so a gated-off inventory is none), in one call per
+// backend under ctx's bound, or takes the one its listing already carried
+// (runtime.InventoryLister), with no second read. A name belongs to the
+// first backend that listed it. Names on a backend without an inventory get
+// empty attrs, which record their enrichment facts as unsupported; names
+// whose backend's inventory failed, or that the inventory omits, get none
+// and keep theirs. A batched agent-process fact is kept for probeProcesses,
+// which answers from it only the names it would probe; a batched identity is
+// kept only on a leaf whose identity is readable (readIdentities). hosts
+// maps each enriched name to its backend, for the identity read and the
+// process probe; programs holds each enriched name's program-status
+// reading, for program-capture heal.
+func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBackend, backends []BackendPass) (attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, programs map[string]runtime.ProgramStatus, errs []string) {
 	attrs = make(map[string]InventoryAttrs)
 	hosts = make(map[string]runtime.Provider)
+	programs = make(map[string]runtime.ProgramStatus)
 	claimed := make(map[string]bool)
 	for i, leaf := range leaves {
 		if backends[i].Outcome == OutcomeFailed {
@@ -627,35 +667,52 @@ func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBac
 		if len(mine) == 0 {
 			continue
 		}
-		inv, ok := leaf.provider.(runtime.InventoryProvider)
-		if !ok {
-			for _, name := range mine {
-				attrs[name] = InventoryAttrs{}
-				hosts[name] = leaf.provider
+		entries := leaf.inventory
+		if entries == nil {
+			inv, ok := runtime.InventoryFor(leaf.provider)
+			if !ok {
+				for _, name := range mine {
+					attrs[name] = InventoryAttrs{}
+					hosts[name] = leaf.provider
+				}
+				continue
 			}
-			continue
+			var err error
+			if entries, err = inv.RuntimeInventory(ctx); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", inventoryLabelForTrace(leaf.label), err))
+				continue
+			}
 		}
-		entries, err := inv.RuntimeInventory(ctx)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", inventoryLabelForTrace(leaf.label), err))
-			continue
-		}
+		readable := identityReadable(leaf.provider)
+		reportsAttach := leaf.provider.Capabilities().CanReportAttachment
 		for _, name := range mine {
 			e, ok := entries[name]
 			if !ok {
 				continue
 			}
-			attrs[name] = InventoryAttrs{
-				Incarnation:   e.Incarnation,
-				DeadKnown:     e.DeadKnown,
-				AllPanesDead:  e.AllPanesDead,
-				AttachedKnown: e.AttachedKnown,
-				Attached:      e.Attached,
+			a := InventoryAttrs{
+				Incarnation:      e.Incarnation,
+				DeadKnown:        e.DeadKnown,
+				AllPanesDead:     e.AllPanesDead,
+				AttachedKnown:    e.AttachedKnown,
+				Attached:         e.Attached,
+				AttachUnread:     !e.AttachedKnown && reportsAttach,
+				ActivityKnown:    e.ActivityKnown,
+				LastActivity:     e.LastActivity,
+				RestartRequested: e.RestartRequested,
+
+				batchedProcessKnown: e.ProcessKnown,
+				batchedProcessAlive: e.ProcessAlive,
 			}
+			if e.IdentityKnown && e.Incarnation != "" && readable {
+				a.Identity = identityOfEnv(e.Identity)
+			}
+			attrs[name] = a
 			hosts[name] = leaf.provider
+			programs[name] = e.Program
 		}
 	}
-	return attrs, hosts, errs
+	return attrs, hosts, programs, errs
 }
 
 // readIdentities fills the identity of every enriched name on a backend
@@ -668,6 +725,9 @@ func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBac
 // incarnation's last read (commit prunes the reads of unlisted names). The
 // reapers' owner fact is derived from the same read, and only where it was
 // always set: an incarnation on a backend with a batched environment read.
+// A Known identity the batched inventory carried for the name's
+// incarnation (enrich) is taken as that incarnation's read, with no read
+// and no share of either budget.
 // It returns the reads made and the names left without a good read.
 func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider) (reads, backlog int) {
 	ctx, cancel := context.WithTimeout(ctx, inventoryAttributionBound)
@@ -688,13 +748,22 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 		return 2
 	}
 	names := make([]string, 0, len(hosts))
+	var toRead []string
 	for name, host := range hosts {
-		if identityReadable(host) {
-			names = append(names, name)
+		if !identityReadable(host) {
+			continue
 		}
+		names = append(names, name)
+		if a := attrs[name]; a.Identity.Known {
+			id := a.Identity
+			id.ReadAt = l.clock.Now()
+			l.identity[name] = inventoryIdentity{incarnation: a.Incarnation, id: id}
+			continue
+		}
+		toRead = append(toRead, name)
 	}
-	sort.Slice(names, func(i, j int) bool {
-		a, b := names[i], names[j]
+	sort.Slice(toRead, func(i, j int) bool {
+		a, b := toRead[i], toRead[j]
 		if ra, rb := rank(a), rank(b); ra != rb {
 			return ra < rb
 		}
@@ -703,7 +772,7 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 		}
 		return a < b
 	})
-	for _, name := range names {
+	for _, name := range toRead {
 		refresh := rank(name) == 2
 		if l.envWindowReads >= inventoryAttributionBudget || (refresh && l.envWindowRefreshes >= inventoryRefreshBudget) || ctx.Err() != nil {
 			break
@@ -740,16 +809,58 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 	return reads, backlog
 }
 
-// identityReadable reports whether leaf's identity env is cheap and local to
-// read: a batched environment read (tmux), or a local sidecar (acp,
+// identityReadable reports whether leaf's identity env is cheap to read in
+// one answer: a batched environment read (tmux), one fresh identity read
+// (runtime.IdentityObserver: a v2-ready exec pack, whose protocol seeds
+// identity before it reports the name, v5 X3), or a local sidecar (acp,
 // subprocess). Other leaves' GetMeta reaches a pod, a host or a script, so
-// their identity is never read, and stays unknown.
+// their identity is never read, and stays unknown. A composite
+// ([runtime.Router]) is never a leaf: it forwards the batched read to a leaf
+// it routes to, so it is not identity-readable itself. A caller that reads
+// identity through GetMeta asks metaIdentityReadable instead.
 func identityReadable(leaf runtime.Provider) bool {
+	if metaIdentityReadable(leaf) {
+		return true
+	}
+	if _, ok := leaf.(runtime.Router); ok {
+		return false
+	}
+	observer, ok := leaf.(runtime.IdentityObserver)
+	return ok && observer.IdentityObservable()
+}
+
+// metaIdentityReadable is identityReadable without the fresh identity read:
+// a leaf whose GetMeta reads the identity env its start stamped before the
+// name is visible, from a batched environment (tmux) or a local sidecar
+// (acp, subprocess). A v2-ready exec pack is not one: `observe` reports the
+// identity its box was started with, but nothing requires its `get-meta` to
+// serve those keys, so a GetMeta read (readPendingCreateIdentity) can find
+// the pack's own box unstamped.
+func metaIdentityReadable(leaf runtime.Provider) bool {
+	if _, ok := leaf.(runtime.Router); ok {
+		return false
+	}
 	if _, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
 		return true
 	}
+	return localSidecar(leaf)
+}
+
+// localSidecar reports a leaf whose GetMeta reads a local sidecar (acp,
+// subprocess).
+func localSidecar(leaf runtime.Provider) bool {
 	sidecar, ok := leaf.(runtime.IdentitySidecarProvider)
 	return ok && sidecar.LocalIdentitySidecar()
+}
+
+// identityOfEnv is the Known identity of an identity env: a batched
+// environment read, an observed identity, or a batched inventory's.
+func identityOfEnv(env map[string]string) runtimeIdentity {
+	var v [len(identityEnvKeys)]string
+	for i, key := range identityEnvKeys {
+		v[i] = strings.TrimSpace(env[key])
+	}
+	return knownIdentity(v)
 }
 
 // readIdentityBounded reads one name's identity on its own goroutine, so a
@@ -818,9 +929,11 @@ func readRuntimeIdentity(ctx context.Context, leaf runtime.Provider, name string
 }
 
 // readIdentityEnv reads name's identity env from leaf: one GetAllEnvironment
-// where the leaf batches it (tmux), otherwise GetMeta per key on a local
-// sidecar (acp, subprocess). Any error, or a leaf whose identity is not
-// readable, leaves the identity unknown.
+// where the leaf batches it (tmux), one ObserveIdentity where the leaf
+// observes it (a v2-ready exec pack; a single fresh answer, so it is read
+// once), otherwise GetMeta per key on a local sidecar (acp, subprocess). Any
+// error, or a leaf whose identity is not readable, leaves the identity
+// unknown.
 //
 // A sidecar is one file per key, re-seeded by clearing every key and then
 // writing each. Its keys are read twice, and only two equal reads count: a
@@ -830,27 +943,37 @@ func readRuntimeIdentity(ctx context.Context, leaf runtime.Provider, name string
 // the row's token with no session ID). LL3 lists a subprocess runtime only
 // after its seed completes, so this needs a re-seed under a listed name.
 func readIdentityEnv(leaf runtime.Provider, name string) runtimeIdentity {
-	var v [len(identityEnvKeys)]string
+	if !identityReadable(leaf) {
+		return runtimeIdentity{}
+	}
 	if batch, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
 		vars, err := batch.GetAllEnvironment(name)
 		if err != nil {
 			return runtimeIdentity{}
 		}
-		for i, key := range identityEnvKeys {
-			v[i] = strings.TrimSpace(vars[key])
-		}
-	} else {
-		if !identityReadable(leaf) {
-			return runtimeIdentity{}
-		}
-		first, ok := readSidecarIdentity(leaf, name)
-		if !ok {
-			return runtimeIdentity{}
-		}
-		if v, ok = readSidecarIdentity(leaf, name); !ok || v != first {
-			return runtimeIdentity{}
-		}
+		return identityOfEnv(vars)
 	}
+	if observer, ok := leaf.(runtime.IdentityObserver); ok && observer.IdentityObservable() {
+		vars, err := observer.ObserveIdentity(name)
+		if err != nil {
+			return runtimeIdentity{}
+		}
+		return identityOfEnv(vars)
+	}
+	first, ok := readSidecarIdentity(leaf, name)
+	if !ok {
+		return runtimeIdentity{}
+	}
+	v, ok := readSidecarIdentity(leaf, name)
+	if !ok || v != first {
+		return runtimeIdentity{}
+	}
+	return knownIdentity(v)
+}
+
+// knownIdentity is the Known identity of the identity env values v, in
+// identityEnvKeys order.
+func knownIdentity(v [len(identityEnvKeys)]string) runtimeIdentity {
 	id := runtimeIdentity{Known: true, SessionID: v[0], Epoch: v[1], Token: v[2]}
 	for _, pn := range strings.Split(v[3], ",") {
 		if pn = strings.TrimSpace(pn); pn != "" {
@@ -878,14 +1001,23 @@ func readSidecarIdentity(leaf runtime.Provider, name string) (v [len(identityEnv
 // time, within ctx (the pass's enrichment bound). Only a complete,
 // error-free answer with a live pane, for the incarnation the pass enriched
 // (probedIncarnation), is known; anything else leaves the fact unknown.
-// Other names are not probed, and their fact stays unsupported. It returns
-// the probes made.
+// Other names are not probed, and their fact stays unsupported. A name
+// that would be probed and whose batched inventory carried a known agent
+// fact (enrich) is answered from that fact instead, with no probe; a
+// batched fact on any other name (an unattributed box, whose agent names
+// are not known) is ignored. It returns the probes made.
 func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, concurrency int) int {
 	var names []string
 	for name, a := range attrs {
-		if _, ok := hosts[name].(runtime.LivenessObserverWithError); ok && a.DeadKnown && !a.AllPanesDead && len(a.Identity.ProcessNames) > 0 {
-			names = append(names, name)
+		if _, ok := hosts[name].(runtime.LivenessObserverWithError); !ok || !a.DeadKnown || a.AllPanesDead || len(a.Identity.ProcessNames) == 0 {
+			continue
 		}
+		if a.batchedProcessKnown {
+			a.ProcessProbed, a.ProcessKnown, a.ProcessAlive = true, true, a.batchedProcessAlive
+			attrs[name] = a
+			continue
+		}
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	type answer struct {
@@ -910,6 +1042,218 @@ func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 		attrs[got.name] = a
 	}
 	return len(names)
+}
+
+// readSidecarRestartMarkers is the restart marker's GetMeta fallback
+// (CONTRACT v5.10q C7a-2b): a name on a leaf whose GetMeta reads a local
+// sidecar (acp, subprocess) and which has no batched inventory to carry the
+// marker (runtime.InventoryFor) has GC_RESTART_REQUESTED read through
+// GetMeta every pass. Any other leaf's GetMeta reaches a script, a pod or a
+// host, and is never read here per name per pass. At most concurrency run
+// at a time within ctx, each on its own goroutine; an error, a panic or a
+// read past ctx leaves the marker unread, which A13 reads as not requested.
+func readSidecarRestartMarkers(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, concurrency int) {
+	var names []string
+	for name := range attrs {
+		leaf := hosts[name]
+		if _, batched := runtime.InventoryFor(leaf); batched {
+			continue
+		}
+		if localSidecar(leaf) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	type answer struct {
+		name string
+		set  bool
+	}
+	answers := make(chan answer, len(names))
+	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
+	for _, name := range names {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
+		go func(leaf runtime.Provider) {
+			defer func() { <-sem }()
+			done := make(chan answer, 1)
+			go func() {
+				got := answer{name: name}
+				defer func() {
+					_ = recover()
+					done <- got
+				}()
+				v, err := leaf.GetMeta(name, "GC_RESTART_REQUESTED")
+				got.set = err == nil && strings.TrimSpace(v) != ""
+			}()
+			select {
+			case got := <-done:
+				answers <- got
+			case <-ctx.Done():
+				answers <- answer{name: name}
+			}
+		}(hosts[name])
+	}
+	for range reads {
+		got := <-answers
+		a := attrs[got.name]
+		a.RestartRequested = got.set
+		attrs[got.name] = a
+	}
+}
+
+// readActivities reads the last activity of every enriched name on a leaf
+// without a batched inventory (runtime.InventoryFor; an inventory read
+// carries activity, tmux's #{window_activity} at no extra fork) that can
+// report it for that name (sessionActivityReportable): GetLastActivity, the read legacy's idle
+// reference makes (sessionIdleReferenceInfoWithError). Such a leaf reports no
+// pane liveness, so every listed name is read. On tmux that read would
+// refresh the fleet snapshot, a full process scan, every pass, so tmux names
+// are never read here. At most concurrency run at a time, each on its own
+// goroutine within ctx (the pass's enrichment bound), so a wedged read cannot
+// hold the pass, and none starts once ctx is done. Only an error-free,
+// non-zero answer is known; anything else, a read past ctx included, leaves
+// the activity unknown, and AL1 never sleeps a live row on unknown activity
+// (configSleepSuppressed). It returns the reads made.
+func readActivities(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, concurrency int) int {
+	var names []string
+	for name := range attrs {
+		if _, batched := runtime.InventoryFor(hosts[name]); batched {
+			continue // its inventory carried the activity, or proved none (tmux)
+		}
+		if sessionActivityReportable(hosts[name], name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	type answer struct {
+		name string
+		at   time.Time
+		ok   bool
+	}
+	answers := make(chan answer, len(names))
+	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
+	for _, name := range names {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
+		go func(leaf runtime.Provider) {
+			defer func() { <-sem }()
+			done := make(chan answer, 1)
+			go func() {
+				got := answer{name: name}
+				defer func() {
+					_ = recover() // a panicking read is an unknown one
+					done <- got
+				}()
+				at, err := leaf.GetLastActivity(name)
+				got.at, got.ok = at, err == nil && !at.IsZero()
+			}()
+			select {
+			case got := <-done:
+				answers <- got
+			case <-ctx.Done():
+				answers <- answer{name: name}
+			}
+		}(hosts[name])
+	}
+	for range reads {
+		got := <-answers
+		a := attrs[got.name]
+		a.ActivityKnown, a.LastActivity = got.ok, got.at
+		attrs[got.name] = a
+	}
+	return reads
+}
+
+// readContents reads, within ctx (the content reads' share of the pass's
+// enrichment bound, contentReserve), the pane content of each enriched name
+// the planner wants (WantContent: the rows on A15's content clock) on a
+// leaf that can snapshot it, at most concurrency at a time, and returns
+// the reads it made; a read past ctx stays unread.
+func readContents(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, want map[string]bool, concurrency int) int {
+	type answer struct {
+		name string
+		got  contentState
+	}
+	var names []string
+	for name := range want {
+		_, enriched := attrs[name]
+		if _, ok := hosts[name].(runtime.IdleSnapshotProvider); ok && enriched {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	answers := make(chan answer, len(names))
+	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
+	for _, name := range names {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
+		go func(snap runtime.IdleSnapshotProvider) {
+			defer func() { <-sem }()
+			done := make(chan contentState, 1)
+			go func() { done <- snapshotContent(snap, name) }()
+			select {
+			case got := <-done:
+				answers <- answer{name, got}
+			case <-ctx.Done():
+				answers <- answer{name, contentUnread}
+			}
+		}(hosts[name].(runtime.IdleSnapshotProvider))
+	}
+	for range reads {
+		got := <-answers
+		a := attrs[got.name]
+		a.Content = got.got
+		attrs[got.name] = a
+	}
+	return reads
+}
+
+// snapshotContent is one pane snapshot, classified as legacy's
+// checkIdleByContent reads it; a panicking read is an erring one.
+func snapshotContent(snap runtime.IdleSnapshotProvider, name string) (got contentState) {
+	got = contentError
+	defer func() { _ = recover() }()
+	idle, err := snap.SnapshotIdle(name)
+	switch {
+	case errors.Is(err, runtime.ErrIdleIndeterminate):
+		return contentIndeterminate
+	case err != nil:
+		return contentError
+	case idle:
+		return contentIdle
+	}
+	return contentBusy
+}
+
+// contentReserve is the share of the enrichment bound held back for the
+// content reads when the planner wants any (v5.9s): the reads before them
+// stop that much early.
+func contentReserve(want map[string]bool) time.Duration {
+	if len(want) == 0 {
+		return 0
+	}
+	return inventoryEnrichBound / 4
 }
 
 // probedIncarnation reports whether a probe answered for incarnation: the
@@ -995,16 +1339,24 @@ type inventoryPassReport struct {
 	enrich        time.Duration
 	envRead       time.Duration
 	processProbe  time.Duration
+	activityRead  time.Duration
+	contentRead   time.Duration
 	enrichErrors  []string
 	envReads      int
 	envBacklog    int
 	processProbes int
+	activityReads int
+	contentReads  int
 	flips         int
 	alerts        []string
 	snapshot      *ObservationSnapshot
 	// attrs is the pass's enrichment, and gone the names it proved gone.
 	attrs map[string]InventoryAttrs
 	gone  []string
+	// programs is each enriched name's program-status reading, and
+	// captureHeals what program-capture heal did with them.
+	programs     map[string]runtime.ProgramStatus
+	captureHeals programCaptureHealTally
 }
 
 // traceDue reports whether a pass is worth a trace record: a flip, a change
@@ -1017,7 +1369,7 @@ func (l *runtimeInventoryLane) traceDue(r *inventoryPassReport) bool {
 	}
 	changed := signature != l.lastSignature
 	l.lastSignature = signature
-	return changed || r.flips > 0 || len(r.alerts) > 0 || r.seq%inventoryTraceHeartbeatPasses == 0
+	return changed || r.flips > 0 || len(r.alerts) > 0 || r.captureHeals.acted() || r.seq%inventoryTraceHeartbeatPasses == 0
 }
 
 // traceInventoryPass records one pass in its own trace cycle, like an
@@ -1079,6 +1431,7 @@ func inventoryPassFields(r *inventoryPassReport) map[string]any {
 		"inventory_probe_ms":      r.processProbe.Milliseconds(),
 		"inventory_enrich_errors": strings.Join(r.enrichErrors, "; "),
 		"inventory_health_alerts": strings.Join(r.alerts, ","),
+		"inventory_capture_heals": r.captureHeals.String(),
 	}
 	if s := r.snapshot; s != nil {
 		addInventorySnapshotFields(fields, s)
@@ -1147,4 +1500,13 @@ func inventoryHealthSummary(health map[string]BackendHealth) string {
 		parts = append(parts, inventoryLabelForTrace(label)+"="+health[label].State)
 	}
 	return strings.Join(parts, ",")
+}
+
+// remaining is what is left of ctx's deadline, zero when it has passed.
+func remaining(ctx context.Context) time.Duration {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	return max(time.Until(dl), 0)
 }

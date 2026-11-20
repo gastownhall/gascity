@@ -19,3 +19,14 @@ func TestChildEnvDropsSessionIdentity(t *testing.T) {
 		t.Fatalf("ChildEnv mutated its input: %q", in)
 	}
 }
+
+// Kills: a poller child that keeps the GC_HOOK_DEADLINE of the hook that
+// spawned it. The poller outlives that hook by design, so the deadline is long
+// past for it, and anything it runs would read itself as out of time.
+func TestChildEnvDropsHookDeadline(t *testing.T) {
+	got := ChildEnv([]string{"PATH=/usr/bin", "GC_HOOK_DEADLINE=2026-10-11T12:00:00Z", "GC_HOOK_DEADLINE_X=keep"})
+	want := []string{"PATH=/usr/bin", "GC_HOOK_DEADLINE_X=keep"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ChildEnv = %q, want %q", got, want)
+	}
+}

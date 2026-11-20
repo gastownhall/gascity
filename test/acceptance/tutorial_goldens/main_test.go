@@ -19,8 +19,6 @@ import (
 	"github.com/gastownhall/gascity/test/dolttest"
 )
 
-const canonicalTutorialRoot = "docs/tutorials"
-
 var (
 	goldenGCBinary string
 	goldenBDPath   string
@@ -29,7 +27,7 @@ var (
 func TestMain(m *testing.M) {
 	if !hasClaudeAuth() || (!useClaudeForCodex() && !hasCodexAuth()) {
 		if !hostProviderMode() {
-			fmt.Fprintf(os.Stderr, "tutorial-goldens: skipping package: on a developer box the provider CLIs run under an isolated HOME holding a copy of their credentials, and none was found to copy (~/.claude/.credentials.json, ~/.codex/auth.json, or ANTHROPIC_API_KEY/OPENAI_API_KEY). Set %s=1 to run them against your real home instead, which writes test trust entries into your ~/.claude.json\n", helpers.EnvAllowHostClaude)
+			fmt.Fprintf(os.Stderr, "tutorial-goldens: skipping package: on a developer box the provider CLIs run under an isolated HOME holding a copy of their credentials, and none was found to copy (~/.claude/.credentials.json, ~/.codex/auth.json, or ANTHROPIC_API_KEY/OPENAI_API_KEY). Set %s=1 to run them against your real home instead, which writes test trust entries into your ~/.claude.json; gc then keeps bd on the tool-home wrapper, so the tutorial cities start single-store and the pages' split-only checks are skipped\n", helpers.EnvAllowHostClaude)
 			os.Exit(0)
 		}
 		if useClaudeForCodex() {
@@ -94,9 +92,12 @@ func tutorialTmuxTmpDir(runtimeDir string) string {
 }
 
 // newTutorialBaseEnv builds the tutorial Env. A non-empty bdPath is staged in
-// the tutorial bin dir behind the tool-home wrapper: gc and the tutorial's own
-// `bd` commands run with the real HOME, and bd must never resolve the
-// operator's ~/.beads (or a user-level dolt.shared-server: true) through it.
+// the tutorial bin dir behind the tool-home wrapper, first on PATH, for the
+// pages' own `bd` commands: they run with gc's HOME, which in host mode is the
+// real one, and bd must never resolve the operator's ~/.beads (or a user-level
+// dolt.shared-server: true) through it. gc itself runs the real bd (BD_BIN),
+// which a split city's gc bd requires, everywhere but host mode off a CI
+// runner.
 func newTutorialBaseEnv(gcBinary, home, runtimeDir, bdPath string) *helpers.Env {
 	env := helpers.NewEnv(gcBinary, home, runtimeDir)
 	if hostProviderMode() {
@@ -105,6 +106,19 @@ func newTutorialBaseEnv(gcBinary, home, runtimeDir, bdPath string) *helpers.Env 
 		// which resolve their state through the host HOME and read trust from
 		// the real ~/.claude.json (the shim drops CLAUDE_CONFIG_DIR).
 		env.WithHostHome().WithHostClaudeState()
+		// Leaving the isolated HOME put gc back on the tool-home wrapper, and
+		// gc init splits a new city only on bd's own Go binary. A CI runner's
+		// home is discarded with it, so gc runs the real bd there and the
+		// tutorial cities are born split, as the pages say. Under the
+		// developer opt-in the home is theirs: gc stays on the wrapper, and
+		// the cities start single-store (tutorialWorkspace.citiesBornSplit).
+		if bdPath != "" && helpers.HostHomeIsDisposable() {
+			realBD, err := filepath.Abs(bdPath)
+			if err != nil {
+				panic("tutorial-goldens: resolving the bd path: " + err.Error())
+			}
+			env.WithRealBD(realBD)
+		}
 	}
 	// Otherwise gc keeps NewEnv's isolated HOME, which is also where the
 	// provider CLIs run with a copy of their credentials (providerHome).
@@ -305,6 +319,12 @@ func cleanupStaleTutorialProcesses(t *testing.T, tmpRoot string) {
 	}
 }
 
+// tutorialSupervisorReadyTimeout bounds startTutorialSupervisor's wait for
+// the control socket. It matches gc's own supervisorReadyTimeout
+// (cmd/gc/cmd_supervisor_lifecycle.go), the budget `gc supervisor start`
+// gives the same readiness condition.
+const tutorialSupervisorReadyTimeout = 15 * time.Second
+
 func startTutorialSupervisor(env *tutorialEnv) error {
 	if env == nil || env.Env == nil {
 		return fmt.Errorf("tutorial env is not initialized")
@@ -340,12 +360,18 @@ func startTutorialSupervisor(env *tutorialEnv) error {
 	env.supervisorDone = done
 	env.supervisorLog = logFile
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(tutorialSupervisorReadyTimeout)
+	var lastOut string
+	var lastErr error
 	for time.Now().Before(deadline) {
+		// Ready means the control socket answers with this supervisor's PID:
+		// the only liveness signal `gc init`/`gc start` trust, and the last
+		// thing the supervisor binds at startup, after its lock and its API.
 		out, err := runEnvCommandWithTimeout(env, env.Home, 2*time.Second, "gc", "supervisor", "status")
-		if err == nil && strings.Contains(out, "Supervisor is running") {
+		if err == nil && helpers.SupervisorStatusConfirmsPID(out, cmd.Process.Pid) {
 			return nil
 		}
+		lastOut, lastErr = out, err
 		select {
 		case err := <-done:
 			env.supervisor = nil
@@ -363,7 +389,8 @@ func startTutorialSupervisor(env *tutorialEnv) error {
 	}
 
 	logData, _ := os.ReadFile(logPath)
-	return fmt.Errorf("tutorial supervisor did not become ready:\n%s", string(logData))
+	return fmt.Errorf("tutorial supervisor did not become ready within %s: want %q from gc supervisor status; last probe (err: %v):\n%s\nsupervisor log:\n%s",
+		tutorialSupervisorReadyTimeout, helpers.SupervisorStatusPIDLine(cmd.Process.Pid), lastErr, lastOut, string(logData))
 }
 
 func TestStartTutorialSupervisorUsesAcceptanceBinaryForStatus(t *testing.T) {
@@ -378,13 +405,26 @@ func TestStartTutorialSupervisorUsesAcceptanceBinaryForStatus(t *testing.T) {
 set -eu
 case "$1 $2" in
   "supervisor run")
+    echo $$ > "$GC_HOME/fake-supervisor.pid"
     echo "Supervisor API listening on http://127.0.0.1:7777"
     echo "Supervisor started."
     trap 'exit 0' TERM INT
-    while :; do sleep 1; done
+    while :; do /bin/sleep 1; done
     ;;
   "supervisor status")
-    echo "Supervisor is running (PID 4242)"
+    # The first probes see what status reports while the supervisor holds
+    # its lock but has not bound its control socket: liveness from a
+    # fallback, with no PID.
+    n=0
+    [ -s "$GC_HOME/status-calls" ] && read -r n < "$GC_HOME/status-calls"
+    n=$((n + 1))
+    echo "$n" > "$GC_HOME/status-calls"
+    if [ "$n" -lt 3 ] || [ ! -s "$GC_HOME/fake-supervisor.pid" ]; then
+      echo "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via api)"
+    else
+      read -r pid < "$GC_HOME/fake-supervisor.pid"
+      echo "Supervisor is running (PID $pid)"
+    fi
     ;;
   *)
     echo "unexpected args: $*" >&2
@@ -399,10 +439,9 @@ esac
 		Env:        helpers.NewEnv(fakeGC, home, runtimeDir).With("PATH", "/does/not/exist"),
 	}
 
-	if err := startTutorialSupervisor(tutorial); err != nil {
-		t.Fatalf("startTutorialSupervisor: %v", err)
-	}
-	defer func() {
+	// Registered before the start so every failure exit below still kills
+	// the fake supervisor; its loop otherwise outlives the test.
+	t.Cleanup(func() {
 		if tutorial.supervisor != nil && tutorial.supervisor.Process != nil {
 			_ = tutorial.supervisor.Process.Kill()
 		}
@@ -412,7 +451,17 @@ esac
 		if tutorial.supervisorLog != nil {
 			_ = tutorial.supervisorLog.Close()
 		}
-	}()
+	})
+	if err := startTutorialSupervisor(tutorial); err != nil {
+		t.Fatalf("startTutorialSupervisor: %v", err)
+	}
+	calls, err := os.ReadFile(filepath.Join(home, "status-calls"))
+	if err != nil {
+		t.Fatalf("reading status call count: %v", err)
+	}
+	if n, _ := strconv.Atoi(strings.TrimSpace(string(calls))); n < 3 {
+		t.Fatalf("startTutorialSupervisor returned after %d status probe(s), want it to wait for the control socket to report the supervisor's PID", n)
+	}
 }
 
 func TestNewTutorialBaseEnvSetsIsolatedTmuxTmpDir(t *testing.T) {
@@ -774,6 +823,43 @@ func TestTutorialProvidersUseTheHostHomeOnCI(t *testing.T) {
 			}
 			if got := providerHome(home); got != hostHomeDir() {
 				t.Fatalf("providerHome = %q, want the host home %q", got, hostHomeDir())
+			}
+		})
+	}
+}
+
+// gc init splits a new city only on bd's own Go binary, so on a CI runner the
+// host-mode Env hands gc the real bd (BD_BIN) while the pages' raw `bd` keeps
+// the tool-home wrapper first on PATH. Under the developer opt-in gc stays on
+// the wrapper: a real bd would resolve user-level state under their home.
+func TestTutorialHostModeRunsTheRealBDOnlyOnCI(t *testing.T) {
+	bd := filepath.Join(t.TempDir(), "bd")
+	writeFile(t, bd, "#!/bin/sh\nexit 0\n", 0o755)
+	for _, tc := range []struct {
+		key, val string
+		realBD   bool
+	}{
+		{"GITHUB_ACTIONS", "true", true},
+		{helpers.EnvAllowHostClaude, "1", false},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			devBoxProviderMode(t)
+			t.Setenv(tc.key, tc.val)
+			home := t.TempDir()
+			env := newTutorialBaseEnv("/tmp/fake-gc", home, filepath.Join(home, "runtime"), bd)
+			if got := env.RunsRealBD(); got != tc.realBD {
+				t.Fatalf("RunsRealBD() = %v, want %v", got, tc.realBD)
+			}
+			wantBDBin := ""
+			if tc.realBD {
+				wantBDBin = bd
+			}
+			if got := env.Get("BD_BIN"); got != wantBDBin {
+				t.Fatalf("BD_BIN = %q, want %q", got, wantBDBin)
+			}
+			wrapper := filepath.Join(home, ".local", "bin", "bd")
+			if got := findExecutableInPath(env.Get("PATH"), "bd"); got != wrapper {
+				t.Fatalf("the first bd on PATH is %q, want the tool-home wrapper %s for the pages' raw bd", got, wrapper)
 			}
 		})
 	}

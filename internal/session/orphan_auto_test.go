@@ -40,7 +40,7 @@ func TestKillExistingOrphansThroughAutoTerminatesOnlyUntrackedSameCityRoots(t *t
 	def.ExtraRuntimes = []runtime.LiveRuntime{liveSeenByDefault, orphan, foreign, otherSession}
 	acp.ExtraRuntimes = []runtime.LiveRuntime{orphan, foreign, otherSession}
 
-	mgr := NewManagerWithOptions(beads.NewMemStore(), sessionauto.New(def, acp), WithCityPath(city))
+	mgr := newTestManager(t, beads.NewMemStore(), sessionauto.New(def, acp), WithCityPath(city))
 	if err := mgr.killExistingOrphans(context.Background(), sessionID); err != nil {
 		t.Fatalf("killExistingOrphans: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestKillExistingOrphansSummarizesScanError(t *testing.T) {
 		log.SetFlags(prevFlags)
 	})
 
-	mgr := NewManagerWithOptions(beads.NewMemStore(), &scanErrorFake{Fake: runtime.NewFake(), err: entries})
+	mgr := newTestManager(t, beads.NewMemStore(), &scanErrorFake{Fake: runtime.NewFake(), err: entries})
 	if err := mgr.killExistingOrphans(context.Background(), "sid-scan"); err != nil {
 		t.Fatalf("killExistingOrphans: %v", err)
 	}

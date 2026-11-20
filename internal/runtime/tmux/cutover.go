@@ -8,8 +8,8 @@ import (
 )
 
 // seamBackedProvider serves the legacy [runtime.Provider] through the
-// de-conflated seams (via [runtime.NewProviderFromSeams]) for the 18
-// driving/lifecycle methods, while EMBEDDING the raw *Provider so that tmux's
+// de-conflated seams (via [runtime.NewProviderFromSeams]) for 17
+// driving/lifecycle methods (Peek rides the raw provider, below), while EMBEDDING the raw *Provider so that tmux's
 // large optional-interface surface AND its real RunLive (session_live re-apply,
 // which the seam adapter cannot model) are carried unchanged. The early cut-over
 // for the local tmux provider.
@@ -20,18 +20,18 @@ import (
 // InterruptBoundaryWait, DialogProvider, ProcessTableScanner, ServerLifecycle,
 // DeadRuntimeSessionChecker, LivenessObserver, SleepCapability, … — and a missed
 // interface would silently degrade a capability. Embedding raw guarantees every
-// non-seam-routed method (known or not) stays on the real provider; only the 18
+// non-seam-routed method (known or not) stays on the real provider; only the 17
 // Provider methods below are explicitly routed through the seams. RunLive is
 // intentionally NOT overridden, so the embedded provider's real RunLive runs.
 type seamBackedProvider struct {
 	*Provider                  // raw: carries RunLive + every optional interface
-	seams     runtime.Provider // the seam adapter, for the 18 routed methods
+	seams     runtime.Provider // the seam adapter, for the 17 routed methods
 }
 
 var (
 	_ runtime.Provider                 = (*seamBackedProvider)(nil)
 	_ runtime.UnattendedSessionStopper = (*seamBackedProvider)(nil)
-	// Relaunch (B2) rides the embedded raw *Provider — it is NOT one of the 18
+	// Relaunch (B2) rides the embedded raw *Provider — it is NOT one of the 17
 	// seam-routed methods, so the warm-box relaunch stays on the real provider.
 	_ runtime.RelaunchProvider = (*seamBackedProvider)(nil)
 	// The listing attestation and the batched inventory also ride the
@@ -50,6 +50,9 @@ var (
 	_ runtime.ServerDeathConfirmer  = (*seamBackedProvider)(nil)
 	_ runtime.FreshLivenessObserver = (*seamBackedProvider)(nil)
 	_ runtime.SessionObjectKiller   = (*seamBackedProvider)(nil)
+	// Stopping a stopped Codex turn's background terminals rides the
+	// embedded raw provider.
+	_ runtime.BackgroundWorkStopper = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.
@@ -59,8 +62,9 @@ func NewSeamBackedWithConfig(cfg Config) runtime.Provider {
 	return &seamBackedProvider{Provider: raw, seams: runtime.NewProviderFromSeams(rt, tp)}
 }
 
-// --- the 18 Provider methods routed through the seams (RunLive intentionally
-// NOT overridden, so the embedded raw provider's real RunLive is used) ---
+// --- the 17 Provider methods routed through the seams (RunLive intentionally
+// NOT overridden, so the embedded raw provider's real RunLive is used, and Peek
+// overridden onto the raw provider) ---
 
 func (s *seamBackedProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	return s.seams.Start(ctx, name, cfg)
@@ -90,8 +94,14 @@ func (s *seamBackedProvider) RemoveMeta(name, key string) error {
 	return s.seams.RemoveMeta(name, key)
 }
 
+// Peek rides the embedded raw provider, not the seams: the seam's Peek reads
+// through an Attachment, which the tmux transport opens only on a running
+// session, so a remain-on-exit corpse would read as an empty screen with no
+// error. The dead pane's screen is what the controller classifies (a
+// provider rate-limit or terminal error, SESS-088/530; mc-g3la1), and
+// capture-pane reads it, as legacy's raw Peek always did.
 func (s *seamBackedProvider) Peek(name string, lines int) (string, error) {
-	return s.seams.Peek(name, lines)
+	return s.Provider.Peek(name, lines)
 }
 
 func (s *seamBackedProvider) ListRunning(prefix string) ([]string, error) {

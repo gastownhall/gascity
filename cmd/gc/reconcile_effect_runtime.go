@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -45,41 +46,29 @@ func (r *txRuntime) Alive() bool { return r.Class == rtAlive && r.Same }
 
 // readRuntime reads name fresh on sp since since, with processNames (the
 // row's template's, processNamesFor), the bracketing read at now(); or
-// refuses with a cause when no backend resolves the name.
+// refuses with a cause when no backend resolves the name, or it is blank.
 func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string, name string, since time.Time, now func() time.Time) (*txRuntime, string) {
+	name = strings.TrimSpace(name)
 	leaf, _, known := runtime.ResolveBackend(sp, name)
-	if sp == nil || !known || leaf == nil {
+	if sp == nil || name == "" || !known || leaf == nil {
 		return nil, causeRouteUnknown
 	}
-	if !freshReadable(leaf) {
+	if !runtime.FreshReadable(leaf) {
 		return &txRuntime{Class: rtUnsupported}, ""
 	}
-	read := func(sp runtime.Provider, since time.Time) (runtime.Liveness, bool) {
-		l, status, err := runtime.ObserveLivenessBoundedSince(ctx, sp, name, processNames, since, fenceProbeTimeout)
-		return l, status == runtime.ObservationComplete && err == nil
-	}
 	rt := &txRuntime{Class: rtUnknown, leaf: leaf}
-	live, ok := read(leaf, since)
+	live, ok := freshRead(ctx, leaf, name, processNames, since)
 	switch rt.Live = live; {
 	case !ok:
 		return rt, ""
-	case !live.Running:
-		// Absent, or a corpse: the leaf's verdict stands only when every
-		// fall-through hop finds nothing running elsewhere (and, for
-		// absence, nothing at all), each backend that cannot read fresh
-		// answering by an attested, error-free listing.
-		for _, hop := range fallThroughHops(sp, name) {
-			if l, ok := read(hop, since); !ok || l.Running || !live.Present() && l.Present() || !unlistedElsewhere(ctx, hop, name) {
-				return rt, ""
-			}
-		}
-		if !live.Present() {
-			rt.Class = rtAbsent
-			return rt, ""
-		}
+	case !live.Running && !hopsQuiet(ctx, sp, name, processNames, since, !live.Present()):
+		return rt, ""
+	case !live.Present():
+		rt.Class = rtAbsent
+		return rt, ""
 	}
 	rt.Identity = readRuntimeIdentity(ctx, leaf, name)
-	again, ok := read(leaf, now())
+	again, ok := freshRead(ctx, leaf, name, processNames, now())
 	if rt.Again = again; !ok {
 		return rt, ""
 	}
@@ -87,13 +76,37 @@ func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string
 	switch {
 	case !again.Present():
 	case again.Corpse:
-		rt.Class = rtCorpse
+		// A corpse stands as one only while nothing runs on a hop either,
+		// the first read's check, or this one's after a running first read.
+		if !live.Running || hopsQuiet(ctx, sp, name, processNames, since, false) {
+			rt.Class = rtCorpse
+		}
 	case !again.Alive:
 		rt.Class = rtZombie
 	default:
 		rt.Class = rtAlive
 	}
 	return rt, ""
+}
+
+// freshRead is one bounded fresh read of name on sp since since; ok only
+// when it completed without error.
+func freshRead(ctx context.Context, sp runtime.Provider, name string, processNames []string, since time.Time) (runtime.Liveness, bool) {
+	l, status, err := runtime.ObserveLivenessBoundedSince(ctx, sp, name, processNames, since, fenceProbeTimeout)
+	return l, status == runtime.ObservationComplete && err == nil
+}
+
+// hopsQuiet reports that every fall-through hop from sp to name's leaf
+// finds nothing running elsewhere (and, for an absence, nothing at all),
+// each backend that cannot read fresh answering by an attested, error-free
+// listing: what confirms a leaf's absence or corpse.
+func hopsQuiet(ctx context.Context, sp runtime.Provider, name string, processNames []string, since time.Time, absent bool) bool {
+	for _, hop := range fallThroughHops(sp, name) {
+		if l, ok := freshRead(ctx, hop, name, processNames, since); !ok || l.Running || absent && l.Present() || !unlistedElsewhere(ctx, hop, name) {
+			return false
+		}
+	}
+	return true
 }
 
 // processNamesFor is row's template's process names, by which a read tells a
@@ -103,19 +116,6 @@ func processNamesFor(w *World, row session.Info) []string {
 		return res.TP.Hints.ProcessNames
 	}
 	return nil
-}
-
-// freshReadable reports a leaf whose liveness read reports errors and is
-// fresh: it implements the fresh read, or reads fresh by construction (acp,
-// subprocess). Any other leaf (a bool-only one: herdr, k8s, exec) proves
-// neither presence nor absence.
-func freshReadable(leaf runtime.Provider) bool {
-	if _, ok := leaf.(runtime.LivenessObserverWithError); !ok {
-		return false
-	}
-	_, fresh := leaf.(runtime.FreshLivenessObserver)
-	m, byConstruction := leaf.(runtime.FreshByConstruction)
-	return fresh || byConstruction && m.LivenessReadsFresh()
 }
 
 // unlistedElsewhere reports whether every backend hop falls through to that
@@ -134,15 +134,19 @@ func unlistedElsewhere(ctx context.Context, hop runtime.Provider, name string) b
 		routed = r.RouteFor(name).Label
 	}
 	type listing struct {
-		names []string
-		err   error
+		names    []string
+		attested bool
+		err      error
 	}
 	for _, backend := range b.Backends() {
-		if backend.Label == routed || freshReadable(backend.Provider) {
+		if backend.Label == routed || runtime.FreshReadable(backend.Provider) {
 			continue
 		}
-		l, ok := boundedProbe(ctx, func() listing { n, err := backend.Provider.ListRunning(name); return listing{n, err} })
-		if !ok || l.err != nil || !runtime.ListRunningAttested(backend.Provider) || slices.Contains(l.names, name) {
+		l, ok := boundedProbe(ctx, func() listing {
+			n, attested, err := runtime.ListRunningWithAttestation(backend.Provider, name)
+			return listing{n, attested, err}
+		})
+		if !ok || l.err != nil || !l.attested || slices.Contains(l.names, name) {
 			return false
 		}
 	}

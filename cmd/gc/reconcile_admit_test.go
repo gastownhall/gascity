@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"maps"
 	"math/rand/v2"
 	"reflect"
@@ -333,6 +334,33 @@ func TestAdmitOpenEndpointAdmitsNothing(t *testing.T) {
 	}
 }
 
+// Kills a heal lost behind its start (should-fix 2): a start that carries
+// its A6 heal and is deferred (an open endpoint, the row-repeated rule
+// aside) admits the heal in its stead, as the row write it is, under the
+// row write's own cap; a start without one admits nothing.
+func TestAdmitHealsInsteadOfADeferredStart(t *testing.T) {
+	in := admitIn(5, 1)
+	shut := map[endpointKey]endpointView{"provider:a": {Gate: gateShut}}
+	in.Endpoints = shut
+	healed := func(i int) intent {
+		it := startOn(i, "provider:a", time.Duration(i))
+		it.Heal = &intent{Kind: intentRowHealFresh, Key: it.Key, Patch: session.MetadataPatch{"state": "asleep"}}
+		return it
+	}
+	res := admit(in, []intent{healed(1), healed(2), startOn(3, "provider:a", 3)})
+	if got := keysOf(res.Admitted); !slices.Equal(got, []string{intentRowHealFresh + ":gc-1"}) || res.Admitted[0].Patch["state"] != "asleep" {
+		t.Fatalf("admitted %v, want gc-1's heal alone (one row write)", got)
+	}
+	if got := causesOf(res.Deferred); len(got) != 3 || got["start:gc-1"] != causeEndpointGate || got["start:gc-2"] != causeEndpointGate {
+		t.Fatalf("deferred %v, want the three starts on the endpoint", got)
+	}
+	twice := admitIn(5, 4)
+	twice.Endpoints = shut
+	if res := admit(twice, []intent{healed(1), healed(1)}); len(res.Admitted) != 1 {
+		t.Fatalf("admitted %v, want one heal for a row proposed twice", keysOf(res.Admitted))
+	}
+}
+
 // Kills rank inversion (START-009): starts go oldest wakeFairnessTime first,
 // and a never-woken row ranks by its CreatedAt.
 func TestAdmitLRUOrderUsesWakeFairnessTime(t *testing.T) {
@@ -405,10 +433,11 @@ func TestAdmitPausedDefersStartsAndCreates(t *testing.T) {
 }
 
 // Kills a destructive effect before the inputs are primed, and gating a
-// start, adopt or rekey on the boot gate (P2): exactly the six destructive
-// families defer, with cause boot-gate.
+// start, adopt or rekey on the boot gate (P2): exactly the destructive
+// families defer, A14's restart and relaunch among them, with cause
+// boot-gate.
 func TestAdmitBootGateClosedDefersExactlyTheSixKinds(t *testing.T) {
-	gated := []string{intentClose, intentDrainBegin, intentDrainBeginFresh, intentRollback, intentSignal, intentSignalFresh, intentStop, intentZombie}
+	gated := []string{intentClose, intentDrainBegin, intentDrainBeginFresh, intentDriftRelaunch, intentDriftRestart, intentRollback, intentSignal, intentSignalAck, intentSignalFresh, intentStop, intentZombie} // A14's restart and relaunch, ruled
 	in := admitIn(50, 50)
 	in.BootOpen = false
 	var intents []intent
@@ -467,7 +496,7 @@ func TestAdmitProbeEffectsCappedAtProbeConcurrency(t *testing.T) {
 }
 
 // Kills a reintroduced special deadline (P3): every kind's deadline is its
-// class's, a start startup_timeout + 10s, a row write 30s, the rest 60s.
+// class's, a start startup_timeout + 30s, a row write 30s, the rest 60s.
 func TestIntentDeadlinesAreFlat(t *testing.T) {
 	rowWrites := []string{intentBaseline, intentDrainBegin, intentDrainCancel, intentDrainVoid, intentRowHeal, intentRowMetadata, intentSignal}
 	in := admitIn(50, 50)
@@ -481,7 +510,7 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 		want := providerEffectDeadline
 		switch {
 		case kind == intentStart:
-			want = 2*time.Minute + 10*time.Second
+			want = 2*time.Minute + 30*time.Second
 		case slices.Contains(rowWrites, kind):
 			want = 30 * time.Second
 		}
@@ -492,8 +521,8 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 	// A startup_timeout that is not positive reads as the 60s default.
 	for _, timeout := range []string{"0s", "-5s"} {
 		in.Cfg.Session.StartupTimeout = timeout
-		if res := admit(in, []intent{startOn(1, "", 0)}); res.Admitted[0].Deadline.Sub(admitT0) != 70*time.Second {
-			t.Errorf("startup_timeout %s: deadline +%v, want +70s", timeout, res.Admitted[0].Deadline.Sub(admitT0))
+		if res := admit(in, []intent{startOn(1, "", 0)}); res.Admitted[0].Deadline.Sub(admitT0) != 90*time.Second {
+			t.Errorf("startup_timeout %s: deadline +%v, want +90s", timeout, res.Admitted[0].Deadline.Sub(admitT0))
 		}
 	}
 }
@@ -530,6 +559,36 @@ func TestAdmitRowBackoffDefersAllButGoneFinalize(t *testing.T) {
 	}
 }
 
+// Kills a row backoff's expiry that schedules no pass (CONTRACT v5.10d (b)):
+// admission reports the earliest expiry of the live row backoffs that
+// deferred an intent, each the later of its row's records that hold it
+// (the row key and a drift kind's own); a finalize the backoff lets through,
+// and an expired backoff, schedule nothing.
+func TestAdmitReportsRowBackoffExpiry(t *testing.T) {
+	in := admitIn(50, 50)
+	in.Backoff = map[string]backoffRecord{
+		rowBackoffKey(admitRow(1)):   {Until: admitT0.Add(30 * time.Second), Cause: causeRedecided},
+		rowBackoffKey(admitRow(2)):   {Until: admitT0.Add(10 * time.Second), Cause: causeRedecided},
+		rowBackoffKey(admitRow(3)):   {Until: admitT0.Add(5 * time.Second), Cause: "fence-l3"},
+		driftBackoffKey(admitRow(3)): {Until: admitT0.Add(20 * time.Second), Cause: causeDriftDeferred},
+	}
+	if res := admit(in, []intent{startOn(1, "", 0), rowIntent(intentStop, 2)}); len(res.Deferred) != 2 || !res.NextBackoff.Equal(admitT0.Add(10*time.Second)) {
+		t.Fatalf("deferred %v, next backoff %v; want both deferred, the pass at +10s", causesOf(res.Deferred), res.NextBackoff)
+	}
+	if res := admit(in, []intent{rowIntent(intentDriftRestart, 3)}); !res.NextBackoff.Equal(admitT0.Add(20 * time.Second)) {
+		t.Fatalf("drift under both records: next backoff %v, want the later, +20s", res.NextBackoff)
+	}
+	finalize := rowIntent(intentStop, 2)
+	finalize.Finalize = true
+	if res := admit(in, []intent{finalize}); len(res.Admitted) != 1 || !res.NextBackoff.IsZero() {
+		t.Fatalf("admitted %v, next backoff %v; want the finalize through and no pass", keysOf(res.Admitted), res.NextBackoff)
+	}
+	in.Now = admitT0.Add(30 * time.Second)
+	if res := admit(in, []intent{startOn(1, "", 0)}); len(res.Admitted) != 1 || !res.NextBackoff.IsZero() {
+		t.Fatalf("admitted %v, next backoff %v; want an expired backoff to defer nothing", keysOf(res.Admitted), res.NextBackoff)
+	}
+}
+
 // Kills a re-probe storm (mc-zndi7.29): an attribution-unknown refusal's row
 // backoff defers the row's adopt, start and rollback until it expires or a
 // readable verdict drops it.
@@ -556,5 +615,79 @@ func TestAdmitDefersAttributionReprobeUnderBackoff(t *testing.T) {
 	in.Now, in.Backoff = admitT0, table.Snapshot()
 	if n := admitted(in); n != 3 {
 		t.Fatalf("%d of 3 admitted after a readable verdict reset it", n)
+	}
+}
+
+// Kills a drift deferral that holds the row (the D3 amendment; the C7b2-2
+// review's R4): a drift kind's refusal backs off its own key, which defers
+// the drift kinds alone, so a row whose drift defers at a prompt for hours
+// still starts, heals and stops at once; a live row backoff still defers
+// the drift kinds too; the drift key prunes with its row.
+func TestDriftBackoffPacesOnlyTheDrift(t *testing.T) {
+	p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	k := admitRow(1)
+	p.backoffSettled(settlement{Key: k, Kind: intentDriftRestart, Outcome: settledRefused, Cause: causeDriftDeferred + fencePending, At: admitT0})
+	if p.backoff.Record(rowBackoffKey(k)).Consecutive != 0 || !p.backoff.Record(driftBackoffKey(k)).live(admitT0) {
+		t.Fatalf("a drift refusal backed off %v, want its drift key alone", p.backoff.Snapshot())
+	}
+	in := admitIn(50, 50)
+	in.Backoff = p.backoff.Snapshot()
+	for kind := range effectSpecs {
+		if kind == intentCreate {
+			continue
+		}
+		drift := kind == intentDriftRestart || kind == intentDriftRelaunch
+		res := admit(in, []intent{rowIntent(kind, 1)})
+		if held := len(res.Deferred) == 1 && res.Deferred[0].Cause == causeRowBackoff; held != drift {
+			t.Errorf("%s: deferred on the drift backoff %v, want %v", kind, held, drift)
+		}
+	}
+	in.Backoff = map[string]backoffRecord{rowBackoffKey(k): {Until: admitT0.Add(time.Second), Cause: "fence-l3"}}
+	for _, kind := range []string{intentDriftRestart, intentDriftRelaunch} {
+		if res := admit(in, []intent{rowIntent(kind, 1)}); len(res.Deferred) != 1 || res.Deferred[0].Cause != causeRowBackoff {
+			t.Errorf("%s: admitted under a live row backoff", kind)
+		}
+	}
+	p.backoffSettled(settlement{Key: k, Kind: intentDriftRelaunch, Outcome: settledLanded, At: admitT0})
+	if p.backoff.Record(driftBackoffKey(k)).Consecutive != 0 {
+		t.Fatal("a landed drift kept its backoff")
+	}
+}
+
+// Kills a drift episode's backoff that outlives it (the round-three
+// review's R7, R8): the bounded deferral's stamp landing (the prompt
+// answered, recent activity's 30s bound now pacing) resets the drift's
+// record, and so does a plain start of the row, so a new drift a day later
+// starts at the base window; a start that landed with a cause does not.
+func TestDriftBackoffResetsWithItsEpisode(t *testing.T) {
+	k := admitRow(1)
+	for _, tc := range []struct {
+		name  string
+		end   settlement
+		reset bool
+	}{
+		{"the stamp lands", settlement{Kind: intentDriftRestart, Outcome: settledLanded, Cause: causeDriftDeferred + "recent_activity"}, true},
+		{"a start lands", settlement{Kind: intentStart, Outcome: settledLanded}, true},
+		{"a start lands with a cause", settlement{Kind: intentStart, Outcome: settledLanded, Cause: causeSessionName}, false},
+		{"another kind lands", settlement{Kind: intentRowHeal, Outcome: settledLanded}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+			at := admitT0
+			for range 6 {
+				p.backoffSettled(settlement{Key: k, Kind: intentDriftRestart, Outcome: settledRefused, Cause: causeDriftDeferred + fencePending, At: at})
+				at = p.backoff.Record(driftBackoffKey(k)).Until.Add(time.Second)
+			}
+			tc.end.Key, tc.end.At = k, at
+			p.backoffSettled(tc.end)
+			if reset := p.backoff.Record(driftBackoffKey(k)).Consecutive == 0; reset != tc.reset {
+				t.Fatalf("drift record %+v, want reset %v", p.backoff.Record(driftBackoffKey(k)), tc.reset)
+			}
+			later := at.Add(24 * time.Hour)
+			p.backoffSettled(settlement{Key: k, Kind: intentDriftRestart, Outcome: settledRefused, Cause: causeDriftDeferred + fenceAttached, At: later})
+			if w := p.backoff.Record(driftBackoffKey(k)).Until.Sub(later); tc.reset && w != backoffBase {
+				t.Fatalf("a new episode's first deferral backs off %v, want %v", w, backoffBase)
+			}
+		})
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
@@ -43,7 +44,7 @@ func claudeKeyedFixture(t *testing.T) (*SessionHandle, string, string) {
 		Provider: "claude",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()
@@ -231,7 +232,7 @@ func TestSessionHandleWritesCodexSidecarByID(t *testing.T) {
 		Provider: "codex",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()
@@ -307,7 +308,7 @@ func TestSessionHandleCodexSidecarIgnoresOutOfWindowDuplicate(t *testing.T) {
 		Provider: "codex",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()
@@ -362,7 +363,7 @@ func TestSessionHandleSkipsSidecarForWorkdirOnlyProvider(t *testing.T) {
 		Provider: "gemini",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()

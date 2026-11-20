@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/herdr"
+	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -55,15 +56,20 @@ func (r fallThrough) ObserveLivenessSince(name string, pn []string, since time.T
 	return runtime.ObserveLivenessSince(r.other, name, pn, since)
 }
 
-// boolOnly answers liveness only as a bool (herdr, k8s, exec).
-type boolOnly struct{ *runtime.Fake }
+// staleRead is tmux's backend answering its error-bearing read from a cache
+// taken before anything started, as tmux's may.
+type staleRead struct{ runtime.FullFake }
 
-// staleWithErrors answers liveness with errors but neither reads fresh nor
-// is fresh by construction: its read may be a cache's.
-type staleWithErrors struct{ *runtime.Fake }
-
-func (staleWithErrors) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+func (staleRead) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
 	return runtime.Liveness{}, nil
+}
+
+// staleHybrid is production's hybrid, tmux over k8s, its tmux leg f read
+// through a cache: it reports errors but neither reads fresh nor is fresh by
+// construction, so only its attested listing proves a name absent.
+func staleHybrid(f *runtime.Fake) runtime.Provider {
+	k8s, _ := fakeProfile(runtime.ProfileK8s)
+	return sessionhybrid.New(runtime.NewFakeProfile(runtime.ProfileTmux, staleRead{runtime.FullFake{Fake: f}}), k8s, func(string) bool { return false })
 }
 
 // downLeaf is a fresh leaf whose reads fail and report nothing.
@@ -119,17 +125,17 @@ func TestReadRuntimeClassifiesTheFreshRead(t *testing.T) {
 	if rt := read(fallThrough{recordingLeaf: leaf, other: downLeaf{newSimProvider()}}); rt.Class != rtUnknown {
 		t.Fatalf("the hop's read failed, reporting nothing: class %d, want unknown", rt.Class)
 	}
-	if rt := read(fallThrough{recordingLeaf: leaf, other: staleWithErrors{runtime.NewFake()}}); rt.Class != rtAbsent {
+	if rt := read(fallThrough{recordingLeaf: leaf, other: staleHybrid(runtime.NewFake())}); rt.Class != rtAbsent {
 		t.Fatalf("the other backend cannot read fresh, its attested listing is empty: class %d, want absent", rt.Class)
 	}
 	unattested := runtime.NewFake()
 	unattested.ListingUnattested = true
-	if rt := read(fallThrough{recordingLeaf: leaf, other: staleWithErrors{unattested}}); rt.Class != rtUnknown {
+	if rt := read(fallThrough{recordingLeaf: leaf, other: staleHybrid(unattested)}); rt.Class != rtUnknown {
 		t.Fatalf("the other backend cannot read fresh nor attest its listing: class %d, want unknown", rt.Class)
 	}
 	listed := runtime.NewFake()
 	_ = listed.Start(context.Background(), "s-1", runtime.Config{})
-	if rt := read(fallThrough{recordingLeaf: leaf, other: staleWithErrors{listed}}); rt.Class != rtUnknown {
+	if rt := read(fallThrough{recordingLeaf: leaf, other: staleHybrid(listed)}); rt.Class != rtUnknown {
 		t.Fatalf("listed on a backend that cannot read fresh: class %d, want unknown", rt.Class)
 	}
 	sp.put("s-1", "gc-1", "1", "tok-1")
@@ -140,7 +146,7 @@ func TestReadRuntimeClassifiesTheFreshRead(t *testing.T) {
 	if rt := read(fallThrough{recordingLeaf: leaf, other: newSimProvider()}); rt.Class != rtCorpse {
 		t.Fatalf("a corpse on the leaf, nothing elsewhere: class %d, want corpse", rt.Class)
 	}
-	if rt := read(fallThrough{recordingLeaf: leaf, other: staleWithErrors{listed}}); rt.Class != rtUnknown {
+	if rt := read(fallThrough{recordingLeaf: leaf, other: staleHybrid(listed)}); rt.Class != rtUnknown {
 		t.Fatalf("a corpse on the leaf, listed on a backend that cannot read fresh: class %d, want unknown", rt.Class)
 	}
 	sp.drop("s-1")
@@ -170,9 +176,9 @@ func TestReadRuntimeClassifiesTheFreshRead(t *testing.T) {
 	if rt := read(leaf); rt.Class != rtUnknown {
 		t.Fatalf("probe errs: class %d, want unknown", rt.Class)
 	}
-	for _, l := range []runtime.Provider{boolOnly{runtime.NewFake()}, staleWithErrors{runtime.NewFake()}} {
-		if rt := read(l); rt.Class != rtUnsupported {
-			t.Fatalf("%T, a leaf without a fresh read: class %d, want unsupported", l, rt.Class)
+	for _, p := range []runtime.Profile{runtime.ProfileHerdr, runtime.ProfileK8s, runtime.ProfileExec, runtime.ProfileSSH, runtime.ProfileT3Bridge} {
+		if l, _ := fakeProfile(p); read(l).Class != rtUnsupported {
+			t.Fatalf("profile %d, a leaf without a fresh read: class %d, want unsupported", p, read(l).Class)
 		}
 	}
 	if _, cause := readRuntime(context.Background(), nil, nil, "s-1", gatherNow, time.Now); cause != causeRouteUnknown {
@@ -213,11 +219,11 @@ func TestReadRuntimeReadsPresenceAndIdentityOnTheRoutedLeaf(t *testing.T) {
 	}
 }
 
-// flakyBoolOnly is a bool-only backend (herdr, k8s, exec) whose probe
+// flakyProbe is a bool-only backend's (herdr, k8s, exec) whose probe
 // failed: IsRunning answers false, as those providers do on an error.
-type flakyBoolOnly struct{ *runtime.Fake }
+type flakyProbe struct{ runtime.FullFake }
 
-func (flakyBoolOnly) IsRunning(string) bool { return false }
+func (flakyProbe) IsRunning(string) bool { return false }
 
 // Kills absence proven by a bool-only backend's failed probe (review pin
 // N1, adapted to the ruling): through real auto, a name routed to a fresh
@@ -238,7 +244,7 @@ func TestReadRuntimeAbsenceThroughAutoOverABoolOnlyDefault(t *testing.T) {
 		}, rtUnknown},
 		{"a failing listing", runtime.NewFailFake, rtUnknown},
 	} {
-		a := sessionauto.New(flakyBoolOnly{c.base()}, newSimProvider())
+		a := sessionauto.New(runtime.NewFakeProfile(runtime.ProfileK8s, flakyProbe{runtime.FullFake{Fake: c.base()}}), newSimProvider())
 		a.RouteACP("s-1")
 		if rt, cause := readRuntime(context.Background(), a, nil, "s-1", gatherNow, time.Now); cause != "" || rt.Class != c.class {
 			t.Fatalf("%s: class %d (cause %q), want %d", c.name, rt.Class, cause, c.class)
@@ -253,9 +259,10 @@ func TestRekeyRefusesAnUnsupportedRead(t *testing.T) {
 	}
 }
 
-// hangingListing is a bool-only backend whose listing blocks until release.
+// hangingListing is a bool-only backend's (k8s) whose listing blocks until
+// release.
 type hangingListing struct {
-	*runtime.Fake
+	runtime.FullFake
 	release chan struct{}
 }
 
@@ -270,9 +277,9 @@ func (h hangingListing) ListRunning(prefix string) ([]string, error) {
 // ListRunning hangs ends the read at the effect's context, Unknown, and
 // never holds the locks past it.
 func TestReadRuntimeBoundsTheHopListing(t *testing.T) {
-	h := hangingListing{Fake: runtime.NewFake(), release: make(chan struct{})}
+	h := hangingListing{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, release: make(chan struct{})}
 	defer close(h.release)
-	a := sessionauto.New(h, newSimProvider())
+	a := sessionauto.New(runtime.NewFakeProfile(runtime.ProfileK8s, h), newSimProvider())
 	a.RouteACP("s-1")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -326,10 +333,6 @@ func TestReadRuntimeJudgesTheBackendTheHopReads(t *testing.T) {
 	}
 }
 
-// herdrShaped is a herdr-default city's base backend: bool-only and with no
-// listing attestation, as the real herdr and exec providers have none.
-type herdrShaped struct{ *runtime.Fake }
-
 // Pins the cost of the listing ruling (review pin, inverted): herdr's listing
 // skips a bound session whose lookup errors, so it is not provably complete
 // and does not attest; an ACP-routed name absent everywhere in a
@@ -339,9 +342,8 @@ func TestReadRuntimeAcpAbsenceInAHerdrDefaultCityIsUnknown(t *testing.T) {
 	if _, ok := any((*herdr.Provider)(nil)).(runtime.ListingAttestation); ok {
 		t.Fatal("herdr attests its listing now: confirm it is complete and flip this pin to absent")
 	}
-	f := runtime.NewFake()
-	f.ListingUnattested = true
-	a := sessionauto.New(herdrShaped{f}, newSimProvider())
+	herdrLeaf, _ := fakeProfile(runtime.ProfileHerdr) // bool-only, and no listing attestation
+	a := sessionauto.New(herdrLeaf, newSimProvider())
 	a.RouteACP("s-1")
 	if rt, cause := readRuntime(context.Background(), a, nil, "s-1", gatherNow, time.Now); cause != "" || rt.Class != rtUnknown {
 		t.Fatalf("class %d (cause %q), want unknown", rt.Class, cause)
@@ -367,5 +369,34 @@ func TestReadRuntimeCorpseThroughAuto(t *testing.T) {
 	other.rts["s-1"].probeErr = true
 	if rt, _ := readRuntime(context.Background(), a, nil, "s-1", gatherNow, time.Now); rt.Class != rtUnknown {
 		t.Fatalf("corpse on the leaf, the other backend's read failing: class %d, want unknown", rt.Class)
+	}
+}
+
+// Kills a blank name read (review item 5), and a corpse on a second read
+// after a running first one standing without the hop check (review item
+// 6): a blank name refuses route-unknown; a runtime running at the first
+// read and a corpse at the second reads a corpse only while the other
+// backend runs nothing.
+func TestReadRuntimeBlankNameAndALateCorpse(t *testing.T) {
+	if _, cause := readRuntime(context.Background(), newSimProvider(), nil, "  ", gatherNow, time.Now); cause != causeRouteUnknown {
+		t.Fatalf("blank name: cause %q, want %q", cause, causeRouteUnknown)
+	}
+	for _, elsewhere := range []bool{false, true} {
+		sp := newSimProvider()
+		sp.put("s-1", "gc-1", "1", "tok")
+		leaf := &recordingLeaf{simProvider: sp}
+		leaf.during = func() {
+			if len(leaf.sinces) == 2 { // dies between the brackets
+				sp.rts["s-1"].corpse = true
+			}
+		}
+		other := newSimProvider()
+		if elsewhere {
+			other.put("s-1", "gc-1", "1", "tok")
+		}
+		rt, _ := readRuntime(context.Background(), fallThrough{recordingLeaf: leaf, other: other}, nil, "s-1", gatherNow, time.Now)
+		if want := map[bool]runtimeClass{false: rtCorpse, true: rtUnknown}[elsewhere]; rt.Class != want {
+			t.Errorf("running elsewhere %t: class %d, want %d", elsewhere, rt.Class, want)
+		}
 	}
 }

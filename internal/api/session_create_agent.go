@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -15,6 +16,28 @@ type agentCreateContext struct {
 	ExplicitName string
 	Identity     string
 	WorkDir      string
+}
+
+// agentTemplateLaunchCommand returns the command a deferred agent-session
+// create persists as its template baseline. It shares the controller's
+// template composition (config.BuildProviderTemplateLaunchCommand), so the
+// async-start drift check does not mistake it for config drift (#7453).
+// Explicit per-session options stay out of it; they live in
+// template_overrides. An option default the provider cannot render is omitted
+// and logged rather than failing the create, as the controller does.
+func (s *Server) agentTemplateLaunchCommand(agentCfg config.Agent, resolved *config.ResolvedProvider, transport string) (string, error) {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return "", fmt.Errorf("no city config loaded")
+	}
+	launch, err := config.BuildProviderTemplateLaunchCommand(s.state.CityPath(), resolved, transport, config.ResolveInstallHooks(&agentCfg, &cfg.Workspace), cfg.Providers)
+	if err != nil {
+		return "", err
+	}
+	for _, pin := range resolved.UnhonoredOptionPins() {
+		log.Printf("api: session create: %s", config.FormatUnhonoredOptionPin(agentCfg.QualifiedName(), resolved.Name, pin))
+	}
+	return launch.Command, nil
 }
 
 func agentSessionCreateMetadata(metadata map[string]string, identity string) map[string]string {

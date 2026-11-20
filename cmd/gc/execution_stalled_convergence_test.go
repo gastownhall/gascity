@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -36,7 +37,7 @@ type stalledConvergenceHarness struct {
 
 func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	template := "worker"
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -49,7 +50,7 @@ func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 		}},
 	}
 
-	manager := sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(env.store), env.sp, sessionpkg.WithClock(env.clk), sessionpkg.WithCityPath(env.city))
 	info, err := manager.CreateSession(t.Context(), sessionpkg.CreateOptions{
 		BeadOnly: true, Template: template, Title: "pool worker", Command: "true", Provider: "fake",
 	})
@@ -141,6 +142,7 @@ func (h *stalledConvergenceHarness) runBackstopToExhaustion(t *testing.T) {
 
 // TestExecutionStalledDrainConvergesToAReclaimableRow is the end-to-end chain.
 func TestExecutionStalledDrainConvergesToAReclaimableRow(t *testing.T) {
+	city := t.TempDir()
 	h := newStalledConvergenceHarness(t)
 
 	h.runBackstopToExhaustion(t)
@@ -177,8 +179,8 @@ func TestExecutionStalledDrainConvergesToAReclaimableRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-reading the claim: %v", err)
 	}
-	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, "", nil,
-		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil)
+	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, city, nil,
+		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil, nil)
 	if len(released) != 1 || released[0].ID != h.work.ID {
 		t.Fatalf("released = %+v, want the stalled claim reopened", released)
 	}
@@ -308,7 +310,7 @@ func TestExecutionStalledDrainDoesNotStrandAMidDrainWake(t *testing.T) {
 		t.Fatalf("re-reading the claim: %v", err)
 	}
 	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, "", nil,
-		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil)
+		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil, nil)
 	if len(released) != 1 {
 		t.Fatalf("released = %+v, want the claim released once its holder is gone", released)
 	}

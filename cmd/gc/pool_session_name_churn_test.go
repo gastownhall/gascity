@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -143,7 +144,7 @@ func TestPoolSessionCreate_TeardownFailureHoldsTheSlot(t *testing.T) {
 	// The backend recovers: the level-triggered rollback retries the teardown,
 	// the row closes, and only then may the slot mint a successor.
 	delete(sp.StopErrors, first.SessionNameMetadata)
-	if !releaseBeadScopedPoolRuntime(first, sp, io.Discard) {
+	if !releaseRowOwnedRuntime(first, sp, io.Discard, nil, nil) {
 		t.Fatal("teardown still refused after the backend recovered")
 	}
 	rollbackPendingCreate(first, sessionFrontDoor(store), now, io.Discard)
@@ -156,6 +157,62 @@ func TestPoolSessionCreate_TeardownFailureHoldsTheSlot(t *testing.T) {
 	}
 	if n := liveRuntimeCount(t, sp); n != 0 {
 		t.Fatalf("%d live runtimes after recovery, want 0", n)
+	}
+}
+
+// TestPoolSessionCreate_AutoProviderFailedKillHoldsTheSlot is the C8.8 pin for
+// a composite provider. The auto provider's Stop joins the default backend's
+// failed kill with the ACP backend's "session not found"; read as gone, that
+// failed kill let the rollback close the row over a live runtime. The row must
+// stay open while the default leg's kill fails, and close once it succeeds.
+func TestPoolSessionCreate_AutoProviderFailedKillHoldsTheSlot(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP, acpSP := runtime.NewFake(), runtime.NewFake()
+	sp := sessionauto.New(defaultSP, acpSP)
+	now := time.Date(2026, 8, 15, 0, 0, 1, 0, time.UTC)
+
+	info, err := createPoolSessionBeadWithAlias(store, poolChurnTemplate, nil, newSessionBeadSnapshot(nil), now, poolChurnIdentity(), "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	name := info.SessionNameMetadata
+	if err := defaultSP.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("provisioning box %q: %v", name, err)
+	}
+	defaultSP.StopErrors[name] = errors.New("tmux -u: kill-session failed")
+
+	if err := sp.Stop(name); err == nil || runtime.IsSessionGone(err) {
+		t.Fatalf("auto Stop = %v (gone=%v), want a failure that is not gone", err, runtime.IsSessionGone(err))
+	}
+	if releaseRowOwnedRuntime(info, sp, io.Discard, nil, nil) {
+		t.Fatal("releaseRowOwnedRuntime reported the runtime released although the default backend's kill failed")
+	}
+	commitStartFailure(startResult{
+		prepared: preparedStart{candidate: startCandidate{
+			info: info,
+			tp:   TemplateParams{SessionName: name, TemplateName: poolChurnTemplate, Command: "true"},
+		}},
+		err:             errors.New("start op failed after provisioning"),
+		outcome:         TraceOutcomeProviderError,
+		started:         now,
+		finished:        now,
+		rollbackPending: true,
+		provider:        sp,
+	}, sessionFrontDoor(store), &clock.Fake{Time: now}, events.Discard, 0, io.Discard, nil)
+	if got, _ := store.Get(info.ID); got.Status == "closed" {
+		t.Fatalf("row %s closed although its runtime's kill failed", info.ID)
+	}
+	if !defaultSP.IsRunning(name) {
+		t.Fatalf("runtime %q gone; the test must keep it live", name)
+	}
+
+	// The kill recovers: the teardown is confirmed and the rollback may close.
+	delete(defaultSP.StopErrors, name)
+	if !releaseRowOwnedRuntime(info, sp, io.Discard, nil, nil) {
+		t.Fatal("teardown still refused after the default backend recovered")
+	}
+	if defaultSP.IsRunning(name) {
+		t.Fatalf("runtime %q still running after a confirmed teardown", name)
 	}
 }
 

@@ -1,7 +1,10 @@
-# Starlark helpers for the repo's BUILD files (go_variant_test.bzl,
+# Starlark helpers for the repo's BUILD files (go_variant_test.bzl, go_test_run.bzl,
 # pnpm_lock.bzl) and the scripts they run.
 
 exports_files([
+    # go_test_run.bzl's action; read by //scripts:scripts_test
+    # (go_test_run_script_test.go).
+    "go_test_run.sh",
     # Read by //scripts:scripts_test (bazel_go_repository_tools_test.go).
     "go_repository_tools.bzl",
     # Read by //scripts:scripts_test (openapi_breaking_gate_test.go).

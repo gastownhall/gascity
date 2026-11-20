@@ -24,14 +24,26 @@ import "github.com/gastownhall/gascity/internal/api/apierr"
 // is a passthrough: create() runs exactly once and nothing is cached.
 //
 // create() should perform all fallible work (validation, the store write) and
-// return the domain body value to cache. Callers wrap that value in their
-// response envelope after withIdempotency returns, so envelope fields derived
-// from live state (e.g. the X-GC-Index event sequence) stay fresh on replay.
+// return the value to cache. A replay serves that value exactly as the
+// original call returned it, so any envelope field that describes the state
+// the body was built from must be cached with it, never re-derived from live
+// state on replay. An X-GC-Index read from the live head would claim the old
+// body reflects every change up to now; endpoints that return X-GC-Index use
+// withIndexedIdempotency.
 //
 // idem is the owning cache: per-city handlers pass s.idem (the per-city cache
 // described above); supervisor-scope handlers (POST /v0/city, where no per-city
 // Server exists yet) pass sm.idem, the SupervisorMux's own process-wide cache.
 func withIdempotency[T any](idem *idempotencyCache, path, key string, body any, create func() (T, error)) (T, error) {
+	return withIdempotencyKeeping(idem, path, key, body, create, nil)
+}
+
+// withIdempotencyKeeping is withIdempotency for an endpoint whose success can
+// be provisional: a success keep reports false for is answered but not
+// cached, and its reservation is released as an error's is, so a same-key
+// retry runs create() again and answers from what the first call stopped
+// waiting for. A nil keep keeps every success.
+func withIdempotencyKeeping[T any](idem *idempotencyCache, path, key string, body any, create func() (T, error), keep func(T) bool) (T, error) {
 	var zero T
 	if key == "" {
 		return create()
@@ -55,10 +67,11 @@ func withIdempotency[T any](idem *idempotencyCache, path, key string, body any, 
 		// serve a wrong-typed replay.
 	}
 
-	// Release the reservation on any non-success exit — an error return OR a
-	// panic in create(). unreserve only drops a *pending* entry, so on the
-	// wrong-typed fall-through above (where this caller holds no reservation) it
-	// is a harmless no-op against the completed entry.
+	// Release the reservation on any exit that caches nothing — an error
+	// return, a panic in create(), or a success keep does not keep. unreserve
+	// only drops a *pending* entry, so on the wrong-typed fall-through above
+	// (where this caller holds no reservation) it is a harmless no-op against
+	// the completed entry.
 	settled := false
 	defer func() {
 		if !settled {
@@ -70,7 +83,24 @@ func withIdempotency[T any](idem *idempotencyCache, path, key string, body any, 
 	if err != nil {
 		return zero, err
 	}
+	if keep != nil && !keep(v) {
+		return v, nil
+	}
 	settled = true
 	idem.storeResponse(scopedKey, bodyHash, v)
 	return v, nil
+}
+
+// withIndexedIdempotency is withIdempotency for create endpoints that return
+// X-GC-Index. The caller captures index before create() reads or writes any
+// state; it is cached with the created body, so a replay returns the index the
+// body was built against rather than the current head.
+func withIndexedIdempotency[T any](idem *idempotencyCache, path, key string, body any, index uint64, create func() (T, error)) (indexedResponse[T], error) {
+	return withIdempotency(idem, path, key, body, func() (indexedResponse[T], error) {
+		v, err := create()
+		if err != nil {
+			return indexedResponse[T]{}, err
+		}
+		return indexedResponse[T]{Index: index, Body: v}, nil
+	})
 }

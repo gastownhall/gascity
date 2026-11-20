@@ -60,7 +60,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		}
 		last = n
 	}
-	if want := []string{"A1", "A1", "A2", "A3", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A9", "A19"}; !slices.Equal(names, want) {
+	if want := []string{"A1", "A1", "A2", "A3", "A4", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A7", "A8", "A9", "A10", "A10", "A11", "A12", "A13", "A14", "A15", "A16", "A17", "A18", "A19", "A20", "A21"}; !slices.Equal(names, want) {
 		t.Fatalf("rowArms = %v, want %v", names, want)
 	}
 
@@ -89,11 +89,12 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		{name: "A3 newer-self holds before A6 heals", meta: expiredHold, identity: newerSelf, want: decideNewerSelf},
 		{name: "A3 refused rekey falls through to A6", meta: append([]string{"pending_create_claim", "true"}, expiredHold...), identity: staleSelf, wantKind: intentRowHeal, want: decideTimerHeal},
 		{name: "A5 unknown state before A6 heals", meta: append([]string{"state", "hibernating"}, expiredHold...), want: decideUnknownState},
-		{name: "stop-pending is not A5's", meta: []string{"state", "draining", "state_reason", "drain-ack-stop-pending"}, want: decideNoAction},
+		{name: "A4 takes a stop-pending row before A5 (DS F1)", meta: []string{"state", "draining", "state_reason", "drain-ack-stop-pending"}, wantKind: intentStop, want: decideStopVerb},
 		{name: "A6 heals before A9 liveness", meta: expiredHold, unknown: true, wantKind: intentRowHeal, want: decideTimerHeal},
 		{name: "A6 heals before A9's desire gate", meta: expiredHold, unranked: true, wantKind: intentRowHeal, want: decideTimerHeal},
 		{name: "A6 running timer falls through to A9", meta: []string{"held_until", rowAt(time.Minute)}, unknown: true, want: decideLivenessUnknown, wantNext: gatherNow.Add(time.Minute + time.Second)},
 		{name: "A9 desire gate", unranked: true, want: decideUnranked},
+		{name: "A9 desire gate, a committed row (no entry under A6's heals)", meta: []string{"state", "active"}, unranked: true, want: decideUnranked},
 		{name: "no arm", want: decideNoAction},
 	}
 	for _, tc := range cases {
@@ -116,6 +117,9 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 				delete(a.Snapshot.Entries, k)
 			}
 			it, next := decideRow(w, a, k)
+			if fresh := it.Kind == intentRekey || it.Kind == intentRowHealFresh || it.Kind == intentStart || it.Kind == intentAdopt || it.Kind == intentStop; fresh != (it.Rests != 0) || it.Kind == "" && it.Rests != 0 {
+				t.Errorf("%s: kind %q rests %b: a fresh kind records its rests, a plain one none (ruling (c))", tc.name, it.Kind, it.Rests)
+			}
 			if it.Kind != tc.wantKind || it.Reason != tc.want || it.Key != k {
 				t.Fatalf("decideRow = (%q, %q, %v), want (%q, %q, %v)", it.Kind, it.Reason, it.Key, tc.wantKind, tc.want, k)
 			}
@@ -208,6 +212,31 @@ func TestRowEndpointIsOneHelper(t *testing.T) {
 		}
 		if got := createIntent(cfg, "", allocPlan{Kind: createPool, Template: info.Template}).Endpoint; got != r.Endpoint {
 			t.Errorf("create intent for %s's template endpoint = %q, want its row's %q", r.Key.ID, got, r.Endpoint)
+		}
+	}
+}
+
+// Kills a fresh kind's arm that reads past its guards (review items 3, 4):
+// a committed sessions-leg row with no allocation entry is unranked, not a
+// panic in the dead-runtime heal; and A3, decided again on a fresh read
+// whose identity spans two objects, proposes no rekey.
+func TestFreshArmsHoldOnWhatTheyCannotRead(t *testing.T) {
+	c := newHealCase(t, livenessGone, desireNone, "state", "active")
+	delete(c.a.Snapshot.Entries, c.k)
+	if it := c.decide(); it.Reason != decideUnranked {
+		t.Fatalf("no entry: decideRow = (%q, %q), want unranked", it.Kind, it.Reason)
+	}
+	w, a := rowWorld(t, sessionRow("gc-1", "template", "worker", "session_name", "s-gc-1", "state", "asleep", "generation", "3"))
+	k := rowKeyOf("gc-1")
+	stale := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok-old"}
+	w.Observed = map[rowKey]rowObservation{k: {Identity: stale}}
+	if it, _ := decideRow(w, a, k); it.Kind != intentRekey {
+		t.Fatalf("the pass's StaleSelf: %q, want a rekey", it.Kind)
+	}
+	for _, same := range []bool{true, false} {
+		fresh := w.withRuntime(k, &txRuntime{Class: rtAlive, Same: same, Identity: stale})
+		if it, _ := decideRow(&fresh, a, k); (it.Kind == intentRekey) != same {
+			t.Errorf("fresh identity on one object %t: %q, want a rekey only on one object", same, it.Kind)
 		}
 	}
 }

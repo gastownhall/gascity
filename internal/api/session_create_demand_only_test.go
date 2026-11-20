@@ -167,14 +167,13 @@ func assertSessionEnqueued(t *testing.T, fs *fakeState, id string) {
 
 // #6858: `gc session wake` records the wake (clearing holds) and then reports
 // that a demand-only singleton's pool session will not start; the API wake
-// does the same, refusing with a dedicated code clients can tell apart from a
-// malformed request.
+// does the same, with the wake's one will-not-start code.
 func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	id := createDemandOnlyPoolSession(t, fs)
 	srv := New(fs)
 
-	_, err := srv.humaHandleSessionWake(context.Background(), &SessionIDInput{ID: id})
+	_, err := srv.humaHandleSessionWake(context.Background(), &SessionControlInput{ID: id})
 	if err == nil {
 		t.Fatal("humaHandleSessionWake() = nil error; want a refusal for a demand-only singleton session")
 	}
@@ -182,8 +181,10 @@ func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 	if !errors.As(err, &problem) {
 		t.Fatalf("humaHandleSessionWake() error = %T %v, want *apierr.ErrorModel", err, err)
 	}
-	if problem.Status != http.StatusBadRequest || problem.Code != apierr.DemandOnlySingleton.Code {
-		t.Fatalf("problem = status %d code %q, want status %d code %q", problem.Status, problem.Code, http.StatusBadRequest, apierr.DemandOnlySingleton.Code)
+	// The wake's one "recorded but will not start" answer (CONTRACT v5.9 D8
+	// 7(a)): 409 wake-will-not-start for every refusal, this one included.
+	if problem.Status != http.StatusConflict || problem.Code != apierr.WakeWillNotStart.Code {
+		t.Fatalf("problem = status %d code %q, want status %d code %q", problem.Status, problem.Code, http.StatusConflict, apierr.WakeWillNotStart.Code)
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
 	if !strings.Contains(problem.Detail, "wake recorded") {
@@ -236,5 +237,27 @@ func assertCompatDemandOnlyCode(t *testing.T, detail string) {
 	t.Helper()
 	if want := apierr.DemandOnlySingleton.Code + ": "; !strings.HasPrefix(detail, want) {
 		t.Fatalf("compat refusal detail = %q, want prefix %q (the Huma routes' code)", detail, want)
+	}
+}
+
+// POST /session/{id}/pin refuses a demand-only singleton's pool session,
+// writing nothing, as gc session pin does (#6858, the #7742 review): the
+// reconciler never reads pin_awake for one.
+func TestHumaHandleSessionPinRefusesDemandOnlySingletonSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	id := createDemandOnlyPoolSession(t, fs)
+	srv := New(fs)
+
+	_, err := srv.humaHandleSessionPin(context.Background(), &SessionIDInput{ID: id})
+	var problem *apierr.ErrorModel
+	if !errors.As(err, &problem) || problem.Code != apierr.DemandOnlySingleton.Code {
+		t.Fatalf("humaHandleSessionPin() error = %v, want code %q", err, apierr.DemandOnlySingleton.Code)
+	}
+	assertDemandOnlyRefusalMessage(t, problem.Detail)
+	if got, _ := fs.cityBeadStore.Get(id); got.Metadata["pin_awake"] != "" {
+		t.Fatalf("pin_awake = %q, want nothing written", got.Metadata["pin_awake"])
+	}
+	if _, err := srv.humaHandleSessionUnpin(context.Background(), &SessionIDInput{ID: id}); err != nil {
+		t.Fatalf("humaHandleSessionUnpin() = %v, want an unpin taken", err)
 	}
 }

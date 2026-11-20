@@ -1,72 +1,172 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"path/filepath"
 	"strings"
-	"sync"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// runtimeNameLocks serializes, per runtime name, the v2 start effect's
-// provider Start with a runtime-keyed reaper's identity re-read and Stop
-// (P4 F14). Named sessions keep stable runtime names, so without it a reaper
-// that read a closed row's GC_SESSION_ID could stop the fresh runtime a new
-// start put under the same name between that read and its Stop. The lock is
-// process-wide because the reapers run on the legacy maintenance path, and it
-// is never held across anything but the one name's provider calls. It is
-// keyed by city as well as name: a supervisor runs several cities, whose
-// runtime names may coincide.
-type runtimeNameLocks struct {
-	mu   sync.Mutex
-	held map[runtimeNameKey]bool
+// tryRuntimeLease takes cityPath's runtime lease on name for a legacy
+// starter or stopper (I-LEASE): the name's flock, which excludes every
+// holder in this process and on this host, and, when id is set, the record
+// on that open row. It never waits: a busy name is
+// session.ErrRuntimeLeaseBusy, and the caller defers. A city path that is
+// not absolute, the empty one included, has no runtime dir to lock in, and
+// refuses (session.RefuseWithoutCity). release is idempotent.
+func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Duration) (lease *session.RuntimeLease, release func(), err error) {
+	return waitRuntimeLease(context.Background(), store, cityPath, name, id, ttl, 0)
 }
 
-// runtimeNameKey is one city's runtime name.
-type runtimeNameKey struct{ city, name string }
-
-var runtimeNames = &runtimeNameLocks{held: make(map[runtimeNameKey]bool)}
-
-// tryLock takes city's lock on name if it is free, or returns nil. A reaper
-// never waits: it skips the name, and the next pass reconsiders it.
-func (l *runtimeNameLocks) tryLock(city, name string) (unlock func()) {
-	k := runtimeNameKey{city, name}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.held[k] {
-		return nil
+// waitRuntimeLease is tryRuntimeLease waiting up to bound, and while ctx
+// lasts, for a busy name.
+func waitRuntimeLease(ctx context.Context, store beads.Store, cityPath, name, id string, ttl, bound time.Duration) (lease *session.RuntimeLease, release func(), err error) {
+	if !filepath.IsAbs(cityPath) {
+		return nil, nil, session.RefuseWithoutCity(cityPath, fmt.Sprintf("runtime %q", name))
 	}
-	l.held[k] = true
-	return func() {
-		l.mu.Lock()
-		delete(l.held, k)
-		l.mu.Unlock()
+	var front *session.Store
+	if store != nil && id != "" {
+		front = sessionFrontDoor(store)
+	} else {
+		id = ""
 	}
+	if lease, err = session.WaitRuntimeLease(ctx, front, session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: id, TTL: ttl}, bound); err != nil {
+		return nil, nil, err
+	}
+	return lease, lease.Release, nil
+}
+
+// startHolderLive reports whether a live holder has the runtime lease of
+// info's row (session.RuntimeLeaseHeld): the reaper spares a row a live
+// holder is starting. What cannot be probed (no store, a city path that is
+// not absolute, a failed read) reads as held.
+func startHolderLive(store beads.Store, cityPath string, info session.Info) bool {
+	held, _ := startHolderLiveErr(store, cityPath, info)
+	return held
+}
+
+// startHolderLiveErr is startHolderLive with the reason a probe could not be
+// made or read: no store, no session name, a city path that is not absolute,
+// or a failed read. Each reads as held (fail closed) and returns its error,
+// for a caller that holds on it and must say so.
+func startHolderLiveErr(store beads.Store, cityPath string, info session.Info) (bool, error) {
+	name := strings.TrimSpace(info.SessionName)
+	switch {
+	case store == nil:
+		return true, errors.New("no session store to read the runtime lease from")
+	case name == "":
+		return true, errors.New("the row has no session name to lease")
+	case !filepath.IsAbs(cityPath):
+		return true, fmt.Errorf("city path %q is not absolute", cityPath)
+	}
+	held, err := session.RuntimeLeaseHeld(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID})
+	return err != nil || held, err
+}
+
+// startAbandoned reports whether the start whose in-flight marker (state
+// creating, a fresh last_woke_at) the pass read on info was abandoned by its
+// holder (session.RuntimeStartAbandoned): no live holder has the lease every
+// PreWake is written under, and the row read under the name's flock still
+// carries the marker. The reconciler relaunches such a start under its own
+// lease (CONTRACT S7, §12.5; mc-5a1ma). A start that committed or failed
+// since the pass's read is not abandoned, and neither is what cannot be
+// probed: the marker keeps its time-based meaning.
+func startAbandoned(store beads.Store, cityPath string, info session.Info) bool {
+	name := strings.TrimSpace(info.SessionName)
+	if store == nil || name == "" || !filepath.IsAbs(cityPath) {
+		return false
+	}
+	abandoned, err := session.RuntimeStartAbandoned(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID}, info)
+	return err == nil && abandoned
+}
+
+// controllerStopLease takes, without waiting, the runtime lease a controller
+// stop sequence holds across all its kills (a kill, its confirm-dead
+// re-kills, an escalation's process-table kill), and returns the controller's
+// Actor carrying it to each. A lease failure other than busy (the store
+// unreachable, the row closed) is logged, and the sequence runs under the
+// name's flock alone: a store never holds a stop hostage. Busy is
+// session.ErrRuntimeLeaseBusy, which the caller defers to a later tick. A city
+// path that is not absolute has no runtime dir to lock in: tryRuntimeLease
+// refuses with session.ErrRuntimeLeaseNoCity, and nothing is killed.
+func controllerStopLease(store beads.Store, cityPath, name, sessionID string, stderr io.Writer) (session.Actor, func(), error) {
+	by := sessionActor(session.ActorController, cityPath)
+	lease, release, err := tryRuntimeLease(store, cityPath, name, sessionID, session.RuntimeLeaseTTL(0))
+	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) && !errors.Is(err, session.ErrRuntimeLeaseNoCity) {
+		fmt.Fprintf(stderr, "session reconciler: stopping %s under the name's flock alone: %v\n", name, err) //nolint:errcheck
+		lease, release, err = tryRuntimeLease(nil, cityPath, name, "", 0)
+	}
+	if err != nil {
+		return by, func() {}, err
+	}
+	by.Lease = lease
+	return by, release, nil
 }
 
 // The v2 effects' shared refusal causes for a row's runtime. A refusal backs
 // the row off (P4).
-//
-//nolint:unused // the wave-7 effects (C4c2, C5a1, C5c1, C5d, C6a) refuse with them
 const (
 	causeNameBusy        = "name-busy"        // another effect, or a reaper, holds the runtime name
 	causeRouteUnknown    = "route-unknown"    // no backend resolves the runtime name
 	causeLivenessUnknown = "liveness-unknown" // the fresh liveness read was incomplete or failed
 	causeNotPresent      = "not-present"      // the runtime the intent acts on is gone
+	causeLeaseStore      = "lease-store"      // the row's lease record could not be read
+	causeLeaseContended  = "lease-contended"  // the record's write lost its fence on every attempt
+	causeLeaseRenamed    = "lease-renamed"    // the row's runtime name moved before its record was taken
+	causeLeaseLocalFS    = "lease-local-fs"   // the name's lock file failed on the local filesystem
+	causeLeaseNoCity     = "lease-no-city"    // the city path is not absolute: no runtime dir to lock in
+	causeLeaseNoCAS      = "lease-no-cas"     // the session store cannot fence the lease record
+	causeLeaseRowClosed  = "lease-row-closed" // the row closed before its lease record was taken
 )
 
-// lockRuntimeName takes w's city lock on row's runtime name, as every v2
-// effect that reads or calls the provider for a row takes it: keyed by the
-// city path and the runtime name (Info.SessionName), as the legacy reaper
-// (stopStillBoundClosedRuntime) keys it. ok is false, and unlock nil, when
-// the row has no runtime name or the name is busy; the caller refuses with
-// causeNameBusy and never waits.
-func lockRuntimeName(w *World, row session.Info) (name string, unlock func(), ok bool) {
+// lockRuntimeName takes w's city runtime lease on row's runtime name, as
+// every v2 effect that reads or calls the provider for a row takes it: the
+// name's flock and, with front (an effect that creates, destroys or
+// restarts a runtime, or writes the incarnation or the commit: needs.Lease),
+// the record on the row, for ttl. It never waits: a busy name, or a record
+// that cannot be taken, is the refusal cause with its error (a busy one
+// names the holder and its expiry), and the lease nil. A row with no
+// runtime name is causeRouteUnknown, and a city path that is not absolute
+// causeLeaseNoCity.
+func lockRuntimeName(w *World, row session.Info, front *session.Store, ttl time.Duration) (name string, lease *session.RuntimeLease, cause string, err error) {
 	name = strings.TrimSpace(row.SessionName)
-	if name == "" {
-		return "", nil, false
+	switch {
+	case name == "":
+		return "", nil, causeRouteUnknown, nil
+	case !filepath.IsAbs(w.CityPath):
+		return name, nil, causeLeaseNoCity, session.RefuseWithoutCity(w.CityPath, fmt.Sprintf("runtime %q", name))
 	}
-	if unlock = runtimeNames.tryLock(w.CityPath, name); unlock == nil {
-		return name, nil, false
+	req := session.RuntimeLeaseRequest{City: w.CityPath, Name: name}
+	if front != nil {
+		req.ID, req.TTL = row.ID, ttl
 	}
-	return name, unlock, true
+	if lease, err = session.TryRuntimeLease(front, req); err != nil {
+		return name, nil, leaseRefusal(err), err
+	}
+	return name, lease, "", nil
+}
+
+// leaseRefusal is a lease error's refusal cause.
+func leaseRefusal(err error) string {
+	switch {
+	case errors.Is(err, session.ErrRuntimeLeaseBusy):
+		return causeNameBusy
+	case errors.Is(err, session.ErrRuntimeLeaseNoCAS):
+		return causeLeaseNoCAS
+	case errors.Is(err, session.ErrRuntimeLeaseRowClosed):
+		return causeLeaseRowClosed
+	case errors.Is(err, session.ErrRuntimeLeaseContention):
+		return causeLeaseContended
+	case errors.Is(err, session.ErrRuntimeLeaseRenamed):
+		return causeLeaseRenamed
+	case errors.Is(err, session.ErrRuntimeLeaseLocalFS):
+		return causeLeaseLocalFS
+	}
+	return causeLeaseStore
 }

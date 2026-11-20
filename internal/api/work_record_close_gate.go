@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
@@ -52,16 +53,19 @@ var workRecordCommitReachable = workrecord.CommitReachableOnBranchContext
 // documented atomic close uses to stamp the record and close in one call:
 // beads.UpdateOpts.Metadata is an additive merge, so validating only the stored
 // row would refuse a request that supplies a perfectly good record. Coverage is
-// decided on the stored row — both Type and gc.kind, read before any submitted
-// field is applied — so a request cannot escape the gate by stamping gc.kind on
-// its way out, nor by retyping a gated task away from task. The same choice
-// means the reverse direction is NOT covered: a closing update that converts a
-// non-gated bead into a task closes ungated, because the type it would be gated
-// on is the one the request is about to write. That is the boundary the CLI door
-// has at isWorkRecordGatedBead in cmd/gc/work_record_gate.go, which decides
-// coverage on the stored row and then projects metadata only; moving it belongs
-// in internal/workrecord so both doors move together rather than asking
-// different questions of different populations.
+// decided on the stored row — Type, gc.kind, and workflow-step metadata, read
+// before any submitted field is applied — so a request cannot escape the gate
+// by stamping gc.kind on its way out, nor by retyping a gated task away from
+// task. The same choice means the reverse direction is NOT covered: a closing
+// update that converts a non-gated bead into a task closes ungated, because the
+// type it would be gated on is the one the request is about to write. That is
+// the boundary the CLI door has at isWorkRecordGatedBead in cmd/gc/work_record_gate.go,
+// which decides coverage on the stored row and then projects metadata only;
+// moving it belongs in internal/workrecord so both doors move together rather
+// than asking different questions of different populations.
+//
+// st is the epoch the caller resolved the owner in (resolveBeadOwnerIn), so the
+// owner and the rig it is matched against come from one Stores() read.
 //
 // ctx is the request's, and it reaches the reachability clause because that
 // clause shells out to git: a client that hangs up has to be able to stop the
@@ -85,12 +89,12 @@ var workRecordCommitReachable = workrecord.CommitReachableOnBranchContext
 // degraded path there rather than a refusal. The window is small and the losing
 // outcome is a close that recorded slightly less than it should, not a corrupted
 // row.
-func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads.Store, stored beads.Bead, submitted map[string]string) error {
+func (s *Server) gateWorkRecordClose(ctx context.Context, st storeref.Stores, id string, store beads.ResidentStore, stored beads.Bead, submitted map[string]string) error {
 	if !workrecord.Gated(stored) {
 		return nil
 	}
 	prospective := projectSubmittedWorkRecord(stored, submitted)
-	repoDir := s.workRecordRepoDir(store, prospective)
+	repoDir := s.workRecordRepoDir(st, store, prospective)
 	unverified := false
 	violations := workrecord.ValidateOnClose(prospective, func(commit, branch string) bool {
 		if repoDir == "" {
@@ -202,11 +206,11 @@ func (s *Server) workRecordScopeDirs() workRecordScopeDirs {
 // because falling back to a default would run git in whatever directory the
 // server happens to occupy and answer the reachability question about the wrong
 // repository.
-func (s *Server) workRecordRepoDir(store beads.Store, bead beads.Bead) string {
+func (s *Server) workRecordRepoDir(st storeref.Stores, store beads.ResidentStore, bead beads.Bead) string {
 	dirs := s.workRecordScopeDirs()
 	dir, kind := workrecord.RepoDirFor(bead, dirs)
 	if kind == workrecord.ScopeUnrooted {
-		return s.workRecordLegacyRepoDir(store, dirs)
+		return s.workRecordLegacyRepoDir(st, store, dirs)
 	}
 	return dir
 }
@@ -218,10 +222,17 @@ func (s *Server) workRecordRepoDir(store beads.Store, bead beads.Bead) string {
 // predates the residency census, so their closes are unchanged.
 //
 // The store is matched by asking each CONFIGURED rig whether it is the one that
-// answered, rather than by enumerating the loaded stores: an enumeration is a
-// list of work stores, which is blind to a binding by construction, and the
-// question is not "which stores exist" but "does the store that answered belong
-// to a rig with a checkout".
+// answered: whether its work handle is that store (beads.SameStore, so the
+// by-id owner over a rig's store is that rig, and a rig the epoch holds no
+// store for matches nothing), rather than by enumerating the loaded stores: an
+// enumeration is a list of work stores, which is blind to a binding by
+// construction, and the question is not "which stores exist" but "does the
+// store that answered belong to a rig with a checkout".
+//
+// Every rig is asked of st, the epoch the owner was resolved in
+// (resolveBeadOwnerIn): one Stores() read per request, so a reload between the
+// owner's resolution and the match cannot judge the bead against the city
+// checkout.
 //
 // A store no configured rig claims is the city store or a class binding, and
 // both answered to the city checkout before this rule existed. buildStores keys
@@ -240,14 +251,14 @@ func (s *Server) workRecordRepoDir(store beads.Store, bead beads.Bead) string {
 // Two shapes still produce "unknown" here: a configured rig that names no
 // checkout, and a city with no path at all. Both are defensive against a State
 // implementation the current ones do not produce — buildStores skips a rig with
-// an empty path outright, so BeadStore answers nil for one and the identity
+// an empty path outright, so Stores().Rig answers none for one and the identity
 // match never selects it, and cityPath is set once at construction from an
 // already-resolved directory and never reassigned. State is an interface and the
 // branches are cheap, so they stay; a refactor that changes either fact should
 // update this note rather than find it silently wrong.
-func (s *Server) workRecordLegacyRepoDir(store beads.Store, dirs workRecordScopeDirs) string {
+func (s *Server) workRecordLegacyRepoDir(st storeref.Stores, store beads.ResidentStore, dirs workRecordScopeDirs) string {
 	for _, rig := range dirs.rigs {
-		if s.state.BeadStore(rig.Name) != store {
+		if work, _ := st.Rig(rig.Name); !beads.SameStore(work, store) {
 			continue
 		}
 		// The path comes off the rig that MATCHED, not from a second lookup by

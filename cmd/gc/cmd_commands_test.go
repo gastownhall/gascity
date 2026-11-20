@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -344,7 +345,7 @@ func TestPackCommandExitHelper(t *testing.T) {
 		}()
 		return runPackCommandScenario(t, invocation.scenario, invocation.args, os.Stdout, os.Stderr)
 	}()
-	os.Exit(code)
+	exitTestProcess(code)
 }
 
 func parsePackCommandProcessInvocation(args []string) (packCommandProcessInvocation, bool) {
@@ -382,6 +383,7 @@ type packCommandProcessResult struct {
 	exitCode int
 	stdout   string
 	stderr   string
+	pid      int
 }
 
 func runPackCommandProcess(t *testing.T, cityPath, scenario string, args ...string) packCommandProcessResult {
@@ -417,7 +419,7 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	if got, err := os.ReadFile(afterRun); err != nil || string(got) != "reached\n" {
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
-	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripLeakGuardNoise(stderr.String())}
+	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripLeakGuardNoise(stderr.String()), pid: cmd.ProcessState.Pid()}
 }
 
 // stripLeakGuardNoise removes BOTH test leak guards' own diagnostic lines from
@@ -2893,6 +2895,34 @@ func TestPackCommandExitReturnsThroughRun(t *testing.T) {
 			}
 			if got := result.stderr; got != "" {
 				t.Fatalf("helper stderr = %q, want empty", got)
+			}
+		})
+	}
+}
+
+// TestPackCommandHelperLeavesNoTempRoot is ga-gcast6 / ga-5qipy6: the helper
+// re-exec ends its process from inside m.Run, which skips TestMain's teardown.
+// Each helper left its temp root behind in this process's root, and once it
+// was two minutes old the next helper's TestMain swept it, announcing the
+// removal on that helper's stderr: a stderr assertion then failed on a repeat
+// run (-count>1) or late in a shard. A helper removes what TestMain made for
+// it before it exits.
+func TestPackCommandHelperLeavesNoTempRoot(t *testing.T) {
+	cityPath := setupPackExitCity(t)
+	for _, scenario := range []string{"eager", "lazy"} {
+		t.Run(scenario, func(t *testing.T) {
+			result := runPackCommandProcess(t, cityPath, scenario, "backstage", "hello")
+			if result.exitCode != 42 {
+				t.Fatalf("helper exit code = %d, want 42; stderr=%q", result.exitCode, result.stderr)
+			}
+			for _, prefix := range []string{testCmdGCTempRootPrefix, testCmdGCShardTempRootPrefix} {
+				left, err := filepath.Glob(filepath.Join(os.TempDir(), prefix+strconv.Itoa(result.pid)+"-*"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(left) > 0 {
+					t.Fatalf("helper pid %d left its test temp root behind: %v", result.pid, left)
+				}
 			}
 		})
 	}

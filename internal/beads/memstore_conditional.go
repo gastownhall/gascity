@@ -1,9 +1,6 @@
 package beads
 
-import (
-	"fmt"
-	"time"
-)
+import "fmt"
 
 var (
 	_ ConditionalWriter                = (*MemStore)(nil)
@@ -79,7 +76,7 @@ func (m *MemStore) CloseIfMatch(id string, expectedRevision int64) error {
 	}
 	setBeadStatus(&m.beads[i], "closed")
 	recordCloseReason(&m.beads[i])
-	m.beads[i].UpdatedAt = time.Now()
+	m.beads[i].UpdatedAt = m.updatedAtLocked(i)
 	m.beads[i].Revision++
 	return nil
 }
@@ -121,11 +118,12 @@ func (m *MemStore) CompareAndSetMetadataKey(id, key, expected, next string) (boo
 	if m.beads[i].Metadata[key] != expected {
 		return false, nil
 	}
+	m.noteSession(m.beads[i], map[string]string{key: next})
 	if m.beads[i].Metadata == nil {
 		m.beads[i].Metadata = make(StringMap)
 	}
 	m.beads[i].Metadata[key] = next
-	m.beads[i].UpdatedAt = time.Now()
+	m.beads[i].UpdatedAt = m.updatedAtLocked(i)
 	m.beads[i].Revision++
 	return true, nil
 }

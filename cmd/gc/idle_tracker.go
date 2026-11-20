@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -35,6 +36,14 @@ type idleTracker interface {
 	// non-ACP transport) are additionally measured by a content-based pane
 	// scan, either of which can report the session idle.
 	checkIdle(sessionName, template, provider, transport string, sp runtime.Provider, now time.Time) bool
+
+	// checkIdleUnder is checkIdle for a session whose idle settings are
+	// registered under settingName instead of its own runtime name: a
+	// configured named session a requalification renamed in place keeps the
+	// bare form's runtime name (lifecycleSessionNameInfo). The timeout and the
+	// template-fallback exemption are settingName's; the runtime is observed,
+	// and its content-idle anchor kept, under sessionName.
+	checkIdleUnder(sessionName, settingName, template, provider, transport string, sp runtime.Provider, now time.Time) bool
 
 	// setTimeout configures the idle timeout for a single session name.
 	// Used for sessions whose runtime names are deterministic at startup
@@ -120,9 +129,13 @@ func (m *memoryIdleTracker) exemptTemplateFallbackForSession(sessionName string)
 }
 
 func (m *memoryIdleTracker) checkIdle(sessionName, template, provider, transport string, sp runtime.Provider, now time.Time) bool {
+	return m.checkIdleUnder(sessionName, sessionName, template, provider, transport, sp, now)
+}
+
+func (m *memoryIdleTracker) checkIdleUnder(sessionName, settingName, template, provider, transport string, sp runtime.Provider, now time.Time) bool {
 	m.mu.Lock()
-	timeout, ok := m.timeouts[sessionName]
-	exempt := m.templateFallbackExemptions[sessionName]
+	timeout, ok := m.timeouts[settingName]
+	exempt := m.templateFallbackExemptions[settingName]
 	if !ok && !exempt && template != "" {
 		timeout, ok = m.templateTimeouts[template]
 	}
@@ -165,18 +178,20 @@ func (m *memoryIdleTracker) checkIdle(sessionName, template, provider, transport
 
 // checkIdleByContent drives the per-session idle-since anchor from a
 // point-in-time pane scan and reports whether the session has been
-// continuously idle longer than timeout. A busy observation resets the anchor;
-// firing clears it so a restarted session re-measures from scratch. An
-// observation error leaves the anchor untouched — a transient read failure
-// must neither reset a long accumulation nor be mistaken for idleness.
+// continuously idle longer than timeout. A busy observation resets the anchor,
+// and so does an indeterminate one (runtime.ErrIdleIndeterminate: no ready
+// prompt on screen), so an anchor never spans a stretch the scan could not read
+// as idle; firing clears it so a restarted session re-measures from scratch.
+// Any other observation error leaves the anchor untouched — a transient read
+// failure must neither reset a long accumulation nor be mistaken for idleness.
 func (m *memoryIdleTracker) checkIdleByContent(sessionName string, snap runtime.IdleSnapshotProvider, timeout time.Duration, now time.Time) bool {
 	idle, err := snap.SnapshotIdle(sessionName)
-	if err != nil {
+	if err != nil && !errors.Is(err, runtime.ErrIdleIndeterminate) {
 		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !idle {
+	if err != nil || !idle {
 		delete(m.idleSince, sessionName)
 		return false
 	}

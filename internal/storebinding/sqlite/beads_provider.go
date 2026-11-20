@@ -548,6 +548,9 @@ func (p *beadsProvider) frontDoors(store beads.Store, descriptor storebinding.De
 		ComponentID: string(component.ID),
 		PhysicalID:  string(component.PhysicalIdentity),
 	}
+	// The queue's delivery verbs do not maintain it. Production wiring that
+	// sends traffic to this queue must also schedule its Maintain pass, or
+	// dead letters and retired records accumulate without bound.
 	queue, err := storebinding.NewBeadsNudgeQueue(beads.NudgesStore{Store: store})
 	if err != nil {
 		return storebinding.OpenedBindingParts{}, fmt.Errorf("binding the SQLite Beads nudge queue: %w", err)

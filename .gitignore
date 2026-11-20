@@ -8,6 +8,7 @@ cmd/gc/.runtime/
 /bin/
 /dist/
 /gc
+/gc.exe
 
 # Dashboard e2e (Layer B) build + run artifacts. The fakesupervisor is a
 # compiled -tags integration binary; Playwright emits reports/results/browsers.

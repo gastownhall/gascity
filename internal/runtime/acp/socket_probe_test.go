@@ -321,9 +321,15 @@ func (h stdinHook) Close() error {
 
 // ownedConn is a conn this provider tracks with no process behind it: signals
 // to its never-started cmd are no-ops, and the process exits when done closes.
+// Like Start's process waiter, it reports the exit once done closes, which
+// Stop waits on before publishing the session's closed event.
 func ownedConn(token string, done chan struct{}, onStdinClose func()) *sessionConn {
 	sc := newSessionConn(&exec.Cmd{}, stdinHook{onClose: onStdinClose}, nil, 0, done)
 	sc.token = token
+	go func() {
+		<-done
+		sc.markExited()
+	}()
 	return sc
 }
 
