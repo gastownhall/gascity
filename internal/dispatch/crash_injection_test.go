@@ -794,6 +794,23 @@ func TestCrashInjectionWorkflowFinalize(t *testing.T) {
 				t.Fatalf("failed workflow's source status = %s, want open for investigation", got)
 			}
 		}),
+		// A skipped sink blocker passes the workflow and marks the root: the
+		// marker must converge across crashes exactly like the outcome does,
+		// and the sweep's own skipped member must stay out of it.
+		workflowFinalizeCrashScenario("skipped", beadmeta.OutcomeSkipped, func(t *testing.T, ledger []ledgerBead, f sourceChainFinalizeFixture, remainingID string) {
+			requireClosedWithOutcome(t, ledger, 0, f.workflow.ID, beadmeta.OutcomePass)
+			marker := ledgerBeadByID(t, ledger, 0, f.workflow.ID).Metadata[beadmeta.SkippedBlockersMetadataKey]
+			if marker != f.step.ID {
+				t.Fatalf("root gc.skipped_blockers = %q, want the sink blocker %q", marker, f.step.ID)
+			}
+			requireClosedWithOutcome(t, ledger, 0, remainingID, beadmeta.OutcomeSkipped)
+			if strings.Contains(marker, remainingID) {
+				t.Fatalf("root gc.skipped_blockers = %q lists the sweep-skipped member %s; only the finalizer's direct blockers belong", marker, remainingID)
+			}
+			requireClosedWithOutcome(t, ledger, 0, f.finalizer.ID, beadmeta.OutcomePass)
+			requireClosedWithOutcome(t, ledger, 0, f.rigLaunch.ID, beadmeta.OutcomePass)
+			requireClosedWithOutcome(t, ledger, 1, f.citySource.ID, beadmeta.OutcomePass)
+		}),
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {

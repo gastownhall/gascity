@@ -4529,6 +4529,8 @@ type sourceChainFinalizeFixture struct {
 	rigLaunch  beads.Bead
 	workflow   beads.Bead
 	finalizer  beads.Bead
+	// step is the workflow's sink step, the finalizer's only direct blocker.
+	step beads.Bead
 }
 
 func newSourceChainFinalizeFixture(t *testing.T) sourceChainFinalizeFixture {
@@ -4563,7 +4565,7 @@ func newSourceChainFinalizeFixtureWithOutcome(t *testing.T, stepOutcome string) 
 			"gc.source_store_ref": "rig:test",
 		},
 	})
-	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+	step := mustCreateWorkflowBead(t, rigStore, beads.Bead{
 		Title:  "Clean up worktree",
 		Type:   "task",
 		Status: "closed",
@@ -4579,7 +4581,7 @@ func newSourceChainFinalizeFixtureWithOutcome(t *testing.T, stepOutcome string) 
 			"gc.root_bead_id": workflow.ID,
 		},
 	})
-	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, finalizer.ID, step.ID, "blocks")
 	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
 
 	return sourceChainFinalizeFixture{
@@ -4589,6 +4591,7 @@ func newSourceChainFinalizeFixtureWithOutcome(t *testing.T, stepOutcome string) 
 		rigLaunch:  rigLaunch,
 		workflow:   workflow,
 		finalizer:  finalizer,
+		step:       step,
 	}
 }
 
