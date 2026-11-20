@@ -171,6 +171,39 @@ func TestBdLatestSchemaVersionLeavesNothingInItsTempRoot(t *testing.T) {
 	}
 }
 
+func TestBdLatestSchemaVersionRetainsFailedProbeEvidence(t *testing.T) {
+	bdPath := stubBd(t, 0)
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf 'probe-state\\n' > probe-state\nprintf 'schema-probe-failure\\n' >&2\nexit 9\n"), 0o755); err != nil { //nolint:gosec // protocol fixture must execute
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	artifacts := t.TempDir()
+	t.Setenv("TEST_UNDECLARED_OUTPUTS_DIR", artifacts)
+	_, probeErr := bdLatestSchemaVersionUnder(bdPath, []string{root})
+	if probeErr == nil || !strings.Contains(probeErr.Error(), "schema-probe-failure") {
+		t.Fatalf("probe error = %v, want the failed child's diagnostic", probeErr)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("failed probe evidence was removed: %v", entries)
+	}
+	state, err := os.ReadFile(filepath.Join(root, entries[0].Name(), "probe-state"))
+	if err != nil || string(state) != "probe-state\n" {
+		t.Fatalf("failed probe state = %q, %v", state, err)
+	}
+	exported := filepath.Join(artifacts, entries[0].Name(), "probe-state")
+	state, err = os.ReadFile(exported)
+	if err != nil || string(state) != "probe-state\n" {
+		t.Fatalf("failed probe state did not survive the Bazel namespace: %q, %v", state, err)
+	}
+	if !strings.Contains(probeErr.Error(), filepath.Dir(exported)) {
+		t.Fatalf("probe error does not name its exported evidence: %v", probeErr)
+	}
+}
+
 // The probe's database is deleted as soon as bd answers, so it must not pay
 // for durability: on a durable filesystem under load its fsyncs alone overran
 // the probe timeout (ga-01i5ul). On Linux it goes to the RAM-backed /dev/shm

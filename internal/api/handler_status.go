@@ -36,6 +36,15 @@ type (
 
 var statusStoreReadTimeout = time.Second
 
+// statusReadyCleanupBudget is how long a status ready read waits for scoped
+// resolution to finish cleanup after the read deadline. A resolver that has
+// observed cancellation must reap its bd child before the caller returns.
+// A resolver blocked on a mutex before it observes ctx will not finish; this
+// cap stops that wait from pinning the status rebuild — and the
+// stale-while-revalidate entry that is not replaced until the rebuild stores
+// — for as long as the lock is held.
+var statusReadyCleanupBudget = 2 * time.Second
+
 // statusResponseTTLFloor lets non-blocking status requests reuse a recently
 // built body after the time-bucket entry has rolled over. The shared
 // time-bucket cache (responseCacheTimeBucket / timeBucketResponseCacheTTL in
@@ -83,7 +92,33 @@ type StatusInput struct {
 	// saved body. It shares orders/check's ?fresh=true name and its
 	// response-cache bypass, but it still reads through the bead cache, and
 	// it waits for its build only so long (freshStatusOutput).
-	Fresh bool `query:"fresh" required:"false" doc:"When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers."`
+	Fresh bool `query:"fresh" required:"false" doc:"When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every complete build saves its body for later reads. Partial builds return survivor counts and diagnostics to their waiting reads while leaving the last complete saved body intact. Default false keeps stale-while-revalidate for pollers."`
+}
+
+// cachedStatusResponse freezes the source-age hint with the body it describes.
+// LastFreshAt is a store-wide latest observation, not a causal watermark: a
+// later point read/write must not make this already built body younger.
+// A zero SourceAgeS retains the existing unknown/not-applicable convention;
+// elapsed body age remains a lower bound even when source age is unknown.
+type cachedStatusResponse struct {
+	indexedResponse[StatusBody]
+	ObservedAt time.Time `json:"observed_at"`
+	SourceAgeS float64   `json:"source_age_s"`
+}
+
+func (r cachedStatusResponse) cacheAgeSeconds(currentAgeS float64) float64 {
+	elapsed := max(0, livenessClock.Now().Sub(r.ObservedAt).Seconds())
+	return max(r.SourceAgeS+elapsed, currentAgeS)
+}
+
+// freshness keeps the captured body's observation age separate from the
+// current cache's refresh metadata. A body that read no stores has no source age.
+func (r cachedStatusResponse) freshness(current cacheFreshness) cacheFreshness {
+	f := statusCacheFreshness(r.Body, current)
+	if !r.Body.StoresNotRead {
+		f.ageS = r.cacheAgeSeconds(f.ageS)
+	}
+	return f
 }
 
 // humaHandleStatus is the Huma-typed handler for GET /v0/status.
@@ -135,12 +170,12 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	index := s.latestIndex()
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
-		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
-			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(work))
+		if hit, ok := cachedResponseAs[cachedStatusResponse](s, cacheKey, bucket); ok {
+			f := hit.freshness(cacheAgeSeconds(work))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
-		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
-			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(work))
+		if hit, ok := cachedResponseWithinAgeAs[cachedStatusResponse](s, cacheKey, statusResponseTTLFloor); ok {
+			f := hit.freshness(cacheAgeSeconds(work))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
@@ -162,12 +197,17 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		}
 	}
 
+	observation := cachedStatusResponse{ObservedAt: livenessClock.Now(), SourceAgeS: cacheAgeSeconds(work).ageS}
 	resp := s.buildStatusBody(ctx, input.Lite)
-	if !blocking {
-		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
+	// Partial reads retain their survivor counts and diagnostics for this
+	// request, but must not turn a transient store failure into a cached body.
+	if !blocking && !resp.Partial {
+		observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
+		s.storeResponse(cacheKey, bucket, observation)
 	}
 
-	f := statusCacheFreshness(resp, cacheAgeSeconds(work))
+	observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
+	f := observation.freshness(cacheAgeSeconds(work))
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: resp}, nil
 }
 
@@ -191,7 +231,7 @@ func (s *Server) freshStatusOutput(ctx context.Context, cacheKey string, lite bo
 			if b.built == nil {
 				return nil, apierr.Internal.Msg("building the status panicked; the server's log has the stack")
 			}
-			f := statusCacheFreshness(b.built.Body, cacheAgeSeconds(s.state.Stores().Work()))
+			f := b.built.freshness(cacheAgeSeconds(s.state.Stores().Work()))
 			return &IndexOutput[StatusBody]{Index: b.built.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: b.built.Body}, nil
 		case <-overrun.C:
 			if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(s.state.Stores().Work())); ok {
@@ -217,13 +257,14 @@ func (s *Server) freshStatusOutput(ctx context.Context, cacheKey string, lite bo
 // state says so (rebuilding), so a client does not blame the cache's
 // re-scans for it.
 func (s *Server) savedStatusOutput(cacheKey string, cache cacheFreshness) (*IndexOutput[StatusBody], bool) {
-	hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey)
+	hit, age, ok := staleResponseAs[cachedStatusResponse](s, cacheKey)
 	if !ok {
 		return nil, false
 	}
-	f := statusCacheFreshness(hit.Body, cache)
-	if built := age.Seconds(); built > f.ageS {
-		f.ageS, f.refresh.State = built, CacheRefreshRebuilding
+	current := statusCacheFreshness(hit.Body, cache)
+	f := hit.freshness(cache)
+	if built := age.Seconds(); built > current.ageS {
+		f.ageS, f.refresh.State = max(f.ageS, built), CacheRefreshRebuilding
 	}
 	return &IndexOutput[StatusBody]{
 		Index:        hit.Index,
@@ -250,7 +291,7 @@ func statusCacheFreshness(body StatusBody, f cacheFreshness) cacheFreshness {
 // build panicked.
 type statusBuild struct {
 	done  chan struct{}
-	built *indexedResponse[StatusBody]
+	built *cachedStatusResponse
 }
 
 // statusBuildSlot holds a /status view's builds, guarded by responseCacheMu:
@@ -335,9 +376,20 @@ func (s *Server) runStatusBuild(cacheKey string, lite bool, b *statusBuild) {
 			}
 		}()
 		index := s.latestIndex()
-		built := indexedResponse[StatusBody]{Index: index, Body: s.buildStatusBody(ctx, lite)}
-		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), built)
-		b.built = &built
+		observation := cachedStatusResponse{
+			ObservedAt: livenessClock.Now(),
+			SourceAgeS: cacheAgeSeconds(s.state.Stores().Work()).ageS,
+		}
+		resp := s.buildStatusBody(ctx, lite)
+		observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
+		b.built = &observation
+		// Keep any prior complete snapshot with its original index/age. A
+		// partial refresh is not a newer reusable observation; the next stale
+		// request can try the same bounded, coalesced refresh again.
+		if resp.Partial {
+			return
+		}
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), observation)
 	})
 }
 
@@ -849,6 +901,13 @@ func (s *Server) statusSessionSnapshot(ctx context.Context, st storeref.Stores) 
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
+		// A complete session cache is already the read model. Resolving a
+		// scoped bd clone first discards that capability and forks readers
+		// even when all session rows are available in memory.
+		if infos, hit, err := sessionReadModelCachedInfos(st.Sessions()); hit {
+			done <- snapshotResult{infos: infos, err: err}
+			return
+		}
 		// Resolve the ctx-bound scoped store INSIDE the timed goroutine.
 		// ScopedStoreLike hands back the sessions leg over a bd-CLI-backed
 		// clone reqCtx can cancel, or the leg unchanged for non-bd backends
@@ -1250,26 +1309,49 @@ func statusReadyStoreWithTimeout(ctx context.Context, state State, leg storeref.
 		capabilityErr = err
 	}
 
-	// ScopedStoreLike is part of the context-aware read contract: resolution
-	// must finish its own cleanup before returning after reqCtx cancellation.
-	// Keep it synchronous so the status deadline cannot abandon a resolver
-	// goroutine after the response has returned.
-	bound, cloned, err := state.ScopedStoreLike(reqCtx, leg)
-	if err != nil {
-		return nil, statusReadyError(fmt.Errorf("resolving scoped store: %w", err))
+	// Scoped resolution runs off this goroutine. A resolver that observes
+	// cancellation still finishes cleanup before we return, so a bd child is
+	// dead when the caller continues. A resolver blocked on a mutex before it
+	// selects on ctx used to pin this call, the status rebuild, and the
+	// stale-while-revalidate body for the life of the lock. The
+	// post-deadline wait is capped at statusReadyCleanupBudget.
+	type readyResult struct {
+		rows []beads.Bead
+		err  error
 	}
-	if !cloned {
-		if capabilityErr == nil {
-			capabilityErr = fmt.Errorf("reading canonical ready projection: %w", beads.ErrReadyContextUnsupported)
+	done := make(chan readyResult, 1)
+	go func() {
+		bound, cloned, err := state.ScopedStoreLike(reqCtx, leg)
+		if err != nil {
+			done <- readyResult{err: fmt.Errorf("resolving scoped store: %w", err)}
+			return
 		}
-		return nil, capabilityErr
+		if !cloned {
+			err = capabilityErr
+			if err == nil {
+				err = fmt.Errorf("reading canonical ready projection: %w", beads.ErrReadyContextUnsupported)
+			}
+			done <- readyResult{err: err}
+			return
+		}
+		rows, err := beads.LiveFor(bound.Strict).Ready()
+		done <- readyResult{rows: rows, err: err}
+	}()
+
+	select {
+	case result := <-done:
+		return result.rows, statusReadyError(result.err)
+	case <-reqCtx.Done():
 	}
 
-	// ScopedStoreLike guarantees the clone and its legacy Ready operation are
-	// bound to reqCtx, including child-process cleanup, so no outer goroutine is
-	// needed to enforce the deadline.
-	rows, err := beads.LiveFor(bound.Strict).Ready()
-	return rows, statusReadyError(err)
+	cleanup := time.NewTimer(statusReadyCleanupBudget)
+	defer cleanup.Stop()
+	select {
+	case result := <-done:
+		return result.rows, statusReadyError(result.err)
+	case <-cleanup.C:
+		return nil, statusReadyError(context.DeadlineExceeded)
+	}
 }
 
 func statusReadyError(err error) error {

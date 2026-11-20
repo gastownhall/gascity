@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -422,6 +423,12 @@ func TestFindRuntimesBySessionIDTracksPerSessionAcrossSessions(t *testing.T) {
 	liveAgent, liveTool := startOrphaningSession(t, p, liveName, "sid-"+liveName, city)
 	deadAgent, deadTool := startOrphaningSession(t, p, deadName, "sid-"+deadName, city)
 
+	// Establish the tool's actual owner before simulating its death.
+	parent, err := pidutil.ParentPID(deadTool)
+	if err != nil || parent != deadAgent {
+		t.Fatalf("tool %d parent=%d error=%v, want agent %d", deadTool, parent, err, deadAgent)
+	}
+
 	p.mu.Lock()
 	deadConn := p.conns[deadName]
 	p.mu.Unlock()
@@ -434,6 +441,27 @@ func TestFindRuntimesBySessionIDTracksPerSessionAcrossSessions(t *testing.T) {
 		t.Fatal("agent conn did not observe the process exit")
 	}
 
+	// Bazel's process-wrapper adopts escaped tools instead of init. Bind
+	// that known test ancestor to the snapshot; do not widen production's
+	// orphan predicate to arbitrary live parents.
+	adopter, err := pidutil.ParentPID(deadTool)
+	if err != nil || adopter == deadAgent || adopter == os.Getpid() {
+		t.Fatalf("tool %d was not adopted outside its owner: parent=%d error=%v", deadTool, adopter, err)
+	}
+	if adopter > 1 {
+		ancestor := os.Getpid()
+		for depth := 0; depth < 64 && ancestor > 1 && ancestor != adopter; depth++ {
+			ancestor, err = pidutil.ParentPID(ancestor)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if ancestor != adopter {
+			t.Fatalf("tool adopter %d is not in the test's process ancestry", adopter)
+		}
+		proctable.SetSubreaperPIDForTesting(t, adopter)
+	}
+
 	// The empty-id scan is the orphan sweep's: only reparented roots
 	// (proctable.OrphanCandidate, mc-ygved), so the live agent, still this
 	// test's child, is not in it, and the dead session's escaped tool is.
@@ -444,7 +472,9 @@ func TestFindRuntimesBySessionIDTracksPerSessionAcrossSessions(t *testing.T) {
 		byPID[r.PID] = r
 	}
 	if len(found) != 1 {
-		t.Fatalf("found = %+v, want the dead session's tool root alone", found)
+		parent, parentErr := pidutil.ParentPID(deadTool)
+		t.Fatalf("found = %+v, want the dead session's tool root alone; tool=%d parent=%d parent_comm=%q parent_error=%v detected_subreaper=%d",
+			found, deadTool, parent, pidutil.Comm(parent), parentErr, pidutil.DetectUserSubreaperPID(os.Getpid()))
 	}
 	if r, ok := byPID[deadTool]; !ok || r.IsTracked || r.ProviderName != "" {
 		t.Fatalf("dead session tool = %+v (present %v), want untracked", r, ok)

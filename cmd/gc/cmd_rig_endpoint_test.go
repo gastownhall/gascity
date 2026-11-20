@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -164,6 +165,9 @@ func TestDoRigSetEndpointInheritWritesManagedInheritedRigConfig(t *testing.T) {
 	writeRigEndpointCityConfig(t, cityDir, rigDir)
 	writeRigEndpointMetadata(t, cityDir, "hq")
 	writeRigEndpointMetadata(t, rigDir, "fe")
+	// This positive intentionally targets an already GC-managed city.
+	// The original metadata-only city is retained as the refusal below.
+	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	writeRigEndpointRuntimeState(t, cityDir, 3311)
 	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
 		IssuePrefix:    "fe",
@@ -227,6 +231,8 @@ func TestRequireCanonicalizedScopeMetadataPreservesExistingManagedProbeDatabase(
 	}); err != nil {
 		t.Fatalf("EnsureCanonicalMetadata: %v", err)
 	}
+	writeRigEndpointCanonicalConfig(t, scopeDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
+
 	if err := requireCanonicalizedScopeMetadata(fsys.OSFS{}, scopeDir, scopeDir); err != nil {
 		t.Fatalf("requireCanonicalizedScopeMetadata: %v", err)
 	}
@@ -253,7 +259,7 @@ func TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata(t *testing.T)
 		}
 	})
 
-	t.Run("metadata without a pinned dolt_database still errors", func(t *testing.T) {
+	t.Run("unowned metadata without a pinned database refuses before mutation", func(t *testing.T) {
 		scopeDir := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
@@ -261,6 +267,24 @@ func TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata(t *testing.T)
 		if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		before := snapshotEndpointRefusalArtifacts(t, scopeDir, scopeDir)
+		fs := &endpointRefusalWriteRecordingFS{FS: fsys.OSFS{}}
+		err := canonicalizeScopeMetadataIfPresent(fs, scopeDir, scopeDir)
+		if err == nil || !strings.Contains(err.Error(), "no proven project identity") {
+			t.Fatalf("canonicalizeScopeMetadataIfPresent error = %v, want unproven native ownership refusal", err)
+		}
+		assertEndpointRefusalPreservesArtifacts(t, fs, before, scopeDir, scopeDir)
+	})
+
+	t.Run("owned metadata without a pinned dolt_database still errors", func(t *testing.T) {
+		scopeDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeRigEndpointCanonicalConfig(t, scopeDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 		err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir, scopeDir)
 		if err == nil || !strings.Contains(err.Error(), "missing pinned dolt_database") {
 			t.Fatalf("canonicalizeScopeMetadataIfPresent error = %v, want missing pinned dolt_database", err)
@@ -311,6 +335,9 @@ func TestDoRigSetEndpointInheritMirrorsExternalCity(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{IssuePrefix: "fe", DoltHost: "old-rig.example.com", DoltPort: "5501"})
+	assertCompleteLegacyEndpointAuthority(t, cityDir, rigDir, "fe")
+
 	var stdout, stderr bytes.Buffer
 	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{Inherit: true}, &stdout, &stderr)
 	if code != 0 {
@@ -347,7 +374,7 @@ func TestDoRigSetEndpointInheritMirrorsExternalCity(t *testing.T) {
 	}
 }
 
-func TestDoRigSetEndpointInheritAcceptsLegacyMinimalConfigs(t *testing.T) {
+func TestDoRigSetEndpointInheritRefusesUnprovenLegacyMinimalConfigs(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -360,6 +387,36 @@ func TestDoRigSetEndpointInheritAcceptsLegacyMinimalConfigs(t *testing.T) {
 	writeRigEndpointRuntimeState(t, cityDir, 3315)
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc"})
 	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{IssuePrefix: "fe"})
+
+	before := snapshotEndpointRefusalArtifacts(t, cityDir, rigDir)
+	fs := &endpointRefusalWriteRecordingFS{FS: fsys.OSFS{}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fs, cityDir, "frontend", rigEndpointOptions{Inherit: true}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "no proven project identity") {
+		t.Fatalf("unproven native binding must refuse: exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bd --readonly doctor --agent --json") ||
+		!strings.Contains(stderr.String(), "docs/getting-started/troubleshooting.md#unproven-native-beads-binding") {
+		t.Fatalf("ownership refusal lacks native diagnosis and recovery guidance: %s", stderr.String())
+	}
+	assertEndpointRefusalPreservesArtifacts(t, fs, before, cityDir, rigDir)
+}
+
+func TestDoRigSetEndpointInheritAcceptsCompleteLegacyEndpointConfig(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	writeRigEndpointRuntimeState(t, cityDir, 3315)
+	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc"})
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{IssuePrefix: "fe", DoltHost: "old-rig.example.com", DoltPort: "5501", DoltUser: "legacy-user"})
+	assertCompleteLegacyEndpointAuthority(t, cityDir, rigDir, "fe")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{Inherit: true}, &stdout, &stderr)
@@ -379,7 +436,7 @@ func TestDoRigSetEndpointInheritAcceptsLegacyMinimalConfigs(t *testing.T) {
 	}
 }
 
-func TestDoRigSetEndpointInheritUsesCompatExternalCityWhenLocalConfigHasNoEndpointAuthority(t *testing.T) {
+func TestDoRigSetEndpointInheritRefusesUnprovenRigDespiteCompatExternalCity(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -404,6 +461,45 @@ prefix = "fe"
 	}
 	writeRigEndpointMetadata(t, rigDir, "fe")
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc"})
+
+	before := snapshotEndpointRefusalArtifacts(t, cityDir, rigDir)
+	fs := &endpointRefusalWriteRecordingFS{FS: fsys.OSFS{}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fs, cityDir, "frontend", rigEndpointOptions{Inherit: true}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "no proven project identity") {
+		t.Fatalf("unproven native binding must refuse: exit=%d stderr=%s", code, stderr.String())
+	}
+	assertEndpointRefusalPreservesArtifacts(t, fs, before, cityDir, rigDir)
+}
+
+func TestDoRigSetEndpointInheritUsesCompatExternalCityWithLegacyRigEndpointAuthority(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[dolt]
+host = "db.example.com"
+port = 4406
+
+[[rigs]]
+name = "frontend"
+path = %q
+prefix = "fe"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc"})
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{IssuePrefix: "fe", DoltHost: "old-rig.example.com", DoltPort: "5501"})
+	assertCompleteLegacyEndpointAuthority(t, cityDir, rigDir, "fe")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{Inherit: true}, &stdout, &stderr)
@@ -452,6 +548,9 @@ func TestDoRigSetEndpointExternalWritesVerifiedExplicitConfig(t *testing.T) {
 		}
 		return nil
 	}
+
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{IssuePrefix: "fe", DoltHost: "old-rig.example.com", DoltPort: "5501"})
+	assertCompleteLegacyEndpointAuthority(t, cityDir, rigDir, "fe")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{
@@ -567,6 +666,9 @@ func TestDoRigSetEndpointExternalAdoptUnverifiedSkipsValidation(t *testing.T) {
 		return nil
 	}
 
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{IssuePrefix: "fe", DoltHost: "old-rig.example.com", DoltPort: "5501"})
+	assertCompleteLegacyEndpointAuthority(t, cityDir, rigDir, "fe")
+
 	var stdout, stderr bytes.Buffer
 	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{
 		External:        true,
@@ -611,7 +713,7 @@ func TestDoRigSetEndpointInheritManagedRequiresRuntimePublication(t *testing.T) 
 	}
 }
 
-func TestDoRigSetEndpointCanonicalizesExistingMetadata(t *testing.T) {
+func TestDoRigSetEndpointRefusesUnprovenDeprecatedMetadata(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -623,6 +725,41 @@ func TestDoRigSetEndpointCanonicalizesExistingMetadata(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"fe","dolt_host":"stale.example.com","dolt_server_port":"3307"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
+	origVerify := verifyRigExternalEndpoint
+	defer func() { verifyRigExternalEndpoint = origVerify }()
+	verifyRigExternalEndpoint = func(contract.ConfigState, string, string) error { return nil }
+
+	before := snapshotEndpointRefusalArtifacts(t, cityDir, rigDir)
+	fs := &endpointRefusalWriteRecordingFS{FS: fsys.OSFS{}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fs, cityDir, "frontend", rigEndpointOptions{
+		External: true,
+		Host:     "rig-db.example.com",
+		Port:     "4406",
+	}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "no proven project identity") {
+		t.Fatalf("unproven native binding must refuse: exit=%d stderr=%s", code, stderr.String())
+	}
+	assertEndpointRefusalPreservesArtifacts(t, fs, before, cityDir, rigDir)
+}
+
+func TestDoRigSetEndpointCanonicalizesExistingMetadataWithLegacyEndpointAuthority(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"fe","dolt_host":"stale.example.com","dolt_server_port":"3307"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{IssuePrefix: "fe", DoltHost: "stale.example.com", DoltPort: "3307"})
+	assertCompleteLegacyEndpointAuthority(t, cityDir, rigDir, "fe")
 
 	origVerify := verifyRigExternalEndpoint
 	defer func() { verifyRigExternalEndpoint = origVerify }()
@@ -665,6 +802,9 @@ func TestDoRigSetEndpointSupportsExecGcBeadsBdProvider(t *testing.T) {
 	writeRigEndpointMetadata(t, cityDir, "hq")
 	writeRigEndpointMetadata(t, rigDir, "fe")
 	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
+
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{IssuePrefix: "fe", DoltHost: "old-rig.example.com", DoltPort: "5501"})
+	assertCompleteLegacyEndpointAuthority(t, cityDir, rigDir, "fe")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{External: true, Host: "rig-db.example.com", Port: "4406", AdoptUnverified: true}, &stdout, &stderr)
@@ -1911,4 +2051,247 @@ func TestSnapshotRigEndpointFilesRestoresSymlinkedCityToml(t *testing.T) {
 	if !bytes.Equal(restored, original) {
 		t.Fatalf("repo city.toml = %q, want restored original %q", restored, original)
 	}
+}
+
+// endpointRefusalWriteRecordingFS counts only writes through the command's FS
+// seam. Artifact snapshots separately prove the named native records survive.
+type endpointRefusalWriteRecordingFS struct {
+	fsys.FS
+	writes []string
+}
+
+func (f *endpointRefusalWriteRecordingFS) WriteFile(path string, data []byte, mode os.FileMode) error {
+	f.writes = append(f.writes, path)
+	return f.FS.WriteFile(path, data, mode)
+}
+
+func snapshotEndpointRefusalArtifacts(t *testing.T, cityDir, rigDir string) []fileSnapshot {
+	t.Helper()
+	paths := []string{
+		filepath.Join(cityDir, "city.toml"), config.SiteBindingPath(cityDir),
+		filepath.Join(cityDir, ".beads", "metadata.json"), filepath.Join(cityDir, ".beads", "config.yaml"),
+		filepath.Join(cityDir, ".beads", "dolt-server.pid"), filepath.Join(cityDir, ".beads", "dolt-server.port"),
+		filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json"),
+		filepath.Join(rigDir, ".beads", "metadata.json"), filepath.Join(rigDir, ".beads", "config.yaml"),
+		filepath.Join(rigDir, ".beads", "dolt-server.pid"), filepath.Join(rigDir, ".beads", "dolt-server.port"),
+	}
+	snapshots := make([]fileSnapshot, 0, len(paths))
+	for _, path := range paths {
+		snapshot, err := snapshotResolvedFile(fsys.OSFS{}, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots
+}
+
+func assertEndpointRefusalPreservesArtifacts(t *testing.T, fs *endpointRefusalWriteRecordingFS, before []fileSnapshot, cityDir, rigDir string) {
+	t.Helper()
+	if len(fs.writes) != 0 {
+		t.Fatalf("ownership refusal attempted FS WriteFile calls: %v", fs.writes)
+	}
+	after := snapshotEndpointRefusalArtifacts(t, cityDir, rigDir)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("ownership refusal changed endpoint artifacts: before=%+v after=%+v", before, after)
+	}
+}
+
+func assertCompleteLegacyEndpointAuthority(t *testing.T, cityDir, scopeDir, prefix string) {
+	t.Helper()
+	raw, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopeDir, ".beads", "config.yaml"))
+	if err != nil || !ok || raw.EndpointOrigin != "" || raw.DoltHost == "" || raw.DoltPort == "" {
+		t.Fatalf("fixture must have complete legacy endpoint YAML without gc origin: state=%+v exists=%v err=%v", raw, ok, err)
+	}
+	_, authoritative, err := contract.ResolveAuthoritativeConfigState(fsys.OSFS{}, cityDir, scopeDir, prefix)
+	if err != nil || !authoritative {
+		t.Fatalf("legacy YAML must independently prove endpoint authority: authoritative=%v err=%v", authoritative, err)
+	}
+}
+
+func TestDoRigSetEndpointInheritMirrorsExternalCityRefusesUnprovenOriginal(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginCityCanonical,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "db.example.com",
+		DoltPort:       "3307",
+		DoltUser:       "city-user",
+	})
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte("4406\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before := snapshotEndpointRefusalArtifacts(t, cityDir, rigDir)
+	fs := &endpointRefusalWriteRecordingFS{FS: fsys.OSFS{}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fs, cityDir, "frontend", rigEndpointOptions{Inherit: true}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "no proven project identity") {
+		t.Fatalf("unproven original fixture must refuse: exit=%d stderr=%s", code, stderr.String())
+	}
+	assertEndpointRefusalPreservesArtifacts(t, fs, before, cityDir, rigDir)
+}
+
+func TestDoRigSetEndpointExternalWritesVerifiedExplicitConfigRefusesUnprovenOriginal(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte("3311\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origVerify := verifyRigExternalEndpoint
+	defer func() { verifyRigExternalEndpoint = origVerify }()
+	called := false
+	verifyRigExternalEndpoint = func(state contract.ConfigState, databaseScopeRoot, authScopeRoot string) error {
+		called = true
+		if databaseScopeRoot != rigDir {
+			t.Fatalf("databaseScopeRoot = %q, want %q", databaseScopeRoot, rigDir)
+		}
+		if authScopeRoot != rigDir {
+			t.Fatalf("authScopeRoot = %q, want %q", authScopeRoot, rigDir)
+		}
+		if state.DoltHost != "rig-db.example.com" || state.DoltPort != "4406" || state.DoltUser != "rig-user" {
+			t.Fatalf("state = %+v", state)
+		}
+		return nil
+	}
+
+	before := snapshotEndpointRefusalArtifacts(t, cityDir, rigDir)
+	fs := &endpointRefusalWriteRecordingFS{FS: fsys.OSFS{}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fs, cityDir, "frontend", rigEndpointOptions{
+		External: true,
+		Host:     "rig-db.example.com",
+		Port:     "4406",
+		User:     "rig-user",
+	}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "no proven project identity") {
+		t.Fatalf("unproven original fixture must refuse: exit=%d stderr=%s", code, stderr.String())
+	}
+
+	if called {
+		t.Fatal("unproven scope reached endpoint verification")
+	}
+	assertEndpointRefusalPreservesArtifacts(t, fs, before, cityDir, rigDir)
+}
+
+func TestDoRigSetEndpointExternalAdoptUnverifiedSkipsValidationRefusesUnprovenOriginal(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, rigDir, "fe")
+
+	origVerify := verifyRigExternalEndpoint
+	defer func() { verifyRigExternalEndpoint = origVerify }()
+	called := false
+	verifyRigExternalEndpoint = func(contract.ConfigState, string, string) error {
+		called = true
+		return nil
+	}
+
+	before := snapshotEndpointRefusalArtifacts(t, cityDir, rigDir)
+	fs := &endpointRefusalWriteRecordingFS{FS: fsys.OSFS{}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fs, cityDir, "frontend", rigEndpointOptions{
+		External:        true,
+		Host:            "rig-db.example.com",
+		Port:            "4406",
+		AdoptUnverified: true,
+	}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "no proven project identity") {
+		t.Fatalf("unproven original fixture must refuse: exit=%d stderr=%s", code, stderr.String())
+	}
+
+	if called {
+		t.Fatal("unproven scope reached endpoint verification")
+	}
+	assertEndpointRefusalPreservesArtifacts(t, fs, before, cityDir, rigDir)
+}
+
+func TestDoRigSetEndpointSupportsExecGcBeadsBdProviderRefusesUnprovenOriginal(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
+
+	before := snapshotEndpointRefusalArtifacts(t, cityDir, rigDir)
+	fs := &endpointRefusalWriteRecordingFS{FS: fsys.OSFS{}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fs, cityDir, "frontend", rigEndpointOptions{External: true, Host: "rig-db.example.com", Port: "4406", AdoptUnverified: true}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "no proven project identity") {
+		t.Fatalf("unproven original fixture must refuse: exit=%d stderr=%s", code, stderr.String())
+	}
+	assertEndpointRefusalPreservesArtifacts(t, fs, before, cityDir, rigDir)
+}
+
+func TestDoRigSetEndpointInheritWritesManagedInheritedRigConfigRefusesUnprovenCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	writeRigEndpointRuntimeState(t, cityDir, 3311)
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "rig-db.example.com",
+		DoltPort:       "4406",
+		DoltUser:       "rig-user",
+	})
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte("4406\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before := snapshotEndpointRefusalArtifacts(t, cityDir, rigDir)
+	fs := &endpointRefusalWriteRecordingFS{FS: fsys.OSFS{}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fs, cityDir, "frontend", rigEndpointOptions{Inherit: true}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "no proven project identity") {
+		t.Fatalf("unproven original fixture must refuse: exit=%d stderr=%s", code, stderr.String())
+	}
+	assertEndpointRefusalPreservesArtifacts(t, fs, before, cityDir, rigDir)
 }

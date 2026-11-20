@@ -49,8 +49,9 @@ type agentResponse struct {
 	Session     *sessionInfo `json:"session,omitempty"`
 	ActiveBead  string       `json:"active_bead,omitempty"`
 
-	Provider    string `json:"provider,omitempty"`
-	DisplayName string `json:"display_name,omitempty"`
+	Provider        string                `json:"provider,omitempty"`
+	DisplayName     string                `json:"display_name,omitempty"`
+	ProviderOptions *AgentProviderOptions `json:"provider_options" doc:"Configured session-start options resolved for this agent; not observed actual runtime settings."`
 
 	// PackDerived reports whether this agent originates from an imported
 	// pack. When true, the agent cannot be mutated directly (a direct

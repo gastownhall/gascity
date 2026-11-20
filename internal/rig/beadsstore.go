@@ -71,31 +71,53 @@ type storeMode struct {
 }
 
 // readAdoptedStorePrefix learns the issue prefix of the store an --adopt
-// registers, and that store's mode (readStoreMode).
-// .beads/config.yaml wins when it records a prefix. Otherwise, when the store
-// has a metadata.json and the caller can read stores, the store's own config
-// table is asked: bd keeps a store's prefix there and leaves config.yaml a
-// commented template. A missing metadata.json is left for the adopt guard to
-// report.
-func readAdoptedStorePrefix(deps Deps, rigPath string) adoptedStorePrefix {
+// registers. Legacy YAML is accepted alone; native stores verify any YAML
+// mirror against the database namespace. Otherwise, when the
+// store has a metadata.json and the caller can read stores, the store's own
+// config table is asked: bd keeps a store's prefix there and leaves
+// config.yaml a commented template. A missing metadata.json is left for the
+// adopt guard to report.
+func readAdoptedStorePrefix(deps Deps, rigPath string, readOnly bool) adoptedStorePrefix {
 	mode, err := readStoreMode(deps.FS, rigPath)
 	if err != nil {
 		return adoptedStorePrefix{err: fmt.Errorf("--adopt: %w", err)}
 	}
-	if prefix, ok, err := contract.ReadIssuePrefix(deps.FS, filepath.Join(rigPath, ".beads", "config.yaml")); err == nil && ok {
-		return adoptablePrefix(rigPath, prefix, true, mode)
+	meta := filepath.Join(rigPath, ".beads", "metadata.json")
+	if _, err := deps.FS.Stat(meta); err != nil {
+		return adoptedStorePrefix{}
+	}
+	configPath := filepath.Join(rigPath, ".beads", "config.yaml")
+	prefix, ok, err := contract.ReadIssuePrefix(deps.FS, configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return adoptedStorePrefix{err: fmt.Errorf("--adopt: reading issue_prefix: %w", err)}
+	}
+	yaml := adoptablePrefix(rigPath, strings.TrimSpace(prefix), true, mode)
+	if yaml.err != nil {
+		return yaml
+	}
+	_, native, err := contract.ReadDoltMode(deps.FS, meta)
+	if err != nil {
+		return adoptedStorePrefix{err: err}
+	}
+	if ok && yaml.prefix != "" && (!native || deps.ReadStorePrefix == nil) {
+		return yaml
 	}
 	if deps.ReadStorePrefix == nil {
 		return adoptedStorePrefix{}
 	}
-	if _, err := deps.FS.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); err != nil {
-		return adoptedStorePrefix{}
-	}
-	prefix, err := deps.ReadStorePrefix(rigPath)
+	prefix, err = deps.ReadStorePrefix(rigPath, readOnly)
 	if err != nil {
 		return adoptedStorePrefix{err: fmt.Errorf("--adopt requires a valid issue_prefix in .beads/config.yaml in %s: reading the store's own issue_prefix: %w", rigPath, err)}
 	}
-	return adoptablePrefix(rigPath, strings.TrimSpace(prefix), false, mode)
+	stored := adoptablePrefix(rigPath, strings.TrimSpace(prefix), false, mode)
+	if stored.err != nil {
+		return stored
+	}
+	if ok && yaml.prefix != "" && yaml.prefix != stored.prefix {
+		return adoptedStorePrefix{err: fmt.Errorf("--adopt: YAML issue_prefix %q conflicts with stored Beads namespace %q; reconcile the existing queue configuration", yaml.prefix, stored.prefix)}
+	}
+	stored.inConfigYAML = ok && yaml.prefix != ""
+	return stored
 }
 
 // readStoreMode reads the mode of the store at rigPath. Its metadata.json puts

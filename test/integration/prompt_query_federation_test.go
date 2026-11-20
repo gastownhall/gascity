@@ -35,7 +35,7 @@ const (
 func setUpPromptQueryFederationCity(t *testing.T) (cityDir, rigDir, qualifiedName string) {
 	t.Helper()
 
-	env := newIsolatedCommandEnv(t, true)
+	env := newIsolatedCommandEnvNativeBD(t)
 	cityName := uniqueCityName()
 	cityDir = filepath.Join(t.TempDir(), cityName)
 	registerIntegrationDoltSQLServerCleanup(t, cityDir)

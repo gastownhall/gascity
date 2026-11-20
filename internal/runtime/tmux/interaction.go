@@ -153,6 +153,18 @@ type parsedApproval struct {
 	// keeps the rows Codex drew it on (codexRequestText).
 	Command     string
 	Description string
+	// CommandRows/Width retain rendered boundaries for native command binding.
+	CommandRows  []string
+	CommandWidth int
+	// NativeID names one unresolved provider invocation, independent of wrapping.
+	NativeID string
+	// NativeCommand keeps an occurrence stable while its consumed observation
+	// remains visible but unavailable; verification must still await its removal.
+	NativeCommand                                    string
+	NativeSessionID, NativePromptID, NativeToolUseID string
+	ClaudeProjection                                 *claudeApprovalProjection
+	// BindingError holds a managed native request whose authority is unavailable.
+	BindingError string
 	// Fingerprint, when set, stands in for Input in the request ID: a Codex
 	// overlay's text above its menu, from its title when gc reads one, with
 	// its line breaks kept and the rows Codex wrapped to the pane width
@@ -389,6 +401,7 @@ func describeApprovalTool(approval *parsedApproval, before []string) {
 			if approval.ToolName == "Bash" {
 				if command, description, ok := boxedBashSubject(body[i+1:]); ok {
 					approval.Command, approval.Description = command, description
+					approval.CommandRows, approval.CommandWidth = boxedApprovalRows(body[i+1:])
 					approval.Input = truncateApprovalInput(strings.TrimSuffix(command+"\n"+description, "\n"))
 					return
 				}
@@ -625,6 +638,9 @@ func isApproveAlwaysLabel(label string) bool {
 // with an error wrapping runtime.ErrInteractionActionUnavailable that says
 // why; it returns nil when the action may proceed.
 func approvalDenyOnly(approval *parsedApproval, action string) error {
+	if approval.BindingError != "" {
+		return fmt.Errorf("%w: %s", runtime.ErrInteractionActionUnavailable, approval.BindingError)
+	}
 	if approval.Unreadable == "" || action == "deny" {
 		return nil
 	}
@@ -690,7 +706,13 @@ type approvalDedup struct {
 
 func approvalHash(a *parsedApproval) string {
 	subject := a.Input
-	if a.Fingerprint != "" {
+	if a.NativeID != "" {
+		command := a.Command
+		if a.NativeCommand != "" {
+			command = a.NativeCommand
+		}
+		subject = a.NativeID + "\x00" + command
+	} else if a.Fingerprint != "" {
 		subject = a.Fingerprint
 	}
 	h := sha256.Sum256([]byte(a.ToolName + "\x00" + subject))
@@ -719,11 +741,15 @@ func (d *approvalDedup) clear(session string) {
 // ---------------------------------------------------------------------------
 
 // Pending checks the tmux pane for an active Claude Code approval prompt,
-// Codex approval overlay or AskUserQuestion dialog (Kind "question"). A
-// question's Prompt is its question text, bounded, and its Options are the
-// labels Respond picks with action QuestionSelectAction: none on a page an
-// option's key does not answer (multi-select, option previews), which is
-// answered in the terminal, as free text and chat are.
+// Codex approval overlay or native question dialog (Kind "question"). For a
+// question bound to its native request, the Prompt is the complete question
+// and the Options are its authored choices; metadata reports whether the
+// runtime can bind an answer to the native request (answer_action). For any
+// other question, the Prompt is its question text, bounded, and its Options
+// are the labels Respond picks with action QuestionSelectAction: none on a
+// page an option's key does not answer (multi-select, option previews),
+// which is answered in the terminal, as free text and chat are. Pending never
+// opens or answers the question editor.
 // Returns nil with no error if nothing is pending.
 func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	dialog, err := t.dialogInPane(name)
@@ -752,11 +778,19 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 
 	if dialog.question != nil {
 		t.approvalDedup().clear(name)
+		prompt := dialog.question.Question
+		var options []string
+		if dialog.question.NativeID == "" {
+			prompt = boundPromptText(prompt)
+			options = dialog.question.selectChoices()
+		} else {
+			options = dialog.question.answerChoices()
+		}
 		return &runtime.PendingInteraction{
 			RequestID: dialog.question.requestID(),
 			Kind:      "question",
-			Prompt:    boundPromptText(dialog.question.Question),
-			Options:   dialog.question.answerChoices(),
+			Prompt:    prompt,
+			Options:   options,
 			Metadata:  questionMetadata(dialog.question),
 		}, nil
 	}
@@ -774,7 +808,25 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	}
 
 	requestID := "tmux-" + approvalHash(approval)
-	metadata := map[string]string{"source": "tmux"}
+	metadata := map[string]string{"source": "tmux", "request_identity": "visible_content"}
+	if approval.NativeID != "" {
+		metadata["request_identity"] = "native_invocation"
+	}
+	if approval.NativeSessionID != "" {
+		metadata["native_session_id"] = approval.NativeSessionID
+		metadata["native_prompt_id"] = approval.NativePromptID
+		metadata["native_tool_use_id"] = approval.NativeToolUseID
+		metadata["native_observation_source"] = "transcript"
+	}
+	if p := approval.ClaudeProjection; p != nil {
+		metadata["native_observation_source"] = "claude_pre_tool_use"
+		metadata["native_observation_sha256"] = p.observationDigest()
+		metadata["native_observation_consumed"] = strconv.FormatBool(p.Consumed)
+	}
+	if approval.BindingError != "" {
+		metadata["request_identity"] = "unavailable"
+		metadata["response_unavailable"] = approval.BindingError
+	}
 	if approval.ToolName != "" {
 		metadata["tool_name"] = approval.ToolName
 	}
@@ -805,7 +857,9 @@ func approvalPromptText(approval *parsedApproval) string {
 	default:
 		text = approval.ToolName + ": " + approval.Input
 	}
-	if approval.Unreadable != "" {
+	if approval.BindingError != "" {
+		text += " (response unavailable: " + approval.BindingError + ")"
+	} else if approval.Unreadable != "" {
 		text += " (deny only: " + approval.Unreadable + ")"
 	}
 	return text
@@ -849,19 +903,21 @@ func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 		runtime.ErrPendingInteraction, name, approvalPromptText(approval), "tmux-"+approvalHash(approval))
 }
 
-// cancelClaudeApproval cancels a Claude permission prompt on session name's
-// agent pane with Escape, the key the prompt offers ("Esc to cancel"). Ctrl-C
-// does not dismiss the prompt, and stopping a turn must never pick one of its
-// numbered options. handled reports that Interrupt is done: a prompt was
+// cancelClaudeDialog cancels a Claude permission or question dialog on the
+// agent pane with Escape. Ctrl-C does not dismiss these widgets, and stopping
+// a turn must never pick one of their numbered options. handled reports that Interrupt is done: a prompt was
 // canceled or the session is gone. A pane that cannot be read is not
 // handled: the error is returned for the caller to log, and the caller
 // interrupts with Ctrl-C as it did before it looked.
-func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled bool, err error) {
+func (t *Tmux) cancelClaudeDialog(ctx context.Context, name string) (handled bool, err error) {
 	target, err := t.agentPaneTarget(name)
 	if err == nil {
-		var approval *parsedApproval
-		approval, err = t.approvalInPane(target)
-		if err == nil && (approval == nil || approval.Codex) {
+		var dialog paneDialog
+		dialog, err = t.dialogInPane(target)
+		if err == nil && dialog.question == nil && (dialog.approval == nil || dialog.approval.Codex) {
+			if err := t.consumeClaudeApprovalsForStop(ctx, target); err != nil {
+				return true, err
+			}
 			return false, nil
 		}
 	}
@@ -869,21 +925,35 @@ func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled b
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return true, absorbGone(ctx, err)
 		}
-		return false, fmt.Errorf("looking for a permission prompt: %w", err)
+		return false, fmt.Errorf("looking for a Claude dialog: %w", err)
+	}
+	if err := t.consumeClaudeApprovalsForStop(ctx, target); err != nil {
+		return true, err
 	}
 	t.cancelCopyModeIfParked(ctx, target)
 	if err := t.sendKeysRawCtx(ctx, target, "Escape"); err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return true, absorbGone(ctx, err)
 		}
-		return true, fmt.Errorf("canceling the permission prompt of %q: %w", name, err)
+		return true, fmt.Errorf("canceling the Claude dialog of %q: %w", name, err)
 	}
 	return true, nil
 }
 
 // questionMetadata is the metadata a pending question carries.
 func questionMetadata(q *parsedQuestion) map[string]string {
-	metadata := map[string]string{"source": "tmux", "header": q.Header}
+	metadata := map[string]string{"source": "tmux", "header": q.Header, "free_text": strconv.FormatBool(q.textOption() > 0 && q.NativeID != "" && !q.MultiSelect)}
+	if q.NativeID != "" {
+		metadata["answer_action"] = "answer"
+	} else {
+		metadata["answer_unavailable"] = "native question identity is unavailable; answer in the terminal or start a new session"
+		if q.BindingError != "" {
+			metadata["answer_unavailable"] += ": " + q.BindingError
+		}
+	}
+	if q.MultiSelect {
+		metadata["multi_select"] = "true"
+	}
 	if q.Focused != "" {
 		metadata["focused"] = q.Focused
 	}
@@ -911,18 +981,47 @@ func (t *Tmux) dialogInPane(target string) (paneDialog, error) {
 	if err != nil {
 		return paneDialog{}, err
 	}
-	if q := parseQuestionDialog(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
+	if q := parseNativeQuestionDialog(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
+		if err := t.bindClaudeQuestion(resolved, q); err != nil {
+			// The pane still has a visible input owner even when the provider
+			// has not published its invocation identity. Keep messages guarded,
+			// expose the question, and refuse answers without that identity.
+			q.NativeID = ""
+			q.BindingError = err.Error()
+		}
+		if q.NativeID == "" {
+			// With no native request the page is the one a select reads.
+			q.presentUnbound()
+		}
 		return paneDialog{question: q}, nil
+	}
+	lines := strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")
+	if q := codexQuestionPanel(lines); q != nil {
+		q, err = t.codexNativeQuestions(resolved, q, 0)
+		return paneDialog{question: q}, err
+	}
+	if count := codexQuestionCount(lines); count > 0 {
+		q, err := t.codexNativeQuestions(resolved, nil, count)
+		return paneDialog{question: q}, err
 	}
 	approval := parseApprovalPrompt(paneText)
 	if approval == nil || !approval.Codex {
+		if approval != nil {
+			if err := t.bindClaudeApproval(resolved, approval); err != nil {
+				approval.BindingError, approval.Command = err.Error(), ""
+			}
+		}
 		return paneDialog{approval: approval}, nil
 	}
 	pane, err := t.capturePaneWithGeometry(resolved)
 	if err != nil {
 		return paneDialog{}, err
 	}
-	return paneDialog{approval: parseApprovalCapture(pane)}, nil
+	approval = parseApprovalCapture(pane)
+	if err := t.bindCodexApproval(resolved, approval); err != nil {
+		approval.BindingError, approval.Command = err.Error(), ""
+	}
+	return paneDialog{approval: approval}, nil
 }
 
 // approvalInPane returns the approval prompt target's agent pane shows, or
@@ -972,7 +1071,7 @@ var (
 )
 
 // Respond sends the appropriate keystroke to the tmux pane to approve or deny
-// a pending tool approval, then verifies the prompt was consumed.
+// a pending tool approval or question, then verifies the prompt was consumed.
 //
 // The prompt is the agent's: every capture and the answer key go to its pane
 // (agentPaneTarget), resolved once for this response.
@@ -983,7 +1082,9 @@ var (
 // (another prompt, or none) runtime.ErrInteractionGone, and an action the
 // menu does not offer runtime.ErrInteractionActionUnavailable (or, for an
 // action no prompt offers, runtime.ErrInteractionResponseInvalid). An answer
-// naming no request when no prompt shows is a no-op.
+// naming no request when no prompt shows is a no-op. Once an answer key was
+// sent, a verification error wraps runtime.ErrInteractionOutcomeUnknown and
+// must not be treated as an unsent refusal, even if its diagnostic wraps one.
 func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error {
 	return t.respond(context.Background(), name, response)
 }
@@ -1012,6 +1113,9 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 	// answered.
 	if dialog.question != nil {
 		return t.respondQuestion(ctx, name, target, dialog.question, response)
+	}
+	if response.Answers != nil {
+		return fmt.Errorf("%w: typed answers require a native multiple-selection question", runtime.ErrInteractionResponseInvalid)
 	}
 	current := dialog.approval
 	if current == nil {
@@ -1043,7 +1147,7 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 	// (approvalOptionKey), which tmux types as given, so unlike caller text it
 	// needs no runtime.TmuxLiteralArgs encoding (RUNTIME-CONTRACT-011).
 	// A key that found no session or no server typed nothing.
-	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", key); err != nil {
+	if _, err := t.runCtx(withClaudeApprovalInput(inputCtx(ctx), current.ClaudeProjection), "send-keys", "-t", target, "-l", key); err != nil {
 		switch {
 		case errors.Is(err, ErrSessionNotFound):
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
@@ -1062,7 +1166,7 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 
 		cleared, err := t.respondCleared(target, current)
 		if err != nil {
-			return err
+			return interactionAnswerUnconfirmed(err)
 		}
 		if cleared {
 			t.approvalDedup().clear(name)
@@ -1070,10 +1174,20 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 		}
 	}
 
-	return fmt.Errorf("approval prompt did not clear within %s of the answer", respondVerifyTimeout)
+	return interactionAnswerUnconfirmed(fmt.Errorf("approval prompt did not clear within %s of the answer", respondVerifyTimeout))
 }
 
-// respondQuestion answers the question page q that target shows: action
+// interactionAnswerUnconfirmed marks an error only after a successful answer
+// key send. Keep the underlying diagnostic, but make the uncertain outcome
+// authoritative so callers never replay an answer as an unsent refusal.
+func interactionAnswerUnconfirmed(err error) error {
+	if err == nil || errors.Is(err, runtime.ErrInteractionOutcomeUnknown) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", runtime.ErrInteractionOutcomeUnknown, err)
+}
+
+// respondQuestionSelect answers the question page q that target shows: action
 // QuestionSelectAction picks the option response.Text names
 // (questionOptionKey) with that option's number key, typed once, and the
 // answer is verified by the page leaving the pane (leftFor): the dialog's
@@ -1083,14 +1197,16 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 // runtime.ErrInteractionActionUnavailable, all before any key. Once the key
 // is typed, only a read proving the session or its pane gone
 // (paneProvenGone) counts as the page leaving; a read that fails otherwise,
-// or a page still showing at the deadline, is an error, since the key may
-// have changed the page.
-func (t *Tmux) respondQuestion(ctx context.Context, name, target string, q *parsedQuestion, response runtime.InteractionResponse) error {
+// or a page still showing at the deadline, is an error wrapping
+// runtime.ErrInteractionOutcomeUnknown, since the key may have changed the
+// page.
+func (t *Tmux) respondQuestionSelect(ctx context.Context, name, target string, q *parsedQuestion, response runtime.InteractionResponse) error {
 	answered := q.requestID()
-	// An action no question takes is refused as such, whatever request it
-	// names.
-	if response.Action == QuestionSelectAction && response.RequestID != "" && response.RequestID != answered {
+	if response.RequestID != "" && response.RequestID != answered {
 		return fmt.Errorf("question changed: expected %s, got %s: %w", response.RequestID, answered, runtime.ErrInteractionGone)
+	}
+	if response.Answers != nil {
+		return fmt.Errorf("%w: typed answers require the answer action on a native multiple-selection question", runtime.ErrInteractionResponseInvalid)
 	}
 	key, err := questionOptionKey(q, response)
 	if err != nil {
@@ -1116,15 +1232,15 @@ func (t *Tmux) respondQuestion(ctx context.Context, name, target string, q *pars
 				// The session ended, and the page with it.
 				return nil
 			}
-			return fmt.Errorf("verifying the answer to question page %s: option %s was typed once, and reading the pane failed: %w",
-				answered, key, err)
+			return interactionAnswerUnconfirmed(fmt.Errorf("verifying the answer to question page %s: option %s was typed once, and reading the pane failed: %w",
+				answered, key, err))
 		}
 		if q.leftFor(dialog.question) {
 			return nil
 		}
 	}
-	return fmt.Errorf("question page %s still showed %s after option %s was typed once (see it in the terminal: gc session attach %s)",
-		answered, respondVerifyTimeout, key, name)
+	return interactionAnswerUnconfirmed(fmt.Errorf("question page %s still showed %s after option %s was typed once (see it in the terminal: gc session attach %s)",
+		answered, respondVerifyTimeout, key, name))
 }
 
 // paneProvenGone reports whether err, from reading a pane, proves its session
@@ -1140,13 +1256,18 @@ func paneProvenGone(err error) bool {
 func (t *Tmux) respondCleared(target string, answered *parsedApproval) (bool, error) {
 	next, err := t.approvalInPane(target)
 	switch {
-	case errors.Is(err, errPaneGeometry):
-		return false, fmt.Errorf("verifying the answer: %w", err)
-	case err != nil:
+	case errors.Is(err, ErrSessionNotFound), errors.Is(err, runtime.ErrSessionNotFound):
 		// Pane gone — session ended, treat as success.
 		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("verifying the answer: %w", err)
 	}
-	// Success once the prompt we answered is gone, even if the next tool
-	// call has already raised a different one.
+	// Losing invocation proof is not proof that the visible prompt cleared.
+	// A completion callback may retire its observation before the UI redraws.
+	if next != nil && next.BindingError != "" {
+		return false, nil
+	}
+	// Success once the prompt we answered is gone, even if the next proven
+	// native invocation has already raised a different one.
 	return next == nil || approvalHash(next) != approvalHash(answered), nil
 }

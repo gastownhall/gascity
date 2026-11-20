@@ -20,6 +20,7 @@ go_library(
         "payload.go",
         "payloads.go",
         "program_status_payloads.go",
+        "provider_payloads.go",
         "query.go",
         "reader.go",
         "reader_context.go",

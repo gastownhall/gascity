@@ -36,6 +36,12 @@ calls = 3
 tagged = true
 
 [[count]]
+path = "cmd/gc-osc7501/tap_memory_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "cmd/gc-write-mint/e2e_test.go"
 resource = "subprocess"
 calls = 1
@@ -2290,6 +2296,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/doctor/repro_orphaned_pack_script_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
 path = "internal/events/events_test.go"
 resource = "fixed_sleep"
 calls = 2
@@ -2349,6 +2360,12 @@ calls = 1
 path = "internal/graphv2/invocation_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "internal/hooks/hooks_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
 
 [[count]]
 path = "internal/hooks/plugin_node_test.go"
@@ -2584,6 +2601,12 @@ medium = 1
 path = "internal/runtime/exec/process_scan_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "internal/runtime/exec/session_script_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
 
 [[count]]
 path = "internal/runtime/fake_test.go"
@@ -3360,6 +3383,18 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "scripts/qualify_beginner_test.go"
+resource = "net_listen"
+calls = 3
+medium = 3
+
+[[count]]
+path = "scripts/qualify_beginner_test.go"
+resource = "subprocess"
+calls = 2
+medium = 2
+
+[[count]]
 path = "scripts/rbe_fork_pool_test.go"
 resource = "http_test_server"
 calls = 1
@@ -3900,6 +3935,12 @@ tagged = true
 path = "test/integration/gastown_witness_test.go"
 resource = "fixed_sleep"
 calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/gate_validator_cleanup_test.go"
+resource = "subprocess"
+calls = 2
 tagged = true
 
 [[count]]

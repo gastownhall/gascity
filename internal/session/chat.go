@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/git"
@@ -1538,6 +1539,9 @@ func PendingInteractionError(pending *runtime.PendingInteraction) error {
 		what += " (request " + pending.RequestID + ")"
 	}
 	if strings.TrimSpace(pending.Kind) == "question" {
+		if pending.Metadata["answer_action"] == "answer" {
+			return fmt.Errorf("%w: %s is waiting for an explicit answer; respond with its request_id, action answer and text before sending a message", ErrPendingInteraction, what)
+		}
 		// A question is answered by picking one of its options; free text
 		// and chat are answered in the terminal.
 		return fmt.Errorf("%w: %s is waiting for an answer; respond to it (select one of its options) or answer it in the terminal (gc session attach <session>); text sent now would select one of its options", ErrPendingInteraction, what)
@@ -2098,6 +2102,59 @@ func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, b
 	return pending, true, nil
 }
 
+// ValidateInteractionResponse refuses a question answer that does not name the
+// request the operator saw. Approval actions retain their existing shorthand.
+// Projections call this before operation admission; the Manager also enforces it.
+func ValidateInteractionResponse(response runtime.InteractionResponse) error {
+	if response.Action == "answer" && response.RequestID == "" {
+		return fmt.Errorf("%w: a question answer requires request_id", ErrInteractionMismatch)
+	}
+	if response.Answers == nil {
+		return nil
+	}
+	if response.Action != "answer" || response.Text != "" || len(response.Answers) == 0 || len(response.Answers) > 32 {
+		return fmt.Errorf("%w: typed question answers require answer action, one to 32 authored labels and no text", ErrInteractionMismatch)
+	}
+	seen := map[string]bool{}
+	for _, answer := range response.Answers {
+		if strings.TrimSpace(answer) == "" || len(answer) > 512 || strings.ContainsFunc(answer, unicode.IsControl) || seen[answer] {
+			return fmt.Errorf("%w: typed question answers must be unique nonempty authored labels without control characters", ErrInteractionMismatch)
+		}
+		seen[answer] = true
+	}
+	return nil
+}
+
+// ValidateInteractionResponseForPending checks typed selections against the
+// current request's authored schema. Projections use it before new admission;
+// historical keyed replies retain their recorded payload and skip this probe.
+func ValidateInteractionResponseForPending(response runtime.InteractionResponse, pending *runtime.PendingInteraction) error {
+	if err := ValidateInteractionResponse(response); err != nil {
+		return err
+	}
+	if response.Answers == nil {
+		return nil
+	}
+	if pending == nil || pending.RequestID == "" || response.RequestID != pending.RequestID {
+		return fmt.Errorf("%w: typed answer does not name the current native question", ErrInteractionMismatch)
+	}
+	if pending.Kind != "question" || pending.Metadata["multi_select"] != "true" {
+		return fmt.Errorf("%w: this native question does not support typed multiple selections", ErrInteractionMismatch)
+	}
+	for _, answer := range response.Answers {
+		matches := 0
+		for _, option := range pending.Options {
+			if option == answer {
+				matches++
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("%w: typed answer %q is not one unambiguous authored choice", ErrInteractionMismatch, answer)
+		}
+	}
+	return nil
+}
+
 // ProgramStatusByName reads the judged OSC 7501 program status of the runtime
 // session sessName from the backend serving it (runtime.ReadProgramStatus):
 // an Unread reading when that backend takes no such reading, otherwise the
@@ -2130,6 +2187,9 @@ func (m *Manager) RespondFenced(ctx context.Context, id string, fence runtime.In
 
 // respond is Respond with the provider's answer sent by send.
 func (m *Manager) respond(id string, response runtime.InteractionResponse, send func(runtime.InteractionProvider, string, runtime.InteractionResponse) error) error {
+	if err := ValidateInteractionResponse(response); err != nil {
+		return err
+	}
 	return withSessionMutationLock(id, func() error {
 		_, sessName, err := m.sessionBead(id)
 		if err != nil {
@@ -2161,6 +2221,9 @@ func (m *Manager) respond(id string, response runtime.InteractionResponse, send 
 		}
 		if pending.RequestID != "" && response.RequestID != pending.RequestID {
 			return fmt.Errorf("%w: pending interaction %q does not match request %q", ErrInteractionMismatch, pending.RequestID, response.RequestID)
+		}
+		if err := ValidateInteractionResponseForPending(response, pending); err != nil {
+			return err
 		}
 		// The provider may not return until it sees the prompt clear (tmux
 		// waits up to 10 s for Claude Code to redraw), and this session's

@@ -67,7 +67,15 @@ func (s *Service) ValidateInitRequest(req InitRequest) error {
 	if !filepath.IsAbs(req.Dir) {
 		return fmt.Errorf("%w: dir must be absolute: %q", ErrInvalidDirectory, req.Dir)
 	}
-	if req.Provider == "" && req.StartCommand == "" {
+	template, err := NormalizeTemplate(req.ConfigName)
+	if err != nil {
+		return err
+	}
+	providerless := template == "custom" || template == "empty"
+	if providerless && (req.Provider != "" || req.StartCommand != "") {
+		return fmt.Errorf("%w: template %s cannot be combined with provider or start_command", ErrInvalidProvider, template)
+	}
+	if !providerless && req.Provider == "" && req.StartCommand == "" {
 		return fmt.Errorf("%w: provider or start_command required", ErrInvalidProvider)
 	}
 	if req.Provider != "" && req.StartCommand != "" {
@@ -223,8 +231,9 @@ func (s *Service) Unregister(ctx context.Context, req UnregisterRequest) (*Unreg
 }
 
 func (s *Service) normalizeRequest(req InitRequest) InitRequest {
+	req.ConfigName = strings.TrimSpace(req.ConfigName)
 	if req.ConfigName == "" {
-		req.ConfigName = "tutorial"
+		req.ConfigName = DefaultTemplate
 	}
 	return req
 }

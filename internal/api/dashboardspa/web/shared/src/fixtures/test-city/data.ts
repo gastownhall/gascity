@@ -85,6 +85,13 @@ function specToAgent(spec: AgentSpec, iso: (offsetMs: number) => string): AgentR
     suspended: spec.suspended,
     provider: spec.provider,
     model: spec.model,
+    // Seeds describe observed runtime state, not provider launch declarations.
+    provider_options: {
+      resolution: 'unknown',
+      reason: 'resolution_failed',
+      scope: 'session_start',
+      supports_per_turn_options: false,
+    },
     rig: spec.rig,
     pack_derived: false,
   };

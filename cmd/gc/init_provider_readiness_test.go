@@ -205,7 +205,7 @@ base = "builtin:claude"
 
 func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if fresh {
 			t.Fatal("wizard guidance should use cached probe mode")
 		}
@@ -232,9 +232,9 @@ func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	}
 }
 
-func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
-	got := providerStatusFixHint("claude", api.ProbeStatusInvalidConfiguration)
-	for _, want := range []string{"`claude.ai`", "`oauth_token`", "`firstParty`"} {
+func TestProviderStatusFixHintPreservesSupportedClaudeModes(t *testing.T) {
+	got := providerStatusFixHint("claude", api.ProbeStatusInvalidConfiguration, "claude")
+	for _, want := range []string{"configured Claude credentials", "cloud-provider setup", "supported login mode"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
 		}
@@ -242,7 +242,7 @@ func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
 }
 
 func TestProviderStatusFixHintIncludesClaudeSetupTokenForNeedsAuth(t *testing.T) {
-	got := providerStatusFixHint("claude", api.ProbeStatusNeedsAuth)
+	got := providerStatusFixHint("claude", api.ProbeStatusNeedsAuth, "claude")
 	for _, want := range []string{"`claude auth login`", "`claude setup-token`", "`CLAUDE_CODE_OAUTH_TOKEN`"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
@@ -267,7 +267,7 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -344,7 +344,8 @@ func TestFinalizeInitWarnsForUnprobeableCustomProviderAndContinues(t *testing.T)
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, _ bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, _ bool) (map[string]api.ReadinessItem, error) {
+		providers := runtimeProbeNamesForTest(targets)
 		t.Fatalf("unexpected readiness probe for unprobeable provider: %v", providers)
 		return nil, nil
 	}
@@ -401,7 +402,8 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 
 	probeCalls := 0
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
+		providers := runtimeProbeNamesForTest(targets)
 		probeCalls++
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
@@ -492,7 +494,8 @@ name = "bright-lights"
 
 	probeCalls := 0
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
+		providers := runtimeProbeNamesForTest(targets)
 		probeCalls++
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
@@ -759,7 +762,7 @@ base = "builtin:claude"
 			}
 			probeCalled := false
 			oldProbe := initProbeProvidersReadiness
-			initProbeProvidersReadiness = func(context.Context, []string, bool) (map[string]api.ReadinessItem, error) {
+			initProbeProvidersReadiness = func(context.Context, []initProviderTarget, bool) (map[string]api.ReadinessItem, error) {
 				probeCalled = true
 				return nil, errors.New("provider unavailable")
 			}
@@ -896,7 +899,10 @@ func TestFreshProviderBd13FloorAcceptsReleaseCandidateAndRelease(t *testing.T) {
 	}{{"1.2.2", false}, {"1.3.0-rc.1", true}, {"1.3.0", true}} {
 		t.Run(tt.version, func(t *testing.T) {
 			initRunVersion = func(string) (string, error) { return "bd version " + tt.version, nil }
-			_, got := depMeetsMinVersion("bd", bdFreshProviderMinVersion)
+			_, got, err := depMeetsMinVersion("bd", bdFreshProviderMinVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got != tt.want {
 				t.Fatalf("bd %s accepted=%t, want %t", tt.version, got, tt.want)
 			}
@@ -921,7 +927,7 @@ func TestFinalizeInitWithoutProgressSkipsStepCounter(t *testing.T) {
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -981,7 +987,8 @@ func TestCmdInitResumesFinalizeForExistingCity(t *testing.T) {
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
+		providers := runtimeProbeNamesForTest(targets)
 		if !fresh {
 			t.Fatal("cmdInit resume should force a fresh readiness probe")
 		}
@@ -1069,7 +1076,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 
 	probeCalled := false
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, _ bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, _ bool) (map[string]api.ReadinessItem, error) {
 		probeCalled = true
 		return map[string]api.ReadinessItem{
 			"claude": {
@@ -1796,7 +1803,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -1866,7 +1873,7 @@ func TestFinalizeInitBlocksManagedBdWhenDoltIdentityMissing(t *testing.T) {
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(context.Context, []string, bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(context.Context, []initProviderTarget, bool) (map[string]api.ReadinessItem, error) {
 		t.Fatal("provider readiness should not run before Dolt identity is configured")
 		return nil, nil
 	}
@@ -2328,7 +2335,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -2406,7 +2413,7 @@ func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing
 	}
 
 	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, _ []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -2555,5 +2562,46 @@ func TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cachePath, "gascity", "roles", "pack.toml")); err != nil {
 		t.Fatalf("roles pack not materialized from embedded content: %v", err)
+	}
+}
+
+// Init must stop before handing an unverifiable required runtime to the
+// supervisor, just as doctor does for an existing city.
+func TestInitRequiredDependencyVersionProbeFailuresBlock(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "")
+	oldLookPath, oldVersion := initLookPath, initRunVersion
+	t.Cleanup(func() { initLookPath, initRunVersion = oldLookPath, oldVersion })
+	initLookPath = func(string) (string, error) { return "/usr/bin/tool", nil }
+	for _, binary := range []string{"bd", "dolt"} {
+		for _, tc := range []struct {
+			name, output string
+			err          error
+		}{
+			{name: "command failure", err: errors.New("version command failed")},
+			{name: "empty"},
+			{name: "unrecognized", output: "unexpected output"},
+			{name: "malformed high version", output: "version 999.bad"},
+			{name: "extra components", output: "version 999.0.0.4"},
+		} {
+			t.Run(binary+"/"+tc.name, func(t *testing.T) {
+				initRunVersion = func(name string) (string, error) {
+					if name == binary {
+						if tc.output != "" {
+							return binary + " " + tc.output, tc.err
+						}
+						return tc.output, tc.err
+					}
+					if name == "dolt" {
+						return "dolt version " + doltMinVersion, nil
+					}
+					return "bd version " + bdMinVersion, nil
+				}
+				missing := checkHardDependencies(t.TempDir())
+				if len(missing) != 1 || !strings.Contains(missing[0].name, binary) || !strings.Contains(missing[0].name, "could not verify") || missing[0].installHint == "" {
+					t.Fatalf("dependencies = %#v, want actionable unverifiable %s blocker", missing, binary)
+				}
+			})
+		}
 	}
 }

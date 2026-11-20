@@ -45,6 +45,13 @@ Violating any fails the build; full rationale is in the architecture docs.
   `nudgequeue.StateFileQueue`. Enforced by
   `TestAPIReachesTheNudgeQueueOnlyThroughState`.
 
+## Interrupted response streams
+
+Mux recovery rethrows the exact `http.ErrAbortHandler` sentinel so `net/http`
+can abort a service-proxy response without appending Problem Details or logging
+an application panic. Other panic values, including wrapped or same-text errors,
+retain the ordinary logged 500 recovery path.
+
 ## Configuration publication
 
 API config edits, validation, snapshot publication and city-config rollback
@@ -70,6 +77,15 @@ a sanctioned bypass of the worker boundary. Do not add others; see
 `internal/worker/AGENTS.md`.
 
 ## Dashboard and API-schema gates
+
+Build the platform-neutral SPA with the execution worker's native JavaScript
+dependencies even when the Go binary targets another OS. Preserve the
+`dist_in_sync_test` comparison with the committed bundle.
+
+Production embedding stores the dashboard in a compressed manifest while the
+HTTP handler reads ordinary uncompressed, seekable files. Preserve exact asset
+bytes, metadata, HEAD/Range, cache and CSP behavior. Keep the raw bundle check,
+packed-manifest sync and both Bazel and Node-less build paths aligned.
 
 - `make dashboard-check` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
@@ -203,7 +219,7 @@ its op names, even when the request names none, so a respond adopted after
 the agent raised another prompt, or a second click that read the same prompt
 pending, closes `skipped{stale}` rather than approving a prompt nobody saw.
 That holds only as far as request IDs tell prompts apart: where the runtime
-derives them from the prompt's content (tmux hashes the tool and its input),
+derives approval IDs from the prompt's content (tmux approval IDs hash the tool and its input),
 an identical prompt raised again carries the first one's ID and is answered
 too. That is permanent for `/respond`: its op stays keyed by request id, with
 its scope, payload (`respondOpPayload`) and at_least_once policy frozen, so
@@ -629,3 +645,138 @@ event watcher derives them from session beads' `bead.*` notifications
 (SESSION-OBSERVE-LIST-EVENTS in `internal/session/REQUIREMENTS.md`), and
 `POST /v0/events` and `gc event emit` refuse them
 (`events.IsSessionListDerived`).
+
+Native question answers use the existing `/respond` contract with `action:
+answer` and a required explicit `request_id`, validated in the session domain
+before any legacy/lane op admission. Keep the existing op keys, payload digest
+and replay rules. Native question IDs include provider invocation identity;
+clients discover answer/text support from pending metadata instead of inferring
+it from `kind`. Provider logs and terminal input remain runtime-adapter concerns.
+
+## Initial factory selection
+
+City creation passes `template` into `cityinit.InitRequest.ConfigName`; the
+shared domain defaults it to Gas City and validates before scaffolding. The
+provider field remains the default coding-provider choice. Preserve custom
+commands when choosing a factory and refuse providers on providerless templates.
+Valid template choices are discoverable in OpenAPI and match native `gc init`.
+
+A visible native question remains pending when its answer identity is not yet
+published: expose unavailable answer capability and preserve the message guard,
+rather than reporting a dead runtime. Stop cancels the native question widget
+without choosing any answer. Provider callback and installed-binary qualification
+must accompany tests built from completed transcript records.
+
+## Rig registration paths
+
+An explicit absolute path may register an existing external project directory
+in place through the same rig provisioner as `gc rig add`. Preserve its path
+and contents. An absent external destination or a relative path escaping the
+city is rejected before provisioning. Keep city containment for managed clones,
+provision manifests and physical teardown; registration grants no ownership of
+an external directory's creation or deletion.
+
+Refuse a canonical project path already bound under another rig name with the
+existing typed conflict before provisioning. Check both the composed snapshot
+and the authoritative raw config under the transaction fence; relative paths
+and symlink spellings must not evade the check or reach adoption writes.
+
+The rig-create `adopt` field forwards to native `rig.ProvisionRequest.Adopt`.
+Infer and validate the existing namespace before any writes, preserve queue
+history, and refuse `adopt` with `git_url` before clone admission. Append new
+RigCreateBody fields with omitempty so deployed request digests remain stable.
+
+## Public group metadata updates
+
+The HTTP group upsert preserves existing fanout policy and omitted routing under
+the group's mutation lock. An explicit empty default_handle clears that route.
+Full service upserts retain their existing replacement semantics; metadata-only
+HTTP calls must not become full settings replacements or handler-side read/write
+races.
+
+
+## Authoritative local bead lists
+
+`gc beads list --fresh` reads the resolved local city's stores directly instead
+of API/cache projections. `--strict` implies that local fresh path and refuses
+any configured work-scope open failure, relocated class-binding refusal, partial
+store list or ownership-merge failure before emitting a successful result.
+Remote selectors must fail rather than fall back to a different local city.
+Ordinary list and convoy commands retain their existing best-effort contracts.
+Preserve store identity when merging: unrelated stores may hold the same bead
+ID; only proven migration copies are superseded.
+
+The strict command is a complete live census for its supplied filters, not an
+atomic transaction across all stores. Mutation admission still owns race
+resolution. See `engdocs/design/beads-list-read-contract.md`.
+
+Strict local bead-list reads must establish an existing physical work-scope directory before invoking a potentially lazy store factory. BD-contract scopes require existing valid backend metadata. Preserve the file provider's legitimate empty-before-first-write contract for an already declared, existing scope; a read must never create a missing rig directory. Database availability is still proved by the provider's ordinary open/List result, without initialization or migration.
+
+## Interrupted city creation
+
+New supervisor city-create requests persist their create operation before
+scaffolding. On supervisor process startup, before admission opens, only known
+create requests absent from the registered-city set may be terminalized as
+`request.failed` with `city_init_interrupted`. Record that outcome in the
+supervisor event provider, visible on global event list/SSE with no city, and
+acknowledge the append before removing its pending correlation. Reuse a matching
+request ID and create terminal event after append-before-cleanup interruption;
+a failure for another operation does not settle a create. Include in-flight
+rotated event segments when checking prior terminal outcomes. Keep registry
+registration serialized with this decision; the event callback must not reenter
+the registry. Failed event reads/appends retain pending requests and explicitly
+warn while healthy registered-city startup continues. Legacy records without a
+create discriminator and unregister requests remain untouched.
+
+This is process-interruption terminalization and operator recovery, not durable
+replay of the process-local Idempotency-Key response cache. An empty path may
+accept a new create after settlement; an existing scaffold still returns 409 and
+must be preserved for native CLI `gc init --no-start` finalization recovery.
+Event append acknowledgment promises readable history, not OS-crash fsync.
+
+## Current provider availability diagnostics
+
+Single-session reads may project the worker's optional current native-UI diagnostic as provider_availability. It is independent of runtime/process liveness, transcript activity and OSC program status: unavailable is a qualified current native failure, unknown is an indeterminate supported observation, and omission is no observation, never readiness. Only the session GET and its existing session streams perform this opt-in read; lists and agent/fleet projections do not aggregate it. The session stream sends an initial view (including an explicit null when no diagnostic is observed) and semantic state/code/source/opaque runtime-incarnation changes, ignoring observed_at-only refreshes. Frames name the exact session ID, and runtime_generation is the existing opaque InputFence digest, never raw fence data. These live side frames have no durable transcript/event cursor or history-replay promise. Controls and recovery policy are unchanged.
+
+## Explicit authoritative bead point reads
+
+Bead GET defaults to cached data. Explicit `fresh=true` resolves every visited
+residency leg through the existing authoritative live handle, including the
+work residual. Never select an owner using a stale cached miss/positive and
+claim freshness by reading only that winner. Preserve precedence/refusal
+policies and propagate indeterminate backing reads. Cache-age metadata names
+the actual owner; live reads use0/not applicable. This is a current per-row
+read, not an atomic cross-store snapshot or event-cursor/write fence.
+
+## Cached status observation age
+
+Freeze the work-store freshness hint alongside each cached status body before
+building it, for synchronous and background builds. On bucket, TTL-floor and
+stale-while-revalidate hits, add elapsed time to that frozen age; later point
+reads or writes must never make an older body appear younger. Preserve cache
+TTLs, coalescing, body/index pairing, partial metadata and uncached behavior.
+
+Fresh build waiters receive partial bodies and their diagnostics even when the
+partial result is excluded from the response cache. Keep response-entry age on
+saved bodies that read no stores; their source observation age stays inapplicable.
+
+Do not cache a partial status build. A cold partial response keeps its survivor
+counts and diagnostics for that request; a partial background refresh leaves
+the last complete body, index and observation age intact. A later complete
+refresh may replace it. Never hide ready-cache uncertainty by manufacturing
+counts or falling back to an unbounded backing read.
+
+`X-GC-Cache-Age-S` describes a latest fresh observation, not a full-store causal
+watermark: a point read/write may advance `LastFreshAt` without synchronizing
+every row. The existing zero value means unknown or not applicable, not proven
+freshness. A cached body's elapsed age is a lower bound when its source age is
+unknown; count lag is not by itself an incomplete or failed status response.
+
+## Codex onboarding readiness
+
+Both supervisor and city readiness projections use the shared bounded native
+Codex login-status probe. A credential file's presence cannot establish readiness
+or override `CODEX_HOME` or `CODEX_ACCESS_TOKEN`. Separate cached verdicts by the
+selected context without storing token bytes in cache keys or diagnostics. Accept
+the native CLI's supported login modes as the CLI preflight does. These verdicts
+describe local configuration, not successful remote inference.

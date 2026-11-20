@@ -206,7 +206,7 @@ func TestControllerStateCreateRigRejectsSymlinkEscape(t *testing.T) {
 		runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	for _, p := range []string{"link/evil", "link/absent"} {
-		if err := cs.CreateRig(config.Rig{Name: "evil", Path: p}); !errors.Is(err, configedit.ErrValidation) {
+		if err := cs.CreateRig(config.Rig{Name: "evil", Path: p}, false); !errors.Is(err, configedit.ErrValidation) {
 			t.Errorf("CreateRig(path=%q) err = %v, want ErrValidation", p, err)
 		}
 	}

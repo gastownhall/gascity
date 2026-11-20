@@ -63,8 +63,8 @@ base = "builtin:codex"
 		t.Fatal(err)
 	}
 
-	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	oldProbe := doctorProbeCatalogReadiness
+	doctorProbeCatalogReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("readiness advisory must use fresh probes")
 		}
@@ -80,7 +80,7 @@ base = "builtin:codex"
 		out["codex"] = api.ReadinessItem{Name: "codex", DisplayName: "Codex", Status: api.ProbeStatusConfigured}
 		return out, nil
 	}
-	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+	t.Cleanup(func() { doctorProbeCatalogReadiness = oldProbe })
 
 	result := newProviderCatalogReadinessAdvisoryCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
 	if result.Status != doctor.StatusWarning {
@@ -91,5 +91,37 @@ base = "builtin:codex"
 	}
 	if strings.Contains(strings.Join(result.Details, "\n"), "Codex") {
 		t.Fatalf("imported codex provider should count as explicit: %v", result.Details)
+	}
+}
+
+func TestProviderCatalogReadinessDoesNotHideLostAuthentication(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+provider = "claude"
+[providers.claude]
+base = "builtin:claude"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldProbe := initProbeProvidersReadiness
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, fresh bool) (map[string]api.ReadinessItem, error) {
+		names := runtimeProbeNamesForTest(targets)
+		if !fresh {
+			t.Fatal("doctor must probe current authentication")
+		}
+		result := make(map[string]api.ReadinessItem)
+		for _, name := range names {
+			result[name] = api.ReadinessItem{Name: name, Status: api.ProbeStatusNotInstalled}
+		}
+		result["claude"] = api.ReadinessItem{Name: "claude", DisplayName: "Claude Code", Status: api.ProbeStatusNeedsAuth}
+		return result, nil
+	}
+	result := newProviderCatalogReadinessAdvisoryCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusError || result.Severity != doctor.SeverityBlocking {
+		t.Fatalf("lost auth must block readiness, got %+v", result)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "claude") || result.FixHint == "" {
+		t.Fatalf("missing actionable provider diagnosis: %+v", result)
 	}
 }

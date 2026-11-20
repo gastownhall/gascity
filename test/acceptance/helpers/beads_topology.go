@@ -440,12 +440,14 @@ func BeadsTopologies() []BeadsTopology {
 	return []BeadsTopology{
 		{
 			Name:                "M1-proxied-local",
-			Doc:                 "the default: no selector at all, bd owns a proxy and its Dolt child",
+			Doc:                 "explicit proxied/local single-store control: bd owns a proxy and its Dolt child; ordinary factory splitting is tested separately",
 			City:                proxiedLocalScope,
 			Rig:                 proxiedLocalScope,
 			CityStore:           proxiedProviderStore,
 			CityStoreNativeLane: proxiedNativeStore,
-			InitArgs:            func(*ExternalDolt) []string { return nil },
+			InitArgs: func(*ExternalDolt) []string {
+				return []string{"--beads-transport", "proxied", "--beads-target", "local"}
+			},
 		},
 		{
 			Name:                     "M2-direct-local",
@@ -601,7 +603,9 @@ func BeadsTopologies() []BeadsTopology {
 			Rig:                 proxiedLocalScope,
 			CityStore:           proxiedProviderStore,
 			CityStoreNativeLane: proxiedNativeStore,
-			InitArgs:            func(*ExternalDolt) []string { return nil },
+			InitArgs: func(*ExternalDolt) []string {
+				return []string{"--beads-transport", "proxied", "--beads-target", "local"}
+			},
 		},
 	}
 }

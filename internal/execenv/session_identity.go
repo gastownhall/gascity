@@ -16,6 +16,7 @@ import "strings"
 var SessionScopedEnvKeys = []string{
 	"GC_HOOK_DEADLINE",
 	"GC_SESSION_ID",
+	"GC_PROVIDER_SESSION_ID",
 	"GC_SESSION_NAME",
 	"GC_ALIAS",
 	"GC_AGENT",

@@ -426,7 +426,7 @@ op="$1"
 case "$op" in
   start) cat > /dev/null ;;
   stop) echo "$*" >> "`+stopFile+`" ;;
-  peek) echo "Bypass Permissions mode" ;;
+  peek) printf '%s\n' 'Bypass Permissions mode' '❯ 1. No, exit' '  2. Yes, I accept' 'Enter to confirm · Esc to cancel' ;;
   send-keys) echo "failed to dismiss dialog" >&2; exit 1 ;;
   *) exit 2 ;;
 esac
@@ -622,6 +622,7 @@ func TestStartAnswersCodexDialogDrawnAfterWatchedComposer(t *testing.T) {
 	dir := t.TempDir()
 	screenFile := filepath.Join(dir, "screen")
 	lateFile := filepath.Join(dir, "late")
+	selectedFile := filepath.Join(dir, "selected")
 	settledFile := filepath.Join(dir, "settled")
 	watchFile := filepath.Join(dir, "watch.jsonl")
 	sendKeysFile := filepath.Join(dir, "send-keys.log")
@@ -630,10 +631,11 @@ func TestStartAnswersCodexDialogDrawnAfterWatchedComposer(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, content := range map[string]string{
-		screenFile:  codexEarlyComposerScreen,
-		lateFile:    codexHookReviewScreen,
-		settledFile: codexSettledComposerScreen,
-		watchFile:   string(event) + "\n",
+		screenFile:   codexEarlyComposerScreen,
+		lateFile:     codexHookReviewScreen,
+		selectedFile: strings.NewReplacer("› 1. Review hooks", "  1. Review hooks", "  2. Trust all and continue", "› 2. Trust all and continue").Replace(codexHookReviewScreen),
+		settledFile:  codexSettledComposerScreen,
+		watchFile:    string(event) + "\n",
 	} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
@@ -661,7 +663,9 @@ case "$op" in
     ;;
   send-keys)
     echo "$*" >> "`+sendKeysFile+`"
-    if [ "$3" = Enter ]; then
+    if [ "$3" = Down ]; then
+      cp -f "`+selectedFile+`" "`+screenFile+`.tmp" && mv -f "`+screenFile+`.tmp" "`+screenFile+`"
+    elif [ "$3" = Enter ]; then
       cp -f "`+settledFile+`" "`+screenFile+`.tmp" && mv -f "`+screenFile+`.tmp" "`+screenFile+`"
     fi
     ;;
@@ -701,10 +705,12 @@ case "$op" in
     ;;
   peek)
     echo "$*" >> "`+peekFile+`"
-    if [ "$(wc -l < "`+sendKeysFile+`" 2>/dev/null || echo 0)" -ge 2 ]; then
+    if [ "$(wc -l < "`+sendKeysFile+`" 2>/dev/null || echo 0)" -ge 3 ]; then
       echo "user@host $"
+    elif [ "$(wc -l < "`+sendKeysFile+`" 2>/dev/null || echo 0)" -eq 2 ]; then
+      printf '%s\n' 'Bypass Permissions mode' '  1. No, exit' '❯ 2. Yes, I accept' 'Enter to confirm · Esc to cancel'
     else
-      echo "Bypass Permissions mode"
+      printf '%s\n' 'Bypass Permissions mode' '❯ 1. No, exit' '  2. Yes, I accept' 'Enter to confirm · Esc to cancel'
     fi
     ;;
   send-keys)
@@ -758,10 +764,12 @@ case "$op" in
     exit 2
     ;;
   peek)
-    if [ -f "`+sendKeysFile+`" ]; then
+    if grep -q 'send-keys test-sess Enter' "`+sendKeysFile+`" 2>/dev/null; then
       echo "user@host $"
+    elif grep -q 'send-keys test-sess Down' "`+sendKeysFile+`" 2>/dev/null; then
+      printf '%s\n' 'Bypass Permissions mode' '  1. No, exit' '❯ 2. Yes, I accept' 'Enter to confirm · Esc to cancel'
     else
-      echo "Bypass Permissions mode"
+      printf '%s\n' 'Bypass Permissions mode' '❯ 1. No, exit' '  2. Yes, I accept' 'Enter to confirm · Esc to cancel'
     fi
     ;;
   send-keys)
@@ -1004,10 +1012,12 @@ case "$op" in
     exit 1
     ;;
   peek)
-    if [ -f "`+sendKeysFile+`" ]; then
+    if grep -q 'send-keys test-sess Enter' "`+sendKeysFile+`" 2>/dev/null; then
       echo "user@host $"
+    elif grep -q 'send-keys test-sess Down' "`+sendKeysFile+`" 2>/dev/null; then
+      printf '%s\n' 'Bypass Permissions mode' '  1. No, exit' '❯ 2. Yes, I accept' 'Enter to confirm · Esc to cancel'
     else
-      echo "Bypass Permissions mode"
+      printf '%s\n' 'Bypass Permissions mode' '❯ 1. No, exit' '  2. Yes, I accept' 'Enter to confirm · Esc to cancel'
     fi
     ;;
   send-keys)
@@ -1052,10 +1062,12 @@ case "$op" in
     ;;
   peek)
     echo "$*" >> "`+peekFile+`"
-    if [ -f "`+sendKeysFile+`" ]; then
+    if grep -q 'send-keys test-sess Enter' "`+sendKeysFile+`" 2>/dev/null; then
       echo "user@host $"
+    elif grep -q 'send-keys test-sess Down' "`+sendKeysFile+`" 2>/dev/null; then
+      printf '%s\n' 'Bypass Permissions mode' '  1. No, exit' '❯ 2. Yes, I accept' 'Enter to confirm · Esc to cancel'
     else
-      echo "Bypass Permissions mode"
+      printf '%s\n' 'Bypass Permissions mode' '❯ 1. No, exit' '  2. Yes, I accept' 'Enter to confirm · Esc to cancel'
     fi
     ;;
   send-keys)

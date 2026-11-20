@@ -77,6 +77,10 @@ const (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "tap" {
+		if err := configureTapMemory(); err != nil {
+			diag(os.Stderr, "configuring tap memory: %v", err)
+			os.Exit(exitFailure)
+		}
 		runtime.GOMAXPROCS(tapMaxProcs)
 		debug.SetGCPercent(tapGCPercent)
 	}

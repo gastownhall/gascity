@@ -27,6 +27,9 @@ const env = {
   ...process.env,
   // playwright.config.ts: serial, no retries beyond CI's one, fresh server.
   CI: '1',
+  // Chromium uses temporary files for shared memory under --disable-dev-shm-usage.
+  // Bazel's strong sandbox only permits writes in the declared test scratch.
+  TMPDIR: process.env.TEST_TMPDIR ?? process.env.TMPDIR,
   FAKESUPERVISOR_BIN: runfile('FAKESUPERVISOR'),
   // Every corpus file sits in testdata/dashport; the first names the directory.
   DASHPORT_CORPUS_DIR: path.dirname(runfile('DASHPORT_CORPUS_FILES')),

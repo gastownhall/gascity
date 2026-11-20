@@ -36,14 +36,14 @@ func TestComputePoolDesiredStatesParkedSeatTakesNoCap(t *testing.T) {
 	scale := map[string]int{"claude": 1}
 
 	t.Run("unparked, the blocked pin's resume fills the city cap", func(t *testing.T) {
-		states := computePoolDesiredStatesParkedAt(cfg, work, sessions, scale, nil, parkNow, nil, nil)
+		states := computePoolDesiredStatesParkedAt(cfg, work, nil, nil, sessions, scale, nil, parkNow, nil, nil)
 		parked, counted := parkedRequests(states)
 		if len(parked) != 0 || len(counted) != 1 || counted[0].SessionBeadID != "sess-1" {
 			t.Fatalf("parked %+v counted %+v, want only sess-1's resume: the cap admits nothing new", parked, counted)
 		}
 	})
 	t.Run("parked, the seat is selected and new demand takes the cap", func(t *testing.T) {
-		states := computePoolDesiredStatesParkedAt(cfg, work, sessions, scale, nil, parkNow, parkedSeats{"sess-1": {Eligible: true, Parked: true}}, nil)
+		states := computePoolDesiredStatesParkedAt(cfg, work, nil, nil, sessions, scale, nil, parkNow, parkedSeats{"sess-1": {Eligible: true, Parked: true}}, nil)
 		parked, counted := parkedRequests(states)
 		if len(parked) != 1 || parked[0].SessionBeadID != "sess-1" || parked[0].Tier != "resume" || parked[0].WorkBeadID != "pin-1" {
 			t.Fatalf("parked %+v, want sess-1 kept selected on its pin", parked)
@@ -57,7 +57,7 @@ func TestComputePoolDesiredStatesParkedSeatTakesNoCap(t *testing.T) {
 	})
 	t.Run("a pin turned ready is a counted resume again", func(t *testing.T) {
 		// The verdict is the pass's: a ready pin is not parked.
-		states := computePoolDesiredStatesParkedAt(cfg, work, sessions, scale, nil, parkNow, parkedSeats{"sess-1": {Eligible: true}}, nil)
+		states := computePoolDesiredStatesParkedAt(cfg, work, nil, nil, sessions, scale, nil, parkNow, parkedSeats{"sess-1": {Eligible: true}}, nil)
 		parked, counted := parkedRequests(states)
 		if len(parked) != 0 || len(counted) != 1 || counted[0].SessionBeadID != "sess-1" {
 			t.Fatalf("parked %+v counted %+v, want sess-1's counted resume", parked, counted)
@@ -86,7 +86,7 @@ func TestComputePoolDesiredStatesMarksAParkedContinuation(t *testing.T) {
 		{name: "no verdict", work: pinOnly},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			states := computePoolDesiredStatesParkedAt(cfg, tc.work, sessions, nil, nil, parkNow, tc.verdict, nil)
+			states := computePoolDesiredStatesParkedAt(cfg, tc.work, nil, nil, sessions, nil, nil, parkNow, tc.verdict, nil)
 			var seat []SessionRequest
 			for _, s := range states {
 				for _, r := range s.Requests {
@@ -137,7 +137,7 @@ func TestComputePoolDesiredStatesReadyPinCompetesForAFullCap(t *testing.T) {
 			if tc.pinFirst {
 				work[0], work[1] = work[1], work[0]
 			}
-			states := computePoolDesiredStatesParkedAt(cfg, work, sessions, nil, nil, parkNow, unparked, nil)
+			states := computePoolDesiredStatesParkedAt(cfg, work, nil, nil, sessions, nil, nil, parkNow, unparked, nil)
 			parked, counted := parkedRequests(states)
 			if len(parked) != 0 || len(counted) != 1 || counted[0].SessionBeadID != tc.want || counted[0].Tier != "resume" {
 				t.Fatalf("parked %+v counted %+v, want only %s's resume in the city's one slot", parked, counted, tc.want)
@@ -157,7 +157,7 @@ func TestComputePoolDesiredStatesParkedSeatsAreNotPoolDemand(t *testing.T) {
 		workBead("pin-3", "claude", "sess-2", "open", 2),
 	}
 	sessions := sessionInfosFromBeads([]beads.Bead{sessionBead("sess-1", "open"), sessionBead("sess-2", "open")})
-	states := computePoolDesiredStatesParkedAt(cfg, work, sessions, nil, nil, parkNow,
+	states := computePoolDesiredStatesParkedAt(cfg, work, nil, nil, sessions, nil, nil, parkNow,
 		parkedSeats{"sess-1": {Eligible: true, Parked: true}, "sess-2": {Eligible: true, Parked: true}}, nil)
 	parked, counted := parkedRequests(states)
 	if len(counted) != 0 {
@@ -181,7 +181,7 @@ func TestComputePoolDesiredStatesParkedSeatDoesNotFillAFloor(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "", nil, 1)}}
 	work := []beads.Bead{workBead("pin-1", "claude", "sess-1", "open", 2)}
 	sessions := sessionInfosFromBeads([]beads.Bead{sessionBead("sess-1", "open")})
-	states := computePoolDesiredStatesParkedAt(cfg, work, sessions, nil, nil, parkNow, parkedSeats{"sess-1": {Eligible: true, Parked: true}}, nil)
+	states := computePoolDesiredStatesParkedAt(cfg, work, nil, nil, sessions, nil, nil, parkNow, parkedSeats{"sess-1": {Eligible: true, Parked: true}}, nil)
 	parked, counted := parkedRequests(states)
 	if len(parked) != 1 || len(counted) != 1 || !counted[0].FloorGuarantee {
 		t.Fatalf("parked %+v counted %+v, want the parked seat plus a floor request", parked, counted)
@@ -202,7 +202,7 @@ func TestComputePoolDesiredStatesInProgressStaysCounted(t *testing.T) {
 		workBead("w-1", "claude", "sess-1", "in_progress", 2),
 	}
 	sessions := sessionInfosFromBeads([]beads.Bead{sessionBead("sess-1", "open")})
-	states := computePoolDesiredStatesParkedAt(cfg, work, sessions, map[string]int{"claude": 1}, nil, parkNow, parkedSeats{"sess-1": {Eligible: true, Parked: true}}, nil)
+	states := computePoolDesiredStatesParkedAt(cfg, work, nil, nil, sessions, map[string]int{"claude": 1}, nil, parkNow, parkedSeats{"sess-1": {Eligible: true, Parked: true}}, nil)
 	parked, counted := parkedRequests(states)
 	if len(parked) != 0 || len(counted) != 1 || counted[0].SessionBeadID != "sess-1" {
 		t.Fatalf("parked %+v counted %+v, want sess-1's counted resume and nothing new", parked, counted)

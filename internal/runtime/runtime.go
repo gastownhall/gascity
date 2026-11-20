@@ -674,6 +674,14 @@ func AttachProbeHolds(attached bool, err error) bool {
 	return attached
 }
 
+// ReconcilerOwnedMergeablePathProvider is implemented by runtimes whose
+// staging layer can honor ReconcilerOwnedMergeablePaths. Returning false keeps
+// desired-state construction on the legacy overlay path, avoiding a
+// provision-drift restart into an adapter that cannot preserve the handoff.
+type ReconcilerOwnedMergeablePathProvider interface {
+	SupportsReconcilerOwnedMergeablePaths() bool
+}
+
 // PendingInteraction describes a blocking interaction raised by a session.
 // This is an optional capability exposed by providers that support
 // structured approvals, questions, or other turn-blocking prompts.
@@ -692,10 +700,12 @@ type InteractionResponse struct {
 	// a caller answering one raising sets it (the conversation lane always
 	// does: request ids may repeat, and an answer must not reach a prompt it
 	// was not meant for). Empty answers whatever is pending.
-	RequestID string            `json:"request_id,omitempty"`
-	Action    string            `json:"action"`
-	Text      string            `json:"text,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	Action    string `json:"action"`
+	Text      string `json:"text,omitempty"`
+	// Answers carries exact authored labels for a multiple-selection question.
+	Answers  []string          `json:"answers,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // InteractionProvider is an optional extension for providers that can
@@ -1460,6 +1470,9 @@ const (
 
 // Config holds the parameters for starting a new session.
 type Config struct {
+	// BootstrapInputOrigin is internal fresh-launch provenance, excluded from fingerprints.
+	BootstrapInputOrigin BootstrapInputOrigin `json:"-"`
+
 	// WorkDir is the working directory for the session process.
 	WorkDir string
 
@@ -1577,6 +1590,13 @@ type Config struct {
 	// copied to the session workdir before the agent's own OverlayDir,
 	// providing additive pack-level file staging with lower priority.
 	PackOverlayDirs []string
+
+	// ReconcilerOwnedMergeablePaths lists the exact workdir-relative JSON
+	// hook/settings files for which reconciliation has established a managed
+	// owner. Runtime overlay staging preserves only these paths while continuing
+	// to stage every sibling. This changes box provisioning behavior and is
+	// therefore part of the core/provision fingerprint.
+	ReconcilerOwnedMergeablePaths []string
 
 	// OverlayDir is the host-side overlay directory whose contents should
 	// be copied into the session's working directory. Used by the exec

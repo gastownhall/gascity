@@ -61,7 +61,7 @@ func Parse(out string) (Info, error) {
 		core = core[:i]
 	}
 	parts := strings.Split(core, ".")
-	if len(parts) < 3 {
+	if len(parts) != 3 {
 		return Info{}, fmt.Errorf("unrecognized version %q", out)
 	}
 	major, err := strconv.Atoi(parts[0])

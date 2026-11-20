@@ -239,6 +239,7 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 	case errors.Is(err, errFixTimedOut):
 		res.FixAttempted = true
 		res.FixError = fmt.Sprintf("fix timed out after %s and was abandoned; remediation unconfirmed", d.CheckTimeout)
+		res.TimedOut = true
 		return res, true
 	case err != nil:
 		res.FixError = err.Error()

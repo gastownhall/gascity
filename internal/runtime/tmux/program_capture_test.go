@@ -268,10 +268,11 @@ func TestRespawnRearmsTapAndClearsRecordInOneList(t *testing.T) {
 		if err := tm.respawnPaneWithWorkDir("%5", "/w", "claude --x", arm); err != nil {
 			t.Fatalf("respawnPaneWithWorkDir: %v", err)
 		}
-		if len(rec.calls) != 1 {
-			t.Fatalf("respawn ran %d tmux invocations, want one list: %q", len(rec.calls), rec.calls)
+		if len(rec.calls) != 2 {
+			t.Fatalf("respawn ran %d tmux invocations, want spend then one respawn list: %q", len(rec.calls), rec.calls)
 		}
-		got := rec.calls[0]
+		assertBootstrapSpendCall(t, rec.calls[0], "%5")
+		got := rec.calls[1]
 		i := slices.Index(got, programTapOption)
 		if i < 0 {
 			t.Fatalf("respawn did not re-arm: %q", got)
@@ -306,10 +307,14 @@ func TestRespawnRearmsTapAndClearsRecordInOneList(t *testing.T) {
 
 func TestRespawnArmFailureKeepsTheRespawn(t *testing.T) {
 	tm, rec, warnings, _ := captureTestTmux(t)
-	rec.errs = []error{&tmuxOutputError{Stdout: "%5", Err: errors.New("tmux respawn-pane: target pane has exited")}}
+	rec.errs = []error{nil, &tmuxOutputError{Stdout: "%5", Err: errors.New("tmux respawn-pane: target pane has exited")}}
 	if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{Capture: true}); err != nil {
 		t.Fatalf("respawn whose arm failed = %v, want nil (the marker proves it respawned)", err)
 	}
+	if len(rec.calls) != 2 {
+		t.Fatalf("respawn calls=%q", rec.calls)
+	}
+	assertBootstrapSpendCall(t, rec.calls[0], "%5")
 	if !strings.Contains(warnings.String(), "target pane has exited") {
 		t.Fatalf("arm failure not logged: %q", warnings.String())
 	}
@@ -317,7 +322,7 @@ func TestRespawnArmFailureKeepsTheRespawn(t *testing.T) {
 
 func TestRespawnFailureIsReturned(t *testing.T) {
 	tm, rec, _, _ := captureTestTmux(t)
-	rec.errs = []error{ErrSessionNotFound}
+	rec.errs = []error{nil, ErrSessionNotFound}
 	err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{Capture: true})
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("err = %v, want the respawn's own failure", err)
@@ -359,9 +364,10 @@ func TestUndeclaredProviderIsNeverArmed(t *testing.T) {
 			{"display-message", "-p", "-t", "%1", "#{pane_id}"},
 			{"if-shell", "-F", "-t", "%1", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%1")},
 		})...)
-		if respawn := rec.calls[created:]; len(respawn) != 1 || !slices.Equal(respawn[0], want) {
+		if respawn := rec.calls[created:]; len(respawn) != 2 || !slices.Equal(respawn[1], want) {
 			t.Fatalf("arm %+v: respawn calls\n got %q\nwant [%q]", arm, respawn, want)
 		}
+		assertBootstrapSpendCall(t, rec.calls[created], "%1")
 	}
 }
 
@@ -540,10 +546,11 @@ func TestRelayDeclaredWithoutCompanionRelayStartsUnwrapped(t *testing.T) {
 			if err := tm.respawnPaneWithWorkDir("%2", "/w", "claude --x", arm); err != nil {
 				t.Fatalf("respawnPaneWithWorkDir: %v", err)
 			}
-			if len(rec.calls) != 1 {
-				t.Fatalf("respawn ran %d tmux invocations, want one list: %q", len(rec.calls), rec.calls)
+			if len(rec.calls) != 2 {
+				t.Fatalf("respawn ran %d tmux invocations, want spend then one respawn list: %q", len(rec.calls), rec.calls)
 			}
-			respawn := rec.calls[0]
+			assertBootstrapSpendCall(t, rec.calls[0], "%2")
+			respawn := rec.calls[1]
 			i = slices.Index(respawn, programTapOption)
 			if i < 0 {
 				t.Fatalf("respawn did not re-arm capture: %q", respawn)
@@ -867,9 +874,10 @@ func TestUnarmedRespawnUnderLiveSwitchRemovesCapture(t *testing.T) {
 					{"set-option", "-pu", "-t", "%5", programSettleOption},
 					{"pipe-pane", "-t", "%5"},
 				})...)
-				if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
+				if len(rec.calls) != 2 || !slices.Equal(rec.calls[1], want) {
 					t.Fatalf("respawn calls\n got %q\nwant [%q]", rec.calls, want)
 				}
+				assertBootstrapSpendCall(t, rec.calls[0], "%5")
 			})
 		}
 	}
@@ -882,14 +890,18 @@ func TestUnarmedRespawnDisarmFailureKeepsTheRespawn(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			tm, rec, warnings, _ := captureTestTmux(t)
 			tm.cfg.ProgramStatus = mode
-			rec.errs = []error{&tmuxOutputError{Stdout: "%5", Err: errors.New("tmux pipe-pane: target pane has exited")}}
+			rec.errs = []error{nil, &tmuxOutputError{Stdout: "%5", Err: errors.New("tmux pipe-pane: target pane has exited")}}
 			if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); err != nil {
 				t.Fatalf("respawn whose disarm failed = %v, want nil (the marker proves it respawned)", err)
 			}
+			if len(rec.calls) != 2 {
+				t.Fatalf("respawn calls=%q", rec.calls)
+			}
+			assertBootstrapSpendCall(t, rec.calls[0], "%5")
 			if !strings.Contains(warnings.String(), "removing program-status capture") {
 				t.Fatalf("disarm failure not logged: %q", warnings.String())
 			}
-			rec.errs, rec.idx = []error{ErrSessionNotFound}, 0
+			rec.errs, rec.idx = []error{nil, ErrSessionNotFound}, 0
 			if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); !errors.Is(err, ErrSessionNotFound) {
 				t.Fatalf("err = %v, want the respawn's own failure", err)
 			}
@@ -923,9 +935,10 @@ func TestRespawnUnderSwitchOffRemovesOnlyABoundCapture(t *testing.T) {
 					{"display-message", "-p", "-t", "%5", "#{pane_id}"},
 					{"if-shell", "-F", "-t", "%5", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%5")},
 				})...)
-				if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
+				if len(rec.calls) != 2 || !slices.Equal(rec.calls[1], want) {
 					t.Fatalf("respawn calls\n got %q\nwant [%q]", rec.calls, want)
 				}
+				assertBootstrapSpendCall(t, rec.calls[0], "%5")
 			})
 		}
 	}
@@ -966,8 +979,12 @@ func TestLiveSwitchOffArmsNothingWhateverTheArm(t *testing.T) {
 				{"display-message", "-p", "-t", "%1", "#{pane_id}"},
 				{"if-shell", "-F", "-t", "%1", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%1")},
 			})...)
-			if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], wantRespawn) {
-				t.Fatalf("respawn under switch off\n got %q\nwant [%q]", rec.calls, wantRespawn)
+			if len(rec.calls) != 2 {
+				t.Fatalf("respawn under switch off must spend credit then respawn: %q", rec.calls)
+			}
+			assertBootstrapSpendCall(t, rec.calls[0], "%1")
+			if !slices.Equal(rec.calls[1], wantRespawn) {
+				t.Fatalf("respawn under switch off\n got %q\nwant %q", rec.calls[1], wantRespawn)
 			}
 			if *probes != 0 {
 				t.Fatalf("switch off evaluated the capability gate %d times", *probes)
@@ -1021,8 +1038,31 @@ func TestLiveSwitchOnArmsTheNextStart(t *testing.T) {
 			if err := tm.respawnPaneWithWorkDir("%2", "/w", "claude", arm); err != nil {
 				t.Fatal(err)
 			}
-			if len(rec.calls) != 1 || !slices.Contains(rec.calls[0], "exec "+relayed) || !slices.Contains(rec.calls[0], programTapOption) {
-				t.Fatalf("respawn after the flip is not relay-wrapped and tapped: %q", rec.calls)
+			if len(rec.calls) != 2 {
+				t.Fatalf("respawn must spend credit then run one relay/tap list: %q", rec.calls)
+			}
+			assertBootstrapSpendCall(t, rec.calls[0], "%2")
+			respawn := rec.calls[1]
+			i = slices.Index(respawn, programTapOption)
+			if i < 0 || i+1 >= len(respawn) {
+				t.Fatalf("respawn after the flip did not arm: %q", respawn)
+			}
+			respawnNonce := strings.TrimSuffix(respawn[i+1], ".#{pane_id}")
+			if respawnNonce == r || !programstatus.ValidNonce(respawnNonce+".%2") {
+				t.Fatalf("respawn nonce %q must be valid and distinct from create nonce %q", respawnNonce, r)
+			}
+			wantRespawn := append([]string{"-u"}, tmuxArgvList([][]string{
+				{"respawn-pane", "-k", "-t", "%2", "-c", "/w", "exec " + relayed},
+				{"display-message", "-p", "-t", "%2", "#{pane_id}"},
+				{"set-option", "-p", "-F", "-t", "%2", programTapOption, respawnNonce + ".#{pane_id}"},
+				{"set-option", "-pu", "-t", "%2", programStatusOption},
+				{"set-option", "-pu", "-t", "%2", programTextOption},
+				{"set-option", "-pu", "-t", "%2", programHoldOption},
+				{"set-option", "-pu", "-t", "%2", programSettleOption},
+				{"pipe-pane", "-O", "-t", "%2", wantTapCommand(respawnNonce, "claude-code")},
+			})...)
+			if !slices.Equal(respawn, wantRespawn) {
+				t.Fatalf("respawn after the flip\n got %q\nwant %q", respawn, wantRespawn)
 			}
 		})
 	}

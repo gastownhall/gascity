@@ -109,3 +109,15 @@ func TestCheckFinalMinimum(t *testing.T) {
 		})
 	}
 }
+
+// A parseable prefix must not turn a malformed reported version into an
+// accepted prerequisite for either init or doctor.
+func TestCheckFinalMinimumRejectsMalformedNumericCore(t *testing.T) {
+	for _, version := range []string{"999.0.0.4", "999.-1.0", "999.0.-1", "999.+1.0", "999.0.+1"} {
+		t.Run(version, func(t *testing.T) {
+			if _, err := CheckFinalMinimum("dolt version "+version, ManagedMin); err == nil {
+				t.Fatalf("accepted malformed Dolt version %q", version)
+			}
+		})
+	}
+}

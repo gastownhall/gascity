@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -124,8 +126,23 @@ func (r *cityRegistry) CityChanges() <-chan struct{} {
 
 // StorePendingRequestID stores a request_id for async correlation.
 func (r *cityRegistry) StorePendingRequestID(cityPath, requestID string) error {
+	return r.storePendingRequestID(cityPath, requestID, false)
+}
+
+// StorePendingCityCreateRequestID persists creation identity before the API
+// writes a scaffold, so startup can settle an unregistered interrupted create.
+func (r *cityRegistry) StorePendingCityCreateRequestID(cityPath, requestID string) error {
+	return r.storePendingRequestID(cityPath, requestID, true)
+}
+
+func (r *cityRegistry) storePendingRequestID(cityPath, requestID string, create bool) error {
 	key := pendingRequestKey(cityPath)
-	if err := supervisor.NewRegistry(supervisor.RegistryPath()).StorePendingCityRequestID(key, requestID); err != nil {
+	registry := supervisor.NewRegistry(supervisor.RegistryPath())
+	store := registry.StorePendingCityRequestID
+	if create {
+		store = registry.StorePendingCityCreateRequestID
+	}
+	if err := store(key, requestID); err != nil {
 		if errors.Is(err, supervisor.ErrPendingCityRequestExists) {
 			return api.ErrPendingRequestExists
 		}
@@ -136,6 +153,83 @@ func (r *cityRegistry) StorePendingRequestID(cityPath, requestID string) error {
 	r.pendingRequestIDs[key] = requestID
 	r.citiesMu.Unlock()
 	return nil
+}
+
+// prepareSupervisorRegistry performs the pre-admission registry recovery.
+// It starts no listeners or city runtimes. Event failures remain explicit and
+// keep their pending requests, while callers can still start registered cities.
+func (r *cityRegistry) prepareSupervisorRegistry(stderr io.Writer) *supervisor.Registry {
+	registry := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := r.recoverInterruptedCityCreates(registry); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: interrupted city create recovery deferred; pending request retained; registered cities will continue startup: %v\n", err) //nolint:errcheck
+	}
+	return registry
+}
+
+// recoverInterruptedCityCreates runs only during supervisor startup, before
+// HTTP admission and reconciliation. It writes to the supervisor event log,
+// which the global event endpoints expose even without a registered city.
+func (r *cityRegistry) recoverInterruptedCityCreates(registry *supervisor.Registry) error {
+	recorder := r.SupervisorEventRecorder()
+	var terminal map[string]bool
+	return registry.RecoverInterruptedCityCreates(func(pending supervisor.PendingCityRequestEntry) error {
+		provider, ok := recorder.(events.Provider)
+		if !ok {
+			return errors.New("supervisor event provider is unavailable; pending request retained")
+		}
+		ack, ok := recorder.(events.AckRecorder)
+		if !ok {
+			return errors.New("supervisor event provider cannot acknowledge recovery; pending request retained")
+		}
+		if terminal == nil {
+			list := provider.List
+			if inFlight, ok := provider.(events.InFlightProvider); ok {
+				// supervisor.started may have just rotated a prior terminal
+				// into a segment still being compressed. It still settles
+				// this request and must not be replaced by another outcome.
+				list = inFlight.ListInFlight
+			}
+			rows, err := list(events.Filter{Types: []string{events.RequestResultCityCreate, events.RequestFailed}})
+			if err != nil {
+				return fmt.Errorf("reading city create terminal events: %w", err)
+			}
+			terminal = make(map[string]bool)
+			for _, row := range rows {
+				if row.Type == events.RequestResultCityCreate {
+					var result api.CityCreateSucceededPayload
+					if err := json.Unmarshal(row.Payload, &result); err != nil {
+						return fmt.Errorf("reading city create result event %d: %w", row.Seq, err)
+					}
+					terminal[result.RequestID] = true
+				} else {
+					var failed api.RequestFailedPayload
+					if err := json.Unmarshal(row.Payload, &failed); err != nil {
+						return fmt.Errorf("reading request failure event %d: %w", row.Seq, err)
+					}
+					if failed.Operation == api.RequestOperationCityCreate {
+						terminal[failed.RequestID] = true
+					}
+				}
+			}
+		}
+		if terminal[pending.RequestID] {
+			return nil
+		}
+		payload, err := json.Marshal(api.RequestFailedPayload{
+			RequestID:    pending.RequestID,
+			Operation:    api.RequestOperationCityCreate,
+			ErrorCode:    "city_init_interrupted",
+			ErrorMessage: fmt.Sprintf("city creation was interrupted before registration; files at %q were preserved; inspect that directory, then run gc init --no-start there to resume an existing scaffold, or retry city creation if no scaffold exists", pending.Path),
+		})
+		if err != nil {
+			return fmt.Errorf("encoding interrupted city create failure: %w", err)
+		}
+		if err := ack.RecordAck(events.Event{Type: events.RequestFailed, Actor: "api", Subject: filepath.Base(pending.Path), Payload: payload}); err != nil {
+			return fmt.Errorf("appending interrupted city create failure: %w", err)
+		}
+		terminal[pending.RequestID] = true
+		return nil
+	})
 }
 
 // ConsumePendingRequestID returns and removes the pending request_id for a city path.

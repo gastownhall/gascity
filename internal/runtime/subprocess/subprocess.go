@@ -58,6 +58,10 @@ type Provider struct {
 	fenceChecked func(name string)
 }
 
+// SupportsReconcilerOwnedMergeablePaths reports that subprocess sessions use
+// the shared validated staging boundary.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool { return true }
+
 type providerOps struct {
 	// start launches cmd as the owner of its process tree and returns the
 	// group identity captured at spawn.

@@ -926,7 +926,7 @@ func laneRespondOpRequest(conv string, raised opjournal.Fact, resp runtime.Inter
 	if err != nil {
 		return opjournal.Request{}, apierr.Internal.Msgf("keying the respond: %v", err)
 	}
-	payload, err := opjournal.EncodeRespondPayload(opjournal.RespondPayload{Action: resp.Action, Text: resp.Text, Metadata: resp.Metadata})
+	payload, err := opjournal.EncodeRespondPayload(opjournal.RespondPayload{Action: resp.Action, Text: resp.Text, Answers: resp.Answers, Metadata: resp.Metadata})
 	if err != nil {
 		return opjournal.Request{}, apierr.ValidationFailed.Msg("invalid_request: " + err.Error())
 	}
@@ -959,6 +959,9 @@ func laneRespondPending(mgr *session.Manager, id string, resp runtime.Interactio
 		return nil, fmt.Errorf("session %s: %w", id, session.ErrNoPendingInteraction)
 	case resp.RequestID != "" && resp.RequestID != pending.RequestID:
 		return nil, fmt.Errorf("%w: pending interaction %q does not match request %q", session.ErrInteractionMismatch, pending.RequestID, resp.RequestID)
+	}
+	if err := session.ValidateInteractionResponseForPending(resp, pending); err != nil {
+		return nil, err
 	}
 	return pending, nil
 }
@@ -1244,7 +1247,7 @@ func sameLaneRespond(prior opjournal.Op, resp runtime.InteractionResponse) (bool
 	if resp.RequestID != "" && resp.RequestID != requestID {
 		return false, nil
 	}
-	payload, err := opjournal.EncodeRespondPayload(opjournal.RespondPayload{Action: resp.Action, Text: resp.Text, Metadata: resp.Metadata})
+	payload, err := opjournal.EncodeRespondPayload(opjournal.RespondPayload{Action: resp.Action, Text: resp.Text, Answers: resp.Answers, Metadata: resp.Metadata})
 	return err == nil && payload == prior.Payload, nil
 }
 

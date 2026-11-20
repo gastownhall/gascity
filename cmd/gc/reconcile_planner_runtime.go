@@ -285,6 +285,7 @@ func (rt *plannerRuntime) pass(now time.Time) passResult {
 		rt.readyOnce.Do(func() { close(rt.ready) })
 	}
 	rt.traceRows(append(slices.Clone(rec.Rows), rec.IdleTraces...))
+	rt.traceProviderFailures(rec.ProviderUnresolved)
 	return res
 }
 
@@ -416,4 +417,18 @@ func (rt *plannerRuntime) bootBackoffAtLeast(ctx context.Context, failures int, 
 		t.Stop()
 		return ctx.Err()
 	}
+}
+
+// traceProviderFailures includes failures that left no row to trace.
+func (rt *plannerRuntime) traceProviderFailures(groups []ProviderUnresolvedGroup) {
+	if len(groups) == 0 || rt.host.beginTrace == nil {
+		return
+	}
+	trace := rt.host.beginTrace("v2-provider-resolution")
+	for _, group := range groups {
+		trace.RecordControllerDecision(TraceSiteDesiredStateProviderUnresolved, TraceReasonProviderNotInPath, TraceOutcomeSkipped, map[string]any{
+			"provider": group.Provider, "command": group.Command, "dropped_templates": group.DroppedTemplates, "templates": group.Templates,
+		})
+	}
+	trace.end(TraceCompletionCompleted, traceRecordPayload{"phase": "provider-resolution"})
 }

@@ -963,6 +963,171 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	t.Run("ReadyIncludesStepDependentsWhenBlockerStepFailedWithWorkOutcomeBlocked", func(t *testing.T) {
+		s := newStore()
+		// The reported shape (gascity#8315 follow-up): a repair-review step
+		// closed failed and blocked in front of a finalize step that runs
+		// under a ralph check. The ralph waits on its iteration, so the
+		// iteration has to be offered or nothing in the workflow can settle.
+		blocker, err := s.Create(beads.Bead{Title: "repair-review", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ralph, err := s.Create(beads.Bead{
+			Title:    "finalize ralph",
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindRalph, beadmeta.StepRefMetadataKey: "build.finalize"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		iteration, err := s.Create(beads.Bead{
+			Title: "finalize iteration",
+			Type:  "task",
+			Metadata: map[string]string{
+				beadmeta.StepRefMetadataKey:       "finalize.iteration.1",
+				beadmeta.ControlForMetadataKey:    "finalize",
+				beadmeta.LogicalBeadIDMetadataKey: ralph.ID,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := s.Create(beads.Bead{
+			Title:    "next step",
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.StepRefMetadataKey: "build.report"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		finalizer, err := s.Create(beads.Bead{
+			Title:    "finalizer",
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, dep := range [][2]string{
+			{ralph.ID, blocker.ID},
+			{ralph.ID, iteration.ID},
+			{iteration.ID, blocker.ID},
+			{next.ID, blocker.ID},
+			{finalizer.ID, blocker.ID},
+		} {
+			if err := s.DepAdd(dep[0], dep[1], "blocks"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetMetadataBatch(blocker.ID, map[string]string{
+			beadmeta.StepRefMetadataKey:      "build.repair-review",
+			beadmeta.KindMetadataKey:         "workflow-step",
+			beadmeta.OutcomeMetadataKey:      beadmeta.OutcomeFail,
+			beadmeta.WorkOutcomeMetadataKey:  beadmeta.WorkOutcomeBlocked,
+			beadmeta.FailureClassMetadataKey: "review_repair_blocked",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A formula step is sequenced on gc.outcome; its work outcome never
+		// withholds the members after it. The ralph stays out only because
+		// its iteration is still open.
+		if titles := titlesOf(got); !hasExactly(titles, "finalize iteration", "next step", "finalizer") {
+			t.Fatalf("Ready() = %v, want [finalize iteration finalizer next step]: a formula step closed failed with gc.work_outcome=blocked must not withhold the iteration, step or control after it", titles)
+		}
+	})
+
+	t.Run("ReadyExcludesWorkflowMembersWhileRootDeferred", func(t *testing.T) {
+		s := newStore()
+		future := time.Now().UTC().Add(time.Hour)
+		heldRoot, err := s.Create(beads.Bead{Title: "held root", Type: "task", DeferUntil: &future})
+		if err != nil {
+			t.Fatal(err)
+		}
+		liveRoot, err := s.Create(beads.Bead{Title: "live root", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		members := []beads.Bead{
+			{Title: "held step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: heldRoot.ID}},
+			{Title: "held finalizer", Type: "task", Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: heldRoot.ID,
+				beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+			}},
+			{Title: "live step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: liveRoot.ID}},
+		}
+		for _, m := range members {
+			created, err := s.Create(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DepAdd(created.ID, blocker.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		// Every member's blocker is closed. The members of the deferred root
+		// stay held, its control included; the live root's member is offered.
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"live root", "live step"}; !slices.Equal(titlesOf(got), want) {
+			t.Fatalf("Ready() = %v, want %v: a deferred workflow root holds its steps and controls out of Ready", titlesOf(got), want)
+		}
+	})
+
+	t.Run("ReadyExcludesWorkflowMembersWhileRootDeferredUndated", func(t *testing.T) {
+		s := newStore()
+		heldRoot, err := s.Create(beads.Bead{Title: "held root", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// An undated hold, written the way a caller defers a bead through the
+		// Store API: status=deferred and no defer_until.
+		deferred := "deferred"
+		if err := s.Update(heldRoot.ID, beads.UpdateOpts{Status: &deferred}); err != nil {
+			t.Fatal(err)
+		}
+		liveRoot, err := s.Create(beads.Bead{Title: "live root", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		members := []beads.Bead{
+			{Title: "held step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: heldRoot.ID}},
+			{Title: "held finalizer", Type: "task", Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: heldRoot.ID,
+				beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+			}},
+			{Title: "live step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: liveRoot.ID}},
+		}
+		for _, m := range members {
+			if _, err := s.Create(m); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"live root", "live step"}; !slices.Equal(titlesOf(got), want) {
+			t.Fatalf("Ready() = %v, want %v: a workflow root deferred with no date holds its steps and controls out of Ready", titlesOf(got), want)
+		}
+	})
+
 	t.Run("ReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked", func(t *testing.T) {
 		s := newStore()
 		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})

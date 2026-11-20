@@ -1,15 +1,23 @@
 package tmux
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
@@ -290,6 +298,7 @@ func TestPhase2ProviderRespondApprovesAndClearsPrompt(t *testing.T) {
 		outs: []string{
 			approvalPromptPane(), // pre-verify capture: prompt present
 			"0",                  // #{pane_in_mode} probe -> not parked (no cancel)
+			"",                   // native bootstrap invalidation
 			"",                   // send-keys -l result (ignored)
 			`assistant ready`,    // poll capture: prompt cleared
 		},
@@ -461,9 +470,9 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		evidence["error"] = err.Error()
 		return workertest.Fail(profile, workertest.RequirementInteractionRespond, fmt.Sprintf("Respond: %v", err)).WithEvidence(evidence)
 	}
-	if len(calls) != 5 {
+	if len(calls) != 6 {
 		return workertest.Fail(profile, workertest.RequirementInteractionRespond,
-			fmt.Sprintf("tmux calls = %d, want 5", len(calls))).WithEvidence(evidence)
+			fmt.Sprintf("tmux calls = %d, want 6", len(calls))).WithEvidence(evidence)
 	}
 	// The #{pane_in_mode} probe is the ga-c4w major #2 copy-mode guard: Respond
 	// checks whether the pane is parked in copy-mode before delivering the
@@ -475,6 +484,7 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		phase2AgentPaneLookup(session),
 		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-120"},
 		{"-u", "-L", "phase2-sock", "display-message", "-t", pane, "-p", "#{pane_in_mode}"},
+		{"-u", "-L", "phase2-sock", "set-option", "-p", "-t", pane, bootstrapInputOption, "spent"},
 		{"-u", "-L", "phase2-sock", "send-keys", "-t", pane, "-l", "1"},
 		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-120"},
 	}
@@ -490,6 +500,7 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		strings.Join(calls[2], " "),
 		strings.Join(calls[3], " "),
 		strings.Join(calls[4], " "),
+		strings.Join(calls[5], " "),
 	}, " | ")
 	return workertest.Pass(profile, workertest.RequirementInteractionRespond, "tmux provider approved the interaction and cleared the prompt").WithEvidence(evidence)
 }
@@ -1191,5 +1202,554 @@ func TestParseApprovalPrompt_WrappedQuestionStopsAtTheMenu(t *testing.T) {
 	}
 	if strings.Contains(a.Question, "Yes") || strings.Contains(a.Question, "╌") {
 		t.Errorf("Question = %q, want only the question rows", a.Question)
+	}
+}
+
+// Captured from Claude2.1.308 / Opus5.5 on bb0bfa319. The native command has
+// no space in /native-approval, while the 80-column UI splits it after /n.
+const nativeClaudeApprovalCommand = "printf %s RFC8191_GRANTED_a0187eff1ad64755803cfd41f1035a93 > /Users/admin/rfc8191/cities/rfc-questions-6b8b9019ce654e55aea596720d18f852/native-approval-b54bcd3e246d4142b08ab98830185f84/granted.txt"
+
+const nativeClaudeApprovalScreen = `────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Write approval marker to granted.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ printf %s RFC8191_GRANTED_a0187eff1ad64755803cfd41f1035a93 >
+ │ /Users/admin/rfc8191/cities/rfc-questions-6b8b9019ce654e55aea596720d18f852/n
+ │ ative-approval-b54bcd3e246d4142b08ab98830185f84/granted.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Permission rule Bash(printf *) requires confirmation for this command.
+ /permissions to update rules
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend`
+
+type nativeClaudeApprovalExecutor struct {
+	paneExecutor
+	providerID string
+	managed    bool
+}
+
+func (e *nativeClaudeApprovalExecutor) execute(args []string) (string, error) {
+	for _, arg := range args {
+		if arg == "show-environment" {
+			e.calls = append(e.calls, append([]string(nil), args...))
+			env := "GC_PROVIDER_SESSION_ID=" + e.providerID + "\nGC_DIR=/owned/qualification\n"
+			if e.managed {
+				env += "GC_SESSION_ID=gcg-owned\n"
+			}
+			return env, nil
+		}
+	}
+	return e.paneExecutor.execute(args)
+}
+
+func (e *nativeClaudeApprovalExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+func nativeClaudeApprovalRecords(t *testing.T, callID, command string) string {
+	t.Helper()
+	rows := []any{
+		map[string]any{"type": "user", "sessionId": "native-approval-session", "promptId": "native-approval-prompt", "message": map[string]any{"content": "Request one harmless approval"}},
+		map[string]any{"type": "assistant", "sessionId": "native-approval-session", "message": map[string]any{"content": []any{map[string]any{"type": "tool_use", "id": callID, "name": "Bash", "input": map[string]any{"command": command, "description": "Write approval marker to granted.txt"}}}}},
+	}
+	var text strings.Builder
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text.Write(data)
+		text.WriteByte('\n')
+	}
+	return text.String()
+}
+
+func nativeClaudeApprovalTmux(t *testing.T, tail *string) (*Tmux, *nativeClaudeApprovalExecutor) {
+	t.Helper()
+	ex := &nativeClaudeApprovalExecutor{paneExecutor: paneExecutor{pane: nativeClaudeApprovalScreen, inMode: "0"}, providerID: "native-approval-session"}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex, claudeQuestionTranscript: func(string) (string, error) { return *tail, nil }}
+	return tm, ex
+}
+
+func TestNativeClaudeApprovalRetainsExactWrappedCommandAndStableOccurrence(t *testing.T) {
+	tail := nativeClaudeApprovalRecords(t, "toolu_first", nativeClaudeApprovalCommand)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	first, err := tm.Pending("q")
+	if err != nil || first == nil || first.Metadata["command"] != nativeClaudeApprovalCommand || first.Metadata["request_identity"] != "native_invocation" {
+		t.Fatalf("native command changed at its visible wrap: pending=%+v err=%v", first, err)
+	}
+	again, err := tm.Pending("q")
+	if err != nil || again == nil || again.RequestID != first.RequestID {
+		t.Fatalf("same native approval changed identity: %+v,%v", again, err)
+	}
+	if err := tm.checkNoApprovalPrompt("q"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("ordinary input did not stay held: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeApprovalIdenticalLaterInvocationRejectsStaleAnswer(t *testing.T) {
+	tail := nativeClaudeApprovalRecords(t, "toolu_first", nativeClaudeApprovalCommand)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	first, err := tm.Pending("q")
+	if err != nil || first == nil {
+		t.Fatalf("first=%+v,%v", first, err)
+	}
+	tail = nativeClaudeApprovalRecords(t, "toolu_second", nativeClaudeApprovalCommand)
+	second, err := tm.Pending("q")
+	if err != nil || second == nil || second.RequestID == first.RequestID {
+		t.Fatalf("identical later invocation reused identity: first=%+v next=%+v,%v", first, second, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: first.RequestID, Action: "approve"}); !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("old approval reached replacement occurrence: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeApprovalUnknownCompletedAmbiguousAndForeignRefuseEveryAction(t *testing.T) {
+	first := nativeClaudeApprovalRecords(t, "toolu_first", nativeClaudeApprovalCommand)
+	second := nativeClaudeApprovalRecords(t, "toolu_second", nativeClaudeApprovalCommand)
+	_, secondCall, _ := strings.Cut(second, "\n")
+	completed := first + `{"type":"user","sessionId":"native-approval-session","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_first","content":"completed"}]}}` + "\n"
+	for name, records := range map[string]string{
+		"different command":  nativeClaudeApprovalRecords(t, "toolu_first", "printf other"),
+		"completed":          completed,
+		"unbound completion": first + `{"type":"user","sessionId":"native-approval-session","message":{"content":[{"type":"tool_result","content":"done"}]}}` + "\n",
+		"ambiguous":          first + secondCall,
+		"foreign session":    strings.ReplaceAll(first, "native-approval-session", "another-provider-session"),
+		"malformed":          first + "{incomplete\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tail := records
+			tm, ex := nativeClaudeApprovalTmux(t, &tail)
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["command"] != "" || pending.Metadata["response_unavailable"] == "" {
+				t.Fatalf("unproven native command exposed as answerable: %+v,%v", pending, err)
+			}
+			for _, action := range []string{"approve", "deny"} {
+				if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+					t.Fatalf("%s reached unproven native request: %v", action, err)
+				}
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}
+
+func TestNativeClaudeApprovalPreservesRealNewlineAndQuotedSpaces(t *testing.T) {
+	command := "printf '%s  %s' one two\nprintf done"
+	pane := strings.Repeat("─", 80) + "\n Bash command\n Write approval marker to granted.txt\n" + strings.Repeat("╌", 80) + "\n │ printf '%s  %s' one two\n │ printf done\n" + strings.Repeat("╌", 80) + "\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n Esc to cancel · Tab to amend"
+	tail := nativeClaudeApprovalRecords(t, "toolu_lines", command)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	ex.pane = pane
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["command"] != command {
+		t.Fatalf("native hard newline or quoted spaces changed: %+v,%v", pending, err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+type nativeClaudeApprovalAnswerExecutor struct{ nativeClaudeApprovalExecutor }
+
+func (e *nativeClaudeApprovalAnswerExecutor) execute(args []string) (string, error) {
+	out, err := e.nativeClaudeApprovalExecutor.execute(args)
+	if sendsKeys(args) {
+		e.pane = "assistant ready"
+	}
+	return out, err
+}
+
+func (e *nativeClaudeApprovalAnswerExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+func TestNativeClaudeApprovalBoundGrantAndDenySendExactlyOneSelectedAction(t *testing.T) {
+	for action, key := range map[string]string{"approve": "1", "deny": "2"} {
+		t.Run(action, func(t *testing.T) {
+			tail := nativeClaudeApprovalRecords(t, "toolu_bound", nativeClaudeApprovalCommand)
+			tm, original := nativeClaudeApprovalTmux(t, &tail)
+			ex := &nativeClaudeApprovalAnswerExecutor{nativeClaudeApprovalExecutor: *original}
+			tm.exec = ex
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["request_identity"] != "native_invocation" {
+				t.Fatalf("native pending=%+v,%v", pending, err)
+			}
+			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); err != nil {
+				t.Fatal(err)
+			}
+			if keys := sentKeys(ex.calls); len(keys) != 1 || keys[0] != key {
+				t.Fatalf("bound action sent %q, want one %s key", keys, key)
+			}
+		})
+	}
+}
+
+func TestNativeClaudeApprovalKnownUUIDCannotFallBackToUnboxedContent(t *testing.T) {
+	tail := nativeClaudeApprovalRecords(t, "toolu_current", nativeClaudeApprovalCommand)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	ex.pane = "● Bash(printf harmless)\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No"
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["response_unavailable"] == "" || pending.Metadata["request_identity"] != "unavailable" {
+		t.Fatalf("managed UUID downgraded to unbound content: %+v,%v", pending, err)
+	}
+	for _, action := range []string{"approve", "deny"} {
+		if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+			t.Fatalf("%s reached unbound managed frame: %v", action, err)
+		}
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeApprovalManagedWithoutProviderUUIDIsUnavailable(t *testing.T) {
+	tail := nativeClaudeApprovalRecords(t, "toolu_current", nativeClaudeApprovalCommand)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	ex.providerID, ex.managed = "", true
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["response_unavailable"] == "" || pending.Metadata["request_identity"] != "unavailable" {
+		t.Fatalf("managed missing UUID downgraded: %+v,%v", pending, err)
+	}
+	for _, action := range []string{"approve", "deny"} {
+		if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+			t.Fatalf("%s reached managed missing UUID: %v", action, err)
+		}
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+const approvalHookTestPrefix = "@gc_claude_approval_v1_"
+
+type approvalHookExecutor struct {
+	paneExecutor
+	env           map[string]string
+	options       map[string]string
+	fence         string
+	inputAttempts int
+	atomicAnswers int
+	failInput     bool
+	drift         bool
+}
+
+func (e *approvalHookExecutor) execute(args []string) (string, error) {
+	e.calls = append(e.calls, slices.Clone(args))
+	if slices.Contains(args, "show-environment") {
+		var lines []string
+		for k, v := range e.env {
+			lines = append(lines, k+"="+v)
+		}
+		return strings.Join(lines, "\n"), nil
+	}
+	if slices.Contains(args, fenceReadFormat) {
+		return e.fence, nil
+	}
+	if slices.Contains(args, "show-options") {
+		var lines []string
+		for k, v := range e.options {
+			lines = append(lines, k+" "+v)
+		}
+		return strings.Join(lines, "\n"), nil
+	}
+	if i := slices.Index(args, "if-shell"); i >= 0 {
+		condition, body := args[i+4], args[i+5]
+		if strings.Contains(condition, approvalHookTestPrefix) {
+			match := regexp.MustCompile(`#\{==:#\{(@gc_claude_approval_v1_[a-f0-9_]+)\},([^}]*)\}`).FindStringSubmatch(condition)
+			if len(match) != 3 {
+				return "", errors.New("test received malformed observation CAS")
+			}
+			if e.drift || e.options[match[1]] != match[2] || !strings.Contains(condition, testFence.Digest()+".#{pane_id}") {
+				return runtime.TmuxFenceMissPrefix + e.fence, nil
+			}
+			// One tmux command list is the atomic observation/input boundary.
+			// Separate client calls are deliberately not combined by this fake.
+			for _, command := range strings.Split(body, " ; ") {
+				inner := shellquote.Split(command)
+				switch inner[0] {
+				case "set-option":
+					if slices.Contains(inner, "-u") {
+						delete(e.options, inner[len(inner)-1])
+					} else {
+						e.options[inner[len(inner)-2]] = inner[len(inner)-1]
+					}
+				case "paste-buffer", "send-keys":
+					e.inputAttempts++
+					e.atomicAnswers++
+					if e.failInput {
+						return "", errors.New("constructed unknown input transport outcome")
+					}
+				}
+			}
+			return "", nil
+		}
+		if strings.Contains(body, "paste-buffer") || strings.Contains(body, "send-keys") {
+			e.inputAttempts++
+			if e.failInput {
+				return "", errors.New("constructed unknown input transport outcome")
+			}
+			return "", nil
+		}
+	}
+	if slices.Contains(args, "send-keys") || slices.Contains(args, "paste-buffer") {
+		e.inputAttempts++
+		if e.failInput {
+			return "", errors.New("constructed unknown input transport outcome")
+		}
+	}
+	return e.paneExecutor.execute(args)
+}
+
+func (e *approvalHookExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+func approvalHookFixture(t *testing.T) (string, string, string, string, string) {
+	t.Helper()
+	var pane string
+	if err := json.Unmarshal([]byte(readApprovalFixture(t, "case16-unpublished-pane.json")), &pane); err != nil {
+		t.Fatal(err)
+	}
+	tail := readApprovalFixture(t, "case16-unpublished-tail.jsonl")
+	var user struct {
+		SessionID, PromptID string
+		Message             struct{ Content string }
+	}
+	first, _, _ := strings.Cut(tail, "\n")
+	if err := json.Unmarshal([]byte(first), &user); err != nil {
+		t.Fatal(err)
+	}
+	_, command, ok := strings.Cut(user.Message.Content, "execute this exact shell command: ")
+	if !ok {
+		t.Fatal("actual user fixture lost requested command")
+	}
+	command, _, ok = strings.Cut(command, ". This harmless qualification")
+	if !ok {
+		t.Fatal("actual user fixture lost command boundary")
+	}
+	return pane, tail, user.SessionID, user.PromptID, command
+}
+
+// This receipt is CONSTRUCTED from the official hook schema. It is not a
+// captured case16 callback; case16 had no Bash callback installed.
+func approvalHookTestReceipt(session, prompt, tool, command string, consumed bool) (string, string) {
+	data, _ := json.Marshal(map[string]any{
+		"version": 1, "fence_digest": testFence.Digest(), "session_id": session,
+		"prompt_id": prompt, "tool_use_id": tool, "command": command, "description": "Write qualification marker to grant-once file", "consumed": consumed,
+	})
+	sum := sha256.Sum256([]byte(session + "\x00" + prompt + "\x00" + tool))
+	return approvalHookTestPrefix + testFence.Digest() + "_" + hex.EncodeToString(sum[:16]), base64.RawStdEncoding.EncodeToString(data)
+}
+
+func approvalHookTmux(t *testing.T) (*Tmux, *approvalHookExecutor, *string, string, string, string) {
+	t.Helper()
+	pane, tail, session, prompt, command := approvalHookFixture(t)
+	env := fenceEnv(testFence)
+	env["GC_PROVIDER_SESSION_ID"], env["GC_SESSION_ID"], env["GC_DIR"] = session, "gcg-owned", "/owned"
+	ex := &approvalHookExecutor{paneExecutor: paneExecutor{pane: pane, inMode: "0"}, env: env, options: map[string]string{}, fence: testFence.Digest() + ".%1|%1|0"}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex, claudeQuestionTranscript: func(string) (string, error) { return tail, nil }}
+	return tm, ex, &tail, session, prompt, command
+}
+
+func TestNativeClaudeApprovalHookBeforeTranscriptPublication(t *testing.T) {
+	tm, ex, _, session, prompt, command := approvalHookTmux(t)
+	key, encoded := approvalHookTestReceipt(session, prompt, "toolu_constructed_case16", command, false)
+	ex.options[key] = encoded
+	first, err := tm.Pending("q")
+	if err != nil || first == nil || first.Metadata["request_identity"] != "native_invocation" || first.Metadata["command"] != command {
+		t.Fatalf("captured unpublished Claude approval needs the fenced native callback: pending=%+v err=%v", first, err)
+	}
+	data, _ := base64.RawStdEncoding.DecodeString(encoded)
+	sum := sha256.Sum256(data)
+	if first.Metadata["native_session_id"] != session || first.Metadata["native_prompt_id"] != prompt || first.Metadata["native_tool_use_id"] != "toolu_constructed_case16" || first.Metadata["native_observation_sha256"] != hex.EncodeToString(sum[:]) || first.Metadata["native_observation_consumed"] != "false" {
+		t.Fatal("pending lost independent exact native callback provenance")
+	}
+	again, err := tm.Pending("q")
+	if err != nil || again.RequestID != first.RequestID || ex.inputAttempts != 0 {
+		t.Fatal("observation changed identity or sent input")
+	}
+}
+
+func TestNativeClaudeApprovalHookUnknownConflictingAndDuplicateInvocationsRefuse(t *testing.T) {
+	for _, scenario := range []string{"missing", "wrong-command", "foreign-session", "old-prompt", "duplicate", "consumed", "transcript-conflict", "completed", "next-prompt", "bad-fence", "malformed", "missing-consumed", "null-consumed", "string-consumed", "number-consumed"} {
+		t.Run(scenario, func(t *testing.T) {
+			tm, ex, tail, session, prompt, command := approvalHookTmux(t)
+			key, value := approvalHookTestReceipt(session, prompt, "toolu_case16", command, false)
+			switch scenario {
+			case "missing":
+			case "bad-fence":
+				ex.fence = "foreign.%1|%1|0"
+				ex.options[key] = value
+			case "malformed":
+				ex.options[key] = "not-base64"
+			case "missing-consumed", "null-consumed", "string-consumed", "number-consumed":
+				data, _ := base64.RawStdEncoding.DecodeString(value)
+				var record map[string]any
+				_ = json.Unmarshal(data, &record)
+				switch scenario {
+				case "missing-consumed":
+					delete(record, "consumed")
+				case "null-consumed":
+					record["consumed"] = nil
+				case "string-consumed":
+					record["consumed"] = "false"
+				case "number-consumed":
+					record["consumed"] = 0
+				}
+				data, _ = json.Marshal(record)
+				ex.options[key] = base64.RawStdEncoding.EncodeToString(data)
+			case "wrong-command":
+				key, value = approvalHookTestReceipt(session, prompt, "toolu_case16", command+" ", false)
+				ex.options[key] = value
+			case "foreign-session":
+				key, value = approvalHookTestReceipt("foreign", prompt, "toolu_case16", command, false)
+				ex.options[key] = value
+			case "old-prompt":
+				key, value = approvalHookTestReceipt(session, "old", "toolu_case16", command, false)
+				ex.options[key] = value
+			case "consumed":
+				key, value = approvalHookTestReceipt(session, prompt, "toolu_case16", command, true)
+				ex.options[key] = value
+			case "duplicate":
+				ex.options[key] = value
+				key, value = approvalHookTestReceipt(session, prompt, "toolu_other", command, false)
+				ex.options[key] = value
+			case "transcript-conflict":
+				ex.options[key] = value
+				row := map[string]any{"type": "assistant", "sessionId": session, "message": map[string]any{"content": []any{map[string]any{"type": "tool_use", "name": "Bash", "id": "toolu_case16", "input": map[string]any{"command": command + " ", "description": "Write qualification marker to grant-once file"}}}}}
+				data, _ := json.Marshal(row)
+				*tail += string(data) + "\n"
+			case "completed":
+				ex.options[key] = value
+				*tail += `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_case16","content":"done"}]}}` + "\n"
+			case "next-prompt":
+				ex.options[key] = value
+				row := map[string]any{"type": "user", "sessionId": session, "promptId": "new-prompt", "message": map[string]any{"content": "next"}}
+				data, _ := json.Marshal(row)
+				*tail += string(data) + "\n"
+			}
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["request_identity"] != "unavailable" || pending.Metadata["command"] != "" {
+				t.Fatalf("unsafe callback became answerable: %+v %v", pending, err)
+			}
+			for _, action := range []string{"approve", "deny"} {
+				if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); err == nil {
+					t.Fatal("unavailable native observation accepted input")
+				}
+			}
+			if ex.inputAttempts != 0 {
+				t.Fatal("refusal sent keys")
+			}
+		})
+	}
+}
+
+func TestNativeClaudeApprovalHookConsumptionSurvivesUnknownSendAndControllerRestart(t *testing.T) {
+	for _, fenced := range []bool{false, true} {
+		t.Run(fmt.Sprint(fenced), func(t *testing.T) {
+			tm, ex, tail, session, prompt, command := approvalHookTmux(t)
+			key, value := approvalHookTestReceipt(session, prompt, "toolu_case16", command, false)
+			ex.options[key] = value
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["command"] != command {
+				t.Fatalf("precondition: %+v %v", pending, err)
+			}
+			ex.failInput = true
+			respond := func() error {
+				response := runtime.InteractionResponse{RequestID: pending.RequestID, Action: "approve"}
+				if fenced {
+					return (&Provider{tm: tm}).RespondFenced(context.Background(), "q", testFence, response)
+				}
+				return tm.Respond("q", response)
+			}
+			if err := respond(); err == nil {
+				t.Fatal("constructed unknown send succeeded")
+			}
+			data, _ := base64.RawStdEncoding.DecodeString(ex.options[key])
+			var receipt map[string]any
+			_ = json.Unmarshal(data, &receipt)
+			if receipt["consumed"] != true || ex.inputAttempts != 1 || ex.atomicAnswers != 1 {
+				t.Fatalf("authority not consumed before one input attempt: %v/%d", receipt["consumed"], ex.inputAttempts)
+			}
+			restarted := &Tmux{cfg: DefaultConfig(), exec: ex, claudeQuestionTranscript: func(string) (string, error) { return *tail, nil }}
+			next, err := restarted.Pending("q")
+			if err != nil || next == nil || next.RequestID != pending.RequestID || next.Metadata["request_identity"] != "unavailable" {
+				t.Fatalf("restart lost consumed occurrence: %+v %v", next, err)
+			}
+			if err := restarted.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "approve"}); err == nil || ex.inputAttempts != 1 {
+				t.Fatal("unknown send was replayed")
+			}
+			current, err := restarted.approvalInPane("q")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleared, err := restarted.respondCleared("q", current)
+			if err != nil || cleared {
+				t.Fatal("consumed but visible prompt was treated as cleared")
+			}
+			delete(ex.options, key) // A native completion may arrive before the screen redraws.
+			cleared, err = restarted.respondCleared("q", current)
+			if err != nil || cleared {
+				t.Fatal("unbound but visible prompt was treated as cleared")
+			}
+			ex.pane = ""
+			cleared, err = restarted.respondCleared("q", current)
+			if err != nil || !cleared {
+				t.Fatal("actually removed approval did not clear")
+			}
+		})
+	}
+}
+
+func TestNativeClaudeApprovalHookStopConsumesBeforeEscapeAndCASDriftSendsNothing(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		t.Run(fmt.Sprint(drift), func(t *testing.T) {
+			tm, ex, _, session, prompt, command := approvalHookTmux(t)
+			key, value := approvalHookTestReceipt(session, prompt, "toolu_case16", command, false)
+			ex.options[key] = value
+			ex.drift = drift
+			handled, err := tm.cancelClaudeDialog(context.Background(), "q")
+			if !handled {
+				t.Fatal("Stop abandoned its native dialog")
+			}
+			if drift {
+				if err == nil || ex.inputAttempts != 0 {
+					t.Fatal("changed callback received Stop input")
+				}
+				return
+			}
+			data, _ := base64.RawStdEncoding.DecodeString(ex.options[key])
+			var receipt map[string]any
+			_ = json.Unmarshal(data, &receipt)
+			if err != nil || receipt["consumed"] != true || ex.inputAttempts != 1 {
+				t.Fatalf("Stop did not consume before exactly one Escape: %v/%v/%d", err, receipt["consumed"], ex.inputAttempts)
+			}
+		})
+	}
+}
+
+func TestNativeClaudeApprovalHookSameIDTranscriptDedupAndLaterOccurrenceRejectsStaleAnswer(t *testing.T) {
+	tm, ex, tail, session, prompt, command := approvalHookTmux(t)
+	key, value := approvalHookTestReceipt(session, prompt, "toolu_first", command, false)
+	ex.options[key] = value
+	row := map[string]any{"type": "assistant", "sessionId": session, "message": map[string]any{"content": []any{map[string]any{"type": "tool_use", "name": "Bash", "id": "toolu_first", "input": map[string]any{"command": command, "description": "Write qualification marker to grant-once file"}}}}}
+	data, _ := json.Marshal(row)
+	*tail += string(data) + "\n"
+	first, err := tm.Pending("q")
+	if err != nil || first == nil || first.Metadata["command"] != command {
+		t.Fatalf("same native ID was not deduplicated: %+v %v", first, err)
+	}
+	// Native completion retires the first call; a later identical command has
+	// another native ID, never the first occurrence's response authority.
+	*tail += `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_first","content":"done"}]}}` + "\n"
+	delete(ex.options, key)
+	key, value = approvalHookTestReceipt(session, prompt, "toolu_second", command, false)
+	ex.options[key] = value
+	second, err := tm.Pending("q")
+	if err != nil || second == nil || second.Metadata["command"] != command || second.RequestID == first.RequestID {
+		t.Fatalf("later identical call reused occurrence: %+v %v", second, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: first.RequestID, Action: "approve"}); !errors.Is(err, runtime.ErrInteractionGone) || ex.inputAttempts != 0 {
+		t.Fatal("stale response reached later identical approval")
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -582,6 +584,8 @@ func (p probeListener) acceptsBefore(t *testing.T) int {
 // opens and closes, so the lifecycle can be asserted without a listener, a
 // database or a byte of MySQL wire protocol.
 type fakeProbeConnector struct {
+	prefix     string
+	projectID  string
 	cursors    map[string]int64
 	connectErr error
 	pingErr    error
@@ -680,6 +684,9 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 	c.connector.record(query, args)
 	if c.connector.queryErr != nil && query != cursorExistsQuery && query != cursorExistsWithHeadQuery {
 		return nil, c.connector.queryErr
+	}
+	if query == namespaceQuery {
+		return &fakeProbeRows{value: c.connector.prefix, extra: []driver.Value{c.connector.projectID}}, nil
 	}
 	if query == cursorExistsQuery || query == cursorExistsWithHeadQuery {
 		table := namedArg(args, 0)
@@ -807,7 +814,7 @@ const fakeProbeHead = "fakehead0000000000000000000000000"
 // answer the probe reads, plus whatever extra columns the statement carries
 // (the main-lane existence statement carries HEAD).
 type fakeProbeRows struct {
-	value int64
+	value driver.Value
 	extra []driver.Value
 	done  bool
 }
@@ -830,4 +837,59 @@ func (r *fakeProbeRows) Next(dest []driver.Value) error {
 	dest[0] = r.value
 	copy(dest[1:], r.extra)
 	return nil
+}
+
+func TestNamespaceReadNeverWritesAndClosesItsSession(t *testing.T) {
+	for _, tc := range []struct{ name, prefix, actualID, wantErr string }{
+		{"valid", "prod", "project-1", ""},
+		{"foreign database", "prod", "project-2", "identity mismatch"},
+		{"missing namespace", "", "project-1", "no issue_prefix"},
+		{"legacy database identity", "prod", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeProbeConnector{prefix: tc.prefix, projectID: tc.actualID}
+			got, err := readNamespaceOver(context.Background(), fake, "project-1")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error=%v", err)
+				}
+			} else if err != nil || got != "prod" {
+				t.Fatalf("prefix=%q error=%v", got, err)
+			}
+			if fake.opened.Load() != 1 || fake.closed.Load() != 1 {
+				t.Fatalf("sessions opened=%d closed=%d", fake.opened.Load(), fake.closed.Load())
+			}
+			statements := fake.statements()
+			if len(statements) != 1 || statements[0] != namespaceQuery || !strings.HasPrefix(statements[0], "SELECT ") {
+				t.Fatalf("statements=%v", statements)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fake := &fakeProbeConnector{}
+	if _, err := readNamespaceOver(ctx, fake, "project-1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled read=%v", err)
+	}
+	if fake.dials.Load() != 0 {
+		t.Fatal("canceled lookup dialed the proxy")
+	}
+}
+
+func TestNamespacePreviewDoesNotCreateOrStartAMissingProvider(t *testing.T) {
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"custom-database","project_id":"project-1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(RootPathEnv, t.TempDir()) // ambient overrides cannot redirect adoption
+	if _, err := ReadIssuePrefix(context.Background(), root); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("stopped-provider preview=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "dolt")); !os.IsNotExist(err) {
+		t.Fatalf("preview created provider root: %v", err)
+	}
 }

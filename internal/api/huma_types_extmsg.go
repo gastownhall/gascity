@@ -20,10 +20,13 @@ import (
 type ExtMsgInboundInput struct {
 	CityScope
 	Body struct {
-		Message   *extmsg.ExternalInboundMessage `json:"message,omitempty" doc:"Pre-normalized inbound message."`
-		Provider  string                         `json:"provider,omitempty" doc:"Provider name for raw payloads (required when message is absent)."`
-		AccountID string                         `json:"account_id,omitempty" doc:"Account ID for raw payloads (required when message is absent)."`
-		Payload   []byte                         `json:"payload,omitempty" doc:"Raw payload bytes."`
+		CancelDeliveries bool                           `json:"cancel_deliveries,omitempty" doc:"Monotonically cancel all deliveries of an existing admission. Requires the same original request_key/message/deliveries; never creates a missing admission. Prepared or unknown lane writes remain cancel_requested until the original operation/tombstone resolves."`
+		RequestKey       string                         `json:"request_key,omitempty" doc:"Opt-in durable admission key, scoped by conversation and actor. Requires explicit deliveries and pre-normalized message."`
+		Deliveries       []extmsg.PublicRecipient       `json:"deliveries,omitempty" doc:"Frozen qualified recipient identities and native message policies for durable admission. Lane guarantee is at_most_once; ambiguous native outcomes are not resent."`
+		Message          *extmsg.ExternalInboundMessage `json:"message,omitempty" doc:"Pre-normalized inbound message."`
+		Provider         string                         `json:"provider,omitempty" doc:"Provider name for raw payloads (required when message is absent)."`
+		AccountID        string                         `json:"account_id,omitempty" doc:"Account ID for raw payloads (required when message is absent)."`
+		Payload          []byte                         `json:"payload,omitempty" doc:"Raw payload bytes."`
 	}
 }
 
@@ -120,7 +123,7 @@ type ExtMsgGroupEnsureInput struct {
 	Body struct {
 		RootConversation extmsg.ConversationRef `json:"root_conversation,omitempty" doc:"Root conversation reference."`
 		Mode             extmsg.GroupMode       `json:"mode,omitempty" doc:"Group mode (launcher, etc.)."`
-		DefaultHandle    string                 `json:"default_handle,omitempty" doc:"Default handle for the group."`
+		DefaultHandle    *string                `json:"default_handle,omitempty" doc:"Default handle for the group. Omit to preserve an existing route; an empty string clears it."`
 		Metadata         map[string]string      `json:"metadata,omitempty" doc:"Group metadata."`
 	}
 }

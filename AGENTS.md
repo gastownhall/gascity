@@ -24,17 +24,24 @@ next to that code; read the matching file before changing it.
 
 | When you touch | Read first |
 |---|---|
-| Asked to run or try Gas City, not change it | README "Get it running" (no build) |
-| `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
-| `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
+| Running or trying Gas City | README "Get it running" (no build) |
+| HTTP/SSE, events, extmsg, CLI API calls, OpenAPI or dashboard | `internal/api/AGENTS.md` |
+| `internal/config/` | `internal/config/AGENTS.md` |
+| Rig/storage | `internal/rig/AGENTS.md`, `internal/beads/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
-| Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |
+| CLI or session lifecycle | `cmd/gc/AGENTS.md`, `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
-| `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |
+| Runtime | `internal/runtime/AGENTS.md`, `internal/providerreadiness/AGENTS.md` |
+| Provider process environment | `internal/processenv/AGENTS.md` |
+| Provider hooks | `internal/hooks/AGENTS.md` |
+| Gate processes | `internal/convergence/AGENTS.md` |
+| Go imports, new files, `scripts/`, test runners or git hooks | `scripts/AGENTS.md` |
 | Any test | `TESTING.md` |
-| Anything under `docs/` | `.claude/skills/gascity-docs/SKILL.md` |
+| Acceptance helpers | `test/acceptance/helpers/AGENTS.md` |
+| OSC companion | `cmd/gc-osc7501/AGENTS.md` |
+| `docs/` | `.claude/skills/gascity-docs/SKILL.md` |
 | New SDK surface or a new primitive | `engdocs/contributors/primitive-test.md` |
 | A controller or session reconciler incident | `engdocs/contributors/reconciler-debugging.md` (use `gc trace`) |
 | Worktree isolation or worker cleanup | `engdocs/archive/backlogs/worktree-roadmap.md` (lifecycle analysis and cleanup-bug lessons) |
@@ -315,10 +322,6 @@ targets, and a green `go test` is not evidence a change passes CI.
   `--config=remote-exec` (ask your human before adding either to
   `.bazelrc.local`). Details: TESTING.md "Bazel cache tiers" and
   `engdocs/bazel-quickstart.md`.
-- **BUILD files.** After changing imports or adding packages or files, run
-  `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
-  fails otherwise. Never commit machine-specific endpoints; they belong in
-  `.bazelrc.local`.
 - **Go-native twins** (the `-go` make targets and the sharded runners of
   TESTING.md "Cross-category runners, timing, and resource isolation") are
   for humans working offline and for hosts Bazel does not serve: the macOS

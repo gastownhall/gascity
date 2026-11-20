@@ -495,6 +495,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if cfg.FreshOnly {
 		return p.startFresh(ctx, name, cfg)
 	}
+	if err := p.validateReconcilerOwnedStaging(cfg); err != nil {
+		return err
+	}
 	p.rememberReadyPrompt(name, cfg)
 	// Was this name already occupied before we touched it? Asked structurally,
 	// before the attempt, because it is the only question whose answer cannot
@@ -593,6 +596,25 @@ func startFailureKeepsBox(startErr error, foreignBox bool) bool {
 	return foreignBox || errors.Is(startErr, runtime.ErrSessionExists)
 }
 
+func (p *Provider) validateReconcilerOwnedStaging(cfg runtime.Config) error {
+	if len(cfg.ReconcilerOwnedMergeablePaths) == 0 {
+		return nil
+	}
+	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return fmt.Errorf("exec provider: %w", err)
+	}
+	if !p.handshakeCapability(runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths) {
+		return fmt.Errorf("exec provider %s must declare %q before receiving reconciler-owned mergeable paths", p.script, runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths)
+	}
+	return nil
+}
+
+// SupportsReconcilerOwnedMergeablePaths reports the maintained script's
+// declared support for the reconciler-owned settings-file protocol.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return p.handshakeCapability(runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths)
+}
+
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
 // agent launch: it must implement the box-without-agent `provision` op
 // (proc.provision) and a way for the controller to launch the agent: the
@@ -615,6 +637,9 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // (execTransport.Launch). `provision` is never sent the first turn, which
 // the launch hands back for its caller to queue (finishSeparableLaunch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.validateReconcilerOwnedStaging(cfg); err != nil {
+		return err
+	}
 	p.rememberReadyPrompt(name, cfg)
 	p.weldedProvision.Delete(name)
 	if !p.supportsSeparableLaunch() {
@@ -714,6 +739,9 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 // v2-ready welded pack the Start is FreshOnly, after `observe` confirms the
 // name absent.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.validateReconcilerOwnedStaging(cfg); err != nil {
+		return err
+	}
 	if p.supportsSeparableLaunch() {
 		if err := p.launchAgent(ctx, name, cfg); err != nil {
 			return err

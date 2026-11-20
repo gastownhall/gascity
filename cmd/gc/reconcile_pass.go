@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -37,6 +38,7 @@ type passTrace struct {
 	Rows               []rowTrace
 	IdleTraces         []rowTrace // A15's ladder deferrals and decided stops, legacy's idle-timeout trace
 	Alerts             []string
+	ProviderUnresolved []ProviderUnresolvedGroup
 }
 
 // rowTrace is one row's decision when it changed: decideRow's reason and
@@ -99,6 +101,12 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		rec.Err = err.Error()
 		return passResult{}
 	}
+	rec.ProviderUnresolved = unresolvedProvidersForPass(&w, &a)
+	var recordProviderEvent func(events.Event)
+	if p.rec != nil {
+		recordProviderEvent = p.record
+	}
+	p.providerUnresolvedAlerts.report(rec.ProviderUnresolved, nil, "v2", p.stderr, recordProviderEvent, now)
 	rec.Alerts = a.Alerts
 	rec.IdleTraces = p.idleWants(&w, &a)
 

@@ -999,7 +999,7 @@ func (c liveSeatCity) tick(t *testing.T, now time.Time, spec *worktree.Spec) liv
 		WorktreeSpecs: map[string]*worktree.Spec{workID: spec},
 	}}
 	desired := map[string]TemplateParams{}
-	for _, state := range computePoolDesiredStatesAt(c.cfg, nil, snapshot.OpenInfos(), map[string]int{"worker": 1}, demand, now, nil) {
+	for _, state := range computePoolDesiredStatesAt(c.cfg, nil, nil, nil, snapshot.OpenInfos(), map[string]int{"worker": 1}, demand, now, nil) {
 		realizePoolDesiredSessionsAt(bp, &c.cfg.Agents[0], state, now, desired, &stderr)
 	}
 	base := cloneDesiredState(desired)

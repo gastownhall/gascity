@@ -76,11 +76,12 @@ type initPackConfig struct {
 
 var initConventionDirs = cityinit.InitConventionDirs()
 
-const defaultInitTemplate = "gascity"
+const defaultInitTemplate = cityinit.DefaultTemplate
 
 // wizardConfig carries the results of the interactive init wizard (or defaults
 // for non-interactive paths). doInit uses it to decide which config to write.
 type wizardConfig struct {
+	experience       string // optional beginner journey over the default pack
 	interactive      bool   // true if the wizard ran with user interaction
 	configName       string // canonical values: "minimal", "gastown", "gascity", "custom", or "empty"
 	defaultProvider  string // selected default provider key
@@ -101,7 +102,7 @@ func defaultWizardConfig() wizardConfig {
 }
 
 func canBootstrapExistingCity(wiz wizardConfig) bool {
-	return !wiz.interactive &&
+	return !wiz.interactive && wiz.experience == "" &&
 		(wiz.configName == "minimal" || wiz.configName == defaultInitTemplate) &&
 		wizardDefaultProvider(wiz) == "" &&
 		len(wiz.providers) == 0 &&
@@ -155,10 +156,12 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 	fmt.Fprintln(stdout, "  2. minimal   — default coding agent")                            //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "  3. gastown   — multi-agent orchestration pack")                  //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "  4. custom    — empty workspace, configure it yourself")          //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "  5. beginner   — guided local task, review and integration")      //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "Template [1]: ")                                                    //nolint:errcheck // best-effort stdout
 
 	configChoice := readLine(br)
 	configName := defaultInitTemplate
+	experience := ""
 
 	switch configChoice {
 	case "", "1", "gascity":
@@ -167,6 +170,9 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 		configName = "minimal"
 	case "3", "gastown":
 		configName = "gastown"
+	case "5", "beginner":
+		configName = defaultInitTemplate
+		experience = "beginner"
 	case "4", "custom":
 		configName = "custom"
 	default:
@@ -216,8 +222,12 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 		}
 	}
 
+	if experience == "beginner" {
+		providers = []string{defaultProvider}
+	}
 	return wizardConfig{
 		interactive:     true,
+		experience:      experience,
 		configName:      configName,
 		defaultProvider: defaultProvider,
 		providers:       providers,
@@ -232,7 +242,7 @@ type wizardProviderChoice struct {
 
 func configuredWizardProviderChoices(ctx context.Context) ([]wizardProviderChoice, error) {
 	names := api.ProviderReadinessNames()
-	items, err := initProbeProvidersReadiness(ctx, names, true)
+	items, err := wizardProbeProviderChoices(ctx, names, true)
 	if err != nil {
 		return nil, fmt.Errorf("checking provider readiness: %w", err)
 	}
@@ -324,6 +334,7 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var fromFlag string
 	var nameFlag string
 	var templateFlag string
+	var experienceFlag string
 	var providerFlag string
 	var providersFlag []string
 	var defaultProviderFlag string
@@ -360,6 +371,7 @@ agent prompt files in the target directory (useful when bootstrapping a
 committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 		Example: `  gc init
   gc init ~/my-city
+  gc init --experience beginner --default-provider claude ~/my-city
   gc init --default-provider codex ~/my-city
   gc init --template gastown --default-provider codex ~/my-city
   gc init --providers claude,codex --default-provider codex ~/my-city
@@ -433,6 +445,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "deprecated alias for --default-provider")
 	cmd.Flags().StringVar(&defaultProviderFlag, "default-provider", "", "default readiness-aware provider to select from --providers")
 	cmd.Flags().StringArrayVar(&providersFlag, "providers", nil, "readiness-aware providers to write to city.toml (repeatable or comma-separated)")
+	cmd.Flags().StringVar(&experienceFlag, "experience", "", "optional guided experience: beginner (uses the gascity template)")
 	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, gascity, custom, or empty")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().StringVar(&doltHostFlag, "dolt-host", "", "external/hosted Dolt host for the city beads ledger (or "+envDoltHost+"); pins the city to an external endpoint instead of bootstrapping a managed-local Dolt")
@@ -448,6 +461,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
+	cmd.MarkFlagsMutuallyExclusive("experience", "file")
+	cmd.MarkFlagsMutuallyExclusive("experience", "from")
 	cmd.Flags().StringVar(&storageFlag, "storage", "", "storage layout for the new city: split (the default: infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd >= "+initSplitBDMinVersion+" or the pinned Enterprise build, else the city starts single-store with a notice; a remote session runtime, or a city name that derives a reserved bead prefix, starts single-store too, and an explicit split is refused there) or single (every class on the work ledger)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix for the new city (default: derived from the city name)")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
@@ -656,13 +671,18 @@ func initWizardConfig(providerFlag, bootstrapProfileFlag string, skipProviderRea
 }
 
 func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProviderFlag string, providersFlag []string, templateFlag, bootstrapProfileFlag string, hosted hostedDoltInitOptions, skipProviderReadiness bool) (wizardConfig, string, error) {
+	experience, _ := cmd.Flags().GetString("experience")
+	experience = strings.TrimSpace(experience)
+	if experience != "" && experience != "beginner" {
+		return wizardConfig{}, "", fmt.Errorf("unknown experience %q (expected beginner)", experience)
+	}
 	legacyChanged := cmd.Flags().Changed("provider")
 	defaultChanged := cmd.Flags().Changed("default-provider")
 	providersChanged := cmd.Flags().Changed("providers")
 	templateChanged := cmd.Flags().Changed("template")
 	bootstrapChanged := strings.TrimSpace(bootstrapProfileFlag) != ""
 
-	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() && strings.TrimSpace(hosted.Transport) == "" && strings.TrimSpace(hosted.Target) == "" {
+	if experience == "" && !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() && strings.TrimSpace(hosted.Transport) == "" && strings.TrimSpace(hosted.Target) == "" {
 		return wizardConfig{}, "", nil
 	}
 	if err := hosted.validate(); err != nil {
@@ -682,6 +702,9 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	template, err := normalizeInitTemplate(templateFlag, templateChanged)
 	if err != nil {
 		return wizardConfig{}, "", err
+	}
+	if experience == "beginner" && template != defaultInitTemplate {
+		return wizardConfig{}, "", fmt.Errorf("--experience beginner requires the gascity template")
 	}
 	defaultProvider, err := normalizeInitProvider(defaultProviderFlag, skipProviderReadiness)
 	if err != nil {
@@ -716,6 +739,7 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 		mode = "template"
 	}
 	return wizardConfig{
+		experience:       experience,
 		configName:       template,
 		defaultProvider:  defaultProvider,
 		providers:        providers,
@@ -779,19 +803,11 @@ func normalizeInitProviders(values []string, skipProviderReadiness bool) ([]stri
 }
 
 func normalizeInitTemplate(template string, supplied bool) (string, error) {
-	template = strings.TrimSpace(template)
-	if template == "" {
+	normalized, err := cityinit.NormalizeTemplate(template)
+	if err != nil && !supplied {
 		return defaultInitTemplate, nil
 	}
-	switch template {
-	case "minimal", "gastown", "gascity", "custom", "empty":
-		return template, nil
-	default:
-		if supplied {
-			return "", fmt.Errorf("unknown template %q (expected one of: minimal, gastown, gascity, custom, empty)", template)
-		}
-		return defaultInitTemplate, nil
-	}
+	return normalized, err
 }
 
 func stringInSlice(value string, items []string) bool {
@@ -808,22 +824,26 @@ func preflightInitSelectedProviders(wiz wizardConfig, skip bool) error {
 	if skip || len(providers) == 0 {
 		return nil
 	}
-	items, err := initProbeProvidersReadiness(context.Background(), providers, true)
+	targets := builtinInitProviderTargets(providers)
+	items, err := initProbeProvidersReadiness(context.Background(), targets, true)
 	if err != nil {
 		return fmt.Errorf("checking provider readiness: %w", err)
 	}
 	var blockers []string
-	for _, provider := range providers {
-		item, ok := items[provider]
-		if !ok || item.Status == api.ProbeStatusConfigured {
+	for _, target := range targets {
+		item, ok := items[target.ProbeName]
+		if ok && (item.Status == api.ProbeStatusConfigured || item.Status == "unverified") {
 			continue
 		}
-		blockers = append(blockers, fmt.Sprintf("%s: %s", item.DisplayName, providerStatusSummary(item.Status)))
+		if !ok {
+			item = api.ReadinessItem{DisplayName: target.DisplayName, Status: api.ProbeStatusProbeError}
+		}
+		blockers = append(blockers, formatProviderReadinessFailure(target, item))
 	}
 	if len(blockers) == 0 {
 		return nil
 	}
-	return fmt.Errorf("provider readiness preflight failed: %s", strings.Join(blockers, "; "))
+	return fmt.Errorf("provider readiness preflight failed: %s", strings.Join(blockers, "\n"))
 }
 
 func normalizeBootstrapProfile(profile string) (string, error) {
@@ -1412,6 +1432,18 @@ func warnEmptyTemplateMissingBootstrapProfile(wiz wizardConfig, stderr io.Writer
 }
 
 func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, stdout, stderr io.Writer, preserveExisting bool) int {
+	// A fresh city is born split onto the SQLite binding (resolveInitStorage),
+	// this bundled factory scaffold included. The native infrastructure
+	// workspace serves the same classes from Dolt through the beads library,
+	// where the cost of an infrastructure read grows with the closed history,
+	// so it is taken only when the operator asks for it by name
+	// (GC_INIT_INFRASTRUCTURE=native), and only for this scaffold.
+	// Authored/file/directory composition and explicit topology choices retain
+	// their existing storage policy without an initializer making it implicit.
+	infraFresh := nativeInitInfrastructureRequested() &&
+		wiz.configName == defaultInitTemplate && !wiz.hostedDolt.enabled() && !wiz.hostedDolt.selectorRequested() &&
+		freshInitInfrastructureCandidate(fs, cityPath, preserveExisting || initAdoptStoreFlag)
+
 	warnEmptyTemplateMissingBootstrapProfile(wiz, stderr)
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
@@ -1461,7 +1493,15 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	case wiz.configName == "gastown":
 		cfg = config.GastownCityWithProviders(cityName, defaultProvider, providers)
 	case wiz.configName == "gascity":
-		cfg = config.GascityCityWithProviders(cityName, defaultProvider, providers)
+		if wiz.experience == "beginner" {
+			cfg = config.GascityBeginnerCityWithProviders(cityName, defaultProvider, providers)
+		} else {
+			cfg = config.GascityCityWithProviders(cityName, defaultProvider, providers)
+			// Custom launch commands inherit the same factory pack and rig roles.
+			if wiz.startCommand != "" {
+				cfg.Workspace.StartCommand = wiz.startCommand
+			}
+		}
 	case defaultProvider != "" || len(providers) > 0:
 		cfg = config.WizardCityWithProviders(cityName, defaultProvider, providers)
 	case wiz.startCommand != "":
@@ -1478,6 +1518,9 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	if wiz.prefix != "" {
 		cfg.Workspace.Prefix = wiz.prefix
 	}
+	// resolveInitStorage decides whether a split city serves this one at all:
+	// --storage=single, a remote session runtime, a reserved derived prefix
+	// and a bd a split city's gc bd refuses each hold it single-store.
 	storage, storageNotice, err := resolveInitStorage(&cfg, cityPath, wiz.storage)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1499,6 +1542,19 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	if err := plainInitReservedPrefixRefusal(cfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	switch {
+	case storage == nil:
+		// A city held single-store gets no split from the native
+		// initializer either.
+		infraFresh = false
+	case infraFresh && wiz.storage == initStorageUnset && freshInitInfrastructureEnabled() && freshInitInfrastructureConfigEligible(&cfg):
+		// A fresh bundled factory scaffold that names no --storage, and that
+		// a split city serves, leaves its split to the native initializer
+		// (recordFreshInitInfrastructure), which appends its own [storage]
+		// once the infrastructure workspace is ready and leaves a city that
+		// already declares one alone.
+		cfg.Storage = nil
 	}
 
 	// Create directory structure.
@@ -1611,7 +1667,16 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		}
 	}
 
+	if err := recordFreshInitInfrastructure(fs, cityPath, infraFresh); err != nil {
+		fmt.Fprintf(stderr, "gc init: recording native infrastructure intent: %v\n", err) //nolint:errcheck // initialization diagnostic
+		return 1
+	}
+
 	switch {
+	case wiz.experience == "beginner":
+		fmt.Fprintf(stdout, "Initialized beginner experience in %q using the default Gas City pack.\n", cityName) //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout, "After startup, run: gc gc tutorial start")                                          //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout, "No model session starts until you submit work or explicitly request one.")          //nolint:errcheck // best-effort stdout
 	case wiz.interactive:
 		fmt.Fprintf(stdout, "Created %s config (Level 1) in %q.\n", wiz.configName, cityName) //nolint:errcheck // best-effort stdout
 	case wiz.configName == "empty":
@@ -2457,6 +2522,37 @@ func restoreLegacyWorkspaceIdentity(fs fsys.FS, cityTomlPath string, cfg *config
 		return fmt.Errorf("write %q: %w", cityTomlPath, err)
 	}
 	return nil
+}
+
+// Wizard discovery retains provider-specific discovery for CLIs without a native
+// status protocol. Claude and Codex discovery uses the same runtime protocol as
+// selected-provider preflight, so API-key users are selectable too.
+var wizardProbeProviderChoices = func(ctx context.Context, names []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	var native, other []string
+	for _, name := range names {
+		if name == "claude" || name == "codex" {
+			native = append(native, name)
+		} else {
+			other = append(other, name)
+		}
+	}
+	items, err := initProbeProvidersReadiness(ctx, builtinInitProviderTargets(native), fresh)
+	if err != nil {
+		return nil, err
+	}
+	if items == nil {
+		items = make(map[string]api.ReadinessItem)
+	}
+	if len(other) > 0 {
+		discovered, err := api.ProbeProviders(ctx, other, fresh)
+		if err != nil {
+			return nil, err
+		}
+		for name, item := range discovered {
+			items[name] = item
+		}
+	}
+	return items, nil
 }
 
 // initAdoptStoreFlag is gc init's --adopt-store.

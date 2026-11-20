@@ -164,15 +164,17 @@ type ListBody[T any] struct {
 // X-GC-Index header and returns items in the standard list envelope.
 // CacheAgeS and CacheRefresh report the server's bead-cache freshness
 // (cacheAgeSeconds): the seconds since the cache last took in fresh data from
-// its store (the cache's age, not each row's), its re-scan interval, and what
+// its store (a latest observation, not a full-row or causal watermark), its
+// re-scan interval, and what
 // bounds the age. Only a handler whose body is read from the cache sets them,
 // and not every such handler does; they are zero when the handler does not,
 // the store has no cache, or the cache has never been primed. Read-path CLI commands surface
 // the age as _cache_age_s in --json output, and print a cache-age footer on
 // stderr once the age passes twice the reported interval.
+// Zero age means unknown or not applicable, not proven freshness.
 type ListOutput[T any] struct {
 	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark."`
 	CacheRefresh
 	Body ListBody[T]
 }
@@ -181,19 +183,16 @@ type ListOutput[T any] struct {
 // that include the X-GC-Index header. CacheAgeS and CacheRefresh mirror
 // ListOutput.
 //
-// One handler widens that meaning: /status may serve a stale-while-revalidate
-// body (ra-4u2eqc, handler_status.go). When it does, CacheAgeS reports the
-// GREATER of the bead cache's age and the age of the cached response entry
-// itself, and the refresh state is rebuilding when the entry's age is the
-// greater. Reporting only the cache's age there would let a recently lagging
-// cache under-report true staleness. A ?fresh=true read is served such a
-// body only when the build it waits for is not done statusFreshBuildWait
-// after the read arrived; otherwise its body is built for it, so CacheAgeS
-// carries only the bead cache's age (0 when that body is not read from the
-// cache) and is never rebuilding.
+// /status cache hits retain the source observation age captured before the
+// body was built and add elapsed time, retaining any worse current store or
+// response-entry age. Unrelated point activity cannot make that body younger.
+// Unknown source age remains unknown; elapsed body age is only a lower bound.
+// A stale-while-revalidate serve reports rebuilding when its entry is older than
+// the current cache. Fresh reads retain the bounded build/coalescing contract.
+// Neither this hint nor X-GC-Index promises a write-synchronized snapshot.
 type IndexOutput[T any] struct {
 	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark."`
 	CacheRefresh
 	Body T
 }

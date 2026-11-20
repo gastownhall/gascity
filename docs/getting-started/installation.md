@@ -29,6 +29,8 @@ for you; the other methods require manual installation.
 | dolt | Yes | 2.6.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
 | bd (Beads CLI) | Yes | 1.3.0 or newer | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
+| Python 3 | Guided quickstart and Python pack scripts | 3.11+ | `brew install python3` | `apt install python3` (Ubuntu 24.04+) | The guided quickstart uses the standard library; no pip packages are needed for its first task |
+| Codex CLI | If selected as a provider | 0.162.1 or newer, final release | `npm install -g @openai/codex` | `npm install -g @openai/codex` | Builtin interactive sessions use `--no-daemon` for per-runtime tool environments |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.27.4+ | Source only | 1.27.4 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
 | make | Source only | — | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |
@@ -37,6 +39,16 @@ Use a final Dolt 2.6.0 or newer. Gas City's managed Dolt checks reject older
 and pre-release builds because they are below the managed bd/Dolt compatibility
 floor: 2.6.0 is the first Dolt built with a Go toolchain that distrusts the
 compromised eMudhra CA intermediates.
+
+The builtin Codex integration requires a final Codex CLI 0.162.1 or newer.
+Its explicit `--no-daemon` launch keeps each runtime's tool environment local,
+including the GC session identity. Upgrade the executable selected by your
+provider configuration; check it with `codex --version`. The normal readiness
+check rejects an older selected Codex before creating a new city. An unselected
+Codex installation does not block choosing Claude. An explicit
+`--skip-provider-readiness` still skips this check and leaves version compatibility
+to the operator. Custom wrappers and configuration arguments remain explicitly
+unverified when they cannot safely use the native readiness protocol.
 
 `brew install gascity` installs a current `bd` along with `gc`. With another
 install method, install the latest
@@ -63,7 +75,8 @@ brew install gascity
 ```
 
 This installs the latest `gc` release and its runtime dependencies (beads,
-dolt, tmux, jq, and flock). Gas City is in homebrew-core, so no tap is needed.
+dolt, tmux, jq, and flock). Gas City is in homebrew-core, so no tap is needed. The guided
+tutorial also uses Python 3.
 
 Verify the installation:
 
@@ -194,9 +207,17 @@ Requires `make` and Go 1.27.4+ (pinned in `go.mod` as 1.27.4).
 ```bash
 git clone https://github.com/gastownhall/gascity.git
 cd gascity
-make install        # builds and installs to $(GOPATH)/bin/gc
+make install        # installs gc and its pinned bd into $(GOPATH)/bin
 gc version
 ```
+
+`make install` builds `bd` from the Beads module version pinned by this GC
+checkout, verifies the binary metadata, and installs the pair into the same
+directory. Install the other prerequisites above separately. To prepare an
+isolated installation, use `make install INSTALL_DIR=/absolute/candidate/bin`;
+an explicit prefix preserves other installed commands. Add that directory to
+your PATH before starting its cities. `make install-bd INSTALL_DIR=...` installs
+only the matching standalone Beads CLI.
 
 To build without installing globally:
 
@@ -231,6 +252,25 @@ If that runs `git commit` instead of Gas City, your shell has a `gc` alias.
 Use `command gc version` for this check and see
 [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc)
 for the permanent fix.
+
+### Configure Dolt's author identity
+
+Dolt records an author for database commits. On a new machine, check:
+
+```bash
+dolt config --global --get user.name
+dolt config --global --get user.email
+```
+
+Set each missing value to your name or email:
+
+```bash
+dolt config --global --add user.name "Your Name"
+dolt config --global --add user.email "you@example.com"
+```
+
+If init has already created a city and reports missing identity, set the named
+values and run `gc start` inside that city to continue.
 
 Next, follow the [Quickstart](/getting-started/quickstart) to create your
 first city and send work through a formula.

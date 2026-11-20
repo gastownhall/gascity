@@ -4,8 +4,8 @@ description: The typed HTTP + SSE control plane exposed by the `gc` supervisor.
 ---
 
 The `gc` supervisor exposes a single, typed HTTP control plane
-described by an OpenAPI 3.1 document. Everything the CLI does, any
-third-party client can do too — there is no hidden surface.
+described by an OpenAPI 3.1 document. Clients use it to create cities,
+submit work, control sessions and observe progress.
 
 See also: [The six primitives](/getting-started/how-gas-city-works) — the canonical model this
 API projects over.
@@ -80,6 +80,43 @@ The spec is the full reference. A brief summary of the surfaces:
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
 
+## Create a city
+
+`POST /v0/city` accepts the same initial `template` choice as `gc init`.
+Omit it to use Gas City, including its default rig roles. `provider` selects
+the coding provider; a client does not need to edit the created city files.
+
+```json
+{"dir":"/home/you/cities/my-city","template":"gascity","provider":"claude"}
+```
+
+Use `minimal` for a smaller initial configuration. `custom` and `empty` create
+providerless cities, so omit both `provider` and `start_command` for those
+choices. A custom `start_command` replaces `provider` and keeps the selected
+factory configuration. The running OpenAPI document lists valid choices.
+
+Creation returns `202` after scaffolding and registration. Follow the returned
+`request_id` on the supervisor event stream for startup completion or a
+`request.failed` event; acceptance alone does not mean the city is ready.
+
+## Register an existing project
+
+Register a repository where it already lives with
+`POST /v0/city/{cityName}/rigs`:
+
+```json
+{"name":"project","path":"/home/agent/projects/project"}
+```
+
+Use an absolute path to an existing directory outside the city. Gas City
+registers it in place and applies the city's default rig configuration.
+For a project that already has a Beads queue, include `"adopt":true`. Gas City
+preserves its issue namespace and history using the same adoption path as
+`gc rig add --adopt`. Leave `prefix` unset to use the existing namespace.
+
+Relative paths resolve inside the city. New clone destinations and their
+cleanup remain inside the city.
+
 ## Agent counts
 
 Several endpoints report an agent count, and each counts something different:
@@ -91,6 +128,57 @@ Several endpoints report an agent count, and each counts something different:
 | `GET /v0/city/{cityName}/agents` | `total` (no `agent_count`) | The rows returned after the `rig`, `pool` and `running` filters: every slot of a bounded pool, and the running sessions of an unlimited pool, or one row under the pool's own name when none is running. |
 | `GET /v0/city/{cityName}/rigs`, `GET /v0/city/{cityName}/rig/{name}` | `agent_count` on each rig | That rig's agent rows: every slot of a bounded pool, and the running sessions of an unlimited pool. |
 | `GET /v0/city/{cityName}/config` | `patches.agent_count` | The `[[patches.agent]]` blocks the config declares, not agents. `/config/defaults` reports no `patches`. |
+
+## Configured session options
+
+Agent list and detail responses include `provider_options`: the selected
+agent's resolved `options_schema` and `configured_defaults` for
+`scope: "session_start"`. These describe configuration for a new session.
+They do not establish the model or effort an existing native turn used.
+
+When a custom launch command, opaque arguments or invalid defaults prevent
+resolution, `resolution: "unknown"` includes a stable `reason` and omits
+guessed defaults. Provider catalog `effective_defaults` is also a configured
+session-start projection; it does not include agent overrides.
+
+An option's `accepts_custom_values` distinguishes open values with curated
+suggestions from a closed choice list. Upstream providers may still reject a
+model/effort combination that GC's schema accepts.
+
+`supports_per_turn_options: false` means delivery cannot bind model/effort
+overrides to one turn. Use the session's `submission_capabilities.supports_steer`
+for actual target steering support. Interrupt-and-send and boundary queueing
+do not establish true steering.
+
+## Durable public delivery
+
+`POST /v0/city/{cityName}/extmsg/inbound` supports durable admission with a
+normalized `message`, a nonempty `request_key` and explicit `deliveries`.
+Each delivery selects a concrete city session or configured named agent and
+its message policy. Recipients must belong to the conversation or its binding.
+Both the Messaging writer and Sessions lane must support guarded writes;
+unready storage returns 503 before appending public history.
+
+The key is scoped to the conversation and actor. Retry the same frozen message,
+recipients, policy and key to recover its admission and delivery identities.
+Changed content under the same identity returns 409. A replay recovers the
+original receipt before reading current routing or membership.
+
+Admission records one public transcript entry and durable recipient intents.
+The GC relay hands each intent to its deterministic Sessions operation; clients
+must not also submit the message separately. `admitted` reports operation
+handoff, not a finished native turn. Follow the operation for execution outcomes.
+Native execution uses `at_most_once`; an unknown handoff is not proof of success.
+
+To request cancellation of an existing admission, resend its unchanged frozen
+body with `cancel_deliveries: true`. A missing admission returns 404 and creates
+nothing. Cancellation flags commit together in Messaging; they are not atomic
+with Sessions execution, and an already-completed operation retains its outcome.
+
+`extmsg.inbound` and `extmsg.public_delivery_changed` are at-least-once
+invalidations. Reconcile using admission/transcript IDs and delivery
+`state_version`; notification retries do not create another public entry or
+operation.
 
 ## Request and response headers
 
@@ -386,13 +474,118 @@ a question — has a *pending interaction*. `GET /v0/city/{cityName}/pending`
 lists them; `GET /v0/city/{cityName}/session/{id}/pending` returns one in
 full; `POST /v0/city/{cityName}/session/{id}/respond` answers it.
 
-A question dialog (`kind` `question`) lists the options it can be answered
-with in `options`. Answer it with `POST .../respond` and `action` `select`,
-`text` naming one of those options by label (or by number, when no option
-carries that label), and the question's `request_id`. A page that lists no
-options — a multi-select page, or one whose options show previews — is
-answered in the session's terminal, as are free-text and chat rows. A
-`respond` the page does not offer returns 409 `invalid_interaction`.
+A native question (`kind: "question"`) includes its full `prompt` and authored
+`options`. When `metadata.answer_action` is `"answer"`, respond with the exact
+`request_id` you read and either a choice label or free text. Free text is
+available when `metadata.free_text` is `"true"`.
+
+```json
+{
+  "request_id": "<request_id from pending>",
+  "action": "answer",
+  "text": "Owl"
+}
+```
+
+When the same pending question also advertises `metadata.multi_select: "true"`,
+use `answers` instead of `text` on this existing endpoint:
+
+```json
+{
+  "request_id": "<request_id from pending>",
+  "action": "answer",
+  "answers": ["Otter", "Fox"]
+}
+```
+
+`answers` supplies the entire desired selection, replacing any previously
+checked choices. It must contain one to 32 unique, nonempty, exact authored
+labels from `options`. Empty selections, unknown labels, the provider's Other
+or free-text row, and mixed `answers` plus `text` are unsupported. The initial
+implementation supports native Claude multiple-selection dialogs; live-provider
+multiple-selection qualification is pending. Native Codex questions currently
+use the single-choice/text contract above. Trust the pending metadata for that
+specific question, rather than assuming a provider or `kind: "question"` is
+answerable.
+
+Keep the exact request ID, answer array **including its order**, and
+`Idempotency-Key` when retrying. The recorded payload binds all three; changing
+array order under the same key conflicts even if it describes the same set. A
+retry of a recorded terminal response returns its historical outcome without
+answering a later question. A new response still requires the current request
+ID; replay support does not authorize an answer to a stale occurrence.
+
+Use one `Idempotency-Key` for that answer and retain it when retrying. A missing
+or stale question ID returns 409 `invalid_interaction` without answering the
+current question. Questions can be withdrawn by their provider, so refresh
+pending state after that refusal. Ordinary messages and automated nudges stay
+held; they never act as question answers.
+
+The runtime opens and answers the provider's own question control. Clients use
+the supervisor API rather than reading provider logs or sending terminal keys.
+When `metadata.answer_action` is absent, the current native frame takes no
+request-bound `answer`.
+
+A question dialog also lists in `options` the options a `select` can pick.
+Answer it with `POST .../respond` and `action` `select`, `text` naming one of
+those options by label (or by number, when no option carries that label), and
+the question's `request_id`:
+
+```json
+{
+  "request_id": "<request_id from pending>",
+  "action": "select",
+  "text": "Keep holding"
+}
+```
+
+A `select` types that option's key once. Without `metadata.answer_action` the
+`request_id` names the page by its visible content, so it cannot tell a later
+identical question from this one. A `select` is refused on a multi-select page
+(use `answers` when `metadata.multi_select` is `"true"`), on a page whose
+options show previews, and on a native Codex question (use `answer`). A page
+that takes neither action lists no options and is answered in the session's
+terminal (`gc session attach`), as are free-text and chat rows without
+`metadata.free_text`. A `respond` the page does not offer returns 409
+`invalid_interaction`.
+
+A native approval (`kind: "approval"`) reports its response authority in
+`metadata.request_identity`:
+
+| Value | Client behavior |
+| --- | --- |
+| `native_invocation` | The exact `metadata.command` is bound to one unresolved native invocation and provider conversation. Display those command bytes unchanged; pane wrapping does not add shell spaces or newlines. A later identical command has another request ID. |
+| `unavailable` | `metadata.response_unavailable` explains why the current request cannot be bound. Disable both approval actions and refresh pending state. The dialog still holds ordinary input. |
+| `visible_content` | Compatibility for older or unmanaged runtimes, or approval tools outside the native binding subset. The ID describes visible content and cannot distinguish later identical commands; it does not provide native occurrence safety. |
+
+Enable occurrence-bound approval controls only for `native_invocation` with no
+`response_unavailable`. Send the exact pending request ID with `approve` for
+one-time permission, or `deny` to reject it:
+
+```json
+{
+  "request_id": "<request_id from pending>",
+  "action": "approve"
+}
+```
+
+Keep that request ID, action and `Idempotency-Key` unchanged when retrying.
+A recorded terminal retry returns its historical outcome; it never authorizes
+an answer to a later occurrence. Missing or stale native authority refuses
+input. Within the supported native bindings, a managed runtime whose native
+identity or command cannot be read stays unavailable; it does not downgrade to a
+visible-content ID.
+
+The current native binding supports Claude Bash and Codex exec approvals.
+Codex supports direct native JSON `exec_command` calls and the observed single
+literal wrapper `const result = await tools.exec_command({...});text(result);`.
+Computed arguments, comments, extra statements, multiple calls and other wrapper
+forms are unavailable. Command rendering that cannot be verified also remains
+unavailable.
+
+Use the supervisor response route for these controls. An unavailable one-time
+response must never become a broad or prefix grant, ordinary chat, automated
+nudge or terminal-key fallback.
 
 The city event stream (and the supervisor stream, tagged with the city)
 also carries each change as an event, so a client does not have to poll:

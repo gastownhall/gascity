@@ -15,7 +15,12 @@ BINARY     := gc
 # installed and removed alongside gc, which looks it up next to itself.
 COMPANION  := gc-osc7501
 BUILD_DIR  := bin
+ifeq ($(origin INSTALL_DIR),undefined)
 INSTALL_DIR := $(BIN_DIR)
+INSTALL_MIGRATE_LOCAL_BIN := 1
+else
+INSTALL_MIGRATE_LOCAL_BIN := 0
+endif
 
 # Version metadata injected via ldflags. These run git in the build directory,
 # so they resolve a worktree's `.git` gitdir pointer and describe the checkout
@@ -173,8 +178,13 @@ ifneq ($(_NIX_ICU_DEV),)
 		echo "OK: $$bin self-contained (RUNPATH present + clean-env boot passes)"
 endif
 
-## install: build and install gc and gc-osc7501 to GOPATH/bin (same location as go install)
-install: check-self-contained
+.PHONY: install-bd
+## install-bd: install bd from the Beads module version pinned by this checkout.
+install-bd:
+	@sh scripts/install-bd-pinned.sh "$(INSTALL_DIR)"
+
+## install: install gc, its companion, and the pinned bd together.
+install: check-self-contained install-bd
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
 		for bin in $(BINARY) $(COMPANION); do \
@@ -185,18 +195,11 @@ install: check-self-contained
 			mv -f "$$tmp" "$(INSTALL_DIR)/$$bin"; \
 			trap - EXIT INT TERM HUP; \
 		done
-	@# Migrate from old install location: replace stale binary with symlink.
-	@# The companion is linked beside gc, because gc looks for it next to the
-	@# path it was started by.
-	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
-		for bin in $(BINARY) $(COMPANION); do \
-			if [ -f "$(HOME)/.local/bin/$$bin" ] || [ -L "$(HOME)/.local/bin/$$bin" ]; then \
-				rm -f "$(HOME)/.local/bin/$$bin"; \
-			fi; \
-			if [ -d "$(HOME)/.local/bin" ]; then \
-				ln -sf "$(INSTALL_DIR)/$$bin" "$(HOME)/.local/bin/$$bin"; \
-				echo "Symlinked $(HOME)/.local/bin/$$bin -> $(INSTALL_DIR)/$$bin"; \
-			fi; \
+	@# Migrate only the default installation; an explicit prefix is isolated.
+	@if [ "$(INSTALL_MIGRATE_LOCAL_BIN)" = 1 ] && [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ] && [ -d "$(HOME)/.local/bin" ]; then \
+		for tool in "$(BINARY)" "$(COMPANION)" bd; do \
+			ln -sf "$(INSTALL_DIR)/$$tool" "$(HOME)/.local/bin/$$tool"; \
+			echo "Symlinked $(HOME)/.local/bin/$$tool -> $(INSTALL_DIR)/$$tool"; \
 		done; \
 	fi
 	@echo "Installed $(BINARY) and $(COMPANION) to $(INSTALL_DIR)"
@@ -1179,16 +1182,18 @@ docs-dev:
 DASHBOARD_WEB := internal/api/dashboardspa/web
 DASHBOARD_BAZEL_TARGETS := //internal/api/dashboardspa/... //internal/api/dashboardbff/...
 
-## dashboard-build: build the SPA bundle with Bazel and sync it into the committed dist/ (a Node-less `go build` embeds that copy)
+## dashboard-build: sync canonical raw dist and its compressed Node-less Go embedding from Bazel
 dashboard-build:
-	$(BAZEL) build $(BAZEL_FLAGS) --remote_download_outputs=toplevel //internal/api/dashboardspa:dist
-	rm -rf internal/api/dashboardspa/dist
+	$(BAZEL) build $(BAZEL_FLAGS) --remote_download_outputs=toplevel //internal/api/dashboardspa:dist //internal/api/dashboardspa:embedded
+	rm -rf internal/api/dashboardspa/dist internal/api/dashboardspa/embedded
 	cp -rfL bazel-bin/internal/api/dashboardspa/dist internal/api/dashboardspa/dist
-	chmod -R a-x,u+w,a+rX internal/api/dashboardspa/dist
+	cp -rfL bazel-bin/internal/api/dashboardspa/embedded internal/api/dashboardspa/embedded
+	chmod -R a-x,u+w,a+rX internal/api/dashboardspa/dist internal/api/dashboardspa/embedded
 
 ## dashboard-build-npm: the same bundle through a local npm install
 dashboard-build-npm:
 	cd $(DASHBOARD_WEB) && npm ci --silent && npm run build && rm -rf ../dist && cp -rf frontend/dist ../dist
+	python3 internal/api/dashboardspa/pack_assets.py --input internal/api/dashboardspa/dist --output internal/api/dashboardspa/embedded/dist.bundle.json.gz
 
 ## dashboard-generate-client: regenerate the typed API client from internal/api/openapi.json (openapi-ts under Bazel)
 dashboard-generate-client:

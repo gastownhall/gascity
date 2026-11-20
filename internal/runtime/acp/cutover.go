@@ -23,22 +23,23 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                    = (*seamBackedProvider)(nil)
-	_ runtime.InteractionProvider         = (*seamBackedProvider)(nil)
-	_ runtime.TransportCapabilityProvider = (*seamBackedProvider)(nil)
-	_ runtime.SleepCapabilityProvider     = (*seamBackedProvider)(nil)
-	_ runtime.IdleWaitProvider            = (*seamBackedProvider)(nil)
-	_ runtime.IdleSnapshotProvider        = (*seamBackedProvider)(nil)
-	_ runtime.SessionEventProvider        = (*seamBackedProvider)(nil)
-	_ runtime.ProcessTableScanner         = (*seamBackedProvider)(nil)
-	_ runtime.LivenessObserverWithError   = (*seamBackedProvider)(nil)
-	_ runtime.ListingAttestation          = (*seamBackedProvider)(nil)
-	_ runtime.FencedInputProvider         = (*seamBackedProvider)(nil)
-	_ runtime.IdentitySidecarProvider     = (*seamBackedProvider)(nil)
-	_ runtime.IdentitySidecarProvider     = (*Provider)(nil)
-	_ runtime.TurnEventProvider           = (*seamBackedProvider)(nil)
-	_ runtime.TurnFenceProvider           = (*seamBackedProvider)(nil)
-	_ runtime.TurnObservationProvider     = (*seamBackedProvider)(nil)
+	_ runtime.Provider                             = (*seamBackedProvider)(nil)
+	_ runtime.InteractionProvider                  = (*seamBackedProvider)(nil)
+	_ runtime.TransportCapabilityProvider          = (*seamBackedProvider)(nil)
+	_ runtime.SleepCapabilityProvider              = (*seamBackedProvider)(nil)
+	_ runtime.IdleWaitProvider                     = (*seamBackedProvider)(nil)
+	_ runtime.IdleSnapshotProvider                 = (*seamBackedProvider)(nil)
+	_ runtime.SessionEventProvider                 = (*seamBackedProvider)(nil)
+	_ runtime.ProcessTableScanner                  = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError            = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation                   = (*seamBackedProvider)(nil)
+	_ runtime.FencedInputProvider                  = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider              = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider              = (*Provider)(nil)
+	_ runtime.TurnEventProvider                    = (*seamBackedProvider)(nil)
+	_ runtime.TurnFenceProvider                    = (*seamBackedProvider)(nil)
+	_ runtime.TurnObservationProvider              = (*seamBackedProvider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs an acp provider served through the seams.
@@ -176,4 +177,8 @@ func (s *seamBackedProvider) SendKeysFenced(ctx context.Context, name string, fe
 // passthrough).
 func (s *seamBackedProvider) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
 	return s.raw.InterruptFenced(ctx, name, fence)
+}
+
+func (s *seamBackedProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return s.raw.SupportsReconcilerOwnedMergeablePaths()
 }

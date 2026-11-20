@@ -78,6 +78,7 @@ type SupervisorProviderReadinessOutput struct {
 
 // cityCreateRequest is the body for POST /v0/city.
 type cityCreateRequest struct {
+	Template         string `json:"template,omitempty" default:"gascity" enum:"minimal,gastown,gascity,custom,empty" doc:"Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command."`
 	Dir              string `json:"dir" minLength:"1" doc:"Directory to create the city in. Absolute or relative to $HOME."`
 	Provider         string `json:"provider,omitempty" minLength:"1" doc:"Provider name for the city's default session template. Mutually exclusive with start_command."`
 	StartCommand     string `json:"start_command,omitempty" doc:"Custom workspace start command for the city's default session template. Mutually exclusive with provider."`
@@ -410,7 +411,7 @@ func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRe
 	// in test configurations that build a SupervisorMux without an
 	// initializer.
 	if cityDirAlreadyInitialized(dir) {
-		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir)
+		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir + "; preserve the directory; if setup was interrupted, run gc init --no-start there to resume finalization")
 	}
 
 	if sm.initializer == nil {
@@ -427,7 +428,11 @@ func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRe
 	}
 	pendingStored := false
 	if store, ok := sm.resolver.(PendingRequestStore); ok {
-		if err := store.StorePendingRequestID(dir, reqID); err != nil {
+		storeCreate := store.StorePendingRequestID
+		if createStore, ok := store.(PendingCityCreateRequestStore); ok {
+			storeCreate = createStore.StorePendingCityCreateRequestID
+		}
+		if err := storeCreate(dir, reqID); err != nil {
 			if errors.Is(err, ErrPendingRequestExists) {
 				return zero, apierr.OperationInProgress.Msg("conflict: city initialization already in progress at " + dir)
 			}
@@ -438,6 +443,7 @@ func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRe
 
 	result, scaffoldErr := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
 		Dir:                   dir,
+		ConfigName:            body.Template,
 		Provider:              body.Provider,
 		StartCommand:          body.StartCommand,
 		BootstrapProfile:      body.BootstrapProfile,
@@ -447,8 +453,9 @@ func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRe
 	switch {
 	case errors.Is(scaffoldErr, cityinit.ErrAlreadyInitialized):
 		sm.clearPendingCityRequestID(dir, pendingStored)
-		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir)
+		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir + "; preserve the directory; if setup was interrupted, run gc init --no-start there to resume finalization")
 	case errors.Is(scaffoldErr, cityinit.ErrInvalidDirectory),
+		errors.Is(scaffoldErr, cityinit.ErrInvalidTemplate),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidProvider),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidBootstrapProfile):
 		sm.clearPendingCityRequestID(dir, pendingStored)

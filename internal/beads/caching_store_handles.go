@@ -315,7 +315,10 @@ func (c *CachingStore) cachedReadyJudgment(ctx context.Context, query ReadyQuery
 	if !c.mu.TryRLock() {
 		return ReadyJudgment{}, fmt.Errorf("reading complete ready projection from busy cache: %w", ErrCacheUnavailable)
 	}
-	if c.state != cacheLive || !c.depsComplete || c.primePartialErr != nil || (len(c.dirty) > 0 && !partial) ||
+	// Eligibility is checked below before requiring dependency completeness:
+	// a complete clean census with no eligible row proves empty readiness even
+	// when a claimed-only work store has never witnessed a blocking edge.
+	if c.state != cacheLive || c.primePartialErr != nil || (len(c.dirty) > 0 && !partial) ||
 		c.readyReadsMustGoLive() {
 		c.mu.RUnlock()
 		return ReadyJudgment{}, fmt.Errorf("reading complete ready projection from cache: %w", ErrCacheUnavailable)
@@ -323,6 +326,7 @@ func (c *CachingStore) cachedReadyJudgment(ctx context.Context, query ReadyQuery
 
 	statusByID := make(map[string]string, len(c.beads))
 	workOutcomeByID := make(map[string]string, len(c.beads))
+	holdsByID := make(map[string]bool)
 	var held map[string]struct{}
 	if partial {
 		held = make(map[string]struct{}, len(c.beads))
@@ -336,6 +340,9 @@ func (c *CachingStore) cachedReadyJudgment(ctx context.Context, query ReadyQuery
 		}
 		statusByID[b.ID] = b.Status
 		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+		if WorkflowRootHolds(b, now) {
+			holdsByID[b.ID] = true
+		}
 		_, dirty := c.dirty[b.ID]
 		if partial && !dirty {
 			held[b.ID] = struct{}{}
@@ -348,6 +355,10 @@ func (c *CachingStore) cachedReadyJudgment(ctx context.Context, query ReadyQuery
 		}
 		if dirty {
 			continue
+		}
+		if !c.depsComplete {
+			c.mu.RUnlock()
+			return ReadyJudgment{}, fmt.Errorf("reading complete ready projection from cache: %w", ErrCacheUnavailable)
 		}
 		if partial {
 			if _, lost := c.readyProjectionLost[b.ID]; lost && !c.readyEdgesJudgeableLocked(c.deps[b.ID]) {
@@ -371,7 +382,7 @@ func (c *CachingStore) cachedReadyJudgment(ctx context.Context, query ReadyQuery
 
 	// The maps above are a consistent snapshot, so sorting and dependency
 	// evaluation need not hold the cache lock or delay writers.
-	rows, err := cachedReadyRows(ctx, query, statusByID, workOutcomeByID, openBeads, depsByID, true, true)
+	rows, err := cachedReadyRows(ctx, query, statusByID, workOutcomeByID, holdsByID, openBeads, depsByID, true, true)
 	if err != nil {
 		return ReadyJudgment{}, err
 	}
@@ -386,11 +397,15 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 
 	statusByID := make(map[string]string, len(c.beads))
 	workOutcomeByID := make(map[string]string, len(c.beads))
+	holdsByID := make(map[string]bool)
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
 		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+		if WorkflowRootHolds(b, now) {
+			holdsByID[b.ID] = true
+		}
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
@@ -403,7 +418,7 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 		openBeads = append(openBeads, cloneBead(b))
 	}
 	return cachedReadyRows(
-		context.Background(), query, statusByID, workOutcomeByID, openBeads, c.deps, c.depsComplete, c.state == cacheLive,
+		context.Background(), query, statusByID, workOutcomeByID, holdsByID, openBeads, c.deps, c.depsComplete, c.state == cacheLive,
 	)
 }
 
@@ -412,6 +427,7 @@ func cachedReadyRows(
 	query ReadyQuery,
 	statusByID map[string]string,
 	workOutcomeByID map[string]string,
+	holdsByID map[string]bool,
 	openBeads []Bead,
 	depsByID map[string][]Dep,
 	depsComplete bool,
@@ -445,7 +461,7 @@ func cachedReadyRows(
 		if !nonclosedStatusesComplete && !cachedReadyDependencyStatusesKnown(b, statusByID, deps) {
 			return nil, fmt.Errorf("reading ready dependency statuses from cache: %w", ErrCacheUnavailable)
 		}
-		if !cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
+		if !cachedBeadReady(b, statusByID, workOutcomeByID, holdsByID, deps) {
 			continue
 		}
 		result = append(result, cloneBead(b))

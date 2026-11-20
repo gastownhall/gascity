@@ -1337,7 +1337,7 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[beads.Bead]{}, err
 	}
-	resp, err := c.cw.GetV0CityByCityNameBeadByIdWithResponse(context.Background(), c.cityName, id)
+	resp, err := c.cw.GetV0CityByCityNameBeadByIdWithResponse(context.Background(), c.cityName, id, nil)
 	if err != nil {
 		return CachedRead[beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}

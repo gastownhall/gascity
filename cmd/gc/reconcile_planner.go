@@ -132,10 +132,11 @@ type planner struct {
 	// classified is each row's last classified dead runtime, by its token
 	// (A12, the start's recycle; v5 S5, X10): in memory, so a restart
 	// classifies once more.
-	classified map[rowKey]classifiedRuntime
-	stderr     io.Writer
-	metrics    *passMetrics
-	emitRecord func(fields map[string]any) // the reconcile.pass record; nil emits none
+	providerUnresolvedAlerts providerUnresolvedAlerts
+	classified               map[rowKey]classifiedRuntime
+	stderr                   io.Writer
+	metrics                  *passMetrics
+	emitRecord               func(fields map[string]any) // the reconcile.pass record; nil emits none
 
 	// observations is the cache a fresh read's Noted fact is written to; nil
 	// notes none. capacity is the endpoint breaker a start admits its ticket

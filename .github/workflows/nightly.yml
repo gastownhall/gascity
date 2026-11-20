@@ -13,6 +13,14 @@ env:
   BD_VERSION: "v1.3.4"
 
 jobs:
+  beginner_qualification:
+    name: Installed beginner journey
+    permissions:
+      contents: read
+    uses: ./.github/workflows/beginner-qualification.yml
+    secrets:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+
   tier-b:
     name: Tier B acceptance tests
     runs-on: ubuntu-latest
@@ -225,6 +233,7 @@ jobs:
   nightly-summary:
     name: Nightly summary
     needs:
+      - beginner_qualification
       - tier-b
       - tier-c
       - beads-proxied-perf
@@ -236,6 +245,7 @@ jobs:
     steps:
       - name: Aggregate nightly job results
         env:
+          BEGINNER_QUALIFICATION_RESULT: ${{ needs.beginner_qualification.result }}
           TIER_B_RESULT: ${{ needs.tier-b.result }}
           TIER_C_RESULT: ${{ needs.tier-c.result }}
           BEADS_PROXIED_PERF_RESULT: ${{ needs.beads-proxied-perf.result }}
@@ -247,6 +257,7 @@ jobs:
           import sys
 
           results = {
+              "beginner_qualification": os.environ.get("BEGINNER_QUALIFICATION_RESULT", "missing"),
               "tier-b": os.environ.get("TIER_B_RESULT", "missing"),
               "tier-c": os.environ.get("TIER_C_RESULT", "missing"),
               "beads-proxied-perf": os.environ.get("BEADS_PROXIED_PERF_RESULT", "missing"),

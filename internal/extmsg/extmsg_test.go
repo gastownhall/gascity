@@ -1134,7 +1134,7 @@ func TestTranscriptServiceAppendDedupeAndList(t *testing.T) {
 		Kind:              TranscriptMessageInbound,
 		Provenance:        TranscriptProvenanceLive,
 		ProviderMessageID: "msg-1",
-		Text:              "hello again",
+		Text:              "hello",
 		CreatedAt:         testNow().Add(time.Minute),
 	})
 	if err != nil {
@@ -3236,5 +3236,154 @@ func TestCloseSessionBindingsClosesGroupParticipants(t *testing.T) {
 
 	if got := openParticipants(); len(got) != 0 {
 		t.Fatalf("open participants(after CloseSessionBindings) = %#v, want []", got)
+	}
+}
+
+// groupWriteProbe observes storage round trips, not elapsed time: native stores
+// make even unchanged writes expensive and every extra Get is another read.
+type groupWriteProbe struct {
+	beads.Store
+	updates, gets int
+	batches       []map[string]string
+}
+
+func (p *groupWriteProbe) Update(id string, opts beads.UpdateOpts) error {
+	p.updates++
+	return p.Store.Update(id, opts)
+}
+
+func (p *groupWriteProbe) Get(id string) (beads.Bead, error) {
+	p.gets++
+	return p.Store.Get(id)
+}
+
+func (p *groupWriteProbe) SetMetadataBatch(id string, fields map[string]string) error {
+	p.batches = append(p.batches, mapsClone(fields))
+	return p.Store.SetMetadataBatch(id, fields)
+}
+
+func TestEnsureGroupAvoidsUnchangedStorageWrites(t *testing.T) {
+	for _, change := range []string{"none", "metadata", "routing", "title"} {
+		t.Run(change, func(t *testing.T) {
+			probe := &groupWriteProbe{Store: beads.NewMemStore()}
+			svc := NewGroupService(beadstest.Mail(probe), beadstest.Sessions(probe))
+			input := EnsureGroupInput{RootConversation: testConversationRef(), Mode: GroupModeLauncher, DefaultHandle: "alpha", Metadata: map[string]string{"intent": "first"}}
+			group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := probe.Store.SetMetadataBatch(group.ID, map[string]string{"meta.unrelated": "retain", "last_addressed_handle": "alpha"}); err != nil {
+				t.Fatal(err)
+			}
+			wantUpdates, wantGets := 0, 1
+			wantFields := map[string]string{}
+			switch change {
+			case "none":
+				wantGets = 0
+			case "metadata":
+				input.Metadata["intent"] = "second"
+				wantFields["meta.intent"] = "second"
+			case "routing":
+				input.DefaultHandle = "beta"
+				wantFields["default_handle"] = "beta"
+			case "title":
+				old := "old title"
+				if err := probe.Store.Update(group.ID, beads.UpdateOpts{Title: &old}); err != nil {
+					t.Fatal(err)
+				}
+				wantUpdates = 1
+			}
+			probe.updates, probe.gets, probe.batches = 0, 0, nil
+			got, err := svc.EnsureGroup(context.Background(), testControllerCaller(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if probe.updates != wantUpdates || probe.gets != wantGets {
+				t.Errorf("storage updates/gets=%d/%d, want %d/%d", probe.updates, probe.gets, wantUpdates, wantGets)
+			}
+			wantBatches := 0
+			if len(wantFields) > 0 {
+				wantBatches = 1
+			}
+			if len(probe.batches) != wantBatches {
+				t.Errorf("metadata batches=%v, want %v", probe.batches, wantFields)
+			} else if wantBatches == 1 {
+				if len(probe.batches[0]) != len(wantFields) {
+					t.Errorf("rewrote unchanged fields: %v", probe.batches[0])
+				}
+				for key, value := range wantFields {
+					if probe.batches[0][key] != value {
+						t.Errorf("field %s=%q, want %q", key, probe.batches[0][key], value)
+					}
+				}
+			}
+			if got.ID != group.ID || got.Metadata["unrelated"] != "retain" || got.LastAddressedHandle != "alpha" || got.DefaultHandle != input.DefaultHandle || got.Metadata["intent"] != input.Metadata["intent"] {
+				t.Errorf("lost identity, metadata or routing: %+v", got)
+			}
+		})
+	}
+}
+
+func TestInboundTranscriptRetryBindsPayloadAcrossServiceRecreation(t *testing.T) {
+	for _, field := range []string{"actor", "text", "target", "reply", "attachment", "kind"} {
+		t.Run(field, func(t *testing.T) {
+			store := beads.NewMemStore()
+			input := AppendTranscriptInput{Caller: testAdapterCaller(), Conversation: testConversationRef(), Kind: TranscriptMessageInbound, Provenance: TranscriptProvenanceLive, ProviderMessageID: "immutable-public-message", Actor: ExternalActor{ID: "github:42", DisplayName: "Keeper"}, Text: "original", ExplicitTarget: "worker", ReplyToMessageID: "parent", Attachments: []ExternalAttachment{{ProviderID: "asset", URL: "https://example.invalid/a.png", MIMEType: "image/png"}}, CreatedAt: testNow()}
+			original, err := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript.Append(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retry := input
+			retry.CreatedAt = input.CreatedAt.Add(time.Hour)
+			recreated := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
+			same, err := recreated.Append(context.Background(), retry)
+			if err != nil || same.ID != original.ID {
+				t.Fatalf("identical retry after recreation: got=%v err=%v", same.ID, err)
+			}
+			switch field {
+			case "actor":
+				retry.Actor.ID = "github:99"
+			case "text":
+				retry.Text = "changed"
+			case "target":
+				retry.ExplicitTarget = "other"
+			case "reply":
+				retry.ReplyToMessageID = "other"
+			case "attachment":
+				retry.Attachments = []ExternalAttachment{{ProviderID: "asset", URL: "https://example.invalid/other.png", MIMEType: "image/png"}}
+			case "kind":
+				retry.Kind = TranscriptMessageOutbound
+			}
+			if _, err := recreated.Append(context.Background(), retry); !errors.Is(err, ErrMessageConflict) {
+				t.Fatalf("changed %s accepted under frozen message identity: %v", field, err)
+			}
+			rows, err := recreated.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: input.Conversation, Limit: 10})
+			if err != nil || len(rows) != 1 || rows[0].Text != "original" {
+				t.Fatalf("conflict changed transcript: rows=%v err=%v", rows, err)
+			}
+		})
+	}
+}
+
+// Full service upserts still own all settings: an explicit all-zero policy
+// and empty route clear them, unlike an HTTP metadata update's omissions.
+func TestEnsureGroupFullUpsertCanClearPolicyAndRoute(t *testing.T) {
+	store := beads.NewMemStore()
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
+	ref := testConversationRef()
+	input := EnsureGroupInput{
+		RootConversation: ref, Mode: GroupModeLauncher, DefaultHandle: "alpha",
+		FanoutPolicy: FanoutPolicy{Enabled: true, AllowUntargetedPublication: true, MaxPeerTriggeredPublishes: 3, MaxTotalPeerDeliveries: 17},
+	}
+	if _, err := svc.EnsureGroup(context.Background(), testControllerCaller(), input); err != nil {
+		t.Fatal(err)
+	}
+	input.DefaultHandle, input.FanoutPolicy = "", FanoutPolicy{}
+	got, err := svc.EnsureGroup(context.Background(), testControllerCaller(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DefaultHandle != "" || got.FanoutPolicy != (FanoutPolicy{}) {
+		t.Fatalf("full upsert could not intentionally clear settings: %+v", got)
 	}
 }

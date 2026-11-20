@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
-	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -76,6 +75,7 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var gitURLFlag string
 	var requestIDFlag string
 	var allowEphemeralFlag bool
+	var dryRunFlag bool
 	cmd := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a project as a rig",
@@ -157,6 +157,10 @@ check remains informational.`,
 				fmt.Fprintf(stderr, "gc rig add: %v\n", rerr) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
+			if isRemote && dryRunFlag {
+				fmt.Fprintln(stderr, "gc rig add: --dry-run requires a local city; remote provisioning has no preview surface") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			if isRemote {
 				// --allow-ephemeral has no remote surface: ProvisionRequest
 				// carries it, but the remote add never populates it, so honoring
@@ -224,13 +228,17 @@ check remains informational.`,
 					fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
-				rig, code := doRigAddWithResult(fsys.OSFS{}, cityPath, rigPath, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, io.Discard, stderr, withAllowEphemeralPath(allowEphemeralFlag))
+				rig, code := doRigAddWithResult(fsys.OSFS{}, cityPath, rigPath, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, io.Discard, stderr, withAllowEphemeralPath(allowEphemeralFlag), withRigAddDryRun(dryRunFlag))
 				if code != 0 {
 					return errExit
 				}
-				return writeManagementActionJSON(stdout, rigAddJSONSummary(rigPath, rig))
+				summary := rigAddJSONSummary(rigPath, rig)
+				if dryRunFlag {
+					summary.Action = "plan"
+				}
+				return writeManagementActionJSON(stdout, summary)
 			}
-			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr, withAllowEphemeralPath(allowEphemeralFlag)) != 0 {
+			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr, withAllowEphemeralPath(allowEphemeralFlag), withRigAddDryRun(dryRunFlag)) != 0 {
 				return errExit
 			}
 			return nil
@@ -242,6 +250,7 @@ check remains informational.`,
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
+	cmd.Flags().BoolVar(&dryRunFlag, "dry-run", false, "preview local registration or adoption without changing city, rig, queue or runtime state")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
 	cmd.Flags().StringVar(&gitURLFlag, "git-url", "", "git URL to clone into a new rig on a REMOTE city (server-side provisioning)")
 	cmd.Flags().StringVar(&requestIDFlag, "request-id", "", "idempotency key for a remote --git-url add; reuse it to resume/retry a provision")
@@ -362,10 +371,10 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
-		PrepareAdopt: prepareRigAdoptProviderState,
-		ReadStorePrefix: func(p string) (string, error) {
-			return rigAdoptStorePrefix(cityPath, p)
+		ReadStorePrefix: func(path string, readOnly bool) (string, error) {
+			return readRigAdoptStorePrefix(cityPath, path, readOnly)
 		},
+		PrepareAdopt:  prepareRigAdoptProviderState,
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		PostProvision: func(pc rig.ProvisionContext) error {
@@ -377,15 +386,20 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 			if err := ensureGitignoreEntries(fs, rigPath, rigGitignoreEntries); err != nil {
 				fmt.Fprintf(stderr, "gc rig add: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 			}
-			if ih := pc.Cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-				resolver := func(name string) string { return config.BuiltinFamily(name, pc.Cfg.Providers) }
-				if err := hooks.InstallWithResolver(fs, cityPath, rigPath, ih, resolver); err != nil {
+
+			reloadedCfg, prov, loadErr := config.LoadWithIncludes(fs, tomlPath)
+			emitLoadCityConfigWarnings(stderr, prov)
+			if loadErr != nil {
+				if err := installRigNonCodexHooks(fs, cityPath, rigPath, pc.Cfg); err != nil {
 					fmt.Fprintf(stderr, "gc rig add: installing agent hooks: %v\n", err) //nolint:errcheck // best-effort stderr
 				}
+				if rigNeedsCodexHookPreparation(pc.Cfg) {
+					fmt.Fprintf(stderr, "gc rig add: loading agent hook config: %v\n", loadErr) //nolint:errcheck // best-effort stderr
+				}
+			} else if err := installRigAgentHooks(fs, cityPath, name, rigPath, reloadedCfg); err != nil {
+				fmt.Fprintf(stderr, "gc rig add: installing agent hooks: %v\n", err) //nolint:errcheck // best-effort stderr
 			}
 
-			reloadedCfg, prov, _ := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-			emitLoadCityConfigWarnings(stderr, prov)
 			if reloadedCfg != nil {
 				layers, ok := reloadedCfg.FormulaLayers.Rigs[name]
 				if !ok || len(layers) == 0 {
@@ -422,12 +436,16 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		Includes:           includes,
 		StartSuspended:     startSuspended,
 		Adopt:              adopt,
+		DryRun:             addOpts.dryRun,
 		AllowEphemeralPath: addOpts.allowEphemeralPath,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		printCredentialHint(stderr, err)
 		return config.Rig{}, 1
+	}
+	if addOpts.dryRun {
+		return r, 0
 	}
 	if reloaded, loadErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); loadErr != nil {
 		fmt.Fprintf(stderr, "gc rig add: reload provider ownership after rig add: %v\n", loadErr) //nolint:errcheck // best-effort stderr
@@ -618,6 +636,39 @@ func prepareRigAdoptProviderState(cityPath, rigPath string) error {
 	if err := validateProxiedScopeBindingHasStore(rigPath); err != nil {
 		return err
 	}
+	if cityUsesBdStoreContract(cityPath) {
+		owned, err := scopeProviderOwned(cityPath, rigPath)
+		if err != nil {
+			return err
+		}
+		metadata, exists, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(rigPath))
+		if err != nil {
+			return err
+		}
+		if exists && metadata.Backend == "dolt" && metadata.DoltMode == "server" && !owned {
+			bound, err := scopeSkipsManagedDoltForInit(cityPath, rigPath)
+			if err != nil {
+				return err
+			}
+			// Canonical GC management authority is valid before registration;
+			// initialization retains the separate connectivity/readiness check.
+			resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, rigPath, "")
+			if err != nil {
+				return err
+			}
+			knownManaged := resolved.Kind == contract.ScopeConfigAuthoritative &&
+				(resolved.State.EndpointOrigin == contract.EndpointOriginManagedCity || resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity)
+			if cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard); cfgErr != nil {
+				return cfgErr
+			} else if cfg != nil {
+				resolveRigPaths(cityPath, cfg.Rigs)
+				knownManaged = knownManaged || (rigConfigForScopeRoot(cityPath, rigPath, cfg.Rigs) != nil && scopeStoreLivesInTheCitysManagedDolt(cityPath, rigPath))
+			}
+			if !bound && !knownManaged {
+				return fmt.Errorf("refuse adoption of native bd store %q: its existing local binding cannot be proven; no store was initialized or relocated", rigPath)
+			}
+		}
+	}
 	if rawBeadsProvider(cityPath) != "file" {
 		return nil
 	}
@@ -646,7 +697,7 @@ var rigAdoptStorePrefix = readAdoptedStoreIssuePrefix
 // adoption is decided. The proxied read is an ordinary bd command: it may
 // start the workspace's proxy and run bd's version-bump maintenance even when
 // the adopt is then refused.
-func readAdoptedStoreIssuePrefix(cityPath, rigPath string) (string, error) {
+func readAdoptedStoreIssuePrefix(_ string, rigPath string) (string, error) {
 	metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
 	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, metaPath)
 	if err != nil {
@@ -660,32 +711,23 @@ func readAdoptedStoreIssuePrefix(cityPath, rigPath string) (string, error) {
 		return "", fmt.Errorf("reading %s: %w", metaPath, err)
 	}
 
-	var env map[string]string
-	args := []string{"--readonly", "config", "get", "--json", "issue_prefix"}
+	// An unregistered workspace owns its connection metadata. Do not project
+	// the destination city's runtime endpoint onto a queue not yet adopted.
 	if contract.IsProxiedDoltMode(backend, mode) {
 		if err := validateProxiedScopeBindingHasStore(rigPath); err != nil {
 			return "", err
 		}
-		env, err = providerOwnedScopeCustomTypesEnv(cityPath, rigPath)
-		args = args[1:]
-	} else {
-		env, err = embeddedScopeCustomTypesEnv(cityPath, rigPath)
 	}
-	if err != nil {
-		return "", fmt.Errorf("preparing bd environment for %s: %w", rigPath, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	run := beads.ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx, map[string]string{"BEADS_DIR": filepath.Join(rigPath, ".beads")})
+	if !contract.IsProxiedDoltMode(backend, mode) {
+		normalRun := run
+		run = func(dir, name string, args ...string) ([]byte, error) {
+			return normalRun(dir, name, append([]string{"--readonly"}, args...)...)
+		}
 	}
-
-	out, err := beads.ExecCommandRunnerWithEnv(env)(rigPath, "bd", args...)
-	if err != nil {
-		return "", fmt.Errorf("bd config get issue_prefix in %s: %w", rigPath, err)
-	}
-	var row struct {
-		Value string `json:"value"`
-	}
-	if err := json.Unmarshal(out, &row); err != nil {
-		return "", fmt.Errorf("parsing bd config get issue_prefix output in %s: %w", rigPath, err)
-	}
-	return strings.TrimSpace(row.Value), nil
+	return beads.NewBdStore(rigPath, run).ConfigGet("issue_prefix")
 }
 
 // findEnclosingRig returns the rig whose path is a prefix of dir. It does

@@ -52,9 +52,12 @@ func TestArmResolvedUnderOffFollowsLiveFlipOn(t *testing.T) {
 			if err := tm.respawnPaneWithWorkDir("%1", "/w", "claude", arm); err != nil {
 				t.Fatal(err)
 			}
-			if len(rec.calls) != 1 || !slices.Contains(rec.calls[0], "exec "+relayed) || !slices.Contains(rec.calls[0], programTapOption) {
+			// A respawn spends the native bootstrap-input credit, then runs
+			// its one relay/tap list.
+			if len(rec.calls) != 2 || !slices.Contains(rec.calls[1], "exec "+relayed) || !slices.Contains(rec.calls[1], programTapOption) {
 				t.Fatalf("respawn after the flip with an arm resolved under off is not relay-wrapped and tapped: %q", rec.calls)
 			}
+			assertBootstrapSpendCall(t, rec.calls[0], "%1")
 		})
 	}
 }
@@ -85,9 +88,12 @@ func TestArmResolvedUnderOffArmsNothingWhileOff(t *testing.T) {
 		{"display-message", "-p", "-t", "%1", "#{pane_id}"},
 		{"if-shell", "-F", "-t", "%1", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%1")},
 	})...)
-	if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], wantRespawn) {
-		t.Fatalf("respawn under switch off\n got %q\nwant [%q]", rec.calls, wantRespawn)
+	// A respawn spends the native bootstrap-input credit, then runs today's
+	// exact argv.
+	if len(rec.calls) != 2 || !slices.Equal(rec.calls[1], wantRespawn) {
+		t.Fatalf("respawn under switch off\n got %q\nwant spend, then %q", rec.calls, wantRespawn)
 	}
+	assertBootstrapSpendCall(t, rec.calls[0], "%1")
 	if *probes != 0 {
 		t.Fatalf("switch off evaluated the capability gate %d times", *probes)
 	}

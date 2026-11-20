@@ -295,7 +295,7 @@ func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
 	hookPath := filepath.Join(repoRoot, ".githooks", "pre-commit")
 
 	tmpRepo := t.TempDir()
-	runGit := func(args ...string) {
+	runGit := func(args ...string) []byte {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = tmpRepo
@@ -303,14 +303,18 @@ func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.invalid",
 			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.invalid",
 		)
-		if out, err := cmd.CombinedOutput(); err != nil {
+		out, err := cmd.CombinedOutput()
+		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
+		return out
 	}
 
 	specPath := filepath.Join(tmpRepo, "internal", "api", "openapi.json")
 	clientPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "web", "shared", "src", "generated", "gc-supervisor-client")
 	distPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "dist", "placeholder")
+	embeddedRelative := "internal/api/dashboardspa/embedded/dist.bundle.json.gz"
+	embeddedPath := filepath.Join(tmpRepo, filepath.FromSlash(embeddedRelative))
 
 	// The hook resolves its beads chain relative to `git rev-parse
 	// --show-toplevel`, which is this temp repo — install the real forwarder
@@ -329,6 +333,7 @@ func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
 	writeTestFile(t, specPath, "{}\n")
 	writeTestFile(t, clientPath, "placeholder\n")
 	writeTestFile(t, distPath, "placeholder\n")
+	writeTestFile(t, embeddedPath, "previous-bundle\n")
 	runGit("add", "-A")
 	runGit("commit", "-m", "init")
 
@@ -344,11 +349,12 @@ set -euo pipefail
 echo "$*" >> "`+npmLog+`"
 exit 0
 `)
-	// Stub make: this test verifies the control-flow reaches the dashboard
-	// block at all (the reviewer's criterion-2 gap), not the real
-	// dashboard-check/dashboard-smoke targets, which need the full repo.
+	// Stub make emits a changed embedding to verify actual index staging
+	// as well as dashboard control flow. The real build remains covered by
+	// dashboard-check/dashboard-smoke against the full repository.
 	writeExecutable(t, filepath.Join(binDir, "make"), `#!/usr/bin/env bash
-exit 0
+set -euo pipefail
+printf "updated-bundle\n" > internal/api/dashboardspa/embedded/dist.bundle.json.gz
 `)
 	// Stub bd so the chained beads pre-commit hook is a no-op here; this test
 	// is about the repo hook's own control flow.
@@ -371,6 +377,10 @@ exit 0
 	if readErr != nil {
 		t.Fatalf("pre-commit hook exited early and never invoked npm when only internal/api/openapi.json was "+
 			"staged -- the go/web/docs early guard must not skip a spec-only commit (hook output: %s)", out)
+	}
+	indexedBytes := runGit("show", ":"+embeddedRelative)
+	if string(indexedBytes) != "updated-bundle\n" {
+		t.Fatalf("generated embedded dashboard must be staged with raw assets: indexed=%q", indexedBytes)
 	}
 	if !strings.Contains(string(logContent), "generate:client") {
 		t.Fatalf("pre-commit hook must run 'npm run generate:client' when only internal/api/openapi.json is "+

@@ -102,6 +102,10 @@ func NewProviderWithConfig(cfg Config) *Provider {
 	return p
 }
 
+// SupportsReconcilerOwnedMergeablePaths reports that tmux sessions validate
+// reconciler-owned files immediately before their staging handoff.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool { return true }
+
 // Start creates a new detached tmux session and performs a multi-step
 // startup sequence to ensure agent readiness. The sequence handles zombie
 // detection, command launch verification, permission warning dismissal,
@@ -129,6 +133,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) (
 	}
 	cfg.Env = injectSessionRuntimeHintsEnv(cfg.Env, cfg)
 
+	if err := p.tm.prepareBootstrapInput(name, cfg); err != nil {
+		return err
+	}
+
 	// Store workDir for CopyTo.
 	if cfg.WorkDir != "" {
 		p.mu.Lock()
@@ -137,6 +145,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) (
 	}
 
 	if err := stageStartFiles(cfg, os.Stderr); err != nil {
+		p.tm.forgetBootstrapInput(name)
 		return err
 	}
 
@@ -145,9 +154,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) (
 	ctx = withoutInputFence(ctx)
 	err = doStartSession(ctx, p.startOps(cfg, true), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
+		if promoteErr := p.tm.promoteBootstrapInput(ctx, name); promoteErr != nil {
+			p.tm.forgetBootstrapInput(name)
+			log.Printf("tmux: session %q has no first-input credit: %v", name, promoteErr)
+		}
 		p.cache.Invalidate()
 		return nil
 	}
+	p.tm.forgetBootstrapInput(name)
 	if errors.Is(err, ErrServerDegraded) {
 		return err
 	}
@@ -163,24 +177,30 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) (
 }
 
 func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
+	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return err
+	}
 	// Copy overlays and CopyFiles before creating the tmux session.
 	// Local provider: files are on the same filesystem.
-	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
+	// V2 per-provider overlay support: configured staging copies universal
 	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
-	// with ProviderName fallback, plus any InstallAgentHooks entries.
-	overlayProviders := runtime.EffectiveOverlayProviderNames(cfg)
+	// with ProviderName fallback, plus any InstallAgentHooks entries. Named home
+	// sessions preserve reconciler-owned mergeable settings.
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
-			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := runtime.StageConfiguredProviderOverlayDir(od, cfg.WorkDir, cfg, warnings); err != nil {
 				return fmt.Errorf("copying pack overlay %s: %w", od, err)
 			}
 		}
 	}
 	// Agent-level overlay (highest priority; merges known settings files, overwrites others).
 	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		if err := runtime.StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+		if err := runtime.StageConfiguredProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, cfg, warnings); err != nil {
 			return fmt.Errorf("copying overlay %s: %w", cfg.OverlayDir, err)
 		}
+	}
+	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return err
 	}
 	for _, cf := range cfg.CopyFiles {
 		dst := cfg.WorkDir
@@ -290,6 +310,11 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
+	if len(cfg.SessionLive) != 0 {
+		if err := p.tm.taintBootstrapInput(name); err != nil {
+			return fmt.Errorf("refusing live commands before first-input invalidation: %w", err)
+		}
+	}
 	runSessionLive(context.Background(), p.startOps(cfg, false), name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
@@ -304,6 +329,7 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	p.tm.forgetBootstrapInput(name)
 	// The runtime dir is what makes the startup-nudge and start-crash
 	// diagnostics reachable. Relaunch and RunLive passed "" here, so an
 	// unconfirmed startup nudge on this path was suppressed by
@@ -362,7 +388,7 @@ func (p *Provider) interrupt(ctx context.Context, name string) error {
 		p.tm.noteProgramInterrupt(name)
 	}
 	if p.tm.isClaudeTarget(name) {
-		handled, err := p.tm.cancelClaudeApproval(ctx, name)
+		handled, err := p.tm.cancelClaudeDialog(ctx, name)
 		if handled {
 			return err
 		}
@@ -371,7 +397,7 @@ func (p *Provider) interrupt(ctx context.Context, name string) error {
 			if logf == nil {
 				logf = log.Printf
 			}
-			logf("tmux: interrupting %q with Ctrl-C without knowing whether a permission prompt is up: %v", name, err)
+			logf("tmux: interrupting %q with Ctrl-C without knowing whether a Claude dialog is up: %v", name, err)
 		}
 	}
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
@@ -1680,7 +1706,7 @@ func (o *tmuxStartOps) waitForCommand(ctx context.Context, name string, timeout 
 }
 
 func (o *tmuxStartOps) acceptStartupDialogs(ctx context.Context, name string) error {
-	return o.tm.AcceptStartupDialogs(ctx, name)
+	return o.tm.acceptBootstrapStartupDialogs(ctx, name)
 }
 
 // waitForReady polls the agent pane, not the active one: a human's split or
@@ -2312,12 +2338,13 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Some CLIs surface trust or permissions dialogs only after their initial
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
+	var dialogErr error
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		// Best-effort, but a trust dialog this last pass still could not
-		// confirm is left on screen with the cursor off the trust row, where
-		// any later Enter would answer it. Say so instead of dropping it.
-		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
-			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: %v\n", name, err)
+		dialogErr = ops.acceptStartupDialogs(ctx, name)
+		if errors.Is(dialogErr, runtime.ErrWorkspaceTrustUnconfirmed) ||
+			errors.Is(dialogErr, runtime.ErrStartupSelectionUnconfirmed) ||
+			errors.Is(dialogErr, runtime.ErrCodexUpdateUnconfirmed) {
+			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: %v\n", name, dialogErr)
 		}
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, "accepting startup dialogs after readiness", err)
@@ -2347,6 +2374,12 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return fmt.Errorf("running session_setup: %w", err)
 	}
 	if cfg.Nudge != "" {
+		if errors.Is(dialogErr, runtime.ErrWorkspaceTrustUnconfirmed) ||
+			errors.Is(dialogErr, runtime.ErrStartupSelectionUnconfirmed) ||
+			errors.Is(dialogErr, runtime.ErrCodexUpdateUnconfirmed) {
+			ops.recordUnconfirmedNudge(name, cfg.Nudge, fmt.Errorf("first turn withheld: %w", dialogErr))
+			return nil
+		}
 		send := func() error { return ops.sendKeys(name, cfg.Nudge) }
 		busy := func() (bool, error) { return ops.paneBusy(name) }
 		if sh, ok := ops.(startupLadderShadower); ok {

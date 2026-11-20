@@ -131,7 +131,7 @@ var (
 
 var (
 	controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
-	statusObservationTimeout                  = statusObservationTimeoutDefault
+	statusObservationTimeout                  = statusRuntimeProbeBudget
 	statusSessionSnapshotTimeout              = 3 * time.Second
 )
 

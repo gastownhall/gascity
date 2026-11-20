@@ -133,6 +133,9 @@ func (s *Server) humaHandleRigCreate(ctx context.Context, input *RigCreateInput)
 	}
 
 	body := input.Body
+	if body.Adopt && strings.TrimSpace(body.GitURL) != "" {
+		return nil, huma.Error422UnprocessableEntity("adopt registers an existing queue and cannot be combined with git_url")
+	}
 	if strings.TrimSpace(body.GitURL) == "" {
 		// Sync create: idempotent via the Idempotency-Key header. Cache the whole
 		// 201 union body and replay it verbatim on a same-key repeat, mirroring
@@ -159,7 +162,7 @@ func (s *Server) rigCreateSync(sm StateMutator, body RigCreateBody) (*RigCreateO
 		Prefix:        body.Prefix,
 		DefaultBranch: body.DefaultBranch,
 	}
-	if err := sm.CreateRig(rig); err != nil {
+	if err := sm.CreateRig(rig, body.Adopt); err != nil {
 		return nil, mutationError(err)
 	}
 	out := &RigCreateOutput{Status: http.StatusCreated}
@@ -173,6 +176,12 @@ func (s *Server) rigCreateSync(sm StateMutator, body RigCreateBody) (*RigCreateO
 // on a fresh/re-clone admission, spawns the detached provisioning goroutine.
 func (s *Server) rigCreateAsync(ctx context.Context, sm StateMutator, body RigCreateBody) (*RigCreateOutput, error) {
 	gitURL := strings.TrimSpace(body.GitURL)
+
+	// Absolute clone cleanup requires a durable ownership intent. A synthetic
+	// no-id admission has no record, even though it supplies a callback.
+	if filepath.IsAbs(strings.TrimSpace(body.Path)) && body.RequestID == "" {
+		return nil, huma.Error422UnprocessableEntity("request_id is required for an explicit absolute clone destination")
+	}
 
 	// G13 §2 validation, at the handler edge before any lock/store access.
 	if body.RequestID != "" {

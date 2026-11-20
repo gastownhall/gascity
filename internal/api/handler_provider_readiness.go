@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/processenv"
+	"github.com/gastownhall/gascity/internal/providerreadiness"
 	"github.com/gastownhall/gascity/internal/searchpath"
 	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 	"gopkg.in/yaml.v3"
@@ -81,9 +84,7 @@ var (
 		"codex": {
 			displayName: "Codex",
 			kind:        probeKindProvider,
-			probe: func(_ context.Context, homeDir string) providerProbeResult {
-				return probeCodex(homeDir)
-			},
+			probe:       probeCodex,
 		},
 		"gemini": {
 			displayName: "Gemini CLI",
@@ -157,11 +158,6 @@ type claudeAuthStatus struct {
 	LoggedIn    bool   `json:"loggedIn"`
 	AuthMethod  string `json:"authMethod"`
 	APIProvider string `json:"apiProvider"`
-}
-
-type codexAuthFile struct {
-	AuthMode string          `json:"auth_mode"`
-	Tokens   json.RawMessage `json:"tokens"`
 }
 
 type geminiSettings struct {
@@ -329,6 +325,11 @@ func buildReadinessResponse(
 
 func probeReadinessItem(ctx context.Context, homeDir, itemName string, fresh bool) providerProbeResult {
 	cacheKey := homeDir + "\x00" + itemName
+	if itemName == "codex" {
+		// Separate account selections without retaining credential bytes in keys.
+		context := sha256.Sum256([]byte(os.Getenv("CODEX_HOME") + "\x00" + os.Getenv("CODEX_ACCESS_TOKEN")))
+		cacheKey += fmt.Sprintf("\x00%x", context)
+	}
 	if !fresh {
 		if result, ok := providerProbeCache.load(cacheKey); ok {
 			return result
@@ -417,37 +418,18 @@ func claudeFirstPartyAuthMethod(method string) bool {
 	return false
 }
 
-func probeCodex(homeDir string) providerProbeResult {
-	if _, ok := findProbeBinary("codex", homeDir); !ok {
+func probeCodex(ctx context.Context, homeDir string) providerProbeResult {
+	path, ok := findProbeBinary("codex", homeDir)
+	if !ok {
 		return providerProbeResult{status: probeStatusNotInstalled, detail: "codex executable not found in probe PATH"}
 	}
-
-	data, err := os.ReadFile(filepath.Join(homeDir, ".codex", "auth.json"))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return providerProbeResult{status: probeStatusNeedsAuth, detail: "missing ~/.codex/auth.json"}
-		}
-		return providerProbeResult{status: probeStatusProbeError, detail: "failed to read ~/.codex/auth.json"}
-	}
-
-	var auth codexAuthFile
-	if err := json.Unmarshal(data, &auth); err != nil {
-		return providerProbeResult{status: probeStatusProbeError, detail: "invalid JSON in ~/.codex/auth.json"}
-	}
-
-	switch strings.ToLower(strings.TrimSpace(auth.AuthMode)) {
-	case "chatgpt":
-		if !codexTokensConfigured(auth.Tokens) {
-			return providerProbeResult{status: probeStatusNeedsAuth, detail: "ChatGPT auth mode is selected but no Codex tokens are stored"}
-		}
-		return providerProbeResult{status: probeStatusConfigured}
-	case "", "none":
-		return providerProbeResult{status: probeStatusNeedsAuth, detail: "Codex auth mode is unset"}
-	case "api_key", "api-key", "apikey":
-		return providerProbeResult{status: probeStatusInvalidConfiguration, detail: "ChatGPT auth is required; API key auth is unsupported for onboarding"}
-	default:
-		return providerProbeResult{status: probeStatusInvalidConfiguration, detail: fmt.Sprintf("unsupported Codex auth mode %q", auth.AuthMode)}
-	}
+	env := processenv.ProviderProcessPassthroughEnv()
+	env["HOME"] = homeDir
+	env["PATH"] = providerProbeSearchPath(homeDir)
+	result := providerreadiness.Probe(ctx, providerreadiness.Target{
+		Family: "codex", Command: path, Env: env,
+	})
+	return providerProbeResult{status: result.Status, detail: result.Detail}
 }
 
 func probeGemini(homeDir string) providerProbeResult {
@@ -837,21 +819,6 @@ func probeEnvVars(keys ...string) []string {
 		}
 	}
 	return env
-}
-
-func codexTokensConfigured(tokens json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(tokens)
-	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return false
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(trimmed, &payload); err != nil {
-		return false
-	}
-	return nonEmptyString(payload["access_token"]) ||
-		nonEmptyString(payload["id_token"]) ||
-		nonEmptyString(payload["refresh_token"])
 }
 
 func geminiOAuthCredsConfigured(payload map[string]any) bool {

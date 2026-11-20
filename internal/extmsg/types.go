@@ -445,6 +445,16 @@ type EnsureGroupInput struct {
 	LastAddressedHandle string
 	FanoutPolicy        FanoutPolicy
 	Metadata            map[string]string
+	// SettingsUpdate selects the HTTP-supported settings subset. Existing groups
+	// retain their fanout policy and any omitted default handle. Nil preserves
+	// the full-upsert contract for callers that own all group settings.
+	SettingsUpdate *GroupSettingsUpdate
+}
+
+// GroupSettingsUpdate preserves omitted settings while allowing an explicit
+// empty default handle to clear the route. Fanout remains owned by full upserts.
+type GroupSettingsUpdate struct {
+	DefaultHandle *string
 }
 
 // UpsertParticipantInput is the input for adding or updating a group participant.

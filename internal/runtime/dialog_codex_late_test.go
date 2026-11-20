@@ -72,7 +72,19 @@ type fakeLateCodexPane struct {
 func (p *fakeLateCodexPane) peek(int) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.screen, nil
+	// Keep the captured native screens immutable; render only the cursor that
+	// the modeled Down key actually moved. The selector must reread it.
+	screen := p.screen
+	if screen == codex0162HookReview || screen == codex0162HookReviewUnderBanner {
+		if p.cursor != 0 {
+			screen = strings.Replace(screen, "› 1. Review hooks", "  1. Review hooks", 1)
+			choices := []string{"  1. Review hooks", "  2. Trust all and continue", "  3. Continue without trusting (hooks won't run)"}
+			if p.cursor >= 0 && p.cursor < len(choices) {
+				screen = strings.Replace(screen, choices[p.cursor], "› "+strings.TrimSpace(choices[p.cursor]), 1)
+			}
+		}
+	}
+	return screen, nil
 }
 
 func (p *fakeLateCodexPane) show(screen string) {
@@ -86,7 +98,7 @@ func (p *fakeLateCodexPane) sendKeys(keys ...string) error {
 	defer p.mu.Unlock()
 	p.sent = append(p.sent, keys...)
 	for _, k := range keys {
-		if p.screen != codex0162HookReview {
+		if p.screen != codex0162HookReview && p.screen != codex0162HookReviewUnderBanner {
 			continue
 		}
 		switch k {
@@ -98,7 +110,11 @@ func (p *fakeLateCodexPane) sendKeys(keys ...string) error {
 			} else {
 				p.confirmed = "review"
 			}
-			p.screen = codex0162SettledComposer
+			// UnderBanner intentionally keeps the answered dialog on screen:
+			// that case proves the startup watch does not answer it twice.
+			if p.screen == codex0162HookReview {
+				p.screen = codex0162SettledComposer
+			}
 		}
 	}
 	return nil

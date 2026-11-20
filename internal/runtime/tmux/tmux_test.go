@@ -2631,7 +2631,8 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 
 func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testing.T) {
 	fe := &fakeExecutor{
-		errs: []error{errors.New("command too long")},
+		// Spend first-input authority before the literal send fails.
+		errs: []error{nil, errors.New("command too long")},
 	}
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
@@ -2641,19 +2642,21 @@ func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testi
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
-	if len(fe.calls) != 3 {
-		t.Fatalf("tmux calls = %d, want 3: %#v", len(fe.calls), fe.calls)
+	if len(fe.calls) != 5 {
+		t.Fatalf("tmux calls = %d, want 5: %#v", len(fe.calls), fe.calls)
 	}
-	first := strings.Join(fe.calls[0], " ")
+	assertBootstrapSpendCall(t, fe.calls[0], "%1")
+	first := strings.Join(fe.calls[1], " ")
 	if !strings.Contains(first, "send-keys") || !strings.Contains(first, "-l") {
-		t.Fatalf("first call = %v, want literal send-keys", fe.calls[0])
+		t.Fatalf("first input call = %v, want literal send-keys", fe.calls[1])
 	}
-	assertTmuxCommand(t, fe.calls[1], "load-buffer")
-	assertTmuxCommand(t, fe.calls[2], "paste-buffer")
-	third := strings.Join(fe.calls[2], "\x00")
+	assertTmuxCommand(t, fe.calls[2], "load-buffer")
+	assertBootstrapSpendCall(t, fe.calls[3], "%1")
+	assertTmuxCommand(t, fe.calls[4], "paste-buffer")
+	third := strings.Join(fe.calls[4], "\x00")
 	for _, want := range []string{"\x00-p\x00", "\x00-d\x00", "\x00-t\x00%1"} {
 		if !strings.Contains(third, want) {
-			t.Fatalf("paste-buffer call = %v, missing %q", fe.calls[2], want)
+			t.Fatalf("paste-buffer call = %v, missing %q", fe.calls[4], want)
 		}
 	}
 }
@@ -2668,11 +2671,69 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
-	if len(fe.calls) != 2 {
-		t.Fatalf("tmux calls = %d, want 2: %#v", len(fe.calls), fe.calls)
+	if len(fe.calls) != 3 {
+		t.Fatalf("tmux calls = %d, want 3: %#v", len(fe.calls), fe.calls)
 	}
 	assertTmuxCommand(t, fe.calls[0], "load-buffer")
-	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+	assertBootstrapSpendCall(t, fe.calls[1], "%1")
+	assertTmuxCommand(t, fe.calls[2], "paste-buffer")
+}
+
+// This isolates a transport hypothesis from the native RFC trial: Claude
+// received only a suffix of a roughly 2.3KB notice+prompt. Requiring one
+// bracketed paste below the size cutoff prevents newline-bearing text from
+// becoming separate typed input, but does not itself prove the native cause.
+func TestSendKeysLiteralWithRetryPreservesClaudeMultilineAsOnePaste(t *testing.T) {
+	paragraph := strings.Repeat("Preserve every byte of this qualification request, including its Unicode marker 界 and line break.\n", 11)
+	multiline := "RFC8191_PREFIX_BEGIN\n" + paragraph + "RFC8191_MIDDLE_INTACT\n" + paragraph + "RFC8191_SUFFIX_END\n"
+	if len(multiline) <= 2000 || len(multiline) >= maxSendKeysLiteralLen {
+		t.Fatalf("fixture must exercise ordinary multiline input below the large-text cutoff: bytes=%d cutoff=%d", len(multiline), maxSendKeysLiteralLen)
+	}
+	for _, tc := range []struct {
+		name, text string
+		paste      bool
+	}{
+		{"multiline atomic paste", multiline, true},
+		{"single line remains typed", strings.ReplaceAll(multiline, "\n", " "), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := newFenceModel(nil, map[string]string{"GC_PROVIDER": "claude"})
+			tm := &Tmux{cfg: DefaultConfig(), exec: model}
+			if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", tc.text, time.Second); err != nil {
+				t.Fatalf("sendKeysLiteralWithRetry = %v", err)
+			}
+			// The executor reads the actual temporary load-buffer file before
+			// pasteLiteralText removes it. Compare the whole payload, so its
+			// prefix, middle, suffix and every UTF-8 byte must all survive.
+			if !slices.Equal(model.events, []string{"text:" + tc.text}) {
+				t.Fatalf("input was split, changed or repeated: got %q want one complete %q", model.events, tc.text)
+			}
+			loads, pastes, typed := 0, 0, 0
+			for _, call := range model.calls {
+				switch call[0] {
+				case "load-buffer":
+					loads++
+				case "paste-buffer":
+					pastes++
+					if !slices.Contains(call, "-p") || !slices.Contains(call, "-d") || flagValue(call, "-t") != "%1" {
+						t.Fatalf("paste must be bracketed, consumed and exactly targeted: %q", call)
+					}
+				case "send-keys":
+					if !slices.Contains(call, "-l") {
+						t.Fatalf("literal transport injected a submit or control key: %q", call)
+					}
+					typed++
+				}
+			}
+			if tc.paste {
+				if loads != 1 || pastes != 1 || typed != 0 {
+					t.Fatalf("multiline input must arrive in one paste: loads=%d pastes=%d typed=%d", loads, pastes, typed)
+				}
+			} else if loads != 0 || pastes != 0 || typed != 1 {
+				t.Fatalf("single-line input changed its transport: loads=%d pastes=%d typed=%d", loads, pastes, typed)
+			}
+		})
+	}
 }
 
 func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {
@@ -2761,7 +2822,9 @@ func TestSendStartupKeysLiteralWithRetryDoesNotChunkOtherProviders(t *testing.T)
 
 func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *testing.T) {
 	errs := make([]error, 6)
-	errs[3] = errors.New("not in a mode")
+	// Each chunk loads, spends authority, then pastes. Fail the second
+	// paste, rather than its load or authority marker.
+	errs[5] = errors.New("not in a mode")
 	fe := &fakeExecutor{errs: errs}
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
@@ -2772,12 +2835,16 @@ func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *t
 	}
 
 	var loadCalls, pasteCalls int
-	for _, call := range fe.calls {
+	for index, call := range fe.calls {
 		joined := "\x00" + strings.Join(call, "\x00") + "\x00"
 		if strings.Contains(joined, "\x00load-buffer\x00") {
 			loadCalls++
 		}
 		if strings.Contains(joined, "\x00paste-buffer\x00") {
+			if index == 0 {
+				t.Fatal("paste has no preceding authority marker")
+			}
+			assertBootstrapSpendCall(t, fe.calls[index-1], "%1")
 			pasteCalls++
 		}
 	}

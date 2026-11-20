@@ -172,6 +172,58 @@ func readRegularFileSnapshot(fs FS, path string) (regularFileSnapshot, error) {
 	return regularFileSnapshot{}, &os.PathError{Op: "open", Path: path, Err: os.ErrInvalid}
 }
 
+// ReadRegularFileStable reads path without following a final symlink and
+// verifies that both the opened regular file and its immediate directory keep
+// the same identity through the read. The returned FileInfo describes the
+// verified file identity. Filesystems that cannot provide identity-bearing
+// snapshots fail closed.
+func ReadRegularFileStable(fs FS, path string) ([]byte, os.FileInfo, error) {
+	parent := filepath.Dir(path)
+	parentBefore, err := fs.Lstat(parent)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inspecting parent %s: %w", parent, err)
+	}
+	if !parentBefore.IsDir() || parentBefore.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, fmt.Errorf("inspecting parent %s: %w", parent, os.ErrInvalid)
+	}
+
+	snapshot, err := readRegularFileSnapshot(fs, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !snapshot.hasID {
+		return nil, nil, &os.PathError{Op: "read", Path: path, Err: os.ErrInvalid}
+	}
+	info, err := fs.Lstat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rechecking %s: %w", path, err)
+	}
+	currentID, ok := fileIdentityFromInfo(info)
+	if !info.Mode().IsRegular() || !ok || currentID != snapshot.id {
+		return nil, nil, fmt.Errorf("rechecking %s: path changed identity or became non-regular", path)
+	}
+	parentAfter, err := fs.Lstat(parent)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rechecking parent %s: %w", parent, err)
+	}
+	if !parentAfter.IsDir() || parentAfter.Mode()&os.ModeSymlink != 0 || !SameFileIdentity(parentBefore, parentAfter) {
+		return nil, nil, fmt.Errorf("rechecking parent %s: path changed identity or became non-directory", parent)
+	}
+	return snapshot.data, info, nil
+}
+
+// SameFileIdentity reports whether two FileInfo values describe the same
+// filesystem object. It supports both OS-backed stat metadata and fsys.Fake's
+// synthetic identity, and fails closed when either identity is unavailable.
+func SameFileIdentity(first, second os.FileInfo) bool {
+	if first == nil || second == nil {
+		return false
+	}
+	firstID, firstOK := fileIdentityFromInfo(first)
+	secondID, secondOK := fileIdentityFromInfo(second)
+	return firstOK && secondOK && firstID == secondID
+}
+
 // ComparableMode returns the portion of a file mode that is significant when
 // deciding whether an on-disk file already matches a desired mode: the
 // permission bits plus the setuid, setgid, and sticky bits.

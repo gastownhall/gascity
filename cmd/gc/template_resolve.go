@@ -110,6 +110,11 @@ type TemplateParams struct {
 	// metadata, and start background helpers, but they do not initiate the
 	// first model turn on their own.
 	HookEnabled bool
+	// PreparedMergeableFiles binds each reconciled workdir-relative settings
+	// path to its verified regular-file digest. Resolution only populates this
+	// for current configured agent/named-session homes, independent of the
+	// session record's origin metadata.
+	PreparedMergeableFiles map[string]string
 	// SessionOverride is the per-agent session provider override (e.g., "acp",
 	// "tmux", "exec:..."). Empty means use the city-level default.
 	SessionOverride string
@@ -308,7 +313,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			ContentHash: runtime.HashPathContentExcluding(scriptsDir, isOperationalScript),
 		})
 	}
-	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers))
+	effectiveRuntime := effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	hookStagingRoot := p.cityPath
+	switch effectiveRuntime {
+	case "", "tmux", "subprocess", "herdr", "acp":
+		hookStagingRoot = workDir
+	}
+	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookStagingRoot, hookFileProvidersForResolved(resolved, installHooks, p.providers))
 
 	// Step 6: Compute session name.
 	// Uses bead-derived naming ("s-{beadID}") when a bead store is available,
@@ -870,7 +881,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProgramStatusEnv: expandEnvMap(programStatusEnv),
 	}
 	params.SessionOverride = cfgAgent.Session
-	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	params.EffectiveSessionProvider = effectiveRuntime
 	if p.city != nil {
 		params.CityRuntimes = p.city.Runtimes
 	}
@@ -1039,6 +1050,8 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	}
 	cfg.WorkDir = tp.WorkDir
 	cfg.FingerprintExtra = tp.FPExtra
+	// Ownership and startup delivery are independent projections.
+	materialize.ApplyVerifiedMergeableOwnership(&cfg, tp.PreparedMergeableFiles)
 	// The plan owns the startup prompt payload (it may prepend the prompt to the
 	// configured nudge) and the delivered marker.
 	plan.applyTo(&cfg)
@@ -1105,3 +1118,20 @@ func prependStartupPromptToNudge(prompt, nudge string) string {
 }
 
 const startupPromptNudgeSeparator = "\n\n---\n\n"
+
+func installHooksIncludeFamily(installHooks []string, family string, providers map[string]config.ProviderSpec) bool {
+	family = strings.TrimSpace(family)
+	if family == "" {
+		return false
+	}
+	for _, hook := range installHooks {
+		hook = strings.TrimSpace(hook)
+		if hook == "" {
+			continue
+		}
+		if hook == family || config.BuiltinFamily(hook, providers) == family {
+			return true
+		}
+	}
+	return false
+}

@@ -3,7 +3,10 @@
 // output, optional --fix support, and a summary report.
 package doctor
 
-import "io"
+import (
+	"context"
+	"io"
+)
 
 // CheckStatus represents the outcome of a health check.
 type CheckStatus int
@@ -80,6 +83,46 @@ func (c *CheckContext) Canceled() bool {
 	default:
 		return false
 	}
+}
+
+// Context returns a subprocess context tied to this check's timeout. The caller
+// must call cancel even when the runner supplied no timeout channel.
+func (c *CheckContext) Context() (context.Context, context.CancelFunc) {
+	if c == nil {
+		return contextFromDone(nil)
+	}
+	return contextFromDone(c.Done)
+}
+
+// contextFromDone derives a context.Context that is canceled when done
+// closes, so a check that shells out can tie its subprocess's lifetime (via
+// exec.CommandContext) to the doctor runner's abandon signal instead of
+// leaving the subprocess to run unsupervised after boundedRun gives up
+// waiting on the check. The returned CancelFunc must be called once the
+// check is done with the context (typically via defer) to release the
+// goroutine that watches done, even when done never closes.
+//
+// A nil done (unbounded runs, or a context built without one) yields a
+// context that is only ever canceled by the returned CancelFunc.
+func contextFromDone(done <-chan struct{}) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if done == nil {
+		return ctx, cancel
+	}
+	select {
+	case <-done:
+		cancel()
+		return ctx, cancel
+	default:
+	}
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 // Renderer is implemented by checks that produce additional, optional

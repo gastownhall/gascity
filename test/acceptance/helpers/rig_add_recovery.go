@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -107,9 +108,10 @@ func sectionInRoots(path string, roots []string) bool {
 }
 
 // recoverableShape returns nil for the one shape a lost backend port may be
-// retried on: a fresh rig in the default local managed proxied city, with no
+// retried on: a fresh rig in a local managed proxied city, with no
 // pre-created store, no other initializer, and no endpoint pinned in the
-// topology's or the run's environment.
+// topology's or the run's environment. The harness's explicit proxied/local
+// control selects that same automatic-port backend; other selectors do not.
 func recoverableShape(topo BeadsTopology, env []string) error {
 	switch {
 	case topo.LegacyInit:
@@ -120,8 +122,12 @@ func recoverableShape(topo BeadsTopology, env []string) error {
 		return errors.New("shape defers its store")
 	case topo.Rig.DoltMode != "proxied-server" || topo.Rig.Owner != OwnerProvider || topo.Rig.Proxies != 1 || topo.Rig.ExternalUpstreamSidecar:
 		return errors.New("shape is not the managed proxied local rig")
-	case topo.InitArgs != nil && len(topo.InitArgs(nil)) > 0:
-		return errors.New("shape selects its transport or target explicitly")
+	}
+	if topo.InitArgs != nil {
+		args := topo.InitArgs(nil)
+		if len(args) > 0 && !slices.Equal(args, []string{"--beads-transport", "proxied", "--beads-target", "local"}) {
+			return errors.New("shape selects another transport or target")
+		}
 	}
 	for name := range topo.Env {
 		if isEndpointPin(name) {

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -196,18 +197,14 @@ func TestAcceptStartupDialogsSelectsClaudeResumeAsIs(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[0]
 			if len(sent) == 0 {
-				return strings.Join([]string{
-					"This session is 1h 55m old and 212.7k tokens.",
-					"",
-					"❯ 1. Resume from summary (recommended)",
-					"  2. Resume full session as-is",
-					"  3. Don't ask me again",
-					"",
-					"Enter to confirm · Esc to cancel",
-				}, "\n"), nil
+				return fixture.frame(fixture.initial), nil
 			}
-			return "❯ ", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -293,11 +290,10 @@ func TestAcceptStartupDialogsSkipsCodexUpdateDialog(t *testing.T) {
 			if lines < 100 {
 				return "loading...", nil
 			}
-			return "✨ Update available! 0.124.0 -> 0.125.0\n" +
-				"› 1. Update now (runs `bun install -g @openai/codex`)\n" +
-				"  2. Skip\n" +
-				"  3. Skip until next version\n" +
-				"Press enter to continue", nil
+			if len(sent) >= 2 {
+				return "› Implement {feature}", nil
+			}
+			return codexUpdateDialogWithSelection(codexUpdateDialogFixture(), len(sent)+1), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -309,6 +305,199 @@ func TestAcceptStartupDialogsSkipsCodexUpdateDialog(t *testing.T) {
 	}
 	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
 		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+// Captured from the pinned native Codex 0.162.1 startup pane, November 3, 2026.
+func codexCompactUpdateDialogFixture() string {
+	return "Update available · 0.162.1 → 0.166.0\n" +
+		"› 1. Update now (runs `npm install -g @openai/codex`)\n" +
+		"  2. Skip\n" +
+		"  3. Skip until next version\n" +
+		"enter continue · esc skip"
+}
+
+func TestContainsCodexUpdateDialogRequiresCompleteWidget(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"captured compact update", codexCompactUpdateDialogFixture(), true},
+		{"legacy update", codexUpdateDialogFixture(), true},
+		{"partial legacy notice", "Update available! 0.124.0 -> 0.125.0\nSkip until next version\nPress enter to continue", false},
+		{"ordinary quoted description", "An Update available! notice says Skip until next version and Press enter to continue.", false},
+		{"native question", "Update available · 0.162.1 → 0.166.0\n› 1. Update now\n  2. Skip\n  3. Skip until next version\nenter select · esc cancel", false},
+		{"authentication", "Sign in to Codex\nUpdate available · 0.162.1 → 0.166.0\n1. Sign in with ChatGPT\n2. Use an API key", false},
+		{"missing skip choice", strings.Replace(codexCompactUpdateDialogFixture(), "  2. Skip\n", "", 1), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsCodexUpdateDialog(tt.content); got != tt.want {
+				t.Fatalf("containsCodexUpdateDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAcceptStartupDialogsSkipsCapturedCompactCodexUpdate(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	completed := false
+	selected := 1
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(int) (string, error) {
+			if completed {
+				return "› Implement {feature}", nil
+			}
+			// The update must take precedence even if an old composer is visible.
+			return codexUpdateDialogWithSelection(codexCompactUpdateDialogFixture(), selected) + "\n› Implement {feature}", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			for _, key := range keys {
+				if key == "Down" {
+					selected = 2
+				}
+				if key == "Enter" {
+					completed = true
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("startup keys = %v, want [Down Enter] to choose Skip", sent)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamSkipsCapturedCompactCodexUpdate(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- codexUpdateDialogWithSelection(codexCompactUpdateDialogFixture(), 2) + "\n› Implement {feature}"
+	snapshots <- "› Implement {feature}"
+	close(snapshots)
+	err := AcceptStartupDialogsFromStream(context.Background(), time.Second, snapshots, func(keys ...string) error {
+		sent = append(sent, keys...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("startup keys = %v, want [Enter] to confirm selected Skip", sent)
+	}
+}
+
+func codexUpdateDialogWithSelection(content string, selected int) string {
+	lines := strings.Split(content, "\n")
+	for i, raw := range lines {
+		line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "› "))
+		for choice, prefix := range []string{"1. ", "2. ", "3. "} {
+			if strings.HasPrefix(line, prefix) {
+				lines[i] = "  " + line
+				if selected == choice+1 {
+					lines[i] = "› " + line
+				}
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func TestAcceptStartupDialogsCodexUpdateConfirmsOnlySelectedSkip(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+	for _, tt := range []struct {
+		name     string
+		selected int
+		dropMove bool
+		want     []string
+		wantErr  bool
+	}{
+		{"update selected", 1, false, []string{"Down", "Enter"}, false},
+		{"skip selected", 2, false, []string{"Enter"}, false},
+		{"skip next selected", 3, false, []string{"Up", "Enter"}, false},
+		{"unknown selection with composer", 0, false, nil, true},
+		{"dropped movement", 1, true, nil, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			selected, completed := tt.selected, false
+			var sent []string
+			err := AcceptStartupDialogs(context.Background(), func(int) (string, error) {
+				if completed {
+					return "› Implement {feature}", nil
+				}
+				return codexUpdateDialogWithSelection(codexCompactUpdateDialogFixture(), selected) + "\n› Implement {feature}", nil
+			}, func(keys ...string) error {
+				for _, key := range keys {
+					sent = append(sent, key)
+					if selected == 0 {
+						t.Fatal("unknown update selection received input")
+					}
+					switch key {
+					case "Down":
+						if !tt.dropMove {
+							selected = selected%3 + 1
+						}
+					case "Up":
+						selected = (selected+1)%3 + 1
+					case "Enter":
+						if selected != 2 {
+							t.Fatalf("Enter would choose option%d, want Skip option2", selected)
+						}
+						completed = true
+					}
+				}
+				return nil
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error=%v, wantErr=%v; keys=%v", err, tt.wantErr, sent)
+			}
+			if tt.dropMove {
+				if len(sent) == 0 || len(sent) > 3 {
+					t.Fatalf("unacknowledged selection moves = %v, want bounded moves without Enter", sent)
+				}
+				for _, key := range sent {
+					if key != "Down" {
+						t.Fatalf("dropped move led to confirmation: %v", sent)
+					}
+				}
+			} else if !reflect.DeepEqual(sent, tt.want) {
+				t.Fatalf("keys=%v, want %v", sent, tt.want)
+			}
+		})
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamCodexUpdateRequiresSelectedSkip(t *testing.T) {
+	for _, selected := range []int{1, 2, 3, 0} {
+		t.Run(strings.Join([]string{"selected", string(rune('0' + selected))}, "-"), func(t *testing.T) {
+			var sent []string
+			snapshots := make(chan string, 2)
+			snapshots <- codexUpdateDialogWithSelection(codexCompactUpdateDialogFixture(), selected) + "\n› Implement {feature}"
+			snapshots <- "› Implement {feature}"
+			close(snapshots)
+			observed, err := AcceptStartupDialogsFromStreamWithStatus(context.Background(), time.Second, snapshots, func(keys ...string) error {
+				sent = append(sent, keys...)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if selected == 2 {
+				if !observed || !reflect.DeepEqual(sent, []string{"Enter"}) {
+					t.Fatalf("selected Skip: observed=%v keys=%v, want true [Enter]", observed, sent)
+				}
+			} else if observed || len(sent) != 0 {
+				t.Fatalf("unconfirmed Skip: observed=%v keys=%v, want false and no input for polling fallback", observed, sent)
+			}
+		})
 	}
 }
 
@@ -326,7 +515,7 @@ func TestAcceptStartupDialogsSkipsUpdateThenHandlesTrustDialog(t *testing.T) {
 			}
 			switch {
 			case len(sent) < 2:
-				return codexUpdateDialogFixture(), nil
+				return codexUpdateDialogWithSelection(codexUpdateDialogFixture(), len(sent)+1), nil
 			case !staleUpdateReturned:
 				staleUpdateReturned = true
 				return codexUpdateDialogFixture(), nil
@@ -357,10 +546,14 @@ func TestAcceptStartupDialogsTrustsCodexHookReviewDialog(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[2]
 			if len(sent) == 0 {
-				return codexHookReviewDialogFixture(), nil
+				return fixture.frame(fixture.initial), nil
 			}
-			return "› Implement {feature}", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -375,7 +568,7 @@ func TestAcceptStartupDialogsTrustsCodexHookReviewDialog(t *testing.T) {
 	}
 }
 
-func TestAcceptStartupDialogsTrustsCompactCodexHookReviewDialog(t *testing.T) {
+func TestAcceptStartupDialogsRefusesCompactHooksWithoutSelectedRows(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second
 
@@ -393,11 +586,8 @@ func TestAcceptStartupDialogsTrustsCompactCodexHookReviewDialog(t *testing.T) {
 			return nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
-	}
-	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
-		t.Fatalf("sent keys = %q, want %q", got, want)
+	if !errors.Is(err, ErrStartupSelectionUnconfirmed) || len(sent) != 0 {
+		t.Fatalf("unselected compact hooks must remain unconfirmed: keys=%v err=%v", sent, err)
 	}
 }
 
@@ -424,11 +614,14 @@ func TestAcceptStartupDialogsHandlesTrustThenCodexHookReview(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[2]
 			switch len(sent) {
 			case 0:
 				return "Do you trust the contents of this directory?", nil
 			case 1:
-				return codexHookReviewDialogFixture(), nil
+				return fixture.frame(fixture.initial), nil
+			case 2:
+				return fixture.frame(fixture.target), nil
 			default:
 				return "› Implement {feature}", nil
 			}
@@ -468,10 +661,14 @@ func TestAcceptStartupDialogsAcceptsMCPTrustDialog(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[1]
 			if len(sent) == 0 {
-				return mcpTrustDialogFixture(), nil
+				return fixture.frame(fixture.initial), nil
 			}
-			return "› Implement {feature}", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -494,11 +691,14 @@ func TestAcceptStartupDialogsHandlesTrustThenMCPTrust(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[1]
 			switch len(sent) {
 			case 0:
 				return "Do you trust the contents of this directory?", nil
 			case 1:
-				return mcpTrustDialogFixture(), nil
+				return fixture.frame(fixture.initial), nil
+			case 2:
+				return fixture.frame(fixture.target), nil
 			default:
 				return "› Implement {feature}", nil
 			}
@@ -772,6 +972,9 @@ func TestAcceptStartupDialogsHandlesTrustThenExternalImportsThenMCP(t *testing.T
 				return externalImportsDialogFixture(), nil
 			case 2:
 				return mcpTrustDialogFixture(), nil
+			case 3:
+				fixture := startupSelectionFixtures()[1]
+				return fixture.frame(fixture.target), nil
 			default:
 				return "› Implement {feature}", nil
 			}
@@ -877,7 +1080,7 @@ func TestAcceptStartupDialogsFromStreamHandlesTrustThenExternalImportsThenMCP(t 
 func TestAcceptStartupDialogsFromStreamSkipsCodexUpdateDialog(t *testing.T) {
 	var sent []string
 	snapshots := make(chan string, 2)
-	snapshots <- codexUpdateDialogFixture()
+	snapshots <- codexUpdateDialogWithSelection(codexUpdateDialogFixture(), 2)
 	snapshots <- "› Implement {feature}"
 	close(snapshots)
 
@@ -893,7 +1096,7 @@ func TestAcceptStartupDialogsFromStreamSkipsCodexUpdateDialog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
 	}
-	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+	if got, want := strings.Join(sent, ","), "Enter"; got != want {
 		t.Fatalf("sent keys = %q, want %q", got, want)
 	}
 }
@@ -927,16 +1130,17 @@ func TestAcceptStartupDialogsAcceptsBypassPermissionsWarning(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	call := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			call++
-			if call <= 2 {
-				// First two peeks: no trust dialog, no bypass. Then bypass appears.
-				return "normal startup output", nil
+			fixture := startupSelectionFixtures()[3]
+			if len(sent) == 0 {
+				return fixture.frame(fixture.initial), nil
 			}
-			return "Bypass Permissions mode", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -956,15 +1160,17 @@ func TestAcceptStartupDialogsAcceptsCustomAPIKeyDialog(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	call := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			call++
-			if call <= 2 {
-				return "normal startup output", nil
+			fixture := startupSelectionFixtures()[4]
+			if len(sent) == 0 {
+				return fixture.frame(fixture.initial), nil
 			}
-			return "Detected a custom API key in your environment\nDo you want to use this API key?\n1. Yes\n2. No (recommended)", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -1446,15 +1652,17 @@ func TestAcceptStartupDialogsDismissesRateLimitDialog(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	call := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			call++
-			if call <= 2 {
-				return "normal startup output", nil
+			fixture := startupSelectionFixtures()[5]
+			if len(sent) == 0 {
+				return fixture.frame(fixture.initial), nil
 			}
-			return "Usage limit reached for gemini-3-flash-preview.\n1. Keep trying\n2. Stop", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -1667,7 +1875,15 @@ func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) 
 			if time.Since(trustAccepted) < renderDelay {
 				return "", nil // next dialog has not rendered yet
 			}
-			return "Bypass Permissions mode", nil
+			if len(sent) >= 3 {
+				return "❯ ", nil
+			}
+			fixture := startupSelectionFixtures()[3]
+			selected := fixture.initial
+			if len(sent) == 2 {
+				selected = fixture.target
+			}
+			return fixture.frame(selected), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)

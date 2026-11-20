@@ -123,7 +123,8 @@ func configureSupervisorHooksForTests() {
 	supervisorLingerEnabled = func(_ string) bool { return true }
 	startNudgePoller = func(string, string, string) error { return nil }
 	initLookPath = func(file string) (string, error) { return file, nil }
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, _ bool) (map[string]api.ReadinessItem, error) {
+	initProbeProvidersReadiness = func(_ context.Context, targets []initProviderTarget, _ bool) (map[string]api.ReadinessItem, error) {
+		providers := runtimeProbeNamesForTest(targets)
 		out := make(map[string]api.ReadinessItem, len(providers))
 		for _, provider := range providers {
 			displayName := provider
@@ -138,6 +139,9 @@ func configureSupervisorHooksForTests() {
 			}
 		}
 		return out, nil
+	}
+	wizardProbeProviderChoices = func(ctx context.Context, names []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		return initProbeProvidersReadiness(ctx, builtinInitProviderTargets(names), fresh)
 	}
 	registerCityWithSupervisorTestHook = func(cityPath, commandName string, stdout, stderr io.Writer) (bool, int) {
 		switch commandName {
@@ -2793,6 +2797,11 @@ func mapKeys(m map[string]TemplateParams) []string {
 
 func TestDoInitSuccess(t *testing.T) {
 	admitInitSplitBD(t)
+	// With Dolt skipped the native infrastructure initializer stays out, so
+	// the default scaffold carries the born-split block itself
+	// (TestFreshGasCityScaffoldRecordsNativeInfrastructureBeforeRegistration
+	// covers the scaffold that leaves its split to that initializer).
+	t.Setenv("GC_DOLT", "skip")
 	f := fsys.NewFake()
 	// No pre-existing files — doInit creates everything from scratch.
 
@@ -3281,8 +3290,8 @@ func stubWizardProviderReadiness(t *testing.T, configured ...string) {
 	for _, provider := range configured {
 		configuredSet[provider] = true
 	}
-	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+	oldProbe := wizardProbeProviderChoices
+	wizardProbeProviderChoices = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
 		if !fresh {
 			t.Fatal("wizard provider readiness must use fresh probes")
 		}
@@ -3305,7 +3314,7 @@ func stubWizardProviderReadiness(t *testing.T, configured ...string) {
 		}
 		return out, nil
 	}
-	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+	t.Cleanup(func() { wizardProbeProviderChoices = oldProbe })
 }
 
 func TestRunWizardDefaults(t *testing.T) {

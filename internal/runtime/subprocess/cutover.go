@@ -26,14 +26,15 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                          = (*seamBackedProvider)(nil)
-	_ runtime.ProcessTableScanner               = (*seamBackedProvider)(nil)
-	_ runtime.LivenessObserverWithError         = (*seamBackedProvider)(nil)
-	_ runtime.ListingAttestation                = (*seamBackedProvider)(nil)
-	_ runtime.FencedInputProvider               = (*seamBackedProvider)(nil)
-	_ runtime.IdentitySidecarProvider           = (*seamBackedProvider)(nil)
-	_ runtime.IdentitySidecarProvider           = (*Provider)(nil)
-	_ interface{ SetScanExecutables([]string) } = (*seamBackedProvider)(nil)
+	_ runtime.Provider                             = (*seamBackedProvider)(nil)
+	_ runtime.ProcessTableScanner                  = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError            = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation                   = (*seamBackedProvider)(nil)
+	_ runtime.FencedInputProvider                  = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider              = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider              = (*Provider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
+	_ interface{ SetScanExecutables([]string) }    = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked returns a subprocess provider served through the seams, storing
@@ -108,4 +109,8 @@ func (s *seamBackedProvider) SendKeysFenced(ctx context.Context, name string, fe
 // InterruptFenced passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
 	return s.raw.InterruptFenced(ctx, name, fence)
+}
+
+func (s *seamBackedProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return s.raw.SupportsReconcilerOwnedMergeablePaths()
 }

@@ -1045,8 +1045,15 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 	sentIDs := make(map[string]struct{})
 	currentActivity := historySnapshotActivity(initial)
 
+	availabilityFrames := newProviderAvailabilityFrames(ctx, info, handle)
+	emitProviderAvailability := func() {
+		if frame, changed := availabilityFrames.next(); changed {
+			_ = send.Data(frame)
+		}
+	}
 	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
+		emitProviderAvailability()
 		if frame, changed := programFrames.next(); changed {
 			seq++
 			_ = send(sse.Message{ID: seq, Data: frame})
@@ -1166,6 +1173,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
 		_ = emitSnapshot(initial)
+		emitProviderAvailability()
 		lw.Run(ctx, reloadSnapshot, func() {
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}, RunOpts{
@@ -1215,8 +1223,15 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 	var lastActivity string
 	sentIDs := make(map[string]struct{})
 
+	availabilityFrames := newProviderAvailabilityFrames(ctx, info, handle)
+	emitProviderAvailability := func() {
+		if frame, changed := availabilityFrames.next(); changed {
+			_ = send.Data(frame)
+		}
+	}
 	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
+		emitProviderAvailability()
 		if frame, changed := programFrames.next(); changed {
 			seq++
 			_ = send(sse.Message{ID: seq, Data: frame})
@@ -1303,6 +1318,7 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
 		_ = emitSnapshot(initial)
+		emitProviderAvailability()
 		lw.Run(ctx, reloadSnapshot, func() {
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}, RunOpts{Wake: workerOps})
@@ -1354,8 +1370,15 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 	lastProgress := time.Now()
 	currentActivity := historySnapshotActivity(initial)
 
+	availabilityFrames := newProviderAvailabilityFrames(ctx, info, handle)
+	emitProviderAvailability := func() {
+		if frame, changed := availabilityFrames.next(); changed {
+			_ = send(StringIDMessage{Data: frame})
+		}
+	}
 	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
+		emitProviderAvailability()
 		if frame, changed := programFrames.next(); changed {
 			_ = send(StringIDMessage{Data: frame})
 		}
@@ -1485,6 +1508,7 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 		_ = emitSnapshot(initial)
 		emitStructuredFallback()
 		_ = emitPending(true)
+		emitProviderAvailability()
 		lw.Run(ctx, reloadSnapshot, func() {
 			_ = send(StringIDMessage{Data: HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)}})
 		}, RunOpts{
@@ -1535,8 +1559,15 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 	var lastOutput string
 	var seq int
 
+	availabilityFrames := newProviderAvailabilityFrames(ctx, info, handle)
+	emitProviderAvailability := func() {
+		if frame, changed := availabilityFrames.next(); changed {
+			_ = send.Data(frame)
+		}
+	}
 	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
+		emitProviderAvailability()
 		if frame, changed := programFrames.next(); changed {
 			seq++
 			_ = send(sse.Message{ID: seq, Data: frame})
@@ -1633,8 +1664,15 @@ func (s *Server) streamSessionPeekStructuredHuma(ctx context.Context, send Strin
 	var lastPendingKey string
 	currentResumeToken := resumeToken
 
+	availabilityFrames := newProviderAvailabilityFrames(ctx, info, handle)
+	emitProviderAvailability := func() {
+		if frame, changed := availabilityFrames.next(); changed {
+			_ = send(StringIDMessage{Data: frame})
+		}
+	}
 	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
+		emitProviderAvailability()
 		if frame, changed := programFrames.next(); changed {
 			_ = send(StringIDMessage{Data: frame})
 		}
@@ -1750,8 +1788,15 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 	var lastOutput string
 	var seq int
 
+	availabilityFrames := newProviderAvailabilityFrames(ctx, info, handle)
+	emitProviderAvailability := func() {
+		if frame, changed := availabilityFrames.next(); changed {
+			_ = send.Data(frame)
+		}
+	}
 	programFrames := s.newProgramStatusFrames(info)
 	emitProgramStatus := func() {
+		emitProviderAvailability()
 		if frame, changed := programFrames.next(); changed {
 			seq++
 			_ = send(sse.Message{ID: seq, Data: frame})

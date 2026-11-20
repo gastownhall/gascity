@@ -96,7 +96,7 @@ func (s *Server) humaHandleProviderPublicList(_ context.Context, _ *ProviderPubl
 	resolved := s.resolveAllProviders()
 	providers := make([]ProviderPublicResponse, 0, len(resolved))
 	for _, p := range resolved {
-		providers = append(providers, toProviderPublicResponse(p.Name, p.Merged, p.Builtin, p.CityLevel))
+		providers = append(providers, toProviderPublicResponse(p.Name, p.Merged, p.Builtin, p.CityLevel, providerPublicOptions(p.Name, s.state.Config().Providers)))
 	}
 	return &ProviderPublicListOutput{
 		Index: index,

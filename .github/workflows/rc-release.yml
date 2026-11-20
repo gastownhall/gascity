@@ -23,7 +23,19 @@ concurrency:
 permissions: {}
 
 jobs:
+  beginner_qualification:
+    name: Installed beginner journey
+    if: ${{ github.repository == 'gastownhall/gascity' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/beginner-qualification.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || github.ref }}
+    secrets:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+
   rc-release:
+    needs: beginner_qualification
     name: Draft RC release
     if: ${{ github.repository == 'gastownhall/gascity' }}
     runs-on: ubuntu-latest
@@ -34,14 +46,14 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ inputs.target_ref }}
+          ref: ${{ needs.beginner_qualification.outputs.commit }}
           fetch-depth: 0
 
       - name: Checkout pushed tag
         if: ${{ github.event_name == 'push' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ needs.beginner_qualification.outputs.commit }}
           fetch-depth: 0
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6

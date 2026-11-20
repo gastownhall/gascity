@@ -7,6 +7,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -38,6 +39,12 @@ func (f *familyStaticPane) execute(args []string) (string, error) {
 			return pid, nil
 		}
 	case "show-environment":
+		// A legacy runtime's complete environment has no native session ID.
+		// Question binding reads this separately from the provider-family key.
+		last := args[len(args)-1]
+		if strings.HasPrefix(last, "=") || strings.HasPrefix(last, "%") {
+			return "GC_PROVIDER=" + f.family, nil
+		}
 		if len(args) > 0 && args[len(args)-1] == "GC_PROVIDER" {
 			if f.envErr != nil {
 				return "", f.envErr

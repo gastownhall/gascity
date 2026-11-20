@@ -4,6 +4,7 @@ go_library(
     name = "auto",
     srcs = [
         "auto.go",
+        "bootstrap_input.go",
         "fence.go",
         "proctable.go",
         "steer.go",
@@ -18,6 +19,7 @@ go_test(
     name = "auto_test",
     srcs = [
         "auto_test.go",
+        "bootstrap_input_test.go",
         "composite_forward_test.go",
         "conformance_test.go",
         "corpse_fallthrough_test.go",

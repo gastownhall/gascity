@@ -343,7 +343,73 @@ func (s *NativeDoltStore) readyPage(ctx context.Context, storage beadslib.Storag
 	if err != nil {
 		return nil, false, err
 	}
+	beads, err = FilterReadyByWorkflowRoot(beads, now, func(ids []string) ([]Bead, error) {
+		return readWorkflowRoots(ctx, storage, ids)
+	})
+	if err != nil {
+		return nil, false, err
+	}
 	return beads, page.HasMore, nil
+}
+
+// readWorkflowRoots reads the workflow roots the ready candidates name, so
+// readyPage can apply WorkflowRootHolds, which the role's own ready answer
+// cannot see. It lists them by id in chunks, as the work-outcome veto lists
+// blockers, and falls back to one Get per root for an IssueReader that refuses
+// List+IDFilter (http-native). A root that is not found holds nothing.
+func readWorkflowRoots(ctx context.Context, storage beadslib.Storage, ids []string) ([]Bead, error) {
+	reader, err := storage.IssueReader()
+	if err != nil {
+		return nil, err
+	}
+	var roots []Bead
+	unlimited := 0
+	for chunkStart := 0; chunkStart < len(ids); chunkStart += nativeReadyVetoListChunkSize {
+		chunkEnd := min(chunkStart+nativeReadyVetoListChunkSize, len(ids))
+		req := nativeListReadRequest()
+		req.IDFilter = strings.Join(ids[chunkStart:chunkEnd], ",")
+		req.Limit = &unlimited
+		page, err := reader.List(ctx, req)
+		if err != nil {
+			var unsupported *beadslib.ErrUnsupported
+			if !errors.As(err, &unsupported) {
+				return nil, fmt.Errorf("listing workflow roots: %w", err)
+			}
+			return getWorkflowRoots(ctx, reader, ids)
+		}
+		for _, row := range page.Items {
+			bead, err := beadFromNativeIssueRow(row)
+			if err != nil {
+				return nil, fmt.Errorf("reading workflow root: %w", err)
+			}
+			if bead.ID != "" {
+				roots = append(roots, bead)
+			}
+		}
+	}
+	return roots, nil
+}
+
+func getWorkflowRoots(ctx context.Context, reader issueops.Reader, ids []string) ([]Bead, error) {
+	roots := make([]Bead, 0, len(ids))
+	for _, id := range ids {
+		details, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+		if err != nil {
+			if errors.Is(err, beadslib.ErrNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("fetching workflow root %s: %w", id, err)
+		}
+		if details == nil {
+			return nil, fmt.Errorf("fetching workflow root %s: IssueReader.Get returned neither a result nor an error", id)
+		}
+		bead, err := beadFromNativeIssueDetails(details, issueops.AnchorEdges{ID: id})
+		if err != nil {
+			return nil, fmt.Errorf("reading workflow root %s: %w", id, err)
+		}
+		roots = append(roots, bead)
+	}
+	return roots, nil
 }
 
 // ReadyOrdered answers a bounded ready read cut in order (OrderedReadyReader):
@@ -496,7 +562,13 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 	}
 	ids := make([]string, 0, len(candidates))
 	for _, c := range candidates {
+		if !WorkOutcomeGatesDependent(c) {
+			continue
+		}
 		ids = append(ids, c.ID)
+	}
+	if len(ids) == 0 {
+		return candidates, nil
 	}
 	edgeReader, err := storage.EdgeReader()
 	if err != nil {

@@ -28,8 +28,12 @@ func gastownExamplePath(t *testing.T) string {
 // .beads/config.yaml.
 func TestInitFromPinsHostedDoltEndpoint(t *testing.T) {
 	clearGCEnv(t)
+	stubInitDependencyChecks(t)
 
-	src := gastownExamplePath(t)
+	// Endpoint persistence does not require a remote pack or host binaries.
+	src := t.TempDir()
+	writeInitSourceFile(t, src, "city.toml", "[workspace]\nname = \"hosted-source\"\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
+	writeInitSourceFile(t, src, "pack.toml", "[pack]\nname = \"hosted-source\"\nschema = 2\n")
 	cityPath := filepath.Join(t.TempDir(), "city")
 
 	hosted := hostedDoltInitOptions{
@@ -163,6 +167,7 @@ func TestInitFromRejectsDoltFlagsWithoutHost(t *testing.T) {
 // re-supply them or the write path treats each rig as unbound and drops it.
 func TestInitFromHostedPreservesRigSiteBindings(t *testing.T) {
 	clearGCEnv(t)
+	stubInitDependencyChecks(t)
 
 	// No bundled example has both a pack.toml and rigs with paths — which is
 	// exactly why this gap survived CI — so build the source shape here.

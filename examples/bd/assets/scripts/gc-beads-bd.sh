@@ -2631,10 +2631,10 @@ wait_for_managed_pid_ready() {
 # exits.
 launch_dolt_sql_server_detached() {
     (
-        for key in GC_HOOK_DEADLINE GC_SESSION_ID GC_SESSION_NAME GC_ALIAS \
-            GC_AGENT GC_TEMPLATE GC_SESSION_ORIGIN GC_RUNTIME_EPOCH \
-            GC_CONTINUATION_EPOCH GC_INSTANCE_TOKEN BEADS_HOLDER_TOKEN \
-            BEADS_ACTOR CLAUDE_CODE_SESSION_ID; do
+        for key in GC_HOOK_DEADLINE GC_SESSION_ID GC_PROVIDER_SESSION_ID \
+            GC_SESSION_NAME GC_ALIAS GC_AGENT GC_TEMPLATE GC_SESSION_ORIGIN \
+            GC_RUNTIME_EPOCH GC_CONTINUATION_EPOCH GC_INSTANCE_TOKEN \
+            BEADS_HOLDER_TOKEN BEADS_ACTOR CLAUDE_CODE_SESSION_ID; do
             unset "$key"
         done
         if command -v setsid >/dev/null 2>&1; then

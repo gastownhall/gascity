@@ -2,6 +2,7 @@ package rig
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,10 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
+
+// ErrAdoptionRequired means registration found a queue the caller has not
+// explicitly chosen to adopt. No queue or city mutation has occurred.
+var ErrAdoptionRequired = errors.New("existing Beads queue requires explicit adoption")
 
 // Provision runs the full rig-add provisioning against the injected deps.
 //
@@ -100,13 +105,24 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 		return config.Rig{}, result, err
 	}
 
-	// Step 10: create the rig directory when missing.
-	if err := createRigDirIfMissing(fs, rigPath, rigPathExists); err != nil {
+	// Validate existing queue ownership before creating or changing anything.
+	if err := validateAdoptAndBeadsStore(deps, req, rigPath, plan); err != nil {
 		return config.Rig{}, result, err
 	}
+	if req.DryRun {
+		emit(ProvisionStep{Name: "dry-run", Detail: fmt.Sprintf("Dry run: would register rig %q at %s with prefix %q and default branch %q", req.Name, rigPath, plan.prefix, resolvedDefaultBranch)})
+		if req.Adopt {
+			emit(ProvisionStep{Name: "adopt-plan", Detail: "  Would adopt the existing beads queue; preserve its issue IDs and history"})
+		} else {
+			emit(ProvisionStep{Name: "store-plan", Detail: "  Would initialize the rig's beads provider"})
+		}
+		emit(ProvisionStep{Name: "topology-plan", Detail: "  Would write rig topology and routes, install configured imports and hooks, and reload this city"})
+		emit(ProvisionStep{Name: "dry-run-complete", Detail: "  No city configuration, rig files, queue data, hooks or runtime state were changed"})
+		return resolveResultRig(plan.nextCfg, req, resolvedDefaultBranch), result, nil
+	}
 
-	// Step 11: adopt validation, prefix-mismatch guard, fresh-add store guard.
-	if err := validateAdoptAndBeadsStore(deps, req, rigPath, plan); err != nil {
+	// Step 10: create the rig directory when missing.
+	if err := createRigDirIfMissing(fs, rigPath, rigPathExists); err != nil {
 		return config.Rig{}, result, err
 	}
 
@@ -236,7 +252,7 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 	// collision fails before the store is consulted).
 	var adopted adoptedStorePrefix
 	if req.Adopt {
-		adopted = readAdoptedStorePrefix(deps, rigPath)
+		adopted = readAdoptedStorePrefix(deps, rigPath, req.DryRun)
 	}
 	prefix, err := resolveRigPrefix(deps, req, name, reAdd, existingRig, adopted)
 	if err != nil {
@@ -575,8 +591,8 @@ func createRigDirIfMissing(fs fsys.FS, rigPath string, rigPathExists bool) error
 // .beads store: --adopt requires an initialized store with a valid prefix
 // (recorded in config.yaml or, failing that, in the store itself); an
 // existing store whose prefix disagrees with the resolved one is rejected with
-// role-specific recovery text; and a fresh add refuses to run over a directory
-// that already holds a store. All returned texts are byte-identical to the CLI.
+// recovery text that preserves its data; and a fresh add refuses to run over a
+// directory that already holds a store. The CLI and API share these guards.
 func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string, plan rigMutationPlan) error {
 	fs := deps.FS
 	name := req.Name
@@ -598,8 +614,8 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 			// On re-add, --prefix is ignored (we use the existing rig's
 			// configured prefix). Direct the user to edit city.toml.
 			return fmt.Errorf("rig %q has bead prefix %q but city.toml has %q; "+
-				"edit city.toml to set prefix = %q, or remove %s/.beads to reinitialize",
-				name, existingPrefix, prefix, existingPrefix, rigPath)
+				"edit city.toml to set prefix = %q to match the existing store",
+				name, existingPrefix, prefix, existingPrefix)
 		case req.Adopt:
 			// On --adopt, the user explicitly wants the existing store.
 			// "Remove .beads to reinitialize" is the wrong recovery here:
@@ -608,9 +624,7 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 				"use --prefix %s (or omit --prefix) to match the existing store",
 				name, existingPrefix, prefix, existingPrefix)
 		default:
-			return fmt.Errorf("rig %q already has bead prefix %q (requested %q); "+
-				"use --prefix %s to match, or remove %s/.beads to reinitialize",
-				name, existingPrefix, prefix, existingPrefix, rigPath)
+			return fmt.Errorf("%w: rig %q already has bead prefix %q (requested %q); use --adopt to register it while preserving its namespace and data", ErrAdoptionRequired, name, existingPrefix, prefix)
 		}
 	}
 
@@ -636,9 +650,7 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 				return containsErr
 			}
 			if containsStore {
-				return fmt.Errorf("%s/.beads already contains a beads store; "+
-					"use --adopt to register it, or remove %s/.beads to reinitialize",
-					rigPath, rigPath)
+				return fmt.Errorf("%w: %s/.beads already contains a beads store; use --adopt to register it while preserving its data", ErrAdoptionRequired, rigPath)
 			}
 		}
 	}

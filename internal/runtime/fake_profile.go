@@ -45,6 +45,7 @@ func (p Profile) String() string {
 // identity sidecar, transports) itself, as the backend does. [FullFake] is
 // one; a test scripting a read embeds it and overrides that method.
 type ProfileBackend interface {
+	BootstrapInputObserver
 	Provider
 	AttachmentObserverWithError
 	BackgroundWorkStopper
@@ -74,6 +75,7 @@ type ProfileBackend interface {
 	ProgramStatusHoldProvider
 	ProgramStatusProvider
 	ProgramStatusShadowProvider
+	ProviderAvailabilityObserver
 	RelaunchProvider
 	ServerDeathConfirmer
 	ServerLifecycleProvider
@@ -99,6 +101,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 		// Keyed, one interface per line: a branch adding an interface then
 		// merges with another branch adding one without a silent miscount.
 		return tmuxProfile{
+			BootstrapInputObserver:        b,
 			Provider:                      core,
 			AttachmentObserverWithError:   b,
 			BackgroundWorkStopper:         b,
@@ -127,6 +130,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			ProgramStatusHoldProvider:     b,
 			ProgramStatusProvider:         b,
 			ProgramStatusShadowProvider:   b,
+			ProviderAvailabilityObserver:  b,
 			RelaunchProvider:              b,
 			ServerDeathConfirmer:          b,
 			ServerLifecycleProvider:       b,
@@ -242,6 +246,7 @@ func (p profileProvider) Capabilities() ProviderCapabilities { return p.caps }
 // The profiles: each embeds its backend's optional interfaces, no others.
 type (
 	tmuxProfile struct {
+		BootstrapInputObserver
 		Provider
 		AttachmentObserverWithError
 		BackgroundWorkStopper
@@ -270,6 +275,7 @@ type (
 		ProgramStatusHoldProvider
 		ProgramStatusProvider
 		ProgramStatusShadowProvider
+		ProviderAvailabilityObserver
 		RelaunchProvider
 		ServerDeathConfirmer
 		ServerLifecycleProvider
@@ -973,4 +979,25 @@ func (f FullFake) record(method, name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: method, Name: name})
+}
+
+// SupportsReconcilerOwnedMergeablePaths mirrors each profiled backend's fixed
+// staging contract. The exec profile's legacy handshake omits this capability.
+func (tmuxProfile) SupportsReconcilerOwnedMergeablePaths() bool       { return true }
+func (acpProfile) SupportsReconcilerOwnedMergeablePaths() bool        { return true }
+func (subprocessProfile) SupportsReconcilerOwnedMergeablePaths() bool { return true }
+func (k8sProfile) SupportsReconcilerOwnedMergeablePaths() bool        { return true }
+func (execProfile) SupportsReconcilerOwnedMergeablePaths() bool       { return false }
+
+// ObserveProviderAvailability leaves a full fake unclassified unless a test overrides it.
+func (f FullFake) ObserveProviderAvailability(_ context.Context, name string, _ ProviderAvailabilityRequest) *ProviderAvailability {
+	f.record("ObserveProviderAvailability", name)
+	return nil
+}
+
+// ObserveBootstrapInput leaves the full fake without first-input credit unless
+// a test deliberately supplies an observer script through ProfileBackend.
+func (f FullFake) ObserveBootstrapInput(_ context.Context, name string, _ BootstrapInputRequest) (*BootstrapInputProof, error) {
+	f.record("ObserveBootstrapInput", name)
+	return nil, nil
 }

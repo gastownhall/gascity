@@ -3,16 +3,18 @@
 package integration
 
 import (
+	"debug/buildinfo"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/test/toolhome"
 )
 
-// Every real bd this suite runs resolves to realBDBinary, directly or through
-// the file-store shim (GC_INTEGRATION_REAL_BD). It must be the tool-home
-// wrapper, or bd reads the operator's ~/.beads through the real HOME gc needs.
+// File-store controls and direct tool commands use realBDBinary, the tool-home
+// wrapper, directly or through the file-store shim (GC_INTEGRATION_REAL_BD).
+// Split defaults use the raw Go binary only under the isolated HOME contract.
 func TestIntegrationRealBdIsTheToolHomeWrapper(t *testing.T) {
 	data, err := os.ReadFile(realBDBinary)
 	if err != nil {
@@ -46,5 +48,49 @@ func TestIntegrationEnvCarriesNoHostBdState(t *testing.T) {
 		if _, ok := vars["BEADS_DOLT_SHARED_SERVER"]; ok {
 			t.Errorf("%s: host BEADS_DOLT_SHARED_SERVER reaches bd", name)
 		}
+	}
+}
+
+// Split default initialization sanitizes GC_* variables before invoking bd.
+// Its real binary must therefore be directly on PATH under the private HOME.
+func TestIntegrationNativeBDEnvKeepsThePrivateHome(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "gc-home")
+	env := integrationEnvFor(t, home, filepath.Join(root, "run"), true)
+	native, err := integrationEnvWithNativeBD(env, rawPinnedBDBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := parseEnvList(native)
+	if vars["HOME"] != integrationIsolatedHome(home) || vars[supervisorIsolatedHomeEnv] != "1" {
+		t.Fatalf("native bd escaped isolated home: HOME=%q", vars["HOME"])
+	}
+	bd := filepath.Join(filepath.SplitList(vars["PATH"])[0], "bd")
+	target, err := os.Readlink(bd)
+	if err != nil || target != rawPinnedBDBinary {
+		t.Fatalf("native bd target=%q err=%v", target, err)
+	}
+	if _, err := buildinfo.ReadFile(bd); err != nil {
+		t.Fatalf("native front door is not the real Go binary: %v", err)
+	}
+	if vars[integrationRealBDBinaryEnv] != realBDBinary {
+		t.Fatal("file-shim fallback lost its tool-home wrapper")
+	}
+}
+
+func TestIntegrationNativeBDEnvRefusesHostHome(t *testing.T) {
+	root := t.TempDir()
+	base := integrationEnvFor(t, filepath.Join(root, "gc-home"), filepath.Join(root, "run"), true)
+	for name, env := range map[string][]string{
+		"host home":               replaceEnv(base, "HOME", filepath.Join(root, "operator-home")),
+		"missing isolated opt-in": filterEnv(base, supervisorIsolatedHomeEnv),
+		"missing gc home":         filterEnv(base, "GC_HOME"),
+		"host XDG":                replaceEnv(base, "XDG_CONFIG_HOME", filepath.Join(root, "operator-config")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := integrationEnvWithNativeBD(env, rawPinnedBDBinary); err == nil {
+				t.Fatal("unwrapped bd accepted an environment with host state")
+			}
+		})
 	}
 }

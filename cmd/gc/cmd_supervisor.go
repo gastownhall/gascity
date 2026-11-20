@@ -1283,6 +1283,8 @@ func reloadSupervisor(stdout, stderr io.Writer) int {
 	return reloadSupervisorJSON(stdout, stderr, false)
 }
 
+const supervisorReloadReconcileTimeoutMessage = "gc supervisor reload: reconcile did not finish before timeout"
+
 func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
@@ -1609,6 +1611,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		defer supFR.Close() //nolint:errcheck
 	}
 	emitSupervisorStarted(stderr, registry.SupervisorEventRecorder(), previousExit, previousExitDetail)
+	reg := registry.prepareSupervisorRegistry(stderr)
 	requestShutdown := func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
 		return requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
 	}
@@ -1644,7 +1647,6 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if err := cleanupSupervisorWorkspaceServicesForSupervisorStart(supervisor.DefaultHome()); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: workspace-service startup cleanup: %v\n", err) //nolint:errcheck
 		return 1
@@ -2638,7 +2640,19 @@ func startOneCity(
 
 	// Run pool on_boot hooks (same as runController does).
 	if err := runPostPrepareStep("running_pool_on_boot", func() error {
-		runPoolOnBoot(cfg, path, shellRunHook, stderr)
+		runPoolOnBootWithProgress(cfg, path, shellRunHook, stderr, func(current, total int, agent string) {
+			cr.BatchUpdate(func(
+				_ map[string]*managedCity,
+				initStatus map[string]cityInitProgress,
+				_ map[string]*initFailRecord,
+				_ map[string]*panicRecord,
+			) {
+				initStatus[path] = cityInitProgress{
+					name:   cityName,
+					status: fmt.Sprintf("running_pool_on_boot:%d/%d:%s", current, total, agent),
+				}
+			})
+		})
 		return nil
 	}); err != nil {
 		// Same as the controller-state branch above: the runtime is built,
@@ -2992,6 +3006,9 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 }
 
 func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	if err := resumeInitInfrastructure(context.Background(), cityPath); err != nil {
+		return nil, nil, fmt.Errorf("native infrastructure initialization incomplete; run gc start to resume: %w", err)
+	}
 	return loadCityConfigWithBuiltinPacks(cityPath)
 }
 

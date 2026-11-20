@@ -38,6 +38,14 @@ func newTestProvider(t *testing.T) *Provider {
 	})
 }
 
+func TestSeamBackedPreservesReconcilerOwnershipCapability(t *testing.T) {
+	provider := NewSeamBackedWithDir(filepath.Join(shortTempDir(t), "acp"), Config{})
+	capability, ok := provider.(runtime.ReconcilerOwnedMergeablePathProvider)
+	if !ok || !capability.SupportsReconcilerOwnedMergeablePaths() {
+		t.Fatal("seam-backed ACP provider must preserve reconciler ownership capability")
+	}
+}
+
 var testCounter atomic.Int64
 
 func testName() string {

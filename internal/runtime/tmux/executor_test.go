@@ -505,8 +505,8 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	if err := ops.respawnAgent("gc-test-token-pin", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 5 {
-		t.Fatalf("tmux calls = %d (%v), want 5 (set-environment, adopt check, pane lookup, respawn-pane, the input fence's environment read)", len(exec.calls), exec.calls)
+	if len(exec.calls) != 6 {
+		t.Fatalf("tmux calls = %d (%v), want 6 (set-environment, adopt check, pane lookup, bootstrap spend, respawn-pane, the input fence's environment read)", len(exec.calls), exec.calls)
 	}
 
 	setEnv := strings.Join(exec.calls[0], " ")
@@ -516,8 +516,9 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	if strings.Contains(setEnv, "-u GC_CONTROLLER_TOKEN") {
 		t.Errorf("first call = %q uses -u; that unsets the session entry and re-exposes the server's global value", setEnv)
 	}
-	if respawn := strings.Join(exec.calls[3], " "); !strings.Contains(respawn, "respawn-pane") {
-		t.Errorf("fourth call = %q, want respawn-pane", respawn)
+	assertBootstrapSpendCall(t, exec.calls[3], "=gc-test-token-pin:@1.%0")
+	if respawn := strings.Join(exec.calls[4], " "); !strings.Contains(respawn, "respawn-pane") {
+		t.Errorf("fifth call = %q, want respawn-pane", respawn)
 	}
 	// A non-empty key is a real value, not a withholding, and must not be
 	// marked for removal.
@@ -540,8 +541,8 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env); err != nil {
 			t.Fatalf("respawnAgent: %v", err)
 		}
-		if len(exec.calls) != 6 {
-			t.Fatalf("tmux calls = %d (%v), want two set-environment calls, the adopt check, the pane lookup, respawn-pane, then the input fence's environment read", len(exec.calls), exec.calls)
+		if len(exec.calls) != 7 {
+			t.Fatalf("tmux calls = %d (%v), want two set-environment calls, the adopt check, the pane lookup, bootstrap spend, respawn-pane, then the input fence's environment read", len(exec.calls), exec.calls)
 		}
 		for i, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
 			setEnv := strings.Join(exec.calls[i], " ")
@@ -549,8 +550,9 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 				t.Errorf("call %d = %q, want %s marked removed from the session env", i, setEnv, key)
 			}
 		}
-		if respawn := strings.Join(exec.calls[4], " "); !strings.Contains(respawn, "respawn-pane") {
-			t.Errorf("fifth call = %q, want respawn-pane", respawn)
+		assertBootstrapSpendCall(t, exec.calls[4], "=gc-test-beads-pin:@1.%0")
+		if respawn := strings.Join(exec.calls[5], " "); !strings.Contains(respawn, "respawn-pane") {
+			t.Errorf("sixth call = %q, want respawn-pane", respawn)
 		}
 	})
 }
@@ -577,9 +579,10 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 	if err := ops.respawnAgent("gc-test-no-pins", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 4 {
-		t.Fatalf("tmux calls = %d (%v), want 4 (adopt check, pane lookup, respawn-pane and the input fence's environment read only; nesting flags must not be marked)", len(exec.calls), exec.calls)
+	if len(exec.calls) != 5 {
+		t.Fatalf("tmux calls = %d (%v), want 5 (adopt check, pane lookup, bootstrap spend, respawn-pane and the input fence's environment read only; nesting flags must not be marked)", len(exec.calls), exec.calls)
 	}
+	assertBootstrapSpendCall(t, exec.calls[2], "=gc-test-no-pins:@1.%0")
 }
 
 // Relaunch respawns the agent pane, never the active one. "=name:" resolves to
@@ -610,13 +613,13 @@ func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 	}{
 		{"respawnAgent, marked pane moved behind a human's", "orphan\t@3.%8\nagent\t@4.%7\norphan\t@4.%9", func(_ *Tmux, ops *tmuxStartOps) error {
 			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil)
-		}, [][]string{adopt, lookup, respawn("=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"), {"show-environment", "-t", "=gc-test-agent-pane"}}},
+		}, [][]string{adopt, lookup, {"set-option", "-p", "-t", "=gc-test-agent-pane:@4.%7", bootstrapInputOption, "spent"}, respawn("=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"), {"show-environment", "-t", "=gc-test-agent-pane"}}},
 		{"unmarked session takes the first pane", "pane\t@3.%7\npane\t@3.%8", func(tm *Tmux, _ *tmuxStartOps) error {
 			return tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "", "claude")
-		}, [][]string{lookup, respawn("=gc-test-agent-pane:@3.%7", "claude")}},
+		}, [][]string{lookup, {"set-option", "-p", "-t", "=gc-test-agent-pane:@3.%7", bootstrapInputOption, "spent"}, respawn("=gc-test-agent-pane:@3.%7", "claude")}},
 		{"pane id", "", func(tm *Tmux, _ *tmuxStartOps) error {
 			return tm.RespawnPaneWithWorkDir("%3", "", "claude")
-		}, [][]string{respawn("%3", "claude")}},
+		}, [][]string{{"set-option", "-p", "-t", "%3", bootstrapInputOption, "spent"}, respawn("%3", "claude")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -19,9 +19,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -3303,6 +3305,14 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 // config.yaml before the op runs, and a city that never registered the rig
 // must not leave those rewrites behind.
 func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
+	oldPrefix := rigAdoptStorePrefix
+	t.Cleanup(func() { rigAdoptStorePrefix = oldPrefix })
+	rigAdoptStorePrefix = func(_, rigPath string) (string, error) {
+		if filepath.Base(rigPath) != "adopted-rig" {
+			t.Fatalf("prefix read for wrong workspace %q", rigPath)
+		}
+		return "ar", nil
+	}
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
 	cityTOMLBefore, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
@@ -3311,7 +3321,10 @@ func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
 	}
 	const initErrText = "managed Dolt server unreachable while inspecting existing store 'ar'"
 	provider := filepath.Join(cityPath, "gc-beads-bd")
-	script := "#!/bin/sh\nif [ \"$1\" = init ]; then echo \"" + initErrText + "\" >&2; exit 1; fi\nexit 0\n"
+	script := "#!/bin/sh\nset -e\nif [ \"$1\" = init ]; then " +
+		"printf '\\n' >> \"$2/.beads/metadata.json\"; " +
+		"printf '\\n# failed provider init\\n' >> \"$2/.beads/config.yaml\"; " +
+		"echo \"" + initErrText + "\" >&2; exit 1; fi\nexit 0\n"
 	if err := os.WriteFile(provider, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -3345,6 +3358,20 @@ func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	// Explicit inherited-city authority proves the pre-existing GC-managed
+	// binding. A native bd store without that proof must be refused instead.
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(beads, "config.yaml"), contract.ConfigState{
+		IssuePrefix: "ar", EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified, DoltMode: "server",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	configBefore, err := os.ReadFile(filepath.Join(beads, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before["config.yaml"] = string(configBefore)
 
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", "", false, true, &stdout, &stderr)
@@ -3456,6 +3483,14 @@ func TestDoRigAdd_FailedInitOverNonStoreBeadsDirAllowsRetry(t *testing.T) {
 // ga-hfly3b.44: an adopt whose provider init narrows .beads/ to 0700 and then
 // fails puts the directory's mode back.
 func TestDoRigAdd_AdoptFailedInitRestoresBeadsDirMode(t *testing.T) {
+	oldPrefix := rigAdoptStorePrefix
+	t.Cleanup(func() { rigAdoptStorePrefix = oldPrefix })
+	rigAdoptStorePrefix = func(_, rigPath string) (string, error) {
+		if filepath.Base(rigPath) != "adopted-rig" {
+			t.Fatalf("prefix read for wrong workspace %q", rigPath)
+		}
+		return "ar", nil
+	}
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
 	const initErrText = "managed Dolt server unreachable while inspecting existing store 'ar'"
@@ -3476,6 +3511,13 @@ func TestDoRigAdd_AdoptFailedInitRestoresBeadsDirMode(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(beads, name), []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(beads, "config.yaml"), contract.ConfigState{
+		IssuePrefix: "ar", EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified, DoltMode: "server",
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -4065,8 +4107,17 @@ func TestRigAddRollbackRestoresThroughCityTomlSymlink(t *testing.T) {
 // makes it fail instead.
 func installAdoptPrefixFakeBd(t *testing.T, exitCode int) string {
 	t.Helper()
+	return installAdoptPrefixFakeBdForPrefix(t, exitCode, "hv")
+}
+
+func installAdoptPrefixFakeBdForPrefix(t *testing.T, exitCode int, prefix string) string {
+	t.Helper()
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "bd.log")
+	response, err := json.Marshal(map[string]any{"key": "issue_prefix", "schema_version": 1, "value": prefix})
+	if err != nil {
+		t.Fatal(err)
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 {
   echo "argv=$*"
@@ -4077,8 +4128,8 @@ if [ %d -ne 0 ]; then
   echo "bd: no beads database found" >&2
   exit %d
 fi
-echo '{"key":"issue_prefix","schema_version":1,"value":"hv"}'
-`, logPath, exitCode, exitCode)
+echo %s
+`, logPath, exitCode, exitCode, shellquote.Quote(string(response)))
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -4277,6 +4328,137 @@ func TestDoRigAdd_AdoptBdInitStoreWithoutConfigYamlPrefix(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_AdoptInfersExistingPrefix(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+
+	// Create rig whose directory basename ("mismatch-rig") derives a prefix
+	// ("mismatchrig") that differs from config.yaml's prefix ("xr").
+	rigPath := filepath.Join(t.TempDir(), "mismatch-rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"name":"mismatch-rig","issue_prefix":"xr"}`
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configYaml := "issue_prefix: xr\n"
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(configYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	// Without --prefix, preserve the existing namespace instead of deriving a new one.
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("adoption failed: %s", stderr.String())
+	}
+	cfg, err := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Rigs) != 1 || cfg.Rigs[0].EffectivePrefix() != "xr" {
+		t.Fatalf("adoption changed namespace: %+v", cfg.Rigs)
+	}
+}
+
+// TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook verifies that --adopt on
+// a managed-Dolt (bd-contract) city invokes the init/hook machinery to
+// register types.custom and other config into the adopted store's DB.
+// Regression for ga-fg1ht3: the adopt branch previously skipped the init
+// path entirely, leaving the DB config table out of sync with config.yaml.
+func TestRigAddDryRunPreservesUserData(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "preview-city", "[workspace]\n", "")
+	setCwd(t, cityPath)
+	t.Setenv("GC_CITY", cityPath)
+	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"metadata.json": `{"name":"adopted-rig","issue_prefix":"ar"}`,
+		"config.yaml":   "issue_prefix: ar\n",
+		"issues.jsonl":  "{\"id\":\"ar-1\",\"title\":\"Keep my existing task\",\"status\":\"open\"}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(rigPath, ".beads", name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := func() []byte {
+		t.Helper()
+		files := make(map[string]string)
+		for _, root := range []string{cityPath, rigPath} {
+			if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if info.IsDir() {
+					files[path] = "directory:" + info.Mode().String()
+				} else {
+					data, readErr := os.ReadFile(path)
+					if readErr != nil {
+						return readErr
+					}
+					files[path] = string(data)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		data, err := json.Marshal(files)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	before := snapshot()
+	var stdout, stderr bytes.Buffer
+	cmd := newRigAddCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{rigPath, "--name", "existing", "--prefix", "ar", "--adopt", "--dry-run", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("preview failed: %v; stderr=%s", err, stderr.String())
+	}
+	if after := snapshot(); !bytes.Equal(before, after) {
+		t.Fatalf("preview changed city or existing queue data:\nbefore=%s\nafter=%s", before, after)
+	}
+	var result struct {
+		Action string `json:"action"`
+		Prefix string `json:"prefix"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "plan" || result.Prefix != "ar" {
+		t.Fatalf("preview must report the proposed action, not a completed add: %s", stdout.String())
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixBeforeDestinationDoltStarts(t *testing.T) {
+	city := t.TempDir()
+	writeSchema2RigCity(t, city, "destination", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "existing")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":21658}`)
+	logPath := installAdoptPrefixFakeBd(t, 0)
+	got, err := readAdoptedStoreIssuePrefix(city, rigPath)
+	if err != nil || got != "hv" {
+		t.Fatalf("existing namespace before destination startup=(%q,%v)", got, err)
+	}
+	if !strings.Contains(readAdoptPrefixFakeBdLog(t, logPath), "beads_dir="+filepath.Join(rigPath, ".beads")) {
+		t.Fatal("lookup did not use existing workspace")
+	}
+	if _, err := os.Stat(filepath.Join(city, ".gc", "runtime", "packs", "dolt", "dolt-state.json")); !os.IsNotExist(err) {
+		t.Fatalf("lookup started destination Dolt: %v", err)
+	}
+}
+
 // A store bd initialized with --server --external against a dolt sql-server
 // the operator runs on this machine is not gc's to initialize. Adopt registers
 // it and leaves bd's files as found.
@@ -4291,6 +4473,7 @@ func TestAdoptLoopbackBdServerStoreLeavesItsFilesAlone(t *testing.T) {
 	}
 	t.Setenv("GC_BEADS", "exec:"+provider)
 	t.Setenv("GC_DOLT", "")
+	prefixLog := installAdoptPrefixFakeBdForPrefix(t, 0, "ar")
 
 	origEnsure := initDirIfReadyEnsureBeadsProvider
 	origWait := initDirIfReadyWaitForManagedDolt
@@ -4323,6 +4506,9 @@ func TestAdoptLoopbackBdServerStoreLeavesItsFilesAlone(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(calls); strings.Contains(string(data), "init") {
 		t.Fatalf("provider init op ran for a store gc does not serve; calls:\n%s", data)
+	}
+	if got := readAdoptPrefixFakeBdLog(t, prefixLog); !strings.Contains(got, "argv=--readonly config get --json issue_prefix") || !strings.Contains(got, "beads_dir="+beads) {
+		t.Fatalf("adopt must verify the existing store namespace read-only: %s", got)
 	}
 	for name, want := range before {
 		got, err := os.ReadFile(filepath.Join(beads, name))

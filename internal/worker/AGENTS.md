@@ -79,6 +79,12 @@ when the context ends. Take the bound from the caller's own context.
   is `session.TurnEndUnreadError`, which withholds a restart on failure. That
   includes `ErrObservationOutstanding`, which every later check's own
   reading gets at once while one an earlier check left wedged is still out.
+  A locked Claude turn check may establish waiting from a current supported
+  approval with a native invocation identity, or a question whose current tmux
+  projection advertises a native-bound answer. Its widget intentionally has an
+  indeterminate idle scan; that separate bounded observation lets the existing
+  fenced interrupt cancel it without answering it. A missing occurrence, failed
+  read or unavailable binding remains unknown.
   A read that decides which turn to act on, such as the lane interrupt's
   target, is `TurnHandle.FreshTurn`: `CurrentTurn` with its session load and
   runtime probes its own, under `fresh-` turn keys, so a shared read that
@@ -369,3 +375,39 @@ which waits for CN-1b2.
 The worker reads work beads and other state it does not own through lookups
 injected as func values (for example `FactoryConfig.ResolveBead`), and never
 enumerates stores itself.
+
+## Live provider availability
+
+Read models opt in through `ObserveHandleWithAvailability`; ordinary liveness
+and control observations retain their existing cost and semantics. Keep a live
+provider diagnostic independent of running, transcript activity and program
+status. Unsupported/no evidence stays absent; an indeterminate supported read
+is unknown. Session-backed reads use the existing input fence and a bounded,
+shared observation keyed by city and exact session ID. Surface only the public
+incarnation digest. Availability never authorizes lifecycle changes or input.
+
+### Conversation-lane boundary handoff
+
+On keystroke runtimes, boundary delivery reads supported native turns: a current
+turn vetoes a quiet screen, and an unreadable supported source remains unknown.
+Reprobes retry transient capability failures and retain native-turn observation.
+Immediately before an ordinary boundary/default keystroke handoff, recheck the
+native turn; busy or unknown returns transient definitely-not-delivered without
+Nudge, preserving the operation and delivery key for a later boundary. Protocol
+held replay keeps its existing fenced delivery semantics. Explicit unsupported
+sources keep their screen fallback, and explicit steer/replacement controls keep
+their existing contracts. This does not change general runtime input, weaken
+pending-interaction protection or claim exclusion of external inputs after the
+final observation.
+
+## Fresh native first input
+
+An unavailable transcript is unknown even when the native composer looks idle.
+The conversation lane may request the optional runtime-owned bootstrap proof for
+one fresh builtin launch. The proof names the exact input fence and carries no
+claim that a native turn ended. Worker input accepts it only on keyed, atomic,
+live-only default delivery; redelivery, wake, immediate and unfenced paths refuse
+it before input. A request without a proof clears inherited context permission.
+The runtime owns first-input provenance, pristine-screen verification and
+consume-before-effect locking; callers never synthesize credit from empty keys,
+timestamps, quiet screens or missing history.

@@ -492,39 +492,59 @@ func TestLifecycleCoordination_InitDirIfReady_DoesNotRetryNonManagedProviderFail
 	}
 }
 
-func TestLifecycleCoordination_InitDirIfReady_BdDeferredPreservesExistingDoltDatabaseWhenCanonicalUnknown(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	materializeBuiltinPacksForTest(t, dir)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-
-	deferred, err := initDirIfReady(dir, dir, "gc")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !deferred {
-		t.Fatal("expected bd provider to defer init")
-	}
-
-	metaData, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
-	if err != nil {
-		t.Fatalf("read metadata: %v", err)
-	}
-	var meta map[string]any
-	if err := json.Unmarshal(metaData, &meta); err != nil {
-		t.Fatalf("unmarshal metadata: %v", err)
-	}
-	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_database"])); got != "gascity" {
-		t.Fatalf("dolt_database = %q, want %q", got, "gascity")
+// Missing native ownership must preserve the database and refuse; complete
+// legacy endpoint YAML remains supported without inventing an origin marker.
+func TestLifecycleCoordination_InitDirIfReady_BdDeferredRequiresOriginalAuthority(t *testing.T) {
+	for _, authoritative := range []bool{false, true} {
+		name := "unknown_refuses"
+		if authoritative {
+			name = "legacy_endpoint_defers"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			const original = `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"gascity"}`
+			writeScopeBeadsMetadata(t, dir, original)
+			if authoritative {
+				if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: gc\ndolt.host: db.example.com\ndolt.port: 4406\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			materializeBuiltinPacksForTest(t, dir)
+			t.Setenv("GC_BEADS", "bd")
+			t.Setenv("GC_DOLT", "skip")
+			oldEnsure, oldInit := initDirIfReadyEnsureBeadsProvider, initDirIfReadyInitAndHookDir
+			t.Cleanup(func() { initDirIfReadyEnsureBeadsProvider, initDirIfReadyInitAndHookDir = oldEnsure, oldInit })
+			initDirIfReadyEnsureBeadsProvider = func(string) error { t.Fatal("deferred/refused scope started a provider"); return nil }
+			initDirIfReadyInitAndHookDir = func(string, string, string) error { t.Fatal("deferred/refused scope ran init"); return nil }
+			deferred, err := initDirIfReady(dir, dir, "gc")
+			if authoritative {
+				if err != nil || !deferred {
+					t.Fatalf("legacy endpoint deferred init = (%t, %v)", deferred, err)
+				}
+			} else {
+				if err == nil || deferred || !strings.Contains(err.Error(), "no proven project identity") {
+					t.Fatalf("unknown ownership = (%t, %v), want safe refusal", deferred, err)
+				}
+				if got := string(mustReadFile(t, scopeMetadataJSONPath(dir))); got != original {
+					t.Fatalf("refusal changed metadata: %q", got)
+				}
+				for _, path := range []string{providerScopeOwnershipPath(dir), filepath.Join(dir, ".beads", "dolt"), filepath.Join(dir, ".beads", "config.yaml")} {
+					if _, err := os.Stat(path); !os.IsNotExist(err) {
+						t.Fatalf("refusal created ownership/store/config %s: %v", path, err)
+					}
+				}
+			}
+			var metadata map[string]any
+			if err := json.Unmarshal(mustReadFile(t, scopeMetadataJSONPath(dir)), &metadata); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(fmt.Sprint(metadata["dolt_database"])); got != "gascity" {
+				t.Fatalf("dolt_database = %q, want existing gascity", got)
+			}
+		})
 	}
 }
 

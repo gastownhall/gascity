@@ -93,9 +93,10 @@ go_test(
         "resolve_test.go",
         "testenv_import_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = ["//:go.mod"] + glob(["testdata/**"]),
     embed = [":packman"],
     deps = [
+        "//internal/bazeltest",
         "//internal/builtinpacks",
         "//internal/config",
         "//internal/fsys",
@@ -104,6 +105,8 @@ go_test(
         "//internal/processgroup/processgrouptest",
         "//internal/testenv",
         "//internal/testutil",
+        "@org_golang_x_mod//modfile",
+        "@org_golang_x_mod//module",
     ],
 )
 

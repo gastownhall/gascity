@@ -3675,6 +3675,10 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if filterErr != nil {
 		return nil, fmt.Errorf("bd ready: %w", filterErr)
 	}
+	filtered, filterErr = FilterReadyByWorkflowRoot(filtered, now, s.workflowRoots)
+	if filterErr != nil {
+		return nil, fmt.Errorf("bd ready: %w", filterErr)
+	}
 	result := filtered
 	if q.Limit > 0 && len(result) > q.Limit {
 		result = result[:q.Limit]
@@ -3737,6 +3741,9 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	}
 	depsByID := make(map[string][]Dep, len(candidates))
 	for _, c := range candidates {
+		if !WorkOutcomeGatesDependent(c) {
+			continue
+		}
 		depsByID[c.ID] = c.Dependencies
 	}
 	blockerIDSet := make(map[string]bool)
@@ -3786,6 +3793,15 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 		}
 	}
 	return result, nil
+}
+
+// workflowRoots returns the beads among ids that are not closed. bd's own
+// ready answer cannot see a workflow root's hold (WorkflowRootHolds), so Ready
+// reads the roots in one list call, and only when a candidate names a root. A
+// closed root holds nothing, so the default list, which leaves closed rows
+// out, is enough.
+func (s *BdStore) workflowRoots(ids []string) ([]Bead, error) {
+	return s.List(ListQuery{IDs: ids, TierMode: TierBoth})
 }
 
 func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {

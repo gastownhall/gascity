@@ -494,13 +494,20 @@ func (realExecutor) executeCtx(ctx context.Context, args []string) (string, erro
 
 // Tmux wraps tmux operations.
 type Tmux struct {
-	cfg                  Config
-	exec                 executor
-	interactionDedup     *approvalDedup
-	interactionDedupOnce sync.Once
-	hiddenAttachMu       sync.Mutex
-	hiddenAttachClients  map[string]*hiddenAttachClient
-	hiddenAttachSeq      atomic.Uint64
+	bootstrapMu     sync.Mutex
+	bootstrapInputs map[string]bootstrapInputCredit
+
+	// claudeQuestionTranscript is an exact native-record reader seam for tests.
+	claudeQuestionTranscript  func(string) (string, error)
+	claudeQuestionProjections func(string) ([]claudeQuestionProjection, error)
+	claudeApprovalProjections func(string) ([]claudeApprovalProjection, error)
+	cfg                       Config
+	exec                      executor
+	interactionDedup          *approvalDedup
+	interactionDedupOnce      sync.Once
+	hiddenAttachMu            sync.Mutex
+	hiddenAttachClients       map[string]*hiddenAttachClient
+	hiddenAttachSeq           atomic.Uint64
 
 	// pokeMu guards pokes, which tracks gc's own send-keys per session so
 	// GetSessionActivity can discount activity that is only our poke's echo
@@ -654,7 +661,7 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 		if g := paneGuardFrom(ctx); g != nil {
 			return g.run(ctx, t, args)
 		}
-		ctx = context.Background()
+		return t.ordinaryPaneInput(withClaudeApprovalInput(context.Background(), claudeApprovalInput(ctx)), args)
 	}
 	return t.runCtxRaw(ctx, args...)
 }
@@ -1034,6 +1041,7 @@ func (t *Tmux) newSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
 	cmds := [][]string{args}
+	cmds = append(cmds, t.seedBootstrapInputCommands(name)...)
 	if plan != nil {
 		cmds = append(cmds, plan.armCommands(paneTarget(name), false)...)
 	}
@@ -1114,6 +1122,7 @@ func (t *Tmux) EnsureSessionFresh(name, workDir string) error {
 
 // KillSession terminates a tmux session.
 func (t *Tmux) KillSession(name string) error {
+	t.forgetBootstrapInput(name)
 	_, err := t.run("kill-session", "-t", sessionTarget(name))
 	return err
 }
@@ -2842,11 +2851,16 @@ func (t *Tmux) sendLiteralText(ctx context.Context, target, text string) error {
 // pastesMultilineText reports whether text must reach target as one bracketed
 // paste even under maxSendKeysLiteralLen. Codex (codex-cli 0.162.1) reads
 // typed multi-line text as a paste burst and takes the submit Enter that
-// follows as one more newline, so the message stays drafted in its composer:
-// every Mayor startup prompt did. A bracketed paste arrives as one paste, and
-// the Enter after it submits.
+// follows as one more newline, so the message stays drafted in its composer.
+// Claude Code 2.1.308 can consume only the suffix of a multiline literal send.
+// One bracketed paste preserves the complete message for both providers; the
+// guarded submit that follows still owns the Enter key.
 func (t *Tmux) pastesMultilineText(target, text string) bool {
-	return strings.Contains(text, "\n") && sessionlog.ProviderFamily(t.providerEnv(target)) == "codex"
+	if !strings.Contains(text, "\n") {
+		return false
+	}
+	family := sessionlog.ProviderFamily(t.providerEnv(target))
+	return family == "codex" || family == "claude"
 }
 
 func (t *Tmux) pasteLiteralText(ctx context.Context, target, text string) error {
@@ -4105,6 +4119,12 @@ func (t *Tmux) AcceptStartupDialogs(ctx context.Context, sess string) error {
 // DismissKnownDialogs dismisses known trust, permissions, and rate-limit
 // dialogs using a bounded timeout.
 func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout time.Duration) error {
+	return t.dismissKnownDialogs(ctx, sess, timeout, nil)
+}
+
+// dismissKnownDialogs keeps the shared parser authoritative. Only raw Start
+// supplies the private, still-candidate startup capability.
+func (t *Tmux) dismissKnownDialogs(ctx context.Context, sess string, timeout time.Duration, startup *bootstrapStartupInput) error {
 	// Gate external-CLAUDE.md-import auto-acceptance to imports within the
 	// pane's own repository; an import that escapes the repo is left for a
 	// human. Both lookups are best-effort: if either fails, the trust root
@@ -4118,8 +4138,16 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 		return err
 	}
 	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
-		func(lines int) (string, error) { return t.CapturePane(target, lines) },
+		func(lines int) (string, error) {
+			if startup != nil {
+				return startup.peek(ctx, t, target, lines)
+			}
+			return t.CapturePane(target, lines)
+		},
 		func(keys ...string) error {
+			if startup != nil {
+				return startup.send(ctx, t, target, keys)
+			}
 			for _, k := range keys {
 				if _, err := t.runCtx(ctx, "send-keys", "-t", target, k); err != nil {
 					return err
@@ -6539,8 +6567,12 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 // before the switch went off is not read valid for the new program once the
 // switch is back on.
 func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime.ProgramStatusArm) error {
+	t.forgetBootstrapInput(pane)
 	target, err := t.agentPaneTarget(pane)
 	if err != nil {
+		return err
+	}
+	if _, err := t.runCtxRaw(context.Background(), "set-option", "-p", "-t", target, bootstrapInputOption, "spent"); err != nil {
 		return err
 	}
 	if plan := t.planCapture(arm); plan != nil {

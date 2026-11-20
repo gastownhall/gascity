@@ -40,7 +40,7 @@ func contractBeadsFamily(t *testing.T, h *contractHarness) {
 	expectStatus(t, "create child bead", child, err, http.StatusCreated)
 	childBead := mustJSON(t, "create child bead", child.JSON201, child)
 
-	got, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, city, root.Id)
+	got, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, city, root.Id, nil)
 	expectStatus(t, "get bead", got, err, http.StatusOK)
 	if b := mustJSON(t, "get bead", got.JSON200, got); b.Title != "contract root" {
 		t.Fatalf("get bead title = %q", b.Title)
@@ -100,7 +100,7 @@ func contractBeadsFamily(t *testing.T, h *contractHarness) {
 		genclient.PostV0CityByCityNameBeadByIdAssignJSONRequestBody{Assignee: ptr(contractAgent)})
 	expectStatus(t, "assign bead to a template name", unassignable, err, http.StatusBadRequest)
 
-	reread, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, city, root.Id)
+	reread, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, city, root.Id, nil)
 	expectStatus(t, "reread bead", reread, err, http.StatusOK)
 	rb := mustJSON(t, "reread bead", reread.JSON200, reread)
 	if rb.Title != "contract root renamed" || rb.Priority == nil || *rb.Priority != 1 ||
@@ -133,7 +133,7 @@ func contractBeadsFamily(t *testing.T, h *contractHarness) {
 		&genclient.DeleteV0CityByCityNameBeadByIdParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete bead", deleted, err, http.StatusOK)
 
-	missing, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, city, "hq-doesnotexist")
+	missing, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, city, "hq-doesnotexist", nil)
 	expectStatus(t, "get missing bead", missing, err, http.StatusNotFound)
 }
 
@@ -155,7 +155,7 @@ func contractSlingFamily(t *testing.T, h *contractHarness) {
 		t.Fatalf("sling target = %q, want %q", resp.Target, contractAgent)
 	}
 
-	got, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, contractCityName, bead.Id)
+	got, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, contractCityName, bead.Id, nil)
 	expectStatus(t, "get slung bead", got, err, http.StatusOK)
 	b := mustJSON(t, "get slung bead", got.JSON200, got)
 	if b.Metadata == nil || (*b.Metadata)["gc.routed_to"] != contractAgent {
@@ -170,7 +170,7 @@ func contractSlingFamily(t *testing.T, h *contractHarness) {
 
 func (h *contractHarness) expectBeadStatus(t *testing.T, id, want string) {
 	t.Helper()
-	got, err := h.client.GetV0CityByCityNameBeadByIdWithResponse(h.ctx, contractCityName, id)
+	got, err := h.client.GetV0CityByCityNameBeadByIdWithResponse(h.ctx, contractCityName, id, nil)
 	expectStatus(t, "get bead "+id, got, err, http.StatusOK)
 	if b := mustJSON(t, "get bead "+id, got.JSON200, got); b.Status != want {
 		t.Fatalf("bead %s status = %q, want %q", id, b.Status, want)

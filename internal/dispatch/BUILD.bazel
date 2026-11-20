@@ -24,6 +24,7 @@ go_library(
         "//internal/convergence",
         "//internal/convoy",
         "//internal/coordclass",
+        "//internal/execenv",
         "//internal/formula",
         "//internal/fsys",
         "//internal/graphv2",
@@ -53,6 +54,7 @@ go_test(
     # again: recheck the split when the test set changes.
     srcs = [
         "attempt_control_routing_test.go",
+        "blocked_work_outcome_test.go",
         "call_budget_test.go",
         "control_attempt_iteration_test.go",
         "control_for_lineage_test.go",
@@ -71,6 +73,7 @@ go_test(
         "finalize_query_timeout_tier_repro_test.go",
         "main_test.go",
         "ralph_check_asset_test.go",
+        "ralph_check_config_test.go",
         "ralph_check_infra_blind_test.go",
         "ralph_check_infra_retry_test.go",
         "ralph_check_unlaunchable_test.go",
@@ -94,7 +97,9 @@ go_test(
         "zz_boolptr_test.go",
     ],
     embed = [":dispatch"],
-    shard_count = 5,
+    # Native Dolt gate proofs include a 78 s case; keep all coverage within
+    # the normal 300 s action budget by partitioning top-level tests.
+    shard_count = 8,
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
@@ -103,8 +108,10 @@ go_test(
         "//internal/config",
         "//internal/convergence",
         "//internal/convoy",
+        "//internal/execenv",
         "//internal/formula",
         "//internal/formulatest",
+        "//internal/fsys",
         "//internal/graphv2",
         "//internal/molecule",
         "//internal/rollout/gate",

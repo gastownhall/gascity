@@ -24,12 +24,16 @@ type ProviderPublicListInput struct {
 // clients — option schemas and defaults — and omits command/args/env and
 // prompt-delivery details.
 type ProviderPublicResponse struct {
-	Name              string              `json:"name"`
-	DisplayName       string              `json:"display_name,omitempty"`
-	Builtin           bool                `json:"builtin"`
-	CityLevel         bool                `json:"city_level"`
-	OptionsSchema     []providerOptionDTO `json:"options_schema,omitempty"`
-	EffectiveDefaults map[string]string   `json:"effective_defaults,omitempty"`
+	Name                   string              `json:"name"`
+	DisplayName            string              `json:"display_name,omitempty"`
+	Builtin                bool                `json:"builtin"`
+	CityLevel              bool                `json:"city_level"`
+	OptionsSchema          []providerOptionDTO `json:"options_schema,omitempty"`
+	EffectiveDefaults      map[string]string   `json:"effective_defaults,omitempty" doc:"Configured declarative session-start defaults, not observed actual settings. Unset model/effort values defer to provider-owned configuration."`
+	OptionsResolution      string              `json:"options_resolution" enum:"resolved,unknown" doc:"Whether GC resolved the provider's declared option defaults."`
+	OptionsReason          string              `json:"options_reason,omitempty" doc:"Stable reason when declared defaults cannot be projected."`
+	OptionsScope           string              `json:"options_scope" enum:"session_start" doc:"These options configure a new session rather than a turn in an existing conversation."`
+	SupportsPerTurnOptions bool                `json:"supports_per_turn_options" doc:"False: GC does not accept atomic per-turn model/effort settings in this contract."`
 }
 
 // ProviderPublicListBody is the response body for GET

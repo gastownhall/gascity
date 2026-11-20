@@ -79,3 +79,19 @@ func TestClaudeInterruptOfAGoneSessionIsANoOp(t *testing.T) {
 		}
 	}
 }
+
+// Stop cancels the question widget; Ctrl-C leaves this native panel open.
+// The escape is cancellation and must never choose a numbered answer.
+func TestClaudeInterruptCancelsQuestionWithEscape(t *testing.T) {
+	pane := newFakeClaudePane("")
+	pane.prompt = nativeClaudeQuestion
+	pane.promptOnCapture = 1
+	tm := newFakeClaudeTmux(pane)
+	installNativeClaudeRecord(t, tm, nativeClaudeQuestion)
+	if err := (&Provider{tm: tm}).Interrupt(pane.sessionName); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if !slices.Equal(pane.promptKeys, []string{"Escape"}) {
+		t.Fatalf("question keys = %q, want exactly Escape", pane.promptKeys)
+	}
+}

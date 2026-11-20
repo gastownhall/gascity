@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -148,6 +149,9 @@ func establishedBdCity(t *testing.T, startScript string) (cityPath, callLog stri
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"exec:"+script+"\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nshutdown_timeout = \"1s\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// An initialized managed city carries GC endpoint authority in addition to
+	// metadata. Keep native project identity absent: this fixture is GC-managed.
+	writeCanonicalScopeConfig(t, cityPath, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	t.Setenv("GC_DOLT", "")
 	writeReachableProviderManagedDoltState(t, cityPath)
 	return cityPath, callLog

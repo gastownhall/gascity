@@ -2381,13 +2381,15 @@ func hookRetireIfInputSettled(candidate beads.Bead, opts hookClaimOptions, ops h
 // workflowInputDone resolves candidate to its workflow root (through
 // gc.root_bead_id, or itself when it is a root that carries
 // gc.input_convoy_id) and reports the state of the root's input convoy. The
-// input is complete when every member the convoy tracks is terminal, or
-// non-terminal but handed off to an assignee outside identityCandidates (no
-// longer ours to wait on); a member that is still unassigned, or still
-// assigned to one of identityCandidates, keeps it pending. A root with no
-// input convoy, or a convoy with no resolvable members, is never complete. For
-// a live graph.v2 root, input that prove proves absent — the convoy itself, or
-// every member it tracks — is purged.
+// input is complete when every member the convoy tracks is terminal outside
+// this workflow, or non-terminal but handed off to an assignee outside
+// identityCandidates (no longer ours to wait on); a member that is still
+// unassigned, or still assigned to one of identityCandidates, keeps it
+// pending. A root with no input convoy, or a convoy with no resolvable
+// members, is never complete. Input completed by this workflow retains its
+// required continuation; a source close is not a workflow close. For a live
+// graph.v2 root, input that prove proves absent — the convoy itself, or every
+// member it tracks — is purged.
 func workflowInputDone(ctx context.Context, store beads.WorkStore, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
 	return workflowInputDoneAcross(ctx, store, store, candidate, identityCandidates, prove)
 }
@@ -2462,7 +2464,7 @@ func workflowInputDoneAcross(ctx context.Context, graph beads.Store, work beads.
 	if missing := unresolvedMemberIDs(members); purgeable && len(missing) == len(members) {
 		return purgedIfProven(ctx, pending, append([]workflowInputReader{work}, graphLeg...), missing, prove)
 	}
-	settled, err := workflowInputMembersSettled(members, identityCandidates, func() ([]string, error) {
+	settled, err := workflowInputMembersSettled(members, identityCandidates, func() ([]string, []string, error) {
 		return workflowStepAssignees(graph, rootID)
 	})
 	if err != nil || !settled {
@@ -2472,14 +2474,44 @@ func workflowInputDoneAcross(ctx context.Context, graph beads.Store, work beads.
 }
 
 // workflowInputMembersSettled reports whether every one of members is
-// terminal, or non-terminal but handed off to an assignee outside
-// identityCandidates that is not one of the workflow's own seats. seats lists
-// those seats, and is read at most once, only for a member that needs it.
-func workflowInputMembersSettled(members []beads.Bead, identityCandidates []string, seats func() ([]string, error)) (bool, error) {
-	var workflowSeats []string
+// terminal outside this workflow, or non-terminal but handed off to an
+// assignee outside identityCandidates that is not one of the workflow's own
+// seats. A terminal member a claimed seat of this workflow completed is not
+// settled: the workflow's own input close precedes its remaining steps. seats
+// lists the workflow's seats and the subset with native claim evidence, and is
+// read at most once, only for a member that needs it.
+func workflowInputMembersSettled(members []beads.Bead, identityCandidates []string, seats func() ([]string, []string, error)) (bool, error) {
+	var workflowSeats, claimedWorkflowSeats []string
 	seatsRead := false
+	readSeats := func() error {
+		if seatsRead {
+			return nil
+		}
+		var err error
+		if workflowSeats, claimedWorkflowSeats, err = seats(); err != nil {
+			return err
+		}
+		seatsRead = true
+		return nil
+	}
 	for _, m := range members {
 		if convoy.IsTerminalStatus(m.Status) {
+			if err := readSeats(); err != nil {
+				return false, err
+			}
+			// Closing this workflow's own input can precede its do-work
+			// close, drain and finalizer. A pre-assignment alone proves no
+			// execution; use actual claim provenance to retain continuation.
+			// An explicit new assignee wins over stale source metadata.
+			memberSeats := []string{strings.TrimSpace(m.Assignee)}
+			if memberSeats[0] == "" {
+				memberSeats = []string{m.Metadata[beadmeta.SessionIDMetadataKey], m.Metadata[beadmeta.SessionNameMetadataKey]}
+			}
+			for _, seat := range memberSeats {
+				if strings.TrimSpace(seat) != "" && hookClaimHasIdentity(seat, claimedWorkflowSeats) {
+					return false, nil
+				}
+			}
 			continue
 		}
 		if strings.TrimSpace(m.Assignee) == "" || hookClaimHasIdentity(m.Assignee, identityCandidates) {
@@ -2488,12 +2520,8 @@ func workflowInputMembersSettled(members []beads.Bead, identityCandidates []stri
 		// A seat that ran a step of this workflow is its own pool worker
 		// (typically dead, its steps reopened), not another lane: the member
 		// was never handed off (sys-pxryan.44).
-		if !seatsRead {
-			var err error
-			if workflowSeats, err = seats(); err != nil {
-				return false, err
-			}
-			seatsRead = true
+		if err := readSeats(); err != nil {
+			return false, err
 		}
 		if hookClaimHasIdentity(m.Assignee, workflowSeats) {
 			return false, nil
@@ -2502,22 +2530,25 @@ func workflowInputMembersSettled(members []beads.Bead, identityCandidates []stri
 	return true, nil
 }
 
-// workflowStepAssignees lists every seat recorded on any step (open or closed)
-// of the workflow rooted at rootID: its assignee plus its gc.session_name and
-// gc.session_id claim provenance, which survive a reopen that clears the
-// assignee of a seat that died mid-step. Closed steps and session provenance
-// are included on purpose so reopened steps of dead seats still count.
-func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
+// workflowStepAssignees returns all step seat identities and the subset with
+// native claim evidence. A mere continuation pre-assignment belongs to this
+// workflow while its input is open, but cannot prove it completed terminal
+// input. Claim timestamps and session back-references survive a reopen that
+// clears the assignee. Closed steps remain part of both projections.
+func workflowStepAssignees(store beads.Store, rootID string) ([]string, []string, error) {
 	steps, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing steps of %s: %w", rootID, err)
+		return nil, nil, fmt.Errorf("listing steps of %s: %w", rootID, err)
 	}
-	seats := []string{}
+	seats, claimedSeats := []string{}, []string{}
 	for _, step := range steps {
+		claimed := strings.TrimSpace(step.Metadata[beadmeta.ClaimedAtMetadataKey]) != "" ||
+			strings.TrimSpace(step.Metadata[beadmeta.SessionIDMetadataKey]) != "" ||
+			strings.TrimSpace(step.Metadata[beadmeta.SessionNameMetadataKey]) != ""
 		for _, a := range []string{
 			step.Assignee,
 			step.Metadata[beadmeta.SessionNameMetadataKey],
@@ -2525,10 +2556,13 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 		} {
 			if a = strings.TrimSpace(a); a != "" {
 				seats = append(seats, a)
+				if claimed {
+					claimedSeats = append(claimedSeats, a)
+				}
 			}
 		}
 	}
-	return seats, nil
+	return seats, claimedSeats, nil
 }
 
 // skipDoneWorkflow closes rootID and every open/in_progress step under it

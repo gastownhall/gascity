@@ -878,13 +878,14 @@ func (s *Server) executeStop(store beads.SessionStore, id string, plan stopPlan,
 type respondOpPayload struct {
 	Action   string            `json:"action"`
 	Text     string            `json:"text"`
+	Answers  []string          `json:"answers,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // encodeRespondOpPayload is resp as a legacy /respond op's payload
 // (respondOpPayload).
 func encodeRespondOpPayload(resp runtime.InteractionResponse) (string, error) {
-	raw, err := json.Marshal(respondOpPayload{Action: resp.Action, Text: resp.Text, Metadata: resp.Metadata})
+	raw, err := json.Marshal(respondOpPayload{Action: resp.Action, Text: resp.Text, Answers: resp.Answers, Metadata: resp.Metadata})
 	if err != nil {
 		return "", apierr.Internal.Msg("encoding the respond op payload: " + err.Error())
 	}
@@ -908,6 +909,9 @@ var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce
 // (legacyop.ErrReservedKey): auto answers unrecorded and require refuses it,
 // so no op of OJ-4's takes the id of the lane op answering that raising.
 func (s *Server) respondSession(ctx context.Context, target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
+	if err := session.ValidateInteractionResponse(resp); err != nil {
+		return syncAnswer{}, humaSessionManagerError(err)
+	}
 	store := s.state.Stores().Sessions()
 	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -979,6 +983,20 @@ func (s *Server) respondOpRequest(mgr *session.Manager, store beads.SessionStore
 		(resp.RequestID == "" || resp.RequestID == prior.Interaction) {
 		req.scope = prior
 		return req, nil
+	}
+	if resp.Answers != nil {
+		pending, supported, err := mgr.Pending(req.conv)
+		switch {
+		case err != nil:
+			return req, humaSessionManagerError(err)
+		case !supported:
+			return req, humaSessionManagerError(session.ErrInteractionUnsupported)
+		case pending == nil:
+			return req, humaSessionManagerError(session.ErrNoPendingInteraction)
+		}
+		if err := session.ValidateInteractionResponseForPending(resp, pending); err != nil {
+			return req, humaSessionManagerError(err)
+		}
 	}
 	scope.Interaction = resp.RequestID
 	if scope.Interaction == "" {

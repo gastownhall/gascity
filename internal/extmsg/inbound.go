@@ -15,6 +15,8 @@ import (
 // identity, whose live session the delivery layer resolves (cold-waking one
 // when none is live).
 type InboundResult struct {
+	Admission       *PublicReceipt   `json:"admission,omitempty"`
+	Deliveries      []PublicDelivery `json:"deliveries,omitempty"`
 	Message         ExternalInboundMessage
 	Binding         *SessionBindingRecord         `json:"Binding,omitempty"`
 	GroupRoute      *GroupRouteDecision           `json:"GroupRoute,omitempty"`

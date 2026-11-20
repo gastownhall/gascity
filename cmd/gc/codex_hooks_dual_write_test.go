@@ -137,7 +137,7 @@ func stageCodex(t *testing.T, overlaySrc, workDir string, skipMergeable bool) {
 	t.Helper()
 	var err error
 	if skipMergeable {
-		err = runtime.StageProviderOverlayDirSkippingMergeable(overlaySrc, workDir, []string{"codex"}, nil)
+		err = runtime.StageProviderOverlayDirSkippingPaths(overlaySrc, workDir, []string{"codex"}, []string{codexManagedMergeablePath}, nil)
 	} else {
 		err = runtime.StageProviderOverlayDir(overlaySrc, workDir, []string{"codex"}, nil)
 	}
@@ -156,17 +156,11 @@ func installCodex(t *testing.T, cityDir, workDir string) {
 
 // TestCodexHooksConvergeWithSkipStaging is the dual-writer reproduce+fix test.
 //
-// The build_desired_state home-dir tick is staging followed by hooks.Install on
-// the SAME dir. Starting from the live drifted hybrid, hooks.Install converges
-// the document to a single bound SessionStart entry — but the LEGACY staging
-// path re-merges the overlay's unbound `matcher:""` entry back in on the very
-// next tick, so the on-disk document a fresh `gc doctor`/session-start reads
-// right after staging is perpetually drifted ([startup, ""]). That oscillation
-// is why codex-hooks-drift never clears without --fix.
-//
-// The observation point that matters is therefore the post-staging state. With
-// the skip path staging no longer touches the mergeable file, so the converged
-// [startup] document is stable at every point in the cycle.
+// The reconciler first merges overlays and immediately runs hooks.Install on
+// the same dir, which converges the live hybrid to one bound SessionStart entry.
+// The permanent second writer is the later runtime Start: legacy staging then
+// re-merges the overlay's unbound matcher, so doctor observes [startup, ""]
+// again. Exact-path runtime staging preserves the post-install document.
 func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 	overlaySrc := seedCodexOverlay(t)
 	cityDir := t.TempDir()
@@ -187,13 +181,9 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 		}
 	}
 
-	// assertManagedEventsIntact guards the dual-writer regression surface. Because
-	// the home-dir staging path now skips the ENTIRE .codex/hooks.json, hooks.Install
-	// must remain the sole, COMPLETE writer: the converged document has to keep the
-	// managed PreCompact (context-cycle handoff) and UserPromptSubmit (mail check +
-	// nudge drain) hooks, not just SessionStart. A future change to the installer's
-	// fresh-write/upgrade path that dropped either event would otherwise slip past
-	// assertSingleBound, which only inspects SessionStart.
+	// assertManagedEventsIntact guards the dual-writer regression surface: the
+	// post-install document must keep PreCompact and both UserPromptSubmit hooks,
+	// not just SessionStart, before runtime staging preserves it.
 	assertManagedEventsIntact := func(t *testing.T, workDir, when string) {
 		t.Helper()
 		hooksPath := filepath.Join(workDir, ".codex", "hooks.json")
@@ -230,12 +220,11 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 		}
 	}
 
-	// Fixed path: seed the drifted hybrid, then run stage → install → stage.
-	// The file must be converged and bound at EVERY observation point, including
-	// the post-staging states where the legacy path re-drifts.
+	// Fixed path: full pre-install merge → canonical install → exact-path runtime
+	// stage. The file must remain converged after the runtime writer boundary.
 	fixedWork := t.TempDir()
 	seedDriftedHybrid(t, cityDir, fixedWork)
-	stageCodex(t, overlaySrc, fixedWork, true)
+	stageCodex(t, overlaySrc, fixedWork, false)
 	installCodex(t, cityDir, fixedWork)
 	assertSingleBound(t, fixedWork, "fixed after install")
 	assertManagedEventsIntact(t, fixedWork, "fixed after install")
@@ -254,6 +243,146 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 	legacyMatchers := codexSessionStartMatchers(t, filepath.Join(legacyWork, ".codex", "hooks.json"))
 	if len(legacyMatchers) <= 1 {
 		t.Fatalf("expected legacy non-skip staging to re-drift the hybrid (>1 SessionStart entry) after re-staging, got %v; if this no longer reproduces, the dual-write may have been fixed elsewhere — re-verify the skip is still required", legacyMatchers)
+	}
+}
+
+// TestPrepareTemplateResolutionReconcilesCodexOnceBeforeRuntimeOwnership guards
+// the single-writer boundary: ordinary siblings stage normally, Codex hook
+// layers are composed with the managed core in one transaction, and a second
+// reconcile pass performs no write before runtime preserves the exact path.
+func TestPrepareTemplateResolutionReconcilesCodexOnceBeforeRuntimeOwnership(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	overlayDir := filepath.Join(cityDir, "packs", "myrig", "overlay")
+	codexOverlay := filepath.Join(overlayDir, "per-provider", "codex", ".codex")
+	if err := os.MkdirAll(codexOverlay, 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay): %v", err)
+	}
+	overlayHooks, err := core.PackFS.ReadFile("overlay/per-provider/codex/.codex/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded codex overlay: %v", err)
+	}
+	var overlayDoc map[string]any
+	if err := json.Unmarshal(overlayHooks, &overlayDoc); err != nil {
+		t.Fatalf("unmarshal embedded codex overlay: %v", err)
+	}
+	promptEntry := overlayDoc["hooks"].(map[string]any)["UserPromptSubmit"].([]any)[0].(map[string]any)
+	promptEntry["hooks"] = append(promptEntry["hooks"].([]any), map[string]any{
+		"type": "command", "command": "printf configured-custom-hook",
+	})
+	overlayHooks, err = json.Marshal(overlayDoc)
+	if err != nil {
+		t.Fatalf("marshal configured codex overlay: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexOverlay, "hooks.json"), overlayHooks, 0o644); err != nil {
+		t.Fatalf("write codex hooks overlay: %v", err)
+	}
+	sibling := filepath.Join(overlayDir, "per-provider", "codex", "AGENTS.codex.md")
+	if err := os.WriteFile(sibling, []byte("codex"), 0o644); err != nil {
+		t.Fatalf("write codex sibling overlay: %v", err)
+	}
+
+	codexBase := "builtin:codex"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "polecat",
+			Provider: "codex-local",
+			Scope:    "rig",
+			Dir:      "myrig",
+			// Deliberately omit InstallAgentHooks. Provider-family overlay
+			// selection still stages Codex hooks, so ownership must not depend
+			// on a redundant explicit hook list (the live supervisor regression).
+		}},
+		Providers: map[string]config.ProviderSpec{
+			// Explicit command + resume_command so resolution does not depend on
+			// a real codex binary on PATH; base still yields the codex family.
+			"codex-local": {Base: &codexBase, Command: "/bin/echo", ResumeCommand: "/bin/echo resume {{.SessionKey}}"},
+		},
+		Rigs:           []config.Rig{{Name: "myrig", Path: rigDir}},
+		RigOverlayDirs: map[string][]string{"myrig": {overlayDir}},
+	}
+
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	cfgAgent := &cfg.Agents[0]
+	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, "myrig/polecat", cfgAgent, bp.rigs)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDir: %v", err)
+	}
+	owned := prepareTemplateResolution(bp, cfgAgent, "myrig/polecat", io.Discard)
+	if len(owned) != 1 || owned[codexManagedMergeablePath] == "" {
+		t.Fatalf("prepared ownership = %v, want %q", owned, codexManagedMergeablePath)
+	}
+
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
+		t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)
+	}
+	before, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read canonical hooks: %v", err)
+	}
+	if !hooks.CodexHooksAreConverged(before, cityDir) {
+		t.Fatalf("prepared hooks are not complete and city-bound:\n%s", before)
+	}
+	if !strings.Contains(string(before), "configured-custom-hook") {
+		t.Fatalf("prepared hooks dropped same-matcher configured custom hook:\n%s", before)
+	}
+	// Pin a deliberately old timestamp so any unnecessary rewrite is
+	// observable without sleeping for the host filesystem's mtime granularity.
+	stableMTime := time.Unix(123456789, 0)
+	if err := os.Chtimes(hookPath, stableMTime, stableMTime); err != nil {
+		t.Fatalf("pin prepared hook mtime: %v", err)
+	}
+	beforeInfo, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatalf("stat prepared hooks: %v", err)
+	}
+	tp, err := resolveTemplatePrepared(bp, cfgAgent, "myrig/polecat", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplatePrepared: %v", err)
+	}
+	if len(tp.PreparedMergeableFiles) != 1 || tp.PreparedMergeableFiles[codexManagedMergeablePath] == "" {
+		t.Fatalf("resolved prepared files = %v, want verified path and digest", tp.PreparedMergeableFiles)
+	}
+	// Session origin is deliberately manual here: the ownership boundary follows
+	// the configured home produced by resolveTemplatePrepared, not record kind.
+	tp.ManualSession = true
+	runtimeCfg := templateParamsToConfig(tp)
+	if len(runtimeCfg.ReconcilerOwnedMergeablePaths) != 1 {
+		t.Fatalf("runtime ownership = %v, want verified path", runtimeCfg.ReconcilerOwnedMergeablePaths)
+	}
+	foundExactCopy := false
+	for _, entry := range runtimeCfg.CopyFiles {
+		if samePath(entry.Src, hookPath) {
+			if entry.RelDst != codexManagedMergeablePath {
+				t.Fatalf("named nested hook RelDst = %q, want workdir-relative %q", entry.RelDst, codexManagedMergeablePath)
+			}
+			foundExactCopy = true
+		}
+	}
+	if !foundExactCopy {
+		t.Fatalf("resolved named session did not carry canonical hook CopyFile: %+v", runtimeCfg.CopyFiles)
+	}
+	afterPrepareInfo, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatalf("stat hooks after second prepare: %v", err)
+	}
+	if !afterPrepareInfo.ModTime().Equal(beforeInfo.ModTime()) {
+		t.Fatalf("second prepare rewrote converged hooks: mtime %s -> %s", beforeInfo.ModTime(), afterPrepareInfo.ModTime())
+	}
+	if err := runtime.StageProviderOverlayDirSkippingPaths(overlayDir, workDir, []string{"codex"}, []string{codexManagedMergeablePath}, nil); err != nil {
+		t.Fatalf("verified runtime stage: %v", err)
+	}
+	after, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read hooks after runtime stage: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("verified runtime stage changed canonical hooks:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 
@@ -346,6 +475,8 @@ func materializeCodexOverlayForTest(t *testing.T, installHooks []string) string 
 	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, "myrig/polecat", cfgAgent, bp.rigs).Rig
 
 	// Staging only — hooks.Install is a separate step in prepareTemplateResolution.
-	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, "myrig/polecat", rigName, workDir, io.Discard)
+	if _, err := materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, "myrig/polecat", rigName, workDir, false, io.Discard); err != nil {
+		t.Fatalf("materializeProviderOverlaysBeforeFingerprint: %v", err)
+	}
 	return workDir
 }

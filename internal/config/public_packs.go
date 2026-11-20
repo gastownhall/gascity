@@ -9,7 +9,7 @@ const (
 	// PublicGastownPackVersion pins fresh init output to the registry release
 	// content commit from gastownhall/gascity-packs (main, or a gastown
 	// release branch such as release/gastown-0.1.11).
-	PublicGastownPackVersion = "sha:66897e7132c9d1160509ee47dd1b935bbd3b9664"
+	PublicGastownPackVersion = "sha:483f21f3efd83f992c3d1ae0b695370d4bc5a072"
 
 	// PublicGascityPackSource is the concrete durable source for the
 	// gascity planning/implementation skills pack.
@@ -17,8 +17,8 @@ const (
 
 	// PublicGascityPackVersion pins fresh init output to the registry
 	// release content commit from gastownhall/gascity-packs main
-	// (gascity 0.1.7).
-	PublicGascityPackVersion = "sha:5bf643ca55bd20f080994cc31414ee4596015a0c"
+	// (RFC8191 candidate branch; qualify this exact content before release).
+	PublicGascityPackVersion = "sha:c2cc8ca4d2778761c73238033821fb5efa0c94e9"
 
 	// PublicGascityRolesPackSource is the concrete durable source for the
 	// gascity role-agents subpack (gc-roles): the providerless, rig-scoped
@@ -49,7 +49,7 @@ const (
 	// trees; bump the pin (and append the old value to
 	// SupersededBundledPackImportVersions) when cutting a release whose
 	// bundled core/bd/dolt content changed.
-	BundledPackImportVersion = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
+	BundledPackImportVersion = "sha:9dedf0ce789ce63133cfe7ff6b81fb2be2f59d8a"
 )
 
 // SupersededBundledPackImportVersions lists previous canonical pins for the
@@ -77,6 +77,9 @@ var SupersededBundledPackImportVersions = []string{
 	"sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5",
 	"sha:505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42",
 	"sha:2e643dc2eb5ff84d9853ecaa6961a87a8e4043ae",
+	"sha:e38ce9cc55d15fa351199c042f0d07aba1a347af",
+	"sha:b21ab3b27bd09f9130fb457e6fbf9e3570ea7297",
+	"sha:bca762adc8ef16fdc7de301b6b31b5ae4dfe2607",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the
@@ -88,6 +91,7 @@ var SupersededBundledPackImportVersions = []string{
 // When bumping PublicGastownPackVersion, append the old value here
 // (scripts/update-bundled-gastown-pack does this).
 var SupersededPublicGastownPackVersions = []string{
+	// Preserve the initial RFC branch base pin when updating the bundled module.
 	"sha:cb6a612882b8402569c495c90ab75bb257a51bdc",
 	"sha:66c672b5ed00af143158b4eac960523c56b977ee",
 	"sha:33d3a430a67d1782ad364556cb566bdb01d0afe3",
@@ -98,6 +102,20 @@ var SupersededPublicGastownPackVersions = []string{
 	"sha:342bcfb0775ad79d2c67df3b235edf70a0a7e372",
 	"sha:2cd3360f36b2ff55f6c306546841963cbca1ed69",
 	"sha:92a9e8558b86854264ccc082fe9f27d48db3c749",
+	"sha:124902097faa3d2e4de69e5ac5fe9e5109cad24f",
+	"sha:478292cb99aec2efe4b3cecc636677b4d2af9665",
+	"sha:cb068845a82e033c32a445d6011ad7127c97377c",
+	"sha:9ea1e00ca15aa4e793b62b6be1fb05d86e3a1212",
+	"sha:50e6ce8fc07eee263a10aa9b138bca919f8d584e",
+	"sha:0decca6b7ea4f0720a358bc244f53d1db32bfdb6",
+	"sha:c27b62ad047b7250fd35e7382e953d9478a1b174",
+	"sha:cc30e82bafe81bff6a12a9c52f8de3df3c89d9f4",
+	"sha:53037f641ed0d6bd9ec8982cd7f09e941e5f5186",
+	"sha:487c4c665398803210e4987bcf907330ae463d0e",
+	"sha:bd5fa8ca95b9afbfc801111d4c1d7d3c59816081",
+	"sha:b298b0000abfd7081b5218f42b85b7a216707fb1",
+	"sha:7833d810917d55dc44c6613b9f20695745906462",
+	"sha:5f4a74aff57487e764ad2509d25c004c837b44d3",
 }
 
 // SupersededPublicGascityPackVersions is the gascity-pack counterpart of
@@ -113,4 +131,18 @@ var SupersededPublicGascityPackVersions = []string{
 	"sha:7aedf80cfa39905bee4104095bfae8a02c67aaa1",
 	"sha:20ac017f5417b82a300f0bfdfa7cddab3773cb07",
 	"sha:ef528014c0fd6ec9d2bd6eded4fe800cf61758bc",
+	"sha:124902097faa3d2e4de69e5ac5fe9e5109cad24f",
+	"sha:676381ee880a38adb9a629b2cffdb17dd8676243",
+	"sha:9b335f3d6e1326c2230c4d9037ef6e2352a51ba8",
+	"sha:fba9d21174c59bc363fc21b2097092cdc8200933",
+	"sha:1c7b7c7f1e9799b78b84b11780e1012a70fd3ae9",
+	"sha:a1c6300426246931c87ffe35b796c4e102982a40",
+	"sha:4c037d340f4b3bb537d60f865143f2015de6f873",
+	"sha:785f4bd6660c7d7e756bbcfcbe14cc514904434c",
+	"sha:c5aaa9fae54af7a13be6e4f5a594d7d49a58e2cb",
+	"sha:4c479c7dfb5b0b38e227953ab9ab75905d6f5b66",
+	"sha:78764b7ae1cb98960d4a4cfcb75468d06f86d7ed",
+	"sha:dd2cff200f18a64e8a010fe1d5b975b1f0493e14",
+	"sha:02039579a40ae20aea47060d96027fc924333ef5",
+	"sha:aa5dcf701a70ca5db19228811e9ee822d852006c",
 }

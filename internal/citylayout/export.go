@@ -62,6 +62,9 @@ var defaultWorkDirExportExcludes = []string{
 	".gc/emergency/**",
 	".gc/storage-served-binding.json",
 	".gc/storage-infra-cleared.json",
+	// Host/workspace-specific initialization and recovery identity stays with
+	// the operator city; work-dir exports must not clone it to another host.
+	".gc/init-infrastructure.json",
 	// S5-A: storage attestations, the reconciler's v2 fallback record, and a
 	// remote stage's record (written by the staging gc init, never shipped).
 	".gc/storage-attestations.log",

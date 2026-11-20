@@ -118,6 +118,60 @@ func TestBeadsQuiescenceRetiresOnlyAfterInFlightStoreWorkFinishes(t *testing.T) 
 	}
 }
 
+func TestBeadsQuiescenceRetiresDetachedOwnedScopeOnlyWithTheCity(t *testing.T) {
+	for _, wholeCity := range []bool{false, true} {
+		name := "rig-only"
+		if wholeCity {
+			name = "whole-city"
+		}
+		t.Run(name, func(t *testing.T) {
+			cr, _, rig, _ := quiescenceRuntime(t, "suspended_on_start = true\n")
+			detached := filepath.Join(cr.cityPath, ".gc", "storage", "detached")
+			if err := os.MkdirAll(detached, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := persistProviderScopeOwnership(cr.cityPath, detached, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := markProviderScopeOwnershipReady(cr.cityPath, detached); err != nil {
+				t.Fatal(err)
+			}
+			stops := map[string]int{}
+			oldStop := stopSuspendedScopeStore
+			t.Cleanup(func() { stopSuspendedScopeStore = oldStop })
+			stopSuspendedScopeStore = func(_ context.Context, _ string, root string, stillSuspended func() error) error {
+				if err := stillSuspended(); err != nil {
+					return err
+				}
+				stops[normalizePathForCompare(root)]++
+				return nil
+			}
+			if wholeCity {
+				t.Setenv("GC_SUSPENDED", "1")
+			}
+			for range 3 {
+				if wholeCity {
+					if !cr.enterBeadsQuiescenceIfDue(context.Background()) {
+						t.Fatal("fully drained suspended city did not become quiescent")
+					}
+				} else {
+					cr.tickRetireSuspendedRigScopes(&tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)})
+				}
+			}
+			if got := stops[normalizePathForCompare(rig)]; got != 1 {
+				t.Fatalf("rig stops = %d, want one as a non-vacuity control", got)
+			}
+			want := 0
+			if wholeCity {
+				want = 1
+			}
+			if got := stops[normalizePathForCompare(detached)]; got != want {
+				t.Fatalf("detached owned scope stops = %d, want %d (all stops: %v)", got, want, stops)
+			}
+		})
+	}
+}
+
 // leaseClearGate is a session store whose runtime lease clear (the write a
 // RuntimeLease's Release makes) blocks until released, so a test can hold an
 // async stop between its kill and that write.

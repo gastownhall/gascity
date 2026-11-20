@@ -99,6 +99,7 @@ func TestProvisionKeepsAdoptedBeadsStoreWhenInitFails(t *testing.T) {
 	deps, req := provisionWithFailingStoreInit(t, func(_, _, _ string) (bool, error) {
 		return false, initErr
 	})
+	deps.StoreContract = func(string) bool { return true }
 	req.Adopt = true
 	// --adopt only runs store init under the bd store contract; without it the
 	// adopt never reaches the failing init this test exercises.
@@ -109,8 +110,8 @@ func TestProvisionKeepsAdoptedBeadsStoreWhenInitFails(t *testing.T) {
 	}
 	marker := filepath.Join(req.Path, ".beads", "metadata.json")
 
-	if _, _, provErr := Provision(deps, req); provErr == nil {
-		t.Fatal("expected the store-init failure to surface")
+	if _, _, provErr := Provision(deps, req); !errors.Is(provErr, initErr) {
+		t.Fatalf("expected store-init failure, got %v", provErr)
 	}
 
 	if _, err := os.Stat(marker); err != nil {

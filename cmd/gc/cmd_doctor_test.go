@@ -1123,10 +1123,12 @@ func TestWriteDoctorJSONOKReflectsBlockingFailed(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		report     *doctor.Report
-		wantOK     bool
-		wantSchema string
+		name          string
+		report        *doctor.Report
+		wantOK        bool
+		wantSchema    string
+		wantErrorCode string
+		wantExitCode  int
 	}{
 		{
 			name:       "clean report",
@@ -1146,6 +1148,16 @@ func TestWriteDoctorJSONOKReflectsBlockingFailed(t *testing.T) {
 			wantSchema: jsonSchemaResultRole,
 		},
 		{
+			name: "incomplete advisory check",
+			report: &doctor.Report{Failed: 1, Results: []*doctor.CheckResult{
+				{Name: "slow-check", Status: doctor.StatusError, Severity: doctor.SeverityAdvisory, TimedOut: true, Message: "outcome unknown"},
+			}},
+			wantOK:        false,
+			wantSchema:    jsonSchemaFailureRole,
+			wantErrorCode: "doctor_incomplete",
+			wantExitCode:  2,
+		},
+		{
 			name: "blocking failure",
 			report: &doctor.Report{
 				Failed:         1,
@@ -1161,6 +1173,13 @@ func TestWriteDoctorJSONOKReflectsBlockingFailed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			wantExit := tt.wantExitCode
+			if !tt.wantOK && wantExit == 0 {
+				wantExit = 1
+			}
+			if _, _, got := doctorReportFailure(tt.report); got != wantExit {
+				t.Errorf("process exit = %d, want %d", got, wantExit)
+			}
 			var buf bytes.Buffer
 			if err := writeDoctorJSON(&buf, tt.report); err != nil {
 				t.Fatalf("writeDoctorJSON: %v", err)
@@ -1193,11 +1212,18 @@ func TestWriteDoctorJSONOKReflectsBlockingFailed(t *testing.T) {
 			if !ok {
 				t.Fatalf("error = %#v, want object; out=%s", raw["error"], buf.String())
 			}
-			if got := errObj["code"]; got != doctorBlockingFailedErrorCode {
-				t.Errorf("error.code = %v, want %q", got, doctorBlockingFailedErrorCode)
+			wantCode := tt.wantErrorCode
+			if wantCode == "" {
+				wantCode = doctorBlockingFailedErrorCode
 			}
-			if got := errObj["exit_code"]; got != float64(1) {
-				t.Errorf("error.exit_code = %v, want 1", got)
+			if got := errObj["code"]; got != wantCode {
+				t.Errorf("error.code = %v, want %q", got, wantCode)
+			}
+			if wantExit == 0 {
+				wantExit = 1
+			}
+			if got := errObj["exit_code"]; got != float64(wantExit) {
+				t.Errorf("error.exit_code = %v, want %d", got, wantExit)
 			}
 			for _, key := range []string{"blocking_failed", "passed", "results"} {
 				if _, ok := raw[key]; !ok {
@@ -1211,5 +1237,53 @@ func TestWriteDoctorJSONOKReflectsBlockingFailed(t *testing.T) {
 				t.Errorf("results = %v, want %d entries", raw["results"], len(tt.report.Results))
 			}
 		})
+	}
+}
+
+// The session checks read the registry the way the runtime does: each open
+// session row's session name, mapped to the configured agent it runs. A
+// closed row is not in the registry, and a store that cannot open is an error
+// the checks report, not an empty registry.
+func TestDoctorSessionRegistryReadsOpenSessionRows(t *testing.T) {
+	oldOpen := openSessionProviderStore
+	t.Cleanup(func() { openSessionProviderStore = oldOpen })
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name": "worker-1-pool",
+			"template":     "worker",
+			"agent_name":   "worker-1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := store.Create(beads.Bead{
+		Type:     "session",
+		Labels:   []string{"gc:session"},
+		Metadata: map[string]string{"session_name": "worker-2-pool", "template": "worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+	openSessionProviderStore = func(string) (beads.Store, error) { return store, nil }
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	names, err := doctorSessionRegistry(t.TempDir(), cfg)()
+	if err != nil {
+		t.Fatalf("registry read: %v", err)
+	}
+	if len(names) != 1 || names["worker-1-pool"] != "worker" {
+		t.Fatalf("registry = %v, want only worker-1-pool -> worker", names)
+	}
+
+	openSessionProviderStore = func(string) (beads.Store, error) { return nil, os.ErrPermission }
+	if _, err := doctorSessionRegistry(t.TempDir(), cfg)(); err == nil {
+		t.Fatal("registry read error = nil, want the store open error")
 	}
 }

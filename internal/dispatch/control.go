@@ -427,7 +427,7 @@ func ralphIterationLiveMembers(store beads.GraphStore, control, iteration beads.
 // ralph's work bead, or a scope body whose abort kept its member's record), or
 // else a hard-failed member of the iteration's scope. The member scan covers
 // iteration bodies aborted before abortScope kept that record. Only an explicit
-// hard class counts, matching the retry classifier and the legacy check path;
+// hard class or a blocked work outcome counts, matching the retry classifier;
 // an empty or transient class leaves the loop to iterate.
 func ralphIterationHardFailure(store beads.GraphStore, control, iteration beads.Bead, opts ProcessOptions) (beads.Bead, bool, error) {
 	if strings.TrimSpace(iteration.Metadata[beadmeta.OutcomeMetadataKey]) != beadmeta.OutcomeFail {

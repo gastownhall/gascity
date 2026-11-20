@@ -53,6 +53,28 @@ gc doctor --verbose   # extra detail
 gc doctor --fix       # attempt automatic repairs
 ```
 
+## Selected Codex is too old or a tool reports another session
+
+The builtin interactive Codex provider requires a final CLI 0.162.1 or newer
+and launches it with `--no-daemon`. This runs each worker with its own tool
+process environment instead of reusing a user-global background server. The
+isolation flag is independent of your selected model and effort; neither needs
+to be set to obtain it. GC does not stop or reconfigure an existing background
+server used by other applications.
+
+Run `codex --version` using the executable selected in your provider configuration
+and upgrade that executable if the readiness check reports an older version.
+For a custom command or explicit `args` override, retain the isolation flag and
+verify the wrapper's environment behavior with a real task; an unverified
+readiness result is not proof of per-session tool identity. Choosing another
+provider does not require upgrading an unselected Codex installation.
+`--skip-provider-readiness` deliberately bypasses the version and login checks.
+
+If a tool reports a stale or different GC session, keep the refusal and its
+session identities as evidence; do not force the claim or alter the stored
+session ID. An old shared server is a possible integration hazard, not proof
+of the cause of any particular mismatch.
+
 ## Add City-Local Doctor Checks
 
 Use `[[doctor.check]]` in `city.toml` for a workspace-specific health check
@@ -317,10 +339,52 @@ bd version
 Upgrade via Homebrew (`brew upgrade beads`) or download a newer release from
 [gastownhall/beads/releases](https://github.com/gastownhall/beads/releases).
 
+## Unproven Native Beads Binding
+
+A message such as `native bd scope ... has no proven project identity` or
+`has no proven local database storage` means Gas City cannot establish the
+original store binding safely. Server-mode metadata with a database name alone
+cannot distinguish a standalone database from an incomplete or changed binding.
+A running city server or a proposed endpoint does not supply that evidence.
+Gas City refuses the fallback or initialization and preserves the existing scope.
+
+Keep the repository's `.beads` directory and a recoverable backup of its database,
+metadata and configuration. From the affected repository, inspect Beads' own
+view without requesting repair:
+
+```bash
+bd --readonly doctor --agent --json
+```
+
+To select the repository explicitly, use
+`bd -C /absolute/path/to/project --readonly doctor --agent --json`.
+The doctor reports observed state and supported remediation commands; some
+checks require an available Dolt server. A failed diagnostic is not evidence
+that the original data can be discarded.
+
+Use supported Beads commands for the diagnosed storage mode, or restore the
+matching original metadata and configuration from a known-good backup. Preserve
+the database and its history. Do not invent a `project_id`, add GC origin or
+endpoint fields just to satisfy the check, or delete/reinitialize `.beads`.
+Do not apply `doctor --fix` blindly to an unidentified binding. If its original
+binding remains unknown, retain the backup and diagnostics for Beads support.
+Retry the Gas City command only after the original binding is verified.
+
+An absent `gc.endpoint_origin` is not itself an error: complete preexisting
+legacy endpoint YAML with its host and port can still provide authority. A
+prefix or database name alone cannot. This refusal does not make endpoint
+migration or [`gc rig add --adopt`](/getting-started/quickstart#adopt-an-existing-beads-queue)
+a repair tool for unknown native data.
+
 ## `gc init` Created a Single-Store City
 
 A new city is born split unless something keeps it single-store, and `gc init`
-prints the reason on stderr. The HTTP city create follows the same rules.
+prints the reason on stderr. The HTTP city create follows the same rules. A
+born-split city serves its infrastructure classes from the local SQLite
+binding. Where none of the reasons below applies, `GC_INIT_INFRASTRUCTURE=native`
+makes a fresh `gc init` of the default template with no `--storage`, on a bd
+work store, leave `[storage]` to a native infrastructure workspace instead,
+which adds the section once that workspace is ready.
 
 | Notice names | Why | To get the split |
 |---|---|---|
@@ -694,6 +758,16 @@ in via `GC_SUPERVISOR_ENV`; any other key in the file is ignored. A value
 exported in the calling shell still takes precedence over the file, and
 `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from both
 sources.
+
+The service file that a reinstall replaces is the last fallback. A key set
+there, such as an `Environment=` line you added to the unit by hand, is kept
+when no other source sets it and the key passes the same check. Credentials are
+the exception: a provider credential, `CLAUDE_CODE_OAUTH_TOKEN` or
+`GC_DOLT_PASSWORD` in the old file is not kept, so a reinstall from a shell
+without it still removes it from the service file. Keep a credential in
+`secrets.env` instead. `gc supervisor install` prints on stderr the keys of the
+old file that it does not keep. To keep one of those, list it in
+`GC_SUPERVISOR_ENV` in the shell that runs the install.
 
 The same file is the durable home for the beads connection-pool deadlines.
 `gc` reads `BEADS_DOLT_POOL_READ_TIMEOUT` and `BEADS_DOLT_POOL_WRITE_TIMEOUT`

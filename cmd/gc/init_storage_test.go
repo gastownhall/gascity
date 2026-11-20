@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -412,7 +413,7 @@ func TestAPIRigCreateOfAReservedDerivedPrefixOnADefaultCityIsTheCallersError(t *
 	}
 	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "bright-lights"}}, runtime.NewFake(), events.NewFake(), "bright-lights", cityPath)
 
-	err = cs.CreateRig(config.Rig{Name: "graphql-code-generator", Path: filepath.Join(cityPath, "graphql-code-generator")})
+	err = cs.CreateRig(config.Rig{Name: "graphql-code-generator", Path: filepath.Join(cityPath, "graphql-code-generator")}, false)
 	if !errors.Is(err, config.ErrReservedBeadPrefix) {
 		t.Fatalf("CreateRig of graphql-code-generator = %v, want the reserved-prefix refusal (ErrReservedBeadPrefix)", err)
 	}
@@ -834,7 +835,7 @@ func TestInitSplitFloorAppliesToOSSPinnedInventoriesOnly(t *testing.T) {
 		t.Run(inv.Name, func(t *testing.T) {
 			stubInitBDVersion(t, "bd version "+inv.Version)
 			stubInitSplitBDJudge(t, inv.Name, nil)
-			belowFloor := compareVersions(inv.Version, initSplitBDMinVersion) < 0
+			belowFloor := deps.CompareVersions(inv.Version, initSplitBDMinVersion) < 0
 			enterprise := inventoryIsEnterprise(inv)
 			if belowFloor && enterprise {
 				sawEnterpriseBelowFloor = true

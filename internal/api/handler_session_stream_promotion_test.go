@@ -169,11 +169,47 @@ func TestStructuredPeekEmitsSameRequestPendingUpdates(t *testing.T) {
 	}
 }
 
+// These partial handles intentionally leave unrelated capabilities embedded,
+// but every stream observation must be explicit rather than dispatching through
+// a nil embedded Handle. Unsupported availability remains a nil diagnostic.
+func TestStructuredPeekHandlesProvideExplicitLiveObservations(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		handle worker.Handle
+	}{
+		{name: "promotion", handle: &structuredPromotionHandle{}},
+		{name: "pending updates", handle: &mutableStructuredPendingHandle{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			observation, err := worker.ObserveHandle(t.Context(), tc.handle)
+			if err != nil || !observation.Running || !observation.Alive || observation.Suspended ||
+				observation.SessionID != "session-1" || observation.RuntimeSessionID != "session-1" || observation.SessionName != "worker-1" {
+				t.Fatalf("stream handle observation = %+v, %v", observation, err)
+			}
+			frames := newProviderAvailabilityFrames(t.Context(), session.Info{ID: "session-1"}, tc.handle)
+			first, changed := frames.next()
+			if !changed || first.ID != "session-1" || first.ProviderAvailability != nil {
+				t.Fatalf("unsupported diagnostic initial frame = %+v, changed=%t", first, changed)
+			}
+			if _, changed := frames.next(); changed {
+				t.Fatal("unchanged unsupported diagnostic emitted a second frame")
+			}
+		})
+	}
+}
+
 type structuredPromotionHandle struct {
 	worker.Handle
 
 	mu           sync.Mutex
 	pendingReads int
+}
+
+func (h *structuredPromotionHandle) LiveObservation(context.Context) (worker.LiveObservation, error) {
+	return worker.LiveObservation{
+		Running: true, Alive: true,
+		SessionID: "session-1", RuntimeSessionID: "session-1", SessionName: "worker-1",
+	}, nil
 }
 
 func (h *structuredPromotionHandle) Peek(context.Context, int) (string, error) {
@@ -225,6 +261,13 @@ type mutableStructuredPendingHandle struct {
 	mu      sync.Mutex
 	output  string
 	pending *worker.PendingInteraction
+}
+
+func (h *mutableStructuredPendingHandle) LiveObservation(context.Context) (worker.LiveObservation, error) {
+	return worker.LiveObservation{
+		Running: true, Alive: true,
+		SessionID: "session-1", RuntimeSessionID: "session-1", SessionName: "worker-1",
+	}, nil
 }
 
 func (h *mutableStructuredPendingHandle) Peek(context.Context, int) (string, error) {

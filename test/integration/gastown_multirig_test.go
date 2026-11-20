@@ -142,7 +142,7 @@ func writeMultiRigToml(t *testing.T, cityDir, cityName string, rigDirs []string,
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "[workspace]\nname = %s\n", quote(cityName))
+	// Machine-local workspace identity is written to .gc/site.toml below.
 	fmt.Fprintf(&b, "\n[beads]\nprovider = \"file\"\n")
 	fmt.Fprintf(&b, "\n[daemon]\npatrol_interval = \"100ms\"\n")
 
@@ -210,57 +210,6 @@ func writeMultiRigAgentPack(t *testing.T, cityDir string, agents map[string]gasT
 		}
 		require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644))
 	}
-}
-
-func installFakeBDForCity(t *testing.T, cityDir string) {
-	t.Helper()
-
-	shimDir := t.TempDir()
-	script := filepath.Join(shimDir, "bd")
-	content := `#!/bin/sh
-set -eu
-store="${BEADS_DIR:?}/fake-beads"
-mkdir -p "$store"
-case "${1:-}" in
-  create)
-    title="${2:?missing title}"
-    id="${GC_BEADS_PREFIX:-bd}-fake"
-    printf '%s' "$title" > "$store/$id"
-    printf 'Created issue: %s\n' "$id"
-    ;;
-  show)
-    id="${2:?missing id}"
-    if [ ! -f "$store/$id" ]; then
-      printf 'Error: issue not found: %s\n' "$id" >&2
-      exit 1
-    fi
-    printf 'ID: %s\n' "$id"
-    printf 'Title: %s\n' "$(cat "$store/$id")"
-    ;;
-  *)
-    printf 'unsupported fake bd command: %s\n' "$*" >&2
-    exit 2
-    ;;
-esac
-`
-	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
-
-	loaded, ok := cityCommandEnv.Load(cityDir)
-	require.True(t, ok, "city command env should be registered for %s", cityDir)
-	env := append([]string(nil), loaded.([]string)...)
-	envMap := parseEnvList(env)
-	env = replaceEnv(env, "PATH", prependPath(shimDir, envMap["PATH"]))
-	registerCityCommandEnv(cityDir, env)
-}
-
-func seedConfiguredFakeBDWorkspace(t *testing.T, dir, prefix string) {
-	t.Helper()
-
-	beadsDir := filepath.Join(dir, ".beads")
-	require.NoError(t, os.MkdirAll(beadsDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: "+prefix+"\n"), 0o644))
-	metadata := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":%q}`+"\n", prefix)
-	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644))
 }
 
 // TestGastown_MultiRig_ConfigLoads creates a city with 2 rigs and verifies
@@ -368,25 +317,29 @@ sleep 3600
 // its own beads database. Creates a bead in rig-0 and verifies the bead ID
 // carries a rig-specific prefix.
 func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
-	cityDir, rigDirs := setupMultiRigCity(t, 2)
-	cityName := uniqueCityName()
-
-	agents := []gasTownAgent{
-		{Name: "worker", StartCommand: "sleep 3600"},
+	requireDoltIntegration(t)
+	env := newIsolatedCommandEnvNativeBD(t)
+	cityDir := filepath.Join(t.TempDir(), uniqueCityName())
+	registerIntegrationDoltSQLServerCleanup(t, cityDir)
+	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--providers", "codex", "--default-provider", "codex", cityDir)
+	require.NoError(t, err, "default city init: %s", out)
+	registerCityCommandEnv(cityDir, env)
+	t.Cleanup(func() {
+		unregisterCityCommandEnv(cityDir)
+		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
+		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
+	})
+	prefix0, prefix1 := "r0", "r1"
+	for i, prefix := range []string{prefix0, prefix1} {
+		rigDir := filepath.Join(t.TempDir(), fmt.Sprintf("rig-%d", i))
+		require.NoError(t, os.MkdirAll(rigDir, 0o755))
+		out, err := gcDolt(cityDir, "rig", "add", rigDir, "--prefix", prefix)
+		require.NoError(t, err, "provision actual rig store: %s", out)
 	}
-	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
-	installFakeBDForCity(t, cityDir)
-
-	// Seed bd store markers after city.toml exists, then exercise only
-	// Gas City's configured rig route rather than direct cwd-based bd calls.
-	prefix0 := "r0"
-	prefix1 := "r1"
-	seedConfiguredFakeBDWorkspace(t, rigDirs[0], prefix0)
-	seedConfiguredFakeBDWorkspace(t, rigDirs[1], prefix1)
 	assert.NotEqual(t, prefix0, prefix1, "rig bead prefixes should differ")
 
 	// Create a bead through Gas City's configured rig route.
-	out, err := gc(cityDir, "bd", "--rig", "rig-0", "create", "multi-rig bead test alpha")
+	out, err = gc(cityDir, "bd", "--rig", "rig-0", "create", "multi-rig bead test alpha")
 	require.NoError(t, err, "bd create in rig-0: %s", out)
 	beadID := extractBeadID(t, out)
 

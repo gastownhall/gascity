@@ -40,19 +40,22 @@ var envArgvSafe = map[string]bool{
 	// AssigneeIdentifier), so listing one and not the other would route an
 	// already-public value through the private-file path and blank it out of
 	// diagnostics for nothing.
-	"BEADS_ACTOR":      true,
-	"GC_AGENT":         true,
-	"GC_ALIAS":         true,
-	"GC_CITY":          true,
-	"GC_CITY_PATH":     true,
-	"GC_PROVIDER":      true,
-	"GC_RIG":           true,
-	"GC_RIG_ROOT":      true,
-	"GC_TEMPLATE":      true,
-	"GT_CREW":          true,
-	"GT_RIG":           true,
-	"GT_ROLE":          true,
-	"GT_PROCESS_NAMES": true,
+	"BEADS_ACTOR":  true,
+	"GC_AGENT":     true,
+	"GC_ALIAS":     true,
+	"GC_CITY":      true,
+	"GC_CITY_PATH": true,
+	// Public native conversation ID, already passed to the provider in
+	// --session-id/--resume argv; it grants no access and must stay diagnostic.
+	"GC_PROVIDER_SESSION_ID": true,
+	"GC_PROVIDER":            true,
+	"GC_RIG":                 true,
+	"GC_RIG_ROOT":            true,
+	"GC_TEMPLATE":            true,
+	"GT_CREW":                true,
+	"GT_RIG":                 true,
+	"GT_ROLE":                true,
+	"GT_PROCESS_NAMES":       true,
 
 	// Session identity and epoch counters. GC_INSTANCE_TOKEN is NOT here: it
 	// fences drain/stop and async delivery against a stale incarnation, so it

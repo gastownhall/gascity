@@ -64,3 +64,27 @@ func normalizeVersion(v string) string {
 	}
 	return v
 }
+
+// ValidVersion reports whether the numeric components consumed by CompareVersions
+// can be parsed without its legacy non-numeric-to-zero fallback. It accepts the
+// same optional v prefix, shortened versions and ignored metadata suffixes.
+func ValidVersion(v string) bool {
+	parts := strings.Split(normalizeVersion(v), ".")
+	if len(parts) > 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, digit := range part {
+			if digit < '0' || digit > '9' {
+				return false
+			}
+		}
+		if _, err := strconv.Atoi(part); err != nil {
+			return false
+		}
+	}
+	return true
+}

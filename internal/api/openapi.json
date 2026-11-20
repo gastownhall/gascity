@@ -685,6 +685,56 @@
         },
         "type": "object"
       },
+      "AgentProviderOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "configured_defaults": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Resolved declarative defaults for a new session. Missing values defer to provider-owned configuration; do not infer a model or effort from curated choices.",
+            "type": "object"
+          },
+          "options_schema": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderOptionDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Stable reason when defaults are unknown: custom_start_command, custom_arguments, unhonored_defaults or resolution_failed.",
+            "type": "string"
+          },
+          "resolution": {
+            "description": "Whether GC can project configured session-start defaults. Never an observation of the running provider.",
+            "enum": [
+              "resolved",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "description": "Options apply to creation of a new session, not one turn of an existing conversation.",
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          "supports_per_turn_options": {
+            "description": "Whether GC accepts model/effort overrides atomically for one turn. False in this contract; session-start options must not be presented as per-turn controls.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "resolution",
+          "scope",
+          "supports_per_turn_options"
+        ],
+        "type": "object"
+      },
       "AgentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -749,6 +799,10 @@
           "provider": {
             "type": "string"
           },
+          "provider_options": {
+            "$ref": "#/components/schemas/AgentProviderOptions",
+            "description": "Configured session-start options resolved for this agent; not observed actual runtime settings."
+          },
           "rig": {
             "type": "string"
           },
@@ -773,6 +827,7 @@
           "name",
           "running",
           "suspended",
+          "provider_options",
           "pack_derived",
           "state",
           "available"
@@ -1571,6 +1626,18 @@
           },
           "start_command": {
             "description": "Custom workspace start command for the city's default session template. Mutually exclusive with provider.",
+            "type": "string"
+          },
+          "template": {
+            "default": "gascity",
+            "description": "Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command.",
+            "enum": [
+              "minimal",
+              "gastown",
+              "gascity",
+              "custom",
+              "empty"
+            ],
             "type": "string"
           }
         },
@@ -3561,6 +3628,12 @@
             "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
           },
           {
+            "$ref": "#/components/schemas/ProviderUnresolvedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/PublicDeliveryChangedPayload"
+          },
+          {
             "$ref": "#/components/schemas/Record"
           },
           {
@@ -3987,7 +4060,7 @@
         "additionalProperties": false,
         "properties": {
           "default_handle": {
-            "description": "Default handle for the group.",
+            "description": "Default handle for the group. Omit to preserve an existing route; an empty string clears it.",
             "type": "string"
           },
           "metadata": {
@@ -4015,6 +4088,20 @@
             "description": "Account ID for raw payloads (required when message is absent).",
             "type": "string"
           },
+          "cancel_deliveries": {
+            "description": "Monotonically cancel all deliveries of an existing admission. Requires the same original request_key/message/deliveries; never creates a missing admission. Prepared or unknown lane writes remain cancel_requested until the original operation/tombstone resolves.",
+            "type": "boolean"
+          },
+          "deliveries": {
+            "description": "Frozen qualified recipient identities and native message policies for durable admission. Lane guarantee is at_most_once; ambiguous native outcomes are not resent.",
+            "items": {
+              "$ref": "#/components/schemas/PublicRecipient"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "message": {
             "$ref": "#/components/schemas/ExternalInboundMessage",
             "description": "Pre-normalized inbound message."
@@ -4026,6 +4113,10 @@
           },
           "provider": {
             "description": "Provider name for raw payloads (required when message is absent).",
+            "type": "string"
+          },
+          "request_key": {
+            "description": "Opt-in durable admission key, scoped by conversation and actor. Requires explicit deliveries and pre-normalized message.",
             "type": "string"
           }
         },
@@ -4903,6 +4994,9 @@
           "actor": {
             "type": "string"
           },
+          "admission_id": {
+            "type": "string"
+          },
           "conversation_id": {
             "type": "string"
           },
@@ -4913,6 +5007,9 @@
             "type": "string"
           },
           "target_session": {
+            "type": "string"
+          },
+          "transcript_id": {
             "type": "string"
           }
         },
@@ -4944,6 +5041,18 @@
           },
           "TranscriptEntry": {
             "$ref": "#/components/schemas/ConversationTranscriptRecord"
+          },
+          "admission": {
+            "$ref": "#/components/schemas/PublicReceipt"
+          },
+          "deliveries": {
+            "items": {
+              "$ref": "#/components/schemas/PublicDelivery"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "required": [
@@ -7147,6 +7256,10 @@
       "ProviderOptionDTO": {
         "additionalProperties": false,
         "properties": {
+          "accepts_custom_values": {
+            "description": "True accepts nonempty values beyond the curated choices. False restricts values to listed choices. GC validation remains authoritative; no CLI flag templates are exposed.",
+            "type": "boolean"
+          },
           "choices": {
             "items": {
               "$ref": "#/components/schemas/OptionChoiceDTO"
@@ -7174,7 +7287,8 @@
           "label",
           "type",
           "default",
-          "choices"
+          "choices",
+          "accepts_custom_values"
         ],
         "type": "object"
       },
@@ -7404,9 +7518,22 @@
             "additionalProperties": {
               "type": "string"
             },
+            "description": "Configured declarative session-start defaults, not observed actual settings. Unset model/effort values defer to provider-owned configuration.",
             "type": "object"
           },
           "name": {
+            "type": "string"
+          },
+          "options_reason": {
+            "description": "Stable reason when declared defaults cannot be projected.",
+            "type": "string"
+          },
+          "options_resolution": {
+            "description": "Whether GC resolved the provider's declared option defaults.",
+            "enum": [
+              "resolved",
+              "unknown"
+            ],
             "type": "string"
           },
           "options_schema": {
@@ -7417,12 +7544,26 @@
               "array",
               "null"
             ]
+          },
+          "options_scope": {
+            "description": "These options configure a new session rather than a turn in an existing conversation.",
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          "supports_per_turn_options": {
+            "description": "False: GC does not accept atomic per-turn model/effort settings in this contract.",
+            "type": "boolean"
           }
         },
         "required": [
           "name",
           "builtin",
-          "city_level"
+          "city_level",
+          "options_resolution",
+          "options_scope",
+          "supports_per_turn_options"
         ],
         "type": "object"
       },
@@ -7566,6 +7707,45 @@
         },
         "type": "object"
       },
+      "ProviderUnresolvedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "desired_session_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "dropped_templates": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "reconciler": {
+            "type": "string"
+          },
+          "templates": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "command",
+          "dropped_templates",
+          "templates",
+          "reconciler"
+        ],
+        "type": "object"
+      },
       "ProviderUpdateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -7695,6 +7875,252 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "PublicDelivery": {
+        "additionalProperties": false,
+        "properties": {
+          "after_delivery_id": {
+            "type": "string"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "error_detail": {
+            "type": "string"
+          },
+          "explicit_target_session_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "native_payload": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "operation_key": {
+            "type": "string"
+          },
+          "operation_outcome": {
+            "type": "string"
+          },
+          "operation_reason": {
+            "type": "string"
+          },
+          "operation_status": {
+            "type": "string"
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "recipient": {
+            "$ref": "#/components/schemas/PublicRecipient"
+          },
+          "recipient_key": {
+            "type": "string"
+          },
+          "resolved_session_id": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "state": {
+            "description": "GC handoff state; admitted means the existing Sessions operation is authoritative, not model completion.",
+            "enum": [
+              "queued",
+              "admission_pending",
+              "admission_unknown",
+              "admitted",
+              "failed",
+              "cancel_requested",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "state_version": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "transcript_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "receipt_id",
+          "transcript_id",
+          "conversation",
+          "recipient",
+          "operation_key",
+          "sequence",
+          "recipient_key",
+          "state",
+          "state_version"
+        ],
+        "type": "object"
+      },
+      "PublicDeliveryChangedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "admission_id": {
+            "type": "string"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_id": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "operation_outcome": {
+            "type": "string"
+          },
+          "operation_reason": {
+            "type": "string"
+          },
+          "operation_status": {
+            "type": "string"
+          },
+          "recipient_key": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "state_version": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "transcript_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "admission_id",
+          "transcript_id",
+          "delivery_id",
+          "state_version",
+          "state",
+          "recipient_key"
+        ],
+        "type": "object"
+      },
+      "PublicMessagePolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "now_generation": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "now_turn": {
+            "type": "string"
+          },
+          "on_unsupported": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "wake": {
+            "type": "string"
+          },
+          "when": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PublicReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "payload_digest": {
+            "type": "string"
+          },
+          "request_key": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "target_agent": {
+            "type": "string"
+          },
+          "target_session": {
+            "type": "string"
+          },
+          "transcript_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "request_key",
+          "payload_digest",
+          "transcript_id",
+          "sequence",
+          "delivery_ids"
+        ],
+        "type": "object"
+      },
+      "PublicRecipient": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_identity": {
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PublicMessagePolicy"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy"
+        ],
         "type": "object"
       },
       "PublishReceipt": {
@@ -8125,6 +8551,10 @@
       "RigCreateBody": {
         "additionalProperties": false,
         "properties": {
+          "adopt": {
+            "description": "Register an existing Beads queue in place, preserving its namespace and history. Cannot be combined with git_url.",
+            "type": "boolean"
+          },
           "default_branch": {
             "description": "Mainline branch (e.g. main, master). Auto-detected when omitted.",
             "type": "string"
@@ -8139,15 +8569,15 @@
             "type": "string"
           },
           "path": {
-            "description": "Filesystem path (server-derived for git_url clones).",
+            "description": "Existing project or new clone destination; use an explicit absolute path outside the city. A clone requires an absent destination with an existing parent; omitted clone path defaults to rigs/name.",
             "type": "string"
           },
           "prefix": {
-            "description": "Session name prefix.",
+            "description": "Beads issue namespace prefix; inferred from an adopted queue when omitted.",
             "type": "string"
           },
           "request_id": {
-            "description": "Client-supplied idempotency key; reuse across retries.",
+            "description": "Client-supplied idempotency key; reuse across retries. Required when git_url uses an explicit absolute clone destination.",
             "type": "string"
           }
         },
@@ -9736,6 +10166,61 @@
         ],
         "type": "object"
       },
+      "SessionProviderAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "connection_restore_failed"
+            ],
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "runtime_generation": {
+            "description": "Opaque current runtime incarnation identity; clients must compare it as a whole, never parse it.",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "native_ui"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "description": "A current native UI failure diagnostic or an indeterminate observation. Never a readiness or liveness report.",
+            "enum": [
+              "unknown",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "source",
+          "observed_at"
+        ],
+        "type": "object"
+      },
+      "SessionProviderAvailabilityEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "provider_availability": {
+            "$ref": "#/components/schemas/SessionProviderAvailability"
+          }
+        },
+        "required": [
+          "id",
+          "provider_availability"
+        ],
+        "type": "object"
+      },
       "SessionRawMessageFrame": {
         "description": "Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.",
         "title": "Session raw transcript frame"
@@ -9786,6 +10271,18 @@
             "description": "Response action (e.g. allow, deny).",
             "minLength": 1,
             "type": "string"
+          },
+          "answers": {
+            "description": "Exact authored choice labels for a multiple-selection native question. Mutually exclusive with text; empty, duplicate, unknown and mixed free-text selections are refused.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "metadata": {
             "additionalProperties": {
@@ -9927,6 +10424,9 @@
           },
           "provider": {
             "type": "string"
+          },
+          "provider_availability": {
+            "$ref": "#/components/schemas/SessionProviderAvailability"
           },
           "reason": {
             "type": "string"
@@ -10072,7 +10572,7 @@
         "type": "object"
       },
       "SessionStreamCommonEvent": {
-        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
+        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, current provider-availability diagnostics, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/SessionActivityEvent"
@@ -10085,6 +10585,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionProgramStatusEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SessionProviderAvailabilityEvent"
           },
           {
             "$ref": "#/components/schemas/HeartbeatEvent"
@@ -15048,6 +15551,7 @@
             "extmsg.inbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
+            "extmsg.public_delivery_changed": "#/components/schemas/TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
             "fact.recorded": "#/components/schemas/TypedEventStreamEnvelopeFactRecorded",
             "gc.store.disk_critical": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical",
@@ -15073,6 +15577,7 @@
             "order.suppressed": "#/components/schemas/TypedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
+            "provider.unresolved": "#/components/schemas/TypedEventStreamEnvelopeProviderUnresolved",
             "request.accepted": "#/components/schemas/TypedEventStreamEnvelopeRequestAccepted",
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
@@ -15274,6 +15779,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound"
           },
           {
@@ -15347,6 +15855,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderUnresolved"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestAccepted"
@@ -17173,6 +17684,7 @@
           "type": {
             "not": {
               "enum": [
+                "provider.unresolved",
                 "session.woke",
                 "session.stopped",
                 "session.crashed",
@@ -17279,6 +17791,7 @@
                 "extmsg.adapter_added",
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
+                "extmsg.public_delivery_changed",
                 "extmsg.outbound",
                 "extmsg.outbound_channel_mismatch",
                 "webhook.received",
@@ -18289,6 +18802,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope extmsg.outbound_channel_mismatch",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PublicDeliveryChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.public_delivery_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope extmsg.public_delivery_changed",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgUnbound": {
@@ -19714,6 +20284,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope provider.swapped",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeProviderUnresolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProviderUnresolvedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.unresolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope provider.unresolved",
         "type": "object"
       },
       "TypedEventStreamEnvelopeRequestAccepted": {
@@ -23242,6 +23869,7 @@
             "extmsg.inbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
+            "extmsg.public_delivery_changed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
             "fact.recorded": "#/components/schemas/TypedTaggedEventStreamEnvelopeFactRecorded",
             "gc.store.disk_critical": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical",
@@ -23267,6 +23895,7 @@
             "order.suppressed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
+            "provider.unresolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderUnresolved",
             "request.accepted": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestAccepted",
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
@@ -23468,6 +24097,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound"
           },
           {
@@ -23541,6 +24173,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderUnresolved"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestAccepted"
@@ -25482,6 +26117,7 @@
           "type": {
             "not": {
               "enum": [
+                "provider.unresolved",
                 "session.woke",
                 "session.stopped",
                 "session.crashed",
@@ -25588,6 +26224,7 @@
                 "extmsg.adapter_added",
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
+                "extmsg.public_delivery_changed",
                 "extmsg.outbound",
                 "extmsg.outbound_channel_mismatch",
                 "webhook.received",
@@ -26667,6 +27304,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope extmsg.outbound_channel_mismatch",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PublicDeliveryChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.public_delivery_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope extmsg.public_delivery_changed",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgUnbound": {
@@ -28192,6 +28890,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope provider.swapped",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeProviderUnresolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProviderUnresolvedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.unresolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope provider.unresolved",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeRequestAccepted": {
@@ -33671,7 +34430,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -34611,7 +35370,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -35449,7 +36208,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -35923,6 +36682,16 @@
               "description": "Bead ID.",
               "type": "string"
             }
+          },
+          {
+            "description": "Use authoritative point reads for every visited residency store, bypassing cached rows and misses. Fails on unavailable owners; does not provide a cross-store atomic snapshot.",
+            "explode": false,
+            "in": "query",
+            "name": "fresh",
+            "schema": {
+              "description": "Use authoritative point reads for every visited residency store, bypassing cached rows and misses. Fails on unavailable owners; does not provide a cross-store atomic snapshot.",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -35938,7 +36707,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -36305,7 +37074,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -36648,7 +37417,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -37221,7 +37990,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -37396,7 +38165,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -37582,7 +38351,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -37718,7 +38487,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -37849,7 +38618,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -37965,7 +38734,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -38081,7 +38850,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -38435,7 +39204,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -38734,7 +39503,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -39231,7 +40000,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -39405,7 +40174,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -39656,7 +40425,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -40382,7 +41151,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -40871,7 +41640,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -41388,6 +42157,21 @@
               }
             },
             "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
@@ -42011,7 +42795,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -44334,7 +45118,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -44965,7 +45749,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -45575,7 +46359,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -47825,7 +48609,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -48132,7 +48916,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -48248,7 +49032,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -48696,7 +49480,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -48812,7 +49596,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -49260,7 +50044,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -49376,7 +50160,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -49653,7 +50437,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -50087,7 +50871,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -50389,7 +51173,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -51198,7 +51982,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -51678,7 +52462,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -52464,7 +53248,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -52713,7 +53497,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -52882,7 +53666,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -53057,7 +53841,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -53258,7 +54042,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -53424,7 +54208,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -54144,7 +54928,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -54507,7 +55291,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -54847,7 +55631,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -55024,7 +55808,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -55252,7 +56036,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -55474,7 +56258,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -56442,6 +57226,32 @@
                       {
                         "properties": {
                           "data": {
+                            "$ref": "#/components/schemas/SessionProviderAvailabilityEvent"
+                          },
+                          "event": {
+                            "const": "provider_availability",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event resume cursor.",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event provider_availability",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
                             "$ref": "#/components/schemas/SessionStreamStructuredMessageEvent"
                           },
                           "event": {
@@ -56987,7 +57797,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -57144,7 +57954,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -57312,7 +58122,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -57756,7 +58566,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. This is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -58274,12 +59084,12 @@
             }
           },
           {
-            "description": "When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.",
+            "description": "When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every complete build saves its body for later reads. Partial builds return survivor counts and diagnostics to their waiting reads while leaving the last complete saved body intact. Default false keeps stale-while-revalidate for pollers.",
             "explode": false,
             "in": "query",
             "name": "fresh",
             "schema": {
-              "description": "When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.",
+              "description": "When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every complete build saves its body for later reads. Partial builds return survivor counts and diagnostics to their waiting reads while leaving the last complete saved body intact. Default false keeps stale-while-revalidate for pollers.",
               "type": "boolean"
             }
           }
@@ -58297,7 +59107,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }
@@ -59443,7 +60253,7 @@
             "headers": {
               "X-GC-Cache-Age-S": {
                 "schema": {
-                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed.",
+                  "description": "Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed. Status cache hits retain the pre-build observation age plus elapsed body time; this is not a full-store causal watermark.",
                   "format": "double",
                   "type": "number"
                 }

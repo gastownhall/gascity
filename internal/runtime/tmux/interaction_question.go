@@ -1,12 +1,16 @@
 package tmux
 
 import (
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -48,7 +52,7 @@ import (
 // strip. One Enter on this page submits every answer.
 //
 // An option's number key answers a single-select page, but not two other
-// forms of it, which are answered in the terminal (TerminalOnly). A
+// forms of it, which Respond's select leaves to the terminal (TerminalOnly). A
 // multi-select page draws a checkbox before each label ("❯ 1. [ ] Cheese",
 // "[✔]" once ticked; testdata/claude-question/question-multiselect-*.txt) and
 // the key ticks that option in place. A page whose options carry previews
@@ -68,6 +72,12 @@ import (
 // existed.
 
 var (
+	askUserQuestionCursorRe   = regexp.MustCompile(`^❯\s+(.+)$`)
+	askUserQuestionReviewTail = []*regexp.Regexp{
+		regexp.MustCompile(`^(?:❯\s+)?2\.\s*Cancel$`),
+		regexp.MustCompile(`^(?:❯\s+)?1\.\s*Submit answers$`),
+		regexp.MustCompile(`^Ready to submit your answers\?$`),
+	}
 	// askUserQuestionFooterRe matches the select footer on its trimmed row, or
 	// on the single-spaced join of the rows a narrow pane wrapped it across.
 	askUserQuestionFooterRe = regexp.MustCompile(`^Enter to select\b.*\bEsc to cancel$`)
@@ -99,6 +109,7 @@ const (
 )
 
 const (
+	askUserQuestionTailSpan = 2
 	// askUserQuestionFooterWrapRows is how many rows from the pane's bottom
 	// the select footer may span: its own row plus the adjacent rows a
 	// narrow pane wraps it onto, joined to match askUserQuestionFooterRe.
@@ -118,31 +129,248 @@ const (
 type parsedQuestion struct {
 	Header   string
 	Question string
-	// Choices are the numbered options' labels in pane order, without a
-	// multi-select page's checkboxes.
+	// ReviewText retains the full rendered review used for native submission
+	// proof separately from the question shown to a client.
+	ReviewText string
+	// Review marks a recognized review page even when only the broad
+	// read-only matcher recognizes its layout.
+	Review bool
+	// Choices are the numbered options' labels in pane order. A page read
+	// for a client with no native request (parseQuestionDialog) carries them
+	// without a multi-select page's checkboxes; parseAskUserQuestion keeps
+	// the rows as drawn for native binding.
 	Choices []string
-	// Numbers are the options' numbers, parallel to Choices: the key that
-	// selects each.
-	Numbers []int
 	// Focused is the label of the highlighted option, empty when the dialog
 	// draws no cursor.
 	Focused string
+	// Numbers are the options' numbers, parallel to Choices: the key that
+	// selects each.
+	Numbers []int
 	// Summary is a review page's rows above its prompt, top first: each
 	// question and the answer it got. Every review page asks the same
 	// thing, so these rows are what tell one questionnaire's apart.
 	Summary []string
 	// TerminalOnly, when set, says why an option's number key does not
-	// answer the page: it is answered in the terminal instead.
+	// answer the page: Respond's select leaves it to the terminal.
 	TerminalOnly string
+	Provider     string
+	NativeID     string
+	// CodexPosition and CodexTotal retain the original async request's batch
+	// position, even after an earlier question in that batch is answered.
+	CodexPosition  int
+	CodexTotal     int
+	BindingError   string
+	FreeNumber     int
+	ChatNumber     int
+	Draft          string
+	FocusedNumber  int
+	Collapsed      bool
+	MultiSelect    bool
+	CheckedChoices map[int]bool
+	ClaudeForm     *claudeQuestionForm
+}
+
+// parseAskUserQuestion returns the open AskUserQuestion dialog the pane lines
+// show, or nil when they show none.
+func parseAskUserQuestion(lines []string) *parsedQuestion {
+	footer := askUserQuestionFooter(lines)
+	review := false
+	if footer < 0 {
+		footer = askUserQuestionReviewEnd(lines)
+		review = footer >= 0
+	}
+	if footer < 0 {
+		return nil
+	}
+
+	header := -1
+	for i := footer - 1; i >= 0 && footer-i <= questionDialogMaxRows; i-- {
+		if askUserQuestionHeaderRe.MatchString(lines[i]) {
+			header = i
+			break
+		}
+	}
+	if header < 0 {
+		return nil
+	}
+
+	q := &parsedQuestion{Header: strings.TrimSpace(askUserQuestionHeaderRe.FindStringSubmatch(lines[header])[1])}
+	if !review && strings.Contains(joinTrimmedRows(lines[footer:]), askUserQuestionPreviewHint) {
+		q.TerminalOnly = questionWithPreviews
+	}
+	var question []string
+	var continuations [][]string
+	focused := false
+	for _, line := range lines[header+1 : footer] {
+		trimmed := strings.TrimSpace(line)
+		if m := askUserQuestionOptionRe.FindStringSubmatch(trimmed); m != nil {
+			label := strings.TrimSpace(m[3])
+			if q.FreeNumber > 0 && label == "Chat about this" {
+				q.ChatNumber, _ = strconv.Atoi(m[2])
+			}
+			// The rows stay as drawn: native binding reads the checkbox
+			// state from them (claudeMultipleChoiceState).
+			if askUserQuestionCheckboxRe.MatchString(label) {
+				q.TerminalOnly = questionMultiSelect
+			}
+			q.Choices = append(q.Choices, label)
+			continuations = append(continuations, nil)
+			number, _ := strconv.Atoi(m[2])
+			q.Numbers = append(q.Numbers, number)
+			if m[1] != "" {
+				focused = true
+				q.Focused = label
+				q.FocusedNumber = number
+			}
+			continue
+		}
+		if len(q.Choices) > 0 {
+			if m := askUserQuestionCursorRe.FindStringSubmatch(trimmed); m != nil {
+				focused = true
+				q.Focused = strings.TrimSpace(m[1])
+				q.FocusedNumber = 0
+				continue
+			}
+		}
+		if strings.HasPrefix(trimmed, "──") && len(q.Choices) > 0 {
+			last := len(q.Choices) - 1
+			q.FreeNumber = q.Numbers[last]
+			if q.Choices[last] != "Type something." {
+				q.Draft = strings.Join(append([]string{q.Choices[last]}, continuations[last]...), "\n")
+			}
+			q.Choices[last] = "Type something."
+		}
+		if len(q.Choices) > 0 && q.FreeNumber == 0 && trimmed != "" && !strings.HasPrefix(trimmed, "──") {
+			last := len(continuations) - 1
+			continuations[last] = append(continuations[last], trimmed)
+		}
+		if len(q.Choices) == 0 && trimmed != "" {
+			question = append(question, strings.TrimSpace(strings.TrimPrefix(trimmed, "│")))
+		}
+	}
+	if !focused {
+		return nil
+	}
+	q.Question = strings.Join(question, " ")
+	if review {
+		q.Review = true
+		q.ReviewText = q.Question
+		q.Question = "Ready to submit your answers?"
+		if page := parseReviewPage(lines); page != nil {
+			q.Summary = page.Summary
+		} else {
+			for _, row := range question {
+				if row != "Review your answers" && row != q.Question {
+					q.Summary = append(q.Summary, row)
+				}
+			}
+		}
+	}
+	return q
+}
+
+// askUserQuestionFooter walks up from the bottom to the select footer,
+// allowing only the dialog's own trailing rows below it, and returns its row,
+// or -1.
+func askUserQuestionFooter(lines []string) int {
+	seen := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" {
+			continue
+		}
+		if askUserQuestionFooterRe.MatchString(trimmed) {
+			return i
+		}
+		seen++
+		if seen >= askUserQuestionTailSpan || strings.HasPrefix(trimmed, "❯") || strings.HasPrefix(trimmed, ">") {
+			return -1
+		}
+	}
+	return -1
+}
+
+// askUserQuestionReviewEnd returns the row just below a review screen whose
+// fixed rows end the pane, or -1. Like the select footer, they may carry the
+// dialog's own trailing row (a named session's rule, "──── name ─"), but no
+// more: an answered review stays in scrollback above the agent's output or
+// the composer.
+func askUserQuestionReviewEnd(lines []string) int {
+	end, matched, seen := -1, 0, 0
+	for i := len(lines) - 1; i >= 0 && matched < len(askUserQuestionReviewTail); i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" {
+			continue
+		}
+		if askUserQuestionReviewTail[matched].MatchString(trimmed) {
+			if end < 0 {
+				end = i + 1
+			}
+			matched++
+			continue
+		}
+		seen++
+		if matched > 0 || seen >= askUserQuestionTailSpan || strings.HasPrefix(trimmed, "❯") || strings.HasPrefix(trimmed, ">") {
+			return -1
+		}
+	}
+	if matched < len(askUserQuestionReviewTail) {
+		return -1
+	}
+	return end
 }
 
 // parseQuestionDialog returns the open AskUserQuestion dialog the pane lines
-// show — its question page or its review page — or nil when they show none.
+// show — its question page or its review page — or nil when they show none,
+// as a client with no native request reads it (presentUnbound).
 func parseQuestionDialog(lines []string) *parsedQuestion {
+	q := parseNativeQuestionDialog(lines)
+	if q != nil {
+		q.presentUnbound()
+	}
+	return q
+}
+
+// parseNativeQuestionDialog is parseQuestionDialog with a page
+// parseAskUserQuestion recognizes left as drawn, for native binding
+// (bindClaudeQuestion), which reads a multi-select page's checkbox rows.
+func parseNativeQuestionDialog(lines []string) *parsedQuestion {
+	if q := parseAskUserQuestion(lines); q != nil {
+		return q
+	}
 	if q := parseQuestionPage(lines); q != nil {
 		return q
 	}
 	return parseReviewPage(lines)
+}
+
+// presentUnbound puts a page parseAskUserQuestion read in the form
+// parseQuestionPage reads one, which is what a client with no native request
+// is shown and what the page's request ID covers: labels without a
+// multi-select page's checkboxes (the checkbox is the option's state, not its
+// label, so ticking it leaves the page, and its request ID, the same), and no
+// focus on an unnumbered row.
+func (q *parsedQuestion) presentUnbound() {
+	for i, label := range q.Choices {
+		if box := askUserQuestionCheckboxRe.FindString(label); box != "" {
+			q.Choices[i] = label[len(box):]
+		}
+	}
+	if q.FreeNumber > 0 {
+		// A multi-select page's free-text row carries a checkbox too; its
+		// label is the row's own, as drawn.
+		first, _, _ := strings.Cut(q.Draft, "\n")
+		if box := askUserQuestionCheckboxRe.FindString(first); box != "" {
+			if i := slices.Index(q.Numbers, q.FreeNumber); i >= 0 {
+				q.Choices[i] = first[len(box):]
+			}
+		}
+	}
+	if q.FocusedNumber == 0 {
+		q.Focused = ""
+	} else if box := askUserQuestionCheckboxRe.FindString(q.Focused); box != "" {
+		q.Focused = q.Focused[len(box):]
+	}
 }
 
 // parseQuestionPage returns the question dialog whose select footer is the
@@ -196,6 +424,7 @@ func parseQuestionPage(lines []string) *parsedQuestion {
 			q.Numbers = append(q.Numbers, number)
 			if m[1] != "" {
 				q.Focused = label
+				q.FocusedNumber = number
 			}
 			continue
 		}
@@ -275,7 +504,7 @@ func parseReviewPage(lines []string) *parsedQuestion {
 		return nil
 	}
 	prompt := rows[0]
-	q := &parsedQuestion{Question: "Ready to submit your answers?"}
+	q := &parsedQuestion{Question: "Ready to submit your answers?", Review: true}
 	labels := []string{"Submit answers", "Cancel"}
 	for k, row := range rows[1:] {
 		m := askUserQuestionOptionRe.FindStringSubmatch(strings.TrimSpace(lines[row]))
@@ -286,6 +515,7 @@ func parseReviewPage(lines []string) *parsedQuestion {
 		q.Numbers = append(q.Numbers, k+1)
 		if m[1] != "" {
 			q.Focused = labels[k]
+			q.FocusedNumber = k + 1
 		}
 	}
 	// The menu alone could be quoted history at the pane's bottom; the page
@@ -337,12 +567,16 @@ func boundPromptText(text string) string {
 }
 
 // requestID is the stable ID of the page on screen: the same on every look
-// while the page stays open, and different on the next one. It covers the
+// while the page stays open, and different on the next one. A page bound to
+// its native request is named by that request (NativeID). Any other covers the
 // question, the choices and a review page's Summary, never the header's ☐/☒
 // chips, a multi-select page's checkboxes or the focused option, which change
 // while the dialog is the same page: a multiSelect toggle ticks a checkbox
 // and flips a chip, arrows move the cursor.
 func (q *parsedQuestion) requestID() string {
+	if q.NativeID != "" {
+		return q.NativeID
+	}
 	text := q.Question + "\x00" + strings.Join(q.Choices, "\x00")
 	if len(q.Summary) > 0 {
 		text += "\x01" + strings.Join(q.Summary, "\x00")
@@ -355,30 +589,35 @@ func (q *parsedQuestion) requestID() string {
 // option of page q was typed (nil for none), is past q: no dialog, or a page
 // with another question, such as the review page. A dialog's questions are
 // unique, and no redraw of a page changes its question, as one can change its
-// option rows (a ticked checkbox, a re-wrapped label).
+// option rows (a ticked checkbox, a re-wrapped label). The questions are
+// compared with their white space folded: a page bound to its native request
+// carries the authored question, a page read off the pane its wrapped rows.
 func (q *parsedQuestion) leftFor(next *parsedQuestion) bool {
-	return next == nil || next.Question != q.Question
+	return next == nil || strings.Join(strings.Fields(next.Question), " ") != strings.Join(strings.Fields(q.Question), " ")
 }
 
 // QuestionSelectAction is the InteractionResponse action that answers a
-// question page: its Text names the option to pick, by its label as
-// Pending's Options list it or, when no option carries that label, by its
-// number.
+// question page by one of its options: its Text names the option to pick, by
+// its label as Pending's Options list it or, when no option carries that
+// label, by its number. A page bound to its native request also takes the
+// request-bound "answer" action (respondQuestionAnswer).
 const QuestionSelectAction = "select"
 
-// questionMetaChoices are the rows a question page offers that answer
-// nothing: they open a free-text field or a chat in the terminal, so
-// Respond does not pick them and Pending does not offer them.
+// questionMetaChoices are the rows a question page offers that a select
+// answers nothing with: they open a free-text field or a chat in the terminal,
+// so Respond's select does not pick them and Pending does not offer them for
+// it.
 var questionMetaChoices = map[string]bool{
 	"Type something.": true,
 	"Chat about this": true,
 }
 
-// answerChoices are the labels of the options Respond may pick, in pane
-// order: every choice but questionMetaChoices, and none on a TerminalOnly
-// page.
-func (q *parsedQuestion) answerChoices() []string {
-	if q.TerminalOnly != "" {
+// selectChoices are the labels of the options Respond's select may pick, in
+// pane order: every choice but questionMetaChoices, and none on a
+// TerminalOnly page or a Codex question, which only its request-bound answer
+// reaches.
+func (q *parsedQuestion) selectChoices() []string {
+	if q.TerminalOnly != "" || q.Provider == "codex" {
 		return nil
 	}
 	out := make([]string, 0, len(q.Choices))
@@ -392,24 +631,33 @@ func (q *parsedQuestion) answerChoices() []string {
 
 // answerHint says how the page is answered, for a refusal to type at it.
 func (q *parsedQuestion) answerHint(session string) string {
-	if q.TerminalOnly != "" {
+	switch {
+	case q.NativeID != "":
+		return fmt.Sprintf("answer its request with respond (action answer) or in the terminal (gc session attach %s), not by a message", session)
+	case q.TerminalOnly != "":
 		return fmt.Sprintf("answer it in the terminal (gc session attach %s), not by a message: it is %s", session, q.TerminalOnly)
+	case q.Provider == "codex":
+		return fmt.Sprintf("it is answered in the terminal (gc session attach %s), not by a message", session)
 	}
 	return fmt.Sprintf("answer it with respond (action %q naming an option) or in the terminal (gc session attach %s), not by a message", QuestionSelectAction, session)
 }
 
 // questionOptionKey returns the key that picks the option response names on
-// q: action QuestionSelectAction, its Text one of answerChoices by label
+// q: action QuestionSelectAction, its Text one of selectChoices by label
 // (case and surrounding space ignored) or, when it is no option's label, by
-// number. A TerminalOnly page, another action, a text naming no offered
-// option or more than one, and an option no single key selects are refused
-// with runtime.ErrInteractionActionUnavailable.
+// number. A Codex question, a TerminalOnly page, another action, a text
+// naming no offered option or more than one, and an option no single key
+// selects are refused with runtime.ErrInteractionActionUnavailable.
 func questionOptionKey(q *parsedQuestion, response runtime.InteractionResponse) (string, error) {
+	if q.Provider == "codex" {
+		return "", fmt.Errorf("%w: a native Codex question (%s) is answered with action \"answer\" naming its request, or in the terminal",
+			runtime.ErrInteractionActionUnavailable, q.promptText())
+	}
 	if q.TerminalOnly != "" {
 		return "", fmt.Errorf("%w: the question dialog (%s) is %s; answer it in the terminal",
 			runtime.ErrInteractionActionUnavailable, q.promptText(), q.TerminalOnly)
 	}
-	offered := strings.Join(q.answerChoices(), " | ")
+	offered := strings.Join(q.selectChoices(), " | ")
 	if response.Action != QuestionSelectAction {
 		return "", fmt.Errorf("%w: a question dialog (%s) is answered with action %q naming one of its options [%s], not %q",
 			runtime.ErrInteractionActionUnavailable, q.promptText(), QuestionSelectAction, offered, response.Action)
@@ -446,4 +694,241 @@ func questionOptionKey(q *parsedQuestion, response runtime.InteractionResponse) 
 			runtime.ErrInteractionActionUnavailable, n, q.Choices[pick])
 	}
 	return strconv.Itoa(q.Numbers[pick]), nil
+}
+
+// answerChoices excludes the provider's editor and chat controls from the
+// model-authored answers shown to a client.
+func (q *parsedQuestion) isChoice(index int) bool {
+	return q.Numbers[index] > 0 && q.Numbers[index] != q.textOption() && q.Numbers[index] != q.ChatNumber
+}
+
+func (q *parsedQuestion) answerChoices() []string {
+	var choices []string
+	for i, label := range q.Choices {
+		if q.isChoice(i) {
+			choices = append(choices, label)
+		}
+	}
+	return choices
+}
+
+func (q *parsedQuestion) textOption() int {
+	if q.FreeNumber != 0 {
+		return q.FreeNumber
+	}
+	for i, label := range q.Choices {
+		if label == "Type something." || (q.Provider == "codex" && label == "Other") {
+			return q.Numbers[i]
+		}
+	}
+	return 0
+}
+
+// respondQuestion answers the question page q that session name's agent pane
+// target shows, by the action response names: QuestionSelectAction picks one
+// of the page's options with its number key (respondQuestionSelect), and
+// "answer" is the request-bound explicit answer to a page bound to its native
+// request (respondQuestionAnswer). Ordinary messages and approval verbs remain
+// unable to select question menu entries.
+func (t *Tmux) respondQuestion(ctx context.Context, name, target string, q *parsedQuestion, response runtime.InteractionResponse) error {
+	if response.Action == QuestionSelectAction {
+		return t.respondQuestionSelect(ctx, name, target, q, response)
+	}
+	return t.respondQuestionAnswer(ctx, target, q, response)
+}
+
+// respondQuestionAnswer accepts only a request-bound explicit answer.
+func (t *Tmux) respondQuestionAnswer(ctx context.Context, target string, q *parsedQuestion, response runtime.InteractionResponse) error {
+	if response.Action != "answer" {
+		return fmt.Errorf("%w: a question dialog (%s) is answered with action \"answer\" naming its request, or with action %q naming one of its options, not %q",
+			runtime.ErrInteractionActionUnavailable, q.promptText(), QuestionSelectAction, response.Action)
+	}
+	if response.RequestID == "" {
+		return fmt.Errorf("%w: answering a question requires request_id", runtime.ErrInteractionResponseInvalid)
+	}
+	if response.RequestID != q.requestID() {
+		return fmt.Errorf("%w: question changed since it was read", runtime.ErrInteractionGone)
+	}
+	if q.NativeID == "" {
+		return fmt.Errorf("%w: native question identity is unavailable; answer in the terminal", runtime.ErrInteractionActionUnavailable)
+	}
+	if q.MultiSelect || response.Answers != nil {
+		return t.respondClaudeMultipleChoices(ctx, target, q, response)
+	}
+	if strings.TrimSpace(response.Text) == "" || len(response.Text) > 16384 || strings.ContainsFunc(response.Text, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) {
+		return fmt.Errorf("%w: answer must be nonempty text of at most 16384 bytes without control characters", runtime.ErrInteractionResponseInvalid)
+	}
+	if q.Provider == "codex" && q.Collapsed {
+		// Only an explicit bound response opens Codex's native question panel.
+		// Polling Pending and ordinary nudges remain read-only.
+		if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "S-Left"); err != nil {
+			return fmt.Errorf("opening native Codex question: %w", err)
+		}
+		opened, err := t.waitQuestionPanel(ctx, target, q)
+		if err != nil {
+			return err
+		}
+		q = opened
+	}
+	number := 0
+	for i, label := range q.Choices {
+		if label == response.Text && q.isChoice(i) {
+			if number != 0 {
+				return fmt.Errorf("%w: answer label is ambiguous", runtime.ErrInteractionActionUnavailable)
+			}
+			number = q.Numbers[i]
+		}
+	}
+	freeText := number == 0
+	if freeText {
+		number = q.textOption()
+		if number == 0 {
+			return fmt.Errorf("%w: question has no free-text editor", runtime.ErrInteractionActionUnavailable)
+		}
+		if q.Draft != "" {
+			return fmt.Errorf("%w: native question editor already contains a draft; finish or clear it in the terminal", runtime.ErrInteractionActionUnavailable)
+		}
+	}
+	if number < 1 || number > 9 {
+		return fmt.Errorf("%w: answer cannot be selected with one key", runtime.ErrInteractionActionUnavailable)
+	}
+	t.cancelCopyModeIfParked(inputCtx(ctx), target)
+	if q.Provider == "codex" {
+		if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", strconv.Itoa(number)); err != nil {
+			return fmt.Errorf("sending question answer: %w", err)
+		}
+	} else if err := t.focusClaudeQuestionRow(ctx, target, q, number); err != nil {
+		return err
+	}
+	if q.Provider != "codex" || freeText {
+		// Both CLIs can submit authored choices on a digit. Claude uses
+		// navigation so the final native identity/focus check precedes its
+		// only submit; Codex's text-editor shortcut does not submit.
+		if err := t.waitQuestionFocus(ctx, target, q, number); err != nil {
+			return err
+		}
+		if freeText {
+			if err := t.pasteLiteralText(inputCtx(ctx), target, response.Text); err != nil {
+				return err
+			}
+			if err := t.waitQuestionDraft(ctx, target, q, response.Text); err != nil {
+				return err
+			}
+		}
+		if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "Enter"); err != nil {
+			return fmt.Errorf("submitting question answer: %w", err)
+		}
+	}
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return interactionAnswerUnconfirmed(ctx.Err())
+		case <-time.After(respondVerifyInterval):
+		}
+		next, err := t.dialogInPane(target)
+		if err != nil {
+			if errors.Is(err, ErrSessionNotFound) {
+				return nil
+			}
+			return interactionAnswerUnconfirmed(fmt.Errorf("verifying question answer: %w", err))
+		}
+		if next.question != nil && q.ClaudeForm != nil && isClaudeQuestionFormReview(next.question) {
+			return interactionAnswerUnconfirmed(t.submitClaudeQuestionFormReview(ctx, target, q, response.Text, nil, next.question))
+		}
+		if next.question == nil || next.question.requestID() != q.requestID() {
+			return nil
+		}
+	}
+	return interactionAnswerUnconfirmed(fmt.Errorf("question did not clear within %s of the answer", respondVerifyTimeout))
+}
+
+// focusClaudeQuestionRow navigates without answering. Numeric shortcuts in
+// Claude2.1.308 submit authored choices immediately, before a focus check can
+// prove which invocation received them.
+func (t *Tmux) focusClaudeQuestionRow(ctx context.Context, target string, q *parsedQuestion, number int) error {
+	current, wanted := slices.Index(q.Numbers, q.FocusedNumber), slices.Index(q.Numbers, number)
+	if current < 0 || wanted < 0 {
+		return fmt.Errorf("%w: native question focus is unknown", runtime.ErrInteractionActionUnavailable)
+	}
+	for current != wanted {
+		key, step := "Down", 1
+		if current > wanted {
+			key, step = "Up", -1
+		}
+		if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, key); err != nil {
+			return fmt.Errorf("focusing native question answer: %w", err)
+		}
+		current += step
+		if err := t.waitQuestionFocus(ctx, target, q, q.Numbers[current]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *Tmux) waitQuestionFocus(ctx context.Context, target string, q *parsedQuestion, number int) error {
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		next, err := t.dialogInPane(target)
+		if err != nil {
+			return fmt.Errorf("verifying question focus: %w", err)
+		}
+		if next.question == nil || next.question.requestID() != q.requestID() {
+			return fmt.Errorf("%w: question changed before submission", runtime.ErrInteractionGone)
+		}
+		if next.question.FocusedNumber == number {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(respondVerifyInterval):
+		}
+	}
+	return fmt.Errorf("question selection was not confirmed within %s; no answer was submitted", respondVerifyTimeout)
+}
+
+func (t *Tmux) waitQuestionPanel(ctx context.Context, target string, q *parsedQuestion) (*parsedQuestion, error) {
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		next, err := t.dialogInPane(target)
+		if err != nil {
+			return nil, fmt.Errorf("reading native question panel: %w", err)
+		}
+		if next.question == nil || next.question.requestID() != q.requestID() {
+			return nil, fmt.Errorf("%w: another question owns the native editor", runtime.ErrInteractionGone)
+		}
+		if !next.question.Collapsed {
+			return next.question, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(respondVerifyInterval):
+		}
+	}
+	return nil, fmt.Errorf("native question panel did not open within %s", respondVerifyTimeout)
+}
+
+func (t *Tmux) waitQuestionDraft(ctx context.Context, target string, q *parsedQuestion, text string) error {
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		next, err := t.dialogInPane(target)
+		if err != nil {
+			return fmt.Errorf("verifying question draft: %w", err)
+		}
+		if next.question == nil || next.question.requestID() != q.requestID() {
+			return fmt.Errorf("%w: question changed before the draft was submitted", runtime.ErrInteractionGone)
+		}
+		if next.question.FocusedNumber == q.textOption() && strings.Join(strings.Fields(next.question.Draft), " ") == strings.Join(strings.Fields(text), " ") {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(respondVerifyInterval):
+		}
+	}
+	return fmt.Errorf("native question draft was not confirmed within %s; no answer was submitted", respondVerifyTimeout)
 }

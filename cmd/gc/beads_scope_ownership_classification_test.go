@@ -29,18 +29,21 @@ func writeScopeBeadsMetadata(t *testing.T, scopeRoot, metadata string) {
 // gc doctor skipping them entirely.
 func TestScopeProviderOwnedClassifiesJournalOrPersistedProxiedBinding(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		metadata  string
-		journal   bool
-		want      bool
-		wantState string
-		wantErr   bool
+		name       string
+		metadata   string
+		config     string
+		wantDetail string
+		journal    bool
+		want       bool
+		wantState  string
+		wantErr    bool
 	}{
 		{name: "journal only", journal: true, want: true, wantState: providerScopeInitializing},
 		{name: "metadata only", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`, want: true, wantState: providerScopeReady},
 		{name: "journal and metadata", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`, journal: true, want: true, wantState: providerScopeInitializing},
 		{name: "neither", want: false},
-		{name: "direct server metadata stays legacy", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`, want: false},
+		{name: "unproven direct server metadata refuses", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`, wantErr: true, wantDetail: "no proven project identity"},
+		{name: "complete legacy endpoint stays GC authoritative without origin", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`, config: "issue_prefix: hq\ndolt.host: db.example.com\ndolt.port: 4406\n", want: false},
 		{name: "metadata without a dolt mode stays legacy", metadata: `{"database":"dolt","backend":"dolt","dolt_database":"hq"}`, want: false},
 		{name: "malformed metadata fails closed", metadata: `{"database":`, wantErr: true},
 	} {
@@ -49,6 +52,11 @@ func TestScopeProviderOwnedClassifiesJournalOrPersistedProxiedBinding(t *testing
 			if tt.metadata != "" {
 				writeScopeBeadsMetadata(t, city, tt.metadata)
 			}
+			if tt.config != "" {
+				if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte(tt.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tt.journal {
 				if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
 					t.Fatal(err)
@@ -56,8 +64,14 @@ func TestScopeProviderOwnedClassifiesJournalOrPersistedProxiedBinding(t *testing
 			}
 			owned, err := scopeProviderOwned(city, city)
 			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("scopeProviderOwned = (%v, nil), want a fail-closed error", owned)
+				if err == nil || owned || tt.wantDetail != "" && !strings.Contains(err.Error(), tt.wantDetail) {
+					t.Fatalf("scopeProviderOwned = (%v, %v), want fail-closed %q", owned, err, tt.wantDetail)
+				}
+				if got := string(mustReadFile(t, scopeMetadataJSONPath(city))); got != tt.metadata {
+					t.Fatalf("refusal changed native metadata: %q", got)
+				}
+				if _, err := os.Stat(providerScopeOwnershipPath(city)); !os.IsNotExist(err) {
+					t.Fatalf("refusal invented ownership: %v", err)
 				}
 				return
 			}

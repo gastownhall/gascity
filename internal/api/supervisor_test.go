@@ -153,7 +153,10 @@ func TestSupervisorProviderReadinessRoute(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir bin: %v", err)
 	}
-	writeExecutable(t, binDir, "codex", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, binDir, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.162.1"; exit 0; fi
+echo 'Logged in using ChatGPT' >&2
+`)
 	if err := os.MkdirAll(filepath.Join(homeDir, ".codex"), 0o755); err != nil {
 		t.Fatalf("mkdir codex dir: %v", err)
 	}

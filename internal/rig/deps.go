@@ -97,17 +97,13 @@ type Deps struct {
 	// rollback protection. nil = fatal at the config-write step for callers that
 	// write config.
 	NormalizeScopes func(cityPath string, cfg *config.City) error
+	// ReadStorePrefix reads a native queue namespace, including when YAML mirrors it.
+	// readOnly forbids provider startup, migrations and persistent writes.
+	// nil retains the legacy YAML-only validation.
+	ReadStorePrefix func(rigPath string, readOnly bool) (string, error)
 	// PrepareAdopt readies provider state for --adopt (cmd/gc
 	// prepareRigAdoptProviderState). nil = skip; only consulted when req.Adopt.
 	PrepareAdopt func(cityPath, rigPath string) error
-	// ReadStorePrefix returns the issue prefix the bd store at rigPath records
-	// in its own config table (cmd/gc readAdoptedStoreIssuePrefix). bd keeps a
-	// store's prefix there and leaves .beads/config.yaml a commented template,
-	// so --adopt asks the store when config.yaml records none. It is consulted
-	// only on --adopt, only when config.yaml has no prefix and
-	// .beads/metadata.json exists. ("", nil) means the store records none. nil =
-	// config.yaml is the only source.
-	ReadStorePrefix func(rigPath string) (string, error)
 	// StoreContract reports whether the city uses the bd store contract (cmd/gc
 	// cityUsesBdStoreContract). It is a func, not a bool, because InitStore can
 	// seed provider state mid-flow and the flow re-evaluates it after init. nil =
@@ -140,6 +136,7 @@ type ProvisionRequest struct {
 	Includes       []string
 	StartSuspended bool
 	Adopt          bool
+	DryRun         bool // validate and report the plan without writing city or rig state
 	// GitURL, when set, is the remote the rig is cloned from at provisioning time
 	// via Deps.CloneGitURL (C3/G15). It is consumed by the clone and never
 	// persisted — no config.Rig field records it — so an embedded credential
@@ -199,6 +196,9 @@ type ProvisionContext struct {
 // provisioning work. Name and Path are always required; the caller is
 // responsible for resolving Path to an absolute location.
 func validateRequest(req ProvisionRequest) error {
+	if req.DryRun && req.GitURL != "" {
+		return errors.New("rig: dry-run does not clone repositories; preview an existing local checkout")
+	}
 	if req.Name == "" {
 		return errors.New("rig: ProvisionRequest.Name is required")
 	}

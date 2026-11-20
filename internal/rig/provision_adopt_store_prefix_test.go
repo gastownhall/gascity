@@ -51,8 +51,8 @@ type storePrefixStub struct {
 	calls []string
 }
 
-func (s *storePrefixStub) reader(prefix string, err error) func(string) (string, error) {
-	return func(rigPath string) (string, error) {
+func (s *storePrefixStub) reader(prefix string, err error) func(string, bool) (string, error) {
+	return func(rigPath string, _ bool) (string, error) {
 		s.calls = append(s.calls, rigPath)
 		return prefix, err
 	}
@@ -226,11 +226,10 @@ func TestProvisionAdoptRefusesAMixedCaseConfigYamlPrefix(t *testing.T) {
 	}
 }
 
-func TestProvisionAdoptPrefersConfigYamlPrefix(t *testing.T) {
+func TestProvisionAdoptVerifiesConfigYamlPrefix(t *testing.T) {
 	deps, req := adoptStoreFixture(t, "issue_prefix: xr\n")
-	deps.ReadStorePrefix = func(string) (string, error) {
-		t.Fatal("ReadStorePrefix consulted although config.yaml records the prefix")
-		return "", nil
+	deps.ReadStorePrefix = func(string, bool) (string, error) {
+		return "xr", nil
 	}
 
 	if _, _, err := Provision(deps, req); err != nil {
@@ -447,14 +446,7 @@ func adoptStoreRecordingPrefix(t *testing.T, prefix string, rec prefixRecord) (D
 			t.Fatal(err)
 		}
 	}
-	if !rec.inConfigYAML {
-		deps.ReadStorePrefix = (&storePrefixStub{}).reader(prefix, nil)
-		return deps, req
-	}
-	deps.ReadStorePrefix = func(string) (string, error) {
-		t.Error("ReadStorePrefix consulted although config.yaml records the prefix")
-		return prefix, nil
-	}
+	deps.ReadStorePrefix = (&storePrefixStub{}).reader(prefix, nil)
 	return deps, req
 }
 

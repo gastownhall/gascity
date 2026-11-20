@@ -2,8 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -153,5 +157,79 @@ func TestPanicRecovery(t *testing.T) {
 	}
 	if problem.Title == "" {
 		t.Error("problem.title should be non-empty")
+	}
+}
+
+// TestPanicRecoveryPreservesHTTPAbortSemantics exercises the recovery boundary
+// used by service proxies when a response stream cannot continue. Only the
+// exact net/http sentinel aborts; application panics still receive Problem Details.
+func TestPanicRecoveryPreservesHTTPAbortSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		panicValue    any
+		streamStarted bool
+		wantAbort     bool
+	}{
+		{name: "before response", panicValue: http.ErrAbortHandler, wantAbort: true},
+		{name: "after streamed response", panicValue: http.ErrAbortHandler, streamStarted: true, wantAbort: true},
+		{name: "wrapped sentinel is application panic", panicValue: fmt.Errorf("proxy failed: %w", http.ErrAbortHandler)},
+		{name: "same message is application panic", panicValue: errors.New(http.ErrAbortHandler.Error())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs lockedBuffer
+			previousLog := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previousLog) })
+
+			req := httptest.NewRequest(http.MethodGet, "/svc/test/events", nil)
+			rec := httptest.NewRecorder()
+			const prefix = "data: ready\\n\\n"
+			handler := withRecovery(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.streamStarted {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte(prefix))
+				}
+				panic(tc.panicValue)
+			}))
+			var gotPanic any
+			func() {
+				defer func() { gotPanic = recover() }()
+				handler.ServeHTTP(rec, req)
+			}()
+
+			if tc.wantAbort {
+				switch gotPanic {
+				case http.ErrAbortHandler:
+				default:
+					t.Fatalf("panic = %v, want exact http.ErrAbortHandler", gotPanic)
+				}
+				wantBody, wantContentType := "", ""
+				if tc.streamStarted {
+					wantBody, wantContentType = prefix, "text/event-stream"
+				}
+				if rec.Code != http.StatusOK || rec.Body.String() != wantBody || rec.Header().Get("Content-Type") != wantContentType {
+					t.Fatalf("abort changed response: status=%d body=%q content-type=%q", rec.Code, rec.Body.String(), rec.Header().Get("Content-Type"))
+				}
+				if got := logs.String(); got != "" {
+					t.Fatalf("abort logged as application panic: %s", got)
+				}
+				return
+			}
+			if gotPanic != nil {
+				t.Fatalf("application panic escaped recovery: %v", gotPanic)
+			}
+			if rec.Code != http.StatusInternalServerError || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/problem+json") {
+				t.Fatalf("application panic response: status=%d content-type=%q", rec.Code, rec.Header().Get("Content-Type"))
+			}
+			var problem struct {
+				Status int `json:"status"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &problem); err != nil || problem.Status != http.StatusInternalServerError {
+				t.Fatalf("application panic problem body = %q, error = %v", rec.Body.String(), err)
+			}
+			if !strings.Contains(logs.String(), "api: panic: ") {
+				t.Fatal("application panic was not logged")
+			}
+		})
 	}
 }

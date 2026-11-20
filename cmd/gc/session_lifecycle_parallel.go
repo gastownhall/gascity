@@ -1254,6 +1254,9 @@ func buildPreparedStartWithTranscript(
 		candidate.tp = tp
 	}
 	tp := candidate.tp
+	// Preserve launch history before stale-key repair can clear its markers.
+	// A repaired/reset conversation must not acquire new first-input credit.
+	bootstrapOriginInfo := candidate.info
 	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
 	if err != nil {
 		return nil, candidate.info, err
@@ -1449,12 +1452,13 @@ func buildPreparedStartWithTranscript(
 	if !firstStart && !forceFresh && hasResumeKey {
 		resumeStartupPromptPlan(tp.Prompt, tp.Hints.Nudge).applyTo(&agentCfg)
 	}
-	// Initial message: append to prompt on first start only, reusing the
-	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
+	// Initial message: append only for a new conversation. A resolved resume
+	// never replays it, even when a missing controller hash classifies firstStart.
+	// Reuse the overrides parsed by parseSessionTemplateOverridesForLaunch above.
 	// Schema overrides were already applied in the block above (before coreHash).
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
-	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
+	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) && !resumed {
 		if (tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none") || initialMessageRidesStartupPrompt(tp.IsACP) {
 			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 		} else {
@@ -1472,6 +1476,7 @@ func buildPreparedStartWithTranscript(
 			}
 		}
 	}
+	agentCfg.BootstrapInputOrigin = freshBootstrapInputOrigin(tp, cfg, agentCfg, bootstrapOriginInfo, firstStart, forceFresh, resumed, parentSID)
 	generation, _ := strconv.Atoi(candidate.info.Generation)
 	if generation <= 0 {
 		generation = sessionpkg.DefaultGeneration
@@ -1694,12 +1699,21 @@ func parseSessionTemplateOverridesForLaunch(info sessionpkg.Info) map[string]str
 }
 
 func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateParams, sessionID string, overrides map[string]string) {
+	if err := resolveSchemaOptionOverridesForLaunch(agentCfg, tp, overrides); err != nil {
+		log.Printf("WARNING: session %s: unhonored template option pin (%v); schema flags not applied", sessionID, err)
+	}
+}
+
+// resolveSchemaOptionOverridesForLaunch shares the launch's pure schema
+// validation and command resolution with template/metadata projection. The
+// caller owns diagnostics; invalid options leave the fresh template unchanged.
+func resolveSchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateParams, overrides map[string]string) error {
 	if agentCfg == nil || tp == nil || len(overrides) == 0 {
-		return
+		return nil
 	}
 	resolved := tp.ResolvedProvider
 	if resolved == nil || len(resolved.OptionsSchema) == 0 {
-		return
+		return nil
 	}
 	fullOptions := make(map[string]string, len(resolved.EffectiveDefaults))
 	for k, v := range resolved.EffectiveDefaults {
@@ -1713,8 +1727,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 	args, resolveErr := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions)
 	if resolveErr != nil {
-		log.Printf("WARNING: session %s: unhonored template option pin (%v); schema flags not applied", sessionID, resolveErr)
-		return
+		return resolveErr
 	}
 	if len(args) > 0 {
 		agentCfg.Command = replaceSchemaFlags(agentCfg.Command, resolved.OptionsSchema, args)
@@ -1724,6 +1737,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 		dup.ResumeCommand = command
 		tp.ResolvedProvider = &dup
 	}
+	return nil
 }
 
 // trigger, when non-nil, is the residency-correct by-id reader the start path

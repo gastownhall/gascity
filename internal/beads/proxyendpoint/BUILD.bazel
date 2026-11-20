@@ -8,6 +8,7 @@ go_library(
         "birth_other.go",
         "idle.go",
         "liveness.go",
+        "namespace.go",
         "poolkey.go",
         "post_open.go",
         "probe.go",

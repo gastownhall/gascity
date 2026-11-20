@@ -60,6 +60,8 @@ type BreakdownCopyEntry struct {
 // drains the sessions it reaches. A v6 hash is an artifact only for config
 // unchanged since (IsCoreHashArtifact), so a session whose config changed
 // under v6 still drains once; every other version is rebaselined silently.
+// An absent ownership set adds no hash bytes or breakdown key; adopting or
+// removing ownership is ordinary provisioning drift within this version.
 const FingerprintVersion = "v7"
 
 // ChangePolicy is what a change to one launch input does to a running
@@ -396,6 +398,7 @@ func hashCoreFieldsExtra(h hash.Hash, cfg Config, extra map[string]string) {
 	h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
 
 	hashOverlayProviders(h, OverlayProviderNames(cfg))
+	hashSortedStringSet(h, "reconciler_owned_mergeable_paths", cfg.ReconcilerOwnedMergeablePaths)
 	hashOptionalBool(h, "accept_startup_dialogs", cfg.AcceptStartupDialogs)
 	hashBool(h, "mouse_on", cfg.MouseOn)
 
@@ -535,6 +538,31 @@ func hashSortedMap(h hash.Hash, m map[string]string) {
 	}
 }
 
+// hashSortedStringSet hashes a set-like string slice deterministically. Empty
+// values contribute nothing, preserving the identity of configs that do not
+// opt into the policy. Duplicate values and caller ordering are immaterial.
+func hashSortedStringSet(h hash.Hash, name string, values []string) {
+	if len(values) == 0 {
+		return
+	}
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	ordered := make([]string, 0, len(set))
+	for value := range set {
+		ordered = append(ordered, value)
+	}
+	sort.Strings(ordered)
+	h.Write([]byte(name)) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
+	for _, value := range ordered {
+		h.Write([]byte(value)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})     //nolint:errcheck // hash.Write never errors
+	}
+	h.Write([]byte{1}) //nolint:errcheck // slice sentinel
+}
+
 func hashMCPServers(h hash.Hash, servers []MCPServerConfig) {
 	for _, server := range NormalizeMCPServerConfigs(servers) {
 		h.Write([]byte(server.Name))      //nolint:errcheck // hash.Write never errors
@@ -652,6 +680,16 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 				}
 			}
 		}),
+	}
+	// Ownership was added without a fingerprint-version bump because an empty
+	// policy contributes no bytes to the core hash. Keep the diagnostic shape
+	// equally absent when unset: emitting SHA-256(empty) here would make a new
+	// binary's v5 breakdown differ from an older binary's otherwise-identical
+	// v5 payload even though the core fingerprints are byte-for-byte equal.
+	if len(cfg.ReconcilerOwnedMergeablePaths) > 0 {
+		fields["ReconcilerOwnedMergeablePaths"] = fieldHash(func(h hash.Hash) {
+			hashSortedStringSet(h, "reconciler_owned_mergeable_paths", cfg.ReconcilerOwnedMergeablePaths)
+		})
 	}
 	// Upstream and OperatorEnv are conditional, as in the core hash, so a
 	// breakdown that sets neither stays byte-identical to one stored before
@@ -824,9 +862,12 @@ func parseStoredBreakdown(stored string) (fields map[string]string, copyEntries 
 	return nil, nil, false
 }
 
+const emptyBreakdownFieldHash = "e3b0c44298fc1c14" // first 16 hex chars of SHA-256(empty)
+
 // diffBreakdownFields returns the sorted list of field names where the
 // stored and current per-field hashes differ, a field only one side carries
-// (a conditional one such as Upstream or OperatorEnv) included.
+// (a conditional one such as Upstream, OperatorEnv or
+// ReconcilerOwnedMergeablePaths) included.
 func diffBreakdownFields(stored, current map[string]string) []string {
 	var diffs []string
 	for field, ch := range current {
@@ -834,10 +875,17 @@ func diffBreakdownFields(stored, current map[string]string) []string {
 			diffs = append(diffs, field)
 		}
 	}
-	for field := range stored {
-		if _, ok := current[field]; !ok {
-			diffs = append(diffs, field)
+	for field, storedHash := range stored {
+		if _, ok := current[field]; ok {
+			continue
 		}
+		// Ignore SHA-256(empty) written for the ownership field by the brief
+		// pre-fix v5 shape: it represented the same unset policy and must
+		// remain upgrade-compatible.
+		if field == "ReconcilerOwnedMergeablePaths" && storedHash == emptyBreakdownFieldHash {
+			continue
+		}
+		diffs = append(diffs, field)
 	}
 	sort.Strings(diffs)
 	return diffs

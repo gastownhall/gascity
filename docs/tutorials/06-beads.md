@@ -1,8 +1,64 @@
 ---
 title: Tutorial 06 - Beads
 sidebarTitle: 06 - Beads
-description: Understand the universal work primitive — the bead — that sessions, mail, and convoys are made of, that formulas materialize into when run, and learn to query and manipulate work items directly.
+description: Inspect the API/client dependency and verify the combined deliverable.
 ---
+
+## Inspect persistent work
+
+Complete the API and client lessons in the same `bright-lights` city. A
+**bead** is a persistent unit of work. The tasks, workflow steps and dependency
+edges remain inspectable after their sessions stop.
+
+```bash
+cd ~/bright-lights
+gc --rig practice bd list --all
+gc gc tutorial status --lesson api
+gc gc tutorial status --lesson client
+```
+
+Use the client source ID printed by the lesson:
+
+```bash
+# Replace <client-source-id> with the printed ID.
+gc --rig practice bd dep list <client-source-id>
+```
+
+The client depends on the API task. Its recorded input commit must include the
+API's accepted commit. Inspect the combined code yourself:
+
+```bash
+cd projects/practice
+python3 -m unittest discover -s tests -v
+python3 client.py Ada
+python3 client.py
+git log --oneline -5
+```
+
+The first client invocation prints a JSON object with name `Ada` and message
+`Hello, Ada!`; the second uses `world` and `Hello, world!`. All greeting, API and
+client tests should pass.
+
+## Optional parallel work
+
+The next tutorial adds two independent read-only checks to this same project
+and runs them through manual orders. Follow its [parallel-check exercise](/tutorials/07-orders#optional-run-independent-checks-in-parallel)
+for commands, expected results and retained command logs. It also explains
+the additional source/conflict boundaries for concurrent code changes.
+
+You can register other existing repositories in place and route independent
+work to their normal rig workers within your configured capacity.
+
+Continue to [Orders](/tutorials/07-orders) for the first mechanical order,
+parallel checks and optional publication using your accepted commit.
+
+## Custom configuration exercise
+
+For an independent configuration exercise, expand the walkthrough below. It
+uses its own `my-city`, `my-project` and explicitly configured agents. The
+numbered configuration exercises share that separate setup with one another.
+
+<Accordion title="Build and customize your own configuration">
 
 Every trackable thing in Gas City is a **bead** — a unit of work in the store.
 Sessions, mail, and convoys are beads; a formula (a reusable method) isn't a
@@ -14,7 +70,7 @@ Formula, Rig, Pack, and Event.
 
 This page continues from a `my-city` with `my-project` rigged, the `pancakes`
 formula cooked, and `mayor` / `reviewer` / `worker` agents (see
-[Tutorial 05](/tutorials/05-formulas)). Most of what follows uses the `bd` tool
+[Tutorial 05](/tutorials/05-formulas#custom-configuration-exercise)). Most of what follows uses the `bd` tool
 on the city's work ledger.
 
 Confirm the local pack, rig registration, and reviewer binding carried forward
@@ -77,7 +133,7 @@ The leading glyph is status, followed by ID, priority (`P2`), and title. Pass
 inventory will differ — these three are created later on this page, and yours
 also holds any work from earlier tutorials. The shape is what matters.
 
-The `pancakes` workflow you cooked in [Tutorial 05](/tutorials/05-formulas) is
+The `pancakes` workflow you cooked in [Tutorial 05](/tutorials/05-formulas#custom-configuration-exercise) is
 not in this list, and neither is the mayor's session. A city keeps its beads in
 two stores:
 
@@ -442,7 +498,7 @@ flow:
 5. The agent runs the claimed work — find work on your hook, you run it
 
 For work routed to a pool — a group of agents sharing a work queue, which
-[Tutorial 07](/tutorials/07-orders) covers — the query checks metadata instead
+[Tutorial 07](/tutorials/07-orders#custom-configuration-exercise) covers — the query checks metadata instead
 of assignee. `gc ready` reads both stores, so it also finds the workflow steps
 routed to the pool; it prints a JSON array of the ready beads:
 
@@ -534,5 +590,7 @@ store.
 
 ## What's next
 
-- **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, triggered
+- **[Orders](/tutorials/07-orders#custom-configuration-exercise)** — formulas and scripts on autopilot, triggered
   by time, schedule, conditions, or events
+
+</Accordion>

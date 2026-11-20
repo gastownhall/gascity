@@ -67,6 +67,9 @@ func RuntimeEnvWithAlias(sessionID, sessionName, alias string, generation, conti
 func RuntimeEnvWithSessionContext(info Info, generation, continuationEpoch int, instanceToken string) map[string]string {
 	publicAlias := runtimePublicAlias(info)
 	env := RuntimeEnvWithAlias(info.ID, info.SessionName, publicAlias, generation, continuationEpoch, instanceToken)
+	// Native conversation identity is observation context, not a credential.
+	// Publish an empty value too, clearing inherited identity on a fresh start.
+	env["GC_PROVIDER_SESSION_ID"] = info.SessionKey
 	if template := strings.TrimSpace(info.Template); template != "" {
 		env["GC_TEMPLATE"] = template
 	}

@@ -5504,3 +5504,60 @@ func mustResolvedPackNames(t *testing.T, includes []string, imports map[string]I
 	}
 	return names
 }
+
+func TestRigImportInheritsPackSlingTargetWithActualBinding(t *testing.T) {
+	for _, explicit := range []string{"", "project/custom.worker"} {
+		t.Run(explicit, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "roles/pack.toml", `[pack]
+name = "roles"
+schema = 2
+[defaults.rig]
+default_sling_target = "worker"
+`)
+			writeFile(t, dir, "roles/agents/worker/agent.toml", `scope = "rig"
+start_command = "true"
+`)
+			cfg := &City{Rigs: []Rig{{Name: "project", DefaultSlingTarget: explicit, Imports: map[string]Import{"renamed": {Source: "roles"}}}}}
+			if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+				t.Fatal(err)
+			}
+			want := explicit
+			if want == "" {
+				want = "project/renamed.worker"
+			}
+			if got := cfg.Rigs[0].DefaultSlingTarget; got != want {
+				t.Fatalf("default target = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRigImportRejectsAmbiguousOrMissingDefaultSlingTargets(t *testing.T) {
+	for _, ambiguous := range []bool{false, true} {
+		dir := t.TempDir()
+		writeFile(t, dir, "roles/pack.toml", `[pack]
+name = "roles"
+schema = 2
+[defaults.rig]
+default_sling_target = "worker"
+`)
+		writeFile(t, dir, "roles/agents/other/agent.toml", `scope = "rig"
+start_command = "true"
+`)
+		imports := map[string]Import{"one": {Source: "roles"}}
+		want := "must name a rig agent"
+		if ambiguous {
+			writeFile(t, dir, "roles/agents/worker/agent.toml", `scope = "rig"
+start_command = "true"
+`)
+			imports["two"] = Import{Source: "roles"}
+			want = "conflicting default sling targets"
+		}
+		cfg := &City{Rigs: []Rig{{Name: "project", Imports: imports}}}
+		err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("ambiguous=%v: got %v, want %q", ambiguous, err, want)
+		}
+	}
+}

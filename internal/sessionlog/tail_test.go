@@ -530,3 +530,205 @@ func writeTailJSONL(t *testing.T, path string, lines []map[string]any) {
 		}
 	}
 }
+
+// Claude's explicit API-error rows are local diagnostics, not model responses.
+// Their activity and usage remain visible while model attribution comes from
+// the newest actual response, or stays unknown when none is in the tail.
+func TestExtractTailMetaAPIErrorModelProvenance(t *testing.T) {
+	row := func(model string, apiError bool, tokens int) map[string]any {
+		return map[string]any{
+			"type":              "assistant",
+			"isApiErrorMessage": apiError,
+			"message": map[string]any{
+				"role": "assistant", "model": model, "stop_reason": "stop_sequence",
+				"usage": map[string]any{"input_tokens": tokens},
+			},
+		}
+	}
+	encodedError := row("<synthetic>", true, 0)
+	encoded, err := json.Marshal(encodedError["message"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedError["message"] = string(encoded)
+
+	for _, tt := range []struct {
+		name        string
+		rows        []map[string]any
+		model       string
+		inputTokens int
+	}{
+		{
+			name:  "later API error retains prior model",
+			rows:  []map[string]any{row("claude-opus-5-5", false, 1000), row("<synthetic>", true, 0)},
+			model: "claude-opus-5-5", inputTokens: 1000,
+		},
+		{
+			name: "only API errors leave model unknown",
+			rows: []map[string]any{row("<synthetic>", true, 0)},
+		},
+		{
+			name:  "later actual response wins after recovery",
+			rows:  []map[string]any{row("claude-opus-5-5", false, 1000), row("<synthetic>", true, 0), row("claude-sonnet-4-5", false, 2000)},
+			model: "claude-sonnet-4-5", inputTokens: 2000,
+		},
+		{
+			name:  "string encoded API error retains prior model",
+			rows:  []map[string]any{row("claude-opus-5-5", false, 1000), encodedError},
+			model: "claude-opus-5-5", inputTokens: 1000,
+		},
+		{
+			name:  "ordinary refusal still identifies its model",
+			rows:  []map[string]any{row("claude-opus-5-5", false, 1000)},
+			model: "claude-opus-5-5", inputTokens: 1000,
+		},
+		{
+			name:  "classification uses explicit flag not model text",
+			rows:  []map[string]any{row("<synthetic>", false, 0)},
+			model: "<synthetic>",
+		},
+		{
+			name:        "API error model is not authority even if named",
+			rows:        []map[string]any{row("claude-opus-5-5", true, 1000)},
+			inputTokens: 1000,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			writeTailJSONL(t, path, tt.rows)
+			meta, err := ExtractTailMeta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta == nil {
+				t.Fatal("missing activity metadata")
+			}
+			if meta.Model != tt.model {
+				t.Errorf("model = %q, want %q", meta.Model, tt.model)
+			}
+			if meta.Activity != "idle" || meta.MalformedTail {
+				t.Errorf("activity/malformed = %q/%t, want idle/false", meta.Activity, meta.MalformedTail)
+			}
+			if tt.inputTokens == 0 {
+				if meta.ContextUsage != nil {
+					t.Fatalf("unexpected usage: %+v", meta.ContextUsage)
+				}
+			} else if meta.ContextUsage == nil || meta.ContextUsage.InputTokens != tt.inputTokens {
+				t.Errorf("usage = %+v, want input_tokens=%d", meta.ContextUsage, tt.inputTokens)
+			}
+		})
+	}
+}
+
+// The notice shape uses only the known local marker and metadata confirmed in
+// native Claude Code 2.1.308. No private conversation text is copied here.
+func TestExtractTailMetaLocalNoResponseModelProvenance(t *testing.T) {
+	row := func(model string, content any, tokens int) map[string]any {
+		return map[string]any{
+			"type": "assistant", "isApiErrorMessage": false,
+			"message": map[string]any{
+				"role": "assistant", "model": model, "content": content,
+				"stop_reason": "stop_sequence",
+				"usage": map[string]any{
+					"input_tokens": tokens, "output_tokens": 0,
+					"cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+				},
+			},
+		}
+	}
+	text := func(s string) []map[string]any { return []map[string]any{{"type": "text", "text": s}} }
+	notice := func() map[string]any { return row("<synthetic>", text("No response requested."), 0) }
+	encodedNotice := notice()
+	encoded, err := json.Marshal(encodedNotice["message"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedNotice["message"] = string(encoded)
+
+	for _, tt := range []struct {
+		name        string
+		rows        []map[string]any
+		model       string
+		inputTokens int
+	}{
+		{
+			name:  "native local notice retains earlier real model",
+			rows:  []map[string]any{row("claude-opus-5-5", text("reply"), 1000), notice()},
+			model: "claude-opus-5-5", inputTokens: 1000,
+		},
+		{
+			name: "only local notices leave model unknown",
+			rows: []map[string]any{notice(), notice()},
+		},
+		{
+			name:  "later real model wins",
+			rows:  []map[string]any{row("claude-opus-5-5", text("reply"), 1000), notice(), row("claude-sonnet-4-5", text("reply"), 2000)},
+			model: "claude-sonnet-4-5", inputTokens: 2000,
+		},
+		{
+			name:  "string encoded local notice retains real model",
+			rows:  []map[string]any{row("claude-opus-5-5", text("reply"), 1000), encodedNotice},
+			model: "claude-opus-5-5", inputTokens: 1000,
+		},
+		{
+			name:  "quoted marker is not classified as local notice",
+			rows:  []map[string]any{row("<synthetic>", text(`"No response requested."`), 0)},
+			model: "<synthetic>",
+		},
+		{
+			name:  "mixed content is not classified as local notice",
+			rows:  []map[string]any{row("<synthetic>", []map[string]any{{"type": "text", "text": "No response requested."}, {"type": "text", "text": "other"}}, 0)},
+			model: "<synthetic>",
+		},
+		{
+			name:  "different model with marker text is retained",
+			rows:  []map[string]any{row("claude-sonnet-4-5", text("No response requested."), 0)},
+			model: "claude-sonnet-4-5",
+		},
+		{
+			name:  "ordinary zero token real response is retained",
+			rows:  []map[string]any{row("claude-opus-5-5", text("reply"), 0)},
+			model: "claude-opus-5-5",
+		},
+		{
+			name:  "other synthetic text is not classified as local notice",
+			rows:  []map[string]any{row("<synthetic>", text("other"), 0)},
+			model: "<synthetic>",
+		},
+		{
+			name:  "non text block is not classified as local notice",
+			rows:  []map[string]any{row("<synthetic>", []map[string]any{{"type": "tool_use", "text": "No response requested."}}, 0)},
+			model: "<synthetic>",
+		},
+		{
+			name:  "marker punctuation must match",
+			rows:  []map[string]any{row("<synthetic>", text("No response requested"), 0)},
+			model: "<synthetic>",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			writeTailJSONL(t, path, tt.rows)
+			meta, err := ExtractTailMeta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta == nil {
+				t.Fatal("missing activity metadata")
+			}
+			if meta.Model != tt.model {
+				t.Errorf("model = %q, want %q", meta.Model, tt.model)
+			}
+			if meta.Activity != "idle" || meta.MalformedTail {
+				t.Errorf("activity/malformed = %q/%t, want idle/false", meta.Activity, meta.MalformedTail)
+			}
+			if tt.inputTokens == 0 {
+				if meta.ContextUsage != nil {
+					t.Fatalf("unexpected usage: %+v", meta.ContextUsage)
+				}
+			} else if meta.ContextUsage == nil || meta.ContextUsage.InputTokens != tt.inputTokens {
+				t.Errorf("usage = %+v, want input_tokens=%d", meta.ContextUsage, tt.inputTokens)
+			}
+		})
+	}
+}

@@ -653,3 +653,77 @@ func TestCityDirAlreadyInitializedAllowsConfigOnlyBootstrap(t *testing.T) {
 		t.Fatal("config-only city should be left for gc init bootstrap")
 	}
 }
+
+func TestSupervisorCityCreateTemplateSelection(t *testing.T) {
+	for _, template := range []string{"gascity", "minimal", "empty", "custom", "typo"} {
+		t.Run(template, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "new-city")
+			init := &fakeInitializer{scaffoldResult: &cityinit.InitResult{CityName: "new-city", CityPath: dir}}
+			sm := newTestSupervisorMuxWithInitializer(t, init)
+			body := struct {
+				Dir      string `json:"dir"`
+				Template string `json:"template"`
+				Provider string `json:"provider,omitempty"`
+			}{Dir: dir, Template: template}
+			if template != "empty" && template != "custom" {
+				body.Provider = "codex"
+			}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(string(raw)))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-GC-Request", "test")
+			rec := httptest.NewRecorder()
+			sm.ServeHTTP(rec, req)
+			if template == "typo" {
+				if rec.Code != 422 || init.scaffoldReq.Dir != "" {
+					t.Fatalf("unknown template status=%d scaffold=%+v", rec.Code, init.scaffoldReq)
+				}
+				return
+			}
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("template %s status=%d: %s", template, rec.Code, rec.Body.String())
+			}
+			if init.scaffoldReq.ConfigName != template || init.scaffoldReq.Provider != body.Provider {
+				t.Fatalf("projection=%+v want template=%s provider=%s", init.scaffoldReq, template, body.Provider)
+			}
+		})
+	}
+}
+
+// A real supervisor persists this distinction so startup recovery cannot
+// misclassify an unregister's identical path/request-id correlation as a create.
+type createOperationResolver struct {
+	*fakeCityResolver
+	createStored bool
+}
+
+func (r *createOperationResolver) StorePendingCityCreateRequestID(path, requestID string) error {
+	r.createStored = true
+	return r.StorePendingRequestID(path, requestID)
+}
+
+func TestSupervisorCityCreateStoresTypedPendingOperation(t *testing.T) {
+	resolver := &createOperationResolver{fakeCityResolver: &fakeCityResolver{cities: map[string]*fakeState{}}}
+	city := filepath.Join(t.TempDir(), "typed-create")
+	initializer := &fakeInitializer{scaffoldResult: &cityinit.InitResult{CityName: "typed-create", CityPath: city}}
+	mux := NewSupervisorMux(resolver, initializer, false, "test", "", time.Time{}).WithAnyHostAllowed()
+	body, err := json.Marshal(cityCreateRequest{Dir: city, Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	req.Header.Set("Idempotency-Key", "typed-create")
+	out := httptest.NewRecorder()
+	mux.ServeHTTP(out, req)
+	if out.Code != http.StatusAccepted {
+		t.Fatalf("city create=%d %s", out.Code, out.Body.String())
+	}
+	if !resolver.createStored {
+		t.Fatal("city create persisted untyped correlation; restart cannot distinguish it from unregister")
+	}
+}

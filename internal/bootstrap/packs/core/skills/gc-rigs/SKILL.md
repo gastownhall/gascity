@@ -26,15 +26,25 @@ scope from a bead ID prefix, `GC_RIG`, or an enclosing rig/worktree. Use
 <rig-name> ...` when a rig is required. Use `gc rig list` to find configured
 rig names and paths.
 
-## Convention
+## Project location
 
-The canonical location for rigs is `<city-root>/rigs/<rig-name>`. Always
-use this path unless the user explicitly provides an alternative. Do not
-create rigs at the city root or as siblings of the city directory.
+A rig can live anywhere on the filesystem. Register an existing repository
+in place and preserve its current path, files and Git history. The project
+can be outside the city directory, including a sibling directory.
 
-If the user asks to create a rig but does not specify where, **ask them**
-before proceeding: confirm the `rigs/` convention and offer the choice of
-a custom path. Do not silently pick a location.
+Use the repository path supplied by the user or identified from the current
+workspace. Check `gc rig list` for an existing registration before adding it.
+Ask for a location only when the intended project cannot be determined.
+
+Select the city independently from the project's location:
+
+```bash
+gc --city /path/to/city rig add /any/path/to/project --name app
+```
+
+For a repository with an existing Beads queue, use `--adopt`. Preview the
+registration with `--dry-run` before applying it; preserve the existing queue
+and its issue IDs.
 
 ## Adding and listing
 

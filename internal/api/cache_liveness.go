@@ -21,11 +21,12 @@ func SetLivenessClockForTest(c clock.Clock) (restore func()) {
 	return func() { livenessClock = prev }
 }
 
-// apiClassStore is a class handle of any class a handler reads: the cache
-// gate and the cache-age headers take the handle of the store the read is
-// served from, so the class is the caller's to name, never a raw store's.
+// apiClassStore is a class handle of any class a handler reads, or the
+// resident handle a by-id resolution pinned: the cache gate and the cache-age
+// headers take the handle of the store the read is served from, so the class
+// (or the resolved owner) is the caller's to name, never a raw store's.
 type apiClassStore interface {
-	beads.WorkStore | beads.GraphStore | beads.SessionStore | beads.MailStore | beads.OrdersStore | beads.NudgesStore
+	beads.WorkStore | beads.GraphStore | beads.SessionStore | beads.MailStore | beads.OrdersStore | beads.NudgesStore | beads.ResidentStore
 }
 
 // classAs is beads.As over a class handle of any class: the capability T of
@@ -44,6 +45,8 @@ func classAs[T any, H apiClassStore](store H) (T, bool) {
 	case beads.OrdersStore:
 		return beads.As[T](h)
 	case beads.NudgesStore:
+		return beads.As[T](h)
+	case beads.ResidentStore:
 		return beads.As[T](h)
 	}
 	var zero T

@@ -56,6 +56,11 @@ const (
 	TraceSourceDerivedDependency TraceSource = "derived_dependency"
 )
 
+const (
+	TraceSiteDesiredStateProviderUnresolved TraceSiteCode   = "desired_state.provider_unresolved"
+	TraceReasonProviderNotInPath            TraceReasonCode = "provider_not_in_path"
+)
+
 type TraceSiteCode string
 
 const (

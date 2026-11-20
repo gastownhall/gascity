@@ -75,6 +75,7 @@ func (e *conversationLaneExec) respondLocked(ctx context.Context, h worker.Handl
 		RequestID: c.RequestID,
 		Action:    c.Response.Action,
 		Text:      c.Response.Text,
+		Answers:   append(c.Response.Answers[:0:0], c.Response.Answers...),
 		Metadata:  maps.Clone(c.Response.Metadata),
 		Fence:     fence,
 	})
@@ -121,6 +122,8 @@ func (e *conversationLaneExec) respondFence(f opjournal.Fence) runtime.InputFenc
 func laneRespondResult(ctx context.Context, err error, unfenced bool) opjournal.ControlResult {
 	var miss *runtime.FenceMismatchError
 	switch {
+	case errors.Is(err, runtime.ErrInteractionOutcomeUnknown):
+		return opjournal.Unknown{Cause: errors.Join(err, ctx.Err())}
 	case err == nil && unfenced:
 		return opjournal.Settled{Via: laneViaLive, Degradation: opjournal.DegradationUnfencedDelivery}
 	case err == nil:

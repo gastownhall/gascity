@@ -1,6 +1,7 @@
 # Copy of gastownhall/gascity-packs registry.toml at 33da48cd9ec44e1de75fe598f520b9b9333ee469 (2026-10-05),
 # plus the gastown 0.1.11 and 0.1.12 and gascity 0.1.7 releases verbatim from 427c2dedce37 (2026-10-29),
 # plus the gastown 0.1.13 release verbatim from gascity-packs #596.
+# Plus the RFC8191 candidate entry verbatim from 483f21f3efd83f992c3d1ae0b695370d4bc5a072.
 # Refresh it when the registry publishes releases the import tests should cover.
 schema = 1
 
@@ -51,6 +52,13 @@ schema = 1
     commit = "5bf643ca55bd20f080994cc31414ee4596015a0c"
     hash = "sha256:7393797bcb064030eef5f0c024d120a4edae29c06d8104465426855f5837771e"
     description = "Route every shipped bead command through gc, so role workers, workflow pages and check scripts reach graph steps on split-store cities (no raw bd), and carry the graph.v2 prompt, check-script and workflow fixes on main since 0.1.6."
+
+  [[pack.release]]
+    version = "0.0.8191"
+    ref = "feat/rfc-8191-gascity-only"
+    commit = "c2cc8ca4d2778761c73238033821fb5efa0c94e9"
+    hash = "sha256:67a9200ea3f99b20eb1f6b94743a0b88dc73a205bea88a935ac7bf35cfac9c73"
+    description = "RFC8191 qualification candidate: preserve native workflow attachment across default work and graph stores; stable catalog selection is unchanged."
 
 [[pack]]
   name = "gastown"

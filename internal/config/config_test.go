@@ -8702,6 +8702,17 @@ func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T
 	}
 }
 
+func TestBeginnerPreservesProviderAndCapacityDefaults(t *testing.T) {
+	city := GascityBeginnerCityWithProviders("guided", "claude", []string{"claude"})
+	normal := GascityCityWithProviders("normal", "claude", []string{"claude"})
+	if !reflect.DeepEqual(city.Providers, normal.Providers) {
+		t.Fatal("beginner experience must preserve normal provider choices")
+	}
+	if !reflect.DeepEqual(city.Workspace.MaxActiveSessions, normal.Workspace.MaxActiveSessions) {
+		t.Fatal("beginner experience must preserve normal factory capacity")
+	}
+}
+
 func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
 	intPtr := func(n int) *int { return &n }
 	for _, tc := range []struct {

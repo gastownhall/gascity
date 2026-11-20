@@ -194,7 +194,7 @@ func TestGenerateTitle_BuiltinProviderArgOrder(t *testing.T) {
 		{
 			name: "codex",
 			spec: config.BuiltinProviders()["codex"],
-			want: []string{"--model", "o4-mini", "exec", titlePrompt + "summarize this"},
+			want: []string{"--no-daemon", "--model", "o4-mini", "exec", titlePrompt + "summarize this"},
 		},
 		{
 			name: "gemini",

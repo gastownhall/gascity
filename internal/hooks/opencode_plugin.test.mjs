@@ -1,4 +1,4 @@
-// Behavioral tests for the embedded OpenCode and MiMo Code plugins.
+// Behavioral tests for embedded OpenCode/MiMo Code plugins and Claude shell hooks.
 //
 // Run directly with `node --test internal/hooks/opencode_plugin.test.mjs`;
 // TestProviderPluginNodeSuite (plugin_node_test.go) runs the same file under
@@ -13,6 +13,7 @@
 
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -688,3 +689,37 @@ for (const plugin of plugins) {
     });
   });
 }
+
+
+describe("Claude managed hooks use the invoking candidate", { timeout: SUITE_TIMEOUT_MS }, () => {
+  const settings = JSON.parse(fs.readFileSync(new URL("./config/claude.json", import.meta.url), "utf8"));
+  for (const explicit of [true, false]) {
+    it(explicit ? "honors GC_BIN with spaces despite a stale HOME install" : "retains the caller PATH ahead of stale HOME installs", () => {
+      const dir = fs.mkdtempSync(path.join(tmp, "claude-hook-"));
+      const home = path.join(dir, "home");
+      const pinned = path.join(dir, "pinned candidate", "gc");
+      const preferred = path.join(dir, "path candidate", "gc");
+      const stale = path.join(home, ".local", "bin", "gc");
+      const log = path.join(dir, "invocations");
+      for (const [binary, identity] of [[pinned, "pinned"], [preferred, "path"], [stale, "stale"]]) {
+        fs.mkdirSync(path.dirname(binary), { recursive: true });
+        fs.writeFileSync(binary, `#!/bin/sh\nprintf '%s\\n' '${identity}' >> "$GC_HOOK_PROBE_LOG"\n`, { mode: 0o755 });
+      }
+      const env = { ...process.env, HOME: home, PATH: path.dirname(preferred) + path.delimiter + process.env.PATH, GC_HOOK_PROBE_LOG: log };
+      if (explicit) env.GC_BIN = pinned;
+      else delete env.GC_BIN;
+      let count = 0;
+      for (const entries of Object.values(settings.hooks)) {
+        for (const entry of entries) {
+          for (const hook of entry.hooks) {
+            if (hook.type !== "command") continue;
+            execFileSync("sh", ["-c", hook.command], { env, input: "{}", timeout: 5000 });
+            count++;
+          }
+        }
+      }
+      assert.ok(count >= 4, "all managed default hooks must actually run");
+      assert.deepEqual(fs.readFileSync(log, "utf8").trim().split("\n"), Array(count).fill(explicit ? "pinned" : "path"));
+    });
+  }
+});

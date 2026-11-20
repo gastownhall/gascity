@@ -1,5 +1,28 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("@rules_python//python:defs.bzl", "py_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+py_test(
+    name = "qualify_process_test",
+    size = "medium",
+    srcs = [
+        "qualify_process.py",
+        "qualify_process_test.py",
+    ],
+    data = ["//docs:tutorials/07-orders.md"],
+    imports = ["."],
+)
+
+py_test(
+    name = "qualify_review_test",
+    size = "small",
+    srcs = [
+        "qualify_review.py",
+        "qualify_review_test.py",
+    ],
+    data = ["qualify-beginner"],
+    imports = ["."],
+)
 
 exports_files([
     "check-generated-in-sync.sh",
@@ -159,6 +182,7 @@ go_test(
         "precommit_contract_test.go",
         "pull_request_target_checkout_test.go",
         "push_ownership_guard_test.go",
+        "qualify_beginner_test.go",
         "rbe_fork_pool_test.go",
         "rbe_worker_env_base_policy_test.go",
         "rbe_worker_env_drift_test.go",
@@ -274,4 +298,15 @@ filegroup(
         allow_empty = True,
     ),
     visibility = ["//visibility:public"],
+)
+
+# Exercise installer pin verification and atomic replacement without host mutations.
+sh_test(
+    name = "install_bd_pinned_test",
+    srcs = ["test-install-bd-pinned.sh"],
+    args = ["$(rootpath :install-bd-pinned.sh)"],
+    data = [
+        ":install-bd-pinned.sh",
+        "//:go.mod",
+    ],
 )

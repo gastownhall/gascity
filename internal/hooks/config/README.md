@@ -77,3 +77,8 @@ pre-compaction hook is installed because Antigravity does not expose one.
   hook fired before context compaction; add a row here and wire
   `gc handoff --auto` if/when Kiro exposes one. Tracked under the parent
   audit (#672 gap 3).
+
+Managed Claude commands use `"${GC_BIN:-gc}"` so child hooks keep the
+launching candidate's binary. Fallback install directories are appended to
+PATH. Legacy exact managed commands upgrade in place; custom wrappers,
+arguments, chained commands and custom hook events remain user-owned.

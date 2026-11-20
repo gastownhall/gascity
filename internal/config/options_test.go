@@ -1104,12 +1104,14 @@ func TestBuiltinProviders_ClaudeHasNilArgsAndOptionDefaults(t *testing.T) {
 	}
 }
 
-func TestBuiltinProviders_CodexHasNilArgsAndOptionDefaults(t *testing.T) {
+func TestBuiltinProviders_CodexHasEmbeddedArgsAndOptionDefaults(t *testing.T) {
 	builtins := BuiltinProviders()
 	codex := builtins["codex"]
 
-	if codex.Args != nil {
-		t.Errorf("codex Args should be nil, got %v", codex.Args)
+	// Per-runtime isolation is fixed policy; selectable option defaults remain
+	// schema-managed and must still leave the user's model/effort untouched.
+	if !reflect.DeepEqual(codex.Args, []string{"--no-daemon"}) {
+		t.Errorf("codex Args = %v, want [--no-daemon]", codex.Args)
 	}
 	if codex.OptionDefaults == nil {
 		t.Fatal("codex OptionDefaults should not be nil")

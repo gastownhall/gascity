@@ -34,6 +34,7 @@ go_library(
         "//internal/citylayout",
         "//internal/doltauth",
         "//internal/events",
+        "//internal/execgrace",
         "//internal/fsys",
         "//internal/gchome",
         "//internal/pathutil",

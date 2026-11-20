@@ -18,6 +18,39 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Defines values for AgentProviderOptionsResolution.
+const (
+	AgentProviderOptionsResolutionResolved AgentProviderOptionsResolution = "resolved"
+	AgentProviderOptionsResolutionUnknown  AgentProviderOptionsResolution = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the AgentProviderOptionsResolution enum.
+func (e AgentProviderOptionsResolution) Valid() bool {
+	switch e {
+	case AgentProviderOptionsResolutionResolved:
+		return true
+	case AgentProviderOptionsResolutionUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AgentProviderOptionsScope.
+const (
+	AgentProviderOptionsScopeSessionStart AgentProviderOptionsScope = "session_start"
+)
+
+// Valid indicates whether the value is a known member of the AgentProviderOptionsScope enum.
+func (e AgentProviderOptionsScope) Valid() bool {
+	switch e {
+	case AgentProviderOptionsScopeSessionStart:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for AgentResponseActivitySource.
 const (
 	AgentResponseActivitySourceProgram    AgentResponseActivitySource = "program"
@@ -90,6 +123,33 @@ func (e CityCreateRequestBootstrapProfile) Valid() bool {
 	case KubernetesCell:
 		return true
 	case SingleHostCompat:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CityCreateRequestTemplate.
+const (
+	Custom  CityCreateRequestTemplate = "custom"
+	Empty   CityCreateRequestTemplate = "empty"
+	Gascity CityCreateRequestTemplate = "gascity"
+	Gastown CityCreateRequestTemplate = "gastown"
+	Minimal CityCreateRequestTemplate = "minimal"
+)
+
+// Valid indicates whether the value is a known member of the CityCreateRequestTemplate enum.
+func (e CityCreateRequestTemplate) Valid() bool {
+	switch e {
+	case Custom:
+		return true
+	case Empty:
+		return true
+	case Gascity:
+		return true
+	case Gastown:
+		return true
+	case Minimal:
 		return true
 	default:
 		return false
@@ -624,6 +684,72 @@ func (e OpsRecordingDegradedPayloadSurface) Valid() bool {
 	}
 }
 
+// Defines values for ProviderPublicResponseOptionsResolution.
+const (
+	ProviderPublicResponseOptionsResolutionResolved ProviderPublicResponseOptionsResolution = "resolved"
+	ProviderPublicResponseOptionsResolutionUnknown  ProviderPublicResponseOptionsResolution = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the ProviderPublicResponseOptionsResolution enum.
+func (e ProviderPublicResponseOptionsResolution) Valid() bool {
+	switch e {
+	case ProviderPublicResponseOptionsResolutionResolved:
+		return true
+	case ProviderPublicResponseOptionsResolutionUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProviderPublicResponseOptionsScope.
+const (
+	ProviderPublicResponseOptionsScopeSessionStart ProviderPublicResponseOptionsScope = "session_start"
+)
+
+// Valid indicates whether the value is a known member of the ProviderPublicResponseOptionsScope enum.
+func (e ProviderPublicResponseOptionsScope) Valid() bool {
+	switch e {
+	case ProviderPublicResponseOptionsScopeSessionStart:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PublicDeliveryState.
+const (
+	PublicDeliveryStateAdmissionPending PublicDeliveryState = "admission_pending"
+	PublicDeliveryStateAdmissionUnknown PublicDeliveryState = "admission_unknown"
+	PublicDeliveryStateAdmitted         PublicDeliveryState = "admitted"
+	PublicDeliveryStateCancelRequested  PublicDeliveryState = "cancel_requested"
+	PublicDeliveryStateCanceled         PublicDeliveryState = "canceled"
+	PublicDeliveryStateFailed           PublicDeliveryState = "failed"
+	PublicDeliveryStateQueued           PublicDeliveryState = "queued"
+)
+
+// Valid indicates whether the value is a known member of the PublicDeliveryState enum.
+func (e PublicDeliveryState) Valid() bool {
+	switch e {
+	case PublicDeliveryStateAdmissionPending:
+		return true
+	case PublicDeliveryStateAdmissionUnknown:
+		return true
+	case PublicDeliveryStateAdmitted:
+		return true
+	case PublicDeliveryStateCancelRequested:
+		return true
+	case PublicDeliveryStateCanceled:
+		return true
+	case PublicDeliveryStateFailed:
+		return true
+	case PublicDeliveryStateQueued:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RequestAcceptedPayloadOperation.
 const (
 	RequestAcceptedPayloadOperationSessionCreate  RequestAcceptedPayloadOperation = "session.create"
@@ -920,61 +1046,61 @@ func (e SessionProgramStatusShadowPayloadKind) Valid() bool {
 
 // Defines values for SessionProgramStatusShadowPayloadPoint.
 const (
-	ClaimNudgeHold    SessionProgramStatusShadowPayloadPoint = "claim_nudge_hold"
-	DrainReminder     SessionProgramStatusShadowPayloadPoint = "drain_reminder"
-	EscapeResend      SessionProgramStatusShadowPayloadPoint = "escape_resend"
-	ExecutionBackstop SessionProgramStatusShadowPayloadPoint = "execution_backstop"
-	InterruptSettle   SessionProgramStatusShadowPayloadPoint = "interrupt_settle"
-	Observation       SessionProgramStatusShadowPayloadPoint = "observation"
-	Pending           SessionProgramStatusShadowPayloadPoint = "pending"
-	ProvedIdle        SessionProgramStatusShadowPayloadPoint = "proved_idle"
-	QueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
-	Readiness         SessionProgramStatusShadowPayloadPoint = "readiness"
-	StartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
-	StarvedBypass     SessionProgramStatusShadowPayloadPoint = "starved_bypass"
-	SubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
-	TypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
-	WaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
-	WaitIdlePreread   SessionProgramStatusShadowPayloadPoint = "wait_idle_preread"
-	WorkLadder        SessionProgramStatusShadowPayloadPoint = "work_ladder"
+	SessionProgramStatusShadowPayloadPointClaimNudgeHold    SessionProgramStatusShadowPayloadPoint = "claim_nudge_hold"
+	SessionProgramStatusShadowPayloadPointDrainReminder     SessionProgramStatusShadowPayloadPoint = "drain_reminder"
+	SessionProgramStatusShadowPayloadPointEscapeResend      SessionProgramStatusShadowPayloadPoint = "escape_resend"
+	SessionProgramStatusShadowPayloadPointExecutionBackstop SessionProgramStatusShadowPayloadPoint = "execution_backstop"
+	SessionProgramStatusShadowPayloadPointInterruptSettle   SessionProgramStatusShadowPayloadPoint = "interrupt_settle"
+	SessionProgramStatusShadowPayloadPointObservation       SessionProgramStatusShadowPayloadPoint = "observation"
+	SessionProgramStatusShadowPayloadPointPending           SessionProgramStatusShadowPayloadPoint = "pending"
+	SessionProgramStatusShadowPayloadPointProvedIdle        SessionProgramStatusShadowPayloadPoint = "proved_idle"
+	SessionProgramStatusShadowPayloadPointQueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
+	SessionProgramStatusShadowPayloadPointReadiness         SessionProgramStatusShadowPayloadPoint = "readiness"
+	SessionProgramStatusShadowPayloadPointStartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	SessionProgramStatusShadowPayloadPointStarvedBypass     SessionProgramStatusShadowPayloadPoint = "starved_bypass"
+	SessionProgramStatusShadowPayloadPointSubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
+	SessionProgramStatusShadowPayloadPointTypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
+	SessionProgramStatusShadowPayloadPointWaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
+	SessionProgramStatusShadowPayloadPointWaitIdlePreread   SessionProgramStatusShadowPayloadPoint = "wait_idle_preread"
+	SessionProgramStatusShadowPayloadPointWorkLadder        SessionProgramStatusShadowPayloadPoint = "work_ladder"
 )
 
 // Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadPoint enum.
 func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
 	switch e {
-	case ClaimNudgeHold:
+	case SessionProgramStatusShadowPayloadPointClaimNudgeHold:
 		return true
-	case DrainReminder:
+	case SessionProgramStatusShadowPayloadPointDrainReminder:
 		return true
-	case EscapeResend:
+	case SessionProgramStatusShadowPayloadPointEscapeResend:
 		return true
-	case ExecutionBackstop:
+	case SessionProgramStatusShadowPayloadPointExecutionBackstop:
 		return true
-	case InterruptSettle:
+	case SessionProgramStatusShadowPayloadPointInterruptSettle:
 		return true
-	case Observation:
+	case SessionProgramStatusShadowPayloadPointObservation:
 		return true
-	case Pending:
+	case SessionProgramStatusShadowPayloadPointPending:
 		return true
-	case ProvedIdle:
+	case SessionProgramStatusShadowPayloadPointProvedIdle:
 		return true
-	case QueuedDelivery:
+	case SessionProgramStatusShadowPayloadPointQueuedDelivery:
 		return true
-	case Readiness:
+	case SessionProgramStatusShadowPayloadPointReadiness:
 		return true
-	case StartupLadder:
+	case SessionProgramStatusShadowPayloadPointStartupLadder:
 		return true
-	case StarvedBypass:
+	case SessionProgramStatusShadowPayloadPointStarvedBypass:
 		return true
-	case SubmitConfirm:
+	case SessionProgramStatusShadowPayloadPointSubmitConfirm:
 		return true
-	case TypingGate:
+	case SessionProgramStatusShadowPayloadPointTypingGate:
 		return true
-	case WaitForIdle:
+	case SessionProgramStatusShadowPayloadPointWaitForIdle:
 		return true
-	case WaitIdlePreread:
+	case SessionProgramStatusShadowPayloadPointWaitIdlePreread:
 		return true
-	case WorkLadder:
+	case SessionProgramStatusShadowPayloadPointWorkLadder:
 		return true
 	default:
 		return false
@@ -1149,6 +1275,54 @@ func (e SessionProgramStatusShadowPayloadValidity) Valid() bool {
 	case Unread:
 		return true
 	case Valid:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProviderAvailabilityCode.
+const (
+	ConnectionRestoreFailed SessionProviderAvailabilityCode = "connection_restore_failed"
+)
+
+// Valid indicates whether the value is a known member of the SessionProviderAvailabilityCode enum.
+func (e SessionProviderAvailabilityCode) Valid() bool {
+	switch e {
+	case ConnectionRestoreFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProviderAvailabilitySource.
+const (
+	NativeUi SessionProviderAvailabilitySource = "native_ui"
+)
+
+// Valid indicates whether the value is a known member of the SessionProviderAvailabilitySource enum.
+func (e SessionProviderAvailabilitySource) Valid() bool {
+	switch e {
+	case NativeUi:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProviderAvailabilityState.
+const (
+	SessionProviderAvailabilityStateUnavailable SessionProviderAvailabilityState = "unavailable"
+	SessionProviderAvailabilityStateUnknown     SessionProviderAvailabilityState = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the SessionProviderAvailabilityState enum.
+func (e SessionProviderAvailabilityState) Valid() bool {
+	switch e {
+	case SessionProviderAvailabilityStateUnavailable:
+		return true
+	case SessionProviderAvailabilityStateUnknown:
 		return true
 	default:
 		return false
@@ -1835,19 +2009,19 @@ func (e SupervisorShutdownPayloadSource) Valid() bool {
 
 // Defines values for SupervisorStartedPayloadPreviousExit.
 const (
-	Clean   SupervisorStartedPayloadPreviousExit = "clean"
-	Crash   SupervisorStartedPayloadPreviousExit = "crash"
-	Unknown SupervisorStartedPayloadPreviousExit = "unknown"
+	SupervisorStartedPayloadPreviousExitClean   SupervisorStartedPayloadPreviousExit = "clean"
+	SupervisorStartedPayloadPreviousExitCrash   SupervisorStartedPayloadPreviousExit = "crash"
+	SupervisorStartedPayloadPreviousExitUnknown SupervisorStartedPayloadPreviousExit = "unknown"
 )
 
 // Valid indicates whether the value is a known member of the SupervisorStartedPayloadPreviousExit enum.
 func (e SupervisorStartedPayloadPreviousExit) Valid() bool {
 	switch e {
-	case Clean:
+	case SupervisorStartedPayloadPreviousExitClean:
 		return true
-	case Crash:
+	case SupervisorStartedPayloadPreviousExitCrash:
 		return true
-	case Unknown:
+	case SupervisorStartedPayloadPreviousExitUnknown:
 		return true
 	default:
 		return false
@@ -2249,6 +2423,31 @@ type AgentPatchSetInputBody struct {
 	WorkDir *string `json:"work_dir,omitempty"`
 }
 
+// AgentProviderOptions defines model for AgentProviderOptions.
+type AgentProviderOptions struct {
+	// ConfiguredDefaults Resolved declarative defaults for a new session. Missing values defer to provider-owned configuration; do not infer a model or effort from curated choices.
+	ConfiguredDefaults *map[string]string   `json:"configured_defaults,omitempty"`
+	OptionsSchema      *[]ProviderOptionDTO `json:"options_schema,omitempty"`
+
+	// Reason Stable reason when defaults are unknown: custom_start_command, custom_arguments, unhonored_defaults or resolution_failed.
+	Reason *string `json:"reason,omitempty"`
+
+	// Resolution Whether GC can project configured session-start defaults. Never an observation of the running provider.
+	Resolution AgentProviderOptionsResolution `json:"resolution"`
+
+	// Scope Options apply to creation of a new session, not one turn of an existing conversation.
+	Scope AgentProviderOptionsScope `json:"scope"`
+
+	// SupportsPerTurnOptions Whether GC accepts model/effort overrides atomically for one turn. False in this contract; session-start options must not be presented as per-turn controls.
+	SupportsPerTurnOptions bool `json:"supports_per_turn_options"`
+}
+
+// AgentProviderOptionsResolution Whether GC can project configured session-start defaults. Never an observation of the running provider.
+type AgentProviderOptionsResolution string
+
+// AgentProviderOptionsScope Options apply to creation of a new session, not one turn of an existing conversation.
+type AgentProviderOptionsScope string
+
 // AgentResponse defines model for AgentResponse.
 type AgentResponse struct {
 	ActiveBead *string `json:"active_bead,omitempty"`
@@ -2268,13 +2467,14 @@ type AgentResponse struct {
 	PackDerived    bool                         `json:"pack_derived"`
 
 	// Pool Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.
-	Pool          *string               `json:"pool,omitempty"`
-	PoolLimits    *PoolLimits           `json:"pool_limits,omitempty"`
-	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty"`
-	Provider      *string               `json:"provider,omitempty"`
-	Rig           *string               `json:"rig,omitempty"`
-	Running       bool                  `json:"running"`
-	Session       *SessionInfo          `json:"session,omitempty"`
+	Pool            *string               `json:"pool,omitempty"`
+	PoolLimits      *PoolLimits           `json:"pool_limits,omitempty"`
+	ProgramStatus   *SessionProgramStatus `json:"program_status,omitempty"`
+	Provider        *string               `json:"provider,omitempty"`
+	ProviderOptions AgentProviderOptions  `json:"provider_options"`
+	Rig             *string               `json:"rig,omitempty"`
+	Running         bool                  `json:"running"`
+	Session         *SessionInfo          `json:"session,omitempty"`
 
 	// State Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on.
 	State             string  `json:"state"`
@@ -2601,10 +2801,16 @@ type CityCreateRequest struct {
 
 	// StartCommand Custom workspace start command for the city's default session template. Mutually exclusive with provider.
 	StartCommand *string `json:"start_command,omitempty"`
+
+	// Template Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command.
+	Template *CityCreateRequestTemplate `json:"template,omitempty"`
 }
 
 // CityCreateRequestBootstrapProfile Optional bootstrap profile.
 type CityCreateRequestBootstrapProfile string
+
+// CityCreateRequestTemplate Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command.
+type CityCreateRequestTemplate string
 
 // CityCreateSucceededPayload defines model for CityCreateSucceededPayload.
 type CityCreateSucceededPayload struct {
@@ -3471,7 +3677,7 @@ type ExtMsgBindInputBody struct {
 
 // ExtMsgGroupEnsureInputBody defines model for ExtMsgGroupEnsureInputBody.
 type ExtMsgGroupEnsureInputBody struct {
-	// DefaultHandle Default handle for the group.
+	// DefaultHandle Default handle for the group. Omit to preserve an existing route; an empty string clears it.
 	DefaultHandle *string `json:"default_handle,omitempty"`
 
 	// Metadata Group metadata.
@@ -3485,14 +3691,23 @@ type ExtMsgGroupEnsureInputBody struct {
 // ExtMsgInboundInputBody defines model for ExtMsgInboundInputBody.
 type ExtMsgInboundInputBody struct {
 	// AccountId Account ID for raw payloads (required when message is absent).
-	AccountId *string                 `json:"account_id,omitempty"`
-	Message   *ExternalInboundMessage `json:"message,omitempty"`
+	AccountId *string `json:"account_id,omitempty"`
+
+	// CancelDeliveries Monotonically cancel all deliveries of an existing admission. Requires the same original request_key/message/deliveries; never creates a missing admission. Prepared or unknown lane writes remain cancel_requested until the original operation/tombstone resolves.
+	CancelDeliveries *bool `json:"cancel_deliveries,omitempty"`
+
+	// Deliveries Frozen qualified recipient identities and native message policies for durable admission. Lane guarantee is at_most_once; ambiguous native outcomes are not resent.
+	Deliveries *[]PublicRecipient      `json:"deliveries,omitempty"`
+	Message    *ExternalInboundMessage `json:"message,omitempty"`
 
 	// Payload Raw payload bytes.
 	Payload *string `json:"payload,omitempty"`
 
 	// Provider Provider name for raw payloads (required when message is absent).
 	Provider *string `json:"provider,omitempty"`
+
+	// RequestKey Opt-in durable admission key, scoped by conversation and actor. Requires explicit deliveries and pre-normalized message.
+	RequestKey *string `json:"request_key,omitempty"`
 }
 
 // ExtMsgOutboundInputBody defines model for ExtMsgOutboundInputBody.
@@ -3804,10 +4019,12 @@ type HookClaimReclaimedStalePayload struct {
 // InboundEventPayload defines model for InboundEventPayload.
 type InboundEventPayload struct {
 	Actor          string  `json:"actor"`
+	AdmissionId    *string `json:"admission_id,omitempty"`
 	ConversationId string  `json:"conversation_id"`
 	Provider       string  `json:"provider"`
 	TargetAgent    *string `json:"target_agent,omitempty"`
 	TargetSession  string  `json:"target_session"`
+	TranscriptId   *string `json:"transcript_id,omitempty"`
 }
 
 // InboundResult defines model for InboundResult.
@@ -3818,6 +4035,8 @@ type InboundResult struct {
 	TargetAgentName string                        `json:"TargetAgentName"`
 	TargetSessionID string                        `json:"TargetSessionID"`
 	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
+	Admission       *PublicReceipt                `json:"admission,omitempty"`
+	Deliveries      *[]PublicDelivery             `json:"deliveries,omitempty"`
 }
 
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.
@@ -4705,11 +4924,13 @@ type ProviderCreatedOutputBody struct {
 
 // ProviderOptionDTO defines model for ProviderOptionDTO.
 type ProviderOptionDTO struct {
-	Choices *[]OptionChoiceDTO `json:"choices"`
-	Default string             `json:"default"`
-	Key     string             `json:"key"`
-	Label   string             `json:"label"`
-	Type    string             `json:"type"`
+	// AcceptsCustomValues True accepts nonempty values beyond the curated choices. False restricts values to listed choices. GC validation remains authoritative; no CLI flag templates are exposed.
+	AcceptsCustomValues bool               `json:"accepts_custom_values"`
+	Choices             *[]OptionChoiceDTO `json:"choices"`
+	Default             string             `json:"default"`
+	Key                 string             `json:"key"`
+	Label               string             `json:"label"`
+	Type                string             `json:"type"`
 }
 
 // ProviderPatch defines model for ProviderPatch.
@@ -4778,13 +4999,33 @@ type ProviderPublicListBody struct {
 
 // ProviderPublicResponse defines model for ProviderPublicResponse.
 type ProviderPublicResponse struct {
-	Builtin           bool                 `json:"builtin"`
-	CityLevel         bool                 `json:"city_level"`
-	DisplayName       *string              `json:"display_name,omitempty"`
-	EffectiveDefaults *map[string]string   `json:"effective_defaults,omitempty"`
-	Name              string               `json:"name"`
-	OptionsSchema     *[]ProviderOptionDTO `json:"options_schema,omitempty"`
+	Builtin     bool    `json:"builtin"`
+	CityLevel   bool    `json:"city_level"`
+	DisplayName *string `json:"display_name,omitempty"`
+
+	// EffectiveDefaults Configured declarative session-start defaults, not observed actual settings. Unset model/effort values defer to provider-owned configuration.
+	EffectiveDefaults *map[string]string `json:"effective_defaults,omitempty"`
+	Name              string             `json:"name"`
+
+	// OptionsReason Stable reason when declared defaults cannot be projected.
+	OptionsReason *string `json:"options_reason,omitempty"`
+
+	// OptionsResolution Whether GC resolved the provider's declared option defaults.
+	OptionsResolution ProviderPublicResponseOptionsResolution `json:"options_resolution"`
+	OptionsSchema     *[]ProviderOptionDTO                    `json:"options_schema,omitempty"`
+
+	// OptionsScope These options configure a new session rather than a turn in an existing conversation.
+	OptionsScope ProviderPublicResponseOptionsScope `json:"options_scope"`
+
+	// SupportsPerTurnOptions False: GC does not accept atomic per-turn model/effort settings in this contract.
+	SupportsPerTurnOptions bool `json:"supports_per_turn_options"`
 }
+
+// ProviderPublicResponseOptionsResolution Whether GC resolved the provider's declared option defaults.
+type ProviderPublicResponseOptionsResolution string
+
+// ProviderPublicResponseOptionsScope These options configure a new session rather than a turn in an existing conversation.
+type ProviderPublicResponseOptionsScope string
 
 // ProviderReadiness defines model for ProviderReadiness.
 type ProviderReadiness struct {
@@ -4825,6 +5066,16 @@ type ProviderSpecJSON struct {
 	PromptFlag   *string            `json:"prompt_flag,omitempty"`
 	PromptMode   *string            `json:"prompt_mode,omitempty"`
 	ReadyDelayMs *int64             `json:"ready_delay_ms,omitempty"`
+}
+
+// ProviderUnresolvedPayload defines model for ProviderUnresolvedPayload.
+type ProviderUnresolvedPayload struct {
+	Command             string    `json:"command"`
+	DesiredSessionCount *int64    `json:"desired_session_count,omitempty"`
+	DroppedTemplates    int64     `json:"dropped_templates"`
+	Provider            string    `json:"provider"`
+	Reconciler          string    `json:"reconciler"`
+	Templates           *[]string `json:"templates"`
 }
 
 // ProviderUpdateInputBody defines model for ProviderUpdateInputBody.
@@ -4885,6 +5136,85 @@ type ProxiedEndpointStamp struct {
 	Generation *string `json:"generation,omitempty"`
 	Pid        *int64  `json:"pid,omitempty"`
 	Port       *int64  `json:"port,omitempty"`
+}
+
+// PublicDelivery defines model for PublicDelivery.
+type PublicDelivery struct {
+	AfterDeliveryId         *string         `json:"after_delivery_id,omitempty"`
+	CancelRequested         *bool           `json:"cancel_requested,omitempty"`
+	Conversation            ConversationRef `json:"conversation"`
+	ErrorCode               *string         `json:"error_code,omitempty"`
+	ErrorDetail             *string         `json:"error_detail,omitempty"`
+	ExplicitTargetSessionId *string         `json:"explicit_target_session_id,omitempty"`
+	Id                      string          `json:"id"`
+	NativePayload           *string         `json:"native_payload,omitempty"`
+	OperationId             *string         `json:"operation_id,omitempty"`
+	OperationKey            string          `json:"operation_key"`
+	OperationOutcome        *string         `json:"operation_outcome,omitempty"`
+	OperationReason         *string         `json:"operation_reason,omitempty"`
+	OperationStatus         *string         `json:"operation_status,omitempty"`
+	ReceiptId               string          `json:"receipt_id"`
+	Recipient               PublicRecipient `json:"recipient"`
+	RecipientKey            string          `json:"recipient_key"`
+	ResolvedSessionId       *string         `json:"resolved_session_id,omitempty"`
+	Retryable               *bool           `json:"retryable,omitempty"`
+	Sequence                int64           `json:"sequence"`
+
+	// State GC handoff state; admitted means the existing Sessions operation is authoritative, not model completion.
+	State        PublicDeliveryState `json:"state"`
+	StateVersion int64               `json:"state_version"`
+	TranscriptId string              `json:"transcript_id"`
+}
+
+// PublicDeliveryState GC handoff state; admitted means the existing Sessions operation is authoritative, not model completion.
+type PublicDeliveryState string
+
+// PublicDeliveryChangedPayload defines model for PublicDeliveryChangedPayload.
+type PublicDeliveryChangedPayload struct {
+	AdmissionId      string  `json:"admission_id"`
+	CancelRequested  *bool   `json:"cancel_requested,omitempty"`
+	DeliveryId       string  `json:"delivery_id"`
+	ErrorCode        *string `json:"error_code,omitempty"`
+	OperationId      *string `json:"operation_id,omitempty"`
+	OperationOutcome *string `json:"operation_outcome,omitempty"`
+	OperationReason  *string `json:"operation_reason,omitempty"`
+	OperationStatus  *string `json:"operation_status,omitempty"`
+	RecipientKey     string  `json:"recipient_key"`
+	Retryable        *bool   `json:"retryable,omitempty"`
+	SessionId        *string `json:"session_id,omitempty"`
+	State            string  `json:"state"`
+	StateVersion     int64   `json:"state_version"`
+	TranscriptId     string  `json:"transcript_id"`
+}
+
+// PublicMessagePolicy defines model for PublicMessagePolicy.
+type PublicMessagePolicy struct {
+	NowGeneration *int64  `json:"now_generation,omitempty"`
+	NowTurn       *string `json:"now_turn,omitempty"`
+	OnUnsupported *string `json:"on_unsupported,omitempty"`
+	Role          *string `json:"role,omitempty"`
+	Wake          *string `json:"wake,omitempty"`
+	When          *string `json:"when,omitempty"`
+}
+
+// PublicReceipt defines model for PublicReceipt.
+type PublicReceipt struct {
+	CancelRequested *bool     `json:"cancel_requested,omitempty"`
+	DeliveryIds     *[]string `json:"delivery_ids"`
+	Id              string    `json:"id"`
+	PayloadDigest   string    `json:"payload_digest"`
+	RequestKey      string    `json:"request_key"`
+	Sequence        int64     `json:"sequence"`
+	TargetAgent     *string   `json:"target_agent,omitempty"`
+	TargetSession   *string   `json:"target_session,omitempty"`
+	TranscriptId    string    `json:"transcript_id"`
+}
+
+// PublicRecipient defines model for PublicRecipient.
+type PublicRecipient struct {
+	AgentIdentity *string             `json:"agent_identity,omitempty"`
+	Policy        PublicMessagePolicy `json:"policy"`
+	SessionId     *string             `json:"session_id,omitempty"`
 }
 
 // PublishReceipt defines model for PublishReceipt.
@@ -5040,6 +5370,9 @@ type RigActionBody struct {
 
 // RigCreateBody defines model for RigCreateBody.
 type RigCreateBody struct {
+	// Adopt Register an existing Beads queue in place, preserving its namespace and history. Cannot be combined with git_url.
+	Adopt *bool `json:"adopt,omitempty"`
+
 	// DefaultBranch Mainline branch (e.g. main, master). Auto-detected when omitted.
 	DefaultBranch *string `json:"default_branch,omitempty"`
 
@@ -5049,13 +5382,13 @@ type RigCreateBody struct {
 	// Name Rig name.
 	Name string `json:"name"`
 
-	// Path Filesystem path (server-derived for git_url clones).
+	// Path Existing project or new clone destination; use an explicit absolute path outside the city. A clone requires an absent destination with an existing parent; omitted clone path defaults to rigs/name.
 	Path *string `json:"path,omitempty"`
 
-	// Prefix Session name prefix.
+	// Prefix Beads issue namespace prefix; inferred from an adopted queue when omitted.
 	Prefix *string `json:"prefix,omitempty"`
 
-	// RequestId Client-supplied idempotency key; reuse across retries.
+	// RequestId Client-supplied idempotency key; reuse across retries. Required when git_url uses an explicit absolute clone destination.
 	RequestId *string `json:"request_id,omitempty"`
 }
 
@@ -5799,6 +6132,34 @@ type SessionProgramStatusShadowPayloadState string
 // SessionProgramStatusShadowPayloadValidity The record reading's validity.
 type SessionProgramStatusShadowPayloadValidity string
 
+// SessionProviderAvailability defines model for SessionProviderAvailability.
+type SessionProviderAvailability struct {
+	Code       *SessionProviderAvailabilityCode `json:"code,omitempty"`
+	ObservedAt time.Time                        `json:"observed_at"`
+
+	// RuntimeGeneration Opaque current runtime incarnation identity; clients must compare it as a whole, never parse it.
+	RuntimeGeneration *string                           `json:"runtime_generation,omitempty"`
+	Source            SessionProviderAvailabilitySource `json:"source"`
+
+	// State A current native UI failure diagnostic or an indeterminate observation. Never a readiness or liveness report.
+	State SessionProviderAvailabilityState `json:"state"`
+}
+
+// SessionProviderAvailabilityCode defines model for SessionProviderAvailability.Code.
+type SessionProviderAvailabilityCode string
+
+// SessionProviderAvailabilitySource defines model for SessionProviderAvailability.Source.
+type SessionProviderAvailabilitySource string
+
+// SessionProviderAvailabilityState A current native UI failure diagnostic or an indeterminate observation. Never a readiness or liveness report.
+type SessionProviderAvailabilityState string
+
+// SessionProviderAvailabilityEvent defines model for SessionProviderAvailabilityEvent.
+type SessionProviderAvailabilityEvent struct {
+	Id                   string                      `json:"id"`
+	ProviderAvailability SessionProviderAvailability `json:"provider_availability"`
+}
+
 // SessionRawMessageFrame Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.
 type SessionRawMessageFrame = interface{}
 
@@ -5820,6 +6181,9 @@ type SessionResetStalledPayload struct {
 type SessionRespondInputBody struct {
 	// Action Response action (e.g. allow, deny).
 	Action string `json:"action"`
+
+	// Answers Exact authored choice labels for a multiple-selection native question. Mutually exclusive with text; empty, duplicate, unknown and mixed free-text selections are refused.
+	Answers *[]string `json:"answers,omitempty"`
 
 	// Metadata Optional response metadata.
 	Metadata *map[string]string `json:"metadata,omitempty"`
@@ -5857,27 +6221,28 @@ type SessionResponse struct {
 	AgentKind      *string                        `json:"agent_kind,omitempty"`
 
 	// AgentName The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.
-	AgentName              *string               `json:"agent_name,omitempty"`
-	Alias                  *string               `json:"alias,omitempty"`
-	Attached               bool                  `json:"attached"`
-	ConfiguredNamedSession *bool                 `json:"configured_named_session,omitempty"`
-	ContextPct             *int64                `json:"context_pct,omitempty"`
-	ContextWindow          *int64                `json:"context_window,omitempty"`
-	CreatedAt              string                `json:"created_at"`
-	DisplayName            *string               `json:"display_name,omitempty"`
-	Id                     string                `json:"id"`
-	Kind                   *string               `json:"kind,omitempty"`
-	LastActive             *string               `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string               `json:"last_nudge_delivered_at,omitempty"`
-	LastOutput             *string               `json:"last_output,omitempty"`
-	Metadata               *map[string]string    `json:"metadata,omitempty"`
-	Model                  *string               `json:"model,omitempty"`
-	Options                *map[string]string    `json:"options,omitempty"`
-	Pool                   *string               `json:"pool,omitempty"`
-	ProgramStatus          *SessionProgramStatus `json:"program_status,omitempty"`
-	Provider               string                `json:"provider"`
-	Reason                 *string               `json:"reason,omitempty"`
-	Rig                    *string               `json:"rig,omitempty"`
+	AgentName              *string                      `json:"agent_name,omitempty"`
+	Alias                  *string                      `json:"alias,omitempty"`
+	Attached               bool                         `json:"attached"`
+	ConfiguredNamedSession *bool                        `json:"configured_named_session,omitempty"`
+	ContextPct             *int64                       `json:"context_pct,omitempty"`
+	ContextWindow          *int64                       `json:"context_window,omitempty"`
+	CreatedAt              string                       `json:"created_at"`
+	DisplayName            *string                      `json:"display_name,omitempty"`
+	Id                     string                       `json:"id"`
+	Kind                   *string                      `json:"kind,omitempty"`
+	LastActive             *string                      `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string                      `json:"last_nudge_delivered_at,omitempty"`
+	LastOutput             *string                      `json:"last_output,omitempty"`
+	Metadata               *map[string]string           `json:"metadata,omitempty"`
+	Model                  *string                      `json:"model,omitempty"`
+	Options                *map[string]string           `json:"options,omitempty"`
+	Pool                   *string                      `json:"pool,omitempty"`
+	ProgramStatus          *SessionProgramStatus        `json:"program_status,omitempty"`
+	Provider               string                       `json:"provider"`
+	ProviderAvailability   *SessionProviderAvailability `json:"provider_availability,omitempty"`
+	Reason                 *string                      `json:"reason,omitempty"`
+	Rig                    *string                      `json:"rig,omitempty"`
 
 	// Running Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
@@ -5942,7 +6307,7 @@ type SessionStrandedPayload struct {
 	WorkBeadIds *[]string `json:"work_bead_ids,omitempty"`
 }
 
-// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, current provider-availability diagnostics, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
 type SessionStreamCommonEvent struct {
 	union json.RawMessage
 }
@@ -8497,6 +8862,22 @@ type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
 	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged defines model for TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged.
+type TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          PublicDeliveryChangedPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeExtmsgUnbound defines model for TypedEventStreamEnvelopeExtmsgUnbound.
 type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Actor            string                   `json:"actor"`
@@ -8895,6 +9276,22 @@ type TypedEventStreamEnvelopeProviderSwapped struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeProviderUnresolved defines model for TypedEventStreamEnvelopeProviderUnresolved.
+type TypedEventStreamEnvelopeProviderUnresolved struct {
+	Actor            string                    `json:"actor"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          ProviderUnresolvedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeRequestAccepted defines model for TypedEventStreamEnvelopeRequestAccepted.
@@ -10660,6 +11057,23 @@ type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
 	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged defines model for TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged.
+type TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          PublicDeliveryChangedPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeExtmsgUnbound defines model for TypedTaggedEventStreamEnvelopeExtmsgUnbound.
 type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
 	Actor            string                   `json:"actor"`
@@ -11083,6 +11497,23 @@ type TypedTaggedEventStreamEnvelopeProviderSwapped struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeProviderUnresolved defines model for TypedTaggedEventStreamEnvelopeProviderUnresolved.
+type TypedTaggedEventStreamEnvelopeProviderUnresolved struct {
+	Actor            string                    `json:"actor"`
+	City             string                    `json:"city"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          ProviderUnresolvedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRequestAccepted defines model for TypedTaggedEventStreamEnvelopeRequestAccepted.
@@ -12668,6 +13099,12 @@ type DeleteV0CityByCityNameBeadByIdParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// GetV0CityByCityNameBeadByIdParams defines parameters for GetV0CityByCityNameBeadById.
+type GetV0CityByCityNameBeadByIdParams struct {
+	// Fresh Use authoritative point reads for every visited residency store, bypassing cached rows and misses. Fails on unavailable owners; does not provide a cross-store atomic snapshot.
+	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
+}
+
 // PatchV0CityByCityNameBeadByIdParams defines parameters for PatchV0CityByCityNameBeadById.
 type PatchV0CityByCityNameBeadByIdParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -13615,7 +14052,7 @@ type GetV0CityByCityNameStatusParams struct {
 	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
 	Lite *bool `form:"lite,omitempty" json:"lite,omitempty"`
 
-	// Fresh When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.
+	// Fresh When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every complete build saves its body for later reads. Partial builds return survivor counts and diagnostics to their waiting reads while leaving the last complete saved body intact. Default false keeps stale-while-revalidate for pollers.
 	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 
@@ -14945,6 +15382,58 @@ func (t *EventPayload) MergeProjectIdentityStampedPayload(v ProjectIdentityStamp
 	return err
 }
 
+// AsProviderUnresolvedPayload returns the union data inside the EventPayload as a ProviderUnresolvedPayload
+func (t EventPayload) AsProviderUnresolvedPayload() (ProviderUnresolvedPayload, error) {
+	var body ProviderUnresolvedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromProviderUnresolvedPayload overwrites any union data inside the EventPayload as the provided ProviderUnresolvedPayload
+func (t *EventPayload) FromProviderUnresolvedPayload(v ProviderUnresolvedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeProviderUnresolvedPayload performs a merge with any union data inside the EventPayload, using the provided ProviderUnresolvedPayload
+func (t *EventPayload) MergeProviderUnresolvedPayload(v ProviderUnresolvedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsPublicDeliveryChangedPayload returns the union data inside the EventPayload as a PublicDeliveryChangedPayload
+func (t EventPayload) AsPublicDeliveryChangedPayload() (PublicDeliveryChangedPayload, error) {
+	var body PublicDeliveryChangedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPublicDeliveryChangedPayload overwrites any union data inside the EventPayload as the provided PublicDeliveryChangedPayload
+func (t *EventPayload) FromPublicDeliveryChangedPayload(v PublicDeliveryChangedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePublicDeliveryChangedPayload performs a merge with any union data inside the EventPayload, using the provided PublicDeliveryChangedPayload
+func (t *EventPayload) MergePublicDeliveryChangedPayload(v PublicDeliveryChangedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsRecord returns the union data inside the EventPayload as a Record
 func (t EventPayload) AsRecord() (Record, error) {
 	var body Record
@@ -16089,6 +16578,32 @@ func (t *SessionStreamCommonEvent) FromSessionProgramStatusEvent(v SessionProgra
 
 // MergeSessionProgramStatusEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionProgramStatusEvent
 func (t *SessionStreamCommonEvent) MergeSessionProgramStatusEvent(v SessionProgramStatusEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionProviderAvailabilityEvent returns the union data inside the SessionStreamCommonEvent as a SessionProviderAvailabilityEvent
+func (t SessionStreamCommonEvent) AsSessionProviderAvailabilityEvent() (SessionProviderAvailabilityEvent, error) {
+	var body SessionProviderAvailabilityEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionProviderAvailabilityEvent overwrites any union data inside the SessionStreamCommonEvent as the provided SessionProviderAvailabilityEvent
+func (t *SessionStreamCommonEvent) FromSessionProviderAvailabilityEvent(v SessionProviderAvailabilityEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionProviderAvailabilityEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionProviderAvailabilityEvent
+func (t *SessionStreamCommonEvent) MergeSessionProviderAvailabilityEvent(v SessionProviderAvailabilityEvent) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18946,6 +19461,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgOutboundCh
 	return err
 }
 
+// AsTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged() (TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged, error) {
+	var body TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged(v TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged) error {
+	v.Type = "extmsg.public_delivery_changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged(v TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged) error {
+	v.Type = "extmsg.public_delivery_changed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeExtmsgUnbound returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgUnbound
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgUnbound() (TypedEventStreamEnvelopeExtmsgUnbound, error) {
 	var body TypedEventStreamEnvelopeExtmsgUnbound
@@ -19636,6 +20179,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeProviderSwapped(v
 // MergeTypedEventStreamEnvelopeProviderSwapped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeProviderSwapped
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderSwapped(v TypedEventStreamEnvelopeProviderSwapped) error {
 	v.Type = "provider.swapped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeProviderUnresolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProviderUnresolved
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProviderUnresolved() (TypedEventStreamEnvelopeProviderUnresolved, error) {
+	var body TypedEventStreamEnvelopeProviderUnresolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeProviderUnresolved overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeProviderUnresolved
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeProviderUnresolved(v TypedEventStreamEnvelopeProviderUnresolved) error {
+	v.Type = "provider.unresolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeProviderUnresolved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeProviderUnresolved
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderUnresolved(v TypedEventStreamEnvelopeProviderUnresolved) error {
+	v.Type = "provider.unresolved"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -21488,6 +22059,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.outbound_channel_mismatch":
 		return t.AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
+	case "extmsg.public_delivery_changed":
+		return t.AsTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
 	case "fact.recorded":
@@ -21538,6 +22111,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedEventStreamEnvelopeProviderSwapped()
+	case "provider.unresolved":
+		return t.AsTypedEventStreamEnvelopeProviderUnresolved()
 	case "request.accepted":
 		return t.AsTypedEventStreamEnvelopeRequestAccepted()
 	case "request.failed":
@@ -22935,6 +23510,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtm
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged() (TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged(v TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged) error {
+	v.Type = "extmsg.public_delivery_changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged(v TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged) error {
+	v.Type = "extmsg.public_delivery_changed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeExtmsgUnbound returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgUnbound
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgUnbound() (TypedTaggedEventStreamEnvelopeExtmsgUnbound, error) {
 	var body TypedTaggedEventStreamEnvelopeExtmsgUnbound
@@ -23625,6 +24228,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeProvi
 // MergeTypedTaggedEventStreamEnvelopeProviderSwapped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeProviderSwapped
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProviderSwapped(v TypedTaggedEventStreamEnvelopeProviderSwapped) error {
 	v.Type = "provider.swapped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeProviderUnresolved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProviderUnresolved
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProviderUnresolved() (TypedTaggedEventStreamEnvelopeProviderUnresolved, error) {
+	var body TypedTaggedEventStreamEnvelopeProviderUnresolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeProviderUnresolved overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeProviderUnresolved
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeProviderUnresolved(v TypedTaggedEventStreamEnvelopeProviderUnresolved) error {
+	v.Type = "provider.unresolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeProviderUnresolved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeProviderUnresolved
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProviderUnresolved(v TypedTaggedEventStreamEnvelopeProviderUnresolved) error {
+	v.Type = "provider.unresolved"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -25477,6 +26108,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.outbound_channel_mismatch":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
+	case "extmsg.public_delivery_changed":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
 	case "fact.recorded":
@@ -25527,6 +26160,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedTaggedEventStreamEnvelopeProviderSwapped()
+	case "provider.unresolved":
+		return t.AsTypedTaggedEventStreamEnvelopeProviderUnresolved()
 	case "request.accepted":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestAccepted()
 	case "request.failed":
@@ -25808,7 +26443,7 @@ type ClientInterface interface {
 	DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameBeadById request
-	GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameBeadByIdWithBody request with any body
 	PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -26657,8 +27292,8 @@ func (c *Client) DeleteV0CityByCityNameBeadById(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameBeadByIdRequest(c.Server, cityName, id)
+func (c *Client) GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameBeadByIdRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -30223,7 +30858,7 @@ func NewDeleteV0CityByCityNameBeadByIdRequest(server string, cityName string, id
 }
 
 // NewGetV0CityByCityNameBeadByIdRequest generates requests for GetV0CityByCityNameBeadById
-func NewGetV0CityByCityNameBeadByIdRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewGetV0CityByCityNameBeadByIdRequest(server string, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -30253,6 +30888,28 @@ func NewGetV0CityByCityNameBeadByIdRequest(server string, cityName string, id st
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Fresh != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "fresh", *params.Fresh, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -40528,7 +41185,7 @@ type ClientWithResponsesInterface interface {
 	DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error)
 
 	// GetV0CityByCityNameBeadByIdWithResponse request
-	GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error)
+	GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error)
 
 	// PatchV0CityByCityNameBeadByIdWithBodyWithResponse request with any body
 	PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
@@ -42547,6 +43204,7 @@ type PostV0CityByCityNameExtmsgInboundResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -46051,8 +46709,8 @@ func (c *ClientWithResponses) DeleteV0CityByCityNameBeadByIdWithResponse(ctx con
 }
 
 // GetV0CityByCityNameBeadByIdWithResponse request returning *GetV0CityByCityNameBeadByIdResponse
-func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error) {
-	rsp, err := c.GetV0CityByCityNameBeadById(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error) {
+	rsp, err := c.GetV0CityByCityNameBeadById(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -51151,6 +51809,13 @@ func ParsePostV0CityByCityNameExtmsgInboundResponse(rsp *http.Response) (*PostV0
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

@@ -11,7 +11,10 @@ package conversationlane_test
 // Claude Code-like screen that redraws its spinner every second during a
 // turn, queues what is submitted into a running turn under the "Press up to
 // edit queued messages" hint drawn with the cursor on it, and records every
-// event. A lane that reads the turn's boundary from the activity clock alone
+// event. Its exact generated Claude key names a transcript of its scripted
+// turns, so native-turn reads have the capability this provider advertises.
+// Screen-only boundary guards are separately exercised in cmd/gc.
+// A lane that reads the turn's boundary from the activity clock alone
 // types into the turn (the pane's whole-second, cached activity reads 3 s
 // quiet between redraws, and the lane comes back at the quiescence deadline
 // it named); each such submit is then unconfirmed and retried.
@@ -156,6 +159,8 @@ func TestBoundaryPromptsWaitOutABusyClaudeTurn(t *testing.T) {
 		}
 		lastProposed = time.Now()
 		ids[i] = c.cliOpID(key)
+		status, err := c.socket("lane-status")
+		t.Logf("lane after proposal %d: %s (%v)", i, status, err)
 	}
 
 	end, _ := c.waitClaudeEvent("turn_end", startAt, busyTurn+30*time.Second)

@@ -1,0 +1,14 @@
+[
+  {
+    "call_id": "call_64c2fc68e23c43b18da85aecd2b57513",
+    "id": "ctc_0614b15660c54a18016aebcff28cd087d0a2bfd9a4e2d7aedb",
+    "input": "text(await tools.exec_command({cmd:\"printf %s RFC8191_GRANTED_11111111111111111111111111111111 > /Users/admin/rfc8191/cities/rfc-questions-22222222222222222222222222222222/native-approval-33333333333333333333333333333333/granted.txt\",sandbox_permissions:\"require_escalated\",justification:\"Do you allow only this exact marker write to /Users/admin/rfc8191/cities/rfc-questions-22222222222222222222222222222222/native-approval-33333333333333333333333333333333/granted.txt?\"}));\n",
+    "internal_chat_message_metadata_passthrough": {
+      "create_time": 1793839090.552586,
+      "turn_id": "01a1a924-3aba-7bc2-9e60-e51b2d4fbda0"
+    },
+    "name": "exec",
+    "status": "completed",
+    "type": "custom_tool_call"
+  }
+]

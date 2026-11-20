@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
@@ -31,6 +32,20 @@ func writeManagedDirectCityFixture(t *testing.T, cityPath string) string {
 		"dolt_database": "hq",
 	})
 	port := strconv.Itoa(writeReachableManagedDoltState(t, cityPath))
+	// This fixture represents GC-owned managed storage, not an unproven bd
+	// standalone store. Declare that authority through the normal contract
+	// writer before template normalization can classify the scope.
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"), contract.ConfigState{
+		IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified, DoltMode: "server",
+	}); err != nil {
+		t.Fatalf("write managed city authority: %v", err)
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "gc")
+	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative || resolved.State.EndpointOrigin != contract.EndpointOriginManagedCity {
+		t.Fatalf("managed city fixture authority = %+v, %v", resolved, err)
+	}
+
 	requireSyncConfiguredDoltPortFiles(t, cityPath, "bd", config.DoltConfig{}, "gc", nil)
 	return port
 }

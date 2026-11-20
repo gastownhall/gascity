@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -312,7 +313,7 @@ func splitBDFloorHold() initSplitHold {
 	if inv == nil {
 		return initSplitHold{reason: fmt.Sprintf("the command tree of bd%s at %s matches no pinned gc bd inventory (%s), so a split city's gc bd would refuse it", versionLabel(version), bdPath, pinnedBdInventoryNames()), remedy: initSplitBDRemedy}
 	}
-	if version != "" && compareVersions(version, initSplitBDMinVersion) < 0 && compareVersions(version, inv.Version) != 0 {
+	if version != "" && deps.CompareVersions(version, initSplitBDMinVersion) < 0 && deps.CompareVersions(version, inv.Version) != 0 {
 		return initSplitHold{reason: fmt.Sprintf("bd v%s at %s is older than v%s, the oldest bd release a split city admits", version, bdPath, initSplitBDMinVersion), remedy: initSplitBDRemedy}
 	}
 	return initSplitHold{}

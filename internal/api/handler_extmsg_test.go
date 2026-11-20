@@ -196,6 +196,137 @@ func TestExtmsgNotifyMembersDoesNotMaterializeExcludedNamedSender(t *testing.T) 
 	}
 }
 
+// ensureDuplicateIdentityMemberships gives one live session three transcript
+// memberships — its alias selector, runtime session name and bead ID — the
+// shape groupService.ensureReplayMemberships leaves for a room-bound seat.
+func ensureDuplicateIdentityMemberships(t *testing.T, services extmsg.Services, ref extmsg.ConversationRef, selectors ...string) {
+	t.Helper()
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	for _, selector := range selectors {
+		if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+			Caller:         caller,
+			Conversation:   ref,
+			SessionID:      selector,
+			BackfillPolicy: extmsg.MembershipBackfillAll,
+			Owner:          extmsg.MembershipOwnerGroup,
+			Now:            time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("EnsureMembership(%s): %v", selector, err)
+		}
+	}
+}
+
+// nudgeTargets lists the session name of every Nudge whose message contains
+// needle, in call order.
+func nudgeTargets(fs *fakeState, needle string) []string {
+	var targets []string
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Nudge" && strings.Contains(call.Message, needle) {
+			targets = append(targets, call.Name)
+		}
+	}
+	return targets
+}
+
+func countNudgesTo(fs *fakeState, sessionName, needle string) int {
+	n := 0
+	for _, target := range nudgeTargets(fs, needle) {
+		if target == sessionName {
+			n++
+		}
+	}
+	return n
+}
+
+func TestExtmsgNotifyMembersDedupesMembershipsResolvingToSameSession(t *testing.T) {
+	ref := extmsg.ConversationRef{
+		ScopeID:        "guild-1",
+		Provider:       "discord",
+		AccountID:      "acct-1",
+		ConversationID: "thread-1",
+		Kind:           extmsg.ConversationThread,
+	}
+	notifiers := map[string]func(srv *Server){
+		"outbound": func(srv *Server) {
+			srv.extmsgNotifyMembers(context.Background(), ref, "Publisher", "agent", "dedupe-outbound", "", "")
+		},
+		"inbound": func(srv *Server) {
+			srv.extmsgNotifyInboundMembers(context.Background(), extmsg.ExternalInboundMessage{
+				Conversation: ref,
+				Actor:        extmsg.ExternalActor{DisplayName: "Alice"},
+				Text:         "dedupe-inbound",
+			})
+		},
+	}
+	needles := map[string]string{"outbound": "dedupe-outbound", "inbound": "dedupe-inbound"}
+
+	for name, notify := range notifiers {
+		t.Run(name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+
+			recipient := createTestSession(t, fs.cityBeadStore, fs.sp, "Recipient")
+			if err := fs.cityBeadStore.Update(recipient.ID, beads.UpdateOpts{
+				Metadata: map[string]string{"alias": "myrig/recipient-worker"},
+			}); err != nil {
+				t.Fatalf("Update(recipient alias): %v", err)
+			}
+			ensureDuplicateIdentityMemberships(t, services, ref, "myrig/recipient-worker", recipient.SessionName, recipient.ID)
+			members, err := services.Transcript.ListMemberships(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}, ref)
+			if err != nil {
+				t.Fatalf("ListMemberships: %v", err)
+			}
+			if len(members) != 3 {
+				t.Fatalf("memberships = %d, want 3 (selector+name+bead); members=%#v", len(members), members)
+			}
+
+			notify(srv)
+
+			if got := countNudgesTo(fs, recipient.SessionName, needles[name]); got != 1 {
+				t.Fatalf("recipient nudges = %d, want exactly 1; nudge targets=%v", got, nudgeTargets(fs, needles[name]))
+			}
+		})
+	}
+}
+
+func TestExtmsgNotifyMembersDedupesMaterializedNamedSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+	fs.extmsgSvc = &services
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "guild-1",
+		Provider:       "discord",
+		AccountID:      "acct-1",
+		ConversationID: "thread-1",
+		Kind:           extmsg.ConversationThread,
+	}
+	// "myrig/worker" is a configured named session with no live bead yet;
+	// "myrig--worker" is its runtime session name. Both memberships
+	// materialize the same session.
+	ensureDuplicateIdentityMemberships(t, services, ref, "myrig/worker", "myrig--worker")
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
+		t.Fatal("named session should not be materialized before notify")
+	}
+
+	srv.extmsgNotifyMembers(context.Background(), ref, "Publisher", "agent", "dedupe-materialized", "", "")
+
+	workerID, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
+	if err != nil {
+		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
+	}
+	workerBead, err := fs.cityBeadStore.Get(workerID)
+	if err != nil {
+		t.Fatalf("Get(worker): %v", err)
+	}
+	if got := countNudgesTo(fs, workerBead.Metadata["session_name"], "dedupe-materialized"); got != 1 {
+		t.Fatalf("worker nudges = %d, want exactly 1; nudge targets=%v", got, nudgeTargets(fs, "dedupe-materialized"))
+	}
+}
+
 func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -616,5 +747,83 @@ func TestFormatExtmsgNotifyReminderExplicitTargetSanitization(t *testing.T) {
 	}
 	if strings.Contains(got, "<system-reminder>HIJACK") {
 		t.Fatalf("ExplicitTarget tag breakout survived stripping:\n%s", got)
+	}
+}
+
+func TestExtMsgGroupMetadataUpsertPreservesPolicyAndExplicitRouteUpdates(t *testing.T) {
+	for _, change := range []string{"omitted", "replace", "clear"} {
+		t.Run(change, func(t *testing.T) {
+			state := newSessionFakeState(t)
+			services := extmsg.NewServices(beadstest.Mail(state.cityBeadStore), beadstest.Sessions(state.cityBeadStore))
+			state.extmsgSvc = &services
+			server := New(state)
+			ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "chat", AccountID: "account", ConversationID: "room", Kind: extmsg.ConversationThread}
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			policy := extmsg.FanoutPolicy{Enabled: true, AllowUntargetedPublication: true, MaxPeerTriggeredPublishes: 3, MaxTotalPeerDeliveries: 17}
+			original, err := services.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
+				RootConversation: ref, Mode: extmsg.GroupModeLauncher, DefaultHandle: "alpha",
+				LastAddressedHandle: "beta", FanoutPolicy: policy, Metadata: map[string]string{"foreign": "keep", "intent": "first"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := map[string]any{"root_conversation": ref, "metadata": map[string]string{"intent": "second"}}
+			wantHandle := "alpha"
+			switch change {
+			case "replace":
+				body["default_handle"], wantHandle = "gamma", "gamma"
+			case "clear":
+				body["default_handle"], wantHandle = "", ""
+			}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, newPostRequest(cityURL(state, "/extmsg/groups"), strings.NewReader(string(raw))))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("metadata upsert status=%d: %s", rec.Code, rec.Body.String())
+			}
+			var response extmsg.ConversationGroupRecord
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := services.Groups.FindByConversation(context.Background(), caller, ref)
+			if err != nil || stored == nil {
+				t.Fatalf("stored group=%+v,%v", stored, err)
+			}
+			for _, got := range []extmsg.ConversationGroupRecord{response, *stored} {
+				if got.ID != original.ID || got.FanoutPolicy != policy || got.DefaultHandle != wantHandle ||
+					got.LastAddressedHandle != "beta" || got.Metadata["foreign"] != "keep" || got.Metadata["intent"] != "second" {
+					t.Errorf("metadata upsert changed unrelated policy/routing or lost explicit update: %+v", got)
+				}
+			}
+		})
+	}
+}
+
+// Presence handling must not lose the existing ability to choose a route on
+// the first HTTP upsert, when there is no prior group from which to retain it.
+func TestExtMsgGroupCreateKeepsExplicitDefaultRoute(t *testing.T) {
+	state := newSessionFakeState(t)
+	services := extmsg.NewServices(beadstest.Mail(state.cityBeadStore), beadstest.Sessions(state.cityBeadStore))
+	state.extmsgSvc = &services
+	server := New(state)
+	ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "chat", AccountID: "account", ConversationID: "new-room", Kind: extmsg.ConversationThread}
+	raw, err := json.Marshal(map[string]any{"root_conversation": ref, "default_handle": "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, newPostRequest(cityURL(state, "/extmsg/groups"), strings.NewReader(string(raw))))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create group status=%d: %s", rec.Code, rec.Body.String())
+	}
+	var got extmsg.ConversationGroupRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID == "" || got.DefaultHandle != "alpha" || got.FanoutPolicy != (extmsg.FanoutPolicy{}) {
+		t.Fatalf("first upsert lost default route/default policy: %+v", got)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // stubDoctorStoreLiveness makes the scopes whose base name is in stopped read
@@ -78,6 +79,7 @@ func TestBuildDoctorChecksNeverReadsAStoppedCityStore(t *testing.T) {
 	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true})
 	for _, name := range []string{
 		"agent-sessions", "zombie-sessions", "orphan-sessions", "order-firing-current",
+		"prompt-delivery-budget",
 		"beads-store", "custom-types:city", "hold-label-conventions:city",
 		"rig:rigstore:beads", "custom-types:rigstore", "hold-label-conventions:rigstore",
 	} {
@@ -135,7 +137,7 @@ func TestBuildDoctorChecksWarnsOnAStoppedStoreUnderARunningCity(t *testing.T) {
 	stubDoctorStoreLiveness(t, "citystore")
 
 	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{ControllerRunning: true, SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true})
-	for _, name := range []string{"agent-sessions", "beads-store", "custom-types:city"} {
+	for _, name := range []string{"agent-sessions", "beads-store", "custom-types:city", "prompt-delivery-budget"} {
 		r := runDoctorCheckNamed(t, checks, name)
 		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, doctor.StoreNotRunningMessage) {
 			t.Errorf("%s = %v %q, want a not-running warning", name, r.Status, r.Message)
@@ -220,10 +222,35 @@ func TestBuildDoctorChecksLeavesASuspendedCityCold(t *testing.T) {
 	}
 
 	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{ControllerRunning: true, SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true})
-	for _, name := range []string{"agent-sessions", "beads-store", "custom-types:city", "hold-label-conventions:city"} {
+	for _, name := range []string{"agent-sessions", "beads-store", "custom-types:city", "hold-label-conventions:city", "prompt-delivery-budget"} {
 		r := runDoctorCheckNamed(t, checks, name)
 		if r.Status != doctor.StatusOK || !strings.Contains(r.Message, doctor.StoreSuspendedMessage) {
 			t.Errorf("%s = %v %q, want %q", name, r.Status, r.Message, doctor.StoreSuspendedMessage)
 		}
+	}
+}
+
+// Registering doctor checks must not enter the storage funnel before a
+// stopped-city gate or --check selection can suppress their store reads.
+func TestBuildDoctorChecksDoesNotResolveStoppedSplitStorage(t *testing.T) {
+	cityDir := oneShotCLICity(t, filepath.Join(t.TempDir(), "infra"))
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	stubDoctorStoreLiveness(t, filepath.Base(cityDir))
+	registries := countStorageRegistryConstructions(t)
+	refuseInfraMigrationSource(t)
+	captureCLIStorageStderr(t)
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true})
+	for _, name := range []string{"order-firing-current", "prompt-delivery-budget"} {
+		r := runDoctorCheckNamed(t, checks, name)
+		if !strings.Contains(r.Message, doctor.StoreNotRunningMessage) {
+			t.Errorf("%s was not gated: %+v", name, r)
+		}
+	}
+	if *registries != 0 {
+		t.Fatalf("registering stopped checks entered split storage %d time(s) before the store gate", *registries)
 	}
 }

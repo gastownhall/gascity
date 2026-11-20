@@ -98,6 +98,9 @@ type paneExecutor struct {
 
 func (e *paneExecutor) execute(args []string) (string, error) {
 	e.calls = append(e.calls, slices.Clone(args))
+	if slices.Contains(args, "#{pane_pid}") {
+		return "4242", nil
+	}
 	if row, ok := fakeAgentPaneRow(args); ok {
 		return row, nil
 	}
@@ -304,6 +307,9 @@ func TestProviderPendingReportsAskUserQuestionDialog(t *testing.T) {
 	wantOptions := []string{"Run gates, then ship if clean (Recommended)", "Run gates, ask again before push", "Keep holding"}
 	if !slices.Equal(pending.Options, wantOptions) {
 		t.Errorf("Options = %q, want the options Respond selects (no free text or chat): %q", pending.Options, wantOptions)
+	}
+	if pending.Metadata["answer_unavailable"] == "" || pending.Metadata["answer_action"] != "" || pending.Metadata["free_text"] != "false" {
+		t.Errorf("metadata=%v; a page with no native invocation context advertises no request-bound answer", pending.Metadata)
 	}
 	if !strings.HasPrefix(pending.RequestID, "tmux-question-") {
 		t.Errorf("RequestID = %q, want the tmux-question- prefix", pending.RequestID)

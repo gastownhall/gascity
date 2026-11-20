@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -66,7 +67,8 @@ type RespondPayload struct {
 	// Action is the runtime's answer verb, such as approve or deny.
 	Action string `json:"action"`
 	// Text is free text for an answer that carries some.
-	Text string `json:"text,omitempty"`
+	Text    string   `json:"text,omitempty"`
+	Answers []string `json:"answers,omitempty"`
 	// Metadata is provider-specific detail the runtime reads.
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
@@ -74,6 +76,18 @@ type RespondPayload struct {
 func (p RespondPayload) validate() error {
 	if err := validateText("respond action", p.Action, maxTokenLen); err != nil {
 		return err
+	}
+	if p.Answers != nil {
+		if p.Action != "answer" || p.Text != "" || len(p.Answers) == 0 || len(p.Answers) > 32 {
+			return invalidf("typed answers require answer action, one to 32 authored labels and no text")
+		}
+		seen := map[string]bool{}
+		for _, answer := range p.Answers {
+			if strings.TrimSpace(answer) == "" || len(answer) > 512 || strings.ContainsFunc(answer, unicode.IsControl) || seen[answer] {
+				return invalidf("typed answers must be unique nonempty labels without control characters")
+			}
+			seen[answer] = true
+		}
 	}
 	for k := range p.Metadata {
 		if err := validateText("respond metadata key", k, maxTokenLen); err != nil {

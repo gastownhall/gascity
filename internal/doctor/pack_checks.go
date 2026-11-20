@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/execgrace"
 )
 
 // PackScriptCheck implements Check by running a script shipped with
@@ -93,12 +95,26 @@ func (c *PackScriptCheck) Fix(ctx *CheckContext) error {
 
 // Run executes the pack script and interprets its output.
 func (c *PackScriptCheck) Run(ctx *CheckContext) *CheckResult {
-	cmd := exec.Command(c.Script) //nolint:gosec // script path from pack config
+	runCtx, cancel := contextFromDone(ctx.Done)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, c.Script) //nolint:gosec // script path from pack config
 	cmd.Dir = c.PackDir
 	cmd.Env = append(cmd.Environ(), citylayout.PackRuntimeEnv(ctx.CityPath, c.PackName)...)
 	cmd.Env = append(cmd.Env,
 		"GC_PACK_DIR="+c.PackDir,
 	)
+
+	// Run the script in its own process group with TERM-then-kill
+	// cancellation (execgrace.Apply) so that when boundedRun abandons this
+	// check at the per-check timeout (ctx.Done closing, bridged into runCtx
+	// by contextFromDone), the script's process — and any child it may have
+	// spawned — is actually killed rather than orphaned. Before this, Run
+	// used a plain exec.Command blocking on CombinedOutput, which never
+	// observed ctx.Done at all: the script kept running after gc doctor
+	// exited, re-parented to init, and leaked on every run that timed one
+	// out. See gastownhall/gascity#8504.
+	execgrace.Apply(cmd, 2*time.Second)
 
 	out, err := cmd.CombinedOutput()
 	exitCode := 0

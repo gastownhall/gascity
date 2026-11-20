@@ -232,7 +232,7 @@ func newQuiescenceCity(t *testing.T) *quiescenceCity {
 			}
 		}
 	})
-	city.Init("claude")
+	initProxiedSingleStore(t, city, false)
 	city.RigAdd(rigDir, "")
 	const rigName = "testrig"
 	if len(doltProcessesUnder(t, rigDir)) == 0 {

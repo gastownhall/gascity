@@ -1752,7 +1752,9 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDrift: subprocess | ga-cp3hwi | doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner; the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store | P0.4b | 2026-12-31 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext: subprocess | ga-cp3hwi | doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner; the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server | P0.4b | 2026-12-31 |
 | Medium owner | `internal/hooks` package `hooks` | TestProviderPluginNodeSuite: subprocess | ga-cp3hwi | the embedded provider-plugin behavior proof is a checked Medium subprocess owner; the one node subprocess is confined to TestProviderPluginNodeSuite, which exists to run the embedded OpenCode and MiMo Code plugins under node against a GC_BIN fake gc: the plugins are JavaScript the provider loads, so only a real node run can prove the system-prompt shape and the once-per-turn drain they produce | P0.4b | 2026-12-31 |
+| Medium owner | `internal/hooks` package `hooks` | TestReconcileCodexHooksWaitsForCrossProcessHookSave: subprocess | ga-cp3hwi | Codex hook cross-process path-lock regression is a checked Medium owner; the test-binary helper subprocess is confined to TestReconcileCodexHooksWaitsForCrossProcessHookSave, signals readiness over stdout, and is released over stdin | P0.4b | 2026-12-31 |
 | Medium owner | `internal/runtime/exec` package `exec` | TestMain: tmux | ga-cp3hwi | runtime exec TestMain is the checked Medium owner that confines the exec op's tmux clients to a private socket root; TestMain points the binary at a private TMUX_TMPDIR and drops TMUX/TMUX_PANE before any test runs, so the tmux commands the exec provider sends over a host-run exec op never reach the developer's tmux server; TestExecOpTmuxClientsCannotReachTheHostServer guards it | P0.4c-tmux | 2026-12-31 |
+| Medium owner | `internal/runtime/exec` package `exec` | TestScreenSessionScriptOwnedPathContract: subprocess | ga-cp3hwi | screen session-script reconciler-owned path contract is a checked Medium owner; the adapter subprocess factory is confined to TestScreenSessionScriptOwnedPathContract and each child uses isolated temporary state | P0.4b | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-cp3hwi | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-cp3hwi | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/k8s` package `k8s` | TestDynamicUserWrapperPreservesCommand: subprocess | ga-cp3hwi | Kubernetes launch-command transport regression is a checked Medium subprocess owner; the /bin/sh executions are confined to TestDynamicUserWrapperPreservesCommand; test-owned su and tmux scripts receive a private PATH and temporary files, so a real shell verifies the decoded command reaches tmux as one argument | P0.4b | 2026-12-31 |
@@ -1764,6 +1766,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `scripts` package `scripts_test` | TestAddTestenvImportSkipsNestedGitWorktrees: subprocess | ga-t00ejy | the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner; the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees | P0.4b | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestBazelLaneWorkerEnvStepStaleBase: subprocess | ga-cp3hwi | the bazel lane worker-env stale-base proof is a checked Medium subprocess owner; the git and bash subprocesses are confined to TestBazelLaneWorkerEnvStepStaleBase (ga-s9mdfm), which exists to run bazel.yml's lane worker-env preflight step itself against a scratch git origin whose main re-pins after the run chose its base (a stale base, a moved pin, a re-pinning PR, a lane that is not remote, no base-sha): the step is git plumbing feeding tools/rbe/worker-env-drift, so only real git and a real shell can prove a stale base fails a remote lane instead of skipping bazel green | P0.4b | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestBazelNightlyFreshDecision: subprocess | ga-cp3hwi | the nightly fresh-on-drift decision proof is a checked Medium subprocess owner; the bash subprocess per case is confined to TestBazelNightlyFreshDecision, which exists to run bazel-nightly.yml's decide step script against a PATH-injected stub gh (shadow mode, a covered week, a new fingerprint, a key prefix, a PR-scoped cache entry, a dispatch, no canary run, a malformed fingerprint): the decision is shell and gh, so only a real shell run can prove when the nightly re-executes every test and that it fails open to fresh | P0.4b | 2026-12-31 |
+| Medium owner | `scripts` package `scripts_test` | TestBeginnerQualifierRefusesUnsafeCandidates: net_listen, subprocess | ga-cp3hwi | the RFC8191 qualification safety proof is a checked Medium subprocess and loopback-listener owner; the Python CLI processes and loopback-port fixtures are confined to TestBeginnerQualifierRefusesUnsafeCandidates; they prove invalid destinations, companion binaries, ports and published commands are refused before any candidate runs, and separate qualification profiles receive distinct runtime namespaces without changing existing user data | RFC8191/P0.4b/P0.4c | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestCacheProbes: http_test_server | ga-cp3hwi | the anonymous-cache probes' behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheProbes, whose one stand-in rbe-cache runs tools/rbe/cache-zstd-probe.sh (zstd advertised or not) and tools/rbe/cache-rrc-probe.sh (an answer or none, the action cache's and the CAS's NOT_FOUND or not, the kill switch off) through gRPC and HTTP errors, malformed answers and timeouts: the probes are curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd and when fork-cache lanes read the remote repo contents cache | P0.4b | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-cp3hwi | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestFreshMergeActionBehaviour: subprocess | ga-cp3hwi | the fresh-merge composite action's behavior proof is a checked Medium subprocess owner; the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails | P0.4b | 2026-12-31 |
@@ -2182,12 +2185,39 @@ unrelated Tier A flows.
 
 #### Beads topology tests (`GC_ACCEPTANCE_BD_BIN`, `GC_ACCEPTANCE_LEGACY_GC_BIN`)
 
-Two groups of Tier A tests drive a real `bd` and a real `dolt` instead of the
+Three groups of Tier A tests drive a real `bd` and a real `dolt` instead of the
 hermetic providers: the `TestBeadsProxiedDefault*` tests, which prove the
-proxied-local default (independent top-level tests, so the sharded Bazel lane
-can spread them), and `TestBeadsInitTopologyMatrix`, which walks every
-supported way to initialise a beads scope. Both skip typed when their tooling is absent, so the
-default `make test-acceptance` run is unaffected.
+proxied-local controls (independent top-level tests, so the sharded Bazel lane
+can spread them), the ordinary factory storage front doors, and
+`TestBeadsInitTopologyMatrix`, which walks every supported way to initialise a
+beads scope. The Bazel acceptance targets pin bd and Dolt and require their
+tooling preconditions; a typed missing-tool skip in an offline run is not
+conformance evidence.
+
+Recorder-backed storage controls explicitly select `--beads-transport proxied
+--beads-target local` and verify that every class remains in the work store
+before counting forks. This preserves the factory pack while selecting the
+single-store compatibility shape. `TestBeadsFactoryDefaultStorageIsSQLiteSplit`
+separately exercises ordinary no-selector initialization with bd's real binary:
+a city born split onto the SQLite binding. `TestBeadsFactoryNativeInfrastructureFrontDoors`
+exercises the native infrastructure workspace a factory city takes with
+`GC_INIT_INFRASTRUCTURE=native`: split ownership, public/default-rig imports,
+front-door writes, restart, and stopped doctor with and without `--fix`. A control's fork census is not a
+measurement of the split default. See the
+[acceptance helper rules](test/acceptance/helpers/AGENTS.md).
+
+Binary API integration fixtures that create the ordinary split default stage
+the real pinned Go `bd` first on PATH under their isolated HOME. File-store
+controls keep their shim/tool-home wrapper. Initialization deliberately strips
+`GC_*` variables; do not pass test-only shim controls through production or
+weaken the Go-build-information check.
+
+Successful schema probes remove their temporary databases. Failed probes retain
+their original directory and report its path with the child's diagnostic. Under
+Bazel they also copy it into `TEST_UNDECLARED_OUTPUTS_DIR` before the private
+namespace is destroyed, so the failure can be investigated and exported. Keep bidirectional schema parity and
+the original 60-second bound; retaining evidence does not turn a failed probe
+into a pass.
 
 | variable | selects | who needs it |
 | --- | --- | --- |
@@ -2439,6 +2469,17 @@ its Bazel target, for example:
 ```bash
 bazel test --config=integration //test/integration:integration_test --test_filter='^TestHumaBinary_'
 ```
+
+The default split API, live-contract, tutorial and routed-query fixtures put
+an actual pinned Go `bd` first on PATH only under their private GC_HOME/HOME.
+Their native environment helper preserves the platform-service isolation and
+file-shim fallback; file-store controls retain the tool-home wrapper.
+
+The busy Claude lane fixture writes its own scripted turns under the exact
+`--session-id`/`--resume` key. An idle screen alone creates no transcript proof.
+Keep the 60-second busy turn and three exactly-once submissions, and exercise
+the separate screen-only boundary regressions. This fixture does not qualify
+an authenticated provider or model request.
 
 **Supervisor binary smoke test** (`test/integration/huma_binary_test.go`):
 builds `gc`, boots the supervisor against an isolated `GC_HOME`, waits

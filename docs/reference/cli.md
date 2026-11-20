@@ -526,7 +526,7 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --assignee, --all, and --format.
+Supports --label, --status, --assignee, --all, --format, --fresh, and --strict.
 --format=json prints a JSON array of beads, the same on every route
 for a local city. For a remote city (--context, --city-url/--city-name, GC_CITY_URL,
 GC_CITY_CONTEXT, or the context selected by gc context use) it prints
@@ -543,6 +543,10 @@ A city or rig bead store that cannot be opened or read fails the command
 (exit 1, naming the store) rather than being left out of the list. For
 a local city whose relocated class binding cannot be read, the command
 warns on stderr, lists the remaining stores and exits 0.
+
+--fresh reads local stores directly instead of cached API projections.
+--strict implies --fresh and refuses incomplete work/class-store reads without
+printing a successful result. Fresh/strict reads require a local city.
 
 The bare --json flag is reserved by the CLI's JSON-contract layer and is
 not wired for this command; use --format=json.
@@ -575,8 +579,10 @@ gc beads list --assignee city.agent-a --status in_progress
 | `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
 | `--assignee` | string |  | filter to beads whose stored assignee matches this string exactly (across every rig and the city) |
 | `--format` | string | `text` | output format: text or json |
+| `--fresh` | bool |  | read local stores directly, bypassing API caches |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
+| `--strict` | bool |  | require a complete local store read (implies --fresh) |
 
 ## gc beads metadata-cas
 
@@ -2596,6 +2602,7 @@ gc init [path] [flags]
 ```
 gc init
 gc init ~/my-city
+gc init --experience beginner --default-provider claude ~/my-city
 gc init --default-provider codex ~/my-city
 gc init --template gastown --default-provider codex ~/my-city
 gc init --providers claude,codex --default-provider codex ~/my-city
@@ -2622,6 +2629,7 @@ gc init --template gascity --default-provider claude \
 | `--dolt-port` | string |  | external/hosted Dolt port (or GC_DOLT_PORT); required with --dolt-host |
 | `--dolt-project-id` | string |  | authoritative beads project_id for the identity handshake (or GC_BEADS_PROJECT_ID); derived from a bd_&lt;id&gt; --dolt-database when omitted |
 | `--dolt-user` | string |  | external/hosted Dolt user (or GC_DOLT_USER); optional |
+| `--experience` | string |  | optional guided experience: beginner (uses the gascity template) |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--json` | bool |  | emit JSON summary |
@@ -4058,6 +4066,7 @@ gc rig add /path/to/existing --adopt
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--allow-ephemeral` | bool |  | register the rig even though its path is on a filesystem that does not survive a restart |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch) |
+| `--dry-run` | bool |  | preview local registration or adoption without changing city, rig, queue or runtime state |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
 | `--include` | stringArray |  | pack to import into the rig: a source, a pack name, or &lt;binding&gt;=&lt;source&gt; (repeatable) |
 | `--json` | bool |  | Output in JSONL format |

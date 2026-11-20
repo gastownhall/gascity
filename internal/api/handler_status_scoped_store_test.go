@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -481,6 +482,48 @@ func TestStatusStoreWorkCountsWaitsForReadyResolutionCleanup(t *testing.T) {
 	}
 }
 
+// TestStatusReadyStoreWithTimeoutDoesNotPinOnCtxBlindResolution pins that a
+// scoped ready resolution that blocks before it observes ctx
+// (a store mutex held by the reconciler) must not hold the status rebuild
+// open. That rebuild is what replaces the stale-while-revalidate body, so
+// a multi-hour block showed up as a multi-hour cache age.
+func TestStatusReadyStoreWithTimeoutDoesNotPinOnCtxBlindResolution(t *testing.T) {
+	if statusReadyCleanupBudget <= 0 || statusReadyCleanupBudget > 5*time.Second {
+		t.Fatalf("statusReadyCleanupBudget = %s, want a short cap so a stuck resolution cannot pin status", statusReadyCleanupBudget)
+	}
+	oldTimeout := statusStoreReadTimeout
+	oldCleanup := statusReadyCleanupBudget
+	statusStoreReadTimeout = 50 * time.Millisecond
+	statusReadyCleanupBudget = 100 * time.Millisecond
+	t.Cleanup(func() {
+		statusStoreReadTimeout = oldTimeout
+		statusReadyCleanupBudget = oldCleanup
+	})
+
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	state := newFakeState(t)
+	state.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) {
+		<-blocked
+		return nil, nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, &legacyReadyStore{Store: beads.NewMemStore()}))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("statusReadyStoreWithTimeout error = %v, want a timed-out error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("statusReadyStoreWithTimeout still blocked on a resolver that has not observed ctx")
+	}
+}
+
 func TestStatusReadyStoreWithTimeoutBoundsSlowScopedStoreResolution(t *testing.T) {
 	oldTimeout := statusStoreReadTimeout
 	statusStoreReadTimeout = 200 * time.Millisecond
@@ -672,5 +715,50 @@ func waitForNonEmptyFileScopedTest(t *testing.T, path string, timeout time.Durat
 			t.Fatalf("timed out waiting for %s to be written", path)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestStatusWorkCountsEmptyBdWorkCacheWithRelocatedGraph(t *testing.T) {
+	var calls atomic.Int32
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		calls.Add(1)
+		if len(args) > 0 {
+			switch args[0] {
+			case "list", "query":
+				return []byte("[]"), nil
+			case "version":
+				return []byte("bd version 1.3.2\n"), nil
+			}
+		}
+		return nil, errors.New("unexpected live bd read: " + strings.Join(args, " "))
+	}
+	backing := beads.NewBdStore(t.TempDir(), runner)
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	before := calls.Load()
+	state := newFakeState(t)
+	state.cityBeadStore = cache
+	state.graphBeadStore = beads.NewMemStore()
+	state.stores = nil
+	var scopedCalls atomic.Int32
+	state.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) {
+		scopedCalls.Add(1)
+		return nil, errors.New("unexpected scoped/live fallback")
+	}
+	server := &Server{state: state}
+	counts, partialErrors := server.statusWorkCounts(context.Background(), state.Stores(), nil)
+	if len(partialErrors) != 0 {
+		t.Fatalf("partial errors = %v, want complete empty work/graph counts", partialErrors)
+	}
+	if counts.Open != 0 || counts.InProgress != 0 || counts.Ready != 0 {
+		t.Fatalf("work counts = %+v, want all zero", counts)
+	}
+	if got := calls.Load() - before; got != 0 {
+		t.Fatalf("status bd calls = %d, want cache-only reads", got)
+	}
+	if got := scopedCalls.Load(); got != 0 {
+		t.Fatalf("scoped/live fallbacks = %d, want none", got)
 	}
 }

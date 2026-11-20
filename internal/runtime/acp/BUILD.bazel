@@ -110,6 +110,7 @@ go_test(
             "//internal/shellquote",
         ],
         "@rules_go//go/platform:android": [
+            "//internal/pidutil",
             "//internal/runtime/proctable",
             "//internal/shellquote",
         ],
@@ -132,6 +133,7 @@ go_test(
             "//internal/shellquote",
         ],
         "@rules_go//go/platform:linux": [
+            "//internal/pidutil",
             "//internal/runtime/proctable",
             "//internal/shellquote",
         ],

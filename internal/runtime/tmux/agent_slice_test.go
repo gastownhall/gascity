@@ -79,7 +79,11 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 		t.Fatalf("RespawnPaneWithWorkDir: %v", err)
 	}
 	// The pane command ends respawn-pane, the list's first command.
-	args := exec.calls[0]
+	if len(exec.calls) != 2 {
+		t.Fatalf("respawn calls=%q, want spend then respawn list", exec.calls)
+	}
+	assertBootstrapSpendCall(t, exec.calls[0], "%0")
+	args := exec.calls[1]
 	sep := slices.Index(args, ";")
 	if sep < 1 || args[sep-1] != want {
 		t.Fatalf("respawn-with-workdir command in %q, want %q", args, want)

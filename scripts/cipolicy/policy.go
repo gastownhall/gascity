@@ -387,7 +387,11 @@ const (
 	// needs every other Nightly job, one python3 step fed by a dedicated
 	// needs.<job>.result env var per dependency that fails closed on anything
 	// but "success"; no new trigger, permission or secret.
-	expectedNightlyExecutionHash = "adfd68dfb5d2c4285bb6cf2ecf5a81ea1446fa54e2bf2a39aa5dd4e4581153cf"
+	// RFC8191 retains the installed beginner qualification job beside those
+	// updated pins: one reusable workflow call, contents:read, and its existing
+	// OLLAMA_API_KEY binding, and nightly-summary needs it as it does every
+	// other job. No trigger change or extra workflow permission.
+	expectedNightlyExecutionHash = "832eddd9b2bf2cc5c496a0426d84f6743f667e7980b8636077a7711e4818ae80"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

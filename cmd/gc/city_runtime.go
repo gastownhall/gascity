@@ -103,6 +103,8 @@ var orderRescanInterval = time.Minute
 // across runController and controllerLoop. A machine-wide supervisor can
 // instantiate multiple CityRuntimes — one per registered city.
 type CityRuntime struct {
+	providerUnresolvedAlerts providerUnresolvedAlerts
+
 	// beadsQuiescent is true while the city is suspended and no session runs:
 	// the controller then touches no bead store (beads_quiescence.go).
 	beadsQuiescent atomic.Bool
@@ -3406,6 +3408,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	if cr.legacySessionEntry("bead_reconcile_tick") {
 		return
 	}
+	cr.reportUnresolvedProviders(result)
 	desiredState := result.State
 	store := cr.cityBeadStore()
 	if store == nil {
@@ -3507,7 +3510,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-				cr.cfg, poolWorkBeads, openInfos, result.ScaleCheckCounts, nil, poolDecisionTime, parked, trace)),
+				cr.cfg, poolWorkBeads, nil, nil, openInfos, result.ScaleCheckCounts, nil, poolDecisionTime, parked, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -3862,6 +3865,8 @@ func (cr *CityRuntime) recordReconcileTraceInputs(
 		"named_scale_check_partial_templates": sortedBoolMapKeys(result.NamedScaleCheckPartialTemplates),
 		"session_query_partial":               result.SessionQueryPartial,
 		"snapshot_query_partial":              result.snapshotQueryPartial(),
+		"provider_unresolved_count":           len(result.ProviderUnresolved),
+		"provider_unresolved_providers":       providerUnresolvedProviderNames(result.ProviderUnresolved),
 	})
 	for _, agent := range cr.cfg.Agents {
 		template := agent.QualifiedName()
@@ -4459,7 +4464,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
+			filteredCfg, poolWorkBeads, nil, nil, openInfos, wfcResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		filteredSnap,
 		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
@@ -4882,7 +4887,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, nil, poolDecisionTime,
+				cr.cfg, poolWorkBeads, nil, nil, openSessionInfos, result.ScaleCheckCounts, nil, poolDecisionTime,
 				parkSeatsForResult(cr.cfg, openSessionInfos, result, poolDecisionTime.UTC()), trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),

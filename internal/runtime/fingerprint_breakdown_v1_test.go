@@ -79,6 +79,41 @@ func TestBreakdownV1MarshalRoundtrip(t *testing.T) {
 	}
 }
 
+func TestV5BreakdownWithoutOptionalOwnershipFieldDoesNotReportSyntheticDrift(t *testing.T) {
+	base := Config{Command: "agent"}
+	stored := CoreFingerprintBreakdown(base)
+	if _, ok := stored.Fields["ReconcilerOwnedMergeablePaths"]; ok {
+		t.Fatal("empty optional ownership field should be omitted from v5 breakdown")
+	}
+	storedJSON, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal stored breakdown: %v", err)
+	}
+
+	if got := CoreFingerprintDriftFieldsFromJSON(string(storedJSON), base); len(got) != 0 {
+		t.Fatalf("legacy v5 breakdown reported synthetic drift: %v", got)
+	}
+
+	owned := base
+	owned.ReconcilerOwnedMergeablePaths = []string{".codex/hooks.json"}
+	if _, ok := CoreFingerprintBreakdown(owned).Fields["ReconcilerOwnedMergeablePaths"]; !ok {
+		t.Fatal("non-empty optional ownership field should be present in v5 breakdown")
+	}
+	if got := CoreFingerprintDriftFieldsFromJSON(string(storedJSON), owned); len(got) != 1 || got[0] != "ReconcilerOwnedMergeablePaths" {
+		t.Fatalf("real ownership adoption drift fields = %v, want [ReconcilerOwnedMergeablePaths]", got)
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(owned), base); len(got) != 1 || got[0] != "ReconcilerOwnedMergeablePaths" {
+		t.Fatalf("real ownership removal drift fields = %v, want [ReconcilerOwnedMergeablePaths]", got)
+	}
+
+	// A short-lived pre-fix build emitted SHA-256(empty) for this optional key.
+	// Treat that payload as equivalent to omission so upgrading it is quiet too.
+	stored.Fields["ReconcilerOwnedMergeablePaths"] = emptyBreakdownFieldHash
+	if got := CoreFingerprintDriftFields(stored, base); len(got) != 0 {
+		t.Fatalf("pre-fix empty ownership field reported synthetic drift: %v", got)
+	}
+}
+
 // TestLogDriftHandlesLegacyMapBreakdown enforces ga-s760.2 / MF-A's
 // upgrade-compat clause: when the stored breakdown JSON is a legacy
 // map[string]string (no Version field, no CopyFiles array), the

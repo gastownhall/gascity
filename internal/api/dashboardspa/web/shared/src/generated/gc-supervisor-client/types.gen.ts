@@ -186,6 +186,32 @@ export type AgentPatchSetInputBody = {
     work_dir?: string;
 };
 
+export type AgentProviderOptions = {
+    /**
+     * Resolved declarative defaults for a new session. Missing values defer to provider-owned configuration; do not infer a model or effort from curated choices.
+     */
+    configured_defaults?: {
+        [key: string]: string;
+    };
+    options_schema?: Array<ProviderOptionDto> | null;
+    /**
+     * Stable reason when defaults are unknown: custom_start_command, custom_arguments, unhonored_defaults or resolution_failed.
+     */
+    reason?: string;
+    /**
+     * Whether GC can project configured session-start defaults. Never an observation of the running provider.
+     */
+    resolution: 'resolved' | 'unknown';
+    /**
+     * Options apply to creation of a new session, not one turn of an existing conversation.
+     */
+    scope: 'session_start';
+    /**
+     * Whether GC accepts model/effort overrides atomically for one turn. False in this contract; session-start options must not be presented as per-turn controls.
+     */
+    supports_per_turn_options: boolean;
+};
+
 export type AgentResponse = {
     active_bead?: string;
     activity?: string;
@@ -216,6 +242,10 @@ export type AgentResponse = {
      */
     program_status?: SessionProgramStatus;
     provider?: string;
+    /**
+     * Configured session-start options resolved for this agent; not observed actual runtime settings.
+     */
+    provider_options: AgentProviderOptions;
     rig?: string;
     running: boolean;
     session?: SessionInfo;
@@ -582,6 +612,10 @@ export type CityCreateRequest = {
      * Custom workspace start command for the city's default session template. Mutually exclusive with provider.
      */
     start_command?: string;
+    /**
+     * Initial factory template, matching gc init --template. Defaults to gascity. custom and empty create providerless cities; they cannot be combined with provider or start_command.
+     */
+    template?: 'minimal' | 'gastown' | 'gascity' | 'custom' | 'empty';
 };
 
 export type CityCreateSucceededPayload = {
@@ -1400,7 +1434,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlCheckUnlaunchablePayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionClosedPayload | SessionConfigDriftDeferredPayload | SessionCreateSucceededPayload | SessionCreatedPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlCheckUnlaunchablePayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | ProviderUnresolvedPayload | PublicDeliveryChangedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionClosedPayload | SessionConfigDriftDeferredPayload | SessionCreateSucceededPayload | SessionCreatedPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1563,7 +1597,7 @@ export type ExtMsgBindInputBody = {
 
 export type ExtMsgGroupEnsureInputBody = {
     /**
-     * Default handle for the group.
+     * Default handle for the group. Omit to preserve an existing route; an empty string clears it.
      */
     default_handle?: string;
     /**
@@ -1588,6 +1622,14 @@ export type ExtMsgInboundInputBody = {
      */
     account_id?: string;
     /**
+     * Monotonically cancel all deliveries of an existing admission. Requires the same original request_key/message/deliveries; never creates a missing admission. Prepared or unknown lane writes remain cancel_requested until the original operation/tombstone resolves.
+     */
+    cancel_deliveries?: boolean;
+    /**
+     * Frozen qualified recipient identities and native message policies for durable admission. Lane guarantee is at_most_once; ambiguous native outcomes are not resent.
+     */
+    deliveries?: Array<PublicRecipient> | null;
+    /**
      * Pre-normalized inbound message.
      */
     message?: ExternalInboundMessage;
@@ -1599,6 +1641,10 @@ export type ExtMsgInboundInputBody = {
      * Provider name for raw payloads (required when message is absent).
      */
     provider?: string;
+    /**
+     * Opt-in durable admission key, scoped by conversation and actor. Requires explicit deliveries and pre-normalized message.
+     */
+    request_key?: string;
 };
 
 export type ExtMsgOutboundInputBody = {
@@ -1941,10 +1987,12 @@ export type HookClaimReclaimedStalePayload = {
 
 export type InboundEventPayload = {
     actor: string;
+    admission_id?: string;
     conversation_id: string;
     provider: string;
     target_agent?: string;
     target_session: string;
+    transcript_id?: string;
 };
 
 export type InboundResult = {
@@ -1954,6 +2002,8 @@ export type InboundResult = {
     TargetAgentName: string;
     TargetSessionID: string;
     TranscriptEntry?: ConversationTranscriptRecord;
+    admission?: PublicReceipt;
+    deliveries?: Array<PublicDelivery> | null;
 };
 
 export type ListBodyAgentPatch = {
@@ -3001,6 +3051,10 @@ export type ProviderCreatedOutputBody = {
 };
 
 export type ProviderOptionDto = {
+    /**
+     * True accepts nonempty values beyond the curated choices. False restricts values to listed choices. GC validation remains authoritative; no CLI flag templates are exposed.
+     */
+    accepts_custom_values: boolean;
     choices: Array<OptionChoiceDto> | null;
     default: string;
     key: string;
@@ -3092,11 +3146,30 @@ export type ProviderPublicResponse = {
     builtin: boolean;
     city_level: boolean;
     display_name?: string;
+    /**
+     * Configured declarative session-start defaults, not observed actual settings. Unset model/effort values defer to provider-owned configuration.
+     */
     effective_defaults?: {
         [key: string]: string;
     };
     name: string;
+    /**
+     * Stable reason when declared defaults cannot be projected.
+     */
+    options_reason?: string;
+    /**
+     * Whether GC resolved the provider's declared option defaults.
+     */
+    options_resolution: 'resolved' | 'unknown';
     options_schema?: Array<ProviderOptionDto> | null;
+    /**
+     * These options configure a new session rather than a turn in an existing conversation.
+     */
+    options_scope: 'session_start';
+    /**
+     * False: GC does not accept atomic per-turn model/effort settings in this contract.
+     */
+    supports_per_turn_options: boolean;
 };
 
 export type ProviderReadiness = {
@@ -3140,6 +3213,15 @@ export type ProviderSpecJson = {
     prompt_flag?: string;
     prompt_mode?: string;
     ready_delay_ms?: number;
+};
+
+export type ProviderUnresolvedPayload = {
+    command: string;
+    desired_session_count?: number;
+    dropped_templates: number;
+    provider: string;
+    reconciler: string;
+    templates: Array<string> | null;
 };
 
 export type ProviderUpdateInputBody = {
@@ -3215,6 +3297,78 @@ export type ProxiedEndpointStamp = {
     generation?: string;
     pid?: number;
     port?: number;
+};
+
+export type PublicDelivery = {
+    after_delivery_id?: string;
+    cancel_requested?: boolean;
+    conversation: ConversationRef;
+    error_code?: string;
+    error_detail?: string;
+    explicit_target_session_id?: string;
+    id: string;
+    native_payload?: string;
+    operation_id?: string;
+    operation_key: string;
+    operation_outcome?: string;
+    operation_reason?: string;
+    operation_status?: string;
+    receipt_id: string;
+    recipient: PublicRecipient;
+    recipient_key: string;
+    resolved_session_id?: string;
+    retryable?: boolean;
+    sequence: number;
+    /**
+     * GC handoff state; admitted means the existing Sessions operation is authoritative, not model completion.
+     */
+    state: 'queued' | 'admission_pending' | 'admission_unknown' | 'admitted' | 'failed' | 'cancel_requested' | 'canceled';
+    state_version: number;
+    transcript_id: string;
+};
+
+export type PublicDeliveryChangedPayload = {
+    admission_id: string;
+    cancel_requested?: boolean;
+    delivery_id: string;
+    error_code?: string;
+    operation_id?: string;
+    operation_outcome?: string;
+    operation_reason?: string;
+    operation_status?: string;
+    recipient_key: string;
+    retryable?: boolean;
+    session_id?: string;
+    state: string;
+    state_version: number;
+    transcript_id: string;
+};
+
+export type PublicMessagePolicy = {
+    now_generation?: number;
+    now_turn?: string;
+    on_unsupported?: string;
+    role?: string;
+    wake?: string;
+    when?: string;
+};
+
+export type PublicReceipt = {
+    cancel_requested?: boolean;
+    delivery_ids: Array<string> | null;
+    id: string;
+    payload_digest: string;
+    request_key: string;
+    sequence: number;
+    target_agent?: string;
+    target_session?: string;
+    transcript_id: string;
+};
+
+export type PublicRecipient = {
+    agent_identity?: string;
+    policy: PublicMessagePolicy;
+    session_id?: string;
 };
 
 export type PublishReceipt = {
@@ -3378,6 +3532,10 @@ export type RigActionBody = {
 
 export type RigCreateBody = {
     /**
+     * Register an existing Beads queue in place, preserving its namespace and history. Cannot be combined with git_url.
+     */
+    adopt?: boolean;
+    /**
      * Mainline branch (e.g. main, master). Auto-detected when omitted.
      */
     default_branch?: string;
@@ -3390,15 +3548,15 @@ export type RigCreateBody = {
      */
     name: string;
     /**
-     * Filesystem path (server-derived for git_url clones).
+     * Existing project or new clone destination; use an explicit absolute path outside the city. A clone requires an absent destination with an existing parent; omitted clone path defaults to rigs/name.
      */
     path?: string;
     /**
-     * Session name prefix.
+     * Beads issue namespace prefix; inferred from an adopted queue when omitted.
      */
     prefix?: string;
     /**
-     * Client-supplied idempotency key; reuse across retries.
+     * Client-supplied idempotency key; reuse across retries. Required when git_url uses an explicit absolute clone destination.
      */
     request_id?: string;
 };
@@ -4303,6 +4461,25 @@ export type SessionProgramStatusShadowPayload = {
     validity: 'unread' | 'valid' | 'not_armed' | 'silent' | 'cleared' | 'reader_lost' | 'exited';
 };
 
+export type SessionProviderAvailability = {
+    code?: 'connection_restore_failed';
+    observed_at: string;
+    /**
+     * Opaque current runtime incarnation identity; clients must compare it as a whole, never parse it.
+     */
+    runtime_generation?: string;
+    source: 'native_ui';
+    /**
+     * A current native UI failure diagnostic or an indeterminate observation. Never a readiness or liveness report.
+     */
+    state: 'unknown' | 'unavailable';
+};
+
+export type SessionProviderAvailabilityEvent = {
+    id: string;
+    provider_availability: SessionProviderAvailability;
+};
+
 /**
  * Session raw transcript frame
  *
@@ -4329,6 +4506,10 @@ export type SessionRespondInputBody = {
      * Response action (e.g. allow, deny).
      */
     action: string;
+    /**
+     * Exact authored choice labels for a multiple-selection native question. Mutually exclusive with text; empty, duplicate, unknown and mixed free-text selections are refused.
+     */
+    answers?: Array<string> | null;
     /**
      * Optional response metadata.
      */
@@ -4405,6 +4586,7 @@ export type SessionResponse = {
      */
     program_status?: SessionProgramStatus;
     provider: string;
+    provider_availability?: SessionProviderAvailability;
     reason?: string;
     rig?: string;
     /**
@@ -4488,9 +4670,9 @@ export type SessionStrandedPayload = {
 /**
  * Session stream lifecycle event
  *
- * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+ * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, current provider-availability diagnostics, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
  */
-export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | SessionPendingClearedEvent | SessionProgramStatusEvent | HeartbeatEvent;
+export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | SessionPendingClearedEvent | SessionProgramStatusEvent | SessionProviderAvailabilityEvent | HeartbeatEvent;
 
 export type SessionStreamMessageEvent = {
     format: string;
@@ -6772,6 +6954,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.outbound_channel_mismatch';
 } & TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
+    type: 'extmsg.public_delivery_changed';
+} & TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
     type: 'fact.recorded';
@@ -6822,6 +7006,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'provider.unresolved';
+} & TypedEventStreamEnvelopeProviderUnresolved) | ({
     type: 'request.accepted';
 } & TypedEventStreamEnvelopeRequestAccepted) | ({
     type: 'request.failed';
@@ -7776,6 +7962,24 @@ export type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
 };
 
 /**
+ * TypedEventStreamEnvelope extmsg.public_delivery_changed
+ */
+export type TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: PublicDeliveryChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.public_delivery_changed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope extmsg.unbound
  */
 export type TypedEventStreamEnvelopeExtmsgUnbound = {
@@ -8222,6 +8426,24 @@ export type TypedEventStreamEnvelopeProviderSwapped = {
     subject?: string;
     ts: string;
     type: 'provider.swapped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope provider.unresolved
+ */
+export type TypedEventStreamEnvelopeProviderUnresolved = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ProviderUnresolvedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'provider.unresolved';
     workflow?: WorkflowEventProjection;
 };
 
@@ -9419,6 +9641,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.outbound_channel_mismatch';
 } & TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
+    type: 'extmsg.public_delivery_changed';
+} & TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
     type: 'fact.recorded';
@@ -9469,6 +9693,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'provider.unresolved';
+} & TypedTaggedEventStreamEnvelopeProviderUnresolved) | ({
     type: 'request.accepted';
 } & TypedTaggedEventStreamEnvelopeRequestAccepted) | ({
     type: 'request.failed';
@@ -10469,6 +10695,25 @@ export type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope extmsg.public_delivery_changed
+ */
+export type TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: PublicDeliveryChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.public_delivery_changed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope extmsg.unbound
  */
 export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
@@ -10940,6 +11185,25 @@ export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
     subject?: string;
     ts: string;
     type: 'provider.swapped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope provider.unresolved
+ */
+export type TypedTaggedEventStreamEnvelopeProviderUnresolved = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ProviderUnresolvedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'provider.unresolved';
     workflow?: WorkflowEventProjection;
 };
 
@@ -13788,7 +14052,12 @@ export type GetV0CityByCityNameBeadByIdData = {
          */
         id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Use authoritative point reads for every visited residency store, bypassing cached rows and misses. Fails on unavailable owners; does not provide a cross-store atomic snapshot.
+         */
+        fresh?: boolean;
+    };
     url: '/v0/city/{cityName}/bead/{id}';
 };
 
@@ -15751,6 +16020,10 @@ export type PostV0CityByCityNameExtmsgInboundErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
@@ -21412,6 +21685,20 @@ export type StreamSessionResponses = {
          */
         retry?: number;
     } | {
+        data: SessionProviderAvailabilityEvent;
+        /**
+         * The event name.
+         */
+        event: 'provider_availability';
+        /**
+         * The event resume cursor.
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
         data: SessionStreamStructuredMessageEvent;
         /**
          * The event name.
@@ -22062,7 +22349,7 @@ export type GetV0CityByCityNameStatusData = {
          */
         lite?: boolean;
         /**
-         * When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.
+         * When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every complete build saves its body for later reads. Partial builds return survivor counts and diagnostics to their waiting reads while leaving the last complete saved body intact. Default false keeps stale-while-revalidate for pollers.
          */
         fresh?: boolean;
     };

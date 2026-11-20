@@ -4,6 +4,7 @@ go_library(
     name = "opjournal",
     srcs = [
         "by_causation.go",
+        "cancel_proposal.go",
         "codec.go",
         "default_recording.go",
         "delivery_key.go",
@@ -29,6 +30,7 @@ go_library(
         "lane_take.go",
         "lane_text.go",
         "lease.go",
+        "message_policy.go",
         "op.go",
         "order.go",
         "propose_with.go",
@@ -54,6 +56,7 @@ go_test(
     name = "opjournal_test",
     srcs = [
         "by_causation_test.go",
+        "cancel_proposal_test.go",
         "codec_test.go",
         "default_recording_test.go",
         "delivery_key_test.go",

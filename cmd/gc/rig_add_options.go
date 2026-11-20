@@ -4,6 +4,7 @@ package main
 // another positional parameter on the already-wide doRigAdd signature.
 type rigAddOptions struct {
 	allowEphemeralPath bool
+	dryRun             bool
 }
 
 // rigAddOption mutates rigAddOptions.
@@ -22,4 +23,9 @@ func newRigAddOptions(opts ...rigAddOption) rigAddOptions {
 		opt(&o)
 	}
 	return o
+}
+
+// withRigAddDryRun previews the existing provisioning plan without mutation.
+func withRigAddDryRun(dryRun bool) rigAddOption {
+	return func(o *rigAddOptions) { o.dryRun = dryRun }
 }

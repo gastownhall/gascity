@@ -54,6 +54,9 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 	createdAt := zeroNow(input.CreatedAt)
 	providerMessageID := strings.TrimSpace(input.ProviderMessageID)
 	text := strings.TrimSpace(input.Text)
+	if prefix, batcher, ok := s.guardedTranscriptPrefix(); ok {
+		return s.appendGuarded(ctx, input, ref, kind, provenance, createdAt, providerMessageID, text, prefix, batcher)
+	}
 	var out ConversationTranscriptRecord
 	err = withBindingLock(s.locks, ref, func() error {
 		state, err := s.ensureStateLocked(ref)
@@ -73,6 +76,12 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				return err
 			}
 			if existing != nil {
+				// A live inbound ID is a frozen admission identity, not an
+				// instruction to silently discard a different public message.
+				// Arrival time may change on retry; the message payload may not.
+				if provenance == TranscriptProvenanceLive && (kind == TranscriptMessageInbound || existing.Kind == TranscriptMessageInbound) && !sameInboundTranscriptPayload(*existing, input, ref, kind) {
+					return fmt.Errorf("%w: provider message %q was already recorded with another payload", ErrMessageConflict, providerMessageID)
+				}
 				out = *existing
 				return nil
 			}
@@ -137,6 +146,18 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		return err
 	})
 	return out, err
+}
+
+// sameInboundTranscriptPayload compares the immutable content after applying
+// the same normalization as first append. Metadata and arrival time are not
+// part of the normalized inbound message; nil and empty attachment lists agree.
+func sameInboundTranscriptPayload(existing ConversationTranscriptRecord, input AppendTranscriptInput, ref ConversationRef, kind TranscriptMessageKind) bool {
+	return existing.Conversation == ref && existing.Kind == kind &&
+		existing.Actor == input.Actor && existing.Text == strings.TrimSpace(input.Text) &&
+		existing.ExplicitTarget == normalizeHandle(input.ExplicitTarget) &&
+		existing.ReplyToMessageID == strings.TrimSpace(input.ReplyToMessageID) &&
+		existing.SourceSessionID == strings.TrimSpace(input.SourceSessionID) &&
+		slices.Equal(existing.Attachments, input.Attachments)
 }
 
 func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput) ([]ConversationTranscriptRecord, error) {
@@ -756,12 +777,16 @@ func (s *transcriptService) ensureStateLockedWriter(w membershipWriter, ref Conv
 		"hydration_status":            string(HydrationLiveOnly),
 		"max_retained_entries":        "0",
 	}
-	created, err := w.Create(beads.Bead{
+	stateBead := beads.Bead{
 		Title:    conversationTitle(ref) + "/state",
 		Type:     "task",
 		Labels:   []string{"gc:extmsg-transcript-state", labelTranscriptStateBase, transcriptStateLabel(ref)},
 		Metadata: fields,
-	})
+	}
+	if prefix, _, ok := s.guardedTranscriptPrefix(); ok {
+		stateBead.ID = prefix + "-xs-" + publicHash(ref)[:32]
+	}
+	created, err := w.Create(stateBead)
 	if err != nil {
 		return ConversationTranscriptStateRecord{}, fmt.Errorf("create transcript state: %w", err)
 	}

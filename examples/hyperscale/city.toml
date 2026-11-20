@@ -52,8 +52,8 @@ tick_debounce = "500ms"
 # The builtin-pack-imports doctor check repairs missing entries.
 [imports.core]
 source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
-version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
+version = "sha:9dedf0ce789ce63133cfe7ff6b81fb2be2f59d8a"
 
 [imports.bd]
 source = "https://github.com/gastownhall/gascity.git//examples/bd"
-version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
+version = "sha:9dedf0ce789ce63133cfe7ff6b81fb2be2f59d8a"

@@ -5,20 +5,22 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // LiveObservation is the worker-owned runtime observation surface used by API
 // and CLI read models.
 type LiveObservation struct {
-	Running          bool
-	Alive            bool
-	Suspended        bool
-	Attached         bool
-	LastActivity     *time.Time
-	RuntimeSessionID string
-	SessionID        string
-	SessionName      string
+	Running              bool
+	Alive                bool
+	Suspended            bool
+	Attached             bool
+	LastActivity         *time.Time
+	RuntimeSessionID     string
+	SessionID            string
+	SessionName          string
+	ProviderAvailability *runtime.ProviderAvailability
 
 	// AttachedErr is set when the attachment probe could not tell (any error
 	// other than runtime.ErrSessionNotFound); Attached is false then. Running

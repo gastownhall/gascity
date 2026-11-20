@@ -198,3 +198,46 @@ func TestBuildPreparedStart_InitialMessageParseSeam(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildPreparedStartUnhashedResumeDoesNotReplayInitialMessage(t *testing.T) {
+	for _, mode := range []string{"none", "arg"} {
+		t.Run(mode, func(t *testing.T) {
+			store := beads.NewMemStore()
+			row, err := store.Create(beads.Bead{
+				Title: "chat", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "chat", "template": "codex", "provider": "codex",
+					"session_origin": "manual", "state": "asleep",
+					"session_key": "existing-native-conversation", "generation": "1", "instance_token": "test-instance",
+					"template_overrides": `{"initial_message":"already delivered initial input"}`,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Direct provider creates have a native key but no controller start
+			// hash. Discover-and-bind providers cannot supply the keyed probe
+			// that repairs this classification for generate-and-pass providers.
+			candidate := startCandidate{
+				info: sessiontest.SeedBead(t, row),
+				tp: TemplateParams{
+					TemplateName: "codex", SessionName: "chat", Command: "codex", WorkDir: t.TempDir(),
+					ResolvedProvider: &config.ResolvedProvider{
+						Name: "codex", Command: "codex", PromptMode: mode,
+						ResumeFlag: "resume", ResumeStyle: "subcommand",
+					},
+				},
+			}
+			prepared, _, err := buildPreparedStart(candidate, &config.City{}, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(prepared.cfg.Command, "resume existing-native-conversation") {
+				t.Fatalf("command %q does not resume the original conversation", prepared.cfg.Command)
+			}
+			if strings.Contains(prepared.cfg.Nudge, "already delivered initial input") || strings.Contains(prepared.cfg.PromptSuffix, "already delivered initial input") {
+				t.Fatalf("resume replays initial input: nudge=%q suffix=%q", prepared.cfg.Nudge, prepared.cfg.PromptSuffix)
+			}
+		})
+	}
+}

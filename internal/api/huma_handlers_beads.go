@@ -752,16 +752,20 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	index := s.latestIndex()
 	id := input.ID
 
-	work := s.state.Stores().Work()
-	if err := cacheLiveOr503(work); err != nil {
-		return nil, err
+	if !input.Fresh {
+		if err := cacheLiveOr503(s.state.Stores().Work()); err != nil {
+			return nil, err
+		}
 	}
 
-	_, b, err := s.resolveBeadOwner(id)
+	owner, b, err := s.resolveBeadOwner(id, input.Fresh)
 	if err != nil {
 		return nil, err
 	}
-	freshness := cacheAgeSeconds(work)
+	var freshness cacheFreshness
+	if !input.Fresh {
+		freshness = cacheAgeSeconds(owner)
+	}
 	return &IndexOutput[beads.Bead]{
 		Index:        index,
 		CacheAgeS:    freshness.ageS,

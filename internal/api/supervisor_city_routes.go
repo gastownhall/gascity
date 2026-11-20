@@ -14,14 +14,15 @@ import (
 // without re-defining the shape.
 func sessionStreamEventMap() map[string]any {
 	return map[string]any{
-		"turn":            SessionStreamMessageEvent{},
-		"message":         SessionStreamRawMessageEvent{},
-		"structured":      SessionStreamStructuredMessageEvent{},
-		"activity":        SessionActivityEvent{},
-		"pending":         runtime.PendingInteraction{},
-		"pending_cleared": SessionPendingClearedEvent{},
-		"program_status":  SessionProgramStatusEvent{},
-		"heartbeat":       HeartbeatEvent{},
+		"turn":                  SessionStreamMessageEvent{},
+		"message":               SessionStreamRawMessageEvent{},
+		"structured":            SessionStreamStructuredMessageEvent{},
+		"activity":              SessionActivityEvent{},
+		"pending":               runtime.PendingInteraction{},
+		"pending_cleared":       SessionPendingClearedEvent{},
+		"program_status":        SessionProgramStatusEvent{},
+		"provider_availability": SessionProviderAvailabilityEvent{},
+		"heartbeat":             HeartbeatEvent{},
 	}
 }
 
@@ -561,7 +562,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		sseCityStream(sm, (*Server).streamEvents))
 
 	// ExtMsg.
-	cityPost(sm, "/extmsg/inbound", (*Server).humaHandleExtMsgInbound, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/extmsg/inbound", (*Server).humaHandleExtMsgInbound, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/extmsg/outbound", (*Server).humaHandleExtMsgOutbound, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/extmsg/bindings", (*Server).humaHandleExtMsgBindingList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/extmsg/bind", (*Server).humaHandleExtMsgBind, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))

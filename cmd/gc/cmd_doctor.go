@@ -218,8 +218,12 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
+	// Building the check must not open relocated storage before the stopped
+	// store gate and --check selection can suppress it.
+	var once sync.Once
+	var resolveStores func(orders.Order) ([]beads.OrdersStore, error)
 	return func(order orders.Order) (time.Time, error) {
+		once.Do(func() { resolveStores = cachedOrderHistoryStoresResolver(cityPath, cfg, stderr) })
 		stores, err := resolveStores(order)
 		if err != nil {
 			return time.Time{}, err
@@ -353,6 +357,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		register(doctor.NewDurationRangeCheck(cfg))
 		register(doctor.NewProviderParityCheck(cfg))
+		// provider-path asks the host question its neighbors deliberately
+		// skip: provider-catalog checks the reference is declared and
+		// provider-parity inspects capability fields under a stub PATH
+		// lookup, so before ob-woag nothing verified that a referenced
+		// provider's binary actually exists. Real exec.LookPath here — a
+		// stub would reproduce the silence.
+		register(doctor.NewProviderPathCheck(cfg, exec.LookPath))
 		register(doctor.NewFormulaRequirementsCheck(cfg, cityPath))
 		register(doctor.NewNamedAlwaysMinConflictCheck(cfg))
 		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
@@ -373,7 +384,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
-		register(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
+		registerCityStoreCheck(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPAdoptionDoctorCheck(cityPath, cfg, exec.LookPath))
@@ -805,16 +816,29 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		doctor.PrintSummary(stdout, report)
 	}
 
-	if report.BlockingFailed > 0 {
-		return doctorBlockingFailureExitCode
-	}
-	return 0
+	_, _, exitCode := doctorReportFailure(report)
+	return exitCode
 }
 
 // doctorBlockingFailureExitCode is the exit code gc doctor returns when any
 // blocking check fails. The --json failure record carries it as
 // error.exit_code, so the record and the process agree.
 const doctorBlockingFailureExitCode = 1
+
+// doctorReportFailure keeps the process exit and JSON verdict consistent.
+// An incomplete observation cannot establish health, even when the check
+// could not return its severity. Confirmed blocking failures take precedence.
+func doctorReportFailure(report *doctor.Report) (code, message string, exitCode int) {
+	if report.BlockingFailed > 0 {
+		return doctorBlockingFailedErrorCode, fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed), doctorBlockingFailureExitCode
+	}
+	for _, result := range report.Results {
+		if result.TimedOut {
+			return "doctor_incomplete", "health checks incomplete; inspect timed-out results and rerun", 2
+		}
+	}
+	return "", "", 0
+}
 
 // maxDoctorCheckSuggestions bounds the "did you mean" list so one typo cannot
 // print most of the registry inline. The full list still follows in text mode.
@@ -842,11 +866,11 @@ type doctorUnknownCheckFailure struct {
 const doctorBlockingFailedErrorCode = "doctor_blocking_failed"
 
 // doctorBlockingFailure is the --json payload for a run with blocking
-// failures. It is the shared failure envelope (schemas/failure.schema.json),
+// failures or incomplete checks. It is the shared failure envelope (schemas/failure.schema.json),
 // so ok:false always arrives with an error object, and the full report rides
 // along under the schema's additionalProperties so the caller still sees
 // which checks failed. Advisory-only failures keep the report shape and
-// ok:true, matching the zero exit code.
+// ok:true when every check completed, matching the zero exit code.
 type doctorBlockingFailure struct {
 	jsonSchemaErrorPayload
 	doctorJSONReport
@@ -1164,15 +1188,15 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			Payload:      r.Payload,
 		})
 	}
-	if report.BlockingFailed > 0 {
+	if code, message, exitCode := doctorReportFailure(report); exitCode != 0 {
 		return writeCLIJSONLine(w, doctorBlockingFailure{
 			jsonSchemaErrorPayload: jsonSchemaErrorPayload{
 				SchemaVersion: "1",
 				OK:            false,
 				Error: jsonSchemaErrorDetail{
-					Code:     doctorBlockingFailedErrorCode,
-					Message:  fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed),
-					ExitCode: doctorBlockingFailureExitCode,
+					Code:     code,
+					Message:  message,
+					ExitCode: exitCode,
 				},
 			},
 			doctorJSONReport: out,

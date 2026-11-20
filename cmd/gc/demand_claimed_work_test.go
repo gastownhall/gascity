@@ -60,7 +60,7 @@ func claimedMerge(work []beads.Bead, collected collectedDemand) mergedDemand {
 // passPoolDesired is a pass's pool demand over its cut and merged demand.
 func passPoolDesired(work, sessions []beads.Bead, collected collectedDemand) []PoolDesiredState {
 	merged := claimedMerge(work, collected)
-	return computePoolDesiredStatesAt(claimedWorkCity(), work, sessionInfosFromBeads(sessions), merged.ScaleCheckCounts, merged.ScaleCheckDemand, claimedWorkNow, nil)
+	return computePoolDesiredStatesAt(claimedWorkCity(), work, nil, nil, sessionInfosFromBeads(sessions), merged.ScaleCheckCounts, merged.ScaleCheckDemand, claimedWorkNow, nil)
 }
 
 // mintedSeatWork is the work each claude request that would mint a seat

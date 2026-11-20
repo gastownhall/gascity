@@ -29,9 +29,10 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                 = (*seamBackedProvider)(nil)
-	_ runtime.UnattendedSessionStopper = (*seamBackedProvider)(nil)
-	// Relaunch (B2) rides the embedded raw *Provider — it is NOT one of the 17
+	_ runtime.Provider                             = (*seamBackedProvider)(nil)
+	_ runtime.UnattendedSessionStopper             = (*seamBackedProvider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
+	// Relaunch rides the embedded raw Provider rather than the
 	// seam-routed methods, so the warm-box relaunch stays on the real provider.
 	_ runtime.RelaunchProvider = (*seamBackedProvider)(nil)
 	// The listing attestation and the batched inventory also ride the

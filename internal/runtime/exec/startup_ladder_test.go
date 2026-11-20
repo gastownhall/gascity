@@ -22,17 +22,18 @@ const launchPackCaps = `{"version":0,"capabilities":["proc.provision","proc.laun
 // launchPackOps are the op bodies of a pack without tmux in its box. Each
 // keeps its stdin (provision.stdin, launch.stdin), the input it was given in
 // $dir/input (one line per nudge or send-keys, in order), and launch shows
-// the bypass-permissions dialog when $dir/dialog-at-start exists, until
-// Enter answers it. exec answers exit 2: there is no exec, and no tmux.
+// the bypass-permissions dialog when $dir/dialog-at-start exists, as the
+// agent draws it (two rows, the first selected, and the confirmation
+// footer), until Down selects the accepting row and Enter answers it. exec answers exit 2: there is no exec, and no tmux.
 func launchPackOps() map[string]string {
 	return map[string]string{
 		"provision":  `cat > "$dir/provision.stdin"`,
-		"launch":     `cat > "$dir/launch.stdin"; : > "$dir/running"; if [ -f "$dir/dialog-at-start" ]; then : > "$dir/dialog"; fi`,
+		"launch":     `cat > "$dir/launch.stdin"; : > "$dir/running"; if [ -f "$dir/dialog-at-start" ]; then echo 1 > "$dir/dialog"; fi`,
 		"exec":       `cat > /dev/null; exit 2`,
 		"is-running": `if [ -f "$dir/running" ]; then echo true; else echo false; fi`,
 		"stop":       `rm -f "$dir/running"`,
-		"peek":       `if [ -f "$dir/dialog" ]; then echo "Bypass Permissions mode"; else echo "❯ "; fi`,
-		"send-keys":  `shift 2; echo "keys $*" >> "$dir/input"; if [ "$1" = Enter ]; then rm -f "$dir/dialog"; fi`,
+		"peek":       `if [ ! -f "$dir/dialog" ]; then echo "❯ "; elif [ "$(cat "$dir/dialog")" = 2 ]; then printf '%s\n' 'Bypass Permissions mode' '  1. No, exit' '❯ 2. Yes, I accept' 'Enter to confirm · Esc to cancel'; else printf '%s\n' 'Bypass Permissions mode' '❯ 1. No, exit' '  2. Yes, I accept' 'Enter to confirm · Esc to cancel'; fi`,
+		"send-keys":  `shift 2; echo "keys $*" >> "$dir/input"; for _k in "$@"; do case "$_k" in Down) if [ -f "$dir/dialog" ]; then echo 2 > "$dir/dialog"; fi ;; Enter) if [ -f "$dir/dialog" ] && [ "$(cat "$dir/dialog")" = 2 ]; then rm -f "$dir/dialog"; fi ;; esac; done`,
 		"nudge":      `txt=$(cat); echo "nudge $txt" >> "$dir/input"`,
 	}
 }

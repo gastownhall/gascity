@@ -31,7 +31,6 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
-	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
@@ -2790,21 +2789,13 @@ func (cs *controllerState) DeleteAgent(name string) error {
 	})
 }
 
-// assertRigPathWithinCity rejects a resolved rig working-tree path that escapes
-// the city root. It guards EVERY HTTP rig-create entry — the sync path
-// (controllerState.CreateRig) and the async git_url path (ProvisionRigFromGit) —
-// plus the physical teardown (TeardownPartialRig): a remote API caller must not
-// steer the server's MkdirAll+store-write (rig.Provision creates an absent path
-// and writes .beads/.gitignore/.env into it) or the clone/RemoveAll outside the
-// city via a "../" or absolute path. It mirrors the configedit path-containment
-// precedent.
-//
-// It is deliberately NOT applied to internal/rig.Provision itself or the cmd/gc
-// CLI wrapper: local `gc rig add <arbitrary/abs/path>` reaches rig.Provision
-// directly (never through this method) and legitimately registers rigs anywhere,
-// staying byte-identical. The error wraps configedit.ErrValidation so the async
-// failure mapper renders invalid_request and the sync mapper renders a 4xx rather
-// than a 500.
+// assertRigPathWithinCity contains relative rig creation/cloning and legacy
+// physical teardown under the city root. Explicit absolute clone destinations
+// use an exclusive physical-directory ownership manifest instead. Registering an existing external project is a
+// separate operation: CreateRig accepts an explicit absolute directory without
+// taking ownership of its creation or deletion. Relative registration paths
+// must still remain within the city. Errors wrap configedit.ErrValidation so
+// both API projections refuse invalid paths before filesystem mutations.
 // The two passes are separate functions so each can be pinned on its own: a
 // test that only ever calls assertRigPathWithinCity cannot tell which pass
 // rejected, so a pass could rot to a no-op without reddening anything (ga-qe7qm).
@@ -2885,7 +2876,7 @@ func realPathForContainment(target string) (string, error) {
 // so a concurrent config edit cannot interleave with Provision's
 // read-modify-append of city.toml, and the runtime reload cannot read the rig's
 // half-written files.
-func (cs *controllerState) CreateRig(r config.Rig) error {
+func (cs *controllerState) CreateRig(r config.Rig, adopt bool) error {
 	rigPath := strings.TrimSpace(r.Path)
 	if rigPath == "" {
 		return fmt.Errorf("%w: rig path is required", configedit.ErrValidation)
@@ -2893,17 +2884,25 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 	// Resolve against the city dir, never the daemon CWD, so a same-named rig
 	// in the controller's working directory can never win.
 	r.Path = resolveStoreScopeRoot(cs.cityPath, rigPath)
-	// City-root containment: the API rig-create must not write a rig outside the
-	// city sandbox. rig.Provision MkdirAll's an absent path and writes a beads
-	// store, .gitignore, and .beads/.env into it, so an uncontained client path
-	// (../-escaping or absolute) is a server-side dir-create + file-plant primitive
-	// outside the city — the same one the async git_url path guards against. The
-	// local CLI `gc rig add <arbitrary/abs path>` reaches rig.Provision directly,
-	// not through this method, so it stays uncontained by design.
 	if err := assertRigPathWithinCity(cs.cityPath, r.Path); err != nil {
-		return err
+		// An explicit absolute path registers an existing project in place,
+		// matching gc rig add. Never create an external destination implicitly:
+		// clone rollback must separately prove the directories that clone created.
+		if !filepath.IsAbs(rigPath) {
+			return err
+		}
+		info, statErr := os.Stat(r.Path)
+		if statErr != nil {
+			return fmt.Errorf("%w: external rig path must be an existing directory: %s: %w", configedit.ErrValidation, r.Path, statErr)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%w: external rig path must be a directory: %s", configedit.ErrValidation, r.Path)
+		}
 	}
-	_, err := cs.provisionRigLocked(r, nil)
+	_, err := cs.provisionRigLocked(r, adopt, nil)
+	if errors.Is(err, rig.ErrAdoptionRequired) {
+		return fmt.Errorf("%w: %w", configedit.ErrValidation, err)
+	}
 	return err
 }
 
@@ -2911,7 +2910,9 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 // gitURL into the rig's working tree OUTSIDE the per-city config lock (a WAN
 // fetch must not freeze config writes), SSRF-fencing the host first, then
 // reuses CreateRig's provisioning handshake under the guard. When r.Path is
-// empty the server derives rigs/<name>. onStep (nil-safe) receives progress.
+// empty the server derives rigs/<name>; explicit absolute destinations must
+// be absent with an existing parent and receive physical ownership before
+// fetching. onStep (nil-safe) receives progress.
 // The returned rig carries the resolved prefix/branch for the terminal event.
 // The config.Rig result is consumed across the StateMutator boundary by
 // spawnRigProvision; unparam only sees cmd/gc's error-path test call sites,
@@ -2926,20 +2927,24 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 		// Server-derived clone destination for git_url adds: rigs/<name> under
 		// the city dir. resolveStoreScopeRoot anchors it to the city, never CWD.
 		rawPath = filepath.Join("rigs", r.Name)
-	} else if filepath.IsAbs(rawPath) {
-		// For a git_url add the clone destination is server-derived; a client must
-		// not pin an absolute path (it could point outside the city, and the G14
-		// rollback would then RemoveAll a caller-controlled directory). A relative
-		// path is still permitted but is contained under the city root below.
-		return config.Rig{}, fmt.Errorf("%w: git_url rig add must not specify an absolute path", configedit.ErrValidation)
+	}
+	absoluteDestination := filepath.IsAbs(rawPath)
+	if absoluteDestination {
+		if err := validateAbsoluteRigCloneDestination(rawPath); err != nil {
+			return config.Rig{}, err
+		}
+		if onManifest == nil {
+			return config.Rig{}, fmt.Errorf("%w: absolute clone destination requires a durable ownership recorder", configedit.ErrValidation)
+		}
 	}
 	r.Path = resolveStoreScopeRoot(cs.cityPath, rawPath)
 
-	// City-root containment: a relative "../" path resolves outside the city, and
-	// the clone + its RemoveAll teardown must never escape it. Reject before any
-	// filesystem side effect (Stat/clone/manifest).
-	if err := assertRigPathWithinCity(cs.cityPath, r.Path); err != nil {
-		return config.Rig{}, err
+	// Relative paths retain city containment. Explicit absolute paths have
+	// already passed the separate absent-destination/symlink ownership gate.
+	if !absoluteDestination {
+		if err := assertRigPathWithinCity(cs.cityPath, r.Path); err != nil {
+			return config.Rig{}, err
+		}
 	}
 
 	// Clone OUTSIDE the config lock. The SSRF host fence runs before git; the
@@ -2960,7 +2965,7 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	// directory, so a preexisting one is both a collision and — for the G14
 	// rollback — a dir the request did NOT create and must never remove. Reject
 	// it here so created_dir in the manifest below is always ours to tear down.
-	if _, err := os.Stat(r.Path); err == nil {
+	if _, err := os.Lstat(r.Path); err == nil {
 		return config.Rig{}, fmt.Errorf("%w: rig path %s already exists; git_url requires a new path", configedit.ErrValidation, r.Path)
 	} else if !os.IsNotExist(err) {
 		return config.Rig{}, fmt.Errorf("checking rig path %s: %w", r.Path, err)
@@ -2974,9 +2979,33 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	// boot sweep nor a re-clone pre-drop could discover it — wedging the
 	// request_id/name on every retry. No resource has been created yet, so
 	// aborting here leaves clean ground.
+	manifest := api.RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path, CreatedDirIdentityRequired: absoluteDestination}
 	if onManifest != nil {
-		if err := onManifest(api.RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path}); err != nil {
+		if err := onManifest(manifest); err != nil {
 			return config.Rig{}, fmt.Errorf("recording rig-provision manifest before clone: %w", err)
+		}
+	}
+	if absoluteDestination {
+		if err := validateAbsoluteRigCloneDestination(r.Path); err != nil {
+			return config.Rig{}, err
+		}
+		// Reserve only an absent leaf; git supports cloning into an empty
+		// existing directory. Persist its physical identity before fetching.
+		// A crash/persist failure in this small gap leaves an unproven empty
+		// orphan, which cleanup must retain rather than guess ownership.
+		if err := os.Mkdir(r.Path, 0o755); err != nil {
+			return config.Rig{}, fmt.Errorf("%w: reserving absolute clone destination: %w", configedit.ErrValidation, err)
+		}
+		info, err := os.Lstat(r.Path)
+		if err != nil {
+			return config.Rig{}, err
+		}
+		manifest.CreatedDirIdentity, err = rigCloneDirectoryIdentity(info)
+		if err != nil {
+			return config.Rig{}, err
+		}
+		if err := onManifest(manifest); err != nil {
+			return config.Rig{}, fmt.Errorf("recording external clone ownership; destination retained: %w", err)
 		}
 	}
 
@@ -2989,6 +3018,11 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 		// fence validated, defeating a DNS rebind between the fence and the fetch.
 		cloneOpts.ResolveOverrides = []string{resolveOverride}
 	}
+	if absoluteDestination {
+		if err := assertProvisionedRigDirectory(cs.cityPath, manifest); err != nil {
+			return config.Rig{}, fmt.Errorf("absolute clone ownership changed before fetch: %w", err)
+		}
+	}
 	if err := rigCloneGit(ctx, gitURL, r.Path, cloneOpts); err != nil {
 		// Wrap with rig.ErrCloneFailed so the async failure mapper classifies it
 		// as clone_failed (distinct from provision_failed). git.Clone already
@@ -2996,10 +3030,15 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 		return config.Rig{}, fmt.Errorf("%w: %w", rig.ErrCloneFailed, err)
 	}
 
+	if absoluteDestination {
+		if err := assertProvisionedRigDirectory(cs.cityPath, manifest); err != nil {
+			return config.Rig{}, fmt.Errorf("absolute clone ownership changed during fetch: %w", err)
+		}
+	}
 	// Provision under the guard. The freshly-cloned dir exists (with .git), so
 	// rig.Provision flows it through the git-detect / fresh-add path — git_url
 	// never enters ProvisionRequest, so nothing here can regress the sync path.
-	provisioned, err := cs.provisionRigLocked(r, onStep)
+	provisioned, err := cs.provisionRigLocked(r, false, onStep)
 	if err != nil {
 		return config.Rig{}, err
 	}
@@ -3013,11 +3052,8 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	// Failing a healthy provision on a transient metadata write would destroy a
 	// good rig, so log and continue.
 	if onManifest != nil {
-		if err := onManifest(api.RigProvisionManifest{
-			RigName:    r.Name,
-			CreatedDir: r.Path,
-			DoltDB:     cs.provisionedManagedDoltDatabase(r.Path),
-		}); err != nil {
+		manifest.DoltDB = cs.provisionedManagedDoltDatabase(r.Path)
+		if err := onManifest(manifest); err != nil {
 			log.Printf("api: rig %q provisioned but persisting the post-init manifest failed (non-fatal; forward-reconciled on retry/sweep): %v", r.Name, err)
 		}
 	}
@@ -3150,6 +3186,12 @@ func (cs *controllerState) TeardownPartialRig(ctx context.Context, m api.RigProv
 		ctx = context.Background()
 	}
 	var errs error
+	// Unproven ownership must refuse before even reading external metadata or
+	// deriving a database to drop. No stale manifest may turn a foreign repo
+	// into cleanup input.
+	if err := assertProvisionedRigDirectory(cs.cityPath, m); err != nil {
+		return fmt.Errorf("refusing unproven rig cleanup: %w", err)
+	}
 	// Resolve the managed Dolt DB to drop BEFORE the RemoveAll destroys the
 	// metadata.json it is read from. A provision that failed after Step-13
 	// InitStore minted the managed DB but before the success path recorded it into
@@ -3165,13 +3207,10 @@ func (cs *controllerState) TeardownPartialRig(ctx context.Context, m api.RigProv
 		doltDB = cs.provisionedManagedDoltDatabase(m.CreatedDir)
 	}
 	if m.CreatedDir != "" {
-		// Re-assert city-root containment before the RemoveAll. CreatedDir is read
-		// back from the durable idempotency record by the boot sweep and the
-		// re-clone pre-drop, so a poisoned record (or a future non-contained writer)
-		// must never be able to drive an RemoveAll outside the city root.
-		if err := assertRigPathWithinCity(cs.cityPath, m.CreatedDir); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("refusing to remove rig dir: %w", err))
-		} else if err := os.RemoveAll(m.CreatedDir); err != nil {
+		// Recheck ownership at removal. Legacy contained manifests retain their
+		// containment contract; new absolute clones require exact directory identity
+		// from the durable record, also used by retry pre-drop and boot sweep.
+		if err := removeProvisionedRigDirectory(cs.cityPath, m); err != nil {
 			errs = errors.Join(errs, fmt.Errorf("removing rig dir %s: %w", m.CreatedDir, err))
 		}
 	}
@@ -3254,12 +3293,15 @@ func (cs *controllerState) sweepOrphanRigProvisions(ctx context.Context) error {
 // resolved absolute. onStep, when non-nil, wires rig.Deps.OnStep so the caller can
 // project provisioning progress onto events; nil onStep produces the exact
 // git-blind behavior CreateRig has always had. It returns the provisioned rig.
-func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, detail string, warn bool)) (config.Rig, error) {
+func (cs *controllerState) provisionRigLocked(r config.Rig, adopt bool, onStep func(step, detail string, warn bool)) (config.Rig, error) {
 	// Duplicate-name guard preserving the API's 409-on-existing-name contract.
 	// Without it, Provision's re-add semantics would make same-name+same-path an
 	// idempotent success and same-name+different-path a plain 500. Config-level
 	// re-add idempotency is owned by the C4 request_id state machine.
 	if err := cs.assertRigNameAvailableSnapshot(r.Name); err != nil {
+		return config.Rig{}, err
+	}
+	if err := cs.assertRigPathAvailableSnapshot(r.Path); err != nil {
 		return config.Rig{}, err
 	}
 
@@ -3272,7 +3314,7 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 	if err := cs.withConfigTransaction(func() error {
 		return cs.mutateAndPokeLocked(func() error {
 			var err error
-			provisionedRig, err = cs.provisionRigWrite(r, depOnStep)
+			provisionedRig, err = cs.provisionRigWrite(r, adopt, depOnStep)
 			return err
 		})
 	}); err != nil {
@@ -3291,6 +3333,35 @@ func (cs *controllerState) assertRigNameAvailableSnapshot(name string) error {
 	cs.mu.RUnlock()
 	if rigConfigHasRigNamed(cfg, name) {
 		return fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, name)
+	}
+	return nil
+}
+
+// assertRigPathAvailableSnapshot rejects a second binding of a project before
+// provisioning. The raw-config check in provisionRigWrite is authoritative;
+// this snapshot check also covers rigs contributed by composed configuration.
+func (cs *controllerState) assertRigPathAvailableSnapshot(path string) error {
+	cs.mu.RLock()
+	cfg := cs.cfg
+	cs.mu.RUnlock()
+	return assertRigPathAvailable(cfg, cs.cityPath, path)
+}
+
+// assertRigPathAvailable treats symlink and relative spellings of a registered
+// project as the same binding. The API refuses the conflict with its existing
+// typed 409 vocabulary; CLI re-add semantics remain owned by rig.Provision.
+func assertRigPathAvailable(cfg *config.City, cityPath, path string) error {
+	if cfg == nil || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	resolved := resolveStoreScopeRoot(cityPath, path)
+	for _, existing := range cfg.Rigs {
+		if strings.TrimSpace(existing.Path) == "" {
+			continue
+		}
+		if pathutil.SamePath(resolveStoreScopeRoot(cityPath, existing.Path), resolved) {
+			return fmt.Errorf("%w: rig path %q is already registered as rig %q", configedit.ErrAlreadyExists, path, existing.Name)
+		}
 	}
 	return nil
 }
@@ -3317,7 +3388,7 @@ func rigConfigHasRigNamed(cfg *config.City, name string) bool {
 // mutateAndPokeLocked still commits the rig that was written to disk —
 // returning it would make mutateAndPokeLocked treat the committed rig as
 // "nothing committed" and split-brain disk vs controller.
-func (cs *controllerState) provisionRigWrite(r config.Rig, depOnStep func(rig.ProvisionStep)) (config.Rig, error) {
+func (cs *controllerState) provisionRigWrite(r config.Rig, adopt bool, depOnStep func(rig.ProvisionStep)) (config.Rig, error) {
 	// Load the raw for-edit config (NOT cs.cfg, which is composed/expanded):
 	// writing city.toml from the composed snapshot would bake expansions into the
 	// file.
@@ -3333,6 +3404,12 @@ func (cs *controllerState) provisionRigWrite(r config.Rig, depOnStep func(rig.Pr
 	if rigConfigHasRigNamed(editCfg, r.Name) {
 		return config.Rig{}, fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, r.Name)
 	}
+	// A concurrent create or local CLI edit may not be in cs.cfg yet. Refuse
+	// its canonical path under the same transaction before any store/rig
+	// provisioning can interpret the collision as an untyped adoption error.
+	if err := assertRigPathAvailable(editCfg, cs.cityPath, r.Path); err != nil {
+		return config.Rig{}, err
+	}
 	// Register the city dolt config so the beads-init path can read the
 	// process-global lifecycle fields — but only if absent: the controller owns a
 	// persistent boot-time registration (startBeadsLifecycle) that this per-request
@@ -3346,6 +3423,7 @@ func (cs *controllerState) provisionRigWrite(r config.Rig, depOnStep func(rig.Pr
 
 	resultRig, res, err := rig.Provision(cs.rigProvisionDeps(editCfg, r, depOnStep), rig.ProvisionRequest{
 		Name:          r.Name,
+		Adopt:         adopt,
 		Path:          r.Path,
 		Prefix:        r.Prefix,
 		DefaultBranch: r.DefaultBranch,
@@ -3379,10 +3457,10 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
-		PrepareAdopt: prepareRigAdoptProviderState,
-		ReadStorePrefix: func(p string) (string, error) {
-			return rigAdoptStorePrefix(cs.cityPath, p)
+		ReadStorePrefix: func(path string, readOnly bool) (string, error) {
+			return readRigAdoptStorePrefix(cs.cityPath, path, readOnly)
 		},
+		PrepareAdopt:  prepareRigAdoptProviderState,
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		OnStep:        depOnStep,
@@ -3405,13 +3483,17 @@ func (cs *controllerState) rigPostProvisionLocal(rigName string, pc rig.Provisio
 	if err := ensureGitignoreEntries(fsys.OSFS{}, pc.RigPath, rigGitignoreEntries); err != nil {
 		log.Printf("api: rig create: writing .gitignore: %v", err)
 	}
-	if ih := pc.Cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-		resolver := func(name string) string { return config.BuiltinFamily(name, pc.Cfg.Providers) }
-		if err := hooks.InstallWithResolver(fsys.OSFS{}, cs.cityPath, pc.RigPath, ih, resolver); err != nil {
+	reloadedCfg, _, loadErr := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
+	if loadErr != nil {
+		if err := installRigNonCodexHooks(fsys.OSFS{}, cs.cityPath, pc.RigPath, pc.Cfg); err != nil {
 			log.Printf("api: rig create: installing agent hooks: %v", err)
 		}
+		if rigNeedsCodexHookPreparation(pc.Cfg) {
+			log.Printf("api: rig create: loading agent hook config: %v", loadErr)
+		}
+	} else if err := installRigAgentHooks(fsys.OSFS{}, cs.cityPath, rigName, pc.RigPath, reloadedCfg); err != nil {
+		log.Printf("api: rig create: installing agent hooks: %v", err)
 	}
-	reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cs.cityPath, "city.toml"))
 	if reloadedCfg != nil {
 		layers, ok := reloadedCfg.FormulaLayers.Rigs[rigName]
 		if !ok || len(layers) == 0 {

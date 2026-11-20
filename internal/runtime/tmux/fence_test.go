@@ -394,7 +394,9 @@ func TestStartRelaunchNeverGuardedByCallerFence(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := newFenceModel(nil, fenceEnv(testFence))
-			m.overlay, m.overlayUntil = "Resume from summary\nResume full session as-is\nEnter to confirm", "Enter"
+			// Model the complete startup menu with its safe row already
+			// selected; this test isolates caller-fence handling, not movement.
+			m.overlay, m.overlayUntil = "This session is 1h old\n  1. Resume from summary (recommended)\n❯ 2. Resume full session as-is\n  3. Don't ask me again\nEnter to confirm · Esc to cancel", "Enter"
 			m.screen = staticShellScreen
 			p := fenceModelProvider(m)
 			ctx := runtime.WithInputFence(context.Background(), caller)

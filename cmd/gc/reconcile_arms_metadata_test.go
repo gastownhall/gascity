@@ -136,6 +136,57 @@ func TestDesiredRowIdentityClientProviderChat(t *testing.T) {
 	}
 }
 
+func TestDesiredRowIdentityRefreshPreservesSessionOptionPins(t *testing.T) {
+	provider := optionSchemaProvider()
+	provider.EffectiveDefaults = map[string]string{"model": "opus", "effort": "low"}
+	provider.ResumeFlag = "--resume"
+	provider.ResumeCommand = "/new/claude --resume {{.SessionKey}} --model claude-opus-4-8 --effort low"
+	tp := TemplateParams{
+		TemplateName: "worker", Command: "/new/claude --custom keep --model claude-opus-4-8 --effort low", ResolvedProvider: provider,
+	}
+	info := session.Info{
+		ID: "gc-pinned", Template: "worker", TemplateOverrides: `{"model":"sonnet","effort":"high","initial_message":"not a command flag"}`,
+		Command: "/old/claude --model claude-sonnet-4-6 --effort high",
+	}
+	raw := rowRefreshKeys{"continuation_epoch": "1", "command": info.Command}
+	want := "/new/claude --custom keep --model claude-sonnet-4-6 --effort high"
+	id := desiredRowIdentity(identityCity(), tp, info, raw)
+	if got := id.Meta["command"]; got != want {
+		t.Fatalf("metadata refresh lost session pins or froze stale command: got %q want %q", got, want)
+	}
+	if got, want := id.Meta["resume_command"], "/new/claude --resume {{.SessionKey}} --model claude-sonnet-4-6 --effort high"; got != want {
+		t.Fatalf("resume metadata lost session pins: got %q want %q", got, want)
+	}
+	// Applying the returned metadata must converge even though the configured
+	// template still carries its default option values.
+	for key, value := range id.Meta {
+		raw[key] = value
+	}
+	info = info.ApplyPatch(id.Meta)
+	again := desiredRowIdentity(identityCity(), tp, info, raw)
+	if _, changed := again.Meta["command"]; changed {
+		t.Fatalf("session pins cause repeated command refresh: %v", again.Meta)
+	}
+	if _, changed := again.Meta["resume_command"]; changed {
+		t.Fatalf("session pins cause repeated resume refresh: %v", again.Meta)
+	}
+	// A later provider/config update still refreshes its non-schema arguments;
+	// only the explicit session choices remain pinned.
+	tp.Command = "/next/claude --custom changed --model claude-opus-4-8 --effort low"
+	next := desiredRowIdentity(identityCity(), tp, info, raw)
+	if got, want := next.Meta["command"], "/next/claude --custom changed --model claude-sonnet-4-6 --effort high"; got != want {
+		t.Fatalf("config refresh was frozen: got %q want %q", got, want)
+	}
+	if tp.ResolvedProvider != provider || provider.ResumeCommand != "/new/claude --resume {{.SessionKey}} --model claude-opus-4-8 --effort low" || provider.EffectiveDefaults["model"] != "opus" {
+		t.Fatal("one session's metadata refresh mutated the shared provider defaults")
+	}
+	// A second session without pins uses the fresh configured command.
+	plain := desiredRowIdentity(identityCity(), tp, session.Info{ID: "gc-other", Template: "worker"}, rowRefreshKeys{"continuation_epoch": "1"})
+	if plain.Meta["command"] != tp.Command {
+		t.Fatalf("another session inherited option pins: %v", plain.Meta)
+	}
+}
+
 // Kills an alias write without its history, conflict clear, rebaseline or
 // guarded keys, a conflict recorded every pass, and a guarded key written
 // past a conflict (SESS-717/718): a free alias writes all of them; a

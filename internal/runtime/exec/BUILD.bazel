@@ -67,12 +67,18 @@ go_test(
         "seam_presence_test.go",
         "seams_test.go",
         "server_test.go",
+        "session_script_test.go",
         "startup_ladder_test.go",
         "testenv_import_test.go",
         "v2_conformance_test.go",
     ],
+    data = [
+        "//:go.mod",
+        "//contrib:all_files",
+    ],
     embed = [":exec"],
     deps = [
+        "//internal/bazeltest",
         "//internal/citylayout",
         "//internal/execenv",
         "//internal/pidutil",

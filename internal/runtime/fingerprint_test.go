@@ -382,6 +382,22 @@ func TestCoreFingerprintIncludesOverlayProviderIdentity(t *testing.T) {
 	}
 }
 
+func TestCoreFingerprintIncludesReconcilerOwnedMergeablePaths(t *testing.T) {
+	base := Config{Command: "agent"}
+	owned := Config{Command: "agent", ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json"}}
+	if CoreFingerprint(base) == CoreFingerprint(owned) {
+		t.Fatal("ReconcilerOwnedMergeablePaths should affect the core fingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(base), owned); len(got) != 1 || got[0] != "ReconcilerOwnedMergeablePaths" {
+		t.Fatalf("drift fields = %v, want [ReconcilerOwnedMergeablePaths]", got)
+	}
+	permuted := Config{Command: "agent", ReconcilerOwnedMergeablePaths: []string{".gemini/settings.json", ".codex/hooks.json", ".codex/hooks.json"}}
+	reordered := Config{Command: "agent", ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json", ".gemini/settings.json"}}
+	if CoreFingerprint(permuted) != CoreFingerprint(reordered) {
+		t.Fatal("ownership path fingerprint should be order- and duplicate-insensitive")
+	}
+}
+
 func TestConfigFingerprintIncludesMCPServers(t *testing.T) {
 	a := Config{Command: "claude"}
 	b := Config{
@@ -599,23 +615,24 @@ func TestCoreFingerprintDriftNamesTheMovedField(t *testing.T) {
 // their own name; FingerprintExtra is FPExtra, and the three fields folded into
 // the overlay-providers hash share OverlayProviders.
 var coreFieldBreakdownKey = map[string]string{
-	"Command":              "Command",
-	"Lifecycle":            "Lifecycle",
-	"Upstream":             "Upstream",
-	"OperatorEnv":          "OperatorEnv",
-	"MCPServers":           "MCPServers",
-	"AcceptStartupDialogs": "AcceptStartupDialogs",
-	"MouseOn":              "MouseOn",
-	"SessionSetup":         "SessionSetup",
-	"SessionSetupScript":   "SessionSetupScript",
-	"Env":                  "Env",
-	"FingerprintExtra":     "FPExtra",
-	"PreStart":             "PreStart",
-	"OverlayDir":           "OverlayDir",
-	"CopyFiles":            "CopyFiles",
-	"ProviderName":         "OverlayProviders",
-	"ProviderOverlayName":  "OverlayProviders",
-	"InstallAgentHooks":    "OverlayProviders",
+	"Command":                       "Command",
+	"Lifecycle":                     "Lifecycle",
+	"Upstream":                      "Upstream",
+	"OperatorEnv":                   "OperatorEnv",
+	"MCPServers":                    "MCPServers",
+	"AcceptStartupDialogs":          "AcceptStartupDialogs",
+	"MouseOn":                       "MouseOn",
+	"SessionSetup":                  "SessionSetup",
+	"SessionSetupScript":            "SessionSetupScript",
+	"Env":                           "Env",
+	"FingerprintExtra":              "FPExtra",
+	"PreStart":                      "PreStart",
+	"OverlayDir":                    "OverlayDir",
+	"CopyFiles":                     "CopyFiles",
+	"ReconcilerOwnedMergeablePaths": "ReconcilerOwnedMergeablePaths",
+	"ProviderName":                  "OverlayProviders",
+	"ProviderOverlayName":           "OverlayProviders",
+	"InstallAgentHooks":             "OverlayProviders",
 }
 
 // TestCoreFingerprintDriftNamesEveryCoreField requires every field hashed into
@@ -679,6 +696,7 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 		{Command: "claude", PreStart: []string{"echo hi"}},
 		{Command: "claude", SessionSetup: []string{"set -x"}},
 		{Command: "claude", OverlayDir: "/overlay"},
+		{Command: "claude", ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json"}},
 		{Command: "claude", OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/x"}},
 		{Command: "claude", Upstream: "bedrock"},
 	}
@@ -690,14 +708,15 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 			coreA := CoreFingerprint(a)
 			coreB := CoreFingerprint(b)
 			bdA := CoreFingerprintBreakdown(a)
-			bdB := CoreFingerprintBreakdown(b)
 
 			if coreA == coreB {
 				continue // same core hash, nothing to check
 			}
-			// Core hashes differ — at least one breakdown field must differ,
-			// a field only one side carries included.
-			if len(diffBreakdownFields(bdA.Fields, bdB.Fields)) == 0 {
+			// Core hashes differ — at least one breakdown field must differ, a
+			// field only one side carries included. Use the production diff
+			// helper: optional fields are omitted when unset, so the comparison
+			// is over the union of both sides' keys, not just A's.
+			if len(CoreFingerprintDriftFields(bdA, b)) == 0 {
 				t.Errorf("configs %d vs %d: CoreFingerprint differs but no CoreFingerprintBreakdown field differs", i, j)
 			}
 		}

@@ -81,3 +81,31 @@ lines only; a new integration-only test file costs one sorted record line.
 The shard rule is `i % shard_total == shard_index - 1` in
 `scripts/test-go-test-shard` (`TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux`
 restates it and runs each shard through the real script).
+
+## Native qualification isolates the runtime namespace
+
+A fresh `GC_HOME` and supervisor port do not isolate tmux: its default socket
+uses the city name. `qualify-beginner` must give every run a unique city basename
+and record that runtime socket with its profile. Keep the published command
+checks intact while substituting the owned city destination; never reuse the
+example's `bright-lights` socket on a host with retained cities.
+
+## Authoritative completion proof
+
+The shipped quick-start reviewer proof requires declared fresh=true bead GETs
+for its root, input and materialized actor rows. Capability is not proof:
+preserve actual terminal identity, role, UUID and SHA guards, the caller's
+absolute deadline and typed warming503 read policy. Refuse undeclared or
+query-ignoring data without CLI or cached fallback. These point reads do not
+provide a cross-store atomic snapshot.
+
+Dashboard generation stages both raw dist assets and the compressed embedded
+bundle. A passing working-tree build must not leave the production embedding
+outside the commit; the real-hook index regression covers both outputs.
+
+## Build metadata synchronization
+
+- **BUILD files.** After changing imports or adding packages or files, run
+  `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
+  fails otherwise. Never commit machine-specific endpoints; they belong in
+  `.bazelrc.local`.

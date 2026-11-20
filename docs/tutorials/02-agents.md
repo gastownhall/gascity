@@ -1,15 +1,49 @@
 ---
 title: Tutorial 02 - Agents
 sidebarTitle: 02 - Agents
-description: Define agents and use them to execute work.
+description: Use the default workers to deliver a reusable API in the same practice repository.
 ---
+
+## Submit the API lesson
+
+Start from the completed [quickstart](/getting-started/quickstart) in
+`~/bright-lights`. Keep its `practice` rig and selected provider.
+
+```bash
+cd ~/bright-lights
+gc agent list
+gc gc tutorial start --lesson api
+```
+
+An **agent** is a configured worker role. The default pack supplies the run
+operator, implementation worker and independent reviewer. The orchestrator
+starts sessions for their ready work and lets them stop after it drains.
+
+The API lesson adds `greeting_parts(name)` to the existing `hello.py`, preserving
+`greet` and its tests. It returns a dictionary containing the normalized name
+and greeting message. The tutorial prints the source task ID and the accepted
+input commit from the greeting lesson. Keep that ID for inspection.
+
+The same delivery method handles implementation, independent review, tests,
+at most two repairs, local integration and cleanup. Repeating the start command
+reuses the lesson's source task. It does not reset your repository.
+
+Continue to [Sessions](/tutorials/03-sessions) while the API work runs.
+
+## Custom configuration exercise
+
+For an independent configuration exercise, expand the walkthrough below. It
+uses its own `my-city`, `my-project` and explicitly configured agents. The
+numbered configuration exercises share that separate setup with one another.
+
+<Accordion title="Build and customize your own configuration">
 
 An implicit agent like `claude` or `codex` is unconfigured: no custom prompt,
 adopting its provider's name, running the raw provider. This tutorial defines a
 custom agent with its own role and prompt, then slings work to it.
 
 You should have `my-city` running with `my-project` rigged (from
-[Tutorial 01](/tutorials/01-cities-and-rigs)).
+[Tutorial 01](/tutorials/01-cities-and-rigs#custom-configuration-exercise)).
 
 ## Defining an agent
 
@@ -176,7 +210,7 @@ No findings.
 ```
 
 Direct delivery suits fire-and-forget work. To watch an agent run or talk to one
-directly, you need a session — see [the next tutorial](/tutorials/03-sessions).
+directly, you need a session — see [the next tutorial](/tutorials/03-sessions#custom-configuration-exercise).
 
 ## What's next
 
@@ -185,9 +219,11 @@ provider, and slung work to it directly. From here:
 
 - **[The six primitives](/getting-started/how-gas-city-works)** — the canonical model agents,
   sessions, and work all build on
-- **[Sessions](/tutorials/03-sessions)** — session lifecycle, sleep/wake,
+- **[Sessions](/tutorials/03-sessions#custom-configuration-exercise)** — session lifecycle, sleep/wake,
   suspension, named sessions
-- **[Formulas](/tutorials/05-formulas)** — how multi-step work should be
+- **[Formulas](/tutorials/05-formulas#custom-configuration-exercise)** — how multi-step work should be
   done: steps, dependencies, and variables
-- **[Beads](/tutorials/06-beads)** — the unit of work; every task, message, and
+- **[Beads](/tutorials/06-beads#custom-configuration-exercise)** — the unit of work; every task, message, and
   convoy member is a bead
+
+</Accordion>

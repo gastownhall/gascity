@@ -1115,7 +1115,7 @@ func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", settingsPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+	got := stageHookFiles(nil, cityDir, workDir, cityDir, []string{"claude"})
 	for _, entry := range got {
 		// City-root-relative hook: no workDir prefix in RelDst.
 		if entry.RelDst == path.Join(".gc", "settings.json") {
@@ -1147,7 +1147,7 @@ func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", hookPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+	got := stageHookFiles(nil, cityDir, workDir, cityDir, []string{"claude"})
 	for _, entry := range got {
 		if entry.RelDst == path.Join("hooks", "claude.json") {
 			if entry.Src != hookPath {
@@ -1181,13 +1181,13 @@ func TestRuntimeSettingsContentChangeDoesNotCascadeStaleSession(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(`{"hooks":{"v1":true}}`), 0o644); err != nil {
 		t.Fatalf("WriteFile v1: %v", err)
 	}
-	before := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+	before := stageHookFiles(nil, cityDir, workDir, cityDir, []string{"claude"})
 
 	// Simulate binary upgrade: rewrite settings with new embedded defaults.
 	if err := os.WriteFile(settingsPath, []byte(`{"hooks":{"v2":true}}`), 0o644); err != nil {
 		t.Fatalf("WriteFile v2: %v", err)
 	}
-	after := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+	after := stageHookFiles(nil, cityDir, workDir, cityDir, []string{"claude"})
 
 	// Locate the settings entry in both results.
 	settingsRel := path.Join(".gc", "settings.json")
@@ -1228,7 +1228,7 @@ func TestStageHookFilesDoesNotStageClaudeSkillsDir(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", skillPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+	got := stageHookFiles(nil, cityDir, workDir, cityDir, []string{"claude"})
 	wantRelDst := path.Join("worker", ".claude", "skills")
 	for _, entry := range got {
 		if entry.RelDst == wantRelDst {
@@ -1248,7 +1248,7 @@ func TestStageHookFilesSkipsUnrequestedWorkDirHooks(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", hookPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+	got := stageHookFiles(nil, cityDir, workDir, cityDir, []string{"claude"})
 	for _, entry := range got {
 		if entry.RelDst == path.Join("worker", ".gemini", "settings.json") {
 			t.Fatalf("stageHookFiles() staged unrequested hook %q", entry.Src)
@@ -1267,7 +1267,7 @@ func TestStageHookFilesIncludesAntigravityHooks(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", hookPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir, []string{"antigravity"})
+	got := stageHookFiles(nil, cityDir, workDir, cityDir, []string{"antigravity"})
 	for _, entry := range got {
 		if entry.RelDst == path.Join("worker", ".agents", "hooks.json") {
 			if entry.Src != hookPath {
@@ -1296,7 +1296,7 @@ func TestStageHookFilesIncludesMimoCodeHooks(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", hookPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir, []string{"mimocode"})
+	got := stageHookFiles(nil, cityDir, workDir, cityDir, []string{"mimocode"})
 	for _, entry := range got {
 		if entry.RelDst == path.Join("worker", ".mimocode", "plugin", "gascity.js") {
 			if entry.Src != hookPath {
@@ -1328,7 +1328,7 @@ func TestStageHookFilesIncludesKimiHooks(t *testing.T) {
 		}
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir, []string{"kimi"})
+	got := stageHookFiles(nil, cityDir, workDir, cityDir, []string{"kimi"})
 	want := map[string]string{
 		path.Join("worker", ".kimi", "config.toml"):                       configPath,
 		path.Join("worker", ".kimi", "hooks", "gascity-session-start.py"): scriptPath,

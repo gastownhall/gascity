@@ -30,6 +30,14 @@ func newTestProvider(t *testing.T) *Provider {
 	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
 }
 
+func TestSeamBackedPreservesReconcilerOwnershipCapability(t *testing.T) {
+	provider := NewSeamBackedWithDir(filepath.Join(shortTempDir(t), "socks"))
+	capability, ok := provider.(runtime.ReconcilerOwnedMergeablePathProvider)
+	if !ok || !capability.SupportsReconcilerOwnedMergeablePaths() {
+		t.Fatal("seam-backed subprocess provider must preserve reconciler ownership capability")
+	}
+}
+
 func TestSeamScanScopeForwarding(t *testing.T) {
 	raw := newTestProvider(t)
 	var got []string

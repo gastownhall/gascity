@@ -61,6 +61,9 @@ func (s *groupService) EnsureGroup(ctx context.Context, caller Caller, input Ens
 		return ConversationGroupRecord{}, fmt.Errorf("%w: invalid group mode %q", ErrInvalidInput, input.Mode)
 	}
 	defaultHandle := normalizeHandle(input.DefaultHandle)
+	if input.SettingsUpdate != nil && input.SettingsUpdate.DefaultHandle != nil {
+		defaultHandle = normalizeHandle(*input.SettingsUpdate.DefaultHandle)
+	}
 	lastHandle := normalizeHandle(input.LastAddressedHandle)
 	title := conversationTitle(ref)
 	fields := encodeMetadataFields(input.Metadata, map[string]string{
@@ -102,11 +105,40 @@ func (s *groupService) EnsureGroup(ctx context.Context, caller Caller, input Ens
 			if !sameConversationRef(record.RootConversation, ref) {
 				continue
 			}
-			if err := s.store.Update(item.ID, beads.UpdateOpts{Title: &title}); err != nil {
-				return fmt.Errorf("update group title: %w", err)
+			if input.SettingsUpdate != nil {
+				// The HTTP metadata upsert cannot specify fanout policy. Preserve
+				// it here, under the same group lock as the update, rather than
+				// read it in the handler and race a full settings upsert.
+				for _, key := range []string{"fanout_enabled", "fanout_allow_untargeted", "fanout_max_peer_triggered_publishes", "fanout_max_total_peer_deliveries"} {
+					delete(fields, key)
+				}
+				if input.SettingsUpdate.DefaultHandle == nil {
+					delete(fields, "default_handle")
+				}
 			}
-			if err := s.store.SetMetadataBatch(item.ID, fields); err != nil {
-				return fmt.Errorf("update group metadata: %w", err)
+			// EnsureGroup is also used to persist application metadata. Avoid
+			// turning an unchanged upsert into multiple native store writes,
+			// and send only changed fields so unrelated metadata stays owned
+			// by its existing writer. Missing fields still need backfilling.
+			changed := make(map[string]string)
+			for key, value := range fields {
+				if previous, exists := item.Metadata[key]; !exists || previous != value {
+					changed[key] = value
+				}
+			}
+			if item.Title == title && len(changed) == 0 {
+				out = record
+				return nil
+			}
+			if item.Title != title {
+				if err := s.store.Update(item.ID, beads.UpdateOpts{Title: &title}); err != nil {
+					return fmt.Errorf("update group title: %w", err)
+				}
+			}
+			if len(changed) != 0 {
+				if err := s.store.SetMetadataBatch(item.ID, changed); err != nil {
+					return fmt.Errorf("update group metadata: %w", err)
+				}
 			}
 			updated, err := s.store.Get(item.ID)
 			if err != nil {

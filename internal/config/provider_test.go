@@ -971,7 +971,7 @@ func TestProviderSessionCreateTransportBuiltinGolden(t *testing.T) {
 		"auggie":      {"", "auggie --allow-indexing"},
 		"cerebras":    {"acp", "opencode acp --model cerebras/gpt-oss-120b"},
 		"claude":      {"", "claude --dangerously-skip-permissions --effort max"},
-		"codex":       {"", "codex --dangerously-bypass-approvals-and-sandbox"},
+		"codex":       {"", "codex --no-daemon --dangerously-bypass-approvals-and-sandbox"},
 		"copilot":     {"", "copilot --yolo --no-ask-user"},
 		"cursor":      {"", "cursor-agent -f --trust"},
 		"gemini":      {"", "gemini --approval-mode yolo"},
