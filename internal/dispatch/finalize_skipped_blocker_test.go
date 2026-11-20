@@ -163,6 +163,35 @@ func TestProcessWorkflowFinalizeNonPassWritesNoSkipMarker(t *testing.T) {
 	})
 }
 
+// The marker rides the root close's existing metadata write: a pass with
+// skipped blockers costs no more store calls than a pass without them (the
+// blocker scan already read every blocker), matching the pinned
+// workflow-finalize budgets in call_budget_test.go.
+func TestProcessWorkflowFinalizeSkipMarkerCostsNoStoreCall(t *testing.T) {
+	t.Parallel()
+
+	run := func(outcomes []string) (int, int) {
+		counting := &callCountingStore{Store: beads.NewMemStore()}
+		_, finalizer := finalizeBlockersFixture(t, counting, nil, outcomes)
+		counting.reset()
+		result, err := ProcessControl(beadstest.Graph(counting), finalizer, ProcessOptions{Work: beadstest.Work(counting)})
+		if err != nil {
+			t.Fatalf("ProcessControl(outcomes %v): %v", outcomes, err)
+		}
+		if !result.Processed || result.Action != "workflow-pass" {
+			t.Fatalf("outcomes %v: result = %+v, want processed workflow-pass", outcomes, result)
+		}
+		return counting.reads, counting.writes
+	}
+
+	markedReads, markedWrites := run([]string{"skipped", "pass", "skipped"})
+	cleanReads, cleanWrites := run([]string{"pass", "pass", "pass"})
+	if markedReads != cleanReads || markedWrites != cleanWrites {
+		t.Fatalf("workflow-finalize with skipped blockers made %d reads / %d writes, all-passed made %d / %d; the marker must ride the existing close write",
+			markedReads, markedWrites, cleanReads, cleanWrites)
+	}
+}
+
 // The close-metadata helper is the marker's only gate: pass with skips adds
 // the key, everything else is the one-key outcome map setOutcomeAndClose
 // writes.
