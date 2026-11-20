@@ -37,6 +37,30 @@ func TestEnsureProjectIDCmdRequiresCityFlag(t *testing.T) {
 	}
 }
 
+// An explicitly empty --port is a managed caller's bug, not a request to
+// resolve the endpoint from the provider-owned binding; it must fail loudly.
+func TestEnsureProjectIDCmdEmptyPortFailsLoud(t *testing.T) {
+	scope := t.TempDir()
+	metadataPath := writeProjectIDMetadataFile(t, scope, "")
+	var stdout, stderr bytes.Buffer
+	cmd := newEnsureProjectIDCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{
+		"--city", scope,
+		"--metadata", metadataPath,
+		"--port", "",
+		"--database", "hq",
+	})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("ensure-project-id with empty --port succeeded; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "missing port") {
+		t.Fatalf("ensure-project-id stderr = %q, want missing port", stderr.String())
+	}
+}
+
 func TestResolveProviderOwnedProjectIdentityTarget(t *testing.T) {
 	clearProxyEnvironment := func(t *testing.T) {
 		t.Helper()

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -623,6 +624,112 @@ printf '%s\n' "$@" > "$capture_dir/gc-args"
 				t.Fatalf("gc helper args = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// A direct/external socket init hands bd --server-socket, so identity
+// reconciliation must use the persisted socket binding rather than forwarding
+// an inherited GC_DOLT_PORT as a TCP endpoint.
+func TestGcBeadsBdProviderOwnedSocketInitIgnoresInheritedTCPPort(t *testing.T) {
+	cityDir := t.TempDir()
+	scopeDir := filepath.Join(cityDir, "rigs", "provider")
+	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	captureDir := t.TempDir()
+	bdPath := writeNamedTestScript(t, "provider-owned-socket-bd.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+printf '%s\n' "$@" > "$capture_dir/bd-args"
+scope=""
+for arg in "$@"; do scope="$arg"; done
+mkdir -p "$scope/.beads"
+printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"provider_db","dolt_server_socket":"%s"}\n' "$BEADS_DOLT_SERVER_SOCKET" > "$scope/.beads/metadata.json"
+`)
+	gcPath := writeNamedTestScript(t, "provider-owned-socket-gc-helper.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+if [ "${1:-} ${2:-}" != "dolt-state ensure-project-id" ]; then
+  echo "unexpected gc helper command: $*" >&2
+  exit 64
+fi
+shift 2
+printf '%s\n' "$@" > "$capture_dir/gc-args"
+`)
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityDir,
+		"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
+		"GC_BIN="+gcPath,
+		"BD_BIN="+bdPath,
+		"GC_BEADS_PROVIDER_OWNED=1",
+		"GC_BEADS_TRANSPORT=direct",
+		"GC_BEADS_TARGET=external",
+		"BEADS_DOLT_SERVER_SOCKET=/run/dolt/x.sock",
+		"GC_DOLT_PORT=3344",
+	)
+	out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, "px", "provider_db")
+	if err != nil {
+		t.Fatalf("provider-owned socket init: %v\n%s", err, out)
+	}
+	bdArgs, err := os.ReadFile(filepath.Join(captureDir, "bd-args"))
+	if err != nil {
+		t.Fatalf("read bd args: %v", err)
+	}
+	if !slices.Contains(strings.Split(strings.TrimSpace(string(bdArgs)), "\n"), "--server-socket") {
+		t.Fatalf("bd args = %q, want --server-socket", bdArgs)
+	}
+	gcArgs, err := os.ReadFile(filepath.Join(captureDir, "gc-args"))
+	if err != nil {
+		t.Fatalf("read gc args: %v", err)
+	}
+	for _, arg := range strings.Split(strings.TrimSpace(string(gcArgs)), "\n") {
+		if arg == "--host" || arg == "--port" {
+			t.Fatalf("gc helper received TCP endpoint arg %q for socket init: %q", arg, gcArgs)
+		}
+	}
+}
+
+// gc's ProviderRoot must resolve the proxy root under the same shared-server
+// opt-out bd ran under, so an inherited BEADS_DOLT_SHARED_SERVER=1 cannot send
+// identity reconciliation to a different root than the one bd initialized.
+func TestGcBeadsBdProviderOwnedProxiedInitPinsSharedServerForIdentity(t *testing.T) {
+	cityDir := t.TempDir()
+	scopeDir := filepath.Join(cityDir, "rigs", "provider")
+	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	captureDir := t.TempDir()
+	bdPath := writeNamedTestScript(t, "provider-owned-shared-bd.sh", `#!/bin/sh
+set -eu
+scope=""
+for arg in "$@"; do scope="$arg"; done
+mkdir -p "$scope/.beads"
+printf '{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"provider_db"}\n' > "$scope/.beads/metadata.json"
+`)
+	gcPath := writeNamedTestScript(t, "provider-owned-shared-gc-helper.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+if [ "${1:-} ${2:-}" != "dolt-state ensure-project-id" ]; then
+  echo "unexpected gc helper command: $*" >&2
+  exit 64
+fi
+printf '%s\n' "${BEADS_DOLT_SHARED_SERVER:-}" > "$capture_dir/shared-server"
+`)
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityDir,
+		"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
+		"GC_BIN="+gcPath,
+		"BD_BIN="+bdPath,
+		"GC_BEADS_PROVIDER_OWNED=1",
+		"GC_BEADS_TRANSPORT=proxied",
+		"GC_BEADS_TARGET=local",
+		"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
+		"BEADS_DOLT_SHARED_SERVER=1",
+	)
+	out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, "px", "provider_db")
+	if err != nil {
+		t.Fatalf("provider-owned proxied init: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(filepath.Join(captureDir, "shared-server"))
+	if err != nil {
+		t.Fatalf("read gc helper shared-server env: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "0" {
+		t.Fatalf("gc helper BEADS_DOLT_SHARED_SERVER = %q, want 0", got)
 	}
 }
 

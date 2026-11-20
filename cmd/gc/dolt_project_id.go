@@ -81,13 +81,15 @@ func newEnsureProjectIDCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short:  "Ensure local metadata and the Dolt metadata table share a project identity",
 		Hidden: true,
 		Args:   cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			rec, closeRecorder := openProjectIdentityEventRecorder(cityPath, stderr)
 			defer closeRecorder()
 			target := contract.DoltConnectionTarget{
 				Host: host, Port: port, User: user, Database: database,
 			}
-			if strings.TrimSpace(port) == "" {
+			// An omitted --port means "resolve from the binding bd persisted";
+			// an explicitly empty --port still fails loudly as a missing port.
+			if !cmd.Flags().Changed("port") {
 				var err error
 				target, err = resolveProviderOwnedProjectIdentityTarget(metadataPath, cityPath, database, user)
 				if err != nil {
@@ -234,6 +236,9 @@ func resolveLocalProxiedProjectIdentityTarget(scopeRoot string, target contract.
 	}
 	endpoint := proxyendpoint.Inspect(root, processTable)
 	if !endpoint.Verdict.Live() {
+		if endpoint.Err == nil {
+			return contract.DoltConnectionTarget{}, fmt.Errorf("provider-owned proxy endpoint %s is not live (%s)", root, endpoint.Verdict)
+		}
 		return contract.DoltConnectionTarget{}, fmt.Errorf("provider-owned proxy endpoint %s is not live (%s): %w", root, endpoint.Verdict, endpoint.Err)
 	}
 	target.Host = proxyendpoint.Host
