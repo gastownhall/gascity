@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRepoCacheKeyDeterministic(t *testing.T) {
@@ -531,4 +532,80 @@ func TestDefaultRunGitFailureKeepsDiagnostics(t *testing.T) {
 			t.Errorf("error = %q, want it to name git rev-parse HEAD", err)
 		}
 	})
+}
+
+// TestCachedRepoDirtyIgnoresStatOnlyRewrite covers the stat-cache claim of
+// PR #8723: a tracked file re-rendered with byte-identical content but a new
+// inode and mtime reads clean through a single status call, with no index
+// refresh, while real content changes still read dirty.
+func TestCachedRepoDirtyIgnoresStatOnlyRewrite(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	rewriteFormula := func(t *testing.T, dir string) {
+		t.Helper()
+		formula := filepath.Join(dir, "formulas", "build.toml")
+		tmp := formula + ".tmp"
+		if err := os.WriteFile(tmp, []byte("formula = \"build\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, formula); err != nil {
+			t.Fatal(err)
+		}
+		future := time.Now().Add(2 * time.Hour)
+		if err := os.Chtimes(formula, future, future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name      string
+		setup     func(t *testing.T, dir string)
+		wantDirty bool
+	}{
+		{name: "writable index", setup: rewriteFormula},
+		{name: "held index lock", setup: func(t *testing.T, dir string) {
+			rewriteFormula(t, dir)
+			writeFixtureFile(t, dir, ".git/index.lock", "", 0o644)
+		}},
+		{name: "optional locks disabled", setup: func(t *testing.T, dir string) {
+			rewriteFormula(t, dir)
+			t.Setenv("GIT_OPTIONAL_LOCKS", "0")
+		}},
+		{name: "modified tracked file", wantDirty: true, setup: func(t *testing.T, dir string) {
+			writeFixtureFile(t, dir, "formulas/build.toml", "formula = \"changed\"\n", 0o644)
+		}},
+		{name: "untracked file", wantDirty: true, setup: func(t *testing.T, dir string) {
+			writeFixtureFile(t, dir, "extra.txt", "extra\n", 0o644)
+		}},
+		{name: "ignored artifact", setup: func(t *testing.T, dir string) {
+			writeFixtureFile(t, dir, "__pycache__/x.pyc", "bytecode", 0o644)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useNeutralGitTestEnv(t)
+			dir := t.TempDir()
+			seedCacheRepo(t, dir)
+			tc.setup(t, dir)
+
+			var calls []string
+			prev := runGit
+			runGit = func(dir string, args ...string) (string, error) {
+				calls = append(calls, strings.Join(args, " "))
+				return defaultRunGit(dir, args...)
+			}
+			t.Cleanup(func() { runGit = prev })
+
+			dirty, err := cachedRepoDirty(dir)
+			if err != nil {
+				t.Fatalf("cachedRepoDirty: %v", err)
+			}
+			if dirty != tc.wantDirty {
+				t.Errorf("cachedRepoDirty = %v, want %v", dirty, tc.wantDirty)
+			}
+			if want := []string{"status --porcelain"}; !reflect.DeepEqual(calls, want) {
+				t.Errorf("git calls = %q, want %q", calls, want)
+			}
+		})
+	}
 }
