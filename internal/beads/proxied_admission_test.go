@@ -2937,3 +2937,60 @@ func TestProxiedOpenUnmovedNamesWhyTheWindowCouldNotAttribute(t *testing.T) {
 		})
 	}
 }
+
+// TestProxiedOpenUnmovedChecksTheIgnoredPlaneOfAForeignWindow closes the gap
+// the attribution opened.
+//
+// The ignored-plane check ran only when HEAD did not move — a foreign window
+// (a move attributed to another bd client) returned nil before the plane was
+// ever looked at. But the window attributes the MOVE; it says nothing about
+// the plane, because the dolt_ignore'd plane never commits and dolt_log
+// cannot see it. A foreign move over a plane the next writable open replays
+// is exactly the database E-S4 refuses, with gc's read handle on it.
+func TestProxiedOpenUnmovedChecksTheIgnoredPlaneOfAForeignWindow(t *testing.T) {
+	pin := Pin{admitted: true, database: "beads", head: "abc123", cursors: pinnedCursors()}
+	foreign := func() *proxyendpoint.PostOpenWindow {
+		return &proxyendpoint.PostOpenWindow{
+			Commits: []string{"bd: update ga-1"},
+			Tables:  []proxyendpoint.WindowTable{{Name: "issues"}},
+		}
+	}
+
+	t.Run("a foreign move over a limited plane still refuses", func(t *testing.T) {
+		observed := proxyendpoint.PostOpenReport{
+			Head: "def456", IgnoredCursorTable: true,
+			Reality: proxyendpoint.CursorReality{
+				Limited: true, Floor: proxyendpoint.IgnoredSentinelColumnFloor, Missing: "leases.granted_node",
+			},
+			Window: foreign(),
+		}
+		err := ProxiedOpenUnmoved(pin, observed)
+		verdict, typed := ProxiedVerdictOf(err)
+		if !typed || verdict.Verdict != ProxiedVerdictHeadMoved {
+			t.Fatalf("err = %v, want head_moved: the window attributes the MOVE, not the plane, and this plane is one the next writable open replays", err)
+		}
+		if verdict.Terminal() {
+			t.Error("the plane arm must stay non-terminal, like the verdict it shares")
+		}
+		for _, want := range []string{"ignored plane", "cursor at 11", fmt.Sprint(SchemaCursorIgnored)} {
+			if !strings.Contains(verdict.Detail, want) {
+				t.Errorf("the verdict detail lacks %q: %s", want, verdict.Detail)
+			}
+		}
+	})
+
+	t.Run("a vanished cursor table under a foreign move still refuses", func(t *testing.T) {
+		observed := proxyendpoint.PostOpenReport{Head: "def456", Window: foreign()}
+		err := ProxiedOpenUnmoved(pin, observed)
+		if verdict, typed := ProxiedVerdictOf(err); !typed || verdict.Verdict != ProxiedVerdictHeadMoved {
+			t.Fatalf("err = %v, want head_moved for the vanished cursor table", err)
+		}
+	})
+
+	t.Run("a foreign move over a healthy plane admits", func(t *testing.T) {
+		observed := proxyendpoint.PostOpenReport{Head: "def456", IgnoredCursorTable: true, Window: foreign()}
+		if err := ProxiedOpenUnmoved(pin, observed); err != nil {
+			t.Fatalf("a foreign move over a healthy plane was refused: %v", err)
+		}
+	})
+}

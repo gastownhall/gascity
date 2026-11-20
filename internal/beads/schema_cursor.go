@@ -336,9 +336,12 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 			return NewProxiedVerdictError(ProxiedVerdictHeadMoved, movedHeadDetail(pin.Database(), before, after, evidence), nil)
 		}
 		// A foreign window: the move is another bd client's, named by evidence
-		// gc read off the window between the two hashes. The open stands; the
-		// caller logs the attribution at DEBUG (proxied_incident_log.go).
-		return nil
+		// gc read off the window between the two hashes. The open stands —
+		// for the MOVE. The ignored plane below still gets its check, because
+		// the window attributes the move and says nothing about the plane:
+		// the dolt_ignore'd plane never commits, so dolt_log cannot see it,
+		// and a foreign move over a plane the next writable open replays is
+		// exactly the database E-S4 refuses.
 	}
 	admitted := pin.Cursors().Ignored
 	if now := observed.EffectiveIgnored(admitted); now != admitted {
