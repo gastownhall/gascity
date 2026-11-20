@@ -3724,16 +3724,23 @@ func loadLiveNudgeFenceSessionIDsFromCity(cityPath string) map[string]struct{} {
 }
 
 // sessionHoldsNudgeFence reports whether a session still occupies its seat
-// for nudge-fence purposes. Drained, archived, failed-create, and closed
-// sessions are superseded: their queued nudges may rebind to a successor.
-// Asleep, draining, and quarantined sessions still own their fence so a
-// concurrent sibling (or an in-flight drain) is not stolen.
+// for nudge-fence purposes. Closed, archived, and failed-create sessions are
+// superseded, and so is a retired drained session (raw MetadataState
+// "drained", or "asleep" with SleepReason "drained", which the codec decodes
+// as asleep) that the reconciler will not wake in place
+// (isRetiredDrainedSessionInfo): their queued nudges may rebind to a
+// successor. Every other session, including asleep for any other reason,
+// draining, quarantined, and a drained always-mode named session, still owns
+// its fence so a concurrent sibling (or an in-flight drain) is not stolen.
 func sessionHoldsNudgeFence(info session.Info) bool {
 	if info.Closed || strings.TrimSpace(info.ID) == "" {
 		return false
 	}
+	if isRetiredDrainedSessionInfo(info) {
+		return false
+	}
 	switch info.State {
-	case session.StateDrained, session.StateArchived, session.StateFailedCreate:
+	case session.StateArchived, session.StateFailedCreate:
 		return false
 	default:
 		return true
