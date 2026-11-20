@@ -688,7 +688,7 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				return false, res.err
 			}
 			if workflowEventRelevant(res.evt) {
-				if selfUsable && res.evt.Actor == selfActor {
+				if selfUsable && res.evt.AttributionActor() == selfActor {
 					// Our own emission. drainWorkflowServeWork already loops
 					// until no control bead is processed, so nothing
 					// discoverable from this loop's own writes can be missed by

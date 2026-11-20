@@ -104,7 +104,7 @@ the failure object carries the code.
 			}
 			submitted := false
 			if jsonOut {
-				submitted = cmdEventEmitSubmitted(args[0], subject, message, effectiveActor, finalPayload, stderr)
+				submitted = cmdEventEmitSubmitted(args[0], subject, message, actor, finalPayload, stderr)
 				return writeCLIJSONLineOrErr(stdout, stderr, "gc event emit", eventEmitJSONResult{
 					SchemaVersion: "1",
 					OK:            true,
@@ -116,7 +116,7 @@ the failure object carries the code.
 					Submitted:     submitted,
 				})
 			}
-			if cmdEventEmit(args[0], subject, message, effectiveActor, finalPayload, stderr) != 0 {
+			if cmdEventEmit(args[0], subject, message, actor, finalPayload, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -358,15 +358,19 @@ func cmdEventEmitSubmitted(eventType, subject, message, actor, payload string, s
 // doEventEmit is the pure logic for "gc event emit". Accepts the provider
 // directly for testability. Best-effort: never fails.
 func doEventEmit(ep events.Provider, eventType, subject, message, actor, payload string, stderr io.Writer) bool {
-	if actor == "" {
-		actor = eventActor()
+	// A CLI write has no verified identity, so the event's actor is unknown and
+	// the flag or env identity is recorded as a claim only (gascity#9180).
+	claimed := strings.TrimSpace(actor)
+	if claimed == "" {
+		claimed = envEventActorClaim()
 	}
 
 	e := events.Event{
-		Type:    eventType,
-		Actor:   actor,
-		Subject: subject,
-		Message: message,
+		Type:         eventType,
+		Actor:        events.UnknownActor,
+		ClaimedActor: claimed,
+		Subject:      subject,
+		Message:      message,
 	}
 	if payload != "" {
 		if !json.Valid([]byte(payload)) {

@@ -45,8 +45,11 @@ func TestDoEventEmitSuccess(t *testing.T) {
 	if e.Message != "Build Tower of Hanoi" {
 		t.Errorf("Message = %q, want %q", e.Message, "Build Tower of Hanoi")
 	}
-	if e.Actor != "mayor" {
-		t.Errorf("Actor = %q, want %q", e.Actor, "mayor")
+	if e.Actor != events.UnknownActor {
+		t.Errorf("Actor = %q, want %q (CLI writes carry no verified identity)", e.Actor, events.UnknownActor)
+	}
+	if e.ClaimedActor != "mayor" {
+		t.Errorf("ClaimedActor = %q, want %q", e.ClaimedActor, "mayor")
 	}
 	if e.Seq != 1 {
 		t.Errorf("Seq = %d, want 1", e.Seq)
@@ -67,9 +70,12 @@ func TestDoEventEmitDefaultActor(t *testing.T) {
 	if len(evts) != 1 {
 		t.Fatalf("len(events) = %d, want 1", len(evts))
 	}
-	// Default actor when GC_AGENT is not set.
-	if evts[0].Actor != "human" {
-		t.Errorf("Actor = %q, want %q", evts[0].Actor, "human")
+	// No identity in env or flag: unverified and unclaimed, never "human".
+	if evts[0].Actor != events.UnknownActor {
+		t.Errorf("Actor = %q, want %q", evts[0].Actor, events.UnknownActor)
+	}
+	if evts[0].ClaimedActor != "" {
+		t.Errorf("ClaimedActor = %q, want empty (no claim made)", evts[0].ClaimedActor)
 	}
 }
 
@@ -86,8 +92,11 @@ func TestDoEventEmitGCAgentEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if evts[0].Actor != "worker" {
-		t.Errorf("Actor = %q, want %q (from GC_AGENT)", evts[0].Actor, "worker")
+	if evts[0].ClaimedActor != "worker" {
+		t.Errorf("ClaimedActor = %q, want %q (from GC_AGENT)", evts[0].ClaimedActor, "worker")
+	}
+	if evts[0].Actor != events.UnknownActor {
+		t.Errorf("Actor = %q, want %q", evts[0].Actor, events.UnknownActor)
 	}
 }
 
@@ -104,8 +113,11 @@ func TestDoEventEmitPrefersAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if evts[0].Actor != "mayor" {
-		t.Errorf("Actor = %q, want %q (from GC_ALIAS)", evts[0].Actor, "mayor")
+	if evts[0].ClaimedActor != "mayor" {
+		t.Errorf("ClaimedActor = %q, want %q (from GC_ALIAS)", evts[0].ClaimedActor, "mayor")
+	}
+	if evts[0].Actor != events.UnknownActor {
+		t.Errorf("Actor = %q, want %q", evts[0].Actor, events.UnknownActor)
 	}
 }
 
