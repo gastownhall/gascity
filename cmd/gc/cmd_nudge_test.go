@@ -9005,3 +9005,97 @@ func TestNudgeSessionStartOwnedByReconciler(t *testing.T) {
 		})
 	}
 }
+
+// TestDeliverSessionNudgeWaitIdleGrokQueuesBusyWithoutBlocking mirrors the
+// claude-family busy short-circuit for grok: a wait-idle nudge to a busy
+// non-ACP grok seat is queued at once with the no-idle-boundary reason and
+// the caller never enters the worker's blocking WaitForIdle. Wait-idle
+// delivery went live for grok with runtime.WaitIdleLiveFamilies, so the CLI
+// must not stall the way claude's once did (gco-90ui) (AC-8).
+func TestDeliverSessionNudgeWaitIdleGrokQueuesBusyWithoutBlocking(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.SetActivity("sess-worker", time.Now()) // pane is repainting
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	fake.WaitForIdleErrors["sess-worker"] = nil
+	fake.WaitForIdleGates["sess-worker"] = gate
+	fake.WaitForIdleStarted["sess-worker"] = started
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "grok", BuiltinAncestor: "grok"},
+		sessionName: "sess-worker",
+	}
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+	}()
+	var code int
+	select {
+	case code = <-done:
+	case <-started:
+		release()
+		code = <-done
+		t.Errorf("caller entered the blocking WaitForIdle for a busy grok target")
+	case <-time.After(10 * time.Second):
+		release()
+		t.Fatalf("deliverSessionNudgeWithProvider did not return within 10s")
+	}
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "the session never reached an idle boundary") {
+		t.Errorf("stdout = %q, want the no-idle-boundary downgrade reason", stdout.String())
+	}
+}
+
+// The idle counterpart: a wait-idle nudge to an idle grok seat still
+// delivers live through the same gate — the busy pre-read must downgrade
+// only busy seats, never idle ones (AC-8).
+func TestDeliverSessionNudgeWaitIdleDeliversIdleGrokLive(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors["sess-worker"] = nil // idle at its prompt
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "grok", BuiltinAncestor: "grok"},
+		sessionName: "sess-worker",
+	}
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Nudged worker") {
+		t.Errorf("stdout = %q, want live delivery (\"Nudged worker\")", stdout.String())
+	}
+	counts := map[string]int{}
+	for _, call := range fake.Calls {
+		counts[call.Method]++
+	}
+	if counts["WaitForIdle"] != 1 || counts["NudgeNow"] != 1 {
+		t.Errorf("WaitForIdle=%d NudgeNow=%d, want 1 and 1", counts["WaitForIdle"], counts["NudgeNow"])
+	}
+}
