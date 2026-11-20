@@ -607,7 +607,7 @@ func TestEventEmitAcceptsCachePrefixedAgentNamesAndNonSnapshotPayloads(t *testin
 		}
 	}
 	got := recordedEvents(t, dir)
-	if len(got) != 2 || got[0].Actor != "cache-warmer" || got[1].Type != events.BeadClaimRejected || string(got[1].Payload) != `{"reason":"taken"}` {
+	if len(got) != 2 || got[0].Actor != events.UnknownActor || got[0].ClaimedActor != "cache-warmer" || got[1].Type != events.BeadClaimRejected || string(got[1].Payload) != `{"reason":"taken"}` {
 		t.Fatalf("recorded %+v, want custom.x by cache-warmer and the claim_rejected payload", got)
 	}
 }
@@ -633,7 +633,7 @@ func TestEventEmitAllowsNonBeadPayloadsAndBeadPayloadFromTheStore(t *testing.T) 
 		t.Fatalf("recorded %d events, want 2: %+v", len(got), got)
 	}
 	decoded, ok := beads.DecodeBeadEventPayload(got[0].Payload)
-	if got[0].Type != events.BeadClosed || got[0].Actor != "worker-1" || !ok || decoded.ID != created.ID || decoded.Title != "step" {
+	if got[0].Type != events.BeadClosed || got[0].Actor != events.UnknownActor || got[0].ClaimedActor != "worker-1" || !ok || decoded.ID != created.ID || decoded.Title != "step" {
 		t.Fatalf("bead.closed event = %+v (payload %s), want the store's row for %s", got[0], got[0].Payload, created.ID)
 	}
 	if got[1].Type != "deploy.started" || string(got[1].Payload) != `{"version":"2.1"}` {

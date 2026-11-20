@@ -201,6 +201,7 @@ func validateEvent(e events.Event) error {
 		max         int
 	}{
 		{"actor", e.Actor, maxActorLen},
+		{"claimed_actor", e.ClaimedActor, maxActorLen},
 		{"subject", e.Subject, maxSubjectLen},
 		{"message", e.Message, MaxMessage},
 		{"run_id", e.RunID, maxIDFieldLen},
