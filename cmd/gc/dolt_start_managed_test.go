@@ -419,7 +419,7 @@ func TestManagedDoltSQLServerSysProcAttrProductionDetaches(t *testing.T) {
 
 	attr := managedDoltSQLServerSysProcAttr()
 
-	if attr == nil || !attr.Setpgid {
+	if attr == nil || !sysProcAttrDetaches(attr) {
 		t.Fatalf("production managed Dolt must keep detached process-group behavior, got %#v", attr)
 	}
 }

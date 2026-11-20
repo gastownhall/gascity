@@ -74,7 +74,7 @@ func TestProductMetricsDirectChildEnvHookWorkQuery(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = shellWorkQueryWithEnv(shellquote.Quote(binary), "", nil)
+		_, err = shellWorkQueryWithEnv(platformCommand(shellquote.Quote(binary), "& "+psLiteral(binary)), "", nil)
 		return err
 	})
 	assertProductMetricsDirectChildEnv(t, entries)

@@ -304,9 +304,9 @@ func supervisorSocketPath() string {
 	return supervisorSocketPathCandidates()[0]
 }
 
-// startSupervisorSocket creates a Unix domain socket at the given path
-// and handles ping/stop commands. Unlike startControllerSocket (which
-// constructs its own path), this binds to the exact path provided.
+// startSupervisorSocket creates the supervisor control endpoint at the given
+// path and handles ping/stop/reload commands. Unlike startControllerSocket
+// (which constructs its own path), this binds to the exact path provided.
 type reconcileRequest struct {
 	done chan struct{}
 	// writeAuthKeys, set only by the reload-report socket verb, receives the
@@ -689,7 +689,8 @@ func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutd
 // Supported: "stop" (shutdown), "ping" (liveness check, returns PID),
 // "reload" (trigger immediate reconciliation of all cities), and
 // "reload-report" (the same reload, answered with a JSON report that includes
-// the write-auth key outcome; see supervisorReloadReportCommand).
+// the write-auth key outcome; see supervisorReloadReportCommand), plus any
+// platform-specific command handled by handlePlatformSupervisorConnCommand.
 //
 // For "stop", the handler first sends "ok\n" (backward compatible ACK),
 // then — if the client keeps the connection open — blocks until shutdown
@@ -706,32 +707,10 @@ func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdown
 			if addr := conn.RemoteAddr(); addr != nil {
 				peer = addr.String()
 			}
-			_ = requestShutdown(supervisorShutdownDestructive, shutdownTrigger{
+			handleSupervisorShutdownConn(conn, requestShutdown, shut, supervisorShutdownDestructive, shutdownTrigger{
 				Source:     "socket_stop",
 				ClientAddr: peer,
 			})
-			if _, err := conn.Write([]byte("ok\n")); err != nil {
-				return
-			}
-			if shut == nil {
-				return
-			}
-			// Wait for shutdown to complete (or client to disconnect)
-			// so we can report the final result.
-			conn.SetWriteDeadline(time.Now().Add(5 * time.Minute)) //nolint:errcheck
-			select {
-			case <-shut.done:
-			case <-time.After(5 * time.Minute):
-				return
-			}
-			res := shut.err.Load()
-			if res == nil || res.err == nil {
-				conn.Write([]byte("done:ok\n")) //nolint:errcheck
-			} else {
-				// Collapse newlines in the error so the protocol stays line-oriented.
-				msg := strings.ReplaceAll(res.err.Error(), "\n", "; ")
-				fmt.Fprintf(conn, "done:err:%s\n", msg) //nolint:errcheck
-			}
 			// One command per connection — return explicitly instead of
 			// falling through to scanner.Scan() again. The read deadline
 			// would close us anyway, but this makes the contract explicit.
@@ -754,8 +733,38 @@ func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdown
 			}
 		case supervisorReloadReportCommand:
 			handleSupervisorReloadReport(conn, reconcileCh)
+		default:
+			if handlePlatformSupervisorConnCommand(scanner.Text(), conn, requestShutdown, shut) {
+				return
+			}
 		}
 	}
+}
+
+func handleSupervisorShutdownConn(conn net.Conn, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, shut *shutdownState, mode supervisorShutdownMode, trigger shutdownTrigger) {
+	_ = requestShutdown(mode, trigger)
+	if _, err := conn.Write([]byte("ok\n")); err != nil {
+		return
+	}
+	if shut == nil {
+		return
+	}
+	// Wait for shutdown to complete (or client to disconnect) so we can report
+	// the final result.
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Minute)) //nolint:errcheck
+	select {
+	case <-shut.done:
+	case <-time.After(5 * time.Minute):
+		return
+	}
+	res := shut.err.Load()
+	if res == nil || res.err == nil {
+		conn.Write([]byte("done:ok\n")) //nolint:errcheck
+		return
+	}
+	// Collapse newlines in the error so the protocol stays line-oriented.
+	msg := strings.ReplaceAll(res.err.Error(), "\n", "; ")
+	fmt.Fprintf(conn, "done:err:%s\n", msg) //nolint:errcheck
 }
 
 // supervisorAlive checks whether the supervisor is running by pinging
@@ -880,12 +889,15 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
 		return 1
 	}
-	defer conn.Close()                                     //nolint:errcheck
-	conn.Write([]byte("stop\n"))                           //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
-	reader := bufio.NewReader(conn)
-	ackLine, err := reader.ReadString('\n')
-	if err != nil || strings.TrimSpace(ackLine) != "ok" {
+	defer conn.Close() //nolint:errcheck
+	return stopSupervisorConnForProcessJSON(conn, sockPath, pid, processAlive, stdout, stderr, wait, waitTimeout, jsonOut)
+}
+
+// stopSupervisorConnForProcessJSON drives the stop protocol over conn; with
+// wait set it also waits for the process processAlive watches to exit.
+func stopSupervisorConnForProcessJSON(conn net.Conn, sockPath string, pid int, processAlive func() bool, stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
+	reader, err := requestSupervisorSocketCommand(conn, "stop")
+	if err != nil {
 		fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
 		return 1
 	}
@@ -992,6 +1004,33 @@ func finishSupervisorStopWait(stdout, stderr io.Writer, pid int, processAlive fu
 	}
 	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 	return 0
+}
+
+var (
+	supervisorSocketAckTimeout        = 10 * time.Second
+	errSupervisorSocketNoAckBeforeEOF = errors.New("supervisor closed the socket without acknowledging")
+)
+
+func requestSupervisorSocketCommand(conn net.Conn, command string) (*bufio.Reader, error) {
+	if _, err := io.WriteString(conn, command+"\n"); err != nil {
+		return nil, err
+	}
+	conn.SetReadDeadline(time.Now().Add(supervisorSocketAckTimeout)) //nolint:errcheck
+	reader := bufio.NewReader(conn)
+	ackLine, err := reader.ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) && ackLine == "" {
+			return nil, errSupervisorSocketNoAckBeforeEOF
+		}
+		if ackLine != "" {
+			return nil, fmt.Errorf("reading acknowledgment %q: %w", strings.TrimSpace(ackLine), err)
+		}
+		return nil, err
+	}
+	if strings.TrimSpace(ackLine) != "ok" {
+		return nil, fmt.Errorf("unexpected acknowledgment %q", strings.TrimSpace(ackLine))
+	}
+	return reader, nil
 }
 
 // supervisorProcessWatch identifies the supervisor process pid while it is
@@ -1574,14 +1613,20 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
 	}
 
-	// Reconcile channel — triggers immediate reconciliation from SIGHUP
-	// or the "reload" socket command.
+	// Reconcile channel — triggers immediate reconciliation from the reload
+	// signal, where the platform has one, or the "reload" endpoint command.
 	reconcileCh := make(chan reconcileRequest, 1)
 
-	// Signal handler: SIGINT/SIGTERM → shutdown, SIGHUP → immediate reconcile.
+	// Signal handler: SIGINT/SIGTERM → shutdown, SIGHUP → immediate reconcile
+	// where the platform delivers it. supervisorControlSignals owns that set;
+	// the loop below stays platform-neutral because a signal it never receives
+	// costs nothing.
 	sigCh := make(chan os.Signal, 2)
-	supervisorSignalNotify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	supervisorSignalNotify(sigCh, supervisorControlSignals()...)
 	defer signal.Stop(sigCh)
+	if hint := supervisorReloadSignalHint(); hint != "" {
+		fmt.Fprintln(stderr, hint) //nolint:errcheck
+	}
 	shutdownSignalsDone := make(chan struct{})
 	defer close(shutdownSignalsDone)
 	go supervisorSignalLoop(sigCh, shutdownSignalsDone, requestShutdown, func() {
@@ -3115,12 +3160,17 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	return nil
 }
 
-// effectiveProviderName returns the provider name respecting GC_SESSION env override.
+// effectiveProviderName returns the runtime provider selection after applying
+// the GC_SESSION override and the platform default.
 func effectiveProviderName(configured string) string {
+	result := configured
 	if v := os.Getenv("GC_SESSION"); v != "" {
-		return v
+		result = v
 	}
-	return configured
+	if result == "" {
+		return sessionProviderRuntimeDefault
+	}
+	return result
 }
 
 // supervisorBuildAgentsFn returns a buildFn suitable for CityRuntimeParams.
