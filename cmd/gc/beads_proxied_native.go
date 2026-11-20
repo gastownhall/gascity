@@ -277,9 +277,10 @@ type proxiedNativeOpener struct {
 	// pre-open root, be-itm5), so the re-read costs round trips on a
 	// connection gc already holds and never a session of its own. Injected for
 	// the same reason as the two opens; nil means the production readers, so
-	// omitting them cannot switch the check off.
-	leafObserve    func(ctx context.Context, native *beads.NativeDoltStore) (proxyendpoint.PostOpenReport, error)
-	storageObserve func(ctx context.Context, storage beads.NativeStorage) (proxyendpoint.PostOpenReport, error)
+	// omitting them cannot switch the check off. since is the pin's HEAD: the
+	// readers read the window between it and the observed HEAD.
+	leafObserve    func(ctx context.Context, native *beads.NativeDoltStore, since string) (proxyendpoint.PostOpenReport, error)
+	storageObserve func(ctx context.Context, storage beads.NativeStorage, since string) (proxyendpoint.PostOpenReport, error)
 
 	// logger receives the post-open check's WARN when the re-read itself
 	// fails. Nil is slog.Default(): the composition roots build this opener
@@ -461,7 +462,7 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 		leafObserve = beads.ProxiedLeafObservation
 	}
 	if verdict := o.openUnmoved(ctx, pin, site, func(ctx context.Context) (proxyendpoint.PostOpenReport, error) {
-		return leafObserve(ctx, native)
+		return leafObserve(ctx, native, pin.Head())
 	}); verdict != nil {
 		closeProxiedLeafQuietly(native)
 		return nil, verdict
@@ -668,7 +669,7 @@ func (o *proxiedNativeOpener) reopen(longLived bool) beads.NativeReopenFunc {
 			storageObserve = beads.ProxiedOpenedObservation
 		}
 		if verdict := o.openUnmoved(ctx, pin, beads.ProxiedIncidentSiteReadReopen, func(ctx context.Context) (proxyendpoint.PostOpenReport, error) {
-			return storageObserve(ctx, storage)
+			return storageObserve(ctx, storage, pin.Head())
 		}); verdict != nil {
 			_ = storage.Close()
 			return nil, verdict

@@ -2720,3 +2720,67 @@ func TestGenerationSetOnlyTheClaimerEndsItsClaim(t *testing.T) {
 		t.Fatalf("B's own settle = %+v, want spent", st)
 	}
 }
+
+// The two hashes the window-attribution tests move HEAD between. They are real
+// Dolt commit-hash shapes, so a detail that names them names what an operator
+// would pass to dolt_log.
+const (
+	windowSinceHead = "0123456789abcdefghijklmnopqrstuv"
+	windowAfterHead = "vutsrqponmlkjihgfedcba9876543210"
+)
+
+// movedHeadPin and movedHeadReport build the two halves of a moved-HEAD
+// observation: the pin admission took at windowSinceHead, and a report at
+// windowAfterHead carrying window and a healthy ignored plane.
+func movedHeadPin() Pin {
+	return Pin{admitted: true, database: "beads", head: windowSinceHead, cursors: pinnedCursors()}
+}
+
+func movedHeadReport(window *proxyendpoint.PostOpenWindow) proxyendpoint.PostOpenReport {
+	return proxyendpoint.PostOpenReport{Head: windowAfterHead, IgnoredCursorTable: true, Window: window}
+}
+
+// requireHeadMoved asserts err is the non-terminal head_moved verdict and that
+// its detail names both hashes, the database and every one of want.
+func requireHeadMoved(t *testing.T, err error, want ...string) {
+	t.Helper()
+	verdict, typed := ProxiedVerdictOf(err)
+	if !typed || verdict.Verdict != ProxiedVerdictHeadMoved {
+		t.Fatalf("err = %v, want the head_moved verdict", err)
+	}
+	if verdict.Terminal() {
+		t.Error("head_moved must stay non-terminal")
+	}
+	for _, w := range append([]string{windowSinceHead, windowAfterHead, `"beads"`}, want...) {
+		if !strings.Contains(verdict.Detail, w) {
+			t.Errorf("the verdict detail lacks %q: %s", w, verdict.Detail)
+		}
+	}
+}
+
+// TestProxiedOpenUnmovedRefusesAnUnattributableWindow is AC-3: a moved HEAD is
+// let through only on evidence that someone other than gc's open moved it. A
+// window that cannot be read, that is too long to read whole, or that lists
+// no commits is no such evidence, so it is head_moved — never "unobserved,
+// proceed" — and the detail says which of those it was.
+func TestProxiedOpenUnmovedRefusesAnUnattributableWindow(t *testing.T) {
+	ordinary := []string{"bd: update ga-1"}
+	for _, tc := range []struct {
+		name   string
+		window *proxyendpoint.PostOpenWindow
+		reason string
+	}{
+		{"no window was read", nil, "no window"},
+		{"a window statement failed", &proxyendpoint.PostOpenWindow{Unreadable: "reading dolt_log: table function not found"}, "table function not found"},
+		{"a hash failed validation", &proxyendpoint.PostOpenWindow{Unreadable: `"before0000" is not a Dolt commit hash`}, "not a Dolt commit hash"},
+		{"the range lists no commits", &proxyendpoint.PostOpenWindow{Tables: []proxyendpoint.WindowTable{{Name: "issues"}}}, "no commits"},
+		{
+			"the range exceeds the commit limit", &proxyendpoint.PostOpenWindow{Commits: ordinary, Tables: []proxyendpoint.WindowTable{{Name: "issues"}}, Truncated: true},
+			fmt.Sprintf("more than %d commits", proxyendpoint.PostOpenWindowCommitLimit),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireHeadMoved(t, ProxiedOpenUnmoved(movedHeadPin(), movedHeadReport(tc.window)), tc.reason)
+		})
+	}
+}
