@@ -151,6 +151,15 @@ func TestAPIBeadCloseEnforcesWorkRecord(t *testing.T) {
 			wantWarn:     "invalid " + beadmeta.WorkOutcomeMetadataKey,
 		},
 		{
+			// An operator's own gc.kind vocabulary is not an engine meaning,
+			// so it leaves the bead in the covered population (ga-j347f5).
+			name:         "an operator-stamped gc.kind refuses under enforcement",
+			meta:         map[string]string{beadmeta.KindMetadataKey: "work"},
+			enforce:      true,
+			wantConflict: "missing " + beadmeta.WorkOutcomeMetadataKey,
+			wantWarn:     "missing " + beadmeta.WorkOutcomeMetadataKey,
+		},
+		{
 			name:    "a no-op outcome closes clean",
 			meta:    map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp},
 			enforce: true,
