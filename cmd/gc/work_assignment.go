@@ -321,8 +321,11 @@ const (
 
 // releaseAssignmentFenced writes opts, a release (or ReassignWorkBead's
 // reassign) decided from the snapshot wb, as ONE write that lands only while
-// the bead still has wb's status and assignee. Any read may be stale, so the
-// fence is at the write:
+// the bead still has wb's status and assignee. The status is the one the
+// store recorded (beads.RecordedStatus), not the folded one: a claim parked
+// as blocked reads "open" through bd's fold, and fenced on "open" it would
+// never match its own row. Any read may be stale, so the fence is at the
+// write:
 //
 //  1. Where the store has a guarded update (beads.AssignmentGuardedUpdaterFor:
 //     BdStore with `bd update --if-status --if-assignee`), the backend checks
@@ -342,7 +345,7 @@ const (
 // time, after the re-read has already cost a bd call.
 func releaseAssignmentFenced(store beads.Store, wb beads.Bead, opts beads.UpdateOpts) (fencedReleaseOutcome, error) {
 	if updater, ok := beads.AssignmentGuardedUpdaterFor(store); ok {
-		updated, err := updater.UpdateIfAssignment(wb.ID, wb.Status, strings.TrimSpace(wb.Assignee), opts)
+		updated, err := updater.UpdateIfAssignment(wb.ID, beads.RecordedStatus(wb), strings.TrimSpace(wb.Assignee), opts)
 		switch {
 		case err == nil && updated:
 			return fencedReleaseApplied, nil
@@ -363,7 +366,7 @@ func releaseAssignmentFenced(store beads.Store, wb beads.Bead, opts beads.Update
 	if err != nil {
 		return fencedReleaseRefused, fmt.Errorf("re-reading before release: %w", err)
 	}
-	if current.Status != wb.Status || strings.TrimSpace(current.Assignee) != strings.TrimSpace(wb.Assignee) {
+	if beads.RecordedStatus(current) != beads.RecordedStatus(wb) || strings.TrimSpace(current.Assignee) != strings.TrimSpace(wb.Assignee) {
 		return fencedReleaseChanged, nil
 	}
 	err = writer.UpdateIfMatch(wb.ID, current.Revision, opts)
