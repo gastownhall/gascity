@@ -196,6 +196,36 @@ func TestGated(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			// Guards for the infrastructure exemption above: the storage tier
+			// and an unrelated label must not exempt work. NoHistory says
+			// where a bead is stored, not whether it is work (a city's bead
+			// policy can store plain worker tasks no-history, and the wisps
+			// read path forces NoHistory=false on rows it returns), so only
+			// the ready-excluded label exempts.
+			name: "a plain no-history task stays gated",
+			bead: beads.Bead{
+				Type:      "task",
+				NoHistory: true,
+			},
+			want: true,
+		},
+		{
+			name: "a plain ephemeral task stays gated",
+			bead: beads.Bead{
+				Type:      "task",
+				Ephemeral: true,
+			},
+			want: true,
+		},
+		{
+			name: "a task with an unrelated label stays gated",
+			bead: beads.Bead{
+				Type:   "task",
+				Labels: []string{"area:docs"},
+			},
+			want: true,
+		},
 		{name: "convoy is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 	}
 	for _, tc := range tests {
