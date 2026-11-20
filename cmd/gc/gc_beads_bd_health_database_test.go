@@ -277,3 +277,22 @@ func TestGcBeadsBdHealthFallbackAcceptsRepositoryDifferingOnlyInCase(t *testing.
 		t.Fatalf("op_health output = %s, want success for data dir entry HQ", out)
 	}
 }
+
+// TestGcBeadsBdHealthFallbackAcceptsRepoDirNamedWithDash covers AC-3 in the
+// helper-less fallback: a repository directory whose name differs from the
+// database only by Dolt's '-'→'_' mapping counts as on disk.
+func TestGcBeadsBdHealthFallbackAcceptsRepoDirNamedWithDash(t *testing.T) {
+	binDir := writeFallbackHeadDolt(t, "")
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "gas-city", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := gcBeadsBdHealthHarness(t,
+		`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gas_city"}`,
+		"issue_prefix: hq\ngc.endpoint_origin: managed_city\n", "", dataDir,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if !strings.Contains(out, "status=0") {
+		t.Fatalf("op_health output = %s, want success for repository dir gas-city backing gas_city", out)
+	}
+}

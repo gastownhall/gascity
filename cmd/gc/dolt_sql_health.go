@@ -358,9 +358,19 @@ func managedDoltCheckDatabase(host, port, user, database, dataDir string) error 
 	return nil
 }
 
+// managedDoltDatabaseName maps a repository directory name to the database
+// name Dolt exposes it as: '-' becomes '_' and matching is
+// case-insensitive. The provider script's managed_backing_store_exists
+// compares the same way.
+func managedDoltDatabaseName(name string) string {
+	return strings.ReplaceAll(strings.ToLower(name), "-", "_")
+}
+
 // managedDoltDatabaseOnDisk reports whether dataDir holds a Dolt repository
 // for database. Dolt matches database names case-insensitively, so a
-// directory that differs only in case counts.
+// directory that differs only in case counts, and it exposes a directory
+// named with '-' as a database named with '_'. A repository reached
+// through a symlink counts, like the shell glob's directory test.
 func managedDoltDatabaseOnDisk(dataDir, database string) error {
 	if managedDoltIsRepoDir(filepath.Join(dataDir, database)) {
 		return nil
@@ -369,8 +379,15 @@ func managedDoltDatabaseOnDisk(dataDir, database string) error {
 	if err != nil {
 		return fmt.Errorf("database %q: reading data dir %s: %w", database, dataDir, err)
 	}
+	want := managedDoltDatabaseName(database)
 	for _, entry := range entries {
-		if entry.IsDir() && strings.EqualFold(entry.Name(), database) && managedDoltIsRepoDir(filepath.Join(dataDir, entry.Name())) {
+		if managedDoltDatabaseName(entry.Name()) != want {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(dataDir, entry.Name())); err != nil || !info.IsDir() {
+			continue
+		}
+		if managedDoltIsRepoDir(filepath.Join(dataDir, entry.Name())) {
 			return nil
 		}
 	}
