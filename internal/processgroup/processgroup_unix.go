@@ -106,6 +106,7 @@ func groupGone(pgid int, err error, opts Options) bool {
 func signalGroup(pgid int, sig syscall.Signal, opts Options) error {
 	settle := opts.epermSettle()
 	deadline := time.Now().Add(settle)
+	retried := false
 	for {
 		err := opts.kill(-pgid, sig)
 		if err == nil || errors.Is(err, syscall.ESRCH) {
@@ -119,13 +120,23 @@ func signalGroup(pgid int, sig syscall.Signal, opts Options) error {
 			return nil
 		}
 		if rerr != nil {
-			return fmt.Errorf("%w: signal refused (EPERM); members unreadable, not retried: %s", err, memberOutcome(pgid, live, rerr, opts))
+			return unreadableMembersError(pgid, err, retried, rerr, opts)
 		}
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("%w: signal still refused (EPERM) after %s: %s", err, settle, memberOutcome(pgid, live, rerr, opts))
 		}
+		retried = true
 		time.Sleep(opts.pollPeriod())
 	}
+}
+
+// unreadableMembersError reports an EPERM from kill(-pgid, ...) whose members
+// could not be read, saying whether earlier attempts had already retried it.
+func unreadableMembersError(pgid int, err error, retried bool, rerr error, opts Options) error {
+	if !retried {
+		return fmt.Errorf("%w: signal refused (EPERM); members unreadable, not retried: %s", err, memberOutcome(pgid, 0, rerr, opts))
+	}
+	return fmt.Errorf("%w: signal refused (EPERM); members became unreadable after retrying: %s", err, memberOutcome(pgid, 0, rerr, opts))
 }
 
 // memberOutcome describes what the member reader says about process group pgid
