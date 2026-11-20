@@ -166,7 +166,7 @@ func TestBuildProviderLaunchCommandUsesACPCommand(t *testing.T) {
 	})
 }
 
-func TestBuildProviderLaunchCommandWithoutOptionsSkipsDefaultsButKeepsSettings(t *testing.T) {
+func TestBuildProviderTemplateLaunchCommandAddsDefaultsAndSettings(t *testing.T) {
 	dir := t.TempDir()
 	runtimeDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
@@ -179,12 +179,12 @@ func TestBuildProviderLaunchCommandWithoutOptionsSkipsDefaultsButKeepsSettings(t
 	spec := BuiltinProviders()["claude"]
 	rp := specToResolved("claude", &spec)
 
-	got, err := BuildProviderLaunchCommandWithoutOptions(dir, rp, "")
+	got, err := BuildProviderTemplateLaunchCommand(dir, rp, "", nil, nil)
 	if err != nil {
-		t.Fatalf("BuildProviderLaunchCommandWithoutOptions: %v", err)
+		t.Fatalf("BuildProviderTemplateLaunchCommand: %v", err)
 	}
 
-	wantCommand := fmt.Sprintf("claude --settings %q", filepath.Join(dir, ".gc", "settings.json"))
+	wantCommand := fmt.Sprintf("claude --dangerously-skip-permissions --effort max --settings %q", filepath.Join(dir, ".gc", "settings.json"))
 	if got.Command != wantCommand {
 		t.Fatalf("Command = %q, want %q", got.Command, wantCommand)
 	}
@@ -196,7 +196,146 @@ func TestBuildProviderLaunchCommandWithoutOptionsSkipsDefaultsButKeepsSettings(t
 	}
 }
 
-func TestBuildProviderLaunchCommandWithoutOptionsUsesBuiltinAncestorForSettings(t *testing.T) {
+func TestBuildProviderTemplateLaunchCommandRejectsInvalidInput(t *testing.T) {
+	if _, err := BuildProviderTemplateLaunchCommand("", nil, "", nil, nil); err == nil {
+		t.Fatal("BuildProviderTemplateLaunchCommand(nil provider) error = nil, want error")
+	}
+	rp := &ResolvedProvider{Command: "custom-agent"}
+	if _, err := BuildProviderTemplateLaunchCommand("", rp, "stdio", nil, nil); err == nil {
+		t.Fatal("BuildProviderTemplateLaunchCommand(unknown transport) error = nil, want error")
+	}
+}
+
+// TestProviderTemplateCommandOmitsUnhonoredDefaults pins the template command
+// to the controller's tolerance: option defaults that cannot render as flags
+// are omitted, where BuildProviderLaunchCommand's strict merge rejects them.
+// Config loading does not validate agent option_defaults, so a template
+// command that errored on them would fail every create for that agent.
+func TestProviderTemplateCommandOmitsUnhonoredDefaults(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "permission_mode", Type: "select", Default: "auto-edit",
+			Choices: []OptionChoice{
+				{Value: "auto-edit", FlagArgs: []string{"--permission-mode", "auto-edit"}},
+				{Value: "unrestricted", FlagArgs: []string{"--skip-permissions"}},
+			},
+		},
+		{
+			Key: "effort", Type: "select",
+			Choices: []OptionChoice{
+				{Value: "", FlagArgs: nil},
+				{Value: "max", FlagArgs: []string{"--effort", "max"}},
+			},
+		},
+	}
+	tests := []struct {
+		name     string
+		defaults map[string]string
+		want     string
+	}{
+		{
+			name:     "resolvable defaults",
+			defaults: map[string]string{"permission_mode": "unrestricted", "effort": "max"},
+			want:     "agent --skip-permissions --effort max",
+		},
+		{
+			name:     "unknown option",
+			defaults: map[string]string{"permission_mode": "unrestricted", "effort": "max", "bogus": "x"},
+			want:     "agent --skip-permissions --effort max",
+		},
+		{
+			name:     "invalid closed value",
+			defaults: map[string]string{"permission_mode": "unrestricted", "effort": "ultra"},
+			want:     "agent --skip-permissions",
+		},
+		{
+			name:     "empty value",
+			defaults: map[string]string{"permission_mode": "", "effort": "max"},
+			want:     "agent --effort max",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rp := &ResolvedProvider{Name: "agent", Command: "agent", OptionsSchema: schema, EffectiveDefaults: tt.defaults}
+
+			got, err := ProviderTemplateCommand(rp, "", nil, nil)
+			if err != nil {
+				t.Fatalf("ProviderTemplateCommand: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ProviderTemplateCommand() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProviderTemplateCommandAddsKimiHookConfigWhenKimiHooksInstalled(t *testing.T) {
+	kimi := &ResolvedProvider{
+		Name:    "kimi",
+		Command: "kimi",
+		Args:    []string{"--yolo"},
+		ACPArgs: []string{"--yolo", "acp"},
+	}
+	wrappedKimi := &ResolvedProvider{
+		Name:            "fast-kimi",
+		BuiltinAncestor: "kimi",
+		Command:         "kimi",
+		Args:            []string{"--yolo"},
+	}
+	kimiBase := "builtin:kimi"
+	cityProviders := map[string]ProviderSpec{"fast-kimi": {Base: &kimiBase}}
+	tests := []struct {
+		name         string
+		resolved     *ResolvedProvider
+		transport    string
+		installHooks []string
+		want         string
+	}{
+		{
+			name:         "tmux appends the config file",
+			resolved:     kimi,
+			installHooks: []string{"claude", "kimi"},
+			want:         "kimi --yolo --config-file .kimi/config.toml",
+		},
+		{
+			name:         "acp inserts the config file before the acp subcommand",
+			resolved:     kimi,
+			transport:    SessionTransportACP,
+			installHooks: []string{"kimi"},
+			want:         "kimi --yolo --config-file .kimi/config.toml acp",
+		},
+		{
+			name:         "a wrapped kimi provider matches a kimi-family hook alias",
+			resolved:     wrappedKimi,
+			installHooks: []string{"fast-kimi"},
+			want:         "kimi --yolo --config-file .kimi/config.toml",
+		},
+		{
+			name:     "kimi without kimi hooks keeps the bare command",
+			resolved: kimi,
+			want:     "kimi --yolo",
+		},
+		{
+			name:         "other providers ignore kimi hooks",
+			resolved:     &ResolvedProvider{Name: "codex", Command: "codex"},
+			installHooks: []string{"kimi"},
+			want:         "codex",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ProviderTemplateCommand(tt.resolved, tt.transport, tt.installHooks, cityProviders)
+			if err != nil {
+				t.Fatalf("ProviderTemplateCommand: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ProviderTemplateCommand() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildProviderTemplateLaunchCommandUsesBuiltinAncestorForSettings(t *testing.T) {
 	dir := t.TempDir()
 	runtimeDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
@@ -214,9 +353,9 @@ func TestBuildProviderLaunchCommandWithoutOptionsUsesBuiltinAncestorForSettings(
 		Args:            []string{"run", "claude", "--"},
 	}
 
-	got, err := BuildProviderLaunchCommandWithoutOptions(dir, rp, "")
+	got, err := BuildProviderTemplateLaunchCommand(dir, rp, "", nil, nil)
 	if err != nil {
-		t.Fatalf("BuildProviderLaunchCommandWithoutOptions: %v", err)
+		t.Fatalf("BuildProviderTemplateLaunchCommand: %v", err)
 	}
 
 	if want := fmt.Sprintf("--settings %q", settingsPath); !strings.Contains(got.Command, want) {
@@ -230,7 +369,7 @@ func TestBuildProviderLaunchCommandWithoutOptionsUsesBuiltinAncestorForSettings(
 	}
 }
 
-func TestBuildProviderLaunchCommandWithoutOptionsIgnoresDeprecatedKindForSettings(t *testing.T) {
+func TestBuildProviderTemplateLaunchCommandIgnoresDeprecatedKindForSettings(t *testing.T) {
 	dir := t.TempDir()
 	runtimeDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
@@ -246,9 +385,9 @@ func TestBuildProviderLaunchCommandWithoutOptionsIgnoresDeprecatedKindForSetting
 		Command: "custom-provider",
 	}
 
-	got, err := BuildProviderLaunchCommandWithoutOptions(dir, rp, "")
+	got, err := BuildProviderTemplateLaunchCommand(dir, rp, "", nil, nil)
 	if err != nil {
-		t.Fatalf("BuildProviderLaunchCommandWithoutOptions: %v", err)
+		t.Fatalf("BuildProviderTemplateLaunchCommand: %v", err)
 	}
 	if strings.Contains(got.Command, "--settings") {
 		t.Fatalf("Command = %q, want no settings from deprecated Kind fallback", got.Command)

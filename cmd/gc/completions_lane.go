@@ -41,6 +41,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 )
@@ -112,7 +113,7 @@ func newCompletionsLane() *completionsLane {
 	return &completionsLane{
 		pending:  map[string]struct{}{},
 		interval: completionsBackstopInterval,
-		poll:     completionsBackstopChunkInterval,
+		poll:     clock.Backstop(completionsBackstopChunkInterval),
 		// Nothing has converged yet, so the first thing this lane does is sweep —
 		// expressed by sweepRan being false rather than by pre-setting the forced
 		// latch. Both make the first pass due; only this one lets it report itself

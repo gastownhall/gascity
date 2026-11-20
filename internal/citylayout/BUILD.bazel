@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "citylayout",
     srcs = [
+        "export.go",
         "layout.go",
         "runtime.go",
     ],
@@ -14,11 +15,25 @@ go_library(
 go_test(
     name = "citylayout_test",
     srcs = [
+        "acp_transcripts_test.go",
+        "export_census_test.go",
+        "export_test.go",
         "runtime_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
     embed = [":citylayout"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+        "//internal/testpolicy/resourcecensus",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

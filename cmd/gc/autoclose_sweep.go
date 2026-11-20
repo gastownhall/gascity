@@ -5,8 +5,9 @@ package main
 // Convoy, wisp and molecule autoclose run when applyBeadEventToStores sees a
 // bead.closed. Nothing else runs them, so a close that never reaches the bus
 // skipped them forever: the event log can drop the notification
-// (CACHE-LAYERING-REVIEW F2). An unconfirmable scan-derived close
-// (applyInferredClose) is deferred here too.
+// (CACHE-LAYERING-REVIEW F2). A bead.closed whose live read cannot confirm it
+// (applyInferredClose: every close but the cache's own write) is deferred
+// here too.
 //
 // The sweep diffs each live cache's active census (open and in-progress rows,
 // both tiers) against the previous pass. A row that left the census was closed
@@ -22,7 +23,10 @@ package main
 //
 // The confirming read goes to the store whose configured prefix owns the id,
 // or on the unconfigured fallback to the first store that holds the row
-// (liveReadOwner).
+// (liveReadOwner). A migrated relic's id may also have a row in the binding
+// that holds the relic; then the read takes the first store whose row reads
+// closed (liveCloseOwner), so an open work bead reusing the id does not refute
+// the relic's close.
 //
 // Known limits: the first census of a cache only seeds it, so a close made
 // while the controller was down, or a row opened and closed between two
@@ -39,6 +43,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -69,6 +75,12 @@ type autocloseSweep struct {
 	// last arrived in a census.
 	ran map[string]struct{}
 
+	// interval and grace are autocloseSweepInterval and autocloseSweepGrace
+	// through clock.Backstop. The ticker and every deferral read them, so
+	// under the test speedup a deferred id still comes due on the pass it
+	// is owed.
+	interval, grace time.Duration
+
 	batch, pendingCap, ranCap int
 	dropped                   int
 }
@@ -78,6 +90,8 @@ func newAutocloseSweep() *autocloseSweep {
 		census:     map[*beads.CachingStore]map[string]struct{}{},
 		pending:    map[string]time.Time{},
 		ran:        map[string]struct{}{},
+		interval:   clock.Backstop(autocloseSweepInterval),
+		grace:      clock.Backstop(autocloseSweepGrace),
 		batch:      autocloseSweepBatch,
 		pendingCap: autocloseSweepPendingCap,
 		ranCap:     autocloseSweepRanCap,
@@ -144,7 +158,7 @@ func (s *autocloseSweep) observe(cache *beads.CachingStore, active map[string]st
 	}
 	for id := range prev {
 		if _, still := active[id]; !still {
-			s.deferLocked(id, now.Add(autocloseSweepGrace))
+			s.deferLocked(id, now.Add(s.grace))
 		}
 	}
 	for id := range active {
@@ -209,11 +223,11 @@ func (cs *controllerState) autocloseSweepOf() *autocloseSweep {
 	return cs.autocloseSweep
 }
 
-// startAutocloseSweep runs the sweep every autocloseSweepInterval until ctx
-// ends.
+// startAutocloseSweep runs a sweep pass every pass interval until ctx ends.
 func (cs *controllerState) startAutocloseSweep(ctx context.Context) {
+	interval := cs.autocloseSweepOf().interval
 	go func() {
-		ticker := time.NewTicker(autocloseSweepInterval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -230,6 +244,7 @@ func (cs *controllerState) startAutocloseSweep(ctx context.Context) {
 // lanes do, so one bad row cannot end the backstop for the controller's life.
 // The ids that pass had already popped are lost; the log names the bug.
 func (cs *controllerState) safeAutocloseSweepPass(now time.Time) (panicked bool) {
+	defer cs.beginStoreWork()()
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -253,7 +268,7 @@ type autocloseSweepResult struct {
 // an open or gone row is dropped, and an unreadable one, or one whose
 // autoclose did not finish, is retried next pass.
 func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepResult {
-	if cs.beadsQuiescent != nil && cs.beadsQuiescent.Load() {
+	if cs.storesQuiescent() {
 		// The city is suspended with nothing running: its stores are not
 		// touched until it resumes.
 		return autocloseSweepResult{}
@@ -277,11 +292,31 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 
 	var res autocloseSweepResult
 	for _, id := range sweep.due(now) {
+		if cs.storesQuiescent() {
+			// The city went quiescent mid-pass: leave the rest for after
+			// resume rather than restart the pairs it just retired.
+			res.Retried++
+			sweep.deferID(id, now)
+			continue
+		}
 		cs.mu.RLock()
 		stores := cs.beadEventStoresLocked(id)
+		probe := cs.beadEventRelicProbeLocked(id)
+		var route []storeref.StoreRef
+		if probe.routes != nil {
+			// Only a relic's close confirmation reads the route by ref.
+			route = cs.beadEventRouteLocked(id)
+		}
 		storeRef := cs.autocloseStoreRefLocked(id)
 		suspendedStore := cs.anySuspendedRigStoreLocked(stores)
 		cs.mu.RUnlock()
+		relic, _ := probe.residentStore(id)
+		if relic != nil {
+			stores = withRelicStore(stores, relic)
+		}
+		// The sweep's reads see the split-strict gate's views, like the
+		// event path's (identity in production).
+		stores, relic = splitStrictEventStores(id, stores, relic)
 		if len(stores) == 0 {
 			continue
 		}
@@ -289,24 +324,28 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 			// A suspended rig's store is not read: a read restarts its
 			// retired proxy. The close is confirmed after the rig resumes.
 			res.Retried++
-			sweep.deferID(id, now.Add(autocloseSweepInterval))
+			sweep.deferID(id, now.Add(sweep.interval))
 			continue
 		}
-		store, live, err := liveReadOwner(stores, id)
+		var epoch storeref.Stores
+		if relic != nil {
+			epoch = cs.Stores() // only the relic's CloseOwner plan reads it
+		}
+		store, live, err := liveCloseOwner(epoch, route, stores, id, relic)
 		switch confirmInferredClose(live, err) {
 		case closeConfirmed:
 			cs.emitCompletedFact(live, autocloseSweepActor)
-			if cs.beadCloseAutoclose(id, store, storeRef)() {
+			if cs.beadCloseAutoclose(id, store, relicStoreRef(store, relic, storeRef))() {
 				res.Ran++
 			} else {
 				res.Retried++
-				sweep.deferID(id, now.Add(autocloseSweepInterval))
+				sweep.deferID(id, now.Add(sweep.interval))
 			}
 		case closeRefuted:
 			res.Refuted++
 		default:
 			res.Retried++
-			sweep.deferID(id, now.Add(autocloseSweepInterval))
+			sweep.deferID(id, now.Add(sweep.interval))
 		}
 	}
 	sweep.mu.Lock()
@@ -320,14 +359,19 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 }
 
 // anySuspendedRigStoreLocked reports whether any of stores is the store of a
-// rig the city runtime last saw suspended. cs.mu must be held.
+// rig the city runtime last saw suspended. Identity is physical
+// (beads.SameStore): a handle over a suspended rig's store is that rig, and
+// reading it would restart the rig's retired proxy. A suspended rig whose
+// store did not open is a nil entry, which the unconfigured fallback
+// (beadEventStoresLocked) lists as it is: it matches a nil store, as it
+// always has. cs.mu must be held.
 func (cs *controllerState) anySuspendedRigStoreLocked(stores []beads.Store) bool {
 	for name, rigStore := range cs.beadStores {
 		if !cs.rigSuspended(name) {
 			continue
 		}
 		for _, store := range stores {
-			if store == rigStore {
+			if beads.SameStore(store, rigStore) || (store == nil && rigStore == nil) {
 				return true
 			}
 		}

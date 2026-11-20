@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -18,7 +19,7 @@ func TestNudgeToHeldSessionQueues(t *testing.T) {
 		t.Run(string(delivery), func(t *testing.T) {
 			store := beads.NewMemStore()
 			sp := runtime.NewFake()
-			manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+			manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 			b, err := store.Create(beads.Bead{Title: "w", Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: map[string]string{
 				"session_name": "s-held", "template": "worker", "provider": "claude", "work_dir": "/tmp", "command": "claude",
 				"state": string(sessionpkg.StateSuspended), "sleep_intent": "user-hold",
@@ -30,13 +31,13 @@ func TestNudgeToHeldSessionQueues(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := handle.Nudge(context.Background(), NudgeRequest{Text: "hello", Delivery: delivery})
+			result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{Text: "hello", Delivery: delivery})
 			if err != nil {
 				t.Fatalf("Nudge: %v", err)
 			}
 			// The session queues a sent nudge itself; a wait-idle nudge is
 			// left for the caller to queue.
-			want := NudgeQueuedHeld
+			want := NudgeQueued
 			if delivery == NudgeDeliveryWaitIdle {
 				want = NudgeUndeliveredHeld
 			}

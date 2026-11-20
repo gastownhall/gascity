@@ -118,6 +118,7 @@ var excludedFromCore = map[string]string{
 	"StartupEnvelope":        "T3 startup metadata, explicitly excluded from Core",
 	"ReadyPromptPrefix":      "startup readiness hint",
 	"ReadyDelayMs":           "startup readiness hint",
+	"NotReadyMarkers":        "startup readiness hint",
 	"ProcessNames":           "liveness-check hint",
 	"EmitsPermissionWarning": "startup dialog hint",
 	"Nudge":                  "post-ready typed text",
@@ -126,6 +127,7 @@ var excludedFromCore = map[string]string{
 	"PromptSuffix":           "volatile beacon text, deliberately excluded",
 	"PromptFlag":             "command-reconstruction hint, not hashed",
 	"FreshOnly":              "per-call Start mode (LL6), not config identity",
+	"ProgramStatus":          "leaf-applied capture declaration; arming and heal never restart the agent",
 }
 
 // TestFingerprintPartitionAccountsForEveryConfigField is the FP-1/GAP-6

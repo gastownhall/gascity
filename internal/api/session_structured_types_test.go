@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -417,4 +418,23 @@ func mustMarshalForStructuredTest(t *testing.T, value any) json.RawMessage {
 		t.Fatalf("marshal structured fixture: %v", err)
 	}
 	return out
+}
+
+// The degraded fallback names the same epoch-scoped logical conversation a
+// real snapshot does, so a fresh reset changes it while the transcript is
+// unavailable too.
+func TestStructuredFallbackHistoryUsesSessionLogicalConversation(t *testing.T) {
+	before := session.Info{ID: "s1", ContinuationEpoch: "1"}
+	got := structuredFallbackHistory(before, string(worker.TailActivityIdle))
+	if got.GCSessionID != "s1" || got.LogicalConversationID != before.LogicalConversationID() {
+		t.Fatalf("fallback ids = %q/%q, want s1/%q", got.GCSessionID, got.LogicalConversationID, before.LogicalConversationID())
+	}
+	reset := before
+	reset.ContinuationEpoch = "2"
+	if after := structuredFallbackHistory(reset, string(worker.TailActivityIdle)); after.LogicalConversationID == got.LogicalConversationID {
+		t.Fatalf("fallback LogicalConversationID = %q across a fresh reset, want a new logical conversation", after.LogicalConversationID)
+	}
+	if unknown := structuredFallbackHistory(session.Info{}, ""); unknown.GCSessionID != "unknown" || unknown.LogicalConversationID != "unknown" {
+		t.Fatalf("fallback ids without a session = %q/%q, want unknown/unknown", unknown.GCSessionID, unknown.LogicalConversationID)
+	}
 }

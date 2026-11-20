@@ -235,7 +235,7 @@ func TestCityRuntimeTickSkipsBeforeManagedDoltAndDemandUnderFSPressure(t *testin
 		managedDoltPort: func(string) string {
 			return ""
 		},
-		managedDoltHealth: func(string) error {
+		managedDoltHealth: func(context.Context, string) error {
 			managedDoltCalls.Add(1)
 			return nil
 		},

@@ -33,7 +33,13 @@ import (
 //   - there is no runtime observation, so the inventory lists the rows whose
 //     state says running, with their own identity;
 //   - maintainer-city's rows are the export-time copy: every tick sees the
-//     current rows, less those created after it.
+//     current rows, less those created after it;
+//   - there are no work beads, so demand is empty: v2 reads every pool row as
+//     undesired, and its pool drains file as "unexplained" until the export
+//     carries work beads.
+
+// replayUntracedSync is the harness gap of A7's identity sync.
+const replayUntracedSync = "untraced identity sync: its keys are the differential's, not the export's"
 
 // replayLookup reads GC_V2_REPLAY_DIR; injected, so no test sets env.
 var replayLookup = os.LookupEnv
@@ -262,8 +268,10 @@ func replayPass(t *testing.T, x replayExport, rows []beads.Bead, at time.Time) *
 		Recording:    func() *externalReadsRecording { return nil },
 		Observations: func() *ObservationCache { return obs },
 		Episodes:     func() (map[string]session.StartupHealthEpisode, error) { return readStartupHealthEpisodes(cache) },
-		ResolveTemplate: func(_ *reconcileEnv, info session.Info) (TemplateParams, error) {
-			return TemplateParams{SessionName: info.SessionNameMetadata}, nil
+		Templates: func(*reconcileEnv, time.Time) templateResolver {
+			return templateResolver{Resolve: func(info session.Info) templateResolution {
+				return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
+			}}
 		},
 		LookPath: func(name string) (string, error) { return "/bin/" + name, nil },
 	}, at)
@@ -302,21 +310,25 @@ var legacyActions = map[string]legacyAction{
 	"reconciler.session.close_failed_create/closed":        {"close", "A21"},
 	"reconciler.drain.timeout/complete":                    {"stop", "§12.2/1"},
 	"reconciler.drain.timeout/retry":                       {"stop", "§12.2/1"},
-	"reconciler.drain.cancel/cancel_min_floor":             {"drain-cancel", "§12.2/14"},
+	"reconciler.drain.cancel/cancel_min_floor":             {"drain-cancel", "A11"},
 	"reconciler.session.reset_stalled/failed":              {"stop", "§12.2/14"},
 	"reconciler.session.terminal_provider_error/unhealthy": {"zombie", "A12"},
 	"reconciler.session.idle_timeout/stop/max_session_age": {"stop", "§12.1/PAR-AGE"},
 }
 
-// v2Class is an intent kind's action class. A create is a bring-up, as
-// legacy's start candidate covers the row it materializes.
-func v2Class(kind string) string {
+// v2Class is an intent's action class. A create is a bring-up, as legacy's
+// start candidate covers the row it materializes; A11's floor cancel
+// (DRAIN-010) is a drain cancel, not a destructive signal.
+func v2Class(kind, reason string) string {
+	if kind == intentSignalAck && reason == decideFloorAckCancel {
+		return "drain-cancel"
+	}
 	switch kind {
 	case intentStart, intentCreate:
 		return "start"
 	case intentDrainBegin, intentDrainBeginFresh:
 		return "drain"
-	case intentSignal, intentSignalFresh:
+	case intentSignal, intentSignalFresh, intentSignalAck:
 		return "signal"
 	case intentDrainVoid:
 		return "drain-cancel"
@@ -410,7 +422,7 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 			if it.CreatePlan.Named != nil {
 				tmpl = it.CreatePlan.Named.Template
 			}
-			c := cell(tmpl, v2Class(it.Kind))
+			c := cell(tmpl, v2Class(it.Kind, it.Reason))
 			c.v2++
 			c.intents = append(c.intents, strings.TrimSuffix(it.Kind+"/"+it.Reason+"/"+it.Cause, "/"))
 		}
@@ -421,7 +433,11 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 			}
 			d := replayDivergence{Tick: tk.ID, At: tk.At.Format(time.RFC3339Nano), Template: k[0], Class: k[1], Legacy: c.legacy, V2: c.v2, Records: c.records, Intents: c.intents}
 			slices.Sort(c.arms)
-			d.Family, d.Item = replayFamily(d, c.arms, built, rec, info, tk.At)
+			heals := 0
+			if h := cells[[2]string{k[0], "heal"}]; h != nil {
+				heals = len(slices.DeleteFunc(slices.Clone(h.intents), func(i string) bool { return !strings.HasPrefix(i, intentRowHeal+"/"+decideTimerHeal) }))
+			}
+			d.Family, d.Item = replayFamily(d, c.arms, built, rec, info, heals)
 			sum.Divergences[d.Family]++
 			out = append(out, d)
 		}
@@ -431,13 +447,32 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 }
 
 // replayFamily files a divergence: a v5 §12.2 (or §12.1 latch) difference
-// by item, a deferred arm, INC-003, unknown-never-destroys, or unexplained.
-// arms are the legacy records' owning arms. The two evidence families need
-// as many rows of the template showing the cause as legacy acted beyond v2.
-// C8.9's fresh attach and pending reads run in the effect, which a trace-only
-// pass never runs, so the replay cannot see that family.
-func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec *passTrace, info map[string]session.Info, at time.Time) (family, item string) {
+// by item, a deferred arm, INC-003, unknown-never-destroys, a harness gap
+// (by what the export cannot carry: a pool template's start, which rests on
+// demand; or A7's identity sync, which legacy's trace never records and
+// whose keys the export's config-free resolver cannot decide: the
+// differential and timeline harnesses pin them), a replay approximation,
+// or unexplained. arms are the legacy
+// records' owning arms. The two evidence families need as many rows of the
+// template showing the cause, as v2 traced it, as legacy acted beyond v2:
+// INC-003 a row v2 held for undesired-wake-grace. C8.9's fresh attach and
+// pending reads run in the effect, which a trace-only pass never runs, so
+// the replay cannot see that family.
+//
+// A replay approximation is a difference the one-pass, trace-only replay
+// makes itself: a v2 close it proposes that the close's L5 work read (in the
+// effect, over work the export does not carry) would decide, and a close
+// legacy made where heals of the template's rows in this pass (A6's timer
+// heal, one pass before A21's close of the same row) number at least the
+// closes v2 is short.
+func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec *passTrace, info map[string]session.Info, heals int) (family, item string) {
+	if (d.Class == intentRowMetadata || d.Class == intentRuntimeAlias) && d.Legacy == 0 {
+		return "harness gap", replayUntracedSync
+	}
 	if d.V2 > d.Legacy {
+		if d.Class == "close" {
+			return "replay approximation", "close's L5 runs in the effect"
+		}
 		return "unexplained", ""
 	}
 	var sec string
@@ -458,7 +493,7 @@ func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec 
 	}
 	short, undesired, unknown, undesiredRecords := d.Legacy-d.V2, 0, 0, 0
 	for _, r := range rec.Rows {
-		if r.Template == d.Template && wakeGracePreservesUndesiredRow(info[r.Key.ID], at) {
+		if r.Template == d.Template && r.Reason == decideWakeGrace {
 			undesired++
 		}
 		if r.Template == d.Template && r.Reason == decideLivenessUnknown {
@@ -471,12 +506,43 @@ func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec 
 		}
 	}
 	switch {
+	case d.Class == "drain-cancel" && d.V2 == 0 && allRecords(d.Records, "/cancel_min_floor/"):
+		// Legacy's min-floor cancel answers an agent's ack, which the export
+		// carries on no row, so the replay's A11 has none to cancel.
+		return "harness gap", "no exported row ack"
+	case d.Class == "start" && d.V2 == 0 && demandDriven(d.Template, info):
+		// A start rests on demand, and the export carries no work beads: the
+		// replay feeds every leg empty demand, so AL1 wants no seat legacy
+		// woke for its work (C5b: mc's resume-tier polecat, bd's worker).
+		return "harness gap", "no exported demand"
 	case d.Class == "drain" && min(undesired, undesiredRecords) >= short:
 		return "INC-003", ""
+	case d.Class == "close" && heals >= short:
+		return "replay approximation", "timer heal precedes the close"
 	case replayDestructive[d.Class] && unknown >= short:
 		return "unknown-never-destroys", ""
 	}
 	return "unexplained", ""
+}
+
+// allRecords reports records all naming an outcome (part, "/outcome/").
+func allRecords(records []string, part string) bool {
+	return len(records) > 0 && !slices.ContainsFunc(records, func(r string) bool { return !strings.Contains(r+"/", part) })
+}
+
+// demandDriven reports a template whose rows are pool seats, none a named
+// session's: its starts rest on demand. A named always session's do not.
+func demandDriven(template string, info map[string]session.Info) bool {
+	pool := false
+	for _, i := range info {
+		if i.Template == template {
+			if i.ConfiguredNamedSession {
+				return false
+			}
+			pool = pool || i.PoolManaged
+		}
+	}
+	return pool
 }
 
 // writeReplay writes divergence.jsonl and divergence_summary.json into dir.
@@ -554,31 +620,52 @@ func TestReplaySampleMatchesExpectedDivergences(t *testing.T) {
 }
 
 // Kills a family filed on too little evidence: each family needs its own
-// cause, a v2-only intent is never explained, an idle drain on a row inside
-// INC-003's grace is not INC-003, and one row in grace explains one drain.
+// cause, a v2-only intent is never explained, INC-003 needs a row v2 held
+// for the grace, an idle drain on such a row is not INC-003, and one row in
+// grace explains one drain.
 func TestReplayFamilies(t *testing.T) {
-	at := time.Date(2026, 10, 5, 0, 2, 0, 0, time.UTC)
 	k := rowKey{Leg: rowLeg, ID: "r1"}
-	info := map[string]session.Info{"r1": {Template: "t", LastWokeAt: at.Add(-time.Minute).Format(time.RFC3339)}}
-	built := map[string]bool{"A20": true, "A21": true}
+	info := map[string]session.Info{"r1": {Template: "t", PoolManaged: true}, "n1": {Template: "n", ConfiguredNamedSession: true}}
+	built := map[string]bool{"A11": true, "A18": true, "A20": true, "A21": true}
 	for _, tc := range []struct {
 		name, arm, class, record, reason string
-		v2                               int
+		v2, heals                        int
 		family, item                     string
 	}{
-		{"v2 only", "A20", "heal", "", "", 1, "unexplained", ""},
-		{"§12.2", "§12.2/1", "stop", "reconciler.drain.timeout/complete/drain_timeout", "", 0, "v5 §12.2", "1"},
-		{"deferred", "A18", "start", "x/start_candidate/wake", "", 0, "deferred arm", "A18"},
-		{"INC-003", "A20", "drain", "x/drain/orphaned", "", 0, "INC-003", ""},
-		{"unknown", "A21", "close", "x/closed/orphaned", decideLivenessUnknown, 0, "unknown-never-destroys", ""},
-		{"idle drain", "A20", "drain", "x/drain/idle", "", 0, "unexplained", ""},
-		{"INC-003 on one row of two", "A20", "drain", "x/drain/orphaned,x/drain/orphaned", "", 0, "unexplained", ""},
+		{"v2 only", "A20", "heal", "", "", 1, 0, "unexplained", ""},
+		{"an identity sync", "", intentRowMetadata, "", "", 1, 0, "harness gap", replayUntracedSync},
+		{"a v2-only close", "A21", "close", "", "", 1, 0, "replay approximation", "close's L5 runs in the effect"},
+		{"a close a timer heal precedes", "A21", "close", "x/closed/orphaned", "", 0, 1, "replay approximation", "timer heal precedes the close"},
+		{"two closes one heal precedes", "A21", "close", "x/closed/orphaned,x/closed/orphaned", "", 0, 1, "unexplained", ""},
+		{"§12.2", "§12.2/1", "stop", "reconciler.drain.timeout/complete/drain_timeout", "", 0, 0, "v5 §12.2", "1"},
+		{"deferred", "A17", "start", "x/start_candidate/wake", "", 0, 0, "deferred arm", "A17"},
+		{"a start with no exported demand", "A18", "start", "x/start_candidate/wake", "", 0, 0, "harness gap", "no exported demand"},
+		{"a floor cancel with no exported row ack", "A11", "drain-cancel", "reconciler.drain.cancel/cancel_min_floor/min_floor_idle_worker", "", 0, 0, "harness gap", "no exported row ack"},
+		{"a floor cancel beside another cancel", "A11", "drain-cancel", "reconciler.drain.cancel/cancel_min_floor/min_floor_idle_worker,x/cancel/idle", "", 0, 0, "unexplained", ""},
+		{"a named session's start", "A18", "start", "x/start_candidate/wake", "", 0, 0, "unexplained", ""},
+		{"INC-003", "A20", "drain", "x/drain/orphaned", decideWakeGrace, 0, 0, "INC-003", ""},
+		{"woken lately, not held for the grace", "A20", "drain", "x/drain/orphaned", decideDrainWorkKept, 0, 0, "unexplained", ""},
+		{"unknown", "A21", "close", "x/closed/orphaned", decideLivenessUnknown, 0, 0, "unknown-never-destroys", ""},
+		{"idle drain", "A20", "drain", "x/drain/idle", decideWakeGrace, 0, 0, "unexplained", ""},
+		{"INC-003 on one row of two", "A20", "drain", "x/drain/orphaned,x/drain/orphaned", decideWakeGrace, 0, 0, "unexplained", ""},
 	} {
 		rec := &passTrace{Rows: []rowTrace{{Key: k, Template: "t", Reason: tc.reason}}}
 		records := strings.Split(tc.record, ",")
-		d := replayDivergence{Template: "t", Class: tc.class, Legacy: len(records) * (1 - tc.v2), V2: tc.v2, Records: records}
-		if f, i := replayFamily(d, strings.Split(tc.arm, ","), built, rec, info, at); f != tc.family || i != tc.item {
+		template := cmp.Or(map[string]string{"a named session's start": "n"}[tc.name], "t")
+		d := replayDivergence{Template: template, Class: tc.class, Legacy: len(records) * (1 - tc.v2), V2: tc.v2, Records: records}
+		if f, i := replayFamily(d, strings.Split(tc.arm, ","), built, rec, info, tc.heals); f != tc.family || i != tc.item {
 			t.Errorf("%s: family %q item %q, want %q %q", tc.name, f, i, tc.family, tc.item)
 		}
+	}
+}
+
+// TestV2ClassOfTheFloorCancel: A11's floor cancel is a drain cancel, which
+// legacy's cancel_min_floor matches, never a destructive signal.
+func TestV2ClassOfTheFloorCancel(t *testing.T) {
+	if got := v2Class(intentSignalAck, decideFloorAckCancel); got != "drain-cancel" || replayDestructive[got] {
+		t.Errorf("the floor cancel classes %q, want drain-cancel", got)
+	}
+	if got := v2Class(intentSignalAck, decideDrainSignal+drainIdle); got != "signal" {
+		t.Errorf("an ack signal classes %q, want signal", got)
 	}
 }

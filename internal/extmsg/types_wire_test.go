@@ -179,3 +179,55 @@ func TestPublishReceiptStaysPascalCaseOnAPISurface(t *testing.T) {
 		}
 	}
 }
+
+// Regression for ga-1up872: the inbound/outbound API results declare their
+// optional records (and receipt metadata) as non-nullable objects, so an
+// absent one must be omitted from the wire, never sent as null. The existing
+// PascalCase keys are a published contract (contrib bridges read
+// TargetSessionID) and must not change.
+func TestInboundOutboundResultsOmitAbsentRecords(t *testing.T) {
+	cases := []struct {
+		name     string
+		value    any
+		absent   []string
+		keepKeys []string
+	}{
+		{
+			name:     "inbound",
+			value:    InboundResult{TargetSessionID: "gc-1"},
+			absent:   []string{`"Binding"`, `"GroupRoute"`, `"TranscriptEntry"`},
+			keepKeys: []string{`"Message":`, `"TargetSessionID":"gc-1"`, `"TargetAgentName":`},
+		},
+		{
+			name:     "outbound",
+			value:    OutboundResult{Receipt: PublishReceipt{MessageID: "m-1"}},
+			absent:   []string{`"DeliveryContext"`, `"TranscriptEntry"`, `"Metadata"`},
+			keepKeys: []string{`"Receipt":`, `"MessageID":"m-1"`, `"Delivered":`},
+		},
+		{
+			name: "records without metadata",
+			value: OutboundResult{
+				DeliveryContext: &DeliveryContextRecord{ID: "dc-1"},
+				TranscriptEntry: &ConversationTranscriptRecord{ID: "tr-1"},
+			},
+			absent:   []string{`"Metadata"`},
+			keepKeys: []string{`"DeliveryContext":{"ID":"dc-1"`, `"TranscriptEntry":{"ID":"tr-1"`},
+		},
+	}
+	for _, tc := range cases {
+		body, err := json.Marshal(tc.value)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", tc.name, err)
+		}
+		for _, key := range tc.absent {
+			if bytes.Contains(body, []byte(key)) {
+				t.Errorf("%s: absent %s must be omitted: %s", tc.name, key, body)
+			}
+		}
+		for _, key := range tc.keepKeys {
+			if !bytes.Contains(body, []byte(key)) {
+				t.Errorf("%s: wire lost %s: %s", tc.name, key, body)
+			}
+		}
+	}
+}

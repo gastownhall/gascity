@@ -5,8 +5,9 @@ import "github.com/gastownhall/gascity/internal/session"
 // The rekey effect (CONTRACT v5 S4; owner ruling 3): arm A3's intent to
 // align a row's instance_token with the runtime of the same row that carries
 // an older token, so that runtime reads Current and its stop's L2 passes.
-// It is a transaction (runTx): under the runtime name lock and the row's
-// session mutation lock, which an in-process start or restart takes, through
+// It is a transaction (runTx): under the runtime lease, with the row's
+// record (needs.Lease: it writes the incarnation), and the row's session
+// mutation lock, which an in-process start or restart takes, through
 // the CAS, it re-reads the runtime fresh (readRuntime): presence, then
 // identity, then presence again on the same session object. It proceeds
 // only while the runtime is still StaleSelf to the pass's row under S4's
@@ -15,7 +16,7 @@ import "github.com/gastownhall/gascity/internal/session"
 // the premise holds at the generation, token and lifecycle facts the pass
 // saw (a pending_create_claim among them). It never writes generation.
 // Residual: an out-of-process writer of the runtime's identity (`gc attach`
-// relaunching it) takes neither lock; a token it rewrites in place on the
+// relaunching it) takes neither the lease nor the lock; a token it rewrites in place on the
 // same object after the read can still be overwritten, and the next pass's
 // A3 re-keys the row to it. A probing effect (60s); not boot-gated, and it
 // costs no token.

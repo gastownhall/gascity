@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -87,9 +86,11 @@ const runtimeLeaseAttempts = 3
 const runtimeLeaseWaitPoll = 200 * time.Millisecond
 
 // RuntimeLeaseTTL is the record's lifetime for a city whose starts are
-// bounded by startupTimeout: one start plus RuntimeLeaseMargin.
+// bounded by startupTimeout: one start plus RuntimeLeaseMargin. A negative
+// startupTimeout (a misconfigured city) counts as zero, so the TTL is never
+// below the margin.
 func RuntimeLeaseTTL(startupTimeout time.Duration) time.Duration {
-	return startupTimeout + RuntimeLeaseMargin
+	return max(startupTimeout, 0) + RuntimeLeaseMargin
 }
 
 var (
@@ -110,6 +111,15 @@ var (
 	ErrRuntimeLeaseRowClosed = errors.New("runtime lease: the session row is closed")
 	// ErrRuntimeLeaseAfterRelease refuses a write under a released lease.
 	ErrRuntimeLeaseAfterRelease = errors.New("runtime lease: written after release")
+	// ErrRuntimeLeaseRenamed refuses a record on a row whose session_name is
+	// not the runtime name asked for.
+	ErrRuntimeLeaseRenamed = errors.New("runtime lease: the row's runtime name moved")
+	// ErrRuntimeLeaseContention reports a record write that lost its
+	// revision fence on every attempt.
+	ErrRuntimeLeaseContention = errors.New("runtime lease: contended")
+	// ErrRuntimeLeaseLocalFS reports the name's lock file or its directory
+	// failing on the local filesystem.
+	ErrRuntimeLeaseLocalFS = errors.New("runtime lease: local lock file")
 )
 
 // RuntimeLeaseBusyError names who holds a busy lease. Local means the holder
@@ -173,6 +183,23 @@ func (l *RuntimeLease) Expires() time.Time { return l.expires }
 // a provider call or an effect's deadline, must end by it.
 func (l *RuntimeLease) SafeUntil() time.Time { return l.expires.Add(-RuntimeLeaseSkewAllowance) }
 
+// HeldAt reports whether the lease still excludes other holders at now on
+// the holder's clock: it is not released and, when it took a record, now is
+// before SafeUntil. A flock-only lease is held until released. It reads
+// nothing, so a takeover it cannot see needs the record to have lapsed first.
+func (l *RuntimeLease) HeldAt(now time.Time) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	released := l.released
+	l.mu.Unlock()
+	if released {
+		return false
+	}
+	return l.expires.IsZero() || now.Before(l.SafeUntil())
+}
+
 // Fenced reports whether the record was taken by conditional write. False
 // means it is best-effort and only holders sharing the flock are excluded.
 func (l *RuntimeLease) Fenced() bool { return l.fenced }
@@ -202,8 +229,11 @@ var noCASWarned = struct {
 // RuntimeLeaseBusyError. The controller and reapers use it and defer on busy.
 func TryRuntimeLease(s *Store, req RuntimeLeaseRequest) (*RuntimeLease, error) {
 	req.Name = strings.TrimSpace(req.Name)
-	if strings.TrimSpace(req.City) == "" || req.Name == "" {
+	if req.Name == "" {
 		return nil, fmt.Errorf("runtime lease: city %q and name %q are required", req.City, req.Name)
+	}
+	if !filepath.IsAbs(req.City) {
+		return nil, RefuseWithoutCity(req.City, fmt.Sprintf("runtime %q", req.Name))
 	}
 	if req.ID != "" && (s == nil || req.TTL < runtimeLeaseMinTTL) {
 		return nil, fmt.Errorf("runtime lease: session %q: a store and a TTL of at least %v (got %v) are required", req.ID, runtimeLeaseMinTTL, req.TTL)
@@ -220,17 +250,93 @@ func TryRuntimeLease(s *Store, req RuntimeLeaseRequest) (*RuntimeLease, error) {
 	if req.ID == "" {
 		return l, nil
 	}
-	host, err := runtimeLeaseHostname()
-	if err != nil {
-		host = "unknown"
-	}
-	l.holder = host + "/" + strconv.Itoa(os.Getpid()) + "/" + runtimeLeaseNonce()
+	l.holder = newRuntimeLeaseHolder()
 	if err := l.acquireRecord(req.City, req.TTL); err != nil {
 		writeRuntimeLeaseLockBody(lock, prev, now()) // no record written: keep the previous token
 		unlockRuntimeNameFile(lock)
 		return nil, err
 	}
 	return l, nil
+}
+
+// TakeRecord adds the record on req's open row to a flock-only lease on the
+// same name, taken as TryRuntimeLease takes it. The legacy start holds the
+// name's flock first and takes the record only just before PreWake, so a start
+// deferred before then writes nothing. A failure leaves the lease flock-only.
+func (l *RuntimeLease) TakeRecord(s *Store, req RuntimeLeaseRequest) error {
+	switch {
+	case l.id != "":
+		return fmt.Errorf("runtime lease: runtime %q already holds session %q's record", l.name, l.id)
+	case strings.TrimSpace(req.Name) != l.name || req.ID == "" || s == nil || req.TTL < runtimeLeaseMinTTL:
+		return fmt.Errorf("runtime lease: runtime %q: a record needs its own name, a session, a store and a TTL of at least %v (got %q, %q, %v)", l.name, runtimeLeaseMinTTL, req.Name, req.ID, req.TTL)
+	}
+	l.store, l.id, l.holder = s, req.ID, newRuntimeLeaseHolder()
+	if req.now != nil {
+		l.now = req.now
+	}
+	if err := l.acquireRecord(req.City, req.TTL); err != nil {
+		l.store, l.id, l.holder, l.epoch, l.expires = nil, "", "", 0, time.Time{}
+		writeRuntimeLeaseLockBody(l.lock, l.prev, l.now()) // no record written: keep the previous token, a dead holder's proof
+		return err
+	}
+	return nil
+}
+
+// RuntimeLeaseHeld reports whether a live holder has req's lease: the name's
+// flock is busy (a holder on this host), or the open row's record is one a
+// contender could not take (another host's, unexpired). A dead holder's lease
+// is not held: its flock died with it and its record names that flock, or the
+// record expired. It writes no record, leaves the lock file's token as it
+// found it, and takes the flock only for the read.
+func RuntimeLeaseHeld(s *Store, req RuntimeLeaseRequest) (bool, error) {
+	held, _, err := probeRuntimeLease(s, req)
+	return held, err
+}
+
+// RuntimeStartAbandoned reports whether the start whose in-flight marker the
+// caller read on decided was abandoned: no live holder has req's lease
+// (RuntimeLeaseHeld), and the row, read under the name's flock, still carries
+// decided's state, instance_token and last_woke_at. Every PreWake is written
+// under that lease and held through its commit, so a start that committed,
+// failed or was relaunched after the caller's read has moved one of them, and
+// is no abandoned start to relaunch (mc-5a1ma). A closed row is not abandoned.
+func RuntimeStartAbandoned(s *Store, req RuntimeLeaseRequest, decided Info) (bool, error) {
+	held, fresh, err := probeRuntimeLease(s, req)
+	if err != nil || held || fresh == nil || fresh.Closed {
+		return false, err
+	}
+	return strings.TrimSpace(fresh.MetadataState) == strings.TrimSpace(decided.MetadataState) &&
+		fresh.InstanceToken == decided.InstanceToken && fresh.LastWokeAt == decided.LastWokeAt, nil
+}
+
+// probeRuntimeLease is RuntimeLeaseHeld's read, with the row it read under
+// the flock (nil without an ID, or when the flock is busy).
+func probeRuntimeLease(s *Store, req RuntimeLeaseRequest) (held bool, fresh *Info, err error) {
+	now := req.now
+	if now == nil {
+		now = time.Now
+	}
+	lock, _, prev, err := lockRuntimeNameFile(req.City, strings.TrimSpace(req.Name), now())
+	if errors.Is(err, ErrRuntimeLeaseBusy) {
+		return true, nil, nil
+	}
+	if err != nil {
+		return false, nil, err
+	}
+	defer unlockRuntimeNameFile(lock)
+	if req.ID == "" {
+		return false, nil, nil
+	}
+	bead, err := s.freshBead(req.ID)
+	if err != nil {
+		return false, nil, err
+	}
+	info := infoFromPersistedBead(bead)
+	if bead.Status == "closed" {
+		return false, &info, nil
+	}
+	free, _ := parseRuntimeLease(bead.Metadata).free(now(), runtimeLeaseFlockIdentity(lock, prev))
+	return !free, &info, nil
 }
 
 // WaitRuntimeLease retries TryRuntimeLease until it succeeds, fails for
@@ -272,7 +378,7 @@ func (l *RuntimeLease) acquireRecord(city string, ttl time.Duration) error {
 			return fmt.Errorf("%w: session %q", ErrRuntimeLeaseRowClosed, l.id)
 		}
 		if name := infoFromPersistedBead(bead).SessionName; name != l.name {
-			return fmt.Errorf("runtime lease: runtime %q is not session %q's runtime %q", l.name, l.id, name)
+			return fmt.Errorf("%w: runtime %q is not session %q's runtime %q", ErrRuntimeLeaseRenamed, l.name, l.id, name)
 		}
 		now := l.now()
 		rec := parseRuntimeLease(bead.Metadata)
@@ -306,7 +412,7 @@ func (l *RuntimeLease) acquireRecord(city string, ttl time.Duration) error {
 			return fmt.Errorf("runtime lease: session %q: %w", l.id, err)
 		}
 	}
-	return fmt.Errorf("runtime lease: session %q: lost the revision fence %d times", l.id, runtimeLeaseAttempts)
+	return fmt.Errorf("%w: session %q: lost the revision fence %d times", ErrRuntimeLeaseContention, l.id, runtimeLeaseAttempts)
 }
 
 func warnRuntimeLeaseNoCAS(city string, diag *beads.BeadsDiagnostic) {
@@ -378,7 +484,9 @@ func (l *RuntimeLease) updateMetadataFenced(attempts int, decide func(Info, Pers
 // Release (ErrRuntimeLeaseReleased), or once a fresh read every interval finds
 // the row closed or no longer recording the lease (ErrRuntimeLeaseLost). It never writes
 // and never renews. A provider Call runs on it, so a holder that lost its
-// record stops calling. A failed read cancels nothing.
+// record stops calling. A failed read cancels nothing. The returned cancel
+// returns once the watch's reads have stopped, so a caller may close the
+// store after it (an in-flight read is waited for, never abandoned).
 func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.Context, context.CancelFunc, error) {
 	if every <= 0 {
 		return nil, nil, fmt.Errorf("runtime lease: watch interval %v must be positive", every)
@@ -395,7 +503,9 @@ func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.
 		return lost, func() { cancelLost(context.Canceled) }, nil
 	}
 	watched, cancelWatched := context.WithDeadlineCause(lost, time.Now().Add(l.SafeUntil().Sub(l.now())), ErrRuntimeLeaseExpired)
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
@@ -403,6 +513,9 @@ func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.
 			case <-watched.Done():
 				return
 			case <-t.C:
+				if watched.Err() != nil { // a tick racing the end starts no read
+					return
+				}
 				if bead, err := l.store.freshBead(l.id); err == nil && !l.holdsRow(bead) {
 					cancelLost(ErrRuntimeLeaseLost)
 					return
@@ -410,7 +523,7 @@ func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.
 			}
 		}
 	}()
-	return watched, func() { cancelWatched(); cancelLost(context.Canceled) }, nil
+	return watched, func() { cancelWatched(); cancelLost(context.Canceled); <-stopped }, nil
 }
 
 // Release cancels the lease's Watch contexts, clears the record if it is
@@ -418,8 +531,20 @@ func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.
 // drops the flock. A failed clear is logged and leaves the record to expire.
 // A nil lease releases nothing.
 func (l *RuntimeLease) Release() {
+	if err := l.release(); err != nil {
+		log.Printf("runtime lease: session %q: clearing the record at release: %v", l.id, err)
+	}
+}
+
+// ReleaseChecked is Release returning the failed clear instead of logging
+// it, for a holder whose next write must follow the release (the kill
+// fence's lift, CONTRACT v5.10p). Only the call that releases reports; a
+// later Release or ReleaseChecked returns nil.
+func (l *RuntimeLease) ReleaseChecked() error { return l.release() }
+
+func (l *RuntimeLease) release() (err error) {
 	if l == nil {
-		return
+		return nil
 	}
 	l.once.Do(func() {
 		l.mu.Lock()
@@ -430,15 +555,16 @@ func (l *RuntimeLease) Release() {
 		l.watchers = nil
 		l.mu.Unlock()
 		if l.id != "" {
-			_, err := l.updateMetadataFenced(runtimeLeaseAttempts, func(Info, PersistedResponse) MetadataPatch {
+			_, err = l.updateMetadataFenced(runtimeLeaseAttempts, func(Info, PersistedResponse) MetadataPatch {
 				return RuntimeLeaseClearPatch()
 			})
-			if err != nil && !errors.Is(err, ErrRuntimeLeaseLost) {
-				log.Printf("runtime lease: session %q: clearing the record at release: %v", l.id, err)
+			if errors.Is(err, ErrRuntimeLeaseLost) {
+				err = nil
 			}
 		}
 		unlockRuntimeNameFile(l.lock)
 	})
+	return err
 }
 
 // holdsRow reports whether the row bead is open and records this lease.
@@ -447,10 +573,11 @@ func (l *RuntimeLease) holdsRow(bead beads.Bead) bool {
 }
 
 // ClearRuntimeLeaseForReopen clears the runtime lease record on session bead
-// id before a generic reopen (the bead API, the bd bridge) flips it open, as
+// id before a generic reopen (the bd bridge; the bead API refuses a session
+// row's reopen, mc-dkblm) flips it open, as
 // SetStatusOpen's own clear does: a reopened row holds no lease. A bead that is
 // not a session, or holds no record, is left alone.
-func ClearRuntimeLeaseForReopen(store beads.Store, id string) error {
+func ClearRuntimeLeaseForReopen(store beads.SessionStore, id string) error {
 	b, err := store.Get(id)
 	if err != nil || !IsSessionBeadOrRepairable(b) || strings.TrimSpace(b.Metadata[RuntimeLeaseHolderKey]) == "" {
 		return nil
@@ -476,10 +603,10 @@ func withRuntimeLeaseCleared(patch MetadataPatch) MetadataPatch {
 
 // freshBead reads the session row past any cache.
 func (s *Store) freshBead(id string) (beads.Bead, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
 	}
-	b, err := beads.HandlesFor(s.store.Store).Live.Get(id)
+	b, err := beads.LiveFor(s.store).Get(id)
 	if err != nil {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, err)
 	}
@@ -532,18 +659,18 @@ func (r runtimeLeaseRecord) free(now time.Time, flock string) (free, malformed b
 // unknown, so no takeover is immediate.
 func runtimeLeaseFlockIdentity(f *os.File, token string) string {
 	boot := runtimeLeaseBootID()
-	if boot == "" || token == "" {
+	if boot == "" || f == nil || token == "" {
 		return ""
 	}
 	fi, err := f.Stat()
 	if err != nil {
 		return ""
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
+	dev, ino, ok := runtimeLeaseFileID(f, fi)
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf("%s/%d/%d/%s", boot, st.Dev, st.Ino, token)
+	return fmt.Sprintf("%s/%d/%d/%s", boot, dev, ino, token)
 }
 
 // runtimeLeaseMinTTL is RuntimeLeaseMargin; the cross-process tests shorten it.
@@ -560,20 +687,20 @@ func lockRuntimeNameFile(city, name string, now time.Time) (f *os.File, token, p
 	sum := sha256.Sum256([]byte(name))
 	path := filepath.Join(citylayout.SessionNameLocksDir(city), "runtime-"+hex.EncodeToString(sum[:])+".lock")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, "", "", fmt.Errorf("runtime lease: creating lock dir: %w", err)
+		return nil, "", "", fmt.Errorf("%w: creating lock dir: %w", ErrRuntimeLeaseLocalFS, err)
 	}
 	f, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("runtime lease: opening lock: %w", err)
+		return nil, "", "", fmt.Errorf("%w: opening lock: %w", ErrRuntimeLeaseLocalFS, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if busy, err := tryLockRuntimeNameFile(f); err != nil {
 		f.Close() //nolint:errcheck // closing after a refused lock
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if busy {
 			body, _ := os.ReadFile(path)
 			_, holder, _ := strings.Cut(string(body), "\n")
 			return nil, "", "", &RuntimeLeaseBusyError{Name: name, Holder: strings.TrimSpace(holder), Local: true}
 		}
-		return nil, "", "", fmt.Errorf("runtime lease: locking %q: %w", name, err)
+		return nil, "", "", fmt.Errorf("%w: locking %q: %w", ErrRuntimeLeaseLocalFS, name, err)
 	}
 	old := make([]byte, 128)
 	n, _ := f.ReadAt(old, 0)
@@ -600,12 +727,20 @@ func writeRuntimeLeaseLockBody(f *os.File, token string, now time.Time) {
 }
 
 func unlockRuntimeNameFile(f *os.File) {
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // close releases it too
-	f.Close()                                   //nolint:errcheck // best-effort cleanup
+	if f == nil {
+		return
+	}
+	releaseRuntimeNameFileLock(f)
+	f.Close() //nolint:errcheck // best-effort cleanup
 }
 
-func runtimeLeaseNonce() string {
+// newRuntimeLeaseHolder names one acquire: host/pid/nonce.
+func newRuntimeLeaseHolder() string {
+	host, err := runtimeLeaseHostname()
+	if err != nil {
+		host = "unknown"
+	}
 	var b [8]byte
 	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+	return host + "/" + strconv.Itoa(os.Getpid()) + "/" + hex.EncodeToString(b[:])
 }

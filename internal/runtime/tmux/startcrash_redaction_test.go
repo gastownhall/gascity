@@ -16,7 +16,8 @@ import (
 // durable file. Redacting at the capture chokepoint covers both.
 func TestStartupDeadSessionErrorRedactsPaneSecrets(t *testing.T) {
 	const secret = "sk-ant-NOT-A-REAL-KEY-0123456789"
-	exec := &fakeExecutor{out: "+ export ANTHROPIC_API_KEY=" + secret + "\nclaude: command not found\n"}
+	// The agent-pane lookup, then the capture.
+	exec := &fakeExecutor{outs: []string{"pane\t@1.%0", "+ export ANTHROPIC_API_KEY=" + secret + "\nclaude: command not found\n"}}
 	tm := NewTmux()
 	tm.exec = exec
 
@@ -102,7 +103,7 @@ func TestRecordStartCrashWritesOwnerOnlyArtifact(t *testing.T) {
 // redaction cannot match that, and an API key is comfortably wider than a
 // default pane. -J rejoins the wrapped lines first.
 func TestStartOpsCapturePaneJoinsWrappedLines(t *testing.T) {
-	exec := &fakeExecutor{out: "hello\n"}
+	exec := &fakeExecutor{outs: []string{"pane\t@1.%0", "hello\n"}}
 	tm := NewTmux()
 	tm.exec = exec
 	ops := newTmuxStartOps(tm, "", 0, runtime.Config{}, true)
@@ -110,15 +111,15 @@ func TestStartOpsCapturePaneJoinsWrappedLines(t *testing.T) {
 	if _, err := ops.capturePane("gc-test-crash", 80); err != nil {
 		t.Fatalf("capturePane: %v", err)
 	}
-	if len(exec.calls) == 0 {
-		t.Fatal("capturePane issued no tmux command")
+	if len(exec.calls) != 2 {
+		t.Fatalf("capturePane issued %q, want the agent-pane lookup then the capture", exec.calls)
 	}
-	args := exec.calls[0]
+	args := exec.calls[1]
 	if !slices.Contains(args, "-J") {
 		t.Errorf("capture-pane args %q omit -J; wrapped credentials survive redaction", args)
 	}
-	// Control: the joined capture is still a capture of the right pane.
-	if !slices.Contains(args, "capture-pane") || !slices.Contains(args, "=gc-test-crash:") {
+	// Control: the joined capture is still a capture of the agent pane.
+	if !slices.Contains(args, "capture-pane") || !slices.Contains(args, "=gc-test-crash:@1.%0") {
 		t.Errorf("capture-pane args %q lost the command or target", args)
 	}
 }

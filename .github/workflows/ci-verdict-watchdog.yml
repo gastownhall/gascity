@@ -23,7 +23,6 @@ on:
     types: [completed]
 
 permissions:
-  checks: write
   actions: read
 
 jobs:
@@ -33,6 +32,9 @@ jobs:
       github.event.workflow_run.conclusion == 'cancelled' &&
       github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      actions: read
     steps:
       - name: Post neutral check-run for the cancelled run
         env:

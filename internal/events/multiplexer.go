@@ -401,7 +401,8 @@ func collectWatchAttachResults(
 //
 // The set of watched cities is not fixed: Sync attaches cities that appeared
 // after Watch and detaches cities that went away. Next reports that all
-// watchers finished once no city is attached and no Sync is in progress.
+// watchers finished once no city is attached and no Sync is in progress,
+// unless StayOpen was called.
 type MuxWatcher struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -415,6 +416,7 @@ type MuxWatcher struct {
 	active   int                 // running fan-in goroutines
 	holds    int                 // in-progress attaches that keep ch open
 	finished bool                // ch is closed
+	stayOpen bool                // a StayOpen hold keeps ch open until Close
 }
 
 // muxCity is one attached city's fan-in goroutine.
@@ -508,6 +510,27 @@ func (w *MuxWatcher) isClosed() bool {
 	}
 }
 
+// StayOpen keeps the watcher open with no city attached: detaching every city
+// (or every city watcher ending) no longer makes Next report that all watchers
+// finished, and a later Sync can still attach cities. Next then blocks until an
+// attached city delivers, the watcher is closed, or its context ends. A
+// long-lived stream whose city set may empty and refill (the supervisor event
+// stream) uses it; a fixed-set consumer keeps the default, which ends once
+// every watcher finished. It reports false when the watcher had already
+// finished or been closed.
+func (w *MuxWatcher) StayOpen() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.finished || w.isClosed() {
+		return false
+	}
+	if !w.stayOpen {
+		w.stayOpen = true
+		w.holds++
+	}
+	return true
+}
+
 // Cities returns the names of the currently attached cities, sorted.
 func (w *MuxWatcher) Cities() []string {
 	w.mu.Lock()
@@ -596,6 +619,13 @@ func (w *MuxWatcher) Close() error {
 	w.closeOnce.Do(func() {
 		close(w.done)
 		w.cancel()
+		w.mu.Lock()
+		if w.stayOpen {
+			w.stayOpen = false
+			w.holds--
+			w.finishIfIdleLocked()
+		}
+		w.mu.Unlock()
 	})
 	return nil
 }

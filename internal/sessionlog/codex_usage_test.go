@@ -1428,3 +1428,168 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		}
 	})
 }
+
+func TestCodexTailActivityUsesExplicitTurnEvents(t *testing.T) {
+	start := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`
+	done := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`
+	answer := `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Ready"}]}}`
+	startNoID := `{"type":"event_msg","payload":{"type":"task_started"}}`
+	doneNoID := `{"type":"event_msg","payload":{"type":"task_complete"}}`
+	// Codex writes this marker immediately before the turn_aborted event_msg
+	// for the same turn; only the event ends the turn.
+	abortMarker := `{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<turn_aborted>\nThe previous turn was interrupted on purpose.\n</turn_aborted>"}]}}`
+	cases := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"started", []string{start}, "in-turn"},
+		{"assistant is not completion", []string{start, answer}, "in-turn"},
+		{"completed", []string{start, answer, done}, "idle"},
+		{"completion alone in tail window", []string{done}, "idle"},
+		{"new turn", []string{done, start}, "in-turn"},
+		{"stale completion", []string{start, `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"older"}}`}, "in-turn"},
+		{"aborted", []string{start, `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1"}}`}, "idle"},
+		{"no terminal event", []string{answer}, ""},
+		{"rate limit update after completion", []string{done, `{"type":"event_msg","payload":{"type":"token_count","info":null}}`}, "idle"},
+		{"malformed trailing event", []string{done, `{"type":"event_msg"`}, ""},
+		{"completion without turn ids", []string{startNoID, doneNoID}, "idle"},
+		{"new turn without turn ids", []string{doneNoID, startNoID}, "in-turn"},
+		{"completion without turn id ends an identified turn", []string{start, doneNoID}, "idle"},
+		{"identified completion ends a turn started without id", []string{startNoID, done}, "idle"},
+		{"abort marker then abort event", []string{start, abortMarker, `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1"}}`}, "idle"},
+		{"abort marker alone", []string{start, abortMarker}, "in-turn"},
+		{"lifecycle name outside event_msg", []string{done, `{"type":"response_item","payload":{"type":"function_call","name":"task_started","arguments":"{}"}}`}, "idle"},
+		{"lifecycle name in another event", []string{start, `{"type":"event_msg","payload":{"type":"agent_message","message":"task_complete"}}`}, "in-turn"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			writeCodexUsageLines(t, path, tc.lines)
+			meta, err := ExtractCodexTailMeta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if meta != nil {
+				got = meta.Activity
+			}
+			if got != tc.want {
+				t.Fatalf("activity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexTailActivitySurvivesLargeToolOutput(t *testing.T) {
+	start := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}`
+	done := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"current"}}`
+	stale := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"older"}}`
+	large := fmt.Sprintf(`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"tool","output":%q}}`, strings.Repeat("guide output ", tailChunkSize/3))
+	largeDone := fmt.Sprintf(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"current","last_agent_message":%q}}`, strings.Repeat("summary ", tailChunkSize/2))
+	torn := `{"type":"event_msg"`
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"active after one large result", []string{start, large}, "in-turn"},
+		{"active across many small results", append([]string{start}, codexFillerLines(t, 3*tailChunkSize)...), "in-turn"},
+		{"delayed old completion outside start window", []string{start, large, stale}, "in-turn"},
+		{"idle after large result", []string{start, large, done}, "idle"},
+		{"idle marker beyond tail", []string{start, done, large}, "idle"},
+		{"aborted beyond tail", []string{start, `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"current"}}`, large}, "idle"},
+		{"new active turn beyond tail", []string{start, done, start, large}, "in-turn"},
+		{"no lifecycle is unknown", []string{large}, ""},
+		{"completion record spanning reads", []string{start, large, largeDone}, "idle"},
+		// A torn final record may be the next turn's start: it cannot end an
+		// open turn, but it hides a completion.
+		{"torn final record keeps open turn", []string{start, large, torn}, "in-turn"},
+		{"torn final record hides completion", []string{start, large, done, torn}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			writeCodexUsageLines(t, path, tc.lines)
+			meta, err := ExtractCodexTailMeta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if meta != nil {
+				got = meta.Activity
+			}
+			if got != tc.want {
+				t.Fatalf("activity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexTailActivityStopsAtLifecycleBudget(t *testing.T) {
+	start := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}`
+	done := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"current"}}`
+	open := append([]string{codexFillerLine(t, 1024), start}, codexFillerLines(t, 2*tailChunkSize)...)
+	closed := append(append([]string{}, open...), done)
+	// A budget of exactly the bytes from the start line onward excludes the
+	// newline before it, so the start is not known to be a whole record.
+	fromStart := func(lines []string) int64 { return codexLinesBytes(lines[1:]) }
+	for _, tc := range []struct {
+		name   string
+		lines  []string
+		budget int64
+		want   string
+	}{
+		{"start inside budget", open, fromStart(open) + 1, "in-turn"},
+		{"start cut by budget", open, fromStart(open), ""},
+		{"completion whose start is cut by budget", closed, fromStart(closed), ""},
+		{"completion and start inside budget", closed, fromStart(closed) + 1, "idle"},
+		{"whole file inside budget", open, codexLinesBytes(open), "in-turn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			writeCodexUsageLines(t, path, tc.lines)
+			meta, err := extractCodexTailMeta(path, tc.budget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if meta != nil {
+				got = meta.Activity
+			}
+			if got != tc.want {
+				t.Fatalf("activity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// An oversized record is an unknown turn boundary, not a failed read: the
+// tail window's model and context usage must survive it.
+func TestCodexTailMetaKeepsModelAndContextPastLifecycleBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	writeCodexUsageLines(t, path, []string{
+		`{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}`,
+		codexFillerLine(t, 3*tailChunkSize),
+		codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.4"),
+		// A truncated window keeps its first cumulative total only as an
+		// anchor; the second is attributable to the in-window turn_context.
+		codexTokenCountLine("2026-04-16T21:49:41.000Z", 15_917, 15_562, 10_624, 355, 166),
+		codexTokenCountLine("2026-04-16T21:49:42.000Z", 31_834, 15_700, 10_624, 217, 0),
+	})
+	meta, err := extractCodexTailMeta(path, 2*tailChunkSize)
+	if err != nil {
+		t.Fatalf("extractCodexTailMeta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("extractCodexTailMeta = nil, want model and context metadata")
+	}
+	if meta.Model != "gpt-5.4" {
+		t.Errorf("Model = %q, want gpt-5.4", meta.Model)
+	}
+	if meta.ContextUsage == nil || meta.ContextUsage.InputTokens != 15_700 {
+		t.Errorf("ContextUsage = %+v, want input tokens 15700", meta.ContextUsage)
+	}
+	if meta.Activity != "" {
+		t.Errorf("Activity = %q, want unknown", meta.Activity)
+	}
+}

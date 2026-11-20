@@ -8,7 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// TestViaControllerNeverStarts: ResumeViaController (the API without
+// TestViaControllerNeverStarts: ActorBackground (the API without
 // resume: true) queues any message to a session whose runtime is not
 // running, held or not, and marks the queue Deferred so the caller asks the
 // controller to start it; a running session takes the message live. Kills
@@ -23,7 +23,7 @@ func TestViaControllerNeverStarts(t *testing.T) {
 			}
 			e := newPolicyEnv(t, meta, live)
 			startsBefore := e.sp.CountCalls("Start", resumeName)
-			out, err := e.mgr.Submit(context.Background(), e.id, "hello", "claude --resume k", runtime.Config{}, SubmitIntentDefault, ResumeViaController)
+			out, err := e.mgr.Submit(context.Background(), testActor(e.mgr, ActorBackground), e.id, "hello", "claude --resume k", runtime.Config{}, SubmitIntentDefault)
 			if err != nil {
 				t.Fatalf("Submit: %v", err)
 			}
@@ -44,7 +44,7 @@ func TestViaControllerNeverStarts(t *testing.T) {
 func TestViaControllerQueuesForHeldLiveRow(t *testing.T) {
 	e := newPolicyEnv(t, policyRow(map[string]string{"state": string(StateSuspended), "sleep_intent": "user-hold"}), true)
 	before := e.row(t)
-	out, err := e.mgr.Submit(context.Background(), e.id, "hello", "claude --resume k", runtime.Config{}, SubmitIntentDefault, ResumeViaController)
+	out, err := e.mgr.Submit(context.Background(), testActor(e.mgr, ActorBackground), e.id, "hello", "claude --resume k", runtime.Config{}, SubmitIntentDefault)
 	if err != nil || !out.Queued {
 		t.Fatalf("Submit = %+v, %v; want queued", out, err)
 	}

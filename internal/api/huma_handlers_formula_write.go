@@ -102,7 +102,11 @@ func (s *Server) humaHandleFormulaUpsert(_ context.Context, input *FormulaUpsert
 		return nil, errMutationsNotSupported
 	}
 	if errs := validateFormulaSource(s.state.Config(), input.Name, input.RawBody); len(errs) > 0 {
-		return nil, apierr.InvalidRequest.Msg("formula validation failed: " + strings.Join(errs, "; "))
+		msg := strings.Join(errs, "; ")
+		if !strings.Contains(errs[0], "formula validation failed:") { // formula.Validate's own error says so
+			msg = "formula validation failed: " + msg
+		}
+		return nil, apierr.InvalidRequest.Msg(msg)
 	}
 	if err := fm.UpsertFormula(input.Name, input.RawBody); err != nil {
 		return nil, mutationError(err)

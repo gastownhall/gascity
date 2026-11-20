@@ -9,10 +9,11 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// TestBeadReopenClearsASessionsRuntimeLease: reopening a closed session bead
-// through the bead API clears its runtime lease record first, keeping the
-// epoch, so the reopened row hands no old holder its lease.
-func TestBeadReopenClearsASessionsRuntimeLease(t *testing.T) {
+// TestBeadReopenLeavesASessionsRuntimeLease (mc-dkblm): the bead API
+// refuses a session row's reopen before anything is written, so the closed
+// row stays closed with its lease record as it was; the session verbs own
+// a session row's reopen.
+func TestBeadReopenLeavesASessionsRuntimeLease(t *testing.T) {
 	state := newFakeState(t)
 	store := newPrefixedAliasStore("myrig-")
 	state.stores["myrig"] = store
@@ -28,11 +29,11 @@ func TestBeadReopenClearsASessionsRuntimeLease(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	newTestCityHandler(t, state).ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/")+b.ID+"/reopen", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("reopen status = %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("reopen status = %d: %s, want 422", rec.Code, rec.Body.String())
 	}
 	got, _ := store.Get(b.ID)
-	if got.Status != "open" || got.Metadata[session.RuntimeLeaseHolderKey] != "" || got.Metadata[session.RuntimeLeaseEpochKey] != "3" {
-		t.Fatalf("reopened session = %s %v, want open with no lease holder and the epoch kept", got.Status, got.Metadata)
+	if got.Status != "closed" || got.Metadata[session.RuntimeLeaseHolderKey] != "h/1/n" || got.Metadata[session.RuntimeLeaseEpochKey] != "3" {
+		t.Fatalf("session = %s %v, want closed with its lease record untouched", got.Status, got.Metadata)
 	}
 }

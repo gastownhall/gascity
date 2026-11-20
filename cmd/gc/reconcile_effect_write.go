@@ -25,21 +25,31 @@ var rowWriteSections = []section{{Decide: redecideRow}}
 
 // redecideRow is the row write's Decide: decideRow on the fresh row, and on
 // the fresh runtime read whenever the effect made one, so a fresh kind's
-// arm decides on its own read whatever its intent records.
+// arm decides on its own read whatever its intent records. A heal the fresh
+// decision composes with a start writes as the heal (intent.Heal).
 func redecideRow(v txView) txStep {
+	step, _ := redecideRowIntent(v)
+	return step
+}
+
+// redecideRowIntent is redecideRow with the fresh decision it wrote from.
+func redecideRowIntent(v txView) (txStep, intent) {
 	w := v.World.withRow(v.It.Key, v.Row, v.Meta)
 	if v.RT != nil {
 		w = w.withRuntime(v.It.Key, v.RT)
 	}
 	fresh, _ := decideRow(&w, v.Alloc, v.It.Key)
-	if fresh.Kind != v.It.Kind || len(fresh.Patch) == 0 {
-		return txStep{Refuse: causeRedecided}
+	if fresh.Heal != nil {
+		fresh = *fresh.Heal
 	}
-	step := txStep{Write: fresh.Patch}
+	if fresh.Kind != v.It.Kind || len(fresh.Patch) == 0 && fresh.Class.Len() == 0 {
+		return txStep{Refuse: causeRedecided}, fresh
+	}
+	step := txStep{Write: fresh.Patch, Class: fresh.Class}
 	if fresh.Event != nil {
 		step.Facts.Events = []events.Event{*fresh.Event}
 	}
-	return step
+	return step, fresh
 }
 
 // freshRow is row k's fresh runtime read.

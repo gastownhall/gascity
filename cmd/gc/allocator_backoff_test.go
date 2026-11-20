@@ -161,9 +161,9 @@ func TestBackoffPruneBoundsTheTable(t *testing.T) {
 	closed := rowKey{Leg: "sessions", ID: "gc-closed"}
 	unread := rowKey{Leg: "rig", ID: "gc-r"}
 	slashed := rowKey{Leg: "rigs/a", ID: "gc-s"}
-	keep := []string{rowBackoffKey(open), rowBackoffKey(unread), workBackoffKey("w-demand"), createBackoffKey("worker/worker-1")}
-	drop := []string{rowBackoffKey(closed), rowBackoffKey(slashed), workBackoffKey("w-gone"), createBackoffKey("worker/worker-2")}
-	for _, k := range []string{rowBackoffKey(open), rowBackoffKey(closed), rowBackoffKey(unread), rowBackoffKey(slashed), workBackoffKey("w-demand"), workBackoffKey("w-gone")} {
+	keep := []string{rowBackoffKey(open), driftBackoffKey(open), idleBackoffKey(open), rowBackoffKey(unread), workBackoffKey("w-demand"), createBackoffKey("worker/worker-1")}
+	drop := []string{rowBackoffKey(closed), driftBackoffKey(closed), idleBackoffKey(closed), rowBackoffKey(slashed), workBackoffKey("w-gone"), createBackoffKey("worker/worker-2")}
+	for _, k := range []string{rowBackoffKey(open), driftBackoffKey(open), idleBackoffKey(open), rowBackoffKey(closed), driftBackoffKey(closed), idleBackoffKey(closed), rowBackoffKey(unread), rowBackoffKey(slashed), workBackoffKey("w-demand"), workBackoffKey("w-gone")} {
 		b.Refuse(k, now, time.Time{}, "c", "")
 	}
 	b.Refuse(createBackoffKey("worker/worker-1"), now, time.Time{}, createStageFence, "rev-2")
@@ -264,10 +264,26 @@ func TestExecutionStalledKeepsARowAPartialCensusMissed(t *testing.T) {
 	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
 	p.postExecutionStalled(executionStalledRequest{ID: "gc-1", Generation: "1"})
 	partial := &sessionCensus{Legs: []censusLeg{{Ref: "sessions"}, {Ref: "rig", Err: errors.New("rig down")}}, Rows: map[rowKey]censusRow{}}
-	if got := p.executionStalled(partial); len(got) != 1 {
+	if got := p.executionStalled(partial, nil, plannerT0, time.Minute); len(got) != 1 {
 		t.Fatalf("after a partial census: %v, want gc-1's request kept", got)
 	}
-	if got := p.executionStalled(&sessionCensus{Legs: []censusLeg{{Ref: "sessions"}}, Rows: map[rowKey]censusRow{}}); len(got) != 0 {
+	if got := p.executionStalled(&sessionCensus{Legs: []censusLeg{{Ref: "sessions"}}, Rows: map[rowKey]censusRow{}}, nil, plannerT0, time.Minute); len(got) != 0 {
+		t.Fatalf("after a complete census without gc-1: %v, want it forgotten", got)
+	}
+}
+
+// Kills an owed runtime-alias sync kept for a closed row, or forgotten on a
+// partial read (the C7d-1 land review): a complete census that holds the
+// row closed drops it; a partial one keeps it.
+func TestAliasOwedForgetsAClosedRow(t *testing.T) {
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	k := rowKey{Leg: "sessions", ID: "gc-1"}
+	p.aliasOwed[k] = true
+	partial := &sessionCensus{Legs: []censusLeg{{Ref: "sessions", Err: errors.New("down")}}, Rows: map[rowKey]censusRow{}}
+	if got := p.aliasOwedFor(partial); !got[k] {
+		t.Fatalf("after a partial census: %v, want gc-1's sync kept", got)
+	}
+	if got := p.aliasOwedFor(&sessionCensus{Legs: []censusLeg{{Ref: "sessions"}}, Rows: map[rowKey]censusRow{}}); len(got) != 0 || len(p.aliasOwed) != 0 {
 		t.Fatalf("after a complete census without gc-1: %v, want it forgotten", got)
 	}
 }

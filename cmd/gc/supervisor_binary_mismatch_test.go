@@ -338,11 +338,70 @@ func TestCheckSupervisorBinaryBeforeRegisterInPlaceUpgrade(t *testing.T) {
 	if proceed, _ := checkSupervisorBinaryBeforeRegister("gc init", &initErr, true); !proceed {
 		t.Fatal("gc init refused an in-place upgrade; it should only warn")
 	}
-	for _, want := range []string{"gc init: warning:", "'gc supervisor stop', then 'gc start'"} {
+	self := shellQuotePath(resolveExecutablePath(bin))
+	for _, want := range []string{"gc init: warning:", "'" + self + " supervisor stop --wait', then '" + self + " start'"} {
 		if !strings.Contains(initErr.String(), want) {
 			t.Fatalf("gc init stderr missing %q:\n%s", want, initErr.String())
 		}
 	}
+}
+
+// TestSupervisorBinaryRemovedRelaunchRemedy covers a supervisor whose service
+// launches a gc binary that an upgrade removed after it started. No restart
+// can launch that binary and nothing remains to keep using, but install
+// replaces such a service file without --force. gc start and gc init keep
+// refusing while it runs, and the doctor check, both gates, and gc status
+// all name one remedy: a synchronous stop (a plain stop can return before
+// the supervisor exits, and gc start would meet the refusal again), then
+// gc start from this gc.
+func TestSupervisorBinaryRemovedRelaunchRemedy(t *testing.T) {
+	removed := filepath.Join(t.TempDir(), "Cellar", "gc", "1.3.5", "bin", "gc")
+	f := macOSHomebrewSupervisorFixture(t)
+	f.procExe, f.serviceBinary = removed, removed
+	stubSupervisorExeProbes(t, "linux")
+	stubSupervisorBinary(t, f)
+	readProcExeLinkHook = func(int) (string, error) { return removed + " (deleted)", nil }
+
+	info := gatherSupervisorBinary(4242)
+	if !info.ExeDeleted || !info.BuildDiffers {
+		t.Fatalf("gatherSupervisorBinary = %+v, want a removed executable serving another build", info)
+	}
+	self := shellQuotePath(resolveExecutablePath(f.localExe))
+	if remedy := "'" + self + " supervisor stop --wait', then '" + self + " start'"; !strings.Contains(info.FixHint, remedy) {
+		t.Fatalf("FixHint = %q, want it to contain %q", info.FixHint, remedy)
+	}
+	for _, reject := range []string{"--force", "use its gc", removed} {
+		if strings.Contains(info.FixHint, reject) {
+			t.Fatalf("FixHint = %q, want it not to contain %q", info.FixHint, reject)
+		}
+	}
+
+	assertDoctorFix := func(command, stderr string) {
+		t.Helper()
+		for _, line := range strings.Split(info.FixHint, "\n") {
+			if !strings.Contains(stderr, "  "+line+"\n") {
+				t.Errorf("%s stderr lacks the doctor's fix line %q:\n%s", command, line, stderr)
+			}
+		}
+		for _, reject := range []string{"--force", "use its gc"} {
+			if strings.Contains(stderr, reject) {
+				t.Errorf("%s stderr contains %q:\n%s", command, reject, stderr)
+			}
+		}
+	}
+	for _, gate := range []struct {
+		command          string
+		warnOnBuildDrift bool
+	}{{"gc start", false}, {"gc init", true}} {
+		var stderr bytes.Buffer
+		if proceed, accepted := checkSupervisorBinaryBeforeRegister(gate.command, &stderr, gate.warnOnBuildDrift); proceed || accepted {
+			t.Errorf("%s: proceed=%v accepted=%v, want refusal while the supervisor runs a removed gc", gate.command, proceed, accepted)
+		}
+		assertDoctorFix(gate.command, stderr.String())
+	}
+	var statusErr bytes.Buffer
+	warnSupervisorBinaryMismatch("gc status", &statusErr)
+	assertDoctorFix("gc status", statusErr.String())
 }
 
 func TestWarnSupervisorBinaryMismatchIsQuietWhenMatched(t *testing.T) {

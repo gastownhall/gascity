@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -140,7 +141,7 @@ func TestCloseFencesAStaleAwakeWriterOutOfTheTerminalRow(t *testing.T) {
 // for a close premise taken from the close's own first read. The caller decides
 // to close a suspended row, and a wake stamps state=awake before the close
 // reads it. That read then agreed with itself, so the close landed on the woken
-// row. Close and CloseWithTerminalPatch now check the caller's Info on every
+// row. Close (CommitClose) now checks the caller's decision on every
 // read, the first included, and write nothing. Close's fallback arm reads the
 // row too, so a store without the atomic close refuses as well.
 func TestCloseRefusesAWakeBetweenTheDecisionAndTheFirstRead(t *testing.T) {
@@ -165,13 +166,6 @@ func TestCloseRefusesAWakeBetweenTheDecisionAndTheFirstRead(t *testing.T) {
 			plain:   true,
 			close: func(front *Store, decided Info) (bool, error) {
 				return front.Close(decided, string(StateDrained), closeTestNow)
-			},
-		},
-		{
-			name:    "CloseWithTerminalPatch/atomic",
-			backing: beads.NewAtomicCloseMemStore,
-			close: func(front *Store, decided Info) (bool, error) {
-				return front.CloseWithTerminalPatch(decided, ClosePatch(closeTestNow, "dead-runtime"), "gc: close session", closeTestNow)
 			},
 		},
 	} {
@@ -235,7 +229,7 @@ func TestCloseRetriesPastAWriteOutsideItsPremise(t *testing.T) {
 
 // TestCloseBoundsRepeatedAtomicRevisionConflicts proves a writer that keeps
 // winning the fence cannot livelock Close. It stops after
-// terminalCloseMaxAttempts with the precondition error, never falls back to
+// terminalCloseMaxAttempts with the fence error, never falls back to
 // the unfenced split write, and leaves the row open for the next pass.
 func TestCloseBoundsRepeatedAtomicRevisionConflicts(t *testing.T) {
 	backing := beads.NewAtomicCloseMemStore()
@@ -249,8 +243,8 @@ func TestCloseBoundsRepeatedAtomicRevisionConflicts(t *testing.T) {
 	front := NewStore(beads.SessionStore{Store: tracing})
 
 	closed, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
-	if !beads.IsPreconditionFailed(err) {
-		t.Fatalf("Close error = %v, want the bounded precondition failure", err)
+	if err == nil || !strings.Contains(err.Error(), "lost the revision fence") {
+		t.Fatalf("Close error = %v, want the bounded fence failure", err)
 	}
 	if closed {
 		t.Fatal("Close reported closed after every fence was lost")
@@ -349,7 +343,7 @@ func TestConcurrentClosesHaveExactlyOneWinner(t *testing.T) {
 // TestCloseFallsBackWhenAtomicCloseIsUnsupportedAtCallTime covers a store that
 // advertises the capability but refuses it when called, for example because
 // its conditional writes are disabled. Unsupported contractually writes
-// nothing, so Close takes the documented two-write fallback instead of failing
+// nothing, so Close takes the documented Tx fallback instead of failing
 // the close.
 func TestCloseFallsBackWhenAtomicCloseIsUnsupportedAtCallTime(t *testing.T) {
 	backing := beads.NewMemStore()
@@ -364,8 +358,8 @@ func TestCloseFallsBackWhenAtomicCloseIsUnsupportedAtCallTime(t *testing.T) {
 	if !closed {
 		t.Fatal("Close reported not-closed on the fallback path")
 	}
-	if tracing.atomicCalls != 1 || tracing.plainCloseCalls != 1 {
-		t.Fatalf("atomic/plain close calls = %d/%d, want 1/1 (refused, then the fallback)", tracing.atomicCalls, tracing.plainCloseCalls)
+	if tracing.atomicCalls != 1 || tracing.plainCloseCalls != 0 {
+		t.Fatalf("atomic/plain close calls = %d/%d, want 1/0 (refused, then the fallback's Tx)", tracing.atomicCalls, tracing.plainCloseCalls)
 	}
 	got, err := backing.Get(created.ID)
 	if err != nil {

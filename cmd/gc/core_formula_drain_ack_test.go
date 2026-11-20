@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -138,11 +139,11 @@ type coreDrainAckRun struct {
 func startCoreDrainAckRun(t *testing.T, formulaName, stepRef string) coreDrainAckRun {
 	t.Helper()
 	store := beads.NewMemStore()
-	result, err := molecule.Cook(context.Background(), store, formulaName, []string{coreDrainAckFormulaDir}, molecule.Options{Vars: coreDrainAckVars})
+	result, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), formulaName, []string{coreDrainAckFormulaDir}, molecule.Options{Vars: coreDrainAckVars})
 	if err != nil {
 		t.Fatalf("cook %s: %v", formulaName, err)
 	}
-	members, err := molecule.ListSubtree(store, result.RootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), result.RootID)
 	if err != nil {
 		t.Fatalf("list %s: %v", formulaName, err)
 	}
@@ -229,7 +230,7 @@ func (r coreDrainAckRun) closeStep(t *testing.T, id string, metadata map[string]
 func (r coreDrainAckRun) drainAck(t *testing.T) {
 	t.Helper()
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, r.store, nil, r.session, drainAckReleaseBudget, &stderr)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, r.store, nil), r.session, drainAckReleaseBudget, &stderr)
 	for round := 0; round < 10; round++ {
 		ready, err := r.store.Ready()
 		if err != nil {
@@ -240,7 +241,7 @@ func (r coreDrainAckRun) drainAck(t *testing.T) {
 			if b.Metadata[beadmeta.RootBeadIDMetadataKey] != r.rootID || !beadmeta.IsControlKind(b.Metadata[beadmeta.KindMetadataKey]) {
 				continue
 			}
-			if _, err := dispatch.ProcessControl(r.store, b, dispatch.ProcessOptions{}); err != nil {
+			if _, err := dispatch.ProcessControl(beadstest.Graph(r.store), b, dispatch.ProcessOptions{}); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					continue
 				}
@@ -265,7 +266,7 @@ func (r coreDrainAckRun) get(t *testing.T, id string) beads.Bead {
 
 func (r coreDrainAckRun) report(t *testing.T) string {
 	t.Helper()
-	members, err := molecule.ListSubtree(r.store, r.rootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(r.store), r.rootID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

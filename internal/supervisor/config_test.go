@@ -3,10 +3,13 @@ package supervisor
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/loopbackport"
 )
 
 func TestLoadConfigMissing(t *testing.T) {
@@ -410,4 +413,35 @@ func TestRegistryRegisterPanicsOnHostPath(t *testing.T) {
 		}
 	}()
 	_ = reg.Register(t.TempDir(), "test-city")
+}
+
+// The seeded port is outside the kernel's ephemeral range, so no bind(":0")
+// or outgoing connect in the network namespace is handed it, and on Linux,
+// where ports are leased, two isolated homes seeded at once get different
+// ports. A listen-then-close reservation on ":0" let concurrent isolated
+// supervisors seed the same port and the loser exit on "address already in
+// use" (ga-96smfk.87).
+func TestLoadConfigSeedsAPortOutsideTheEphemeralRange(t *testing.T) {
+	lo, hi := loopbackport.EphemeralPortRange()
+	if lo <= 10000 && hi == 65535 {
+		t.Skipf("the kernel's ephemeral range [%d, %d] covers every port from 10000 up, where loopbackport.Reserve draws", lo, hi)
+	}
+	seen := map[int]bool{}
+	for i := 0; i < 20; i++ {
+		t.Setenv("GC_HOME", t.TempDir())
+		cfg, err := LoadConfig(ConfigPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := cfg.Supervisor.Port
+		if port >= lo && port <= hi {
+			t.Fatalf("seeded port %d is in the kernel's ephemeral range [%d, %d]", port, lo, hi)
+		}
+		// Ports are leased only on Linux (loopbackport), so elsewhere two homes
+		// seeded in one process can be handed the same port.
+		if runtime.GOOS == "linux" && seen[port] {
+			t.Fatalf("seeded port %d twice", port)
+		}
+		seen[port] = true
+	}
 }

@@ -153,7 +153,9 @@ trigger = "manual"
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.Create(beads.Bead{Title: "digest run", Type: "task", Labels: []string{"order-run:digest"}})
+	// A run record carries order-tracking beside its order-run label, as
+	// orders.(*Store).CreateRun writes it.
+	run, err := store.Create(beads.Bead{Title: "digest run", Type: "task", Labels: []string{"order-run:digest", labelOrderTracking}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +406,7 @@ trigger = "manual"
 	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("poll", "", false, nil, &stdout, &stderr)
+	code := cmdOrderRun("poll", "", false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(exec) = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -451,7 +453,7 @@ pool = "dog"
 	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("digest", "", false, nil, &stdout, &stderr)
+	code := cmdOrderRun("digest", "", false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(formula) = %d, want 0; stderr: %s", code, stderr.String())
 	}

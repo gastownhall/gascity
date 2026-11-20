@@ -48,7 +48,14 @@ const (
 	// is a CI reliability defect, not just tightness.
 	fakeStartupPostControlOverhead = hangBudget
 
-	fakeInteractionSignalBound = 2 * time.Second
+	// fakeInteractionSignalBound bounds a whole fake-worker run in
+	// runFakeInteraction, from exec to exit. Almost all of that is the
+	// subprocess's own start and teardown; the interaction signal itself
+	// typically takes a fraction of a millisecond. WC-INT-000 proves the
+	// worker surfaces the blocked interaction signal and state, not how
+	// fast, so this is a hang detector too — reuse hangBudget (ga-4pxoo4r).
+	// See TestPhase2InteractionSignalBoundStaysAHangDetector for the guard.
+	fakeInteractionSignalBound = hangBudget
 )
 
 func runFakeStartup(t *testing.T, profile ProfileID, outcome string, delay time.Duration) fakeStartupRun {
@@ -237,11 +244,12 @@ func runFakeInteraction(t *testing.T, profile ProfileID) fakeStartupRun {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("fake worker CLI: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
+	elapsed := time.Since(start)
 	return fakeStartupRun{
 		StatePath: statePath,
 		EventPath: eventPath,
 		Events:    readWorkerFakeEvents(t, eventPath),
-		Elapsed:   time.Since(start),
+		Elapsed:   elapsed,
 	}
 }
 

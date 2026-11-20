@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // validTmuxName mirrors the local tmux provider's guard: a session name must be
@@ -23,6 +26,33 @@ var validTmuxName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // ErrInvalidSessionName reports a session name that is not a safe tmux target.
 var ErrInvalidSessionName = errors.New("invalid session name")
+
+// checkName rejects a session name that is not a safe tmux target. Start never
+// creates such a session, and the name must never reach tmux: a bare target is
+// matched by prefix and as a glob ("worker-1*" names worker-10), and "." and
+// ":" split it into window and pane parts, so every verb checks it first.
+func checkName(name string) error {
+	if !validTmuxName.MatchString(name) {
+		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
+	}
+	return nil
+}
+
+// sessionTarget returns the exact target-session form of a (checked) session
+// name, as the local tmux provider does. tmux resolves a bare -t name by
+// unique prefix, so once "worker-1" has exited "-t worker-1" names a live
+// "worker-10" on the same box: has-session reports a dead session alive and
+// kill-session kills the wrong one. The "=" prefix disables that.
+func sessionTarget(name string) string {
+	return "=" + name
+}
+
+// paneTarget is [sessionTarget] for commands whose -t is a target-window or
+// target-pane. The trailing ":" is required: tmux still prefix-matches
+// "=name" in that position, and only "=name:" is exact.
+func paneTarget(name string) string {
+	return "=" + name + ":"
+}
 
 // Provider is a [runtime.Provider] that runs each session as a tmux session on
 // an existing remote host reached over SSH. It does NOT provision the box (the
@@ -39,19 +69,43 @@ var ErrInvalidSessionName = errors.New("invalid session name")
 // k8s), and CopyTo.
 type Provider struct {
 	conn            *Conn
-	postStartSettle time.Duration // settle before the post-start liveness recheck
+	postStartSettle time.Duration      // settle before the post-start liveness recheck
+	verbTimeout     time.Duration      // bound on each context-free verb; 0 means defaultVerbTimeout
+	psDegraded      atomic.Bool        // ProcessAlive's degraded episode is logged once
+	transport       atomic.Int32       // the box's last transport state (see noteTransport); each failed episode is logged once
+	pokes           runtime.PokeLedger // gc's own input, discounted from GetLastActivity
+	now             func() time.Time   // the poke ledger's clock; nil is time.Now
 }
 
 var (
-	_ runtime.Provider                = (*Provider)(nil)
-	_ runtime.ExecProvider            = (*Provider)(nil)
-	_ runtime.SleepCapabilityProvider = (*Provider)(nil)
+	_ runtime.Provider                    = (*Provider)(nil)
+	_ runtime.ExecProvider                = (*Provider)(nil)
+	_ runtime.SleepCapabilityProvider     = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError   = (*Provider)(nil)
 )
 
 // defaultPostStartSettle is how long Start waits before re-checking that a
 // managed session survived startup (the box already exists, so a short settle
 // suffices to catch an agent that dies immediately, e.g. a stale --resume key).
 const defaultPostStartSettle = time.Second
+
+// defaultVerbTimeout bounds every Provider method that takes no context
+// (Stop, IsRunning, the meta and driving verbs, the probes): the remote calls
+// of one such verb share this deadline, so a box that stops answering
+// mid-call fails the verb with runtime.ErrRuntimeUnavailable instead of
+// hanging its caller.
+const defaultVerbTimeout = 30 * time.Second
+
+// verbContext returns the deadline-bound context a context-free verb runs its
+// remote calls under.
+func (p *Provider) verbContext() (context.Context, context.CancelFunc) {
+	timeout := p.verbTimeout
+	if timeout <= 0 {
+		timeout = defaultVerbTimeout
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
 
 // NewProvider returns an ssh Provider for the box at ep.
 func NewProvider(ep Endpoint) *Provider {
@@ -63,17 +117,133 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	return p.conn.Exec(ctx, name, argv)
 }
 
-// carrier drives the named session's tmux over the connection. The in-box tmux
-// target is the session name itself (one host, many named sessions).
-func (p *Provider) carrier(name string) runtime.Carrier {
-	return runtime.NewTmuxCarrier(p.conn, name)
+// carrier drives the session's agent pane over the connection, resolved once
+// for the operation (see [Provider.agentPane]): one host runs many named
+// sessions, and a session's active pane may be a human's split or window.
+func (p *Provider) carrier(ctx context.Context, name string) (runtime.Carrier, error) {
+	target, err := p.agentPane(ctx, name, false)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.NewTmuxCarrier(p.conn, target), nil
+}
+
+// agentPane resolves a (checked) session's agent pane in one remote list-panes
+// call over all its windows, classified as the local tmux provider does
+// ([runtime.PickTmuxAgentPaneRow]): the pane carrying the session-scoped
+// marker Start sets, else (a session created before the marker) the first
+// pane of the first window. A marked session whose agent pane is gone, or
+// with two, fails closed. The pane is returned fenced to its session and
+// window ("=name:@W.%P"), so a stale id cannot name another pane.
+//
+// With adopt, a session with exactly one pane, unmarked, is marked first
+// (Relaunch on a warm box from before the marker): that pane can only be the
+// agent's. The same call serves both.
+func (p *Provider) agentPane(ctx context.Context, name string, adopt bool) (string, error) {
+	out, code, err := p.tmux(ctx, name, "list-panes", "-s", "-t", paneTarget(name), "-F", agentPaneRowFormat)
+	if err != nil {
+		return "", err
+	}
+	if code != 0 {
+		return "", fmt.Errorf("%w: ssh session %q", runtime.ErrSessionNotFound, name)
+	}
+	out = tabSeparateRows(strings.TrimSpace(out))
+	if rows := strings.Split(out, "\n"); adopt && len(rows) == 1 {
+		if mark, fields, _ := strings.Cut(rows[0], "\t"); mark == "pane" {
+			if _, id, ok := strings.Cut(fields, "."); ok {
+				p.markAgentPane(ctx, name, id)
+			}
+		}
+	}
+	pane, err := runtime.PickTmuxAgentPaneRow(out)
+	if err != nil {
+		return "", fmt.Errorf("ssh session %q: %w", name, err)
+	}
+	pane = strings.TrimSpace(pane)
+	if !strings.HasPrefix(pane, "@") || !strings.Contains(pane, ".%") {
+		return "", fmt.Errorf("ssh session %q: no panes found (got %q)", name, out)
+	}
+	return paneTarget(name) + pane, nil
+}
+
+// agentPaneRowFormat is the agent-pane list-panes row: "<mark> @W.%P". The
+// separator is a space, not the tab the local provider uses: tmux run
+// without -u in a non-UTF-8 locale (an ssh session, a CI sandbox with no
+// LANG) prints control characters in format output as "_", so a tab would
+// arrive as "agent_@0.%0". Neither field can contain a space.
+const agentPaneRowFormat = runtime.TmuxAgentPaneMarkerFormat + " #{window_id}.#{pane_id}"
+
+// tabSeparateRows turns agentPaneRowFormat rows into the "<mark>\t<fields>"
+// rows [runtime.PickTmuxAgentPaneRow] classifies.
+func tabSeparateRows(out string) string {
+	rows := strings.Split(out, "\n")
+	for i, row := range rows {
+		rows[i] = strings.Replace(strings.TrimSpace(row), " ", "\t", 1)
+	}
+	return strings.Join(rows, "\n")
+}
+
+// markAgentPane marks pane (the id new-session printed) as the session's agent
+// pane, valued with the session's id, then flags the session as marked; the
+// flag follows a successful mark only, since a flagged session with no marked
+// pane fails closed. Best-effort and logged: an unmarked session falls back to
+// its first pane, and Relaunch adopts a lone unmarked pane (agentPane).
+func (p *Provider) markAgentPane(ctx context.Context, name, pane string) {
+	pane = strings.TrimSpace(pane)
+	if !strings.HasPrefix(pane, "%") {
+		pane = paneTarget(name)
+	}
+	if _, code, err := p.tmux(ctx, name, "set-option", "-p", "-F", "-t", pane, runtime.TmuxAgentPaneOption, "#{session_id}"); err != nil || code != 0 {
+		log.Printf("ssh session %q: marking agent pane %s failed (exit %d): %v", name, pane, code, err)
+		return
+	}
+	if _, code, err := p.tmux(ctx, name, "set-option", "-t", paneTarget(name), runtime.TmuxAgentSessionOption, "1"); err != nil || code != 0 {
+		log.Printf("ssh session %q: flagging marked session failed (exit %d): %v", name, code, err)
+	}
 }
 
 // tmux runs a tmux subcommand over the connection and returns trimmed stdout,
 // the exit code, and a transport error (if any).
 func (p *Provider) tmux(ctx context.Context, name string, args ...string) (string, int, error) {
 	out, code, err := p.conn.Exec(ctx, name, append([]string{"tmux"}, args...))
+	p.noteTransport(err)
 	return strings.TrimRight(string(out), "\n"), code, err
+}
+
+// The box's transport states, as [Provider.noteTransport] records them.
+const (
+	transportAnswering int32 = iota
+	transportUnreachable
+	transportRefused
+)
+
+// noteTransport records how the box met one of the provider's own commands
+// (tmux, the process probe, secret staging) and logs a failure once per
+// episode: when the box stops answering, or starts refusing this client, after
+// it last did otherwise. A start or probe that cannot reach the box defers
+// without recording why, so this log is where the cause shows. A configured
+// command (pre_start, setup) is never noted: its stderr can echo a
+// credential. A caller's own cancellation says nothing about the box.
+func (p *Provider) noteTransport(err error) {
+	state := transportAnswering
+	switch {
+	case err == nil:
+	case errors.Is(err, context.Canceled):
+		return
+	case errors.Is(err, errAuthFailed):
+		state = transportRefused
+	default:
+		state = transportUnreachable
+	}
+	if p.transport.Swap(state) == state {
+		return
+	}
+	switch state {
+	case transportRefused:
+		log.Printf("ssh provider %s: the box refused this client (check its key and the pinned host key): %v", p.conn.ep.target(), err)
+	case transportUnreachable:
+		log.Printf("ssh provider %s: box unreachable, reporting it unavailable until it answers: %v", p.conn.ep.target(), err)
+	}
 }
 
 const defaultRemoteShell = "/bin/sh"
@@ -106,14 +276,14 @@ const defaultRemoteShell = "/bin/sh"
 // AcceptStartupDialogs), CopyTo, and live SessionLive re-apply on drift (RunLive
 // is a no-op, matching k8s; SessionLive is applied once at startup).
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	if !validTmuxName.MatchString(name) {
-		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
+	if err := checkName(name); err != nil {
+		return err
 	}
 	if p.hasSession(ctx, name) {
 		return fmt.Errorf("%w: ssh session %q", runtime.ErrSessionExists, name)
 	}
 
-	args := []string{"new-session", "-d", "-s", name}
+	args := []string{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name}
 	if cfg.WorkDir != "" {
 		args = append(args, "-c", cfg.WorkDir)
 	}
@@ -129,7 +299,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
 	staged, err := p.stageSecretEnv(ctx, secretEnv, args)
 	if err != nil {
-		return fmt.Errorf("ssh start %q: %w", name, err)
+		return fmt.Errorf("ssh start %q: %w", name, startStepErr(ctx, "staging session env", err))
 	}
 	defer p.cleanupStagedEnv(ctx, name, staged)
 
@@ -138,49 +308,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// runSetupCommand and the k8s in-pod environment.
 	prelude := setupPrelude(cfg, name, staged.envPath)
 
-	// PreStart prepares the target filesystem; a failure aborts startup.
-	//
-	// The failure renders both the command and what the box wrote, and either can
-	// carry a credential: the command may name one inline, and the prelude
-	// exported the session env, so a `set -x` trace or a failing curl echoes it
-	// back. This error is durable — logs, event bus, bead notes — so unlike argv
-	// it outlives the process. Only the session env is in scope here, not this
-	// process's: the command ran on the far box and inherited that box's
-	// environment, not ours.
-	secrets := runtime.SecretEnvValues(cfg.Env)
-	for _, cmd := range cfg.PreStart {
-		if cmd == "" {
-			continue
-		}
-		out, code, err := p.conn.Exec(ctx, name, []string{"sh", "-c", prelude + cmd})
-		if err != nil {
-			// A transport error is not always about transport. ssh reserves exit
-			// 255 for its own failures and cannot distinguish those from a remote
-			// command that genuinely exits 255 — `exit -1`, a nested ssh, rsync —
-			// so [shellRunner.run] collapses both and folds the box's stderr into
-			// the message. That stderr is the pre_start command's, written after
-			// the prelude exported the session env, so this branch carries exactly
-			// the credential risk the one below does.
-			//
-			// Redacting means rendering the error rather than wrapping it. Only
-			// cancellation is worth matching on here, and that branch returns
-			// before any stderr is read, so it keeps its chain; nothing else in
-			// this message was ever matchable.
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return fmt.Errorf("ssh start %q: pre_start: %w", name, err)
-			}
-			return fmt.Errorf("ssh start %q: pre_start %q: %s", name,
-				runtime.RedactSecrets(cmd, secrets), runtime.RedactSecrets(err.Error(), secrets))
-		}
-		if code != 0 {
-			detail := runtime.RedactSecrets(strings.TrimSpace(string(out)), secrets)
-			return fmt.Errorf("ssh start %q: pre_start %q exited %d: %s",
-				name, runtime.RedactSecrets(cmd, secrets), code, detail)
-		}
+	if err := p.runPreStart(ctx, name, cfg, prelude); err != nil {
+		return fmt.Errorf("ssh start %q: %w", name, err)
 	}
 
-	if _, code, err := p.launchSession(ctx, name, args, staged); err != nil {
-		return fmt.Errorf("ssh start %q: %w", name, err)
+	pane, code, err := p.launchSession(ctx, name, args, staged)
+	if err != nil {
+		return fmt.Errorf("ssh start %q: %w", name, startStepErr(ctx, "new-session", err))
 	} else if code != 0 {
 		// Tighten the sentinel under the precheck TOCTOU: if the session now
 		// exists, new-session failed because it was a duplicate.
@@ -189,6 +323,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		return fmt.Errorf("ssh start %q: tmux new-session exited %d", name, code)
 	}
+	p.markAgentPane(ctx, name, pane)
 
 	// SessionSetup, SessionSetupScript, and SessionLive run on the box,
 	// best-effort, with the same cwd + env prelude.
@@ -211,6 +346,68 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	if cfg.Nudge != "" {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+	}
+	return nil
+}
+
+// startStepErr is the error a Start or Relaunch step fails with: err, or,
+// once the caller's ctx has ended, ctx's error, named for the step. A step's
+// ssh call wraps an ended ctx in runtime.ErrRuntimeUnavailable, which is right
+// for a context-free verb, whose deadline is the provider's own bound on the
+// box. A start's ctx is its caller's startup budget, though, and a start that
+// overruns it met no box that could not answer: as unavailable it would be
+// deferred on every tick, with no failure or backoff recorded, where the
+// deadline fails it as a timeout.
+func startStepErr(ctx context.Context, step string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%s: %w", step, ctxErr)
+	}
+	return err
+}
+
+// runPreStart runs the PreStart commands on the box, which prepare the target
+// filesystem before the session exists; the first failure aborts startup.
+//
+// The failure renders both the command and what the box wrote, and either can
+// carry a credential: the command may name one inline, and the prelude
+// exported the session env, so a `set -x` trace or a failing curl echoes it
+// back. This error is durable — logs, event bus, bead notes — so unlike argv
+// it outlives the process. Only the session env is in scope here, not this
+// process's: the command ran on the far box and inherited that box's
+// environment, not ours.
+func (p *Provider) runPreStart(ctx context.Context, name string, cfg runtime.Config, prelude string) error {
+	secrets := runtime.SecretEnvValues(cfg.Env)
+	for _, cmd := range cfg.PreStart {
+		if cmd == "" {
+			continue
+		}
+		out, code, err := p.conn.Exec(ctx, name, []string{"sh", "-c", prelude + cmd})
+		if err != nil {
+			// A transport error is not always about transport. ssh reserves exit
+			// 255 for its own failures and cannot distinguish those from a remote
+			// command that genuinely exits 255 — `exit -1`, a nested ssh, rsync —
+			// so [shellRunner.run] collapses both and folds the box's stderr into
+			// the message. That stderr is the pre_start command's, written after
+			// the prelude exported the session env, so this branch carries exactly
+			// the credential risk the one below does.
+			//
+			// Redacting means rendering the error rather than wrapping it, which
+			// drops its class (runtime.ErrRuntimeUnavailable, errAuthFailed) on
+			// purpose: the start fails and backs off instead of deferring, since
+			// a pre_start that itself exits 255 would otherwise defer every tick
+			// with no failure recorded. Only the start's own ctx ending, which
+			// returns before any stderr is read, keeps a chain: ctx's error, as
+			// in [startStepErr], so cancellation and an overrun stay matchable.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("pre_start: %w", ctxErr)
+			}
+			return fmt.Errorf("pre_start %q: %s",
+				runtime.RedactSecrets(cmd, secrets), runtime.RedactSecrets(err.Error(), secrets))
+		}
+		if code != 0 {
+			detail := runtime.RedactSecrets(strings.TrimSpace(string(out)), secrets)
+			return fmt.Errorf("pre_start %q exited %d: %s", runtime.RedactSecrets(cmd, secrets), code, detail)
+		}
 	}
 	return nil
 }
@@ -250,7 +447,8 @@ func (p *Provider) runPostLaunchSetup(ctx context.Context, name string, cfg runt
 }
 
 // Relaunch re-launches the agent inside the existing remote tmux session without
-// re-provisioning: it respawns the session's pane (respawn-pane -k) with the
+// re-provisioning: it respawns the session's agent pane (respawn-pane -k on
+// [Provider.agentPane], never the active pane) with the
 // (possibly changed) command, then re-runs the post-launch setup tail and the
 // liveness recheck. The box (remote host) and its tmux session must already
 // exist — a missing session is a [runtime.ErrSessionNotFound], NOT a silent
@@ -267,8 +465,8 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !validTmuxName.MatchString(name) {
-		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
+	if err := checkName(name); err != nil {
+		return err
 	}
 	if !p.hasSession(ctx, name) {
 		return fmt.Errorf("%w: ssh session %q (box must be provisioned first)", runtime.ErrSessionNotFound, name)
@@ -280,19 +478,27 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
 	staged, err := p.stageSecretEnv(ctx, secretEnv, nil)
 	if err != nil {
-		return fmt.Errorf("ssh relaunch %q: %w", name, err)
+		return fmt.Errorf("ssh relaunch %q: %w", name, startStepErr(ctx, "staging session env", err))
 	}
 	defer p.cleanupStagedEnv(ctx, name, staged)
 
 	prelude := setupPrelude(cfg, name, staged.envPath)
 
-	args := []string{"respawn-pane", "-k", "-t", name}
+	// Respawn the agent pane, never the active one: a human who split the
+	// session or opened a window would otherwise have that pane killed and the
+	// old agent left running. A warm box from before the marker is marked first
+	// while it still has only the agent's pane.
+	target, err := p.agentPane(ctx, name, true)
+	if err != nil {
+		return fmt.Errorf("ssh relaunch %q: %w", name, startStepErr(ctx, "agent pane", err))
+	}
+	args := []string{"respawn-pane", "-k", "-t", target}
 	if cfg.WorkDir != "" {
 		args = append(args, "-c", cfg.WorkDir)
 	}
 	args = append(args, resolveCommand(cfg))
 	if _, code, err := p.tmux(ctx, name, args...); err != nil {
-		return fmt.Errorf("ssh relaunch %q: %w", name, err)
+		return fmt.Errorf("ssh relaunch %q: %w", name, startStepErr(ctx, "respawn-pane", err))
 	} else if code != 0 {
 		return fmt.Errorf("ssh relaunch %q: tmux respawn-pane exited %d", name, code)
 	}
@@ -331,34 +537,91 @@ func (p *Provider) requiresPostStartLiveness(cfg runtime.Config) bool {
 // error would let the seam adapter drop tracking while the remote tmux session
 // and the agent inside it keep running untracked, leaking the remote box.
 func (p *Provider) Stop(name string) error {
-	if _, _, err := p.tmux(context.Background(), name, "kill-session", "-t", name); err != nil {
+	if err := checkName(name); err != nil {
+		return fmt.Errorf("ssh stop: %w", err)
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	if _, _, err := p.tmux(ctx, name, "kill-session", "-t", sessionTarget(name)); err != nil {
 		return fmt.Errorf("ssh stop %q: %w", name, err)
 	}
 	return nil
 }
 
 // hasSession reports whether the tmux session exists, using the given context.
+// A box that cannot be reached reads false; [Provider.hasSessionWithError]
+// tells the two apart.
 func (p *Provider) hasSession(ctx context.Context, name string) bool {
-	_, code, err := p.tmux(ctx, name, "has-session", "-t", name)
-	return err == nil && code == 0
+	running, err := p.hasSessionWithError(ctx, name)
+	return err == nil && running
 }
 
-// IsRunning reports whether the tmux session exists on the box.
-func (p *Provider) IsRunning(name string) bool {
-	return p.hasSession(context.Background(), name)
-}
-
-// IsAttached reports whether a terminal is attached to the tmux session.
-func (p *Provider) IsAttached(name string) bool {
-	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", name, "-p", "#{session_attached}")
-	if err != nil || code != 0 {
-		return false
+// hasSessionWithError reports whether the tmux session exists, or an error
+// when the box could not answer (runtime.ErrRuntimeUnavailable) or refused
+// this client (see [transportFailed]).
+func (p *Provider) hasSessionWithError(ctx context.Context, name string) (bool, error) {
+	if checkName(name) != nil {
+		return false, nil
 	}
-	return strings.TrimSpace(out) == "1"
+	_, code, err := p.tmux(ctx, name, "has-session", "-t", sessionTarget(name))
+	if err != nil {
+		return false, err
+	}
+	return code == 0, nil
+}
+
+// IsRunning reports whether the tmux session exists on the box. A box that
+// cannot be reached reads false; [Provider.ObserveLivenessWithError] reports
+// that as an error instead.
+func (p *Provider) IsRunning(name string) bool {
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	return p.hasSession(ctx, name)
+}
+
+// IsAttached reports whether a terminal is attached to the tmux session
+// (false when that cannot be told; see [Provider.IsAttachedWithError]).
+func (p *Provider) IsAttached(name string) bool {
+	attached, err := p.IsAttachedWithError(name)
+	return err == nil && attached
+}
+
+// IsAttachedWithError implements [runtime.AttachmentObserverWithError]: one or
+// more clients is attached, none is, the session is missing (an error wrapping
+// runtime.ErrSessionNotFound), or the box could not answer (an error wrapping
+// runtime.ErrRuntimeUnavailable) or refused this client (see
+// [transportFailed]).
+func (p *Provider) IsAttachedWithError(name string) (bool, error) {
+	if err := checkName(name); err != nil {
+		return false, fmt.Errorf("ssh is-attached: %w", err)
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	// The session name is echoed because tmux answers a missing target with an
+	// empty line and exit 0 (as the local provider's probe handles it).
+	out, code, err := p.tmux(ctx, name, "display-message", "-t", paneTarget(name), "-p", "#{session_name}|#{session_attached}")
+	if err != nil {
+		return false, fmt.Errorf("ssh is-attached %q: %w", name, err)
+	}
+	echoed, count, _ := strings.Cut(strings.TrimSpace(out), "|")
+	if code != 0 || echoed == "" {
+		return false, fmt.Errorf("%w: ssh session %q", runtime.ErrSessionNotFound, name)
+	}
+	if echoed != name {
+		return false, fmt.Errorf("%w: ssh session %q: probe answered for session %q", runtime.ErrRuntimeUnavailable, name, echoed)
+	}
+	clients, perr := strconv.Atoi(count)
+	if perr != nil {
+		return false, fmt.Errorf("%w: ssh session %q: unexpected #{session_attached} %q", runtime.ErrRuntimeUnavailable, name, count)
+	}
+	return clients > 0, nil
 }
 
 // Attach connects the local terminal to the remote tmux session over ssh -t.
 func (p *Provider) Attach(name string) error {
+	if err := checkName(name); err != nil {
+		return fmt.Errorf("ssh attach: %w", err)
+	}
 	cmd := exec.Command("ssh", attachArgs(p.conn.ep, name)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -366,58 +629,315 @@ func (p *Provider) Attach(name string) error {
 	return cmd.Run()
 }
 
-// ProcessAlive reports whether any of processNames is running on the box.
-// Returns true when processNames is empty (per the interface contract).
+// ProcessAlive reports whether one of processNames runs in the session's agent
+// pane (every pane, in a session from before the marker): in the pane's
+// process or anything beneath it, judged as the local tmux provider
+// judges its panes (by command, argv[0], or an interpreter's script; see
+// [proctable.ProcessMatchesNameSet]). It is scoped to this session's panes: a
+// box-wide match would read a dead session alive whenever another session on
+// the box runs the same CLI. One remote call lists the session's pane pids
+// and the box's process table (POSIX ps, so any remote OS). A missing session
+// is not alive; a process table that cannot be read while the session's panes
+// exist degrades to alive, as the local provider does, so a failed secondary
+// probe never triggers a reap. A box that cannot be reached, or that refuses
+// this client, reads alive for the same reason (logged once per episode; see
+// [Provider.noteTransport]): could-not-tell is not dead, and
+// [Provider.ObserveLivenessWithError] reports it as an error. Returns true
+// when processNames is empty (per the interface contract).
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
-	if len(processNames) == 0 {
+	names := proctable.ProcessNameSet(processNames)
+	if len(names) == 0 {
 		return true
 	}
-	for _, pname := range processNames {
-		if pname == "" {
+	if checkName(name) != nil {
+		return false
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	alive, err := p.processAlive(ctx, name, names)
+	return alive || err != nil // could-not-tell is not dead
+}
+
+// ObserveLivenessWithError implements [runtime.LivenessObserverWithError]:
+// whether the session exists and, given processNames, whether the agent runs
+// in it. A box that cannot be reached, or that refuses this client, yields an
+// error (see [transportFailed]) and a zero Liveness, never "absent".
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	if checkName(name) != nil {
+		return runtime.Liveness{}, nil
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	running, err := p.hasSessionWithError(ctx, name)
+	if err != nil {
+		return runtime.Liveness{}, fmt.Errorf("ssh observe %q: %w", name, err)
+	}
+	if !running {
+		return runtime.Liveness{}, nil
+	}
+	names := proctable.ProcessNameSet(processNames)
+	if len(names) == 0 {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	alive, err := p.processAlive(ctx, name, names)
+	if err != nil {
+		return runtime.Liveness{}, fmt.Errorf("ssh observe %q: %w", name, err)
+	}
+	return runtime.Liveness{Running: true, Alive: alive}, nil
+}
+
+// processAlive is ProcessAlive's remote probe for a checked name and a
+// non-empty names set; a transport failure is returned, not judged.
+func (p *Provider) processAlive(ctx context.Context, name string, names map[string]struct{}) (bool, error) {
+	// The exit code is not the verdict: a missing session prints no pane pids
+	// (|| exit 3) and reads dead below, while a failed ps must not read every
+	// session on the box dead.
+	out, _, err := p.conn.Exec(ctx, name, []string{"sh", "-c", processAliveScript(name)})
+	p.noteTransport(err)
+	if err != nil {
+		return false, err
+	}
+	alive, degraded := paneTreeRunsNames(string(out), names)
+	if degraded {
+		if !p.psDegraded.Swap(true) {
+			log.Printf("ssh provider %s: process snapshot degraded, retaining tmux pane liveness for ProcessAlive", p.conn.ep.target())
+		}
+	} else {
+		p.psDegraded.Store(false)
+	}
+	return alive, nil
+}
+
+// processAliveScript lists the session's pane pids, then the box's process
+// table twice: comm (the process identity) and args (its command line), each
+// in its own pass so the variable-width column is last and parses safely.
+// Each pass is filtered on the box to the pane pids' process trees
+// (processTreeAwk), so only those rows cross the connection, not the whole
+// table of a busy box. The pane pids reach awk space-separated: the One True
+// AWK (macOS's awk) rejects a -v value holding a newline.
+func processAliveScript(name string) string {
+	return "panes=$(tmux list-panes -s -t " + shellQuote([]string{paneTarget(name)}) + " -F " + shellQuote([]string{runtime.TmuxAgentPaneMarkerFormat + " #{pane_pid}"}) + ") || exit 3\n" +
+		"echo \"$panes\"\n" +
+		"roots=$(echo \"$panes\" | awk '{printf \"%s \", $2}')\n" +
+		"echo " + processSectionComm + "\n" +
+		"ps -A -o pid= -o ppid= -o comm= | awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "\n" +
+		"echo " + processSectionArgs + "\n" +
+		"ps -A -o pid= -o ppid= -o args= | awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "\n"
+}
+
+// processTreeAwk prints the "pid ppid ..." rows of the processes in the trees
+// rooted at the space-separated roots, down to maxProcessDepth (POSIX awk).
+const processTreeAwk = `{ row[$1] = $0; kids[$2] = kids[$2] " " $1 }
+END {
+	n = split(roots, r, " ")
+	for (i = 1; i <= n; i++) { want[r[i]] = 0; stack[++top] = r[i] }
+	while (top > 0) {
+		p = stack[top--]
+		if (want[p] >= 10) continue
+		m = split(kids[p], c, " ")
+		for (j = 1; j <= m; j++) if (!(c[j] in want)) { want[c[j]] = want[p] + 1; stack[++top] = c[j] }
+	}
+	for (p in want) if (p in row) print row[p]
+}`
+
+const (
+	processSectionComm = "--gc-comm--"
+	processSectionArgs = "--gc-args--"
+	maxProcessDepth    = 10 // matches the local provider's descendant bound
+)
+
+// paneTreeRunsNames evaluates processAliveScript's output: whether a pane pid,
+// or a descendant within maxProcessDepth, matches names. degraded reports a
+// session whose panes exist but whose process rows could not be read (ps
+// failed or printed nothing), which reads alive.
+func paneTreeRunsNames(out string, names map[string]struct{}) (alive, degraded bool) {
+	type proc struct{ ppid, comm, args string }
+	// Pane rows are "<agent|orphan|pane> <pid>". A marked session is judged
+	// by its agent pane only, so a human running the agent's CLI in a split
+	// cannot make a dead agent read alive; with its agent pane gone it reads
+	// dead. An unmarked session (from before the marker) is judged by every
+	// pane. Two agent panes (ambiguous) are both judged.
+	var agents, all []string
+	marked := false
+	procs := map[string]*proc{}
+	children := map[string][]string{}
+	section := ""
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+			continue
+		case line == processSectionComm || line == processSectionArgs:
+			section = line
+			continue
+		case section == "":
+			mark, pid, ok := strings.Cut(line, " ")
+			if !ok {
+				continue
+			}
+			all = append(all, pid)
+			switch mark {
+			case runtime.TmuxAgentPaneMarked:
+				agents = append(agents, pid)
+				marked = true
+			case runtime.TmuxAgentPaneOrphan:
+				marked = true
+			}
 			continue
 		}
-		// Bracket the first character so the regex cannot match the literal
-		// text in the invoking shell's own command line: over ssh the op runs
-		// as `sh -c "'pgrep' '-f' '<pat>'"`, and on dash the wrapper shell
-		// survives carrying <pname> in its argv, which a bare `pgrep -f <pname>`
-		// would self-match (a false positive for any name). "[c]laude" cannot
-		// match the literal "[c]laude" text yet still matches a running "claude".
-		pat := "[" + pname[:1] + "]" + pname[1:]
-		_, code, err := p.conn.Exec(context.Background(), name, []string{"pgrep", "-f", pat})
-		if err == nil && code == 0 {
-			return true
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, ppid := fields[0], fields[1]
+		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, pid)), ppid))
+		pr := procs[pid]
+		if pr == nil {
+			pr = &proc{ppid: ppid}
+			procs[pid] = pr
+			children[ppid] = append(children[ppid], pid)
+		}
+		if section == processSectionComm {
+			pr.comm = rest
+		} else {
+			pr.args = rest
 		}
 	}
-	return false
+	if len(all) == 0 {
+		return false, false // no panes: the session is gone
+	}
+	roots := all
+	if marked {
+		roots = agents
+	}
+	if len(roots) == 0 {
+		return false, false // a marked session whose agent pane is gone
+	}
+	if len(procs) == 0 {
+		return true, true // the panes exist but the process table is unreadable
+	}
+	visited := map[string]bool{}
+	var walk func(pid string, depth int) bool
+	walk = func(pid string, depth int) bool {
+		if depth > maxProcessDepth || visited[pid] {
+			return false
+		}
+		visited[pid] = true
+		if pr := procs[pid]; pr != nil && proctable.ProcessMatchesNameSet(pr.comm, pr.args, names) {
+			return true
+		}
+		for _, child := range children[pid] {
+			if walk(child, depth+1) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, root := range roots {
+		if walk(root, 0) {
+			return true, false
+		}
+	}
+	return false, false
 }
 
 // Nudge delivers content to the session (best-effort).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	_ = p.carrier(name).Nudge(context.Background(), name, content)
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	if c, err := p.carrier(ctx, name); err == nil {
+		_ = p.poke(ctx, name, func() error { return c.Nudge(ctx, name, content) })
+	}
 	return nil
 }
 
 // SendKeys sends bare keystrokes to the session (best-effort).
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	_ = p.carrier(name).SendKeys(context.Background(), name, keys...)
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	if c, err := p.carrier(ctx, name); err == nil {
+		_ = p.poke(ctx, name, func() error { return c.SendKeys(ctx, name, keys...) })
+	}
 	return nil
 }
 
-// Peek captures the last N lines of the session pane (best-effort: empty on failure).
+// poke runs send, gc's own input to the session, and records it in the poke
+// ledger: tmux counts gc's keystrokes as window activity even when the agent
+// never answers, so GetLastActivity discounts their echo. The session's raw
+// activity is read before send types anything, the genuine baseline, and
+// again once send has delivered, the echo: the box stamps both on its own
+// clock, so the echo is matched there and only the grace runs on the
+// provider's ([runtime.PokeLedger]).
+func (p *Provider) poke(ctx context.Context, name string, send func() error) error {
+	commit := p.pokes.Begin(name, p.rawActivity(ctx, name))
+	if err := send(); err != nil {
+		return err
+	}
+	commit(p.clock(), p.rawActivity(ctx, name))
+	return nil
+}
+
+// clock is the poke ledger's time source.
+func (p *Provider) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
+}
+
+// Peek captures the last N lines of the session pane. A session without a
+// resolvable agent pane reads empty; a box that cannot be reached, or that
+// refuses this client, is an error (see [transportFailed]), never an empty
+// pane.
 func (p *Provider) Peek(name string, lines int) (string, error) {
-	out, _ := p.carrier(name).Peek(context.Background(), name, lines)
+	if checkName(name) != nil {
+		return "", nil
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	c, err := p.carrier(ctx, name)
+	if err != nil {
+		if transportFailed(err) {
+			return "", fmt.Errorf("ssh peek %q: %w", name, err)
+		}
+		return "", nil
+	}
+	out, err := c.Peek(ctx, name, lines)
+	if transportFailed(err) {
+		return "", fmt.Errorf("ssh peek %q: %w", name, err)
+	}
 	return out, nil
 }
 
 // Interrupt sends Ctrl-C to the session (best-effort).
 func (p *Provider) Interrupt(name string) error {
-	_ = p.carrier(name).Interrupt(context.Background(), name)
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	if c, err := p.carrier(ctx, name); err == nil {
+		_ = c.Interrupt(ctx, name)
+	}
 	return nil
 }
 
 // ClearScrollback clears the session's scrollback (best-effort).
 func (p *Provider) ClearScrollback(name string) error {
-	_ = p.carrier(name).ClearScrollback(context.Background(), name)
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	if c, err := p.carrier(ctx, name); err == nil {
+		_ = c.ClearScrollback(ctx, name)
+	}
 	return nil
 }
 
@@ -427,27 +947,51 @@ func (p *Provider) ClearScrollback(name string) error {
 // box and applied with `source-file`, exactly as Start stages secret env, so it
 // reaches neither the local ssh client's argv nor the box's. SetMeta stays
 // best-effort, but a staging failure skips the write rather than falling back to
-// argv — that fallback is the leak.
+// argv — that fallback is the leak. A box that cannot be reached, or that
+// refuses this client, is an error (see [transportFailed]); a tmux refusal (no
+// such session) and a staging script that ran but failed are not.
 func (p *Provider) SetMeta(name, key, value string) error {
-	ctx := context.Background()
-	args := []string{"set-environment", "-t", name, key, value}
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	args := []string{"set-environment", "-t", sessionTarget(name), key, value}
 	if !runtime.ArgvSecretEnvValue(key, value) {
-		_, _, _ = p.tmux(ctx, name, args...)
+		if _, _, err := p.tmux(ctx, name, args...); err != nil {
+			return fmt.Errorf("ssh set-meta %q %s: %w", name, key, err)
+		}
 		return nil
 	}
 	staged, err := p.stageSecretEnv(ctx, map[string]string{key: value}, args)
+	if transportFailed(err) {
+		return fmt.Errorf("ssh set-meta %q %s: %w", name, key, err)
+	}
 	if err != nil {
 		return nil // best-effort; never fall back to argv
 	}
 	defer p.cleanupStagedEnv(ctx, name, staged)
-	_, _, _ = p.tmux(ctx, name, "source-file", staged.tmuxPath)
+	if _, _, err := p.tmux(ctx, name, "source-file", staged.tmuxPath); err != nil {
+		return fmt.Errorf("ssh set-meta %q %s: %w", name, key, err)
+	}
 	return nil
 }
 
-// GetMeta retrieves a value from the tmux session environment ("" if unset).
+// GetMeta retrieves a value from the tmux session environment ("" if unset or
+// if tmux refuses the read). A box that cannot be reached, or that refuses
+// this client, is an error (see [transportFailed]), so a failed read is never
+// mistaken for unset.
 func (p *Provider) GetMeta(name, key string) (string, error) {
-	out, code, err := p.tmux(context.Background(), name, "show-environment", "-t", name, key)
-	if err != nil || code != 0 {
+	if checkName(name) != nil {
+		return "", nil
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	out, code, err := p.tmux(ctx, name, "show-environment", "-t", sessionTarget(name), key)
+	if err != nil {
+		return "", fmt.Errorf("ssh get-meta %q %s: %w", name, key, err)
+	}
+	if code != 0 {
 		return "", nil
 	}
 	out = strings.TrimSpace(out)
@@ -460,15 +1004,26 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 	return "", nil
 }
 
-// RemoveMeta removes a key from the tmux session environment.
+// RemoveMeta removes a key from the tmux session environment. A box that
+// cannot be reached, or that refuses this client, is an error (see
+// [transportFailed]).
 func (p *Provider) RemoveMeta(name, key string) error {
-	_, _, _ = p.tmux(context.Background(), name, "set-environment", "-t", name, "-u", key)
+	if checkName(name) != nil {
+		return nil
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	if _, _, err := p.tmux(ctx, name, "set-environment", "-t", sessionTarget(name), "-u", key); err != nil {
+		return fmt.Errorf("ssh remove-meta %q %s: %w", name, key, err)
+	}
 	return nil
 }
 
 // ListRunning returns the names of tmux sessions whose names have the prefix.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	out, code, err := p.tmux(context.Background(), "", "list-sessions", "-F", "#{session_name}")
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	out, code, err := p.tmux(ctx, "", "list-sessions", "-F", "#{session_name}")
 	if err != nil {
 		return nil, err
 	}
@@ -485,17 +1040,28 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
-// GetLastActivity returns the session's last-activity time (zero if unknown).
+// GetLastActivity returns the session's last-activity time (zero if unknown),
+// read as the local tmux provider reads it: the newest #{window_activity} of
+// the session's windows, less the keystroke echo of gc's own nudges and keys
+// (see [Provider.poke]). #{session_activity} is pinned at creation/attach time
+// for a detached session and does not advance when the agent prints output.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", name, "-p", "#{session_activity}")
-	if err != nil || code != 0 {
+	if checkName(name) != nil {
 		return time.Time{}, nil
 	}
-	secs, perr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	if perr != nil {
-		return time.Time{}, nil
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	return p.pokes.Discount(name, p.rawActivity(ctx, name), p.clock()), nil
+}
+
+// rawActivity reads a (checked) session's raw activity clock, the newest
+// #{window_activity} of its windows (zero if unknown).
+func (p *Provider) rawActivity(ctx context.Context, name string) time.Time {
+	activity, err := runtime.ReadTmuxWindowActivity(ctx, p.conn, name, sessionTarget(name))
+	if err != nil {
+		return time.Time{}
 	}
-	return time.Unix(secs, 0), nil
+	return activity
 }
 
 // CopyTo is not yet supported by the v0 ssh provider (best-effort no-op).
@@ -505,13 +1071,16 @@ func (p *Provider) CopyTo(_, _, _ string) error { return nil }
 func (p *Provider) RunLive(_ string, _ runtime.Config) error { return nil }
 
 // Capabilities reports what this provider can observe. Activity is reported
-// via tmux #{session_activity}. Attachment is observable (IsAttached queries
-// #{session_attached}) but — matching the Kubernetes provider — is left
-// undeclared so idle-sleep resolves to timed-only on a remote box; revisit
-// once attachment-aware sleep is validated against a real remote.
+// via tmux #{window_activity}. A human can attach a terminal (Attach runs
+// ssh -t), which keeps the destructive-action fence on its quiet window for
+// a session someone may be watching. Attachment is observable (IsAttached
+// queries #{session_attached}) but — matching the Kubernetes provider — is
+// left undeclared so idle-sleep resolves to timed-only on a remote box;
+// revisit once attachment-aware sleep is validated against a real remote.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
-		CanReportActivity: true, // tmux #{session_activity}
+		CanReportActivity: true, // tmux #{window_activity}
+		CanAttachTTY:      true, // Attach: ssh -t ... tmux attach
 	}
 }
 
@@ -540,7 +1109,7 @@ func attachArgs(ep Endpoint, name string) []string {
 	if ep.Port != 0 {
 		args = append(args, "-p", strconv.Itoa(ep.Port))
 	}
-	return append(args, "--", ep.target(), shellQuote([]string{"tmux", "attach", "-t", name}))
+	return append(args, "--", ep.target(), shellQuote([]string{"tmux", "attach", "-t", sessionTarget(name)}))
 }
 
 // setupPrelude builds a sh prefix that cd's into the session WorkDir and

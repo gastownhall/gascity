@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,9 +61,13 @@ import (
 // name rather than in a magic status value.
 //
 // There is no ExcludeStatus member to spell "everything but closed"
-// with, so the status axis cannot be pushed down at all; gc's three-value
-// projection (mapBdStatus, ListQuery.Matches) is the only definition of it and
-// it runs Go-side, where it always did.
+// with, so gc's "open" and its not-closed default cannot be pushed down; gc's
+// three-value projection (mapBdStatus, ListQuery.Matches) is the only
+// definition of them and runs Go-side. The two statuses that map one-to-one
+// onto a bd status are pushed beside AllFlag (nativeListRequestFromListQuery),
+// which keeps the pinned-flag default lifted under a named status. One
+// exception: a Live "open" is pushed as bd's raw "open" (nativeListPushesRawOpen).
+// That is the backing's own answer, and Live callers are owed it.
 //
 // The four include flags lift the type and plane suppressions in the same
 // spirit. They are stated individually rather than as IncludeAllTypes because
@@ -85,14 +91,14 @@ func nativeListReadRequest() issueops.ListRequest {
 // Get retrieves a bead by ID: the row from the reader role's detail view, the
 // edges from EdgeReader.
 //
-// THE DETAIL VIEW IS THE ONE TOKEN SOURCE. issueops.IssueDetails.Revision is
-// the only place the optimistic-concurrency token is published to a client: the
-// row's own RowVersion is json:"-" and never crosses a wire, so a store that
-// read RowVersion off a served row would hand every guarded write a fabricated
-// 0 — which, being a real value that matches an un-mutated legacy row, is the
-// one wrong answer a CAS cannot detect. A LIST row publishes no token at all,
-// and Bead.Revision is left at zero there deliberately: absent is absent, never
-// 0, and a caller that means to act on a row it listed re-reads it here first.
+// THE TOKEN IS THE DETAIL VIEW'S. issueops.IssueDetails.Revision is the only
+// place the optimistic-concurrency token is published to a client: the row's
+// own RowVersion is json:"-" and never crosses a wire, so a store that read
+// RowVersion off a served row would hand every guarded write a fabricated 0 —
+// which, being a real value that matches an un-mutated legacy row, is the one
+// wrong answer a CAS cannot detect. In process there is no wire: the view's
+// Revision is the row's RowVersion, and the same RowVersion rides every list
+// row (beadFromNativeIssueRow), so List and Get agree.
 //
 // THE EDGES ARE THE STORED ROWS, read by the same door DepList's DOWN leg uses.
 // The detail view lists the far-end ISSUES rather than the edge rows, so an
@@ -145,39 +151,111 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 }
 
 // List returns beads matching the query, through the reader role's listing.
+// It sends NativeListPlan's requests over the store's own pushable type set;
+// see NativeListPlan for what a fanned-out plan reads.
 func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	var out []Bead
+	s.listCounters.noteList()
+	pushable := s.listPushableTypes
+	if s.typePushdownOff.Load() {
+		pushable = nil
+	}
+	plan := nativeListPlan(query, pushable)
+	s.noteUnkeyedPlan(query, plan)
+	var (
+		out   []Bead
+		tally nativeListTally
+	)
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		tally = nativeListTally{}
 		reader, err := storage.IssueReader()
 		if err != nil {
 			return err
 		}
-		page, err := reader.List(ctx, nativeListRequestFromListQuery(query))
-		if err != nil {
-			return err
-		}
-		s.noteRows(len(page.Items))
-		beads := make([]Bead, 0, len(page.Items))
-		for _, row := range page.Items {
-			bead, err := beadFromNativeIssueRow(row)
+		var beads []Bead
+		seen := make(map[string]bool)
+		for _, req := range plan {
+			if req.IssueType != "" && s.typePushdownOff.Load() {
+				req.IssueType = ""
+			}
+			page, err := s.listPlanRequest(ctx, reader, req, &tally)
 			if err != nil {
-				if isNativeIssueMetadataParseError(err) {
-					continue
-				}
 				return err
 			}
-			beads = append(beads, bead)
+			s.noteRows(len(page.Items))
+			for _, row := range page.Items {
+				bead, err := beadFromNativeIssueRow(row)
+				if err != nil {
+					if isNativeIssueMetadataParseError(err) {
+						continue
+					}
+					return err
+				}
+				if len(plan) > 1 {
+					if seen[bead.ID] {
+						continue
+					}
+					seen[bead.ID] = true
+				}
+				beads = append(beads, bead)
+			}
+		}
+		if len(plan) > 1 && query.Sort == SortDefault {
+			// One request answers in the backend's default order, and an
+			// unsorted Limit keeps that order's prefix. A union of several is
+			// put back into it, so the prefix ApplyListQuery keeps is the one
+			// the single request would have kept.
+			sortBeadsNativeListDefaultOrder(beads)
 		}
 		out = ApplyListQuery(beads, query)
 		return nil
 	})
+	s.listCounters.commit(tally)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// listPlanRequest sends one plan request. A pushed type the backend refuses is
+// sent again without it; type pushdown latches off only when that retry is
+// answered. A retry that fails too returns both errors joined: errors.Is still
+// finds the refusal, and withReadRetry classifies the retry's own failure, so
+// a connection lost on the retry reconnects. Both sends are counted.
+func (s *NativeDoltStore) listPlanRequest(ctx context.Context, reader issueops.Reader, req issueops.ListRequest, tally *nativeListTally) (issueops.IssuePage, error) {
+	page, err := reader.List(ctx, req)
+	tally.noteRequest(req, len(page.Items))
+	if err == nil || req.IssueType == "" || !nativeListTypeRefused(err) {
+		return page, err
+	}
+	refusedType := req.IssueType
+	req.IssueType = ""
+	retried, retryErr := reader.List(ctx, req)
+	tally.noteRequest(req, len(retried.Items))
+	if retryErr != nil {
+		return issueops.IssuePage{}, errors.Join(err, retryErr)
+	}
+	s.disableTypePushdown(refusedType, err)
+	return retried, nil
+}
+
+// sortBeadsNativeListDefaultOrder sorts items into the reader role's default
+// listing order (sqlbuild.OrderByForColumns with no sort key): priority
+// ascending with an unset priority as 2, then created_at descending, then id
+// ascending.
+func sortBeadsNativeListDefaultOrder(items []Bead) {
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if pa, pb := readySortPriority(a), readySortPriority(b); pa != pb {
+			return pa < pb
+		}
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		return a.ID < b.ID
+	})
 }
 
 // Ready returns open, unblocked actionable beads through the reader role.
@@ -213,34 +291,7 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(queries)
 	var out []Bead
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
-		reader, err := storage.IssueReader()
-		if err != nil {
-			return err
-		}
-		page, err := reader.Ready(ctx, nativeReadyRequestFromReadyQuery(q))
-		if err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		var beads []Bead
-		seen := make(map[string]bool, len(page.Items))
-		for _, row := range page.Items {
-			bead, err := beadFromNativeIssueRow(row)
-			if err != nil {
-				return err
-			}
-			if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
-				continue
-			}
-			seen[bead.ID] = true
-			beads = append(beads, bead)
-		}
-		// Work-outcome filtering must see the full candidate set before the
-		// limit is applied — a candidate near the front can be vetoed below,
-		// and truncating first would under-fill the result instead of
-		// backfilling from the candidates behind it (mirrors BdStore.Ready's
-		// candidates-then-filter-then-limit order).
-		beads, err = s.filterReadyByWorkOutcome(ctx, storage, beads)
+		beads, _, err := s.readyPage(ctx, storage, q, nativeReadyRequestFromReadyQuery(q))
 		if err != nil {
 			return err
 		}
@@ -254,6 +305,106 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// readyPage reads one ready page with req and applies everything gc layers over
+// the role's own readiness: the tier and excluded-bead filter, and the
+// work-outcome veto. hasMore is the role's verdict that req's limit cut the page.
+//
+// Work-outcome filtering must see the whole candidate page before any limit of
+// the caller's is applied: a candidate near the front can be vetoed, and
+// truncating first would under-fill the result instead of backfilling from the
+// candidates behind it (mirrors BdStore.Ready's candidates-then-filter-then-limit
+// order).
+func (s *NativeDoltStore) readyPage(ctx context.Context, storage beadslib.Storage, q ReadyQuery, req issueops.ReadyRequest) ([]Bead, bool, error) {
+	reader, err := storage.IssueReader()
+	if err != nil {
+		return nil, false, err
+	}
+	page, err := reader.Ready(ctx, req)
+	if err != nil {
+		return nil, false, err
+	}
+	now := time.Now().UTC()
+	var beads []Bead
+	seen := make(map[string]bool, len(page.Items))
+	for _, row := range page.Items {
+		bead, err := beadFromNativeIssueRow(row)
+		if err != nil {
+			return nil, false, err
+		}
+		if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
+			continue
+		}
+		seen[bead.ID] = true
+		beads = append(beads, bead)
+	}
+	beads, err = s.filterReadyByWorkOutcome(ctx, storage, beads)
+	if err != nil {
+		return nil, false, err
+	}
+	return beads, page.HasMore, nil
+}
+
+// ReadyOrdered answers a bounded ready read cut in order (OrderedReadyReader):
+// the first query.Limit rows, in order, of exactly the set Ready(query) returns
+// with no limit.
+//
+// The role is asked for a page of that size in that order, and gc's own filters
+// and the work-outcome veto then run over the page. When they leave fewer rows
+// than the limit while the role reports more behind the page, the page is read
+// again four times as large, from the start, so the answer is one consistent
+// read rather than pages stitched across concurrent writes.
+func (s *NativeDoltStore) ReadyOrdered(query ReadyQuery, order ReadyOrder) ([]Bead, bool, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		query.Limit = 0
+		rows, err := s.Ready(query)
+		return rows, false, err
+	}
+	sort, ok := nativeReadySortFor(order)
+	if !ok {
+		query.Limit = 0
+		rows, err := s.Ready(query)
+		return rows, false, err
+	}
+	var out []Bead
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		for page := limit; ; page *= 4 {
+			req := nativeReadyRequestFromReadyQuery(query)
+			req.Sort = sort
+			req.Limit = &page
+			beads, hasMore, err := s.readyPage(ctx, storage, query, req)
+			if err != nil {
+				return err
+			}
+			if len(beads) >= limit || !hasMore {
+				if len(beads) > limit {
+					beads = beads[:limit]
+				}
+				out = beads
+				return nil
+			}
+		}
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// nativeReadySortFor is the role's sort policy for order. The role's `priority`
+// policy is ORDER BY priority, created_at, id and its `oldest` policy is ORDER
+// BY created_at, id: the canonical ready order and --sort oldest.
+func nativeReadySortFor(order ReadyOrder) (string, bool) {
+	switch order {
+	case ReadyOrderCanonical:
+		return "priority", true
+	case ReadyOrderOldest:
+		return "oldest", true
+	default:
+		return "", false
+	}
 }
 
 // nativeReadEdgesChunkSize bounds how many anchor ids one ReadEdges call
@@ -585,22 +736,29 @@ func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.
 // nativeListRequestFromListQuery projects a ListQuery onto the role's request.
 //
 // Only the predicates that push down EXACTLY travel: a parent, an assignee, one
-// label, the metadata equality map and the created-before bound. Three of gc's
-// selectors deliberately stay Go-side, and each has a reason the role's own
-// contract supplies:
+// label, the metadata equality map, the created-before bound, the two statuses
+// that map one-to-one onto a bd status, and a type from the
+// store's pushable set. The plural assignee set is fanned out by NativeListPlan.
+// Everything else stays Go-side, and each has a reason the role's own contract
+// supplies:
 //
-//   - STATUS, because the request has no ExcludeStatus and no way to name
-//     "every status but closed", and because any named status re-arms the
-//     pinned-flag default. See nativeListReadRequest.
-//   - TYPE, because BuildListFilter VALIDATES it against the workspace
-//     vocabulary and fails a request naming an unknown one, where the raw
-//     filter answered empty — and because naming an INFRA type (agent, role,
-//     message) routes the query to the ephemeral plane ALONE, which would hide
-//     every durable mail bead. gc's type predicate is exact in ApplyListQuery.
+//   - STATUS "open" and the not-closed default, because the request has no
+//     ExcludeStatus and gc's "open" is every bd status but closed and
+//     in_progress. "in_progress" and "closed" are exact: mapBdStatus maps them
+//     one-to-one, and AllFlag keeps the pinned-flag default lifted under a
+//     named status. See nativeListReadRequest. The exception is a Live
+//     "open", which travels as bd's raw "open" (nativeListPushesRawOpen).
+//   - TYPE outside the store's pushable set (nativeListPushableTypesFor),
+//     because BuildListFilter VALIDATES it against the workspace vocabulary
+//     and fails a request naming an unknown one, where the raw filter answered
+//     empty — and because naming a type the server classifies as INFRA routes
+//     the query to the ephemeral plane ALONE, which would hide every durable
+//     row of it (every durable mail bead, for message). gc's type predicate
+//     is exact in ApplyListQuery.
 //   - TIER, because the plane knobs only ADMIT. There is no member that
 //     excludes the ephemeral rows a TierIssues read must drop, so that filter
 //     is ApplyListQuery's, as the wisp-tier filter already was.
-func nativeListRequestFromListQuery(query ListQuery) issueops.ListRequest {
+func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bool) issueops.ListRequest {
 	req := nativeListReadRequest()
 	limit := nativeListLimitPushdown(query)
 	req.Limit = &limit
@@ -624,6 +782,12 @@ func nativeListRequestFromListQuery(query ListQuery) issueops.ListRequest {
 	}
 	if !query.CreatedBefore.IsZero() {
 		req.CreatedBefore = zeroTimePtr(query.CreatedBefore)
+	}
+	if nativeListPushableStatus(query.Status) || nativeListPushesRawOpen(query) {
+		req.Status = query.Status
+	}
+	if pushableTypes[query.Type] {
+		req.IssueType = query.Type
 	}
 	return req
 }
@@ -652,8 +816,11 @@ func nativeListLimitPushdown(query ListQuery) int {
 	if query.Limit <= 0 {
 		return 0
 	}
-	// The status, type and tier predicates below run only in ApplyListQuery, so
-	// a backing limit under any of them cuts rows before the residual filter.
+	// The status, type and tier predicates below are applied, or re-applied,
+	// by ApplyListQuery: gc's "open" and the tier never reach the backing (a
+	// Live "open" reaches it only as bd's raw status, nativeListPushesRawOpen),
+	// and a pushed type is dropped again if the backend refuses it. A backing
+	// limit under any of them would cut rows before the residual filter.
 	if query.Status != "" || !query.IncludeClosed || query.Type != "" || query.TierMode != TierBoth {
 		return 0
 	}
@@ -715,6 +882,16 @@ func nativeReadyRequestFromReadyQuery(q ReadyQuery) issueops.ReadyRequest {
 	if q.Assignee != "" {
 		req.Assignee = q.Assignee
 	}
+	// The advisory narrowing predicates (ReadyQuery's contract) map onto the
+	// role's own: it matches an empty assignee for Unassigned and compares
+	// JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."key"')) with each value, the
+	// same comparisons `bd ready --unassigned --metadata-field` makes.
+	if q.Unassigned {
+		req.Unassigned = true
+	}
+	if len(q.MetadataEquals) > 0 {
+		req.MetadataFields = maps.Clone(q.MetadataEquals)
+	}
 	return req
 }
 
@@ -768,11 +945,16 @@ func beadFromNativeIssueDetails(details *issueops.IssueDetails, edges issueops.A
 
 // beadFromNativeIssueRow converts one row of a listing or a ready page.
 //
-// Bead.Revision is cleared, not merely left alone: the page publishes no token,
-// and the row's RowVersion — zero on every served row, because it never crosses
-// the wire — would fence a guarded write against a value that means "absent"
-// while reading as the real revision 0. beadFromNativeIssue stamps it for the
-// detail view, so the row path has to undo that rather than rely on a zero.
+// Bead.Revision is the row's RowVersion, as beadFromNativeIssue stamps it. The
+// in-process readers (Dolt server and embedded) scan row_lock into RowVersion
+// on every row they return, list rows included, so a listed row carries the
+// same token the detail view publishes for it, and a conditional write fenced
+// on it compares against row_lock inside its own transaction. A legacy row
+// still at the default 0 lists at 0, which is its real revision: the first
+// fenced write moves it off 0 and a write fenced on 0 after that is refused.
+// A reader that drops RowVersion (it is json:"-", so a served page cannot
+// carry it) lists every row at 0; C0.7 refuses v2 over such a store
+// (CheckListRevisionFidelity).
 //
 // The computed parent beside the row is preferred over the edge scan when the
 // row carries one: a page hydrates it with a dedicated join, and a projection
@@ -785,7 +967,6 @@ func beadFromNativeIssueRow(row *issueops.IssueWithCounts) (Bead, error) {
 	if err != nil {
 		return Bead{}, err
 	}
-	bead.Revision = 0
 	if row.Parent != nil && *row.Parent != "" {
 		bead.ParentID = *row.Parent
 	}

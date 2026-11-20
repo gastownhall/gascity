@@ -38,6 +38,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 		Command:                "/bin/echo",
 		ReadyPromptPrefix:      "stub-ready>",
 		ReadyDelayMs:           250,
+		NotReadyMarkers:        []string{"stub-not-ready"},
 		ProcessNames:           []string{"echo"},
 		EmitsPermissionWarning: true,
 		Env:                    env,
@@ -50,6 +51,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
 		workspaceEnv,
+		runtime.ProgramStatusOff,
 		"worker",
 		"worker-named",
 		"myrig/worker",
@@ -79,6 +81,9 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	}
 	if got, want := cfg.Runtime.Hints.ReadyPromptPrefix, "stub-ready>"; got != want {
 		t.Fatalf("Runtime.Hints.ReadyPromptPrefix = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(cfg.Runtime.Hints.NotReadyMarkers, ","), "stub-not-ready"; got != want {
+		t.Fatalf("Runtime.Hints.NotReadyMarkers = %q, want %q", got, want)
 	}
 	if len(cfg.Runtime.Hints.MCPServers) != 1 {
 		t.Fatalf("Runtime.Hints.MCPServers len = %d, want 1", len(cfg.Runtime.Hints.MCPServers))
@@ -158,6 +163,7 @@ func TestResolvedSessionConfigForProviderPinsControllerTokenEmpty(t *testing.T) 
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
 		workspaceEnv,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",
@@ -202,10 +208,50 @@ func TestResolvedSessionConfigForProviderPinsControllerTokenEmpty(t *testing.T) 
 	}
 }
 
+// A controller started from an agent's pane carries that pane's demand-spawn
+// keys. An API-created session is not demand-spawned and must not inherit
+// them: each is withheld (present and empty), never omitted, because an
+// omitted key is an inherited key (gastownhall/gascity#5738).
+func TestResolvedSessionConfigForProviderWithholdsInheritedDemandSpawnEnv(t *testing.T) {
+	keys := []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"}
+	for _, key := range keys {
+		t.Setenv(key, "ga-foreign")
+	}
+	cfg, err := resolvedSessionConfigForProvider(
+		"/tmp/test-city",
+		nil,
+		runtime.ProgramStatusOff,
+		"worker",
+		"",
+		"myrig/worker",
+		"Worker",
+		"",
+		nil,
+		&config.ResolvedProvider{Name: "stub", Command: "/bin/echo"},
+		"",
+		"/tmp/workdir",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedSessionConfigForProvider: %v", err)
+	}
+	for name, env := range map[string]map[string]string{
+		"Runtime.SessionEnv": cfg.Runtime.SessionEnv,
+		"Runtime.Hints.Env":  cfg.Runtime.Hints.Env,
+	} {
+		for _, key := range keys {
+			if val, ok := env[key]; !ok || val != "" {
+				t.Errorf("%s[%s] = (%q, present=%v), want (\"\", true) so the session cannot inherit the controller's copy", name, key, val, ok)
+			}
+		}
+	}
+}
+
 func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	if _, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
 		nil,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",
@@ -229,7 +275,7 @@ func TestSessionCreateHintsSeedsRuntimeEnv(t *testing.T) {
 		"GC_CITY":              "/tmp/test-city",
 	}
 
-	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, sessionEnv, nil)
+	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, sessionEnv, nil, runtime.ProgramStatusArm{})
 
 	for key, want := range sessionEnv {
 		if got := hints.Env[key]; got != want {
@@ -248,7 +294,7 @@ func TestSessionCreateHintsSeedsRuntimeEnv(t *testing.T) {
 // resolve MouseOn from cmd/gc/template_resolve.go and are unaffected (guarded
 // separately in template_resolve_prompt_test.go).
 func TestSessionCreateHintsEnablesMouse(t *testing.T) {
-	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, nil, nil)
+	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, nil, nil, runtime.ProgramStatusArm{})
 	if !hints.MouseOn {
 		t.Error("sessionCreateHints().MouseOn = false, want true (interactive wheel→scrollback, ga-c4w)")
 	}
@@ -263,10 +309,10 @@ func TestSessionCreateHintsEnablesMouse(t *testing.T) {
 // only the interactive case and let the unconditional MouseOn=true default leak
 // mouse-on onto resumed pool agents (ga-g7go).
 func TestSessionResumeHintsEnablesMouse(t *testing.T) {
-	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, true); !hints.MouseOn {
+	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, true, runtime.ProgramStatusArm{}); !hints.MouseOn {
 		t.Error("sessionResumeHints(interactive=true).MouseOn = false, want true (interactive wheel survives resume, ga-c4w)")
 	}
-	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, false); hints.MouseOn {
+	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, false, runtime.ProgramStatusArm{}); hints.MouseOn {
 		t.Error("sessionResumeHints(interactive=false).MouseOn = true, want false (polled pool agent stays mouse-off, ga-g7go)")
 	}
 }
@@ -290,6 +336,7 @@ func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
 		nil,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",
@@ -380,6 +427,7 @@ func TestResolvedSessionConfigForProviderCityAnchorsBeatConflictingProviderEnv(t
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
 		nil,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",
@@ -513,6 +561,7 @@ func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
 		nil,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",

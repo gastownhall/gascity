@@ -224,3 +224,12 @@ func TestListRunningIsNotAttested(t *testing.T) {
 		}
 	}
 }
+
+// Kills a production t3bridge that stops declaring protocol turn interrupts:
+// its SendKeys is dropped, so without the declaration the session layer would
+// "interrupt" codex-family threads with an Escape that never arrives.
+func TestSeamBackedDeclaresProtocolTurnInterrupt(t *testing.T) {
+	if got := runtime.TurnInterruptModeFor(NewSeamBacked(), "agent-a"); got != runtime.TurnInterruptProtocol {
+		t.Fatalf("TurnInterruptModeFor(NewSeamBacked()) = %q, want protocol", got)
+	}
+}

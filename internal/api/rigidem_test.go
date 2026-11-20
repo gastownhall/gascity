@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // fixedCursor returns a cursor func that always yields v. A distinct value per
@@ -189,7 +190,7 @@ func TestRigIdemValidateRigName(t *testing.T) {
 
 func TestRigIdemRecordClosedAtCreateNeverReady(t *testing.T) {
 	store := beads.NewMemStore()
-	id, err := createIdemRecord(store, "c1", "req-abc12345", "digestval", "5", "web", idemStateInFlight)
+	id, err := createIdemRecord(beadstest.Work(store), "c1", "req-abc12345", "digestval", "5", "web", idemStateInFlight)
 	if err != nil {
 		t.Fatalf("createIdemRecord: %v", err)
 	}
@@ -216,7 +217,7 @@ func TestRigIdemRecordClosedAtCreateNeverReady(t *testing.T) {
 	}
 
 	// ...but the machine lookup finds it via IncludeClosed.
-	rec, err := lookupIdemRecord(store, "c1", "req-abc12345")
+	rec, err := lookupIdemRecord(beadstest.Work(store), "c1", "req-abc12345")
 	if err != nil {
 		t.Fatalf("lookupIdemRecord: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestRigIdemAdmitNew(t *testing.T) {
 	idx := newRigIdemIndex()
 	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-new-00001"}
 
-	res, err := admitRigCreate(idx, store, fixedCursor("7"), nil, nil, "c1", body)
+	res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("7"), nil, nil, "c1", body)
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -282,7 +283,7 @@ func TestRigIdemAdmitNew(t *testing.T) {
 		t.Fatalf("entry = %+v, want non-synthetic with a durable beadID", res.entry)
 	}
 
-	rec, err := lookupIdemRecord(store, "c1", "req-new-00001")
+	rec, err := lookupIdemRecord(beadstest.Work(store), "c1", "req-new-00001")
 	if err != nil || rec == nil {
 		t.Fatalf("lookupIdemRecord: rec=%v err=%v", rec, err)
 	}
@@ -313,12 +314,12 @@ func TestRigIdemAdmitInflightReplay(t *testing.T) {
 	idx := newRigIdemIndex()
 	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-replay-001"}
 
-	if _, err := admitRigCreate(idx, store, fixedCursor("7"), nil, nil, "c1", body); err != nil {
+	if _, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("7"), nil, nil, "c1", body); err != nil {
 		t.Fatalf("first admit: %v", err)
 	}
 	// A second identical POST while the live entry exists replays the ORIGINAL
 	// cursor (7), not the cursor this call would capture (9), and spawns nothing.
-	res, err := admitRigCreate(idx, store, fixedCursor("9"), nil, nil, "c1", body)
+	res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("9"), nil, nil, "c1", body)
 	if err != nil {
 		t.Fatalf("replay admit: %v", err)
 	}
@@ -354,15 +355,15 @@ func TestRigIdemAdmitExisting(t *testing.T) {
 
 	// Mirror the G13 §8 sync-201 shape: reserve the record already succeeded,
 	// then merge the result fields.
-	id, err := createIdemRecord(store, "c1", "req-exist-0001", digest, "3", "api", idemStateSucceeded)
+	id, err := createIdemRecord(beadstest.Work(store), "c1", "req-exist-0001", digest, "3", "api", idemStateSucceeded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := markIdemSucceeded(store, id, "api", "ap", "main"); err != nil {
+	if err := markIdemSucceeded(beadstest.Work(store), id, "api", "ap", "main"); err != nil {
 		t.Fatal(err)
 	}
 
-	res, err := admitRigCreate(idx, store, fixedCursor("7"), nil, nil, "c1", body)
+	res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("7"), nil, nil, "c1", body)
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -395,15 +396,15 @@ func TestRigIdemAdmitReclone(t *testing.T) {
 	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-reclone-01"}
 	digest, _ := rigCreateDigest(body)
 
-	id, err := createIdemRecord(store, "c1", "req-reclone-01", digest, "3", "web", idemStateInFlight)
+	id, err := createIdemRecord(beadstest.Work(store), "c1", "req-reclone-01", digest, "3", "web", idemStateInFlight)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := markIdemRolledBack(store, id); err != nil {
+	if err := markIdemRolledBack(beadstest.Work(store), id); err != nil {
 		t.Fatal(err)
 	}
 
-	res, err := admitRigCreate(idx, store, fixedCursor("8"), nil, nil, "c1", body)
+	res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("8"), nil, nil, "c1", body)
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -416,7 +417,7 @@ func TestRigIdemAdmitReclone(t *testing.T) {
 	if res.eventCursor != "8" {
 		t.Fatalf("re-clone cursor = %q, want the fresh 8", res.eventCursor)
 	}
-	rec, _ := lookupIdemRecord(store, "c1", "req-reclone-01")
+	rec, _ := lookupIdemRecord(beadstest.Work(store), "c1", "req-reclone-01")
 	if rec.Metadata[metaIdemState] != idemStateInFlight {
 		t.Fatalf("record not reset to in_flight: %q", rec.Metadata[metaIdemState])
 	}
@@ -437,12 +438,12 @@ func TestRigIdemAdmitOrphanNoReplay(t *testing.T) {
 	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-orphan-01"}
 	digest, _ := rigCreateDigest(body)
 
-	id, err := createIdemRecord(store, "c1", "req-orphan-01", digest, "3", "web", idemStateInFlight)
+	id, err := createIdemRecord(beadstest.Work(store), "c1", "req-orphan-01", digest, "3", "web", idemStateInFlight)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	res, err := admitRigCreate(idx, store, fixedCursor("9"), nil, nil, "c1", body)
+	res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("9"), nil, nil, "c1", body)
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -459,12 +460,12 @@ func TestRigIdemAdmitRequestIDConflict(t *testing.T) {
 		store := beads.NewMemStore()
 		idx := newRigIdemIndex()
 		first := RigCreateBody{Name: "web", Path: "/srv/web", RequestID: "req-conf-0001"}
-		if _, err := admitRigCreate(idx, store, fixedCursor("1"), nil, nil, "c1", first); err != nil {
+		if _, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("1"), nil, nil, "c1", first); err != nil {
 			t.Fatal(err)
 		}
 		// Same id, different body (name differs ⇒ digest differs).
 		second := RigCreateBody{Name: "web2", Path: "/srv/web2", RequestID: "req-conf-0001"}
-		_, err := admitRigCreate(idx, store, fixedCursor("1"), nil, nil, "c1", second)
+		_, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("1"), nil, nil, "c1", second)
 		var rc *requestIDConflictError
 		if !errors.As(err, &rc) {
 			t.Fatalf("err = %v, want *requestIDConflictError", err)
@@ -481,15 +482,15 @@ func TestRigIdemAdmitRequestIDConflict(t *testing.T) {
 		idx := newRigIdemIndex()
 		orig := RigCreateBody{Name: "web", Path: "/srv/web", RequestID: "req-conf-0002"}
 		digest, _ := rigCreateDigest(orig)
-		id, err := createIdemRecord(store, "c1", "req-conf-0002", digest, "3", "web", idemStateInFlight)
+		id, err := createIdemRecord(beadstest.Work(store), "c1", "req-conf-0002", digest, "3", "web", idemStateInFlight)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := markIdemRolledBack(store, id); err != nil {
+		if err := markIdemRolledBack(beadstest.Work(store), id); err != nil {
 			t.Fatal(err)
 		}
 		changed := RigCreateBody{Name: "web", Path: "/srv/DIFFERENT", RequestID: "req-conf-0002"}
-		_, err = admitRigCreate(idx, store, fixedCursor("1"), nil, nil, "c1", changed)
+		_, err = admitRigCreate(idx, beadstest.Work(store), fixedCursor("1"), nil, nil, "c1", changed)
 		var rc *requestIDConflictError
 		if !errors.As(err, &rc) {
 			t.Fatalf("err = %v, want *requestIDConflictError", err)
@@ -502,11 +503,11 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 		store := beads.NewMemStore()
 		idx := newRigIdemIndex()
 		a := RigCreateBody{Name: "web", Path: "/srv/web", RequestID: "req-name-aaa1"}
-		if _, err := admitRigCreate(idx, store, fixedCursor("5"), nil, nil, "c1", a); err != nil {
+		if _, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("5"), nil, nil, "c1", a); err != nil {
 			t.Fatal(err)
 		}
 		b := RigCreateBody{Name: "web", Path: "/srv/other", RequestID: "req-name-bbb2"}
-		_, err := admitRigCreate(idx, store, fixedCursor("5"), nil, nil, "c1", b)
+		_, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("5"), nil, nil, "c1", b)
 		var nc *rigNameConflictError
 		if !errors.As(err, &nc) {
 			t.Fatalf("err = %v, want *rigNameConflictError", err)
@@ -521,7 +522,7 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 		idx := newRigIdemIndex()
 		inConfig := func(name string) bool { return name == "web" }
 		b := RigCreateBody{Name: "web", Path: "/srv/web", RequestID: "req-cfg-00001"}
-		_, err := admitRigCreate(idx, store, fixedCursor("5"), inConfig, nil, "c1", b)
+		_, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("5"), inConfig, nil, "c1", b)
 		var nc *rigNameConflictError
 		if !errors.As(err, &nc) {
 			t.Fatalf("err = %v, want *rigNameConflictError", err)
@@ -538,11 +539,11 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 		// with no live entry (the committed-but-invisible / orphan window).
 		otherBody := RigCreateBody{Name: "web", Path: "/srv/web", RequestID: "req-other-0001"}
 		otherDigest, _ := rigCreateDigest(otherBody)
-		if _, err := createIdemRecord(store, "c1", "req-other-0001", otherDigest, "3", "web", idemStateInFlight); err != nil {
+		if _, err := createIdemRecord(beadstest.Work(store), "c1", "req-other-0001", otherDigest, "3", "web", idemStateInFlight); err != nil {
 			t.Fatal(err)
 		}
 		b := RigCreateBody{Name: "web", Path: "/srv/web", RequestID: "req-scan-0001"}
-		_, err := admitRigCreate(idx, store, fixedCursor("5"), nil, nil, "c1", b)
+		_, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("5"), nil, nil, "c1", b)
 		var nc *rigNameConflictError
 		if !errors.As(err, &nc) {
 			t.Fatalf("err = %v, want *rigNameConflictError", err)
@@ -566,17 +567,17 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 		// req-X previously failed: a rolled_back durable record for "web".
 		reqX := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-x-00001"}
 		xDigest, _ := rigCreateDigest(reqX)
-		xid, err := createIdemRecord(store, "c1", "req-x-00001", xDigest, "3", "web", idemStateInFlight)
+		xid, err := createIdemRecord(beadstest.Work(store), "c1", "req-x-00001", xDigest, "3", "web", idemStateInFlight)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := markIdemRolledBack(store, xid); err != nil {
+		if err := markIdemRolledBack(beadstest.Work(store), xid); err != nil {
 			t.Fatal(err)
 		}
 
 		// A DIFFERENT request req-Y then claims the same name "web" and is live.
 		reqY := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-y-00002"}
-		yres, err := admitRigCreate(idx, store, fixedCursor("7"), nil, nil, "c1", reqY)
+		yres, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("7"), nil, nil, "c1", reqY)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -586,7 +587,7 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 
 		// req-X retries: its request_id axis routes to re-clone, but "web" is now
 		// held by req-Y. It must 409 at the name axis, pointing at req-Y's stream.
-		_, err = admitRigCreate(idx, store, fixedCursor("9"), nil, nil, "c1", reqX)
+		_, err = admitRigCreate(idx, beadstest.Work(store), fixedCursor("9"), nil, nil, "c1", reqX)
 		var nc *rigNameConflictError
 		if !errors.As(err, &nc) {
 			t.Fatalf("re-clone-vs-live-byName err = %v, want *rigNameConflictError", err)
@@ -603,7 +604,7 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 			t.Fatal("re-clone clobbered req-Y's live request_id entry")
 		}
 		// req-X's durable record must remain rolled_back (never reset to in_flight).
-		rec, _ := lookupIdemRecord(store, "c1", "req-x-00001")
+		rec, _ := lookupIdemRecord(beadstest.Work(store), "c1", "req-x-00001")
 		if rec == nil || rec.Metadata[metaIdemState] != idemStateRolledBack {
 			t.Fatalf("req-X record must stay rolled_back, got %+v", rec)
 		}
@@ -624,11 +625,11 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 		// live entry. A rolled_back provision never committed its own name to config.
 		reqX := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-x-commit01"}
 		xDigest, _ := rigCreateDigest(reqX)
-		xid, err := createIdemRecord(store, "c1", "req-x-commit01", xDigest, "3", "web", idemStateInFlight)
+		xid, err := createIdemRecord(beadstest.Work(store), "c1", "req-x-commit01", xDigest, "3", "web", idemStateInFlight)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := markIdemRolledBack(store, xid); err != nil {
+		if err := markIdemRolledBack(beadstest.Work(store), xid); err != nil {
 			t.Fatal(err)
 		}
 
@@ -639,7 +640,7 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 
 		// req-X retries: its request_id axis routes to re-clone, but "web" is now a
 		// committed rig owned by req-Y. It must 409 rig_name_conflict.
-		_, err = admitRigCreate(idx, store, fixedCursor("9"), inConfig, nil, "c1", reqX)
+		_, err = admitRigCreate(idx, beadstest.Work(store), fixedCursor("9"), inConfig, nil, "c1", reqX)
 		var nc *rigNameConflictError
 		if !errors.As(err, &nc) {
 			t.Fatalf("re-clone-vs-committed err = %v, want *rigNameConflictError", err)
@@ -650,7 +651,7 @@ func TestRigIdemAdmitRigNameConflict(t *testing.T) {
 
 		// The rejected re-clone must have zero side effects: req-X's record stays
 		// rolled_back (never reset to in_flight) and no live entry was registered.
-		rec, _ := lookupIdemRecord(store, "c1", "req-x-commit01")
+		rec, _ := lookupIdemRecord(beadstest.Work(store), "c1", "req-x-commit01")
 		if rec == nil || rec.Metadata[metaIdemState] != idemStateRolledBack {
 			t.Fatalf("req-X record must stay rolled_back after a rejected re-clone, got %+v", rec)
 		}
@@ -669,7 +670,7 @@ func TestRigIdemAdmitAbsentRequestID(t *testing.T) {
 
 	// Absent id ⇒ synthetic correlation id, no durable record, but a byName
 	// marker so the name axis still protects the async provision.
-	res, err := admitRigCreate(idx, store, fixedCursor("2"), nil, nil, "c2", RigCreateBody{Name: "web", Path: "/srv/web"})
+	res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("2"), nil, nil, "c2", RigCreateBody{Name: "web", Path: "/srv/web"})
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -694,14 +695,14 @@ func TestRigIdemAdmitAbsentRequestID(t *testing.T) {
 	}
 
 	// A second absent-id add for the SAME name hits the name axis.
-	_, err = admitRigCreate(idx, store, fixedCursor("2"), nil, nil, "c2", RigCreateBody{Name: "web", Path: "/srv/web2"})
+	_, err = admitRigCreate(idx, beadstest.Work(store), fixedCursor("2"), nil, nil, "c2", RigCreateBody{Name: "web", Path: "/srv/web2"})
 	var nc *rigNameConflictError
 	if !errors.As(err, &nc) {
 		t.Fatalf("second same-name absent-id add err = %v, want *rigNameConflictError", err)
 	}
 
 	// A different name proceeds.
-	res3, err := admitRigCreate(idx, store, fixedCursor("2"), nil, nil, "c2", RigCreateBody{Name: "other", Path: "/srv/other"})
+	res3, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("2"), nil, nil, "c2", RigCreateBody{Name: "other", Path: "/srv/other"})
 	if err != nil {
 		t.Fatalf("different-name admit: %v", err)
 	}
@@ -742,7 +743,7 @@ func TestRigIdemAdmitLedgerLagDoubleClone(t *testing.T) {
 	idx := newRigIdemIndex()
 	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-web-0001"}
 
-	r1, err := admitRigCreate(idx, store, fixedCursor("7"), nil, nil, "c1", body)
+	r1, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("7"), nil, nil, "c1", body)
 	if err != nil {
 		t.Fatalf("first admit: %v", err)
 	}
@@ -750,7 +751,7 @@ func TestRigIdemAdmitLedgerLagDoubleClone(t *testing.T) {
 		t.Fatalf("first outcome = %d, want rigAdmitNew", r1.outcome)
 	}
 
-	r2, err := admitRigCreate(idx, store, fixedCursor("7"), nil, nil, "c1", body)
+	r2, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("7"), nil, nil, "c1", body)
 	if err != nil {
 		t.Fatalf("second admit: %v", err)
 	}

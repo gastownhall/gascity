@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -150,6 +151,106 @@ func TestStatusKeepsUnlimitedPoolAgentVisible(t *testing.T) {
 	}
 }
 
+// TestStatusCountsOwnNamedSessionOnce covers the same agent once it is also a
+// configured named session. The agent expansion now lists that identity
+// itself, so the session-bead leg must not add a second row for it, and the
+// row must be there even before the named session has ever started — without
+// taking over the session of a pool instance running beside it.
+func TestStatusCountsOwnNamedSessionOnce(t *testing.T) {
+	for _, running := range []bool{true, false} {
+		t.Run(fmt.Sprintf("running=%v", running), func(t *testing.T) {
+			st, sessions := poolIdentityState(t, config.Agent{
+				Name: "witness", Dir: "beads", Provider: "test-agent",
+			})
+			st.cfg.NamedSessions = []config.NamedSession{{Template: "witness", Dir: "beads", Mode: "always"}}
+			if running {
+				if _, err := sessions.Create(poolSessionBead("beads/witness", "beads--witness")); err != nil {
+					t.Fatalf("create session bead: %v", err)
+				}
+				if err := st.sp.Start(context.Background(), "beads--witness", runtime.Config{}); err != nil {
+					t.Fatalf("start runtime session: %v", err)
+				}
+			}
+
+			body := New(st).buildStatusBody(context.Background(), false)
+
+			if body.Agents.Total != 1 {
+				t.Fatalf("Agents.Total = %d, want 1 (rows=%+v)", body.Agents.Total, body.AgentDetails)
+			}
+			if row := agentRow(t, body, "beads/witness"); row.Running != running {
+				t.Fatalf("beads/witness running = %v, want %v (row=%+v)", row.Running, running, row)
+			}
+		})
+	}
+
+	// Routed work mints a <template>-1 instance while the on-demand named
+	// session has never started, so the only session bead recorded against
+	// the template is that sibling's, whether the instance runs under its
+	// canonical name or a bead-scoped one. A bead an older build left on a
+	// bead-scoped name, recording no identity or the template itself, is the
+	// same case: status lists that session as a row of its own. The named
+	// row must stay on its own (stopped) session, leaving one live session
+	// counted once, on the row that owns it.
+	for _, tt := range []struct {
+		name        string
+		bead        beads.Bead
+		sessionName string
+		row         string
+	}{
+		{
+			name:        "stopped beside a running instance",
+			bead:        poolSessionBeadWithAgentName("beads/witness", "beads/witness-1", "beads--witness-1"),
+			sessionName: "beads--witness-1",
+			row:         "beads/witness-1",
+		},
+		{
+			name:        "stopped beside an instance on a bead-scoped name",
+			bead:        poolSessionBeadWithAgentName("beads/witness", "beads/witness-1", "witness-gc-41"),
+			sessionName: "witness-gc-41",
+			row:         "beads/witness-1",
+		},
+		{
+			name:        "stopped beside a running bead with no recorded identity",
+			bead:        poolSessionBead("beads/witness", "witness-gc-41"),
+			sessionName: "witness-gc-41",
+			row:         "witness-gc-41",
+		},
+		{
+			name:        "stopped beside a running bead recording the template",
+			bead:        poolSessionBeadWithAgentName("beads/witness", "beads/witness", "witness-gc-41"),
+			sessionName: "witness-gc-41",
+			row:         "witness-gc-41",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st, sessions := poolIdentityState(t, config.Agent{
+				Name: "witness", Dir: "beads", Provider: "test-agent",
+			})
+			st.cfg.NamedSessions = []config.NamedSession{{Template: "witness", Dir: "beads"}}
+			if _, err := sessions.Create(tt.bead); err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			if err := st.sp.Start(context.Background(), tt.sessionName, runtime.Config{}); err != nil {
+				t.Fatalf("start runtime session: %v", err)
+			}
+
+			body := New(st).buildStatusBody(context.Background(), false)
+
+			if body.Agents.Total != 2 || body.Agents.Running != 1 {
+				t.Fatalf("Agents = %+v, want Total=2 Running=1 (rows=%+v)", body.Agents, body.AgentDetails)
+			}
+			if row := agentRow(t, body, "beads/witness"); row.SessionName != "beads--witness" || row.Running {
+				t.Fatalf("beads/witness = {SessionName:%q Running:%v}, want {beads--witness false}: it must not report a session another row lists (row=%+v)",
+					row.SessionName, row.Running, row)
+			}
+			if row := agentRow(t, body, tt.row); row.SessionName != tt.sessionName || !row.Running {
+				t.Fatalf("%s = {SessionName:%q Running:%v}, want {%s true} (row=%+v)",
+					tt.row, row.SessionName, row.Running, tt.sessionName, row)
+			}
+		})
+	}
+}
+
 // poolSessionBeadWithAgentName is the production shape of a pool session bead.
 // createPoolSessionBeadWithGuardedAliasUsingLock
 // (cmd/gc/build_desired_state.go:4836) records agent_name as the qualified
@@ -187,6 +288,58 @@ func TestStatusReportsPoolSuffixedSessionAsRunningWithRecordedAgentName(t *testi
 	}
 }
 
+// TestStatusReportsSingletonSeatUnderStaleSlotIdentity is the other side of
+// the rule above. A single-seat template (max_active_sessions = 1) lists no
+// session beads as rows of their own, yet it can hold a bead recorded under a
+// slot-suffixed identity. An older build may have written one; the controller
+// reclaims it as the canonical seat (normalizeNonExpandingPoolSessionInfo in
+// cmd/gc), so until it does, that bead IS the seat. A namepool seat is never
+// reclaimed, because a namepool template does not use the canonical singleton
+// identity; when its file loads no names, the seat still lists under the
+// template's name. Status must keep measuring the seat in both cases.
+func TestStatusReportsSingletonSeatUnderStaleSlotIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		agent config.Agent
+	}{
+		{
+			name: "singleton pool",
+			agent: config.Agent{
+				Name: "deployer", Dir: "gascity", Provider: "test-agent",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1),
+			},
+		},
+		{
+			name: "namepool seat without names",
+			agent: config.Agent{
+				Name: "deployer", Dir: "gascity", Provider: "test-agent",
+				MaxActiveSessions: intPtr(1), Namepool: "names.txt",
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st, sessions := poolIdentityState(t, tt.agent)
+			if _, err := sessions.Create(poolSessionBeadWithAgentName(
+				"gascity/deployer", "gascity/deployer-1", "deployer-gc-41")); err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			if err := st.sp.Start(context.Background(), "deployer-gc-41", runtime.Config{}); err != nil {
+				t.Fatalf("start runtime session: %v", err)
+			}
+
+			body := New(st).buildStatusBody(context.Background(), false)
+
+			if body.Agents.Total != 1 || body.Agents.Running != 1 {
+				t.Fatalf("Agents = %+v, want Total=1 Running=1 (rows=%+v)", body.Agents, body.AgentDetails)
+			}
+			if row := agentRow(t, body, "gascity/deployer"); row.SessionName != "deployer-gc-41" || !row.Running {
+				t.Fatalf("gascity/deployer = {SessionName:%q Running:%v}, want {deployer-gc-41 true} (row=%+v)",
+					row.SessionName, row.Running, row)
+			}
+		})
+	}
+}
+
 // TestStatusMapsEachPoolInstanceToItsOwnSession guards the disambiguation rule.
 // A multi-instance pool must not cross-wire instances onto each other's
 // sessions: reporting the right boolean off the wrong session would be a
@@ -218,5 +371,95 @@ func TestStatusMapsEachPoolInstanceToItsOwnSession(t *testing.T) {
 		if !row.Running {
 			t.Fatalf("%s running = false, want true (row=%+v)", qn, row)
 		}
+	}
+}
+
+// TestStatusRuntimeSessionNameTemplateFallback pins how statusRuntimeSessionName
+// resolves a row whose identity is the template itself and whose canonical
+// name has no bead. An unlimited template lists every bead recorded against
+// it as a row of its own, so its template row keeps the canonical name; a
+// bounded one still takes the one bead recorded against it (step 3).
+func TestStatusRuntimeSessionNameTemplateFallback(t *testing.T) {
+	const qn = "beads/witness"
+	canonical := agentSessionName("city", qn, "")
+	unlimited := config.Agent{Name: "witness", Dir: "beads"}
+	singleSeat := config.Agent{Name: "witness", Dir: "beads", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)}
+	namepoolSeat := config.Agent{Name: "witness", Dir: "beads", MaxActiveSessions: intPtr(1), Namepool: "names.txt"}
+	sibling := statusSessionInfo{sessionName: "beads--witness-1", agentName: "beads/witness-1", template: qn}
+	unrecorded := statusSessionInfo{sessionName: "witness-gc-41", template: qn}
+	templateRecorded := statusSessionInfo{sessionName: "witness-gc-41", agentName: qn, template: qn}
+	staleSlot := statusSessionInfo{sessionName: "witness-gc-7", agentName: "beads/witness-1", template: qn}
+	tests := []struct {
+		name  string
+		agent config.Agent
+		beads []statusSessionInfo
+		want  string
+	}{
+		{name: "unlimited template does not take a sibling instance's session", agent: unlimited, beads: []statusSessionInfo{sibling}, want: canonical},
+		{name: "unlimited template does not take a bead with no recorded identity", agent: unlimited, beads: []statusSessionInfo{unrecorded}, want: canonical},
+		{name: "unlimited template does not take a bead recording the template", agent: unlimited, beads: []statusSessionInfo{templateRecorded}, want: canonical},
+		{name: "single-seat template keeps a stale slot identity", agent: singleSeat, beads: []statusSessionInfo{staleSlot}, want: staleSlot.sessionName},
+		{name: "namepool seat without names keeps its slot identity", agent: namepoolSeat, beads: []statusSessionInfo{staleSlot}, want: staleSlot.sessionName},
+		{name: "single-seat template keeps a bead with no recorded identity", agent: singleSeat, beads: []statusSessionInfo{unrecorded}, want: unrecorded.sessionName},
+		{name: "two beads on a single-seat template are ambiguous", agent: singleSeat, beads: []statusSessionInfo{unrecorded, staleSlot}, want: canonical},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := statusSessionSnapshot{
+				bySessionName: make(map[string]statusSessionInfo, len(tt.beads)),
+				byTemplate:    map[string][]statusSessionInfo{qn: tt.beads},
+			}
+			for _, info := range tt.beads {
+				snapshot.bySessionName[info.sessionName] = info
+			}
+			if got := statusRuntimeSessionName("city", "", qn, qn, statusListsTemplateBeads(tt.agent), snapshot); got != tt.want {
+				t.Fatalf("statusRuntimeSessionName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStatusScaleLabelMatchesCLI pins the banner on a pool group's first row
+// to the one the CLI renders client-side (buildCityStatusSnapshot via
+// scaleParamsFor): an unset max_active_sessions is unlimited, not max=1.
+func TestStatusScaleLabelMatchesCLI(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent config.Agent
+		named bool
+		want  string
+	}{
+		{name: "unset max is unlimited", agent: config.Agent{Name: "witness", Dir: "beads", Provider: "test-agent"}, want: "scaled (min=0, max=unlimited)"},
+		{name: "unset max with own named session is unlimited", agent: config.Agent{Name: "witness", Dir: "beads", Provider: "test-agent"}, named: true, want: "scaled (min=0, max=unlimited)"},
+		{name: "negative max is unlimited", agent: config.Agent{Name: "witness", Dir: "beads", Provider: "test-agent", MaxActiveSessions: intPtr(-1)}, want: "scaled (min=0, max=unlimited)"},
+		{name: "bounded pool keeps its bounds", agent: config.Agent{Name: "witness", Dir: "beads", Provider: "test-agent", MinActiveSessions: intPtr(2), MaxActiveSessions: intPtr(5)}, want: "scaled (min=2, max=5)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, sessions := poolIdentityState(t, tt.agent)
+			if tt.named {
+				st.cfg.NamedSessions = []config.NamedSession{{Template: "witness", Dir: "beads"}}
+			}
+			// An unlimited pool lists only the instances it has, so give every
+			// group a running one for its first row.
+			if _, err := sessions.Create(poolSessionBeadWithAgentName("beads/witness", "beads/witness-1", "beads--witness-1")); err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			if err := st.sp.Start(context.Background(), "beads--witness-1", runtime.Config{}); err != nil {
+				t.Fatalf("start runtime session: %v", err)
+			}
+
+			body := New(st).buildStatusBody(context.Background(), false)
+
+			var labels []string
+			for _, d := range body.AgentDetails {
+				if d.GroupName == "beads/witness" && d.ScaleLabel != "" {
+					labels = append(labels, d.ScaleLabel)
+				}
+			}
+			if len(labels) != 1 || labels[0] != tt.want {
+				t.Fatalf("beads/witness scale labels = %q, want exactly [%q] (rows=%+v)", labels, tt.want, body.AgentDetails)
+			}
+		})
 	}
 }

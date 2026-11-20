@@ -3,6 +3,7 @@ package main
 import (
 	"time"
 
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -75,6 +76,7 @@ const (
 	reasonConfigSleep          = "config-sleep-suppressed"
 	reasonSuspendedCity        = "suspended-city"
 	reasonNoWake               = "no-wake-reason"
+	reasonExplicitWake         = "explicit-wake" // the awake set's reason for an honored explicit wake (D7)
 	reasonUnknownState         = "unknown-state"
 	reasonRollbackCandidate    = "rollback-candidate"
 	reasonFailedCreate         = "failed-create"
@@ -90,7 +92,9 @@ const (
 	// reasonPendingCreate and reasonAssignedWork keep a row in a suspended
 	// city that legacy's suspend drain leaves alone: a pending create within
 	// its lease, and a row with open assigned work
-	// (session_reconciler.go:2414-2436).
+	// (session_reconciler.go:2414-2436). reasonPendingCreate also keeps an
+	// undesired pending create in a running city while its lease holds
+	// (v5.9r, SESS-065).
 	reasonPendingCreate = "pending-create"
 	reasonAssignedWork  = "assigned-work"
 	drainOrphaned       = "orphaned"
@@ -153,6 +157,17 @@ type selectionEntry struct {
 	Endpoint             endpointKey
 	ObservationUncertain bool
 	Identity             *identityView
+	// OpenWork is a Drain entry's first open or in-progress assigned work,
+	// ready or not: legacy's undesired-drain keep (SESS-074).
+	OpenWork *assignedWorkView
+	// WakeHonored marks a pending explicit wake AL1 honors (CONTRACT D7
+	// rule 4; the awake set's explicit-wake desire): the row is never Sleep
+	// or Drain, and no finalize closes it.
+	WakeHonored bool
+	// Park is the row's park verdict (parkSeats): a pool seat asleep on its
+	// own stop holding only blocked pre-assigned work, which A21 holds
+	// without the stranded branch until its bound (ga-ylpbsy.16).
+	Park parkVerdict
 }
 
 // rowBasis is the row incarnation the pass saw.
@@ -214,6 +229,14 @@ type bindingTarget struct {
 	// when set, must be verified by the session key before it applies.
 	WorkDir      string
 	WorktreeSpec *worktree.Spec
+	// KeptWorkDir is the recorded work dir Patch keeps over WorkDir for a
+	// parked seat's resume (parkedWorkDirKept), which the PreWake verifies
+	// still hosts the resume (parkedWorkDirUsable) and otherwise binds
+	// WorkDir instead.
+	KeptWorkDir string
+	// Patch is computePoolTriggerBindingPatch against the pass's row: what
+	// the start effect's PreWake folds (v5 S1).
+	Patch session.MetadataPatch
 }
 
 // identityView is a row's place among its named identity's rows (C2.13) or
@@ -287,10 +310,16 @@ type planReservation struct {
 }
 
 // allocTraceRecord is one decision the pass refused or skipped, so
-// starvation is visible (C2.2): a plan gate's refusal consumes nothing.
+// starvation is visible (C2.2): a plan gate's refusal consumes nothing. A
+// request the pass refuses because it found the request's worktree evidence
+// unusable also names its work item (WorkBeadID) and why (Detail): no create
+// effect ever sees that request, so the planner alerts on the record
+// (observeWorktreeRefusals).
 type allocTraceRecord struct {
-	Template string
-	Instance string
-	Key      rowKey
-	Reason   string
+	Template   string
+	Instance   string
+	Key        rowKey
+	Reason     string
+	WorkBeadID string
+	Detail     string
 }

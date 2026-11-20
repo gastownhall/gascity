@@ -55,7 +55,7 @@ func TestProviderDecoratorsPreserveLivenessObservationUncertainty(t *testing.T) 
 }
 
 func TestReconcileSessionBeadsNamedSpecReappearsDuringLivenessErrorClearsDeferral(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	sessionName := config.NamedSessionRuntimeName("test-city", config.Workspace{Name: "test-city"}, "worker")
 	withSpec := &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
@@ -83,9 +83,9 @@ func TestReconcileSessionBeadsNamedSpecReappearsDuringLivenessErrorClearsDeferra
 	})
 	runTick := func(sp runtime.Provider) {
 		configuredNames := configuredSessionNames(env.cfg, "", env.store)
-		reconcileSessionBeads(
-			context.Background(), []beads.Bead{session}, env.desiredState,
-			configuredNames, env.cfg, sp, env.store, nil, nil, nil, env.dt,
+		reconcileSessionBeadsAtPath(
+			context.Background(), env.city, []beads.Bead{session}, env.desiredState,
+			configuredNames, env.cfg, sp, env.store, nil, nil, nil, nil, env.dt,
 			nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
 			&env.stdout, &env.stderr, env.startOptions...,
 		)
@@ -122,7 +122,7 @@ func TestReconcileSessionBeadsNamedSpecReappearsDuringLivenessErrorClearsDeferra
 }
 
 func TestReconcileSessionBeadsPreservedNamedSecondaryLivenessErrorDefersLifecycle(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
@@ -150,10 +150,10 @@ func TestReconcileSessionBeadsPreservedNamedSecondaryLivenessErrorDefersLifecycl
 	sp := &secondLivenessObservationUnavailableProvider{Fake: env.sp}
 	rec := events.NewFake()
 
-	woken := reconcileSessionBeads(
-		context.Background(), []beads.Bead{before}, env.desiredState,
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{before}, env.desiredState,
 		configuredSessionNames(env.cfg, "", env.store), env.cfg, sp, env.store,
-		nil, nil, nil, env.dt, map[string]int{}, false, nil, "", nil, env.clk,
+		nil, nil, nil, nil, env.dt, map[string]int{}, false, nil, "", nil, env.clk,
 		rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...,
 	)
 	if woken != 0 {

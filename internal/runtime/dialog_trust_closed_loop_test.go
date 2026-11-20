@@ -605,3 +605,94 @@ func TestAcceptStartupDialogsFromStreamTrustDialogFallsBackToPeeks(t *testing.T)
 		})
 	}
 }
+
+// fakeCodexTrustPane models the Codex 0.156 workspace-trust dialog
+// (codex0156TrustDialog): the composer line ("› Ask Codex to do anything")
+// is already rendered above the dialog, and the "›" cursor sits on either
+// "1. Trust and continue" or "2. Quit". Up and Down move the cursor between
+// the two rows; Enter confirms whichever row it is on.
+type fakeCodexTrustPane struct {
+	onTrust   bool // cursor on "1. Trust and continue"
+	sent      []string
+	confirmed string // "" until Enter is applied; then "trust" or "quit"
+}
+
+func (p *fakeCodexTrustPane) peek(int) (string, error) {
+	switch {
+	case p.confirmed == "trust":
+		return "› Ask Codex to do anything", nil
+	case p.confirmed == "quit":
+		return "user@host $", nil
+	case p.onTrust:
+		return codex0156TrustDialog, nil
+	default:
+		return codex0156TrustDialogQuitSelected, nil
+	}
+}
+
+func (p *fakeCodexTrustPane) sendKeys(keys ...string) error {
+	p.sent = append(p.sent, keys...)
+	for _, k := range keys {
+		if p.confirmed != "" {
+			break // the dialog is gone
+		}
+		switch k {
+		case "Up":
+			p.onTrust = true
+		case "Down":
+			p.onTrust = false
+		case "Enter":
+			p.confirmed = "quit"
+			if p.onTrust {
+				p.confirmed = "trust"
+			}
+		}
+	}
+	return nil
+}
+
+// TestAcceptStartupDialogsMovesCodexTrustDialogOffQuit drives the polling
+// sequence through a Codex 0.156 trust dialog whose cursor starts on
+// "2. Quit": the handler must move Up to "1. Trust and continue" and send
+// Enter only from a frame showing it selected, never from the Quit frame.
+func TestAcceptStartupDialogsMovesCodexTrustDialogOffQuit(t *testing.T) {
+	withZeroDialogTimings(t)
+	pane := &fakeCodexTrustPane{}
+
+	if err := AcceptStartupDialogsWithTimeout(context.Background(), time.Second, pane.peek, pane.sendKeys); err != nil {
+		t.Fatalf("AcceptStartupDialogsWithTimeout() error = %v", err)
+	}
+	if pane.confirmed != "trust" || !reflect.DeepEqual(pane.sent, []string{"Up", "Enter"}) {
+		t.Fatalf("sent = %v confirmed = %q, want [Up Enter] trust", pane.sent, pane.confirmed)
+	}
+}
+
+// TestAcceptStartupDialogsFromStreamCodexTrustDialogFallsBackToPeeks drives
+// the exec provider's sequence (exec.go dismissStartupDialogs) through a
+// Codex 0.156 trust dialog whose cursor starts on "2. Quit". The composer
+// line above the dialog looks like a ready prompt, but the stream must still
+// answer the dialog: it sends nothing, since it cannot re-read the screen
+// after a move, and reports the stream inconclusive so the polling fallback
+// moves the selection and confirms.
+func TestAcceptStartupDialogsFromStreamCodexTrustDialogFallsBackToPeeks(t *testing.T) {
+	withZeroDialogTimings(t)
+	pane := &fakeCodexTrustPane{}
+	snapshots := make(chan string, 1)
+	snapshots <- codex0156TrustDialogQuitSelected
+	t.Cleanup(func() { close(snapshots) })
+
+	observed, err := AcceptStartupDialogsFromStreamWithStatus(context.Background(), 2*time.Second, snapshots, pane.sendKeys)
+	if err != nil {
+		t.Fatalf("stream error = %v", err)
+	}
+	if observed || len(pane.sent) != 0 {
+		t.Fatalf("stream observed = %v sent = %v, want inconclusive with no keys sent", observed, pane.sent)
+	}
+
+	if err := AcceptStartupDialogsWithTimeout(context.Background(), 2*time.Second, pane.peek, pane.sendKeys); err != nil {
+		t.Fatalf("polling fallback error = %v", err)
+	}
+	if pane.confirmed != "trust" || !reflect.DeepEqual(pane.sent, []string{"Up", "Enter"}) {
+		t.Fatalf("sent = %v confirmed = %q, want [Up Enter] trust", pane.sent, pane.confirmed)
+	}
+}

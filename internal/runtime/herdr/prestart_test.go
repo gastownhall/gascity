@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,8 +33,8 @@ func TestRunPreStartRunsCommandsInOrder(t *testing.T) {
 	p := newTestProvider(t, 10*time.Second)
 	cfg := runtime.Config{
 		PreStart: []string{
-			"printf one >> " + filepath.Join(dir, "order.txt"),
-			"printf two >> " + filepath.Join(dir, "order.txt"),
+			fixtureAppend(filepath.Join(dir, "order.txt"), "one"),
+			fixtureAppend(filepath.Join(dir, "order.txt"), "two"),
 		},
 	}
 	if err := p.runPreStart(context.Background(), cfg); err != nil {
@@ -54,7 +55,7 @@ func TestRunPreStartUsesGCDirAsCwd(t *testing.T) {
 	p := newTestProvider(t, 10*time.Second)
 	cfg := runtime.Config{
 		Env:      map[string]string{"GC_DIR": dir},
-		PreStart: []string{"pwd > pwd.txt"},
+		PreStart: []string{fixturePrintCwdTo("pwd.txt")},
 	}
 	if err := p.runPreStart(context.Background(), cfg); err != nil {
 		t.Fatalf("runPreStart: %v", err)
@@ -75,7 +76,7 @@ func TestRunPreStartPassesEnv(t *testing.T) {
 	p := newTestProvider(t, 10*time.Second)
 	cfg := runtime.Config{
 		Env:      map[string]string{"GC_DIR": dir, "GC_TEST_TOKEN": "sentinel"},
-		PreStart: []string{"printf %s \"$GC_TEST_TOKEN\" > token.txt"},
+		PreStart: []string{fixtureWriteEnvTo("GC_TEST_TOKEN", "token.txt")},
 	}
 	if err := p.runPreStart(context.Background(), cfg); err != nil {
 		t.Fatalf("runPreStart: %v", err)
@@ -94,7 +95,7 @@ func TestRunPreStartPassesEnv(t *testing.T) {
 func TestRunPreStartFailureIsFatal(t *testing.T) {
 	p := newTestProvider(t, 10*time.Second)
 	cfg := runtime.Config{
-		PreStart: []string{"true", "echo boom >&2; exit 3", "true"},
+		PreStart: []string{fixtureSucceed, fixtureEchoToStderrExit("boom", 3), fixtureSucceed},
 	}
 	err := p.runPreStart(context.Background(), cfg)
 	if err == nil {
@@ -111,11 +112,16 @@ func TestRunPreStartFailureIsFatal(t *testing.T) {
 // A hung pre_start must not hang the start forever; setupTimeout bounds it.
 func TestRunPreStartRespectsSetupTimeout(t *testing.T) {
 	p := newTestProvider(t, 150*time.Millisecond)
-	cfg := runtime.Config{PreStart: []string{"sleep 5"}}
+	cfg := runtime.Config{PreStart: []string{fixtureSleepPastTimeout}}
 	start := time.Now()
 	err := p.runPreStart(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("runPreStart = nil, want timeout error")
+	}
+	// A command that fails fast (say, one the interpreter cannot parse) also
+	// returns an error within the bound; only the deadline makes it a timeout.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("runPreStart = %v, want it to report the setup timeout", err)
 	}
 	if elapsed := time.Since(start); elapsed > 4*time.Second {
 		t.Errorf("took %v, want it bounded by setupTimeout", elapsed)
@@ -129,7 +135,7 @@ func TestNewDefaultsSetupTimeout(t *testing.T) {
 	if p.setupTimeout != defaultSetupTimeout {
 		t.Errorf("setupTimeout = %v, want default %v", p.setupTimeout, defaultSetupTimeout)
 	}
-	if err := p.runPreStart(context.Background(), runtime.Config{PreStart: []string{"true"}}); err != nil {
+	if err := p.runPreStart(context.Background(), runtime.Config{PreStart: []string{fixtureSucceed}}); err != nil {
 		t.Errorf("runPreStart with defaulted timeout = %v, want nil", err)
 	}
 }
@@ -142,7 +148,7 @@ func TestRunPreStartToleratesMissingGCDir(t *testing.T) {
 	p := New("gctest-prestart-missing", t.TempDir(), cityRoot, 10*time.Second, 0)
 	cfg := runtime.Config{
 		Env:      map[string]string{"GC_DIR": filepath.Join(cityRoot, "does", "not", "exist")},
-		PreStart: []string{"pwd > cwd.txt"},
+		PreStart: []string{fixturePrintCwdTo("cwd.txt")},
 	}
 	if err := p.runPreStart(context.Background(), cfg); err != nil {
 		t.Fatalf("runPreStart with missing GC_DIR = %v, want nil (cwd fallback)", err)

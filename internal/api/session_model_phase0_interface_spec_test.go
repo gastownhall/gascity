@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -327,7 +328,7 @@ func TestPhase0APIMailQuery_BareNamedSessionUsesTargetedRecipientLookup(t *testi
 	fs.cityBeadStore = noBroadAPISessionListStore{Store: baseStore, t: t}
 	srv := New(fs)
 
-	recipients := srv.resolveMailQueryRecipientsWithContext(t.Context(), "worker")
+	recipients := srv.resolveMailQueryWithContext(t.Context(), "worker").recipients
 	want := []string{live.ID, closed.ID, "live-worker", "myrig/worker", "s-gc-test-city-worker", "s-gc-test-city-worker-old", "worker"}
 	if strings.Join(recipients, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients = %#v, want %#v", recipients, want)
@@ -478,7 +479,7 @@ func TestPhase0APIResolver_BareConfigNameDoesNotMaterializeOrdinarySession(t *te
 	fs := newPhase0APIOrdinaryWorkerState(t)
 	srv := New(fs)
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(beadstest.Sessions(fs.cityBeadStore), "worker")
 	if err == nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker) = %q, want error", id)
 	}

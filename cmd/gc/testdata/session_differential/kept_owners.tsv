@@ -1,4 +1,4 @@
-# The KEPT rows of reconciler-review p0/BEHAVIORS.md (sha256 e7b0f491705b, 2026-10-08), by owner cell:
+# The KEPT rows of reconciler-review p0/BEHAVIORS.md (sha256 e7b0f491705b, 2026-10-08; DRAIN-010 and SESS-069 flipped to KEPT under A11, 2026-10-12, #7642), by owner cell:
 # <the text after "→ **v5:** KEPT: ">\t<row IDs, comma-separated>. Regenerate when BEHAVIORS.md changes:
 #   for each table row, take the Owner cell's text after "KEPT:" up to the next "|", and group the IDs by it.
 pass record (R6)	SESS-001
@@ -9,6 +9,7 @@ AL1 named-duplicate verdict	SESS-011,SESS-012
 S1 template resolution	SESS-026
 AL1 allocate	SESS-027,SESS-028,SESS-583,SESS-604,POOL-001,POOL-002,POOL-003,POOL-004,POOL-006,POOL-007,POOL-008,POOL-009,POOL-010,POOL-011,POOL-012,POOL-016,POOL-017,POOL-018,POOL-021,POOL-022,POOL-023,POOL-024,POOL-025,POOL-026,POOL-027,POOL-029,POOL-030,POOL-031,POOL-032,POOL-033,POOL-034,POOL-035,POOL-036,POOL-037,POOL-038,POOL-039,POOL-040,POOL-041,POOL-042,POOL-043,POOL-044,POOL-045,POOL-047,POOL-048,POOL-049,POOL-050,POOL-054,POOL-055,POOL-057,POOL-059,POOL-061,POOL-063,POOL-068,POOL-069,POOL-070,POOL-073,POOL-074,POOL-082,SESS-706,SESS-707,SESS-708,SESS-712,GUAR-009,GUAR-030,GUAR-031,GUAR-033,GUAR-044,INC-004,INC-011,INC-013,INC-017,INC-019,INC-036
 A4 + D3 stop verb, D4 finalizePatch	SESS-033,SESS-034,SESS-035,SESS-036,DRAIN-051,DRAIN-053,DRAIN-054,DRAIN-055,GUAR-005
+A11 floor-ack cancel (PAR-FLOORACK, #7642)	SESS-069,DRAIN-010
 AL1 Keep on partial + P2 boot gate	SESS-037,SESS-073,SESS-079
 A5 unknown state	SESS-044,SESS-047
 A5 unknown state: the planner records `session.unknown_state` on first sight (OBS1 follow-up); no `unknown_state_*` markers (§12.2 row 32)	SESS-045
@@ -19,7 +20,7 @@ A12 / S5 classification and recycle	SESS-056,SESS-057
 A21 + C3 failed-create close	SESS-060,SESS-061,SESS-702
 A6 heal of a `creating` row without a claim to asleep, fenced on `instance_token` (lease branch removed)	SESS-062
 AL1 Drain + A20 + D2	SESS-074
-A21 + C3 close	SESS-080,SESS-081,SESS-082,SESS-083,SESS-624,SESS-626,SESS-722,GUAR-022,GUAR-038
+A21 + C3 close	SESS-080,SESS-081,SESS-082,SESS-083,SESS-624,SESS-626,SESS-722,GUAR-022
 A12 / S5 classification and recycle (reset-stall via the recycle)	SESS-085,SESS-086,SESS-087,SESS-088,SESS-089,SESS-090,SESS-530
 A6 dead-runtime heal (C5d replay): a committed row whose runtime is gone and that AL1 does not Drain, fresh-read fenced; heartbeat-held rows wait for A17	SESS-531
 A19/A20 + D2 policy table	SESS-532,SESS-616,SESS-617,SESS-618,SESS-619,SESS-621,DRAIN-022,DRAIN-501
@@ -27,7 +28,7 @@ A6 detached-at marker (C5d replay): cleared when the policy is not interactive, 
 AL1 Keep on an uncertain attach (C2.9); A6's detached-at marker writes nothing	SESS-534
 A6 detached-at marker (C5d replay): cleared while attached	SESS-535
 A6 detached-at marker (C5d replay): stamped at the pass time when detached and empty	SESS-536
-S3 abandon table + S6 #46	SESS-537,SESS-538,START-031,START-032,START-033,START-034,START-035,GUAR-025,GUAR-027,GUAR-039
+S3 abandon table + S6 #46	SESS-537,SESS-538,START-031,START-032,START-033,START-034,START-035,GUAR-025,GUAR-027,GUAR-038,GUAR-039
 A6 stability clear (C5d replay): `wake_attempts` and an unexpired `quarantined_until` on a committed row alive 30s past `last_woke_at`, before A20	SESS-539
 A6 stability clear (C5d replay): `churn_count` on a committed row alive 5 min past `last_woke_at`	SESS-540
 A14 config drift + D2/D3 (C7b)	SESS-550,SESS-552,SESS-553,SESS-554,SESS-555,SESS-556,SESS-557,SESS-558,SESS-559,SESS-560,SESS-561,SESS-562,SESS-565,SESS-566,SESS-568,GUAR-006
@@ -53,7 +54,7 @@ A4 + D3 stop verb, D4 finalizePatch; **v5.7 (CONTRACT §12.2 #10):** another row
 A4 + D3 stop verb, D4 finalizePatch (v5.7, A9: D4 names the close-gate form, read live; A21 keeps the plain form)	DRAIN-050
 S5 start recycle covers it; session.reset_stalled not emitted (§12.2 row 10)	SESS-590,SESS-591,SESS-592
 F4 fresh L4 / AL1 stage 6b	SESS-650,SESS-651
-AL1; custom scale_check refused at the latch (PAR-SC), K1 source wired	POOL-005
+AL1; custom scale_check from the K1 source, admitted by PAR-SC	POOL-005
 gather: K1 recording for bd/PG legs (R4)	POOL-013,POOL-014,POOL-062
 K1 demand-repairs step	POOL-019,POOL-020
 C1 create	POOL-051,GUAR-042,INC-018
