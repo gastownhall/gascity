@@ -119,3 +119,26 @@ func TestProxiedLongLivedOpenServesADemotedStore(t *testing.T) {
 		}
 	})
 }
+
+// TestProxiedOneShotOpenKeepsTheBdFrontDoor is the other half of the demoted
+// store: a one-shot open has no guard to re-pin anything, so a leaf that
+// answers head_moved still hands the factory the verdict and no store, and the
+// factory takes the bd front door exactly as it did before demoted stores.
+func TestProxiedOneShotOpenKeepsTheBdFrontDoor(t *testing.T) {
+	d := newDemotedOpenFixture(t)
+
+	got, _, err := d.opener.open(context.Background(), false)
+	verdict, typed := beads.ProxiedVerdictOf(err)
+	if got != nil {
+		t.Fatalf("a one-shot open served %T; want no store, so the factory takes the bd front door", got)
+	}
+	if !typed || verdict.Verdict != beads.ProxiedVerdictHeadMoved || verdict.Terminal() {
+		t.Fatalf("open err = %v, want the leaf's non-terminal head_moved", err)
+	}
+	if d.bdOpens != 0 {
+		t.Fatalf("a one-shot open opened the bd leaf %d time(s); the factory opens its own", d.bdOpens)
+	}
+	if d.leaf.closed != 1 {
+		t.Fatalf("the refused leaf was closed %d time(s), want exactly 1", d.leaf.closed)
+	}
+}
