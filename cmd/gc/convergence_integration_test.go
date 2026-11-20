@@ -1778,8 +1778,9 @@ func serviceConvergeSocketCmd(t *testing.T, cr *CityRuntime, payload string) con
 }
 
 // liveConvergenceLoops lists the non-closed convergence loops in store for
-// the given formula and target.
-func liveConvergenceLoops(t *testing.T, store beads.Store, formula, target string) []beads.Bead {
+// the test formula and target.
+func liveConvergenceLoops(t *testing.T, store beads.Store) []beads.Bead {
+	const formula, target = "test-formula", "test-agent"
 	t.Helper()
 	loops, err := store.List(beads.ListQuery{Type: "convergence", IncludeClosed: true})
 	if err != nil {
@@ -1842,7 +1843,7 @@ func TestConvergeSocketRetryAfterWithdrawnCreateMakesOneLoop(t *testing.T) {
 					t.Fatalf("unmarshaling retry result: %v", err)
 				}
 
-				live := liveConvergenceLoops(t, store, "test-formula", "test-agent")
+				live := liveConvergenceLoops(t, store)
 				if len(live) != 1 || live[0].ID != created.BeadID {
 					ids := make([]string, 0, len(live))
 					for _, b := range live {
@@ -1858,4 +1859,114 @@ func TestConvergeSocketRetryAfterWithdrawnCreateMakesOneLoop(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestConvergeSocketNormalReply: a socket request the event loop services
+// before the deadline, and an in-process request with no handoff, keep their
+// normal results, errors and side effects.
+func TestConvergeSocketNormalReply(t *testing.T) {
+	createParams := map[string]string{"formula": "test-formula", "target": "test-agent", "max_iterations": "3"}
+
+	t.Run("socket-create", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr, store := setupConvergenceRuntime(t)
+			reply := serviceConvergeSocketCmd(t, cr, convergeSocketPayload(t, convergenceRequest{Command: "create", Params: createParams}))
+			if reply.Error != "" {
+				t.Fatalf("create error: %s", reply.Error)
+			}
+			var created convergence.CreateResult
+			if err := json.Unmarshal(reply.Result, &created); err != nil {
+				t.Fatalf("unmarshaling create result: %v", err)
+			}
+			live := liveConvergenceLoops(t, store)
+			if len(live) != 1 || live[0].ID != created.BeadID {
+				t.Fatalf("live loops = %v, want exactly %s", live, created.BeadID)
+			}
+			if _, err := store.Get(created.FirstWispID); err != nil {
+				t.Errorf("first wisp %s not created: %v", created.FirstWispID, err)
+			}
+		})
+	})
+
+	t.Run("socket-stop", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr, _ := setupConvergenceRuntime(t)
+			created := createTestConvergenceLoop(t, cr)
+			reply := serviceConvergeSocketCmd(t, cr, convergeSocketPayload(t, convergenceRequest{Command: "stop", BeadID: created.BeadID, User: "test-operator"}))
+			if reply.Error != "" {
+				t.Fatalf("stop error: %s", reply.Error)
+			}
+			meta, err := hqScope(t, cr).handler.Store.GetMetadata(created.BeadID)
+			if err != nil {
+				t.Fatalf("GetMetadata: %v", err)
+			}
+			if meta[convergence.FieldState] != convergence.StateTerminated {
+				t.Errorf("state = %q, want %q", meta[convergence.FieldState], convergence.StateTerminated)
+			}
+		})
+	})
+
+	t.Run("socket-handler-error", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr, _ := setupConvergenceRuntime(t)
+			reply := serviceConvergeSocketCmd(t, cr, convergeSocketPayload(t, convergenceRequest{Command: "bogus"}))
+			if want := `unknown convergence command: "bogus"`; reply.Error != want {
+				t.Errorf("reply error = %q, want %q", reply.Error, want)
+			}
+		})
+	})
+
+	t.Run("socket-handler-panic", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr, _ := setupConvergenceRuntime(t)
+			cr.convScopes[""] = cr.newConvergenceScope("", getPanicStore{Store: beads.NewMemStore()}, cr.cityPath, []string{sharedTestFormulaDir}, false)
+			reply := serviceConvergeSocketCmd(t, cr, convergeSocketPayload(t, convergenceRequest{Command: "stop", BeadID: "gc-1"}))
+			if !strings.HasPrefix(reply.Error, "internal error (panic): ") {
+				t.Errorf("reply error = %q, want the panic wrapper's internal error", reply.Error)
+			}
+		})
+	})
+
+	t.Run("in-process-nil-handoff", func(t *testing.T) {
+		cr, store := setupConvergenceRuntime(t)
+		reply := cr.safeHandleConvergenceRequest(context.Background(), convergenceRequest{Command: "create", Params: createParams})
+		if reply.Error != "" {
+			t.Fatalf("create error: %s", reply.Error)
+		}
+		if live := liveConvergenceLoops(t, store); len(live) != 1 {
+			t.Errorf("live loops = %d, want 1", len(live))
+		}
+	})
+
+	t.Run("malformed-payload", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr, _ := setupConvergenceRuntime(t)
+			reply := convergeSocketReply(t, cr.convergenceReqCh, "{not json")
+			if !strings.HasPrefix(reply.Error, "invalid request: ") {
+				t.Errorf("reply error = %q, want an invalid-request error", reply.Error)
+			}
+			if got := len(cr.convergenceReqCh); got != 0 {
+				t.Errorf("queued requests = %d, want 0", got)
+			}
+		})
+	})
+
+	t.Run("full-queue-enqueue-timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr, store := setupConvergenceRuntime(t)
+			for i := 0; i < cap(cr.convergenceReqCh); i++ {
+				cr.convergenceReqCh <- convergenceRequest{Command: "bogus", replyCh: make(chan convergenceReply, 1)}
+			}
+			reply := convergeSocketReply(t, cr.convergenceReqCh, convergeSocketPayload(t, convergenceRequest{Command: "create", Params: createParams}))
+			if want := "controller busy (request timeout)"; reply.Error != want {
+				t.Errorf("reply error = %q, want %q", reply.Error, want)
+			}
+			// The losing send never entered the queue, so draining it runs
+			// only the requests that were already there.
+			cr.processConvergenceRequests(context.Background())
+			if live := liveConvergenceLoops(t, store); len(live) != 0 {
+				t.Errorf("live loops after drain = %d, want 0", len(live))
+			}
+		})
+	})
 }
