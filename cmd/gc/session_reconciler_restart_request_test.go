@@ -1106,3 +1106,44 @@ func TestReconcileSessionBeads_RestartRequestLiveKillRestartsSamePass(t *testing
 		t.Fatalf("session %q is not running after the pass that killed it; stderr: %s", sessionName, env.stderr.String())
 	}
 }
+
+// TestReconcileSessionBeads_RestartRequestLiveKillSamePassStartsFresh
+// checks the same-pass restart starts the fresh conversation the reset
+// asked for: the handoff consumed, the reset no longer pending, the wake
+// recorded, and the start launched with a rotated key.
+func TestReconcileSessionBeads_RestartRequestLiveKillSamePassStartsFresh(t *testing.T) {
+	env, session, sessionName := newPinnedAlwaysRestartScenario(t)
+	env.useFreshReads()
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Errorf("restart_requested = %q, want consumed", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Errorf("continuation_reset_pending = %q, want cleared by the same-pass start", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["last_woke_at"] == "" {
+		t.Errorf("last_woke_at empty (state=%q), want the same-pass wake recorded", got.Metadata["state"])
+	}
+	if key := got.Metadata["session_key"]; key == "" || key == "original-key" {
+		t.Errorf("session_key = %q, want rotated", key)
+	}
+	var started bool
+	for _, c := range restartCalls(env.sp, sessionName) {
+		if c.Method != "Start" {
+			continue
+		}
+		started = true
+		if strings.Contains(c.Config.Command, "original-key") {
+			t.Errorf("Start command %q carries the pre-restart key", c.Config.Command)
+		}
+	}
+	if !started {
+		t.Fatalf("no Start recorded for %q in the pass", sessionName)
+	}
+}
