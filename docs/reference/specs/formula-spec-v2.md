@@ -1071,7 +1071,12 @@ orchestrator aggregates the outcomes of its blockers into a single
 pass/fail, closes the workflow root with that outcome (root first, so a
 crash retries finalization), closes generated spec sidecars, and — on pass
 only — propagates closure across the `gc.source_bead_id` chain. Failures
-intentionally leave parent source beads open for investigation.
+intentionally leave parent source beads open for investigation. A blocker
+that closed `gc.outcome = skipped` does not fail the workflow. When the
+root closes pass with one or more skipped blockers, the same update also
+writes `gc.skipped_blockers` on the root — those blockers' IDs, sorted and
+comma-joined — so a pass earned with skipped work is distinguishable from
+one whose every blocker ran; the key is absent from every other root close.
 
 **Teardown is post-settlement.** Teardown work
 (`gc.scope_role = "teardown"`) is the one part of a workflow that outlives

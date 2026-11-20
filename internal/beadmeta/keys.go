@@ -330,14 +330,24 @@ const (
 	// SessionNameCamelMetadataKey is the camelCase variant of SessionNameMetadataKey,
 	// mirroring SessionIDCamelMetadataKey.
 	SessionNameCamelMetadataKey = "gc.sessionName"
-	SourceBeadIDMetadataKey     = "gc.source_bead_id"
-	SourceStepSpecMetadataKey   = "gc.source_step_spec"
-	SourceStoreRefMetadataKey   = "gc.source_store_ref"
-	SpawnedCountMetadataKey     = "gc.spawned_count"
-	SpecForMetadataKey          = "gc.spec_for"
-	SpecForRefMetadataKey       = "gc.spec_for_ref"
-	StderrMetadataKey           = "gc.stderr"
-	StdoutMetadataKey           = "gc.stdout"
+	// SkippedBlockersMetadataKey is written by workflow-finalize, on the
+	// workflow root only, when the root closes gc.outcome=pass while one or
+	// more of the finalizer's direct blocks blockers closed
+	// gc.outcome=skipped: a pass earned with skipped work must read
+	// differently from one whose every blocker ran. The value is those
+	// blockers' IDs, sorted and comma-joined, the encoding
+	// DrainUnprojectedBlockersMetadataKey uses. A skipped blocker is
+	// deliberately not a failure, so the outcome is unchanged and the key is
+	// absent from every other root close.
+	SkippedBlockersMetadataKey = "gc.skipped_blockers"
+	SourceBeadIDMetadataKey    = "gc.source_bead_id"
+	SourceStepSpecMetadataKey  = "gc.source_step_spec"
+	SourceStoreRefMetadataKey  = "gc.source_store_ref"
+	SpawnedCountMetadataKey    = "gc.spawned_count"
+	SpecForMetadataKey         = "gc.spec_for"
+	SpecForRefMetadataKey      = "gc.spec_for_ref"
+	StderrMetadataKey          = "gc.stderr"
+	StdoutMetadataKey          = "gc.stdout"
 	// StepDefinedEmittedMetadataKey records, on a graph.v2 physical step bead,
 	// that its execution.step_defined fact has already been emitted AND
 	// acknowledged durable. The level-triggered projector restates the full
@@ -772,6 +782,7 @@ var KnownMetadataKeys = []string{
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
+	SkippedBlockersMetadataKey,
 	SourceBeadIDMetadataKey,
 	SourceStepSpecMetadataKey,
 	SourceStoreRefMetadataKey,
