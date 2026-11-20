@@ -71,11 +71,15 @@ func ValidOutcome(v string) bool {
 // including ones an operator stamped with its own gc.kind vocabulary (work,
 // review, ...) — and deliberately NOT to beads carrying a gc.kind the engine
 // owns (beadmeta.EngineKinds: workflow roots, scope/run/check/drain steps,
-// wisps, ...), workflow steps identified by gc.step_id or gc.step_ref, or
-// non-task beads (convoy, message). The engine's kinds use the disjoint
-// control-plane gc.outcome vocabulary and are closed by the dispatch engine,
-// not by a worker reporting a work outcome; an operator's own kind carries no
-// engine meaning, so it leaves the bead in the covered population.
+// wisps, ...), workflow steps identified by gc.step_id or gc.step_ref,
+// non-task beads (convoy, message), or ready-excluded infrastructure
+// (beads.IsReadyExcludedBead: order tracking, session, op/fact rows). The
+// engine's kinds use the disjoint control-plane gc.outcome vocabulary and are
+// closed by the dispatch engine, not by a worker reporting a work outcome; an
+// operator's own kind carries no engine meaning, so it leaves the bead in the
+// covered population, and infrastructure bookkeeping is not a work outcome at
+// all. The storage tier (NoHistory, Ephemeral) is deliberately not an
+// exemption: it says where a bead is stored, not whether it is work.
 func Gated(bead beads.Bead) bool {
 	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
 		return false
@@ -85,6 +89,9 @@ func Gated(bead beads.Bead) bool {
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey]) != "" ||
 		strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]) != "" {
+		return false
+	}
+	if beads.IsReadyExcludedBead(bead) {
 		return false
 	}
 	return true

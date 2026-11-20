@@ -1377,6 +1377,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The work-record close gate exempted every bead that carried a `gc.kind`,
+  and covered the order-tracking beads it never should have.**
+  `workrecord.Gated` treated any non-empty `gc.kind` as engine-owned, so a
+  city stamping its own vocabulary on work beads (`gc.kind=work`,
+  `gc.kind=review`) got no close checks on any of them, with or without
+  `GC_WORK_RECORD_ENFORCE`. The exemption is now exactly the engine's kind
+  vocabulary (`beadmeta.EngineKinds`); an operator's kind no longer lifts
+  the contract — under enforcement such a close is refused with the missing
+  `gc.work_outcome` violation, and without enforcement it warns and
+  proceeds. Order-run tracking beads (untyped and kindless by design) were
+  the mirror bug: the gate read them as work and enforcement refused their
+  close, stranding run markers open. Ready-excluded infrastructure (order
+  tracking, session, op/fact rows) is now outside the gate on both the CLI
+  and HTTP doors, while a plain work bead's storage tier (`NoHistory`,
+  `Ephemeral`) alone still does not exempt it.
+
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues
   were given, so an empty convoy created with `--rig <rig>` could never

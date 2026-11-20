@@ -54,6 +54,33 @@ func seedGateBead(t *testing.T, store beads.Store, id string, meta map[string]st
 	return id
 }
 
+// seedTrackingBead plants an order-run tracking bead under an exact id in the
+// shape orders.Store.CreateRun writes: untyped, kindless, labels
+// order-run:<scoped> + order-tracking. noHistory selects the storage shape —
+// CreateRun writes NoHistory, and a city whose bead policy sets the
+// order_tracking tier to history stores the same labels with history.
+func seedTrackingBead(t *testing.T, store beads.Store, id string, noHistory bool) string {
+	t.Helper()
+	mem, ok := store.(*beads.MemStore)
+	if !ok {
+		t.Fatalf("fixture store is %T, want *beads.MemStore so the test can pin the seeded id", store)
+	}
+	mem.HonorExplicitIDs = true
+	created, err := mem.Create(beads.Bead{
+		ID:        id,
+		Title:     "order:digest",
+		Labels:    []string{"order-run:digest", "order-tracking"},
+		NoHistory: noHistory,
+	})
+	if err != nil {
+		t.Fatalf("seeding %s: %v", id, err)
+	}
+	if created.ID != id {
+		t.Fatalf("the fixture store minted %q instead of the pinned %q", created.ID, id)
+	}
+	return id
+}
+
 // closeSpelling is one of the two ways this surface closes a bead. Both must
 // answer to the gate: gating one and not the other just moves the closes.
 type closeSpelling struct {
@@ -228,6 +255,55 @@ func TestAPIBeadCloseEnforcesWorkRecord(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestAPIBeadCloseLeavesOrderTrackingOutsideTheWorkRecordGate pins the
+// infrastructure half of the population on this plane: an order's tracking
+// bead (orders.Store.CreateRun) is untyped and kindless, so before the
+// ready-excluded exemption this door's gate read it as work and enforcement
+// refused its close with a missing gc.work_outcome, stranding run markers
+// open. The bead is bookkeeping, not work — the gate must leave it alone,
+// under enforcement, in both storage shapes (CreateRun writes NoHistory; a
+// bead policy that sets the order_tracking tier to history stores the same
+// labels with history).
+//
+// The gate is pinned through gateWorkRecordClose itself, the call both close
+// spellings make after their owned-row check, not through the handlers: the
+// generic bead API refuses every write to a run record outright (refuseOwned,
+// "the generic bead API never closes one" — bd and the owner routes are the
+// writers), a boundary upstream of and independent from this gate. What
+// belongs to this test is that when a close does reach the gate — the CLI
+// door's gc bd close is the same population through the shared predicate —
+// the tracking bead answers not-covered.
+func TestAPIBeadCloseLeavesOrderTrackingOutsideTheWorkRecordGate(t *testing.T) {
+	for _, noHistory := range []bool{true, false} {
+		shape := "no-history"
+		if !noHistory {
+			shape = "with-history"
+		}
+		t.Run(shape, func(t *testing.T) {
+			t.Setenv(workrecord.EnforceEnvVar, "1")
+			st := newFakeState(t)
+			city := beads.NewMemStore()
+			st.cityBeadStore = city
+			st.stores = nil
+			st.cfg.Rigs = nil
+			id := seedTrackingBead(t, city, "wr-track-1", noHistory)
+			logged := captureWorkRecordGateLog(t)
+
+			s := New(st)
+			stored, getErr := city.Get(id)
+			if getErr != nil {
+				t.Fatalf("Get(%s): %v", id, getErr)
+			}
+			if err := s.gateWorkRecordClose(context.Background(), s.state.Stores(), id, beadstest.Resident(city), stored, nil); err != nil {
+				t.Fatalf("gateWorkRecordClose: %v (gate log: %s)", err, logged.String())
+			}
+			if out := logged.String(); out != "" {
+				t.Fatalf("expected no gate output for a tracking bead, got %q", out)
+			}
+		})
 	}
 }
 

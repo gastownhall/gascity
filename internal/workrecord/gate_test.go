@@ -166,6 +166,36 @@ func TestGated(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			// The orders.Store.CreateRun shape: untyped, kindless, labels
+			// order-run:<scoped> + order-tracking. Infrastructure bookkeeping,
+			// not work — stored no-history by CreateRun, and with history when
+			// a city's bead policy sets the order_tracking tier to history, so
+			// the exemption must not hinge on the storage shape.
+			name: "order tracking bead (no history) is not gated",
+			bead: beads.Bead{
+				Title:     "order:digest",
+				Labels:    []string{"order-run:digest", "order-tracking"},
+				NoHistory: true,
+			},
+			want: false,
+		},
+		{
+			name: "order tracking bead (with history) is not gated",
+			bead: beads.Bead{
+				Title:  "order:digest",
+				Labels: []string{"order-run:digest", "order-tracking"},
+			},
+			want: false,
+		},
+		{
+			name: "canonical gc:order-tracking label exempts a task",
+			bead: beads.Bead{
+				Type:   "task",
+				Labels: []string{"gc:order-tracking"},
+			},
+			want: false,
+		},
 		{name: "convoy is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 	}
 	for _, tc := range tests {

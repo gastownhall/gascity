@@ -140,6 +140,11 @@ func TestIsWorkRecordGatedBead(t *testing.T) {
 			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "work"}},
 			want: true,
 		},
+		{
+			name: "order tracking bead is not gated",
+			bead: beads.Bead{Labels: []string{"order-run:digest", "order-tracking"}},
+			want: false,
+		},
 		{name: "convoy bead is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 		{name: "message bead is not gated", bead: beads.Bead{Type: "message"}, want: false},
 	}
@@ -213,6 +218,12 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-opkind", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: "work"}},
+		// The orders.Store.CreateRun shape, in both storage forms: no type, no
+		// kind, labels order-run:<scoped> + order-tracking. CreateRun writes
+		// NoHistory; a city whose bead policy sets the order_tracking tier to
+		// history stores the same labels with history.
+		{ID: "wr-track-nh", Title: "order:digest", Status: "in_progress", Labels: []string{"order-run:digest", "order-tracking"}, NoHistory: true},
+		{ID: "wr-track-h", Title: "order:digest", Status: "in_progress", Labels: []string{"order-run:digest", "order-tracking"}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
 	}
 	newStore := func() beads.Store { return beads.NewMemStoreFrom(1, beadsList, nil) }
@@ -234,6 +245,11 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		// leaves the bead in the covered population (ga-j347f5).
 		{"operator-kind close blocks when enforced", []string{"close", "wr-opkind"}, true, true, "close of wr-opkind: missing " + beadmeta.WorkOutcomeMetadataKey},
 		{"operator-kind close warns only by default", []string{"close", "wr-opkind"}, false, false, "close of wr-opkind: missing " + beadmeta.WorkOutcomeMetadataKey},
+		// Order tracking beads are infrastructure, not work: under enforcement
+		// their close must succeed silently, in both storage shapes and on
+		// both close spellings (ga-j347f5).
+		{"tracking bead close is not gated", []string{"close", "wr-track-nh"}, true, false, ""},
+		{"tracking bead update close is not gated", []string{"update", "wr-track-h", "--status=closed"}, true, false, ""},
 		// mol-do-work stamps the record with a plain update, then closes with a reason.
 		{"no-op close with reason passes", []string{"close", "wr-noop", "--reason", "No-op: already satisfied"}, true, false, ""},
 		{"close with reason is still gated", []string{"close", "wr-missing", "--reason", "Done: x"}, true, true, "close of wr-missing"},
@@ -362,6 +378,30 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 				t.Fatalf("gate output %q does not contain %q", out, tc.wantWarn)
 			}
 		})
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateBatchWithTrackingBead pins the batch shape:
+// a close that names an exempt tracking bead beside a real violator still
+// blocks, still names the violator, and never names the tracking bead. The
+// table above can only assert a substring is present; this row also has to
+// assert one is absent.
+func TestEvaluateWorkRecordCloseGateBatchWithTrackingBead(t *testing.T) {
+	store := beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "wr-track-nh", Title: "order:digest", Status: "in_progress", Labels: []string{"order-run:digest", "order-tracking"}, NoHistory: true},
+		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
+	}, nil)
+	var stderr strings.Builder
+	block := evaluateWorkRecordCloseGate([]string{"close", "wr-track-nh", "wr-missing"}, store, nil, workRecordRepoDirs{legacy: t.TempDir()}, true, &stderr)
+	if !block {
+		t.Fatalf("block = false, want true; stderr=%s", stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "close of wr-missing") {
+		t.Fatalf("gate output %q does not name the violator wr-missing", out)
+	}
+	if strings.Contains(out, "wr-track-nh") {
+		t.Fatalf("gate output %q names the exempt tracking bead, want only the violator", out)
 	}
 }
 
