@@ -899,6 +899,37 @@ func TestNudgeStalledPoolContinuations_SendsTheClaimLineNotTheConfiguredNudge(t 
 	}
 }
 
+// A template whose nudge is blank keeps the continuation backstop silent past
+// its grace: the configured nudge's presence gates this lane, and with none
+// there is nothing to send and nothing else to do.
+func TestNudgeStalledPoolContinuations_BlankNudgeSendsNothing(t *testing.T) {
+	for name, nudge := range map[string]string{"empty": "", "whitespace": " \t "} {
+		t.Run(name, func(t *testing.T) {
+			const sessionName = "session-a"
+			sp := continuationRunningFake(t, sessionName)
+			cfg := continuationNudgeCfg()
+			cfg.Agents[0].Nudge = nudge
+			session := continuationPoolSession("session-bead-a", sessionName)
+			store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+			clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+			candidates := []ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)}
+			var out bytes.Buffer
+
+			for i := 0; i < 2*idleClaimNudgeMaxAttempts; i++ {
+				session = mustGetTestBead(t, store, session.ID)
+				nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+				clk.Advance(idleClaimNudgeBackoff + idleClaimNudgeGrace)
+			}
+			if got := sp.CountCalls("Nudge", sessionName); got != 0 {
+				t.Fatalf("Nudge calls with a blank nudge = %d, want 0; out=%s", got, out.String())
+			}
+			if got := sp.CountCalls("Stop", sessionName); got != 0 {
+				t.Fatalf("Stop calls with a blank nudge = %d, want 0", got)
+			}
+		})
+	}
+}
+
 func TestNudgeStalledPoolContinuations_WriteAheadFailurePreventsDelivery(t *testing.T) {
 	const sessionName = "session-a"
 	sp := continuationRunningFake(t, sessionName)

@@ -267,6 +267,29 @@ func TestExecutionBackstopNudgesAnUnstartedClaimWithTheClaimLine(t *testing.T) {
 	}
 }
 
+// A whitespace-only nudge is no nudge: the unstarted claim is drained just
+// after the grace with nothing sent, as for an empty one
+// (TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured).
+func TestExecutionBackstopTreatsAWhitespaceNudgeAsNone(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = " \t "
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests inside the grace window = %v, want none", f.drained)
+	}
+
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.nudgesDelivered(); len(got) != 0 {
+		t.Fatalf("nudges delivered with a whitespace nudge = %q, want none", got)
+	}
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	}
+}
+
 // Control A: a WORKING agent. The provider reports recent activity, so the
 // predicate holds — zero nudges and, just as importantly, zero writes, because a
 // backstop that marks a busy session is a backstop that will eventually nudge it
