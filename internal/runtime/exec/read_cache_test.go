@@ -389,3 +389,26 @@ func TestReadCache_NilCacheReadsThrough(t *testing.T) {
 		t.Errorf("nil cache fetched %d times, want 2", calls)
 	}
 }
+
+func TestReadCache_OpLeavesStateAlone(t *testing.T) {
+	reads := []string{
+		"is-running", "process-alive", "get-meta", "get-last-activity",
+		"protocol", "list-running", "inventory", "observe", "peek",
+		"is-attached", "check-image",
+	}
+	writes := []string{
+		"start", "provision", launchOp, "stop", "set-meta", "remove-meta",
+		"nudge", "interrupt", "send-keys", "clear-scrollback", "exec",
+		"kill-object", serverStopOp, "an-op-added-later",
+	}
+	for _, op := range reads {
+		if !opLeavesStateAlone(op) {
+			t.Errorf("opLeavesStateAlone(%q) = false, want true: a read must not clear the cache", op)
+		}
+	}
+	for _, op := range writes {
+		if opLeavesStateAlone(op) {
+			t.Errorf("opLeavesStateAlone(%q) = true, want false: an op that may change a session clears the cache", op)
+		}
+	}
+}
