@@ -886,9 +886,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	// its calls stop once the lease lapses or moves.
 	lease, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
 	if err != nil {
-		if unroute != nil {
-			unroute()
-		}
+		releaseRoute(unroute)
 		return err
 	}
 	defer release()
@@ -915,9 +913,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		err = fmt.Errorf("%w: %s", ErrSessionStopping, id)
 	}
 	if err != nil {
-		if unroute != nil {
-			unroute()
-		}
+		releaseRoute(unroute)
 		return err
 	}
 	b = fresh
@@ -938,9 +934,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	// minted over a runtime that may be live.
 	upAndAlive, err := m.leasedLiveness(id, sessName, hints.ProcessNames)
 	if err != nil {
-		if unroute != nil {
-			unroute()
-		}
+		releaseRoute(unroute)
 		return err
 	}
 
@@ -971,16 +965,12 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		// alongside its replacement" scenario. No fresh-create to roll back,
 		// so unroute and propagate before Start.
 		if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-			if unroute != nil {
-				unroute()
-			}
+			releaseRoute(unroute)
 			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
 		minted, err := m.mintStart(ctx, lease, by.Kind, &b, strings.TrimSpace(b.Metadata["continuation_reset_pending"]) != "")
 		if err != nil {
-			if unroute != nil {
-				unroute()
-			}
+			releaseRoute(unroute)
 			return err
 		}
 		inc, provisional = &minted, true
@@ -1001,9 +991,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 					// to strip, so a relaunch would repeat this failure
 					// verbatim. Propagate the original start error rather than
 					// reporting a start that never happened.
-					if unroute != nil {
-						unroute()
-					}
+					releaseRoute(unroute)
 					return startFailure(resumeCommand, b.Metadata, err)
 				}
 				started = retried
@@ -1024,9 +1012,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 				}
 				inc, provisional, converged = nil, false, true
 			default:
-				if unroute != nil {
-					unroute()
-				}
+				releaseRoute(unroute)
 				return startFailure(resumeCommand, b.Metadata, err)
 			}
 		} else {
@@ -1050,9 +1036,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			// sees the suspended-state bead, reads the runtime up, and
 			// persists "active" with the runtime's binding. The mint stands:
 			// the process launched carries it.
-			if unroute != nil {
-				unroute()
-			}
+			releaseRoute(unroute)
 			return err
 		}
 		// An unreadable runtime may be up: a fresh retry would clear its
@@ -1220,6 +1204,14 @@ func (m *Manager) runtimeRunning(sessName string) (bool, error) {
 	return live.Running, nil
 }
 
+// releaseRoute releases the ACP route a start path holds, when it holds one
+// (unroute is nil for a provider that is not routed).
+func releaseRoute(unroute func()) {
+	if unroute != nil {
+		unroute()
+	}
+}
+
 // runningOrUnroute is runtimeRunning for a start path that holds an ACP route:
 // when the runtime cannot be read it releases the route before returning the
 // error, since the caller abandons the start.
@@ -1335,9 +1327,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	// work bead. This is the reconciler respawn bridge on a stable/reused bead
 	// ID. No fresh-create to roll back, so unroute and propagate before Start.
 	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
-		}
+		releaseRoute(unroute)
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
@@ -1352,9 +1342,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			if !retried {
 				// The recovery declined: nothing to strip, so a relaunch would
 				// repeat this failure verbatim. Propagate the original error.
-				if unroute != nil {
-					unroute()
-				}
+				releaseRoute(unroute)
 				return startFailure(resumeCommand, b.Metadata, err)
 			}
 			started = retried
@@ -1364,9 +1352,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			}
 			return err
 		default:
-			if unroute != nil {
-				unroute()
-			}
+			releaseRoute(unroute)
 			return startFailure(resumeCommand, b.Metadata, err)
 		}
 	} else {
@@ -1375,9 +1361,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	}
 	if started && b.Metadata["session_key"] != "" {
 		if err := m.staleKeyDetectionWaiter(ctx, sessName); err != nil {
-			if unroute != nil {
-				unroute()
-			}
+			releaseRoute(unroute)
 			return err
 		}
 		up, upErr := m.runningOrUnroute(sessName, unroute)
