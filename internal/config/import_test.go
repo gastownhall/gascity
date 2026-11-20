@@ -43,9 +43,6 @@ func stubCleanRepoCacheGit(t *testing.T) string {
 		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
 			return commit, nil
 		}
-		if len(args) >= 2 && args[0] == "update-index" && args[1] == "--refresh" {
-			return "", nil
-		}
 		if len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain" {
 			return "", nil
 		}
@@ -2959,4 +2956,22 @@ func TestDefaultRunRepoCacheGitFailureKeepsStderr(t *testing.T) {
 			t.Errorf("error = %q, want it to name the git command", err)
 		}
 	})
+}
+
+func TestRunRepoCacheGitPutsConfigArgsBeforeCommand(t *testing.T) {
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	got, err := RunRepoCacheGit(t.TempDir(), []string{"-c", "core.fsmonitor=false", "-c", "protocol.allow=never"}, "status", "--porcelain")
+	if err != nil {
+		t.Fatalf("RunRepoCacheGit: %v", err)
+	}
+	want := "-c\ncore.fsmonitor=false\n-c\nprotocol.allow=never\nstatus\n--porcelain"
+	if got != want {
+		t.Fatalf("git argv = %q, want %q", got, want)
+	}
 }

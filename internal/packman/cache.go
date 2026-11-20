@@ -249,16 +249,6 @@ func checkoutExistingCache(cachePath, commit string) error {
 }
 
 func cachedRepoDirty(cachePath string) (bool, error) {
-	// Refresh git's cached stat info before trusting `git status`: a
-	// pack-cache file re-rendered with byte-identical content (e.g. after a
-	// redeploy or a filesystem copy that preserves bytes but not mtime/inode)
-	// makes git's stat-cache optimization report the file as dirty even
-	// though its content matches the index exactly (ga-8705). `update-index
-	// --refresh` is git's supported way to clear that stale stat state
-	// without touching any file. It exits non-zero when a file is genuinely
-	// modified; `git status` below still reports those as dirty, so that
-	// exit status is deliberately ignored here.
-	_, _ = runGit(cachePath, "update-index", "--refresh")
 	// Intentionally NOT --ignored: gitignored build artifacts written into
 	// the cache in place (e.g. Python __pycache__/*.pyc from running a cached
 	// pack's scripts, or a stray .DS_Store) are not local modifications to the
@@ -325,24 +315,15 @@ func normalizeRemoteSource(source string) remoteSource {
 	return remoteSource{CloneURL: parsed.CloneURL, Subpath: parsed.Subpath}
 }
 
+// defaultRunGit runs a local repo-cache git command (rev-parse, status,
+// checkout, reset, clean) through config.RunRepoCacheGit, the runner the
+// config loader uses for the same caches: stdout only, GIT_TRACE* dropped,
+// and a command that succeeds while writing to stderr fails closed. Network
+// fetch/clone/ls-remote run through defaultRunNetworkGit instead. Every
+// invocation still carries baseHardeningGitArgs, so the transport allowlist
+// and SSRF hardening apply to anything that reaches a remote through here.
 func defaultRunGit(dir string, args ...string) (string, error) {
-	// The pack source URL can be attacker-influenced on the API import path, and
-	// this runner drives the network fetch/clone/ls-remote for it. Harden every
-	// invocation against redirect-based SSRF and transport abuse; the flags are
-	// inert for the local cache operations (rev-parse, checkout, reset, ...) that
-	// also flow through here. The remaining DNS-rebinding residual is documented
-	// at the pack SSRF fence (internal/api/pack_source_policy.go).
-	cmdArgs := append(baseHardeningGitArgs(), args...)
-	cmd := exec.Command("git", cmdArgs...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = gitutil.HermeticEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
-	}
-	return strings.TrimSpace(string(out)), nil
+	return config.RunRepoCacheGit(dir, baseHardeningGitArgs(), args...)
 }
 
 // baseHardeningGitArgs returns the leading `-c` flags every network git

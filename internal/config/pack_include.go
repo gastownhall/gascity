@@ -576,16 +576,6 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	if !gitutil.SameCommit(head, commit) {
 		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)
 	}
-	// Refresh git's cached stat info before trusting `git status`: a
-	// pack-cache file re-rendered with byte-identical content (e.g. after a
-	// redeploy or a filesystem copy that preserves bytes but not mtime/inode)
-	// makes git's stat-cache optimization report the file as dirty even
-	// though its content matches the index exactly (ga-8705). `update-index
-	// --refresh` is git's supported way to clear that stale stat state
-	// without touching any file. It exits non-zero when a file is genuinely
-	// modified; `git status` below still reports those as dirty, so that
-	// exit status is deliberately ignored here.
-	_, _ = runRepoCacheGit(cacheDir, "update-index", "--refresh")
 	// Intentionally NOT --ignored: gitignored build artifacts that land in the
 	// cache in place (Python __pycache__/*.pyc from a cached pack's scripts, a
 	// stray .DS_Store, etc.) are not local edits to the pack and must not trip
@@ -630,11 +620,24 @@ func dirtyStatusSummary(status string) string {
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
-	cmdArgs := append([]string{
+	return RunRepoCacheGit(dir, []string{
 		"-c", "core.fsmonitor=false",
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.untrackedCache=false",
 	}, args...)
+}
+
+// RunRepoCacheGit runs `git <gitConfigArgs> <args>` in dir for a repo-cache
+// read or maintenance command and returns its stdout with trailing CR/LF
+// trimmed. It runs with gitutil.HermeticEnv minus GIT_TRACE* variables and
+// never merges stderr into the result. A command that fails to start or exits
+// non-zero returns "" and an error naming `git <args>` with git's stderr and
+// the wrapped process error. A command that exits zero but writes to stderr
+// also returns "" and an "unexpected diagnostics" error, because callers parse
+// stdout as a commit hash or porcelain records and must not act on an
+// incomplete answer.
+func RunRepoCacheGit(dir string, gitConfigArgs []string, args ...string) (string, error) {
+	cmdArgs := append(append([]string{}, gitConfigArgs...), args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
 	cmd.Env = repoCacheGitEnv()
@@ -649,9 +652,8 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 		}
 		return "", fmt.Errorf("%s: %s: %w", command, diagnostic, err)
 	}
-	// Callers parse stdout as a commit hash or porcelain records, so a
-	// successful command that still wrote diagnostics (such as a directory it
-	// could not read) fails closed instead of passing an incomplete answer.
+	// A successful command that still wrote diagnostics (such as a directory
+	// it could not read) fails closed instead of passing an incomplete answer.
 	if diagnostic != "" {
 		return "", fmt.Errorf("%s: unexpected diagnostics: %s", command, diagnostic)
 	}
