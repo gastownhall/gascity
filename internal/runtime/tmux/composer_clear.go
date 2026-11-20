@@ -121,6 +121,34 @@ func readClaudeInput(lines []string) (claudeInput, bool) {
 	return claudeInput{}, false
 }
 
+// claudeQueuedMessagesHint is the dim placeholder Claude Code draws in its
+// empty input box while it holds messages queued behind a running turn.
+const claudeQueuedMessagesHint = "Press up to edit queued messages"
+
+// paneShowsClaudeQueuedInput reports whether Claude Code's live input box is
+// empty and shows the queued-messages hint, which is how Claude acknowledges a
+// message submitted while a turn is running: it moves the message into its
+// queue and runs it when the turn ends. lines must come from a capture-pane -e
+// capture (captureEscapedInputLines), so that the hint counts only when Claude
+// drew it dim; the same words typed into the input box are a draft.
+//
+// The live input box is found the way paneShowsDrainedComposer finds it: the
+// framed box when one is on screen, otherwise the last prompt row.
+func paneShowsClaudeQueuedInput(lines []string) bool {
+	if !paneShowsDrainedComposer(stripDimLines(lines)) {
+		return false
+	}
+	shown := make([]string, len(lines))
+	for i, line := range lines {
+		shown[i] = stripEscapeSequences(line, false)
+	}
+	if in, ok := readClaudeInput(shown); ok {
+		return in.text() == claudeQueuedMessagesHint
+	}
+	remainder, ok := lastComposerRemainder(shown, DefaultReadyPromptPrefix)
+	return ok && strings.TrimSpace(remainder) == claudeQueuedMessagesHint
+}
+
 // stripDimText removes the escape sequences from a line captured with
 // capture-pane -e, and with them every character drawn with the dim (faint)
 // attribute. Claude Code draws its input placeholder ("Try \"write a test for
@@ -133,6 +161,13 @@ func readClaudeInput(lines []string) (claudeInput, bool) {
 // anything else, or longer than one cell, is the cursor on or after typed
 // text, or highlighted text, and stays.
 func stripDimText(line string) string {
+	return stripEscapeSequences(line, true)
+}
+
+// stripEscapeSequences removes the escape sequences from a line captured with
+// capture-pane -e. With dropDim it also removes every character drawn with the
+// dim (faint) attribute.
+func stripEscapeSequences(line string, dropDim bool) string {
 	var b strings.Builder
 	var attrs sgrAttrs
 	// cursor holds a reverse-video run until the next visible character
@@ -149,6 +184,9 @@ func stripDimText(line string) string {
 			switch {
 			case attrs.dim:
 				settle(true)
+				if !dropDim {
+					b.WriteByte(line[i])
+				}
 			case attrs.reverse:
 				cursor.WriteByte(line[i])
 			default:
@@ -243,6 +281,16 @@ func (t *Tmux) readInput(target string) (claudeInput, bool, error) {
 // as one line rather than one per pane row; and stripDimText then removes the
 // escape sequences along with the dim text.
 func (t *Tmux) captureInputLines(target string) ([]string, error) {
+	lines, err := t.captureEscapedInputLines(target)
+	if err != nil {
+		return nil, err
+	}
+	return stripDimLines(lines), nil
+}
+
+// captureEscapedInputLines is captureInputLines without the stripping: the rows
+// keep their escape sequences, for readers that need to see dim text.
+func (t *Tmux) captureEscapedInputLines(target string) ([]string, error) {
 	out, err := t.run("capture-pane", "-p", "-e", "-J", "-t", paneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 	if err != nil {
 		return nil, err
@@ -250,11 +298,19 @@ func (t *Tmux) captureInputLines(target string) ([]string, error) {
 	if out == "" {
 		return nil, nil
 	}
-	lines := strings.Split(out, "\n")
-	for i, line := range lines {
-		lines[i] = stripDimText(line)
+	return strings.Split(out, "\n"), nil
+}
+
+// stripDimLines applies stripDimText to every line, in a new slice.
+func stripDimLines(lines []string) []string {
+	if lines == nil {
+		return nil
 	}
-	return lines, nil
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = stripDimText(line)
+	}
+	return out
 }
 
 // inputClearKeys is one clearing press: Ctrl-U then Ctrl-K, sent in one
