@@ -265,7 +265,10 @@ const runCompletionGrace = time.Minute
 // its persisted dispatch deadline plus runCompletionGrace is still after now.
 // A bead with no deadline holds nothing, so the sweeps' existing age and
 // boot-exclusion rules alone decide it; so does one whose run already stamped
-// an outcome, whose failed close is the sweeps' to recover.
+// an outcome, whose failed close is the sweeps' to recover. A stamp that is
+// present but malformed, empty or zero holds nothing either, and is logged
+// with the bead, key, value and reason so the corruption is visible; a missing
+// stamp (a run dispatched before deadlines were recorded) is silent.
 func deadlineHolds(b beads.Bead, now time.Time) bool {
 	if outcomeFromLabels(b.Labels) != RunOutcomeNone {
 		return false
@@ -275,7 +278,12 @@ func deadlineHolds(b beads.Bead, now time.Time) bool {
 		return false
 	}
 	deadline, err := time.Parse(time.RFC3339Nano, raw)
-	if err != nil || deadline.IsZero() {
+	if err == nil && deadline.IsZero() {
+		err = errors.New("zero time")
+	}
+	if err != nil {
+		runtimeHelpersLogf("orders: tracking bead %s has invalid %s %q (%v); applying the age rules alone",
+			b.ID, beadmeta.OrderRunDeadlineMetadataKey, raw, err)
 		return false
 	}
 	return now.Before(deadline.Add(runCompletionGrace))

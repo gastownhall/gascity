@@ -2,7 +2,9 @@ package orders
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -871,5 +873,81 @@ func TestOrphanedOpenRunsRespectsDispatchDeadline(t *testing.T) {
 	}
 	if got, want := runIDs(runs), []string{"gc-boundary", "gc-missing", "gc-finished", "gc-fresh"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("OrphanedOpenRuns() IDs = %v, want %v (unfinished runs before deadline+grace held)", got, want)
+	}
+}
+
+// TestDeadlineHoldDiagnosesCorruptStamp proves a corrupt dispatch-deadline
+// stamp falls back to the existing age and boot-exclusion rules and is
+// diagnosed: malformed, explicitly empty and zero stamps each log the bead ID,
+// the metadata key, the quoted value and why it was rejected, while the same
+// read still returns the other eligible runs and holds the protected one. A
+// tracking bead with no deadline metadata at all is silent.
+func TestDeadlineHoldDiagnosesCorruptStamp(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	at := func(i int) time.Time { return now.Add(-time.Hour + time.Duration(i)*time.Second) }
+	corrupt := func(id string, i int, raw string) beads.Bead {
+		b := deadlineTracking(id, "open", at(i), time.Time{})
+		b.Metadata = map[string]string{beadmeta.OrderRunDeadlineMetadataKey: raw}
+		return b
+	}
+	seed := []beads.Bead{
+		corrupt("gc-malformed", 0, "not-a-time"),
+		corrupt("gc-empty", 1, ""),
+		corrupt("gc-zero", 2, time.Time{}.Format(time.RFC3339Nano)),
+		deadlineTracking("gc-expired", "open", at(3), now.Add(-2*runCompletionGrace)),
+		deadlineTracking("gc-protected", "open", at(4), now.Add(10*time.Minute)),
+		deadlineTracking("gc-missing", "open", at(5), time.Time{}),
+	}
+	wantIDs := []string{"gc-malformed", "gc-empty", "gc-zero", "gc-expired", "gc-missing"}
+	reads := []struct {
+		name string
+		read func(*Store) ([]OrderRun, error)
+	}{
+		{"StaleOpenRuns", func(s *Store) ([]OrderRun, error) { return s.StaleOpenRuns(now.Add(-2*time.Minute), now) }},
+		{"StaleNotClosedRuns", func(s *Store) ([]OrderRun, error) { return s.StaleNotClosedRuns(now.Add(-2*time.Minute), now) }},
+		{"OrphanedOpenRuns", func(s *Store) ([]OrderRun, error) { return s.OrphanedOpenRuns(now) }},
+	}
+	for _, rd := range reads {
+		t.Run(rd.name, func(t *testing.T) {
+			oldLogf := runtimeHelpersLogf
+			var logs []string
+			runtimeHelpersLogf = func(format string, args ...any) {
+				logs = append(logs, fmt.Sprintf(format, args...))
+			}
+			t.Cleanup(func() { runtimeHelpersLogf = oldLogf })
+
+			st := ordersStoreOver(beads.NewMemStoreFrom(len(seed), seed, nil))
+			runs, err := rd.read(st)
+			if err != nil {
+				t.Fatalf("%s: %v", rd.name, err)
+			}
+			if got := runIDs(runs); !reflect.DeepEqual(got, wantIDs) {
+				t.Fatalf("%s IDs = %v, want %v (corrupt stamps fall back, protected run held)", rd.name, got, wantIDs)
+			}
+			for _, want := range []struct{ id, value, reason string }{
+				{"gc-malformed", `"not-a-time"`, "cannot parse"},
+				{"gc-empty", `""`, "cannot parse"},
+				{"gc-zero", `"0001-01-01T00:00:00Z"`, "zero time"},
+			} {
+				found := false
+				for _, line := range logs {
+					if strings.Contains(line, want.id) && strings.Contains(line, beadmeta.OrderRunDeadlineMetadataKey) &&
+						strings.Contains(line, want.value) && strings.Contains(line, want.reason) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("no diagnostic naming %s, %s, %s and %q in logs %q", want.id, beadmeta.OrderRunDeadlineMetadataKey, want.value, want.reason, logs)
+				}
+			}
+			if len(logs) != 3 {
+				t.Errorf("logged %d lines, want 3 (one per corrupt stamp; missing metadata silent): %q", len(logs), logs)
+			}
+			for _, line := range logs {
+				if strings.Contains(line, "gc-missing") || strings.Contains(line, "gc-protected") || strings.Contains(line, "gc-expired") {
+					t.Errorf("valid or missing deadline logged a diagnostic: %q", line)
+				}
+			}
+		})
 	}
 }
