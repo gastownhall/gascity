@@ -703,3 +703,47 @@ func TestRunStage1CleansRemovedSkills(t *testing.T) {
 		t.Errorf("code-review symlink should remain: %v", err)
 	}
 }
+
+// requireSkillLink fails unless sink/name is a symlink whose target is want.
+func requireSkillLink(t *testing.T, sink, name, want string) {
+	t.Helper()
+	path := filepath.Join(sink, name)
+	target, err := os.Readlink(path)
+	if err != nil {
+		t.Fatalf("skill %q in %s: %v", name, sink, err)
+	}
+	if target != want {
+		t.Fatalf("skill %q in %s links to %q, want %q", name, sink, target, want)
+	}
+}
+
+// TestRunStage1SharedSinkKeepsAgentLocalSkill is the #7547 reproduction:
+// a declared city-scoped claude agent shares <city>/.claude/skills with the
+// implicit claude agent appended after it, and the later agent's pass must
+// not prune the earlier agent's agent-local skill.
+func TestRunStage1SharedSinkKeepsAgentLocalSkill(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	mayorSkills := filepath.Join(cityPath, "agents", "mayor", "skills")
+	writeSkillSource(t, filepath.Join(mayorSkills, "notes"))
+
+	cfg := &config.City{
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Session:       config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", SkillsDir: mayorSkills},
+			{Name: "claude", Scope: "city", Provider: "claude"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatalf("runStage1SkillMaterialization: %v (stderr: %s)", err, stderr.String())
+	}
+
+	sink := filepath.Join(cityPath, ".claude", "skills")
+	requireSkillLink(t, sink, "plan", filepath.Join(cityPath, "skills", "plan"))
+	requireSkillLink(t, sink, "notes", filepath.Join(mayorSkills, "notes"))
+}

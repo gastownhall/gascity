@@ -166,7 +166,7 @@ func planStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io
 		req.Request.DryRun = true
 		res, err := materialize.Run(req.Request)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q at %s: %v\n", req.Agent, req.Request.SinkDir, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for %s at %s: %v\n", formatSinkAgents(req.Agents), req.Request.SinkDir, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
 		plan := sinks[req.Request.SinkDir]
