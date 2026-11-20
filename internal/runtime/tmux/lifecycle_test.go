@@ -1,7 +1,9 @@
 package tmux
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -171,4 +173,56 @@ func containsSetOptionExitEmptyWithValue(args []string, value string) bool {
 		}
 	}
 	return false
+}
+
+// TestKillServerWaitsForListenerToClose verifies that KillServer and
+// TeardownServer do not return while the named server socket still answers
+// after tmux acknowledged kill-server: an immediate restart would otherwise
+// be refused by the new-session preflight with ErrServerDegraded
+// (reason=live-unix-socket).
+func TestKillServerWaitsForListenerToClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kill func(tmux *Tmux) error
+	}{
+		{name: "KillServer", kill: func(tmux *Tmux) error { return tmux.KillServer() }},
+		{name: "TeardownServer", kill: func(tmux *Tmux) error { return tmux.TeardownServer() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			const liveObservations = 2
+			var paths []string
+			var callsAtObservation []int
+			tmux := &Tmux{
+				cfg:  Config{SocketName: "gc-settle-wait"},
+				exec: fe,
+				serverSocketObserver: func(_ context.Context, path string) error {
+					paths = append(paths, path)
+					callsAtObservation = append(callsAtObservation, len(fe.calls))
+					if len(paths) <= liveObservations {
+						return errors.New("path=" + path + " inode=1 peer_pid=42 reason=live-unix-socket")
+					}
+					return nil
+				},
+			}
+
+			if err := tc.kill(tmux); err != nil {
+				t.Fatalf("%s() error = %v, want nil after the listener closes", tc.name, err)
+			}
+			if len(paths) != liveObservations+1 {
+				t.Fatalf("%s() made %d socket observations, want %d (the two live ones, then the closed socket)", tc.name, len(paths), liveObservations+1)
+			}
+			wantPath := tmux.namedServerSocketPath()
+			for i, path := range paths {
+				if path != wantPath {
+					t.Fatalf("observation %d watched %q, want the named server socket path %q", i+1, path, wantPath)
+				}
+			}
+			for i, calls := range callsAtObservation {
+				if calls != 1 || !slices.Contains(fe.calls[0], "kill-server") {
+					t.Fatalf("observation %d happened with %d executor call(s) %v, want only kill-server", i+1, calls, fe.calls)
+				}
+			}
+		})
+	}
 }

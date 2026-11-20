@@ -532,10 +532,12 @@ type Tmux struct {
 	// program_status_pending.go).
 	dialogs programDialogs
 
-	// serverSocketObserver observes the server socket only after tmux reports
+	// serverSocketObserver observes the server socket after tmux reports
 	// ErrNoServer, during the new-session preflight or a liveness observation
-	// (serverConfirmedDead). Nil selects the production observer; tests inject
-	// a deterministic observation without opening a socket.
+	// (serverConfirmedDead), and after an acknowledged kill-server while
+	// KillServer waits for the dying server's listener to close. Nil selects
+	// the production observer; tests inject a deterministic observation
+	// without opening a socket.
 	serverSocketObserver func(context.Context, string) error
 
 	// namedSocketLstat observes a named socket before an attach. Nil selects
@@ -1674,13 +1676,21 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 	return terminateProcessKillPlan(plan)
 }
 
-// KillServer terminates the entire tmux server and all sessions.
+// KillServer terminates the entire tmux server and all sessions. On a named
+// socket it returns only after the server's socket stops answering: a dying
+// server can acknowledge kill-server while its listener is still bound, and a
+// restart that immediate would be refused by the new-session preflight
+// (ErrServerDegraded, reason=live-unix-socket). The default socket keeps the
+// immediate return; its preflight never probes.
 func (t *Tmux) KillServer() error {
 	_, err := t.run("kill-server")
 	if errors.Is(err, ErrNoServer) {
 		return nil // Already dead
 	}
-	return err
+	if err != nil || t.cfg.SocketName == "" {
+		return err
+	}
+	return t.awaitServerSocketClosed()
 }
 
 // ConfigureServer sets tmux server options required for Gas City lifecycle
@@ -1691,6 +1701,8 @@ func (t *Tmux) ConfigureServer() error {
 }
 
 // TeardownServer terminates the tmux server after all sessions are drained.
+// On a named socket it returns only after the server's socket stops answering
+// (see KillServer).
 func (t *Tmux) TeardownServer() error {
 	return t.KillServer()
 }
