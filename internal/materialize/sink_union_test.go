@@ -76,6 +76,25 @@ func TestUnionSinkMembers(t *testing.T) {
 		}
 	})
 
+	t.Run("agent-local overrides shared in either order", func(t *testing.T) {
+		localPlan := sinkUnionEntry("plan", filepath.Join(alphaRoot, "plan"), "agent")
+		withPlan := AgentCatalog{Entries: []SkillEntry{localPlan, notes}, OwnedRoot: alphaRoot}
+		orders := map[string][]SinkMember{
+			"local first":  {{Agent: "alpha", Shared: shared, Local: withPlan}, {Agent: "implicit", Shared: shared}},
+			"shared first": {{Agent: "implicit", Shared: shared}, {Agent: "alpha", Shared: shared, Local: withPlan}},
+		}
+		for order, members := range orders {
+			got := UnionSinkMembers(members)
+			if src := sinkUnionDesiredSources(got.Desired)["plan"]; src != localPlan.Source {
+				t.Fatalf("%s: plan source = %q, want agent-local %q", order, src, localPlan.Source)
+			}
+			if got.WantedBy["plan"] != "alpha" {
+				t.Fatalf("%s: WantedBy[plan] = %q, want alpha", order, got.WantedBy["plan"])
+			}
+			requireSortedByName(t, got.Desired)
+		}
+	})
+
 	t.Run("no members", func(t *testing.T) {
 		got := UnionSinkMembers(nil)
 		if len(got.Desired) != 0 || len(got.OwnedRoots) != 0 {

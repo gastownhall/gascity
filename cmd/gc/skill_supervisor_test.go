@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/materialize"
 )
 
 // TestRunStage1SkillMaterialization exercises the happy path of the
@@ -812,6 +813,49 @@ func TestRunStage1SharedSinkPrunesOnlyRemovedSkill(t *testing.T) {
 				t.Fatalf("removed skill notes still in the shared sink, lstat err = %v", err)
 			}
 			requireSkillLink(t, sink, "plan", filepath.Join(cityPath, "skills", "plan"))
+		})
+	}
+}
+
+// TestRunStage1SharedSinkAgentLocalOverridesShared: an agent-local skill
+// overrides a shared skill of the same name across the whole sink, whatever
+// the agents' config order, and a second pass changes nothing.
+func TestRunStage1SharedSinkAgentLocalOverridesShared(t *testing.T) {
+	for _, mayorFirst := range []bool{true, false} {
+		name := "implicit agent first"
+		if mayorFirst {
+			name = "declared agent first"
+		}
+		t.Run(name, func(t *testing.T) {
+			cityPath, mayorSkills, cfg := sharedSinkTestCity(t)
+			writeSkillSource(t, filepath.Join(mayorSkills, "plan"))
+			if !mayorFirst {
+				cfg.Agents[0], cfg.Agents[1] = cfg.Agents[1], cfg.Agents[0]
+			}
+
+			var stderr bytes.Buffer
+			if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+				t.Fatalf("first pass: %v (stderr: %s)", err, stderr.String())
+			}
+			sink := filepath.Join(cityPath, ".claude", "skills")
+			requireSkillLink(t, sink, "plan", filepath.Join(mayorSkills, "plan"))
+			requireSkillLink(t, sink, "notes", filepath.Join(mayorSkills, "notes"))
+
+			for _, req := range stage1SkillRequests(cityPath, cfg, &stderr) {
+				req.Request.DryRun = true
+				res, err := materialize.Run(req.Request)
+				if err != nil {
+					t.Fatalf("second pass on %s: %v", req.Request.SinkDir, err)
+				}
+				if len(res.Created)+len(res.Relinked)+len(res.Removed) != 0 {
+					t.Fatalf("second pass on %s would create %q, re-point %q, remove %q; want no change",
+						req.Request.SinkDir, res.Created, res.Relinked, res.Removed)
+				}
+			}
+			if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+				t.Fatalf("second pass: %v (stderr: %s)", err, stderr.String())
+			}
+			requireSkillLink(t, sink, "plan", filepath.Join(mayorSkills, "plan"))
 		})
 	}
 }

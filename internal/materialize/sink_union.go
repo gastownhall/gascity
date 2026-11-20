@@ -29,12 +29,19 @@ type SinkUnion struct {
 }
 
 // UnionSinkMembers merges the catalogs of every agent that writes one sink.
-// For each name the first member in input order that wants it supplies the
-// entry, so a sink with a single member desires exactly that member's
-// EffectiveSet.
+// An agent-local entry beats a shared entry of the same name across the
+// whole sink, whatever the members' order, which is each member's own
+// EffectiveSet rule applied to the sink. Within a class, the first member
+// in input order that has the name supplies the entry, so a sink with a
+// single member desires exactly that member's EffectiveSet.
 func UnionSinkMembers(members []SinkMember) SinkUnion {
+	type pick struct {
+		entry SkillEntry
+		agent string
+	}
 	union := SinkUnion{WantedBy: make(map[string]string)}
-	byName := make(map[string]SkillEntry)
+	local := make(map[string]pick)
+	shared := make(map[string]pick)
 	seenRoot := make(map[string]bool)
 	addRoot := func(root string) {
 		if root == "" || seenRoot[root] {
@@ -48,17 +55,28 @@ func UnionSinkMembers(members []SinkMember) SinkUnion {
 			addRoot(root)
 		}
 		addRoot(m.Local.OwnedRoot)
-		for _, e := range EffectiveSet(m.Shared, m.Local) {
-			if _, ok := byName[e.Name]; ok {
-				continue
+		for _, e := range m.Local.Entries {
+			if _, ok := local[e.Name]; !ok {
+				local[e.Name] = pick{entry: e, agent: m.Agent}
 			}
-			byName[e.Name] = e
-			union.WantedBy[e.Name] = m.Agent
+		}
+		for _, e := range m.Shared.Entries {
+			if _, ok := shared[e.Name]; !ok {
+				shared[e.Name] = pick{entry: e, agent: m.Agent}
+			}
 		}
 	}
-	union.Desired = make([]SkillEntry, 0, len(byName))
-	for _, e := range byName {
-		union.Desired = append(union.Desired, e)
+	union.Desired = make([]SkillEntry, 0, len(local)+len(shared))
+	for name, p := range local {
+		union.Desired = append(union.Desired, p.entry)
+		union.WantedBy[name] = p.agent
+	}
+	for name, p := range shared {
+		if _, overridden := local[name]; overridden {
+			continue
+		}
+		union.Desired = append(union.Desired, p.entry)
+		union.WantedBy[name] = p.agent
 	}
 	sort.Slice(union.Desired, func(i, j int) bool { return union.Desired[i].Name < union.Desired[j].Name })
 	return union
