@@ -456,6 +456,67 @@ func TestManagedDoltHealthCheckForPasswordPathReportsHeadFailure(t *testing.T) {
 	}
 }
 
+// TestDoltStateHealthCheckCmdDatabaseMissingOnDisk covers AC-3: the on-disk
+// check counts a repository directory whose name differs from the database
+// only by the '-'→'_' mapping Dolt applies when exposing a directory as a
+// database (the rule managed_backing_store_exists compares by), follows
+// symlinks to the repository, and counts a missing data dir as missing —
+// even though the SQL checks would succeed.
+func TestDoltStateHealthCheckCmdDatabaseMissingOnDisk(t *testing.T) {
+	runCheck := func(t *testing.T, database, dataDir string) map[string]string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only", "--database", database, "--data-dir", dataDir}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+		}
+		return parseDoltStateOutput(t, stdout.String())
+	}
+	t.Run("only another database on disk", func(t *testing.T) {
+		setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+		dataDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dataDir, "other_db", ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got := runCheck(t, "gas_city", dataDir)
+		if got["database_ready"] != "false" || !strings.Contains(got["database_error"], "gas_city") || !strings.Contains(got["database_error"], "data dir") {
+			t.Fatalf("output maps = %v, want database_ready false with an on-disk error naming gas_city", got)
+		}
+	})
+	t.Run("dash normalized repository matches", func(t *testing.T) {
+		setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+		dataDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dataDir, "gas-city", ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := runCheck(t, "gas_city", dataDir); got["database_ready"] != "true" {
+			t.Fatalf("output maps = %v, want database_ready true for repository dir gas-city", got)
+		}
+	})
+	t.Run("data dir absent", func(t *testing.T) {
+		setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+		dataDir := filepath.Join(t.TempDir(), "gone")
+		got := runCheck(t, "gas_city", dataDir)
+		if got["database_ready"] != "false" || !strings.Contains(got["database_error"], "data dir") {
+			t.Fatalf("output maps = %v, want database_ready false for an absent data dir", got)
+		}
+	})
+	t.Run("symlinked repository matches", func(t *testing.T) {
+		setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+		dataDir := t.TempDir()
+		repo := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(repo, ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(repo, filepath.Join(dataDir, "gas-city")); err != nil {
+			t.Fatal(err)
+		}
+		if got := runCheck(t, "gas_city", dataDir); got["database_ready"] != "true" {
+			t.Fatalf("output maps = %v, want database_ready true through a symlinked repository", got)
+		}
+	})
+}
+
 func TestDoltStateHealthCheckCmdChecksDataDir(t *testing.T) {
 	setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
 	dataDir := t.TempDir()
