@@ -1151,3 +1151,110 @@ func TestCachingStoreCASLandsOnlyOnTheFencedRow(t *testing.T) {
 		t.Errorf("none of the %d CAS attempts landed; the stress fenced nothing", 3*casAttempts)
 	}
 }
+
+// TestCachingStoreBoundsEventChecksOnADemotedProxiedSplit is the event-watcher
+// half of issue #9156: a split's point reads are in-process library calls while
+// native and fork the bd CLI once demoted, so the check's bounding must follow
+// the leaf that will actually answer. While native the check stays synchronous —
+// bounding an in-process read buys nothing; demoted it runs one at a time under
+// the deadline, so a burst of events forks one bd, not one each; a re-pin flips
+// the answer back with the leaf.
+func TestCachingStoreBoundsEventChecksOnADemotedProxiedSplit(t *testing.T) {
+	pin := PinForTest("/scope", "", "beads")
+	headMoved := NewProxiedVerdictError(ProxiedVerdictHeadMoved, "head moved from abc123 to def456 on beads", nil)
+	unusedReopener := func(context.Context) (*NativeDoltStore, Pin, error) {
+		return nil, Pin{}, errors.New("not called by this test")
+	}
+
+	t.Run("native, the answer is no and the check installs synchronously", func(t *testing.T) {
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
+		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
+		native.idPrefix = "prx"
+		writeLeaf := newNativeDoltStoreForTest(storage)
+		writeLeaf.idPrefix = "prx"
+		split, err := NewProxiedStore(native, &recordingLeaf{Store: writeLeaf}, pin)
+		if err != nil {
+			t.Fatalf("NewProxiedStore: %v", err)
+		}
+		t.Cleanup(func() { _ = split.CloseStore() })
+		if split.readsBySubprocess() {
+			t.Fatal("a native split claimed subprocess reads: every event check on it would fork bd for nothing")
+		}
+		row, err := split.Create(Bead{Title: "seed"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		cache := newConditionalCacheForTest(t, split)
+		renamed := "renamed elsewhere"
+		if err := split.Update(row.ID, UpdateOpts{Title: &renamed}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		fresh, err := split.Get(row.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		cache.ApplyEvent("bead.updated", eventPayload(t, fresh))
+		got, dirty, _ := rowFences(cache, row.ID)
+		if dirty || got.Title != renamed {
+			t.Fatalf("dirty %v, title %q; want the synchronous check to install the row", dirty, got.Title)
+		}
+	})
+
+	t.Run("demoted at birth, one check runs at a time under the deadline", func(t *testing.T) {
+		backing := &blockingSubprocessStore{MemStore: NewMemStore()}
+		split, err := NewDemotedProxiedStore(backing, pin, headMoved, WithNativeLeafReopener(unusedReopener))
+		if err != nil {
+			t.Fatalf("NewDemotedProxiedStore: %v", err)
+		}
+		t.Cleanup(func() { _ = split.CloseStore() })
+		if !split.readsBySubprocess() {
+			t.Fatal("a demoted split claimed in-process reads: its checks fork bd unbounded")
+		}
+		row, err := backing.Create(Bead{Title: "seed"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		cache := newConditionalCacheForTest(t, split)
+		_, _, before := rowFences(cache, row.ID)
+		block := make(chan struct{})
+		backing.block = block
+		cache.eventCheckAfter = func(time.Duration) <-chan time.Time {
+			fired := make(chan time.Time)
+			close(fired)
+			return fired
+		}
+		row.Title = "renamed elsewhere"
+		cache.ApplyEvent("bead.updated", eventPayload(t, row))
+		got, dirty, seq := rowFences(cache, row.ID)
+		if !dirty || seq <= before || got.Title != "seed" {
+			t.Fatalf("after a stalled subprocess check: dirty %v, beadSeq %d (was %d), title %q; want dirty, stamped, seed",
+				dirty, seq, before, got.Title)
+		}
+		// One in flight: the abandoned check still holds the slot, so the next
+		// event is refused busy rather than forking a second bd.
+		if !cache.eventCheckBusy.Load() {
+			t.Fatal("the stalled check did not hold the one-check slot")
+		}
+		cache.ApplyEvent("bead.updated", eventPayload(t, row))
+		close(block)
+	})
+
+	t.Run("re-pinned, the answer is no again", func(t *testing.T) {
+		backing := &blockingSubprocessStore{MemStore: NewMemStore()}
+		split, err := NewDemotedProxiedStore(backing, pin, headMoved, WithNativeLeafReopener(unusedReopener))
+		if err != nil {
+			t.Fatalf("NewDemotedProxiedStore: %v", err)
+		}
+		t.Cleanup(func() { _ = split.CloseStore() })
+		replacement := newNativeDoltStoreForTest(&nativeDoltMemStorage{
+			store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true},
+		})
+		replacement.idPrefix = "prx"
+		if !split.repin(replacement, pin) {
+			t.Fatal("the re-pin did not land")
+		}
+		if split.readsBySubprocess() {
+			t.Fatal("a re-pinned split still claimed subprocess reads: its checks would stay bounded after recovery")
+		}
+	})
+}

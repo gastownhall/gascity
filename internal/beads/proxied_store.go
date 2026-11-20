@@ -419,6 +419,14 @@ func (s *ProxiedStore) readLeaf() Store {
 	return s.bd
 }
 
+// readsBySubprocess reports that this split's point reads fork a process once
+// it is demoted — they go to the bd CLI leaf — so a CachingStore bounds the
+// event checks it runs against it (one in flight, under a deadline; see
+// checkEvent). While native, reads are in-process library calls and must stay
+// synchronous: bounding them buys nothing. The answer follows the leaf, so a
+// guard re-pin flips it back.
+func (s *ProxiedStore) readsBySubprocess() bool { return s.Demoted() }
+
 // nativeLeaf returns the native read leaf, or nil when demoted.
 func (s *ProxiedStore) nativeLeaf() *NativeDoltStore {
 	s.mu.RLock()
