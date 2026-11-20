@@ -747,3 +747,71 @@ func TestRunStage1SharedSinkKeepsAgentLocalSkill(t *testing.T) {
 	requireSkillLink(t, sink, "plan", filepath.Join(cityPath, "skills", "plan"))
 	requireSkillLink(t, sink, "notes", filepath.Join(mayorSkills, "notes"))
 }
+
+// sharedSinkTestCity writes a city whose pack provides "plan" and whose
+// agent "mayor" has the agent-local skill "notes", and returns a config in
+// which mayor shares <city>/.claude/skills with the implicit "claude" agent.
+func sharedSinkTestCity(t *testing.T) (cityPath, mayorSkills string, cfg *config.City) {
+	t.Helper()
+	clearGCEnv(t)
+	cityPath = t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	mayorSkills = filepath.Join(cityPath, "agents", "mayor", "skills")
+	writeSkillSource(t, filepath.Join(mayorSkills, "notes"))
+	cfg = &config.City{
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Session:       config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", SkillsDir: mayorSkills},
+			{Name: "claude", Scope: "city", Provider: "claude"},
+		},
+	}
+	return cityPath, mayorSkills, cfg
+}
+
+// TestRunStage1SharedSinkPrunesOnlyRemovedSkill: reconciling a shared sink
+// against its members' union still prunes an agent-local skill once it is
+// gone from the agent's directory or the agent leaves the config, and keeps
+// the shared skill.
+func TestRunStage1SharedSinkPrunesOnlyRemovedSkill(t *testing.T) {
+	cases := []struct {
+		name   string
+		remove func(t *testing.T, mayorSkills string, cfg *config.City)
+	}{
+		{
+			name: "skill deleted from the agent's directory",
+			remove: func(t *testing.T, mayorSkills string, _ *config.City) {
+				if err := os.RemoveAll(filepath.Join(mayorSkills, "notes")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "agent removed from the config",
+			remove: func(_ *testing.T, _ string, cfg *config.City) {
+				cfg.Agents = cfg.Agents[1:]
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, mayorSkills, cfg := sharedSinkTestCity(t)
+			var stderr bytes.Buffer
+			if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+				t.Fatalf("seeding pass: %v (stderr: %s)", err, stderr.String())
+			}
+			sink := filepath.Join(cityPath, ".claude", "skills")
+			requireSkillLink(t, sink, "notes", filepath.Join(mayorSkills, "notes"))
+
+			tc.remove(t, mayorSkills, cfg)
+			if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+				t.Fatalf("pass after removal: %v (stderr: %s)", err, stderr.String())
+			}
+			if _, err := os.Lstat(filepath.Join(sink, "notes")); !os.IsNotExist(err) {
+				t.Fatalf("removed skill notes still in the shared sink, lstat err = %v", err)
+			}
+			requireSkillLink(t, sink, "plan", filepath.Join(cityPath, "skills", "plan"))
+		})
+	}
+}
