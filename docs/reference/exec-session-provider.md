@@ -192,7 +192,11 @@ Without either, or with `carrier.ops` and only `proc.exec`, the welded `start`
 op provisions and launches, and the orchestrator issues no `provision` or
 separate launch. The ops are gated by the `RPP-PROVISION-001` to `005`
 conformance requirements (`002` to `004` only for `proc.launch`, `005` only
-for a pack that un-welds start).
+for a pack that un-welds start). `gc runtime check` smoke-tests the un-welded
+start in a private city of its own: `provision` exits 0 and leaves
+`is-running` false, and under `proc.launch` a `launch` into that box exits 0
+with `is-running` true and a `fresh_only` launch over the running agent exits
+73.
 
 **The first turn on the un-welded path.** `provision` runs before any agent
 exists and `launch` types nothing, so the orchestrator delivers the start
@@ -226,7 +230,8 @@ first:
 A script that un-welds start must therefore implement `set-meta`, `get-meta`
 and `remove-meta` for every box. For such a script, exit 2 from one of them
 is a missing store, not an unknown op: conformance fails the metadata
-requirements on it, as it does under `observe.v1`, and `RPP-PROVISION-005`
+requirements on it, as it does under `observe.v1`, `gc runtime check` fails
+its metadata round-trip rather than skipping it, and `RPP-PROVISION-005`
 checks that `get-meta` answers the identity keys `set-meta` stored after the
 launch. The orchestrator reports such an exit 2 as a missing store too, and
 from `set-meta` it fails the launch, as the Identity rule says. A script
@@ -789,7 +794,10 @@ non-zero on its own with stderr saying the name is taken (it contains
 `carrier.ops`) gets `provision` in place of that `start`: no `stop` follows a failed `provision`, and one always
 follows a failed agent launch after it. It gets that `is-running` (`observe`
 on a v2-ready script) only when it also declares `fs.host`, because gc needs
-the answer before it does any [host work](#host-filesystem-fshost).
+the answer before it does any [host work](#host-filesystem-fshost). A
+`provision` that exits non-zero with stderr saying the name is taken is read
+the way such a `start` is: as the session already existing, not as a failed
+start.
 
 Scripts may handle these hints or ignore them:
 
@@ -885,11 +893,11 @@ name absent or its box dead (a start recycles a dead box, so the work is
 done again, as after a death under tmux). Into a name a running box holds,
 or one whose read fails, it does none of it and sends the full config.
 
-When gc relaunches the agent in a warm box (a script declaring
-`proc.provision` and `proc.exec`, without `carrier.ops`), it runs
-`session_setup` and `session_setup_script` on the host again after the
-launch, as the tmux runtime does. It does not stage the work dir or run
-`pre_start` again: the box is warm. Any other script is relaunched by a
+When gc relaunches the agent in a warm box (a script that un-welds start:
+`proc.provision` with `proc.launch`, or with `proc.exec` and without
+`carrier.ops`), it runs `session_setup` and `session_setup_script` on the
+host again after the launch, as the tmux runtime does. It does not stage the
+work dir or run `pre_start` again: the box is warm. Any other script is relaunched by a
 `stop` and a `start`, which do all of the host work again.
 
 gc runs no `session_live` for an exec runtime; the field stays in the start

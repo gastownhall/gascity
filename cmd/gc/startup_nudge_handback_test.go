@@ -431,6 +431,17 @@ func TestQueueRetriesRefusedHandedBackFirstTurn(t *testing.T) {
 		t.Fatal("a refused first turn was acked as delivered")
 	}
 	h.fake.NudgeErrors = nil
+	if delivered, sent := h.pass(t); delivered || len(sent) != 0 {
+		t.Fatalf("pass right after the refusal = delivered %v, sent %q; want nothing until the retry delay runs out", delivered, sent)
+	}
+	pending, _, dead, err := listQueuedNudgesForTarget(h.dir, h.target, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || len(dead) != 0 || pending[0].Attempts != 0 || !pending[0].DeliverAfter.After(time.Now()) {
+		t.Fatalf("after the refusal: pending %+v, dead %d; want the turn pending, uncharged, due after the retry delay", pending, len(dead))
+	}
+	makeQueuedNudgesDue(t, h.dir)
 	delivered, sent := h.pass(t)
 	if !delivered || len(sent) != 1 || sent[0] != handbackNudge {
 		t.Fatalf("retry = delivered %v, sent %q; want the first turn delivered once", delivered, sent)

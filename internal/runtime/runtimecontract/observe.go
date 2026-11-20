@@ -442,8 +442,8 @@ func probeObserveFreshOnly(ctx context.Context, r *runner, hs runtime.ProtocolIn
 		return StatusFail, "a fresh_only start over a held name succeeded"
 	case again.unsupported:
 		return StatusFail, "a fresh_only start returned exit 2"
-	case again.exitCode != 73 && !collisionPhrase(again.err.Error()):
-		return StatusFail, fmt.Sprintf("a fresh_only start over a held name exited %d without the collision phrase; want 73 or already exists/already running", again.exitCode)
+	case again.exitCode != runtime.ExitCodeFreshCollision && !collisionPhrase(again.err.Error()):
+		return StatusFail, fmt.Sprintf("a fresh_only start over a held name exited %d without the collision phrase; want %d or already exists/already running", again.exitCode, runtime.ExitCodeFreshCollision)
 	}
 	after, s, d := presentObserve(ctx, r, name, "running")
 	if s != StatusPass {

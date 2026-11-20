@@ -339,17 +339,19 @@ func (e *opExitError) Unwrap() error { return e.err }
 // reports its failure as "could not tell"), the observe.v1 ops, and
 // server-stop (it runs only for a pack that declared server-lifecycle). strict
 // is an exit 2 the pack's declarations oblige it not to give
-// (Provider.exitTwoIsStrict), which fails as strictExitTwo maps it. A
-// start-op name collision maps to [runtime.ErrSessionExists]; a start-op
-// [runtime.ExitCodeTempFail] is an endpoint capacity refusal
-// ([runtime.CapacityError]); everything else is base unchanged.
+// (Provider.exitTwoIsStrict), which fails as strictExitTwo maps it. A start
+// or provision op's name collision maps to [runtime.ErrSessionExists], so
+// gc's non-fresh start paths read a provision refused because the name is
+// taken as a collision; a start-op [runtime.ExitCodeTempFail] is an endpoint
+// capacity refusal ([runtime.CapacityError]); everything else is base
+// unchanged.
 func classifyExecExit(op string, code int, msg string, strict bool, base error) error {
 	switch {
 	case code == 2 && strict:
 		return strictExitTwo(op, base)
 	case code == 2 && !exitTwoIsFailure(op):
 		return nil
-	case op == "start" && isStartCollision(msg):
+	case (op == "start" || op == "provision") && isStartCollision(msg):
 		return fmt.Errorf("%w: %w", runtime.ErrSessionExists, base)
 	case op == "start" && code == runtime.ExitCodeTempFail:
 		return &runtime.CapacityError{ExitCode: code, Source: runtime.CapacitySourceExitStatus, Err: base}
@@ -446,8 +448,8 @@ func strictExitTwo(op string, base error) error {
 	}
 }
 
-// isStartCollision reports whether a failed start op's message says the name is
-// already taken by a live session.
+// isStartCollision reports whether a failed start or provision op's message
+// says the name is already taken by a live session.
 func isStartCollision(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	for _, phrase := range startCollisionPhrases {

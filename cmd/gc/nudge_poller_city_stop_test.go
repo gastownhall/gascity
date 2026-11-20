@@ -328,7 +328,10 @@ func TestCmdNudgePollExitsWithoutObservingWhenItsCityIsSuspended(t *testing.T) {
 	item := newQueuedNudgeWithOptions("worker", "follow-up", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{
 		SessionID: created.ID,
 	})
-	if err := enqueueQueuedNudgeWithStore(cityDir, beads.NudgesStore{Store: store}, item); err != nil {
+	// Queue the nudge through the nudges-class store, where gc nudge writes
+	// it (cliNudgesStore), not the work store openCityStoreAt returns: under
+	// the split-strict gate that work store does not own nudge rows.
+	if err := enqueueQueuedNudgeWithStore(cityDir, cliNudgesStore(store, nil, cityDir), item); err != nil {
 		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
 	}
 

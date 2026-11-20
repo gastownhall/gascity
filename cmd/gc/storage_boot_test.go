@@ -2559,12 +2559,12 @@ func TestStrandRecheckSeedsFromADegradedBoot(t *testing.T) {
 // degraded serve, and the refusal names the clear.
 func TestStorageGateRefusesAStrandBesideRetainedCopies(t *testing.T) {
 	cityPath, cfg, source, _ := convergedRecoveryCity(t)
-	before := checkInfraClassConvergence(cityPath, cfg, "gc start", io.Discard)
+	before := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", io.Discard, storageBootGateOpts{})
 	if before.Outcome != infraMigrationRetained {
 		t.Fatalf("fixture: outcome %s, want retained", before.Outcome)
 	}
 	work := workShapedStrandedBead(t, source)
-	after := checkInfraClassConvergence(cityPath, cfg, "gc start", io.Discard)
+	after := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", io.Discard, storageBootGateOpts{})
 	if after.Outcome != infraMigrationStranded || after.servesDegraded() || len(after.Retained) == 0 {
 		t.Fatalf("after one strand: outcome=%s retained=%v servesDegraded=%v, want a stranded verdict that carries the retained copies and does not serve", after.Outcome, after.Retained, after.servesDegraded())
 	}

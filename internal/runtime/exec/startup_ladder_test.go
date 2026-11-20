@@ -658,3 +658,22 @@ func TestStopForgetsTheWeldedProvisionMarker(t *testing.T) {
 		t.Fatal("the welded-provision marker outlived Stop")
 	}
 }
+
+// Kills a non-fresh separable start that reads a provision refused because
+// the name is taken as a plain provider error: Start returns a
+// session-exists, and runs neither launch nor the teardown stop, which would
+// end the live session that owns the name.
+func TestProvisionCollisionIsSessionExists(t *testing.T) {
+	for _, phrase := range []string{`session "s" already exists`, `session "s" already running`} {
+		ops := launchPackOps()
+		ops["provision"] = `cat >/dev/null; echo '` + phrase + `' >&2; exit 1`
+		script, dir := observePack(t, launchPackCaps, ops)
+		err := NewSeamBacked(script).Start(t.Context(), "s", runtime.Config{Command: "agent"})
+		if !errors.Is(err, runtime.ErrSessionExists) {
+			t.Errorf("%s: Start = %v, want ErrSessionExists", phrase, err)
+		}
+		if got, want := opsRan(t, dir), []string{"provision"}; !slices.Equal(got, want) {
+			t.Errorf("%s: ops = %v, want %v: no launch and no stop", phrase, got, want)
+		}
+	}
+}

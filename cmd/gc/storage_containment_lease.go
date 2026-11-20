@@ -117,13 +117,11 @@ type containmentLease struct {
 	TakenAt time.Time
 	// FreshMS is this lease's freshness budget in milliseconds, computed
 	// once at publish time from the recheck's interval (strandRecheckInterval
-	// — fixed in this slice, slice 2's to make adaptive) and its last check
-	// duration (design doc §4.3): min(10 min, 2×interval + last duration),
-	// which this slice's fixed interval collapses to the 10-minute cap
-	// regardless of the check duration (strandRecheckFreshCap's comment). It
-	// does not change between serves of the same lease, except that a
-	// transient recheck failure stretches it to the full ten-minute cap (Q3;
-	// extendLeaseOnTransientFailure).
+	// — adaptive, strandRecheckNextInterval) and the check's own duration d
+	// (design doc §4.3): min(10 min, 2×interval + d)
+	// (strandRecheckFreshness's comment). It does not change between
+	// serves of the same lease, except that a transient recheck failure
+	// stretches it to the full ten-minute cap (Q3; extendLeaseOnTransientFailure).
 	FreshMS int64
 	// RecheckFailing is true once a transient recheck failure has kept this
 	// verdict from being refreshed (Q3, design doc §5): the verdict below
@@ -136,6 +134,16 @@ type containmentLease struct {
 	// freshly published lease and moves on every later transient failure,
 	// while TakenAt keeps naming the last DEFINITIVE check.
 	LastAttemptAt time.Time
+	// RecheckFailureFromWorkStore is set alongside RecheckFailing, true
+	// only when the transient attempt that extended this lease
+	// (extendLeaseOnTransientFailure) failed reading the WORK STORE itself
+	// (infraMigrationReport.FaultFromWorkStore), as opposed to the binding
+	// or a local file. Slice 2's caller treats it as "this lease is not
+	// safe to trust while recheck_failing" (design doc carry-over 3): a
+	// transient fault anywhere else says nothing about the ledger the
+	// lease exists to avoid re-reading, but one reading the work store is
+	// a fault in that very read.
+	RecheckFailureFromWorkStore bool
 	// Basis is the containment basis captured for this verdict.
 	Basis containmentBasis
 	// Serving and ServesDegraded are infraMigrationReport.serving() and
@@ -168,24 +176,29 @@ type containmentLease struct {
 // serving, serves_degraded, recheck_failing and last_attempt_ms are all
 // part of v1: v does not bump for them.
 type containmentLeaseWire struct {
-	V              int                 `json:"v"`
-	PID            int                 `json:"pid"`
-	Binding        string              `json:"binding"`
-	Database       string              `json:"database"`
-	Outcome        string              `json:"outcome"`
-	Serving        bool                `json:"serving"`
-	ServesDegraded bool                `json:"serves_degraded"`
-	AgeMS          int64               `json:"age_ms"`
-	FreshMS        int64               `json:"fresh_ms"`
-	RecheckFailing bool                `json:"recheck_failing"`
-	LastAttemptMS  int64               `json:"last_attempt_ms"`
-	Basis          containmentBasis    `json:"basis"`
-	ProvenBeads    int                 `json:"proven_beads"`
-	LostCrossEdges []string            `json:"lost_cross_edges,omitempty"`
-	Stranded       []string            `json:"stranded,omitempty"`
-	PresumedReused []string            `json:"presumed_reused,omitempty"`
-	Declassifiable map[string][]string `json:"declassifiable,omitempty"`
-	Complete       bool                `json:"complete"`
+	V              int    `json:"v"`
+	PID            int    `json:"pid"`
+	Binding        string `json:"binding"`
+	Database       string `json:"database"`
+	Outcome        string `json:"outcome"`
+	Serving        bool   `json:"serving"`
+	ServesDegraded bool   `json:"serves_degraded"`
+	AgeMS          int64  `json:"age_ms"`
+	FreshMS        int64  `json:"fresh_ms"`
+	RecheckFailing bool   `json:"recheck_failing"`
+	LastAttemptMS  int64  `json:"last_attempt_ms"`
+	// RecheckFailingFromWorkStore mirrors containmentLease.RecheckFailureFromWorkStore
+	// (design doc carry-over 3). Meaningful only alongside RecheckFailing;
+	// the slice 2 caller refuses a recheck_failing lease carrying it rather
+	// than accept one within the 10-minute cap.
+	RecheckFailingFromWorkStore bool                `json:"recheck_failing_from_work_store,omitempty"`
+	Basis                       containmentBasis    `json:"basis"`
+	ProvenBeads                 int                 `json:"proven_beads"`
+	LostCrossEdges              []string            `json:"lost_cross_edges,omitempty"`
+	Stranded                    []string            `json:"stranded,omitempty"`
+	PresumedReused              []string            `json:"presumed_reused,omitempty"`
+	Declassifiable              map[string][]string `json:"declassifiable,omitempty"`
+	Complete                    bool                `json:"complete"`
 }
 
 // wire renders l as of now, using the controller's own clock for AgeMS and
@@ -193,24 +206,25 @@ type containmentLeaseWire struct {
 // ages, never a value frozen at publish time.
 func (l *containmentLease) wire(now time.Time) containmentLeaseWire {
 	return containmentLeaseWire{
-		V:              containmentLeaseProtocolVersion,
-		PID:            l.PID,
-		Binding:        l.Binding,
-		Database:       l.Database,
-		Outcome:        l.Outcome,
-		Serving:        l.Serving,
-		ServesDegraded: l.ServesDegraded,
-		AgeMS:          now.Sub(l.TakenAt).Milliseconds(),
-		FreshMS:        l.FreshMS,
-		RecheckFailing: l.RecheckFailing,
-		LastAttemptMS:  now.Sub(l.LastAttemptAt).Milliseconds(),
-		Basis:          l.Basis,
-		ProvenBeads:    l.ProvenBeads,
-		LostCrossEdges: l.LostCrossEdges,
-		Stranded:       l.Stranded,
-		PresumedReused: l.PresumedReused,
-		Declassifiable: l.Declassifiable,
-		Complete:       l.Complete,
+		V:                           containmentLeaseProtocolVersion,
+		PID:                         l.PID,
+		Binding:                     l.Binding,
+		Database:                    l.Database,
+		Outcome:                     l.Outcome,
+		Serving:                     l.Serving,
+		ServesDegraded:              l.ServesDegraded,
+		AgeMS:                       now.Sub(l.TakenAt).Milliseconds(),
+		FreshMS:                     l.FreshMS,
+		RecheckFailing:              l.RecheckFailing,
+		LastAttemptMS:               now.Sub(l.LastAttemptAt).Milliseconds(),
+		RecheckFailingFromWorkStore: l.RecheckFailureFromWorkStore,
+		Basis:                       l.Basis,
+		ProvenBeads:                 l.ProvenBeads,
+		LostCrossEdges:              l.LostCrossEdges,
+		Stranded:                    l.Stranded,
+		PresumedReused:              l.PresumedReused,
+		Declassifiable:              l.Declassifiable,
+		Complete:                    l.Complete,
 	}
 }
 
