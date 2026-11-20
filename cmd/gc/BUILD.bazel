@@ -2083,6 +2083,7 @@ go_test(
         "provider_health_gate_test.go",
         "provider_op_process_windows_test.go",
         "provider_owned_fake_bd_test.go",
+        "provider_owned_identity_session_test.go",
         "provider_owned_identity_test.go",
         "provider_store_resolution_test.go",
         "provider_swap_test.go",
