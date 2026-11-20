@@ -517,6 +517,39 @@ func TestDoltStateHealthCheckCmdDatabaseMissingOnDisk(t *testing.T) {
 	})
 }
 
+// TestDoltStateHealthCheckCmdDatabaseReady covers AC-4: with a healthy
+// database the report keeps today's query_ready, read_only and
+// connection_count lines and adds the database verdict.
+func TestDoltStateHealthCheckCmdDatabaseReady(t *testing.T) {
+	setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only", "--database", "hq"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	want := "query_ready\ttrue\nread_only\tfalse\nconnection_count\t3\ndatabase\thq\ndatabase_ready\ttrue\n"
+	if stdout.String() != want {
+		t.Fatalf("output = %q, want %q", stdout.String(), want)
+	}
+}
+
+// TestDoltStateHealthCheckCmdWithoutDatabaseUnchanged covers AC-4: without
+// --database the output is byte-identical to the server-only report.
+func TestDoltStateHealthCheckCmdWithoutDatabaseUnchanged(t *testing.T) {
+	setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	want := "query_ready\ttrue\nread_only\tfalse\nconnection_count\t3\n"
+	if stdout.String() != want {
+		t.Fatalf("output = %q, want the server-only report %q", stdout.String(), want)
+	}
+}
+
 func TestDoltStateHealthCheckCmdChecksDataDir(t *testing.T) {
 	setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
 	dataDir := t.TempDir()
