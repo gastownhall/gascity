@@ -1184,7 +1184,7 @@ func TestReconcileSessionBeads_RestartRequestLiveKillYieldsWhenReleaseUnproven(t
 		}
 		return env, session, sessionName
 	}
-	assertYield := func(t *testing.T, env *restartRequestTestEnv, session beads.Bead, sessionName string) {
+	assertYield := func(t *testing.T, env *restartRequestTestEnv, session beads.Bead, sessionName string, followUps *int) {
 		t.Helper()
 		stopAt := -1
 		for i, call := range env.sp.SnapshotCalls() {
@@ -1213,26 +1213,39 @@ func TestReconcileSessionBeads_RestartRequestLiveKillYieldsWhenReleaseUnproven(t
 		if !strings.Contains(stderr, sessionName) || !strings.Contains(stderr, "starts on the next pass") {
 			t.Fatalf("stderr = %q, want the release-gate yield notice naming %q", stderr, sessionName)
 		}
+		fired := 0
+		if followUps != nil {
+			fired = *followUps
+		}
+		if fired != 1 {
+			t.Fatalf("async start follow-ups fired %d times, want exactly one with the yield so async callers reschedule the deferred restart", fired)
+		}
 	}
 
 	t.Run("name still reads present after the kill", func(t *testing.T) {
 		env, session, sessionName := setup(t)
+		followUps := 0
+		env.startOptions = append(env.startOptions, withAsyncStartFollowUp(func() { followUps++ }))
 		env.sp.StopLeavesRunning[sessionName] = true
 		env.useFreshReads()
 		env.reconcile([]beads.Bead{session})
-		assertYield(t, env, session, sessionName)
+		assertYield(t, env, session, sessionName, &followUps)
 	})
 	t.Run("provider that cannot read fresh", func(t *testing.T) {
 		env, session, sessionName := setup(t)
+		followUps := 0
+		env.startOptions = append(env.startOptions, withAsyncStartFollowUp(func() { followUps++ }))
 		env.reconcile([]beads.Bead{session})
-		assertYield(t, env, session, sessionName)
+		assertYield(t, env, session, sessionName, &followUps)
 	})
 	t.Run("fresh read fails", func(t *testing.T) {
 		env, session, sessionName := setup(t)
+		followUps := 0
+		env.startOptions = append(env.startOptions, withAsyncStartFollowUp(func() { followUps++ }))
 		env.useFreshReads()
 		env.provider = scriptedRelease{Provider: env.provider, err: runtime.ErrRuntimeUnavailable}
 		env.reconcile([]beads.Bead{session})
-		assertYield(t, env, session, sessionName)
+		assertYield(t, env, session, sessionName, &followUps)
 	})
 }
 

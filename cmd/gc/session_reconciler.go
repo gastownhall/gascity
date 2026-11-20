@@ -3827,6 +3827,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						running, alive = false, false
 					} else {
 						fmt.Fprintf(stderr, "session reconciler: restart-requested %s stopped, but its runtime name is not confirmed released; it starts on the next pass\n", name) //nolint:errcheck
+						// Async start callers wait on the follow-up signal to
+						// look again; fire it for the deferred restart too,
+						// since this pass enqueues no start of its own.
+						if reconcileOpts.asyncFollowUp != nil {
+							reconcileOpts.asyncFollowUp()
+						}
 						continue
 					}
 				}
