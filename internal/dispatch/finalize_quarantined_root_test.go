@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
@@ -219,7 +220,9 @@ func TestCloseWorkflowRootNeverPassesOverQuarantine(t *testing.T) {
 				Status:   "closed",
 				Metadata: meta,
 			})
-			if err := closeWorkflowRoot(beadstest.Graph(store), b.ID, "pass", nil); !errors.Is(err, errRootQuarantined) {
+			// A refused pass carries its skipped-blocker list too, and the
+			// refusal must leave that marker unwritten along with the pass.
+			if err := closeWorkflowRoot(beadstest.Graph(store), b.ID, "pass", []string{"bd-skipped"}); !errors.Is(err, errRootQuarantined) {
 				t.Fatalf("closeWorkflowRoot err = %v, want errRootQuarantined", err)
 			}
 			after, err := store.Get(b.ID)
@@ -228,6 +231,9 @@ func TestCloseWorkflowRootNeverPassesOverQuarantine(t *testing.T) {
 			}
 			if got := after.Metadata["gc.outcome"]; got != "fail" {
 				t.Fatalf("gc.outcome = %q, want fail kept over a pass write", got)
+			}
+			if got, ok := after.Metadata[beadmeta.SkippedBlockersMetadataKey]; ok {
+				t.Fatalf("gc.skipped_blockers = %q, want the key absent: no pass was written", got)
 			}
 		})
 	}
