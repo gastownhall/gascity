@@ -2843,3 +2843,31 @@ func TestProxiedOpenUnmovedNamesTheOpenShapedWrite(t *testing.T) {
 		})
 	}
 }
+
+// TestProxiedOpenUnmovedChecksThePlaneUnderAForeignWindow is AC-4: a window
+// that shows only another client's writes says nothing about the ignored
+// plane, which HEAD cannot see. The plane is read under a foreign move exactly
+// as under an unmoved HEAD, and a plane the open left short of a sentinel is
+// head_moved from the plane check.
+func TestProxiedOpenUnmovedChecksThePlaneUnderAForeignWindow(t *testing.T) {
+	report := movedHeadReport(&proxyendpoint.PostOpenWindow{
+		Commits: []string{"bd: update ga-1"},
+		Tables:  []proxyendpoint.WindowTable{{Name: "issues"}},
+	})
+	report.Reality = proxyendpoint.CursorReality{
+		Limited: true, Floor: proxyendpoint.IgnoredSentinelColumnFloor, Missing: "leases.granted_node",
+	}
+	err := ProxiedOpenUnmoved(movedHeadPin(), report)
+	verdict, typed := ProxiedVerdictOf(err)
+	if !typed || verdict.Verdict != ProxiedVerdictHeadMoved || verdict.Terminal() {
+		t.Fatalf("err = %v, want the non-terminal head_moved verdict from the plane check", err)
+	}
+	for _, want := range []string{
+		"ignored plane", "leases.granted_node",
+		fmt.Sprintf("cursor at %d", proxyendpoint.IgnoredSentinelColumnFloor), windowAfterHead,
+	} {
+		if !strings.Contains(verdict.Detail, want) {
+			t.Errorf("the verdict detail lacks %q: %s", want, verdict.Detail)
+		}
+	}
+}
