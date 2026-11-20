@@ -1,0 +1,283 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	gcapi "github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+)
+
+const (
+	providerOwnedIdentityP = "11111111-2222-3333-4444-555555555555"
+	providerOwnedIdentityQ = "99999999-8888-7777-6666-555555555555"
+	// providerOwnedProxyPort is the live proxy record's port in fixtures. No
+	// listener is behind it: the L3 opener is stubbed wherever it is reached.
+	providerOwnedProxyPort = 45123
+)
+
+// providerOwnedL3Fake stands in for the L3 opener: it records every endpoint
+// it was opened for and every close, and serves L3 from a
+// projectIdentityL3Double.
+type providerOwnedL3Fake struct {
+	l3     *projectIdentityL3Double
+	opened []providerOwnedIdentityEndpoint
+	closed int
+	seeds  int
+	onOpen func()
+}
+
+func (f *providerOwnedL3Fake) ReadProjectID(ctx context.Context) (string, bool, error) {
+	return f.l3.read(ctx)
+}
+
+func (f *providerOwnedL3Fake) SeedProjectID(ctx context.Context, projectID string) (bool, error) {
+	f.seeds++
+	return f.l3.seed(ctx, projectID)
+}
+
+// stubProviderOwnedL3 routes the L3 opener to fake for the rest of the test.
+func stubProviderOwnedL3(t *testing.T, fake *providerOwnedL3Fake) {
+	t.Helper()
+	prev := openProviderOwnedScopeL3Fn
+	openProviderOwnedScopeL3Fn = func(_ context.Context, endpoint providerOwnedIdentityEndpoint) (projectIdentityL3Store, func() error, error) {
+		fake.opened = append(fake.opened, endpoint)
+		if fake.onOpen != nil {
+			fake.onOpen()
+		}
+		return fake, func() error { fake.closed++; return nil }, nil
+	}
+	t.Cleanup(func() { openProviderOwnedScopeL3Fn = prev })
+}
+
+// clearProviderOwnedProxyEnv removes the inherited environment that would
+// move ProviderRoot away from the scope's own default root.
+func clearProviderOwnedProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		proxyendpoint.RootPathEnv,
+		proxyendpoint.DoltDataDirEnv,
+		proxyendpoint.SharedServerModeEnv,
+		proxyendpoint.SharedServerDirEnv,
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+// stubLiveProviderOwnedProxy publishes a live proxy record on
+// providerOwnedProxyPort under a proxy root dedicated to the test, and a
+// process table that vouches for it.
+func stubLiveProviderOwnedProxy(t *testing.T) {
+	t.Helper()
+	const port = providerOwnedProxyPort
+	root := filepath.Join(t.TempDir(), "proxy-root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(proxyendpoint.RootPathEnv, root)
+	rootID, err := proxyendpoint.RootID(root)
+	if err != nil {
+		t.Fatalf("identify proxy root: %v", err)
+	}
+	const pid = 4242
+	record := proxyendpoint.Record{
+		PID:         pid,
+		Port:        port,
+		UpstreamID:  "provider-owned-identity-test",
+		Schema:      proxyendpoint.SchemaV2,
+		Kind:        proxyendpoint.RecordKind,
+		Birth:       proxyendpoint.BirthToken("test-boot", strconv.Itoa(pid)),
+		RootID:      rootID,
+		ControlPort: port + 1,
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyendpoint.PIDPath(root), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"bd", proxyendpoint.ChildVerb, proxyendpoint.RootFlag, root, proxyendpoint.IdleTimeoutFlag, "0"}
+	prev := providerOwnedIdentityProcessTable
+	providerOwnedIdentityProcessTable = func() proxyendpoint.ProcessTable {
+		return proxyendpoint.ProcessTable{
+			Alive: func(p int) bool { return p == pid },
+			Argv:  func(int) ([]string, error) { return argv, nil },
+			Birth: func(int) (string, error) { return record.Birth, nil },
+		}
+	}
+	t.Cleanup(func() { providerOwnedIdentityProcessTable = prev })
+}
+
+// skipProviderOwnedIdentityReconcile makes the provider-owned identity step a
+// no-op, for tests whose exec provider stands in for bd with no store behind
+// the binding it writes.
+func skipProviderOwnedIdentityReconcile(t *testing.T) {
+	t.Helper()
+	prev := reconcileProviderOwnedScopeIdentityFn
+	reconcileProviderOwnedScopeIdentityFn = func(context.Context, string, string) error { return nil }
+	t.Cleanup(func() { reconcileProviderOwnedScopeIdentityFn = prev })
+}
+
+// providerOwnedIdentityCity is a city whose own scope is provider-owned
+// through a fake exec provider: init writes metadata (when set), every op
+// succeeds, and each op is logged.
+type providerOwnedIdentityCity struct {
+	dir   string
+	opLog string
+}
+
+func newProviderOwnedIdentityCity(t *testing.T, metadata string) providerOwnedIdentityCity {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	clearProviderOwnedProxyEnv(t)
+	city := t.TempDir()
+	tools := t.TempDir()
+	opLog := filepath.Join(tools, "ops.log")
+	writeMetadata := ""
+	if metadata != "" {
+		writeMetadata = "  mkdir -p \"$2/.beads\"\n  printf '%s' " + shellQuoteForTest(metadata) + " > \"$2/.beads/metadata.json\"\n"
+	}
+	provider := filepath.Join(tools, "provider.sh")
+	body := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$1\" >> " + strconv.Quote(opLog) + "\n" +
+		"if [ \"$1\" = init ]; then\n" + writeMetadata + "  exit 0\nfi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(provider, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bd := filepath.Join(tools, "bd")
+	if err := os.WriteFile(bd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"identity\"\n\n[workspace.env]\nBD_BIN = \"" + bd + "\"\n" +
+		"[beads]\nprovider = \"exec:" + provider + "\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	return providerOwnedIdentityCity{dir: city, opLog: opLog}
+}
+
+func shellQuoteForTest(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ops returns the provider ops the city ran, in order, and resets the log.
+func (c providerOwnedIdentityCity) ops(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(c.opLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(c.opLog); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(data))
+}
+
+func (c providerOwnedIdentityCity) entry(t *testing.T) providerScopeOwnershipEntry {
+	t.Helper()
+	entry, ok, err := providerScopeOwnership(c.dir, c.dir)
+	if err != nil || !ok {
+		t.Fatalf("scope ownership = (%+v, %t, %v), want a journaled entry", entry, ok, err)
+	}
+	return entry
+}
+
+// stampedLayers returns the layer of every ProjectIdentityStamped event in
+// the city's event log, in order.
+func (c providerOwnedIdentityCity) stampedLayers(t *testing.T) []string {
+	t.Helper()
+	path := filepath.Join(c.dir, citylayout.RuntimeRoot, "events.jsonl")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	all, err := events.ReadAll(path)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	var layers []string
+	for _, event := range all {
+		if event.Type != events.ProjectIdentityStamped {
+			continue
+		}
+		var payload gcapi.ProjectIdentityStampedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode stamped payload: %v", err)
+		}
+		if payload.NewID != providerOwnedIdentityP {
+			t.Fatalf("stamped event new_id = %q, want %q", payload.NewID, providerOwnedIdentityP)
+		}
+		layers = append(layers, payload.Layer)
+	}
+	return layers
+}
+
+func (c providerOwnedIdentityCity) identity(t *testing.T) (string, bool) {
+	t.Helper()
+	id, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, c.dir)
+	if err != nil {
+		t.Fatalf("ReadProjectIdentity: %v", err)
+	}
+	return id, ok
+}
+
+func proxiedIdentityMetadata(projectID string) string {
+	m := `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"`
+	if projectID != "" {
+		m += `,"project_id":"` + projectID + `"`
+	}
+	return m + "}"
+}
+
+// TestInitAndHookDirProviderOwnedReconcilesProjectIdentity: a pending
+// proxied-local scope whose bd init left metadata project_id = Dolt
+// _project_id = P and no identity.toml gets identity.toml = P, one L1
+// stamped event, and turns ready only after L1 was written.
+func TestInitAndHookDirProviderOwnedReconcilesProjectIdentity(t *testing.T) {
+	city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP))
+	stubLiveProviderOwnedProxy(t)
+	var stateAtOpen string
+	fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+	fake.onOpen = func() { stateAtOpen = city.entry(t).State }
+	stubProviderOwnedL3(t, fake)
+
+	if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+		t.Fatalf("initAndHookDirResolvingDatabase: %v", err)
+	}
+
+	if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+		t.Fatalf("identity.toml = (%q, present=%t), want %q", got, ok, providerOwnedIdentityP)
+	}
+	if got := city.stampedLayers(t); len(got) != 1 || got[0] != "L1" {
+		t.Fatalf("stamped layers = %v, want exactly [L1]", got)
+	}
+	if got := city.ops(t); strings.Join(got, " ") != "init health" {
+		t.Fatalf("provider ops = %v, want [init health]", got)
+	}
+	if stateAtOpen != providerScopeInitializing {
+		t.Fatalf("journal state when the reconcile ran = %q, want %q", stateAtOpen, providerScopeInitializing)
+	}
+	if got := city.entry(t).State; got != providerScopeReady {
+		t.Fatalf("journal state after the pass = %q, want %q", got, providerScopeReady)
+	}
+	if fake.closed != len(fake.opened) {
+		t.Fatalf("L3 opened %d time(s) and closed %d, want every open closed", len(fake.opened), fake.closed)
+	}
+}

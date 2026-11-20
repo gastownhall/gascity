@@ -1021,6 +1021,9 @@ func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *ci
 		if err := runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, dir, "health"); err != nil {
 			return fmt.Errorf("provider-owned scope readiness: %w", err)
 		}
+		if err := reconcileProviderOwnedScopeIdentityFn(context.Background(), cityPath, dir); err != nil {
+			return fmt.Errorf("provider-owned scope %q project identity: %w", dir, err)
+		}
 		if pending {
 			return markProviderScopeOwnershipReady(cityPath, dir)
 		}
