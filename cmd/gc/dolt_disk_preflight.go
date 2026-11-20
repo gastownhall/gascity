@@ -37,7 +37,9 @@ func doltDiskMinFreeBytes() int64 {
 }
 
 // doltDiskWarnFreeBytes returns the soft floor from GC_DOLT_WARN_FREE_BYTES,
-// defaulting to 2 GiB.
+// defaulting to 2 GiB. The bd pack's ENOSPC recovery skip (dolt-enospc.sh)
+// reads the same variable as the free space at which recovery and
+// `gc dolt restart` resume; there, 0 means the 2 GiB default.
 func doltDiskWarnFreeBytes() int64 {
 	if v := os.Getenv("GC_DOLT_WARN_FREE_BYTES"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
