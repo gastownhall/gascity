@@ -51,7 +51,18 @@ func CompileWithoutRuntimeVarValidation(_ context.Context, name string, searchPa
 const explicitGraphRequirementError = `requires: formulas that use graph-only constructs must declare [requires] formula_compiler = ">=2.0.0" or the deprecated contract = "graph.v2" explicitly`
 
 func compileFormula(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool) (*Recipe, error) {
-	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
+	return compileFormulaFromSource(name, searchPaths, vars, validateRuntimeVars, SourceFromEnv())
+}
+
+// CompileWithoutRuntimeVarValidationFromSource runs the inspection compiler with
+// a caller-supplied source, allowing callers to capture the actual compilation
+// reads without re-reading files or changing formula lookup semantics.
+func CompileWithoutRuntimeVarValidationFromSource(_ context.Context, name string, searchPaths []string, vars map[string]string, source Source) (*Recipe, error) {
+	return compileFormulaFromSource(name, searchPaths, vars, false, source)
+}
+
+func compileFormulaFromSource(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool, source Source) (*Recipe, error) {
+	parser := NewParser(searchPaths...).SetSource(source)
 	v2Enabled := IsFormulaV2Enabled()
 	var composedRequirements []formulaCompilerConstraint
 	collectComposedRequirements := func(f *Formula) error {

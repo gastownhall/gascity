@@ -60,3 +60,22 @@ round-trips. When adding a field to `SiteBinding` or `RigSiteBinding`, register
 its TOML key in `siteBindingKeyOwners` / `rigSiteBindingKeyOwners` and patch it
 only in that owning writer. `TestSiteBindingFieldsHaveWriterOwner` fails on an
 unregistered field.
+
+## Explicit pack configuration validation
+
+Only `gc config show --validate` runs pack doctors with `config_validate = true`.
+Both doctor manifest forms validate `config_validate_formulas` as unique,
+nonempty pack-supplied names, requiring the opt-in when names are supplied.
+Ordinary config loading/show and startup do not execute this extension.
+
+Supply the invocation's already-resolved config, including overlays and explicit
+empty overrides, plus compiled declarations for every configured rig/requested
+name. Capture contributing formula bytes through the compiler's actual Source
+reads; never claim complete provenance from search paths or later rereads.
+Compilation errors remain per-entry input for pack applicability decisions.
+
+The versioned stdin contract and `GC_CONFIG_VALIDATION=1` belong only to explicit
+validation. Ordinary pack doctor checks, warm-up checks and fixes strip that
+reserved marker. Scripts retain policy and the 0/1/2+ diagnostic protocol;
+errors fail explicit validation, warnings remain advisory, and fixes/gates are
+never dispatched by validation. Bound each diagnostic subprocess.

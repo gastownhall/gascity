@@ -2244,6 +2244,9 @@ func deepCopyCommands(in []DiscoveredCommand) []DiscoveredCommand {
 func deepCopyDoctors(in []DiscoveredDoctor) []DiscoveredDoctor {
 	out := make([]DiscoveredDoctor, len(in))
 	copy(out, in)
+	for i := range out {
+		out[i].ConfigValidateFormulas = append([]string(nil), in[i].ConfigValidateFormulas...)
+	}
 	return out
 }
 
@@ -2302,6 +2305,9 @@ func legacyPackCommands(entries []PackCommandEntry, packDir, packName string) []
 func legacyPackDoctors(fs fsys.FS, entries []PackDoctorEntry, packDir, packName string) ([]DiscoveredDoctor, error) {
 	out := make([]DiscoveredDoctor, 0, len(entries))
 	for _, entry := range entries {
+		if err := validateDoctorFormulaInputs(entry.ConfigValidate, entry.ConfigValidateFormulas); err != nil {
+			return nil, fmt.Errorf("doctor %s: %w", entry.Name, err)
+		}
 		runScript := entry.Script
 		if runScript != "" && !filepath.IsAbs(runScript) {
 			runScript = filepath.Join(packDir, runScript)
@@ -2320,14 +2326,16 @@ func legacyPackDoctors(fs fsys.FS, entries []PackDoctorEntry, packDir, packName 
 		}
 
 		out = append(out, DiscoveredDoctor{
-			Name:        entry.Name,
-			Description: entry.Description,
-			RunScript:   runScript,
-			FixScript:   fixScript,
-			SourceDir:   packDir,
-			PackDir:     packDir,
-			PackName:    packName,
-			Warmup:      entry.Warmup,
+			Name:                   entry.Name,
+			Description:            entry.Description,
+			RunScript:              runScript,
+			FixScript:              fixScript,
+			SourceDir:              packDir,
+			PackDir:                packDir,
+			PackName:               packName,
+			Warmup:                 entry.Warmup,
+			ConfigValidate:         entry.ConfigValidate,
+			ConfigValidateFormulas: append([]string(nil), entry.ConfigValidateFormulas...),
 		})
 	}
 	return out, nil
