@@ -252,10 +252,24 @@ const (
 	// completion facts the completions backstop has fully reconciled: the root
 	// is closed, every listed step is closed, and every emittable fact is in
 	// the journal. A closed root's steps never change again, so the stamp is
-	// terminal and the backstop sweep skips stamped roots instead of paying a
-	// per-root step listing to rediscover a converged state every hour
-	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
-	// lane, which reacts to the close events themselves.
+	// terminal while the root stays closed, and every backstop sweep, whatever
+	// its reason (startup, cursor-gap, cadence), skips a closed, stamped root
+	// instead of paying a per-root step listing to rediscover a converged state
+	// (ga-wevcl, #7172).
+	//
+	// Any visit that finds a stamped root not converged clears the stamp:
+	//   - the delta pass, for a root named by an observed bead.closed (the step
+	//     snapshot carries gc.root_bead_id) or execution.step_* event; it visits
+	//     named roots whether or not they are stamped;
+	//   - every sweep, for a stamped root that is no longer closed.
+	//
+	// Step surgery on a closed, stamped root that no observed event names (the
+	// controller was down, or the write emitted no bead.closed) is not
+	// re-verified automatically. Clear the stamp
+	// (gc bd update <root> --unset-metadata gc.completion_facts_converged) or
+	// reopen the root, and the next sweep re-proves it. Any change to what the
+	// stamp proves must rename this key, so every root reads as unstamped and
+	// the ordinary chunked sweep re-proves each one once.
 	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
 	LabelRevisionMetadataKey            = "gc.label_rev" // label CAS bookkeeping; see beads.NativeDoltStore.updateLabelsIfMatch
 	LastFailureClassMetadataKey         = "gc.last_failure_class"
