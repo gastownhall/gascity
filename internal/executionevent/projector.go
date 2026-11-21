@@ -883,14 +883,6 @@ type CompletionBackstop struct {
 	// skippedConverged accumulates the stamped-root skips of the store
 	// currently being traversed so each chunk reports only its own share.
 	skippedConverged int
-	// VisitStamped makes the NEXT sweep traverse stamped roots too. The
-	// completions lane sets it for startup sweeps: converged stamps are a
-	// cadence optimization, and the per-boot full traversal is what re-examines
-	// them (clearing stale ones — a hand-reopened step, a vacuous stamp from a
-	// past store wedge) so a wrong stamp is bounded by one boot, not forever.
-	VisitStamped bool
-	// sweepVisitsStamped latches VisitStamped for the life of one sweep.
-	sweepVisitsStamped bool
 	// sweepStores latches a copy of the store fan, in order, at sweep start; a
 	// copy, because the caller may reuse its slice. The caller re-resolves its
 	// store set every chunk, and the cursor is an INDEX into it: if any
@@ -997,15 +989,14 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 // prepareSweep readies the sweep for this Pass. At a fresh sweep start it
 // re-derives the completion record — nothing feeds this index between sweeps, so
 // a warm one would only know the facts it emitted itself and would re-emit
-// everything the delta lane or the close path recorded — and latches the sweep's
-// VisitStamped choice and a copy of its store fan. Mid-sweep, a changed store fan (a
+// everything the delta lane or the close path recorded — and latches a copy of
+// the sweep's store fan. Mid-sweep, a changed store fan (a
 // store added, removed, replaced, or reordered, even at unchanged length) means
 // the cursor's store index no longer names the store its held roots came from, so
 // the sweep restarts against the current fan.
 func (b *CompletionBackstop) prepareSweep(graphStores []beads.GraphStore) {
 	if b.storeIndex == 0 && b.afterRootID == "" && !b.storeRootsLoaded {
 		b.index.Invalidate()
-		b.sweepVisitsStamped = b.VisitStamped
 		b.sweepStores = slices.Clone(graphStores)
 		return
 	}
@@ -1017,7 +1008,6 @@ func (b *CompletionBackstop) prepareSweep(graphStores []beads.GraphStore) {
 	b.storeRoots = nil
 	b.storeRootsLoaded = false
 	b.skippedConverged = 0
-	b.sweepVisitsStamped = b.VisitStamped
 	b.sweepStores = slices.Clone(graphStores)
 }
 
@@ -1042,7 +1032,7 @@ func (b *CompletionBackstop) ensureStoreRoots(graphStore beads.GraphStore) error
 	// Converged roots leave the traversal here: the stamp rides the listing
 	// already in hand, so skipping one costs a map lookup where visiting it costs
 	// a per-root step listing (ga-wevcl).
-	unstamped, skipped := partitionUnstampedRoots(roots, b.sweepVisitsStamped)
+	unstamped, skipped := partitionUnstampedRoots(roots)
 	sort.Slice(unstamped, func(i, j int) bool { return unstamped[i].ID < unstamped[j].ID })
 	b.storeRoots = unstamped
 	b.storeRootsLoaded = true
@@ -1052,18 +1042,16 @@ func (b *CompletionBackstop) ensureStoreRoots(graphStore beads.GraphStore) error
 
 // partitionUnstampedRoots splits roots into the ones a sweep must still visit
 // (returned, filtered in place) and a count of the converged ones it may skip. A
-// root is skipped only when it is STILL converged: closed AND stamped, and only
-// when this is not a visitStamped (per-boot full re-examination) sweep. A stamped
+// root is skipped only when it is STILL converged: closed AND stamped. A stamped
 // root that has REOPENED (Status != closed) is no longer converged — it can emit
 // again — so it stays in the traversal to be revisited and to have its stale
 // stamp cleared, exactly like any other open root. Skipping a reopened-but-stamped
 // root would leave the stamp uncleared forever (the clear branch only runs for
 // visited roots), permanently voiding the backstop's recovery guarantee for it.
-func partitionUnstampedRoots(roots []beads.Bead, visitStamped bool) (unstamped []beads.Bead, skipped int) {
+func partitionUnstampedRoots(roots []beads.Bead) (unstamped []beads.Bead, skipped int) {
 	unstamped = roots[:0]
 	for _, root := range roots {
-		if !visitStamped &&
-			strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != "" &&
+		if strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != "" &&
 			strings.EqualFold(strings.TrimSpace(root.Status), "closed") {
 			skipped++
 			continue
@@ -1203,9 +1191,9 @@ func applyConvergenceStamp(graphStore beads.GraphStore, root beads.Bead, rowCoun
 		// (root.Status != closed) while its step rows stayed closed (a converged
 		// root re-driven/retried). The stamp only ever applies to a closed root, so
 		// a stamped non-closed root is always stale. Clear it so the sweeps resume
-		// visiting: the cadence filter keeps a reopened root in the traversal, and a
-		// startup sweep re-examines every stamped root, so both paths reach here and
-		// heal it.
+		// visiting. Two paths reach here: every sweep keeps a reopened root in the
+		// traversal, and the delta pass visits any root an observed bead.closed or
+		// execution.step_* event names, stamped or not.
 		_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, "")
 	}
 }
