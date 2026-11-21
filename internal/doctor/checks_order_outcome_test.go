@@ -903,3 +903,103 @@ func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 		})
 	}
 }
+
+// TestOrderOutcomeHealthyIncompleteOutcomeOrderScope pins which declarations
+// count: only monitored cron/cooldown orders outside suspended rigs, matched by
+// full scoped subject, so a same-named order in another scope neither inherits
+// nor clears the declaration, and the hint keeps the rig-aware target.
+func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	setup := func(t *testing.T) (string, *config.City) {
+		t.Helper()
+		cityPath, cfg := orderFiringTestCity(t)
+		ordersDir := filepath.Join(cityPath, "orders")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "export-sweep", "cooldown", "6h")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "manual-export", "manual", "")
+		writeOrderFiringTestOrderInDir(t, ordersDir, "event-export", "event", "bead.closed")
+
+		rigFormulas := map[string][]string{}
+		for _, rig := range []config.Rig{
+			{Name: "st", Path: filepath.Join(cityPath, "rigs", "st")},
+			{Name: "parked", Path: filepath.Join(cityPath, "rigs", "parked"), SuspendedOnStart: true},
+		} {
+			rigOrders := filepath.Join(rig.Path, "orders")
+			if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+				t.Fatalf("creating rig orders dir: %v", err)
+			}
+			cfg.Rigs = append(cfg.Rigs, rig)
+			rigFormulas[rig.Name] = []string{cfg.FormulaLayers.City[0], filepath.Join(rig.Path, "formulas")}
+		}
+		cfg.FormulaLayers.Rigs = rigFormulas
+		writeOrderFiringTestOrderInDir(t, filepath.Join(cityPath, "rigs", "st", "orders"), "export-sweep", "cron", "0 3 * * *")
+		writeOrderFiringTestOrderInDir(t, filepath.Join(cityPath, "rigs", "parked", "orders"), "parked-sweep", "cooldown", "1h")
+		return cityPath, cfg
+	}
+	declared := func(subject string, ts time.Time) events.Event {
+		return skippedOrderEvent(subject, ts, "partial", "store unreachable",
+			events.OrderSkippedScope{Scope: "rig:st", Reason: "dolt not reachable"})
+	}
+	completed := func(subject string, ts time.Time) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: subject, Actor: "controller"}
+	}
+	excluded := []events.Event{
+		declared("manual-export", now.Add(-30*time.Minute)),
+		declared("event-export", now.Add(-30*time.Minute)),
+		declared("parked-sweep:rig:parked", now.Add(-30*time.Minute)),
+		declared("export-sweep:rig:other", now.Add(-30*time.Minute)),
+	}
+
+	cases := []struct {
+		name        string
+		evts        []events.Event
+		wantDetails []string
+		wantHint    string
+	}{
+		{
+			name: "rig-scoped declaration survives a city-scope completion",
+			evts: append([]events.Event{
+				completed("export-sweep:rig:st", now.Add(-2*time.Hour)),
+				declared("export-sweep:rig:st", now.Add(-2*time.Hour)),
+				completed("export-sweep", now.Add(-time.Hour)),
+			}, excluded...),
+			wantDetails: []string{
+				"export-sweep: last run succeeded",
+				"export-sweep:rig:st: recorded incomplete work: partial: store unreachable; not run: rig:st (dolt not reachable)",
+			},
+			wantHint: "Inspect with: gc order check && gc order history export-sweep --rig st",
+		},
+		{
+			name: "city-scoped declaration survives a rig-scope completion",
+			evts: append([]events.Event{
+				completed("export-sweep", now.Add(-2*time.Hour)),
+				declared("export-sweep", now.Add(-2*time.Hour)),
+				completed("export-sweep:rig:st", now.Add(-time.Hour)),
+			}, excluded...),
+			wantDetails: []string{
+				"export-sweep: recorded incomplete work: partial: store unreachable; not run: rig:st (dolt not reachable)",
+				"export-sweep:rig:st: last run succeeded",
+			},
+			wantHint: "Inspect with: gc order check && gc order history export-sweep",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := setup(t)
+			writeOrderFiringTestEvents(t, cityPath, tc.evts...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != StatusWarning {
+				t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			got := append([]string(nil), result.Details...)
+			sort.Strings(got)
+			if strings.Join(got, "\n") != strings.Join(tc.wantDetails, "\n") {
+				t.Fatalf("details = %q, want %q (excluded orders and scopes must not appear)", got, tc.wantDetails)
+			}
+			if result.FixHint != tc.wantHint {
+				t.Fatalf("FixHint = %q, want %q", result.FixHint, tc.wantHint)
+			}
+		})
+	}
+}
