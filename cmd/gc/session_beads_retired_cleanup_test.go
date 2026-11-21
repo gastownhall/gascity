@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -257,4 +258,112 @@ func TestRetiredCleanupHealthyStoreReachesFinalState(t *testing.T) {
 	if b, p, m := x.counts(t); b != 0 || p != 0 || m != 0 {
 		t.Fatalf("open bindings/participants/memberships = %d/%d/%d, want 0/0/0", b, p, m)
 	}
+}
+
+func wantOnlyCutoffLine(t *testing.T, stderr, sessionID, leg string) {
+	t.Helper()
+	lines := nonEmptyLines(stderr)
+	want := fmt.Sprintf("session beads: retired-session cleanup for %s: %s leg ran out of its 10s budget; what it did not reach stays open", sessionID, leg)
+	if len(lines) != 1 || lines[0] != want {
+		t.Fatalf("stderr lines = %q, want exactly [%q]", lines, want)
+	}
+}
+
+// TestRetiredCleanupBoundsSlowWaitsLeg: when wait cancellation on a slow store
+// outlasts its 10s budget, the next checkpoint stops it, the waits it already
+// canceled keep their metadata, the rest stay open, and exactly one line names
+// the session, the waits leg and the budget.
+func TestRetiredCleanupBoundsSlowWaitsLeg(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	mem := beads.NewMemStore()
+	sessionBead := newRetiredCleanupSessionBead(t, mem)
+	seedRetiredCleanupWaits(t, mem, sessionBead.ID, 50, 0)
+
+	// Lookup ends at 3s; batches end at 6s, 9s and 12s; the checkpoint after
+	// the 12s batch sees the expired budget.
+	store := &retiredCleanupBudgetStore{MemStore: mem, waitLabel: "session:" + sessionBead.ID, waitDelay: 3 * time.Second}
+	stderr, elapsed := runRetiredCleanupInBubble(t, store, sessionBead.ID, now)
+
+	wantOnlyCutoffLine(t, stderr, sessionBead.ID, "waits")
+	if open, closed := retiredCleanupWaitCounts(t, mem, sessionBead.ID, now); open != 20 || closed != 30 {
+		t.Fatalf("open/closed waits = %d/%d, want 20/30 (three ten-wait batches before the cut-off)", open, closed)
+	}
+	if elapsed != 12*time.Second {
+		t.Fatalf("cleanup took %s, want 12s (one in-flight batch past the 10s budget)", elapsed)
+	}
+}
+
+// TestRetiredCleanupOutcomeClassification: only a leg that fails with its own
+// budget's deadline is reported as cut off; every other failure keeps its
+// ordinary diagnostic, and work that succeeds past the budget reports nothing.
+func TestRetiredCleanupOutcomeClassification(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name        string
+		waitDelay   time.Duration
+		closeAllErr error
+		wantLine    string // "" wants no stderr
+	}{
+		{
+			name:        "OrdinaryError",
+			closeAllErr: errors.New("store unavailable"),
+			wantLine:    "session beads: canceling waits for retired session %s: store unavailable",
+		},
+		{
+			name:        "ForeignDeadlineBeforeBudget",
+			closeAllErr: fmt.Errorf("store call: %w", context.DeadlineExceeded),
+			wantLine:    "session beads: canceling waits for retired session %s: store call: context deadline exceeded",
+		},
+		{
+			name:        "OrdinaryErrorAfterBudget",
+			waitDelay:   6 * time.Second,
+			closeAllErr: errors.New("store unavailable"),
+			wantLine:    "session beads: canceling waits for retired session %s: store unavailable",
+		},
+		{
+			name:      "FinalBatchOverrunsBudget",
+			waitDelay: 6 * time.Second,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			sessionBead := newRetiredCleanupSessionBead(t, mem)
+			seedRetiredCleanupWaits(t, mem, sessionBead.ID, 5, 0)
+			store := &retiredCleanupBudgetStore{
+				MemStore:    mem,
+				waitLabel:   "session:" + sessionBead.ID,
+				waitDelay:   tc.waitDelay,
+				closeAllErr: tc.closeAllErr,
+			}
+			stderr, _ := runRetiredCleanupInBubble(t, store, sessionBead.ID, now)
+			lines := nonEmptyLines(stderr)
+			if tc.wantLine == "" {
+				if len(lines) != 0 {
+					t.Fatalf("stderr lines = %q, want none", lines)
+				}
+				if open, _ := retiredCleanupWaitCounts(t, mem, sessionBead.ID, now); open != 0 {
+					t.Fatalf("open waits = %d, want 0", open)
+				}
+				return
+			}
+			if want := fmt.Sprintf(tc.wantLine, sessionBead.ID); len(lines) != 1 || lines[0] != want {
+				t.Fatalf("stderr lines = %q, want exactly [%q]", lines, want)
+			}
+		})
+	}
+
+	t.Run("NilStderrAndEmptySession", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		sessionBead := newRetiredCleanupSessionBead(t, mem)
+		seedRetiredCleanupWaits(t, mem, sessionBead.ID, 20, 0)
+		store := &retiredCleanupBudgetStore{MemStore: mem, waitLabel: "session:" + sessionBead.ID, waitDelay: 3 * time.Second}
+		synctest.Test(t, func(*testing.T) {
+			cancelStateAssignedToRetiredSessionBead(store, " ", now, nil)
+			cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, now, nil)
+		})
+		if open, _ := retiredCleanupWaitCounts(t, mem, sessionBead.ID, now); open != 0 {
+			t.Fatalf("open waits = %d, want 0", open)
+		}
+	})
 }
