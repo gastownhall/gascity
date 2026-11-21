@@ -16,6 +16,7 @@ go_test(
     srcs = [
         "child_env_test.go",
         "poller_test.go",
+        "target_from_argv_test.go",
         "testenv_import_test.go",
     ],
     embed = [":nudgepoller"],
