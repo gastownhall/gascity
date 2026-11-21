@@ -59,7 +59,7 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 //
 // The topology only names which store owns the row. The row is then read from
 // that store's live reader (beads.LiveFor: past its policy and cache layers,
-// and any class layer above them), as freshAnchorBeadTerminal does: a rig leg
+// and any class layer above them), as freshAnchorLiveRow does: a rig leg
 // is a CachingStore whose Get answers a primed, undirtied row without a
 // backing read, and a handoff or close made by another process (`bd update
 // --assignee`, `bd close`) reaches the backing store alone. A cached row would report the old assignee and keep row A
@@ -140,33 +140,59 @@ func sessionHasFreshInProgressClaim(sw *SeatWork, info sessionpkg.Info) (bool, e
 	return sessionHasInProgressAssignedWorkForConfig(sw.fresh(releaseScope(info, sw.Legs().cfg)), info)
 }
 
-// freshAnchorBeadTerminal fetches the fresh-cycle guard's anchor bead
+// freshAnchorOwned reports whether the fresh cycle's live anchor row still
+// authorizes the cycle: it is not terminal, and its trimmed, non-empty
+// assignee is one of ids (the session's ReleaseScope, the identities the
+// allocator's sessionAssigneeMatches assigned the anchor under). A released,
+// handed-off or closed anchor authorizes no kill. Status and assignee come
+// from the same row, so they cannot describe two different moments (#9320).
+// Legacy's Q2 and v2's fresh-cycle probe share it; each keeps its own read
+// path and read-error policy.
+func freshAnchorOwned(anchor beads.Bead, ids []string) bool {
+	if convoycore.IsTerminalStatus(anchor.Status) {
+		return false
+	}
+	assignee := strings.TrimSpace(anchor.Assignee)
+	if assignee == "" {
+		return false
+	}
+	for _, id := range ids {
+		if strings.TrimSpace(id) == assignee {
+			return true
+		}
+	}
+	return false
+}
+
+// freshAnchorLiveRow fetches the fresh-cycle guard's anchor bead
 // (ComputeAwakeSet's decision.AssignedWorkBeadID) with one fresh, uncached
-// read over the caller's residency topology and reports whether it is
-// already terminal (closed). ga-pvjbx3 Q2: the tick's assigned-work snapshot
-// can already be several minutes stale by the time the kill decision runs;
-// cycling a session onto an anchor that has since closed is pure loss — there
-// is no work left to reassign onto. An error (including a bead no leg holds)
-// is "could not tell", and the caller then proceeds to the cycle: Q1 has
-// already established that the session holds no claim a kill could cost.
+// read over the seat's work legs (WorkLegs.readLive: the store that owns it
+// by residency, read through its live reader) and returns that row, whose
+// status and assignee the caller judges together (freshAnchorOwned).
+// ga-pvjbx3 Q2 and #9320: the tick's assigned-work snapshot can already be
+// several minutes stale by the time the kill decision runs; cycling a
+// session onto an anchor that has since closed is pure loss, and cycling it
+// onto one it has since released (or handed to another session) kills it
+// between the release and its hand-back sling. An error (including a bead no
+// leg holds) is "could not tell", and the caller then proceeds to the cycle:
+// Q1 has already established that the session holds no claim a kill could
+// cost.
 //
-// The topology only names which store owns the anchor. The row is then read
-// from that store's live reader (beads.LiveFor), and the row the owner probe
-// may already have read is discarded: a rig leg is a
-// CachingStore whose Get answers a primed, undirtied row without a backing
-// read, and a close made by another process (`bd close`) reaches the backing
-// store alone. Reading through the cache would report that closed anchor as
-// live and cycle the session onto work that no longer exists.
-func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (bool, error) {
-	owner, err := byIDOwnerRowForTopology(topo, anchorID)
+// The owner probe's row is discarded: a rig leg is a CachingStore whose Get
+// answers a primed, undirtied row without a backing read, and a close or
+// release made by another process (`bd close`, `bd update --assignee ""`)
+// reaches the backing store alone. Reading through the cache would report
+// that anchor as still this session's and cycle the session onto work that
+// is no longer its own.
+func freshAnchorLiveRow(legs WorkLegs, anchorID string) (beads.Bead, error) {
+	anchor, found, err := legs.readLive(anchorID)
 	if err != nil {
-		return false, err
+		return beads.Bead{}, fmt.Errorf("reading fresh-cycle anchor %q: %w", anchorID, err)
 	}
-	anchor, err := beads.LiveFor(owner.Resident).Get(anchorID)
-	if err != nil {
-		return false, err
+	if !found {
+		return beads.Bead{}, fmt.Errorf("reading fresh-cycle anchor %q: %w", anchorID, beads.ErrNotFound)
 	}
-	return convoycore.IsTerminalStatus(anchor.Status), nil
+	return anchor, nil
 }
 
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh
