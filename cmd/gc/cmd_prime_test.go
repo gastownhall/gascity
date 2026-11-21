@@ -72,20 +72,6 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 	}
 }
 
-func TestBuildPrimeContextUsesBD105ReadyCompatibility(t *testing.T) {
-	cityPath := filepath.Join(t.TempDir(), "demo-city")
-	ctx := buildPrimeContextFor(cityPath, "", &config.Agent{
-		Name: "worker",
-	}, nil, config.QueryTopology{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}}, nil)
-
-	if !strings.Contains(ctx.AssignedReadyQuery, `bd ready --include-ephemeral --assignee="$id"`) {
-		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.5-compatible assigned ready query", ctx.AssignedReadyQuery)
-	}
-	if !strings.Contains(ctx.WorkQuery, "bd ready --include-ephemeral") {
-		t.Fatalf("WorkQuery = %q, want bd-1.0.5-compatible ready probes", ctx.WorkQuery)
-	}
-}
-
 func TestBuildPrimeContextLogsTemplateExpansionWarning(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
 	var stderr bytes.Buffer
@@ -1499,17 +1485,17 @@ func TestBuildPrimeContextConfigDir(t *testing.T) {
 	// ConfigDir. Pin the site, not just the helper.
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
 
-	ctx := buildPrimeContextFor(cityPath, "", &config.Agent{Name: "worker"},
-		nil, config.QueryTopology{}, nil)
+	ctx := buildPrimeContext(cityPath, "", &config.Agent{Name: "worker"},
+		nil, nil)
 	if ctx.ConfigDir != cityPath {
 		t.Fatalf("ConfigDir = %q, want %q", ctx.ConfigDir, cityPath)
 	}
 
 	packDir := filepath.Join(cityPath, ".gc", "packs", "example")
-	ctx = buildPrimeContextFor(cityPath, "", &config.Agent{
+	ctx = buildPrimeContext(cityPath, "", &config.Agent{
 		Name:      "worker",
 		SourceDir: packDir,
-	}, nil, config.QueryTopology{}, nil)
+	}, nil, nil)
 	if ctx.ConfigDir != packDir {
 		t.Fatalf("ConfigDir = %q, want SourceDir override %q", ctx.ConfigDir, packDir)
 	}

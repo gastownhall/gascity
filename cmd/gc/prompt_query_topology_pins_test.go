@@ -48,8 +48,7 @@ func newPromptQueryPinsFixture(t *testing.T, agentScope string, withRigs bool) p
 // build them: gc prime's context builder and the controller's resolveTemplate.
 func (f promptQueryPinsFixture) renderedQueries(t *testing.T) (prime, controller [4]string) {
 	t.Helper()
-	topo := cityQueryTopology(f.cityPath, f.cfg)
-	ctx := buildAgentPromptContext(f.cityPath, f.cfg.Workspace.Name, f.agent, f.rigs, topo, io.Discard)
+	ctx := buildAgentPromptContext(f.cityPath, f.cfg.Workspace.Name, f.agent, f.rigs, io.Discard)
 	prime = [4]string{ctx.WorkQuery, ctx.AssignedInProgressQuery, ctx.AssignedReadyQuery, ctx.RoutedPoolQuery}
 
 	tmpl := writePromptQueryPinTemplate(t, f.cityPath)
@@ -72,11 +71,14 @@ func (f promptQueryPinsFixture) renderedQueries(t *testing.T) (prime, controller
 	return prime, controller
 }
 
-var promptQueryPinNames = [4]string{"WorkQuery", "AssignedInProgressQuery", "AssignedReadyQuery", "RoutedPoolQuery"}
+var (
+	promptQueryPinNames = [4]string{"WorkQuery", "AssignedInProgressQuery", "AssignedReadyQuery", "RoutedPoolQuery"}
+	promptQueryPinTiers = [4]string{"work", "assigned-in-progress", "assigned-ready", "routed-pool"}
+)
 
-// assertQueriesEqualBase checks each placeholder against what base renders for
-// the same agent: the value Effective*QueryFor builds from the caller's own
-// topology, which is exactly the topology base's render sites passed through.
+// assertQueriesEqualBase checks that each placeholder renders the compact tier
+// command, and that the query the tier runs is what base runs for the same
+// agent: the value Effective*QueryFor builds from the caller's own topology.
 func assertQueriesEqualBase(t *testing.T, f promptQueryPinsFixture, site string, queries [4]string) {
 	t.Helper()
 	topo := cityQueryTopology(f.cityPath, f.cfg)
@@ -86,9 +88,13 @@ func assertQueriesEqualBase(t *testing.T, f promptQueryPinsFixture, site string,
 		f.agent.EffectiveAssignedReadyQueryFor(topo),
 		f.agent.EffectiveRoutedPoolQueryFor(topo),
 	}
-	for i := range queries {
-		if queries[i] != base[i] {
-			t.Errorf("%s %s changed for a shape the federation swap must not reach:\ngot:  %q\nbase: %q", site, promptQueryPinNames[i], queries[i], base[i])
+	tierTopo := promptQueryTopology(topo, f.agent, f.rigs)
+	for i, tier := range promptQueryPinTiers {
+		if want := "gc hook query " + tier; queries[i] != want {
+			t.Errorf("%s %s = %q, want the compact tier command %q", site, promptQueryPinNames[i], queries[i], want)
+		}
+		if got := hookQueryCommand(f.agent, tierTopo, tier); got != base[i] {
+			t.Errorf("%s %s changed for a shape the federation swap must not reach:\ngot:  %q\nbase: %q", site, promptQueryPinNames[i], got, base[i])
 		}
 	}
 }
@@ -151,6 +157,36 @@ func TestPromptQueriesUserWorkQueryOverridesVerbatim(t *testing.T) {
 				t.Errorf("%s %s = %q, want the user work_query verbatim %q", []string{"prime", "controller"}[i], promptQueryPinNames[j], got, custom)
 			}
 		}
+	}
+}
+
+// TestHookTierQueryReadsThePromptTopology pins what a generated placeholder
+// runs: `gc hook query <tier>` for a city-scoped agent on a rig city reads
+// through the federated `gc ready`, once, on the primary store, so it keeps the
+// loud failure TestCityScopedPromptDiscoveryFailsLoudOnABrokenRigStore pins for
+// that reader. A custom work_query stays verbatim and is not scoped.
+func TestHookTierQueryReadsThePromptTopology(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
+	cfg := &config.City{Workspace: config.Workspace{Name: "bright-lights"}, Rigs: rigs}
+	agent := &config.Agent{Name: "planner", Scope: "city"}
+	for _, tier := range promptQueryPinTiers {
+		topo, query := hookTierQuery(cityPath, "bright-lights", cfg, agent, tier, io.Discard)
+		if !topo.FederatedReady {
+			t.Errorf("gc hook query %s did not read with the prompt topology", tier)
+		}
+		assertFederatedDiscoveryQuery(t, "gc hook query "+tier, query)
+		if !hookStoresScopeToPrimary(query, singleStoreHookQuery(cityPath, "bright-lights", cfg, agent, topo, tier, io.Discard)) {
+			t.Errorf("gc hook query %s fans out; the federated reader already spans every store", tier)
+		}
+	}
+	custom := &config.Agent{Name: "planner", Scope: "city", WorkQuery: "echo my own discovery"}
+	topo, query := hookTierQuery(cityPath, "bright-lights", cfg, custom, "work", io.Discard)
+	if query != custom.WorkQuery {
+		t.Errorf("gc hook query work = %q, want the custom work_query verbatim", query)
+	}
+	if hookStoresScopeToPrimary(query, singleStoreHookQuery(cityPath, "bright-lights", cfg, custom, topo, "work", io.Discard)) {
+		t.Error("a custom work_query was scoped to the primary store")
 	}
 }
 

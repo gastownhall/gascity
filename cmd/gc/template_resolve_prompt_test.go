@@ -940,39 +940,6 @@ func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
 	}
 }
 
-func TestResolveTemplateAssignedReadyQueryUsesBD105Compatibility(t *testing.T) {
-	cityPath := filepath.Join(t.TempDir(), "demo-city")
-	fs := fsys.NewFake()
-	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Assigned={{ .AssignedReadyQuery }}")
-
-	params := &agentBuildParams{
-		city:            &config.City{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
-		fs:              fs,
-		cityName:        "",
-		cityPath:        cityPath,
-		workspace:       &config.Workspace{Provider: "opencode"},
-		providers:       config.BuiltinProviders(),
-		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
-		beaconTime:      testBeaconTime,
-		sessionTemplate: "",
-		beadNames:       make(map[string]string),
-		stderr:          io.Discard,
-	}
-	agent := &config.Agent{
-		Name:           "worker",
-		PromptTemplate: "prompts/worker.template.md",
-		Provider:       "opencode",
-	}
-
-	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
-	if err != nil {
-		t.Fatalf("resolveTemplate: %v", err)
-	}
-	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=1`) {
-		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query: %q", tp.Prompt)
-	}
-}
-
 func TestResolveTemplateClaudeProjectsCityDotClaudeSettingsIntoRuntimeFile(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
