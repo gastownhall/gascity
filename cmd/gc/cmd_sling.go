@@ -1013,6 +1013,9 @@ func printSlingResult(result sling.SlingResult, stdout, _ io.Writer) {
 	default:
 		fmt.Fprintf(stdout, "Slung %s → %s\n", result.BeadID, result.Target) //nolint:errcheck
 	}
+	if result.RoutedMembers > 0 {
+		fmt.Fprintf(stdout, "Routed %d steps of %s → %s\n", result.RoutedMembers, result.BeadID, result.Target) //nolint:errcheck
+	}
 }
 
 // printBatchSlingResult formats a batch SlingResult for CLI display.

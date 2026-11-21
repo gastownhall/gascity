@@ -347,7 +347,7 @@ func TestForcedGraphV2ReplacementRollbackRestoresInTheGraphStore(t *testing.T) {
 func TestFinalizeWithNoStoreHoldingTheBeadRefuses(t *testing.T) {
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
 	opts := SlingOpts{Target: config.Agent{Name: "mayor"}, BeadOrFormula: "gc-1", Initiator: "alice"}
-	_, err := finalizeInStore(opts, deps, beads.MoleculeTarget{}, "gc-1", "bead", SlingResult{})
+	_, err := finalizeInStore(opts, deps, beads.MoleculeTarget{}, "gc-1", "bead", nil, SlingResult{})
 	if err == nil || !strings.Contains(err.Error(), "no store holds the bead") {
 		t.Fatalf("finalizeInStore over an absent target = %v, want the no-store refusal", err)
 	}

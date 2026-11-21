@@ -734,16 +734,9 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 		a = &resolved
 	}
 
-	defaultRoute := GraphRouteBindingForAgent(*a)
-	// routedTo is the caller's already-normalized persisted identity. Preserve
-	// it rather than recomputing in case the caller resolved a compatibility
-	// spelling that agentutil intentionally keeps stable on the wire.
-	defaultRoute.QualifiedName = routedTo
-	if !defaultRoute.MetadataOnly {
-		defaultRoute.SessionName = agentutil.LookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		if defaultRoute.SessionName == "" {
-			return fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
-		}
+	defaultRoute, err := SlingTargetBinding(*a, routedTo, store, cityName, cfg)
+	if err != nil {
+		return err
 	}
 	routeVars := GraphWorkflowRouteVars(recipe, vars)
 	return DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, storeRef, defaultRoute, store, cityName, cfg, deps)

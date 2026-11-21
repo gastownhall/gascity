@@ -254,6 +254,9 @@ type SlingResult struct {
 	MetadataErrors []string // non-fatal metadata write failures
 	BeadWarnings   []string // pre-flight bead state warnings
 	Deprecations   []string // deprecated formula constructs (graph.v2 issue alias)
+	// RoutedMembers is how many members of a slung expanded workflow root the
+	// sling routed to the target.
+	RoutedMembers int
 
 	// Batch fields (populated by DoSlingBatch).
 	ContainerType string // "convoy", "epic", etc. (batch only)

@@ -575,7 +575,7 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if hint := rootOnlyVaporPourHint(opts.BeadOrFormula, recipe); hint != "" {
 		result.BeadWarnings = append(result.BeadWarnings, hint)
 	}
-	return finalizeInStore(opts, deps, rootStore, mResult.RootID, method, result)
+	return finalizeInStore(opts, deps, rootStore, mResult.RootID, method, nil, result)
 }
 
 // rootOnlyVaporPourHint returns a sling-time diagnostic when a formula compiled
@@ -884,21 +884,30 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 }
 
 // slingPlainBead handles plain bead routing (no formula).
+// Slinging an expanded workflow root also routes the run's unrouted members
+// to the target (see expandedRootMemberRoutes).
 func slingPlainBead(opts SlingOpts, deps SlingDeps, beadID string, result SlingResult) (SlingResult, error) {
-	return finalize(opts, deps, beadID, "bead", result)
+	members, err := planExpandedRootMemberRoutes(opts, deps, deps.Store, beadID)
+	if err != nil {
+		a := opts.Target
+		telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), "bead", err)
+		return result, err
+	}
+	return finalizeInStore(opts, deps, beads.WorkMolecule(deps.Store), beadID, "bead", members, result)
 }
 
 // finalize executes the sling command, records telemetry, sets merge
 // metadata, creates auto-convoy, pokes the controller, and signals nudge.
 func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
-	return finalizeInStore(opts, deps, beads.WorkMolecule(deps.Store), beadID, method, result)
+	return finalizeInStore(opts, deps, beads.WorkMolecule(deps.Store), beadID, method, nil, result)
 }
 
 // finalizeInStore is finalize for a bead held by beadStore rather than by
 // deps.Store: the routing stamp and the merge-strategy stamp go to the store
 // that holds the bead. Auto-convoy bookkeeping stays in deps.Store, the work
-// store convoys live in.
-func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTarget, beadID, method string, result SlingResult) (SlingResult, error) {
+// store convoys live in. members, when non-nil, is written after the initiator
+// stamp and before the bead itself is routed.
+func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTarget, beadID, method string, members *expandedRootMemberRoutes, result SlingResult) (SlingResult, error) {
 	a := opts.Target
 
 	// Execute routing -- prefer typed Router, fall back to shell Runner.
@@ -937,6 +946,11 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
 		}
+		if err := members.apply(writer); err != nil {
+			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+			return result, err
+		}
+		result.RoutedMembers = members.routedMembers()
 		req := RouteRequest{
 			BeadID:  beadID,
 			Target:  agentutil.RoutedToIdentity(&a),
