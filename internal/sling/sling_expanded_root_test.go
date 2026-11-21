@@ -348,3 +348,48 @@ func TestSlingExpandedRootToAnotherTargetFillsOnlyUnroutedAndWarns(t *testing.T)
 		t.Errorf("warning %q names %s, which this sling routed", warning, serve.ID)
 	}
 }
+
+// TestSlingExpandedRootCustomSlingQueryWarnsAndWritesNoMembers is AC-6: a
+// custom sling_query owns routing, so Go cannot know what routing the run's
+// members means for it. The custom command runs, no member is written, and
+// the result says the unrouted steps were not routed.
+func TestSlingExpandedRootCustomSlingQueryWarnsAndWritesNoMembers(t *testing.T) {
+	run := newCookedRun(t)
+	mix := run.step(t, "mix batter")
+	cook := run.step(t, "cook")
+	custom := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1), SlingQuery: "custom-dispatch {}"}
+	deps, _ := cookedRunDeps(run, custom)
+	runner := newFakeRunner()
+	deps.Router = nil
+	deps.Runner = runner.run
+	before := map[string]map[string]string{
+		mix.ID:  maps.Clone(run.get(t, mix.ID).Metadata),
+		cook.ID: maps.Clone(run.get(t, cook.ID).Metadata),
+	}
+
+	result, err := DoSling(testOpts(custom, run.root.ID), deps, run.store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	want := "custom-dispatch '" + run.root.ID + "'"
+	if len(runner.calls) != 1 || runner.calls[0] != want {
+		t.Fatalf("runner calls = %#v, want [%q]", runner.calls, want)
+	}
+	for id, meta := range before {
+		if got := run.get(t, id).Metadata; !maps.Equal(got, meta) {
+			t.Errorf("member %s metadata = %v, want unchanged %v", id, got, meta)
+		}
+	}
+	if result.RoutedMembers != 0 {
+		t.Errorf("RoutedMembers = %d, want 0", result.RoutedMembers)
+	}
+	var warned bool
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, run.root.ID) && strings.Contains(w, "2 unrouted") && strings.Contains(w, "sling_query") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("BeadWarnings = %q, want one naming %s, its 2 unrouted steps and the custom sling_query", result.BeadWarnings, run.root.ID)
+	}
+}

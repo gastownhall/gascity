@@ -26,6 +26,30 @@ type expandedRootMemberRoutes struct {
 	// elsewhere names the open members already routed to another target,
 	// which the fill-only plan leaves on their routes.
 	elsewhere []string
+	// customQueryUnrouted counts the members a custom sling_query target
+	// leaves unrouted: the custom command owns routing, so Go writes none.
+	customQueryUnrouted int
+}
+
+// customQueryMemberRoutes is the plan for a target whose custom sling_query
+// owns routing: it writes nothing and counts the members that carry no route
+// of their own, so the sling can say they were not routed.
+func customQueryMemberRoutes(rootID, target string, members []beads.Bead) (*expandedRootMemberRoutes, error) {
+	plan := &expandedRootMemberRoutes{rootID: rootID}
+	probe := graphroute.GraphRouteBinding{QualifiedName: target, MetadataOnly: true}
+	for _, member := range members {
+		if member.ID == rootID {
+			continue
+		}
+		patch, err := graphroute.UnroutedMemberPatch(member, probe)
+		if err != nil {
+			return nil, fmt.Errorf("reading the members of workflow %s: %w", rootID, err)
+		}
+		if patch != nil {
+			plan.customQueryUnrouted++
+		}
+	}
+	return plan, nil
 }
 
 // memberRoutePatch is the metadata one member gains.
@@ -59,16 +83,20 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, store beads.Wo
 		return nil, nil
 	}
 	a := opts.Target
-	if deps.Router == nil || IsCustomSlingQuery(a) {
+	customQuery := IsCustomSlingQuery(a)
+	if deps.Router == nil && !customQuery {
 		return nil, nil
-	}
-	binding, err := graphroute.SlingTargetBinding(a, agentutil.RoutedToIdentity(&a), deps.Sessions, deps.CityName, deps.Cfg)
-	if err != nil {
-		return nil, fmt.Errorf("routing the members of workflow %s: %w", beadID, err)
 	}
 	members, err := beads.DirectMembersWithRoot(store, root)
 	if err != nil {
 		return nil, fmt.Errorf("listing the members of workflow %s: %w", beadID, err)
+	}
+	if customQuery {
+		return customQueryMemberRoutes(root.ID, agentutil.RoutedToIdentity(&a), members)
+	}
+	binding, err := graphroute.SlingTargetBinding(a, agentutil.RoutedToIdentity(&a), deps.Sessions, deps.CityName, deps.Cfg)
+	if err != nil {
+		return nil, fmt.Errorf("routing the members of workflow %s: %w", beadID, err)
 	}
 	plan := &expandedRootMemberRoutes{rootID: root.ID}
 	for _, member := range members {
@@ -148,12 +176,20 @@ func otherMemberRoute(member beads.Bead, target string) string {
 	return route
 }
 
-// elsewhereWarning names the members the plan left on another route, or
-// returns "" when there are none.
-func (p *expandedRootMemberRoutes) elsewhereWarning() string {
-	if p == nil || len(p.elsewhere) == 0 {
-		return ""
+// warnings names the members the plan leaves unrouted by the target: those
+// already on another route, and those a custom sling_query target owns.
+func (p *expandedRootMemberRoutes) warnings() []string {
+	if p == nil {
+		return nil
 	}
-	return fmt.Sprintf("warning: workflow %s members already routed to other agents were left on their routes: %s",
-		p.rootID, strings.Join(p.elsewhere, ", "))
+	var out []string
+	if len(p.elsewhere) > 0 {
+		out = append(out, fmt.Sprintf("warning: workflow %s members already routed to other agents were left on their routes: %s",
+			p.rootID, strings.Join(p.elsewhere, ", ")))
+	}
+	if p.customQueryUnrouted > 0 {
+		out = append(out, fmt.Sprintf("warning: workflow %s has %d unrouted steps that were not routed: the target's custom sling_query owns routing; route them with the same command or gc sling --formula",
+			p.rootID, p.customQueryUnrouted))
+	}
+	return out
 }

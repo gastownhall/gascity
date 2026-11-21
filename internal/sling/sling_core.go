@@ -969,9 +969,6 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 			return result, err
 		}
 		result.RoutedMembers = members.routedMembers()
-		if warning := members.elsewhereWarning(); warning != "" {
-			result.BeadWarnings = append(result.BeadWarnings, warning)
-		}
 		req := RouteRequest{
 			BeadID:  beadID,
 			Target:  agentutil.RoutedToIdentity(&a),
@@ -999,6 +996,7 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 		}
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
+	result.BeadWarnings = append(result.BeadWarnings, members.warnings()...)
 	clearGraphTakeoverRoute(deps, bead, &result)
 
 	// Merge strategy metadata. With no --merge flag this falls back to the
