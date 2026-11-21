@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+"""Run the pre-flight checks the diff against a base branch can affect.
+
+`make check-affected` runs this as `affected-preflight run`; `plan` prints the
+selection without running anything. The diff is everything between the merge
+base with AFFECTED_BASE and the working tree, untracked files included.
+
+Selection:
+
+* Touched packages: the Go package of every changed Go file, the package that
+  embeds a changed file, and the package whose BUILD file changed. Their Bazel
+  targets get the nogo build (`go vet` plus the golangci-lint linters) and
+  their tests run.
+* Direct importers of the touched packages (Imports, TestImports and
+  XTestImports). Their targets always get the nogo build, which catches a
+  broken caller. Their tests run only while there are at most
+  AFFECTED_MAX_RDEP_TESTS of them.
+* Direct readers: a test target that lists a changed file itself (`srcs`,
+  `data`). It always runs.
+* Aggregate readers: a test target that reads a changed file through a
+  filegroup, like the repository-wide scanners over `//:repo_go_srcs`. They
+  run only while there are at most AFFECTED_MAX_READER_TESTS of them.
+* The shell guards `make check-go` runs, with formatting scoped to the
+  changed Go files.
+
+The steps run through make: the guards, `lint-targets` (the nogo build),
+`test-bazel-targets` and `test-go-pkgs`. A selected Go package is tested with
+`go test`; a selected test target that is not a `go_test` of a root-module
+package runs under `bazel test`. A changed package without a BUILD file fails
+the run: `make bazel-sync` writes it, and CI's BUILD-sync gate would fail too.
+
+The selection fails closed: a diff touching the Go module, Bazel's module or
+workspace configuration, a `.bzl` file, `tools/`, `third_party/`, the Makefile,
+the linter configuration, a BUILD file outside a Go package, or a Go file
+outside every package `go list` reports runs the full `make check-go`, and so
+does any step of the selection that cannot complete.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+
+FULL_CHECK_NAMES = frozenset(
+    {
+        "go.mod",
+        "go.sum",
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
+        "WORKSPACE",
+        "WORKSPACE.bazel",
+        "WORKSPACE.bzlmod",
+        ".bazelrc",
+        ".bazelversion",
+        ".bazelignore",
+        "Makefile",
+        "GNUmakefile",
+        ".golangci.yml",
+        ".golangci.yaml",
+    }
+)
+FULL_CHECK_SUFFIXES = (".bzl", ".mk", ".work", ".work.sum")
+FULL_CHECK_TREES = ("tools/", "third_party/")
+BUILD_NAMES = ("BUILD.bazel", "BUILD")
+
+GO_LIST_FIELDS = ",".join(
+    [
+        "Dir",
+        "ImportPath",
+        "GoFiles",
+        "CgoFiles",
+        "TestGoFiles",
+        "XTestGoFiles",
+        "Imports",
+        "TestImports",
+        "XTestImports",
+        "EmbedFiles",
+        "TestEmbedFiles",
+        "XTestEmbedFiles",
+    ]
+)
+
+GUARD_TARGETS = (
+    "check-release-dist-ignore",
+    "check-routed-test-rows",
+    "check-split-topology-rows",
+    "check-residency-boundary",
+    "fmt-check-changed",
+)
+
+
+class SelectionError(Exception):
+    """The affected scope could not be selected without losing coverage."""
+
+
+class FullCheck(Exception):
+    """The diff touches something whose effect the selection cannot bound."""
+
+
+class Refusal(Exception):
+    """The diff cannot pass, so no check is worth running."""
+
+
+@dataclass
+class Package:
+    dir: str
+    import_path: str
+    testable: bool
+    imports: frozenset[str]
+    embeds: tuple[str, ...]
+
+
+@dataclass
+class Plan:
+    base: str = ""
+    max_rdep_tests: int = 0
+    max_reader_tests: int = 0
+    merge_base: str = ""
+    changed: list[str] = field(default_factory=list)
+    full_reason: str = ""
+    refusal: str = ""
+    touched: list[str] = field(default_factory=list)
+    build_targets: list[str] = field(default_factory=list)
+    go_test_packages: list[str] = field(default_factory=list)
+    bazel_tests: list[str] = field(default_factory=list)
+    untested_rdeps: list[str] = field(default_factory=list)
+    untested_readers: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+def command_output(args: list[str]) -> bytes:
+    try:
+        completed = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as error:
+        raise SelectionError(f"cannot run {args[0]!r}: {error}") from error
+    if completed.returncode != 0:
+        detail = os.fsdecode(completed.stderr).strip()
+        raise SelectionError(
+            f"{shlex.join(args[:2])} failed with exit {completed.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+    return completed.stdout
+
+
+def int_setting(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    if raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise SelectionError(f"{name}={raw!r} is not a whole number") from error
+    if value < 0:
+        raise SelectionError(f"{name}={raw!r} is negative")
+    return value
+
+
+def changed_paths(merge_base: str) -> list[tuple[str, str]]:
+    output = command_output(
+        [
+            "git",
+            "diff",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            "--diff-filter=ACDMRT",
+            merge_base,
+            "--",
+        ]
+    )
+    fields = output.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    if len(fields) % 2 != 0:
+        raise SelectionError("git produced a malformed NUL-delimited name-status diff")
+    records = {
+        os.fsdecode(fields[index + 1]): os.fsdecode(fields[index])
+        for index in range(0, len(fields), 2)
+    }
+    untracked = command_output(["git", "ls-files", "--others", "--exclude-standard", "-z", "--"])
+    for path in untracked.split(b"\0"):
+        if path:
+            records.setdefault(os.fsdecode(path), "A")
+    for path in records:
+        if not path or os.path.isabs(path) or ".." in path.split("/"):
+            raise SelectionError(f"git produced unsafe path {path!r}")
+    return sorted((status, path) for path, status in records.items())
+
+
+def load_packages() -> dict[str, Package]:
+    go = os.environ.get("GO", "go")
+    output = command_output([go, "list", "-e", f"-json={GO_LIST_FIELDS}", "./..."])
+    root = os.getcwd()
+    decoder = json.JSONDecoder()
+    text = os.fsdecode(output)
+    packages: dict[str, Package] = {}
+    index = 0
+    while True:
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        try:
+            raw, index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError as error:
+            raise SelectionError(f"go list produced malformed JSON: {error}") from error
+        rel = os.path.relpath(raw["Dir"], root).replace(os.sep, "/")
+        if rel == ".." or rel.startswith("../"):
+            raise SelectionError(f"go list reported package {raw['ImportPath']} outside the repository")
+        rel_dir = "" if rel == "." else rel
+        embeds = tuple(
+            f"{rel_dir}/{name}" if rel_dir else name
+            for key in ("EmbedFiles", "TestEmbedFiles", "XTestEmbedFiles")
+            for name in raw.get(key) or ()
+        )
+        packages[rel_dir] = Package(
+            dir=rel_dir,
+            import_path=raw["ImportPath"],
+            testable=any(raw.get(key) for key in ("GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles")),
+            imports=frozenset(
+                name
+                for key in ("Imports", "TestImports", "XTestImports")
+                for name in raw.get(key) or ()
+            ),
+            embeds=embeds,
+        )
+    if not packages:
+        raise SelectionError("go list reported no packages")
+    return packages
+
+
+def parent_dir(path: str) -> str:
+    return path.rsplit("/", 1)[0] if "/" in path else ""
+
+
+def is_go_ignored(path: str) -> bool:
+    """Report whether the go command skips the directories holding path."""
+    return any(
+        part == "testdata" or part.startswith((".", "_"))
+        for part in path.split("/")[:-1]
+    )
+
+
+def bazel_package(path: str) -> str | None:
+    directory = parent_dir(path)
+    while True:
+        if any(os.path.isfile(os.path.join(directory or ".", name)) for name in BUILD_NAMES):
+            return directory
+        if directory == "":
+            return None
+        directory = parent_dir(directory)
+
+
+def bazel_ignored_prefixes() -> list[str]:
+    try:
+        with open(".bazelignore", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except FileNotFoundError:
+        return []
+    return [line.strip().rstrip("/") + "/" for line in lines if line.strip() and not line.startswith("#")]
+
+
+def full_check_reason(path: str, packages: dict[str, Package]) -> str:
+    name = path.rsplit("/", 1)[-1]
+    if name in FULL_CHECK_NAMES or name.endswith(FULL_CHECK_SUFFIXES):
+        return f"{path} configures the build"
+    if path.startswith(FULL_CHECK_TREES):
+        return f"{path} is build tooling"
+    if name in BUILD_NAMES and parent_dir(path) not in packages:
+        return f"{path} is a BUILD file outside a Go package"
+    if name in BUILD_NAMES and parent_dir(path) == "":
+        return f"{path} defines the repository-wide targets"
+    return ""
+
+
+def go_test_arg(directory: str) -> str:
+    return "./" + directory if directory else "."
+
+
+def bazel_all(directory: str) -> str:
+    return f"//{directory}:all"
+
+
+def query_test_targets(bazel: str, labels: list[str], aggregate: bool) -> list[tuple[str, str]]:
+    files = " ".join(json.dumps(label) for label in labels)
+    if aggregate:
+        expression = f'kind("_test rule$", rdeps(//..., kind(filegroup, rdeps(//..., set({files}))), 1))'
+    else:
+        expression = f'kind("_test rule$", rdeps(//..., set({files}), 1))'
+    output = os.fsdecode(command_output([bazel, "query", "--output=label_kind", expression]))
+    targets = []
+    for line in output.splitlines():
+        words = line.split()
+        if not words:
+            continue
+        if len(words) != 3 or words[1] != "rule":
+            raise SelectionError(f"bazel query produced an unexpected line {line!r}")
+        targets.append((words[0], words[2]))
+    return targets
+
+
+def target_package(label: str) -> str:
+    if not label.startswith("//") or ":" not in label:
+        raise SelectionError(f"bazel query produced a label outside the main repository: {label!r}")
+    return label[2:].split(":", 1)[0]
+
+
+def select(plan: Plan) -> None:
+    plan.max_rdep_tests = max_rdep_tests = int_setting("AFFECTED_MAX_RDEP_TESTS", 5)
+    plan.max_reader_tests = max_reader_tests = int_setting("AFFECTED_MAX_READER_TESTS", 5)
+    bazel = os.environ.get("AFFECTED_BAZEL", "bazel")
+
+    plan.merge_base = os.fsdecode(
+        command_output(["git", "merge-base", plan.base, "HEAD"])
+    ).strip()
+    records = changed_paths(plan.merge_base)
+    plan.changed = [path for _, path in records]
+    if not records:
+        return
+
+    packages = load_packages()
+    for _, path in records:
+        reason = full_check_reason(path, packages)
+        if reason:
+            raise FullCheck(reason)
+    if shutil.which(bazel) is None:
+        raise FullCheck(f"{bazel!r} is not on PATH, so nogo cannot lint the affected packages")
+
+    embedded_by = {embed: pkg.dir for pkg in packages.values() for embed in pkg.embeds}
+    ignored = bazel_ignored_prefixes()
+    code_touched: set[str] = set()
+    test_touched: set[str] = set()
+    labels: list[str] = []
+    for status, path in records:
+        name = path.rsplit("/", 1)[-1]
+        directory = parent_dir(path)
+        if path.endswith(".go") and not is_go_ignored(path):
+            if directory not in packages:
+                raise FullCheck(
+                    f"{path} is outside every package go list reports (a deleted package or another module)"
+                )
+            code_touched.add(directory)
+        elif name in BUILD_NAMES:
+            code_touched.add(directory)
+        elif path in embedded_by:
+            code_touched.add(embedded_by[path])
+        if status == "D" or not os.path.lexists(path):
+            if not path.endswith(".go") or is_go_ignored(path):
+                owner = directory
+                while owner not in packages and owner != "":
+                    owner = parent_dir(owner)
+                if owner in packages:
+                    test_touched.add(owner)
+            continue
+        if any(path.startswith(prefix) for prefix in ignored):
+            continue
+        package = bazel_package(path)
+        if package is None:
+            continue
+        if any(char in path for char in '"\n\r\\'):
+            raise FullCheck(f"{path!r} cannot be written as a Bazel label")
+        target = path[len(package) + 1 :] if package else path
+        labels.append(f"//{package}:{target}")
+
+    plan.touched = sorted(go_test_arg(directory) for directory in code_touched)
+    test_pkgs = set(code_touched) | test_touched
+    bazel_tests: set[str] = set()
+    plan_notes = plan.notes
+
+    def place(kind: str, label: str, into_pkgs: set[str], into_bazel: set[str]) -> None:
+        package = target_package(label)
+        if kind == "go_test" and package in packages:
+            if packages[package].testable:
+                into_pkgs.add(package)
+            else:
+                note = f"{label}: package has no untagged Go files; the tagged tiers cover it"
+                if note not in plan_notes:
+                    plan_notes.append(note)
+        else:
+            into_bazel.add(label)
+
+    if labels:
+        for kind, label in query_test_targets(bazel, labels, aggregate=False):
+            place(kind, label, test_pkgs, bazel_tests)
+
+    importers = {
+        pkg.dir
+        for pkg in packages.values()
+        if pkg.dir not in code_touched
+        and pkg.imports & {packages[directory].import_path for directory in code_touched}
+    }
+    rdep_tests = {directory for directory in importers if packages[directory].testable} - test_pkgs
+    if len(rdep_tests) <= max_rdep_tests:
+        test_pkgs |= rdep_tests
+    else:
+        plan.untested_rdeps = sorted(go_test_arg(directory) for directory in rdep_tests)
+
+    if labels and max_reader_tests > 0:
+        reader_pkgs: set[str] = set()
+        reader_bazel: set[str] = set()
+        for kind, label in query_test_targets(bazel, labels, aggregate=True):
+            place(kind, label, reader_pkgs, reader_bazel)
+        reader_pkgs -= test_pkgs
+        reader_bazel -= bazel_tests
+        if len(reader_pkgs) + len(reader_bazel) <= max_reader_tests:
+            test_pkgs |= reader_pkgs
+            bazel_tests |= reader_bazel
+        else:
+            plan.untested_readers = sorted(
+                [go_test_arg(directory) for directory in reader_pkgs] + list(reader_bazel)
+            )
+
+    missing_build = sorted(
+        directory
+        for directory in code_touched | importers
+        if not any(os.path.isfile(os.path.join(directory or ".", name)) for name in BUILD_NAMES)
+    )
+    if missing_build:
+        raise Refusal(
+            "no BUILD.bazel for "
+            + " ".join(go_test_arg(directory) for directory in missing_build)
+            + "; run 'make bazel-sync'"
+        )
+    plan.build_targets = sorted(bazel_all(directory) for directory in code_touched | importers)
+    plan.go_test_packages = sorted(go_test_arg(directory) for directory in test_pkgs)
+    plan.bazel_tests = sorted(bazel_tests)
+
+
+def make_plan() -> Plan:
+    plan = Plan(base=os.environ.get("AFFECTED_BASE") or "origin/HEAD")
+    try:
+        select(plan)
+    except FullCheck as reason:
+        plan.full_reason = str(reason)
+    except Refusal as reason:
+        plan.refusal = str(reason)
+    except SelectionError as error:
+        plan.full_reason = f"selection failed: {error}"
+    return plan
+
+
+def print_plan(plan: Plan) -> None:
+    def say(line: str) -> None:
+        print(f"affected-preflight: {line}", flush=True)
+
+    say(f"base {plan.base}" + (f" (merge base {plan.merge_base[:12]})" if plan.merge_base else ""))
+    if plan.full_reason:
+        say(f"full check: {plan.full_reason}")
+        return
+    if plan.refusal:
+        say(f"refused: {plan.refusal}")
+        return
+    say(f"{len(plan.changed)} changed path(s)")
+    for title, items in (
+        ("touched packages", plan.touched),
+        ("nogo build", plan.build_targets),
+        ("go test", plan.go_test_packages),
+        ("bazel test", plan.bazel_tests),
+    ):
+        say(f"{title}: {' '.join(items) if items else '(none)'}")
+    if plan.untested_rdeps:
+        say(
+            f"importer tests not run ({len(plan.untested_rdeps)} > AFFECTED_MAX_RDEP_TESTS={plan.max_rdep_tests}; "
+            f"nogo still builds them): {' '.join(plan.untested_rdeps)}"
+        )
+    if plan.untested_readers:
+        say(
+            f"aggregate-reader tests not run ({len(plan.untested_readers)} > AFFECTED_MAX_READER_TESTS={plan.max_reader_tests}): "
+            f"{' '.join(plan.untested_readers)}"
+        )
+    for note in plan.notes:
+        say(note)
+
+
+def run_step(args: list[str]) -> int:
+    print(f"affected-preflight: + {shlex.join(args)}", flush=True)
+    try:
+        return subprocess.run(args).returncode
+    except OSError as error:
+        print(f"affected-preflight: cannot run {args[0]!r}: {error}", file=sys.stderr)
+        return 127
+
+
+def run(plan: Plan) -> int:
+    make = shlex.split(os.environ.get("AFFECTED_MAKE") or "make")
+    if plan.refusal:
+        return 1
+    if plan.full_reason:
+        return run_step([*make, "check-go"])
+    steps = [
+        [
+            *make,
+            *GUARD_TARGETS,
+            "LINT_CHANGED_SCOPE=worktree",
+            f"LINT_CHANGED_REF={plan.merge_base}",
+        ]
+    ]
+    if plan.build_targets:
+        steps.append([*make, "lint-targets", f"LINT_TARGETS={' '.join(plan.build_targets)}"])
+    if plan.bazel_tests:
+        steps.append([*make, "test-bazel-targets", f"BAZEL_TEST_TARGETS={' '.join(plan.bazel_tests)}"])
+    if plan.go_test_packages:
+        steps.append([*make, "test-go-pkgs", f"GO_TEST_PKGS={' '.join(plan.go_test_packages)}"])
+    for step in steps:
+        status = run_step(step)
+        if status != 0:
+            return status
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2 or argv[1] not in {"plan", "run"}:
+        print("usage: affected-preflight plan|run", file=sys.stderr)
+        return 2
+    try:
+        top = os.fsdecode(command_output(["git", "rev-parse", "--show-toplevel"])).strip()
+    except SelectionError as error:
+        print(f"affected-preflight: {error}", file=sys.stderr)
+        return 2
+    os.chdir(top)
+    plan = make_plan()
+    print_plan(plan)
+    if argv[1] == "plan":
+        return 0
+    return run(plan)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
