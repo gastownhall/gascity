@@ -189,12 +189,19 @@ func (f providerAuthFinding) fixHint() string {
 }
 
 // referencedReadinessProviders maps each readiness probe name to the sorted
-// provider keys the city references through it, using the same reference
-// set and probe mapping as gc init's provider preflight. References that no
-// readiness probe can verify are omitted.
+// provider keys the city references through it, using gc init's reference
+// rules and probe mapping. Implicit agents, which config loading injects for
+// every [providers.*] entry, do not count as references: listing a provider
+// is not using it. References that no readiness probe can verify are omitted.
 func referencedReadinessProviders(cfg *config.City) map[string][]string {
+	declared := make([]config.Agent, 0, len(cfg.Agents))
+	for _, agent := range cfg.Agents {
+		if !agent.Implicit {
+			declared = append(declared, agent)
+		}
+	}
 	referenced := make(map[string][]string)
-	for _, ref := range explicitProviderRefs(cfg) {
+	for _, ref := range providerRefsFor(cfg.Workspace.Provider, declared) {
 		probe := providerReadinessProbeName(ref, cfg)
 		if probe == "" {
 			continue

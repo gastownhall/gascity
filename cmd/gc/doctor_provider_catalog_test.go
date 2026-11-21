@@ -271,3 +271,31 @@ base = "builtin:claude"
 		t.Fatalf("doctor result does not name the logged-out provider: message=%q details=%v", result.Message, result.Details)
 	}
 }
+
+func TestProviderCatalogReadinessAdvisoryIgnoresNeedsAuthForUnreferencedProvider(t *testing.T) {
+	cityDir := writeDoctorCityToml(t, `[workspace]
+provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.gemini]
+base = "builtin:gemini"
+`)
+	stubProviderReadiness(t, map[string]api.ReadinessItem{
+		"claude": {Name: "claude", DisplayName: "Claude Code", Status: api.ProbeStatusConfigured},
+		"gemini": {Name: "gemini", DisplayName: "Gemini CLI", Status: api.ProbeStatusNeedsAuth, Detail: "gemini is installed but not signed in"},
+	})
+
+	result := runProviderReadinessAdvisory(cityDir)
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v (message %q), want OK", result.Status, result.Message)
+	}
+	if want := "configured local providers are explicit"; result.Message != want {
+		t.Fatalf("message = %q, want %q", result.Message, want)
+	}
+	report := strings.ToLower(result.Message + "\n" + strings.Join(result.Details, "\n") + "\n" + result.FixHint)
+	if strings.Contains(report, "gemini") {
+		t.Fatalf("unreferenced gemini must not be reported: message=%q details=%q hint=%q", result.Message, result.Details, result.FixHint)
+	}
+}

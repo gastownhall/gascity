@@ -334,13 +334,20 @@ func collectInitProviderTargets(cfg *config.City) ([]initProviderTarget, []strin
 }
 
 func explicitProviderRefs(cfg *config.City) []string {
+	return providerRefsFor(cfg.Workspace.Provider, cfg.Agents)
+}
+
+// providerRefsFor returns the sorted, unique provider names referenced by the
+// workspace provider and by agents that do not override their command with
+// start_command.
+func providerRefsFor(workspaceProvider string, agents []config.Agent) []string {
 	seen := make(map[string]struct{})
 	var refs []string
-	if name := strings.TrimSpace(cfg.Workspace.Provider); name != "" {
+	if name := strings.TrimSpace(workspaceProvider); name != "" {
 		seen[name] = struct{}{}
 		refs = append(refs, name)
 	}
-	for _, agent := range cfg.Agents {
+	for _, agent := range agents {
 		if agent.StartCommand != "" {
 			continue
 		}
