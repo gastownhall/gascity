@@ -1541,11 +1541,11 @@ type graphStepTarget struct {
 	fromAssignee bool
 }
 
-func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
-	return resolveGraphStepBindingWithVars(stepID, stepByID, stepAlias, depsByStep, cache, resolving, nil, fallback, rigContext, store, cityName, cityPath, cfg)
+func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, sessions beads.SessionStore, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
+	return resolveGraphStepBindingWithVars(stepID, stepByID, stepAlias, depsByStep, cache, resolving, nil, fallback, rigContext, sessions, cityName, cityPath, cfg)
 }
 
-func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, routeVars map[string]string, fallback graphRouteBinding, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
+func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, routeVars map[string]string, fallback graphRouteBinding, rigContext string, sessions beads.SessionStore, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
 	if aliased, ok := stepAlias[stepID]; ok {
 		stepID = aliased
 	}
@@ -1568,7 +1568,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		case "scope-check":
 			controlTarget := strings.TrimSpace(step.Metadata[beadmeta.ControlForMetadataKey])
 			if controlTarget != "" {
-				binding, err := resolveGraphStepBindingWithVars(controlTarget, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cityPath, cfg)
+				binding, err := resolveGraphStepBindingWithVars(controlTarget, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, sessions, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1578,7 +1578,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		case "fanout":
 			controlTarget := strings.TrimSpace(step.Metadata[beadmeta.ControlForMetadataKey])
 			if controlTarget != "" {
-				binding, err := resolveGraphStepBindingWithVars(controlTarget, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cityPath, cfg)
+				binding, err := resolveGraphStepBindingWithVars(controlTarget, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, sessions, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1607,7 +1607,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 				subjectID = depsByStep[step.ID][0]
 			}
 			if subjectID != "" {
-				binding, err := resolveGraphStepBindingWithVars(subjectID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cityPath, cfg)
+				binding, err := resolveGraphStepBindingWithVars(subjectID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, sessions, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1621,7 +1621,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 				if depID == "" {
 					continue
 				}
-				binding, err := resolveGraphStepBindingWithVars(depID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cityPath, cfg)
+				binding, err := resolveGraphStepBindingWithVars(depID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, sessions, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1647,8 +1647,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		return graphRouteBinding{}, fmt.Errorf("formulas v2 routing for %s requires config", stepID)
 	}
 	if target.fromAssignee {
-		// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
-		binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(beads.SessionStore{Store: store}, cityName, cfg, target.value, rigContext, cliGraphrouteDeps(cityPath))
+		binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(sessions, cityName, cfg, target.value, rigContext, cliGraphrouteDeps(cityPath))
 		if err != nil {
 			return graphRouteBinding{}, fmt.Errorf("step %s: %w", stepID, err)
 		}
@@ -1667,7 +1666,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		cache[stepID] = binding
 		return binding, nil
 	}
-	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
+	sn := lookupSessionNameOrLegacyIn(sessions, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
 	if sn == "" {
 		return graphRouteBinding{}, fmt.Errorf("step %s: could not resolve session name for %q", stepID, agentCfg.QualifiedName())
 	}

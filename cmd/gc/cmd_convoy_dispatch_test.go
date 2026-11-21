@@ -1580,7 +1580,7 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, beadstest.Sessions(store), cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -1717,7 +1717,7 @@ func TestDecorateDrainItemRecipeUsesDirectExecutionRoute(t *testing.T) {
 		},
 	}
 
-	if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+	if err := decorateDrainItemRecipe(recipe, source, beadstest.Sessions(store), "city:test", "test", t.TempDir(), cfg); err != nil {
 		t.Fatalf("decorateDrainItemRecipe: %v", err)
 	}
 	work := recipe.StepByID("item.work")
@@ -1790,7 +1790,7 @@ func TestDecorateDrainItemRecipeDoesNotFallbackToControllerAssignee(t *testing.T
 		},
 	}
 
-	if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+	if err := decorateDrainItemRecipe(recipe, source, beadstest.Sessions(store), "city:test", "test", t.TempDir(), cfg); err != nil {
 		t.Fatalf("decorateDrainItemRecipe: %v", err)
 	}
 	work := recipe.StepByID("item.work")
@@ -1902,7 +1902,7 @@ func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *t
 				},
 			}
 
-			if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+			if err := decorateDrainItemRecipe(recipe, source, beadstest.Sessions(store), "city:test", "test", t.TempDir(), cfg); err != nil {
 				t.Fatalf("decorateDrainItemRecipe: %v", err)
 			}
 
@@ -3515,7 +3515,7 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, beadstest.Sessions(store), cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -3600,7 +3600,7 @@ func TestDecorateDynamicFragmentRecipeOneShotPoolFallbackLeavesStepsIndependent(
 		}},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, beadstest.Sessions(store), cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -3660,7 +3660,7 @@ func TestDecorateDynamicFragmentRecipePerStepOneShotPoolTargetLeavesStepIndepend
 		}},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, beadstest.Sessions(store), cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -3706,7 +3706,7 @@ func TestDecorateDynamicFragmentRecipeControlRouteUsesOwningStoreScope(t *testin
 		}},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, beadstest.Sessions(store), cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 	check := fragment.Steps[1]
@@ -3853,7 +3853,7 @@ func TestDecorateDynamicFragmentRecipeUsesDirectExecutionRoute(t *testing.T) {
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, t.TempDir(), cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, beadstest.Sessions(store), cfg.Workspace.Name, t.TempDir(), cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 	steps := map[string]formula.RecipeStep{}
@@ -3921,7 +3921,7 @@ func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t 
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, beadstest.Sessions(store), cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -3979,7 +3979,7 @@ func TestDecorateDynamicFragmentRecipeMarksRetryEvalAsScopedControl(t *testing.T
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, beadstest.Sessions(store), cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -8414,7 +8414,7 @@ func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, beadstest.Sessions(store), cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -8500,7 +8500,7 @@ func TestResolveGraphStepBindingWorkflowFinalizeUsesFallback(t *testing.T) {
 		SessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate),
 	}
 
-	binding, err := resolveGraphStepBinding("demo.workflow-finalize", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, "", cfg)
+	binding, err := resolveGraphStepBinding("demo.workflow-finalize", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", beadstest.Sessions(store), cfg.Workspace.Name, "", cfg)
 	if err != nil {
 		t.Fatalf("resolveGraphStepBinding(workflow-finalize): %v", err)
 	}
@@ -8550,7 +8550,7 @@ func TestResolveGraphStepBindingCheckRejectsInconsistentDeps(t *testing.T) {
 		SessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "reviewer-a", cfg.Workspace.SessionTemplate),
 	}
 
-	if _, err := resolveGraphStepBinding("demo.check", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, "", cfg); err == nil || !strings.Contains(err.Error(), "inconsistent control routing") {
+	if _, err := resolveGraphStepBinding("demo.check", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", beadstest.Sessions(store), cfg.Workspace.Name, "", cfg); err == nil || !strings.Contains(err.Error(), "inconsistent control routing") {
 		t.Fatalf("resolveGraphStepBinding(check) error = %v, want inconsistent control routing", err)
 	}
 }
@@ -8600,7 +8600,7 @@ func TestResolveGraphStepBindingRetryEvalUsesDependencyRoute(t *testing.T) {
 		SessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "control-dispatcher", cfg.Workspace.SessionTemplate),
 	}
 
-	binding, err := resolveGraphStepBinding("demo.review.eval.1", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, "", cfg)
+	binding, err := resolveGraphStepBinding("demo.review.eval.1", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", beadstest.Sessions(store), cfg.Workspace.Name, "", cfg)
 	if err != nil {
 		t.Fatalf("resolveGraphStepBinding(retry-eval): %v", err)
 	}

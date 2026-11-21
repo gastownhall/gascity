@@ -488,10 +488,6 @@ cmd/gc/cmd_convoy_dispatch.go	controlGraphBinding	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	controlScopeTakesGraphClass	cap-assert	1
-cmd/gc/cmd_convoy_dispatch.go	decorateDrainItemRecipe	mint	1
-cmd/gc/cmd_convoy_dispatch.go	decorateDrainItemRecipe	raw-param	1
-cmd/gc/cmd_convoy_dispatch.go	decorateDynamicFragmentRecipe	mint	1
-cmd/gc/cmd_convoy_dispatch.go	decorateDynamicFragmentRecipe	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	deleteWorkflowBead	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	deleteWorkflowBeadUnguarded	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	deleteWorkflowBeads	raw-param	1
@@ -506,8 +502,6 @@ cmd/gc/cmd_convoy_dispatch.go	findWorkflowBeads	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	findWorkflowBeadsFromRoot	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	graphBindingResidentScope	cap-assert	1
 cmd/gc/cmd_convoy_dispatch.go	graphBindingResidentScope	raw-result	1
-cmd/gc/cmd_convoy_dispatch.go	graphFallbackBindingForBead	mint	1
-cmd/gc/cmd_convoy_dispatch.go	graphFallbackBindingForBead	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	makeSourceWorkflowStoresLister	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	makeSourceWorkflowStoresListerWithOpenStore	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	makeStoreRefResolver	raw-result	2
@@ -699,9 +693,6 @@ cmd/gc/cmd_sling.go	openSlingCityStore	raw-result	1
 cmd/gc/cmd_sling.go	openSlingStore	raw-result	1
 cmd/gc/cmd_sling.go	openSlingStoreForSource	raw-result	1
 cmd/gc/cmd_sling.go	printNudgePreview	raw-param	1
-cmd/gc/cmd_sling.go	resolveGraphStepBinding	raw-param	1
-cmd/gc/cmd_sling.go	resolveGraphStepBindingWithVars	mint	1
-cmd/gc/cmd_sling.go	resolveGraphStepBindingWithVars	raw-param	1
 cmd/gc/cmd_sling.go	resolveInlineBeadAction	raw-param	1
 cmd/gc/cmd_sling.go	slingCityStore	raw-field	2
 cmd/gc/cmd_sling.go	slingFixedNudge	raw-param	1

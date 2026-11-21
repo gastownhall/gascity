@@ -1091,6 +1091,17 @@ func lookupSessionNameOrLegacy(store beads.Store, cityName, qualifiedName, sessi
 	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate)
 }
 
+// lookupSessionNameOrLegacyIn is lookupSessionNameOrLegacy over a sessions
+// handle: a zero handle has no session rows to read, so it falls straight
+// back to the legacy name.
+func lookupSessionNameOrLegacyIn(sessions beads.SessionStore, cityName, qualifiedName, sessionTemplate string) string {
+	var store beads.Store
+	if sessions != (beads.SessionStore{}) {
+		store = sessions
+	}
+	return lookupSessionNameOrLegacy(store, cityName, qualifiedName, sessionTemplate)
+}
+
 // lookupPoolSessionNames returns bead-backed session names for pool instances
 // under the given template-qualified agent. The result maps the logical
 // instance qualified name (for example "frontend/worker-1") to the actual
