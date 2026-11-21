@@ -5899,11 +5899,22 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		if usedSlots[0] {
 			return 0, fmt.Errorf("%w: canonical pool template %q is already selected", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
 		}
+		canonicalName := strings.TrimSpace(cfgAgent.QualifiedName())
 		for _, info := range occupancyInfos {
 			if isFailedCreateSessionInfo(info) {
 				continue
 			}
-			if infoIdentifiesAsCanonical(info, cfgAgent.QualifiedName()) {
+			if infoIdentifiesAsCanonical(info, canonicalName) {
+				// A manual session holds the canonical seat only through a
+				// name it explicitly claimed (its own alias or session_name);
+				// identifiers derived from its template never hold the pool's
+				// identity lease (issue #8945). The create still defers its
+				// public alias while the manual holder keeps the name.
+				if isManualSessionInfoForAgent(info, cfgAgent) &&
+					strings.TrimSpace(info.Alias) != canonicalName &&
+					strings.TrimSpace(info.SessionNameMetadata) != canonicalName {
+					continue
+				}
 				return 0, fmt.Errorf("%w: canonical pool template %q is held by session %s", errPoolSessionNameUnavailable, cfgAgent.QualifiedName(), info.ID)
 			}
 		}
