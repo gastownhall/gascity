@@ -450,14 +450,25 @@ func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo
 	return WaitInfoFromBead(created), nil
 }
 
+// waitCancelBatchSize caps each CloseAll that CancelWaits issues under a
+// cancellable context, so cancellation is observed between small batches.
+const waitCancelBatchSize = 10
+
 // CancelWaits marks all non-terminal waits for the session canceled (closing the
 // terminal ones idempotently) and returns every queued wait-nudge ID discovered
 // across capped lookup pages, plus whether any lookup page was capped.
+//
+// A cancellable ctx is checked before each lookup and before each CloseAll,
+// and each CloseAll then covers at most waitCancelBatchSize waits. Once
+// cancellation is observed CancelWaits returns the nudge IDs and cap it has
+// accumulated with an error wrapping ctx.Err(); waits it did not reach stay
+// open. A store call already in flight is not interrupted. A ctx that can
+// never be canceled closes each ID class of a lookup page in one CloseAll.
 func (s *Store) CancelWaits(ctx context.Context, sessionID string, now time.Time) (nudgeIDs []string, capped bool, err error) {
 	return s.cancelWaitsAndCollectNudgeIDs(ctx, sessionID, now)
 }
 
-func (s *Store) cancelWaitsAndCollectNudgeIDs(_ context.Context, sessionID string, now time.Time) ([]string, bool, error) {
+func (s *Store) cancelWaitsAndCollectNudgeIDs(ctx context.Context, sessionID string, now time.Time) ([]string, bool, error) {
 	ids := []string(nil)
 	seen := map[string]bool{}
 	capped := false
@@ -466,6 +477,9 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(_ context.Context, sessionID strin
 		"canceled_at": now.UTC().Format(time.RFC3339),
 	}
 	for {
+		if err := waitCancelCheckpoint(ctx, sessionID); err != nil {
+			return ids, capped, err
+		}
 		waits, err := s.WaitsForSession(sessionID)
 		if err != nil && !beads.IsLookupLimitError(err) {
 			return ids, capped, err
@@ -485,15 +499,11 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(_ context.Context, sessionID strin
 			}
 			cancelIDs = append(cancelIDs, wait.ID)
 		}
-		if len(cancelIDs) > 0 {
-			if _, err := s.store.CloseAll(cancelIDs, canceledMetadata); err != nil {
-				return ids, capped, err
-			}
+		if err := s.closeWaitBatches(ctx, sessionID, cancelIDs, canceledMetadata); err != nil {
+			return ids, capped, err
 		}
-		if len(terminalIDs) > 0 {
-			if _, err := s.store.CloseAll(terminalIDs, nil); err != nil {
-				return ids, capped, err
-			}
+		if err := s.closeWaitBatches(ctx, sessionID, terminalIDs, nil); err != nil {
+			return ids, capped, err
 		}
 		canceled := len(cancelIDs) + len(terminalIDs)
 		if !lookupCapped {
@@ -503,6 +513,35 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(_ context.Context, sessionID strin
 			return ids, capped, err
 		}
 	}
+}
+
+// closeWaitBatches closes ids with metadata, checking ctx before each batch.
+// A cancellable ctx gets batches of at most waitCancelBatchSize; a ctx that can
+// never be canceled gets one CloseAll, since smaller batches buy it nothing.
+func (s *Store) closeWaitBatches(ctx context.Context, sessionID string, ids []string, metadata map[string]string) error {
+	batchSize := len(ids)
+	if ctx.Done() != nil {
+		batchSize = waitCancelBatchSize
+	}
+	for start := 0; start < len(ids); start += batchSize {
+		if err := waitCancelCheckpoint(ctx, sessionID); err != nil {
+			return err
+		}
+		end := min(start+batchSize, len(ids))
+		if _, err := s.store.CloseAll(ids[start:end], metadata); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// waitCancelCheckpoint reports ctx's cancellation as a wait-cancellation stop
+// for sessionID.
+func waitCancelCheckpoint(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("canceling waits for session %s stopped: %w", sessionID, err)
+	}
+	return nil
 }
 
 // ReassignWaits moves open non-terminal waits from one session bead ID to another
