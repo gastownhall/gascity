@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -27,6 +28,9 @@ type exactClaimFixture struct {
 	// revision, when set, is the revision fence claims write through in
 	// place of the store itself.
 	revision beads.ConditionalWriter
+	// assignment, when set, is the only fence claims write through: the
+	// store offers no revision fence.
+	assignment beads.AssignmentGuardedUpdater
 }
 
 func newExactClaimFixture(t *testing.T) *exactClaimFixture {
@@ -59,6 +63,9 @@ func (f *exactClaimFixture) add(stored, observed beads.Bead) {
 }
 
 func (f *exactClaimFixture) writers() molecule.ClaimExactWriters {
+	if f.assignment != nil {
+		return molecule.ClaimExactWriters{Assignment: f.assignment}
+	}
 	if f.revision != nil {
 		return molecule.ClaimExactWriters{Revision: f.revision}
 	}
@@ -486,5 +493,117 @@ func TestHookClaimExactClaimsThroughAssignmentGuardWithoutRevisionFence(t *testi
 		if strings.Contains(strings.Join(cmd, " "), "--claim") {
 			t.Fatalf("exact claim issued a --claim: %q", cmd)
 		}
+	}
+}
+
+// memAssignmentGuard is bd's --if-status/--if-assignee guard over a MemStore.
+// beforeWrite, when set, runs between the claim's read and its guarded write.
+type memAssignmentGuard struct {
+	store       *beads.MemStore
+	beforeWrite func()
+}
+
+func (g *memAssignmentGuard) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts beads.UpdateOpts) (bool, error) {
+	if g.beforeWrite != nil {
+		g.beforeWrite()
+	}
+	b, err := g.store.Get(id)
+	if err != nil {
+		return false, err
+	}
+	if b.Status != expectedStatus || b.Assignee != expectedAssignee {
+		return false, nil
+	}
+	return true, g.store.Update(id, opts)
+}
+
+// TestHookClaimExactReleasesAClaimWhoseObservationMoved: on a store with only
+// the assignment guard, the guarded write lands but the readback shows a step
+// identity key that moved after the work query observed it. The hook gives
+// the bead back through the assignee-CAS release, records the release with
+// reason observation_moved, writes no receipt for it, and goes on to the next
+// candidate; only a failed release exits 1.
+func TestHookClaimExactReleasesAClaimWhoseObservationMoved(t *testing.T) {
+	const self = "gc__role-mc-sess1"
+	meta := func() map[string]string {
+		m := graphStepMeta("build")
+		m[beadmeta.ContinuationGroupMetadataKey] = "group-1"
+		return m
+	}
+	for _, tc := range []struct {
+		name       string
+		key, moved string
+		releaseErr error
+	}{
+		{name: "step_id", key: beadmeta.StepIDMetadataKey, moved: "test"},
+		{name: "root_bead_id", key: beadmeta.RootBeadIDMetadataKey, moved: "root-2"},
+		{name: "routed_to", key: beadmeta.RoutedToMetadataKey, moved: "other"},
+		{name: "continuation_group", key: beadmeta.ContinuationGroupMetadataKey, moved: "group-2"},
+		{name: "release fails", key: beadmeta.StepIDMetadataKey, moved: "test", releaseErr: errors.New("bd unreachable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExactClaimFixture(t)
+			f.add(beads.Bead{ID: "work-1", Title: "moving", Status: "open", Metadata: meta()},
+				beads.Bead{ID: "work-1", Status: "open", Metadata: meta()})
+			f.add(beads.Bead{ID: "work-2", Title: "next", Status: "open", Metadata: graphStepMeta("build")},
+				beads.Bead{ID: "work-2", Status: "open", Metadata: graphStepMeta("build")})
+			moved := false
+			f.assignment = &memAssignmentGuard{store: f.store, beforeWrite: func() {
+				if moved {
+					return
+				}
+				moved = true
+				if err := f.store.SetMetadata("work-1", tc.key, tc.moved); err != nil {
+					t.Fatalf("move %s: %v", tc.key, err)
+				}
+			}}
+			var released []hookClaimReleaseRecord
+			var releaseCalls []string
+			ops := f.ops()
+			ops.Release = func(_ context.Context, _ string, _ []string, id, assignee string) (bool, error) {
+				releaseCalls = append(releaseCalls, id+"/"+assignee)
+				if tc.releaseErr != nil {
+					return false, tc.releaseErr
+				}
+				open, empty := "open", ""
+				return true, f.store.Update(id, beads.UpdateOpts{Status: &open, Assignee: &empty})
+			}
+			ops.EmitClaimReleased = func(r hookClaimReleaseRecord) { released = append(released, r) }
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr)
+			if len(releaseCalls) != 1 || releaseCalls[0] != "work-1/"+self {
+				t.Fatalf("release calls = %q, want work-1 released as %s; stderr=%s", releaseCalls, self, stderr.String())
+			}
+			if strings.Contains(stdout.String(), `"bead_id":"work-1"`) {
+				t.Fatalf("hook wrote a receipt for the moved claim: %s", stdout.String())
+			}
+			if tc.releaseErr != nil {
+				if code != 1 {
+					t.Fatalf("doHookClaim = %d, want 1 after a failed release; stderr=%s", code, stderr.String())
+				}
+				if len(released) != 0 {
+					t.Fatalf("released events = %+v, want none for a failed release", released)
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("doHookClaim = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			want := hookClaimReleaseRecord{BeadID: "work-1", Assignee: self, Reason: "observation_moved"}
+			if len(released) != 1 || released[0] != want {
+				t.Fatalf("released events = %+v, want [%+v]", released, want)
+			}
+			if got := f.get("work-1"); got.Status != "open" || got.Assignee != "" {
+				t.Fatalf("work-1 = status %q assignee %q, want released", got.Status, got.Assignee)
+			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("decode result %q: %v", stdout.String(), err)
+			}
+			if result.Action != "work" || result.BeadID != "work-2" {
+				t.Fatalf("result = %+v, want work on work-2", result)
+			}
+		})
 	}
 }

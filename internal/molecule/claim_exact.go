@@ -67,6 +67,12 @@ const (
 	// bead (e.g. compare its own execution identity against what's there)
 	// rather than rely on ClaimExact to re-apply effects silently.
 	ClaimExactStale ClaimExactOutcome = "stale"
+	// ClaimExactObservationMoved means an assignment-tier write landed, so
+	// the caller now holds the bead, but its readback shows a step, root,
+	// route or group key differing from want, or a claim generation other
+	// than the one this call wrote: the bead the claim was decided on moved
+	// under it. The caller must give the bead back.
+	ClaimExactObservationMoved ClaimExactOutcome = "observation_moved"
 )
 
 // ClaimExactReader is the read half of an exact claim: the one-bead Get the
@@ -197,9 +203,10 @@ func ClaimExact(store beads.MoleculeTarget, id string, want ClaimExactPreconditi
 //     and Assignee, which must both be set. Status and assignee, the facts
 //     that define ownership, are fenced inside the write, so two claimants
 //     cannot both win; the other preconditions and the generation are checked
-//     at read time. A guard that no longer holds is ClaimExactStale. Its
-//     residue is ABA: another actor claiming and releasing the bead between
-//     this call's read and its write.
+//     at read time and again on the readback, where a mismatch is
+//     ClaimExactObservationMoved. A guard that no longer holds is
+//     ClaimExactStale. Its residue is ABA: another actor claiming and
+//     releasing the bead between this call's read and its write.
 //
 // With neither tier available the call writes nothing and returns an error
 // wrapping beads.ErrConditionalWriteUnsupported: there is no unconditional
@@ -260,7 +267,22 @@ func ClaimExactWithWriters(reader ClaimExactReader, writers ClaimExactWriters, r
 	if !landed {
 		return ClaimExactResult{Bead: bestEffortGet(reader, id, b), Outcome: ClaimExactStale}, nil
 	}
-	return claimExactReadback(reader, id, b, ClaimExactFenceAssignment)
+	res, err := claimExactReadback(reader, id, b, ClaimExactFenceAssignment)
+	if err == nil && !claimExactObservationHolds(res.Bead, req.Want, toGeneration) {
+		res.Outcome = ClaimExactObservationMoved
+	}
+	return res, err
+}
+
+// claimExactObservationHolds reports whether an assignment-tier readback still
+// carries want's identity keys (everything but the status and assignee the
+// guard fenced, which the claim itself changed) and the generation the claim
+// wrote.
+func claimExactObservationHolds(b beads.Bead, want ClaimExactPreconditions, toGeneration string) bool {
+	identity := want
+	identity.Status, identity.Assignee = nil, nil
+	return claimExactPreconditionsMatch(b, identity) &&
+		b.Metadata[beadmeta.ClaimGenerationMetadataKey] == toGeneration
 }
 
 // claimExactReadback re-reads a claim whose write landed through fence. A
