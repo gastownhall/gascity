@@ -3238,3 +3238,56 @@ func TestCloseSessionBindingsClosesGroupParticipants(t *testing.T) {
 		t.Fatalf("open participants(after CloseSessionBindings) = %#v, want []", got)
 	}
 }
+
+// participantSweepProbeStore cancels a context when the binding lookup for a
+// session runs, and records whether a residual-participant lookup started.
+type participantSweepProbeStore struct {
+	*beads.MemStore
+	sessionID         string
+	cancel            context.CancelFunc
+	participantListed bool
+}
+
+func (s *participantSweepProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	switch query.Label {
+	case bindingSessionLabel(s.sessionID):
+		s.cancel()
+	case groupParticipantSessionLabel(s.sessionID):
+		s.participantListed = true
+	}
+	return s.MemStore.List(query)
+}
+
+// TestCloseSessionBindingsChecksParticipantSweepContext: a context that ends
+// during the binding lookup of a session with no bindings stops teardown
+// before the residual-participant lookup starts.
+func TestCloseSessionBindingsChecksParticipantSweepContext(t *testing.T) {
+	freezeTestClock(t)
+	mem := beads.NewMemStore()
+	fabric := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem))
+	group, err := fabric.Groups.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: testConversationRef(),
+		Mode:             GroupModeLauncher,
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := fabric.Groups.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: "sess-a",
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &participantSweepProbeStore{MemStore: mem, sessionID: "sess-a", cancel: cancel}
+
+	err = CloseSessionBindings(ctx, beadstest.Mail(store), beadstest.Sessions(store), "sess-a", testNow().Add(time.Minute))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CloseSessionBindings error = %v, want one matching context.Canceled", err)
+	}
+	if store.participantListed {
+		t.Fatal("residual-participant lookup started on a canceled context")
+	}
+}

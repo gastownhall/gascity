@@ -403,3 +403,74 @@ func TestRetiredCleanupLegsHaveIndependentBudgets(t *testing.T) {
 		t.Fatalf("wait_lookup_capped_source = %q, want retired-session-cleanup", got)
 	}
 }
+
+const (
+	retiredCleanupParticipantLabelPrefix = "extmsg:group:participant:session:v1:"
+	retiredCleanupBindingLabelPrefix     = "extmsg:binding:session:v1:"
+)
+
+// listsWithPrefix returns the recorded external-message lookups whose label
+// starts with prefix.
+func (s *retiredCleanupBudgetStore) listsWithPrefix(prefix string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, l := range s.extmsgLists {
+		if strings.HasPrefix(l, prefix) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// TestRetiredCleanupExternalMessageCutoff: a slow external-message leg stops at
+// the next service or seed checkpoint once its own budget expires, starts no
+// residual participant lookup on the expired budget, leaves what it did not
+// reach open, and logs exactly one external-message cut-off line.
+func TestRetiredCleanupExternalMessageCutoff(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+
+	t.Run("BindingLookupOutlastsBudget", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		sessionBead := newRetiredCleanupSessionBead(t, mem)
+		x := newRetiredCleanupExtmsg(mem, sessionBead.ID)
+		x.seed(t, 0, 2, 1, now)
+		store := &retiredCleanupBudgetStore{MemStore: mem, waitLabel: "session:" + sessionBead.ID, extmsgDelay: 11 * time.Second}
+
+		stderr, _ := runRetiredCleanupInBubble(t, store, sessionBead.ID, now)
+
+		wantOnlyCutoffLine(t, stderr, sessionBead.ID, "external-message")
+		if got := store.listsWithPrefix(retiredCleanupBindingLabelPrefix); len(got) != 1 {
+			t.Fatalf("binding lookups = %v, want 1", got)
+		}
+		if got := store.listsWithPrefix(retiredCleanupParticipantLabelPrefix); len(got) != 0 {
+			t.Fatalf("participant lookups = %v, want none on the expired budget", got)
+		}
+		if _, p, m := x.counts(t); p != 2 || m != 3 {
+			t.Fatalf("open participants/memberships = %d/%d, want 2/3 left open", p, m)
+		}
+	})
+
+	t.Run("ParticipantSweepOutlastsBudget", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		sessionBead := newRetiredCleanupSessionBead(t, mem)
+		x := newRetiredCleanupExtmsg(mem, sessionBead.ID)
+		x.seed(t, 0, 8, 0, now)
+		// No call boundary lands on the 10s deadline, so the cut-off point
+		// does not depend on whether the timer or the call wakes first.
+		store := &retiredCleanupBudgetStore{MemStore: mem, waitLabel: "session:" + sessionBead.ID, extmsgDelay: 3 * time.Second}
+
+		stderr, _ := runRetiredCleanupInBubble(t, store, sessionBead.ID, now)
+
+		wantOnlyCutoffLine(t, stderr, sessionBead.ID, "external-message")
+		_, p, m := x.counts(t)
+		if p == 0 || p == 8 {
+			t.Fatalf("open participants = %d, want some removed and some left open by the cut-off", p)
+		}
+		// A removal cut off between its own store calls can close the
+		// participant and leave its membership, never the reverse.
+		if m < p {
+			t.Fatalf("open memberships = %d, want at least %d (one per participant left open)", m, p)
+		}
+	})
+}

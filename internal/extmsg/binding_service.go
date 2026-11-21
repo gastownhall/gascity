@@ -872,8 +872,12 @@ func CloseSessionBindings(ctx context.Context, store beads.MailStore, sessions b
 
 // closeSessionParticipants closes every gc:extmsg-participant bead labeled
 // for sessionID by delegating to RemoveParticipant, which also cleans up the
-// group-owned portion of the corresponding membership.
+// group-owned portion of the corresponding membership. It checks ctx before
+// its residual lookup, which no service entry check covers.
 func closeSessionParticipants(ctx context.Context, store beads.MailStore, svc Services, caller Caller, sessionID string) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
 	items, err := store.List(beads.ListQuery{Label: groupParticipantSessionLabel(sessionID)})
 	if err != nil {
 		return fmt.Errorf("list residual participants for retired session %s: %w", sessionID, err)
