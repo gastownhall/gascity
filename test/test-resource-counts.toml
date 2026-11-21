@@ -2433,9 +2433,21 @@ calls = 2
 tagged = true
 
 [[count]]
-path = "internal/processgroup/processgroup_unix_test.go"
+path = "internal/processgroup/processgroup_darwin_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/processgroup/processgroup_darwin_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
+
+[[count]]
+path = "internal/processgroup/processgroup_unix_test.go"
+resource = "subprocess"
+calls = 2
 
 [[count]]
 path = "internal/processgroup/processgroup_windows_test.go"

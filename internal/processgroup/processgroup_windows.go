@@ -20,6 +20,9 @@ import (
 
 const defaultPollPeriod = 25 * time.Millisecond
 
+// ManagedStopSignalRetryBudget is zero: Windows does not retry EPERM.
+const ManagedStopSignalRetryBudget time.Duration = 0
+
 // ctrlBreakEvent is the console control event used as the graceful stop
 // request. CTRL_BREAK is the one that can be addressed to a specific process
 // group; CTRL_C cannot, so it would hit this process too.
