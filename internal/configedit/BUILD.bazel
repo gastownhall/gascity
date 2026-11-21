@@ -23,6 +23,7 @@ go_library(
 go_test(
     name = "configedit_test",
     srcs = [
+        "city_lock_test.go",
         "configedit_linux_test.go",
         "configedit_test.go",
         "formulas_test.go",
@@ -38,15 +39,8 @@ go_test(
         "//internal/pathutil",
         "//internal/suspensionstate",
         "//internal/testenv",
-    ] + select({
-        "@rules_go//go/platform:android": [
-            "//internal/testutil",
-        ],
-        "@rules_go//go/platform:linux": [
-            "//internal/testutil",
-        ],
-        "//conditions:default": [],
-    }),
+        "//internal/testutil",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
