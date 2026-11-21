@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	currentFormulaCompilerCapability = "2.0.0"
+	currentFormulaCompilerCapability = "2.1.0"
 	defaultFormulaCompilerCapability = "1.0.0"
 	graphV2Requirement               = ">=2.0.0"
 )

@@ -59,6 +59,8 @@ func TestPinnedOutcomeAndFailureClassValues(t *testing.T) {
 func TestPinnedVocabularyValues(t *testing.T) {
 	pinned := map[string]string{
 		FormulaContractGraphV2:          "graph.v2",
+		InputLifecycleExternal:          "external",
+		InputLifecycleGraph:             "graph",
 		ScopeRoleBody:                   "body",
 		ScopeRoleMember:                 "member",
 		ScopeRoleControl:                "control",

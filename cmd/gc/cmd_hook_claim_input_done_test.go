@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -552,5 +553,271 @@ func TestSkipDoneWorkflowPreservesRecordedOutcomesAndExistingMetadata(t *testing
 	}
 	if got, _ := store.Get(root.ID); got.Metadata[beadmeta.InputConvoyIDMetadataKey] == "" {
 		t.Errorf("the root's input convoy id was clobbered by the skip close")
+	}
+}
+
+// graphOwnedRetireOps wires the claim-time input check and retirement straight
+// to store, as a single-store city does.
+func graphOwnedRetireOps(store *beads.MemStore) hookClaimOps {
+	return hookClaimOps{
+		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputDone(ctx, beadstest.Work(store), candidate, identityCandidates, prove)
+		},
+		RetireWorkflow: func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			return skipDoneWorkflow(store, verdict.RootID)
+		},
+	}
+}
+
+// requireOpen fails unless every id in ids is still open in store.
+func requireOpen(t *testing.T, store *beads.MemStore, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status = %q outcome=%q, want open: graph-owned tail retired after input settlement",
+				id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+	}
+}
+
+// TestHookClaimKeepsGraphOwnedTailAfterInputSettles: a workflow whose root
+// declares gc.input_lifecycle=graph owns its finalization tail past input
+// settlement, so terminal input must not retire the root or its open steps
+// (#8870).
+func TestHookClaimKeepsGraphOwnedTailAfterInputSettles(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "closed")
+	if err := store.SetMetadata(root.ID, "gc.input_lifecycle", "graph"); err != nil {
+		t.Fatalf("stamp input lifecycle: %v", err)
+	}
+	step, err := store.Get(step.ID)
+	if err != nil {
+		t.Fatalf("get step: %v", err)
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"rig/worker"}}
+
+	var stderr bytes.Buffer
+	kept := retireDoneWorkflowCandidates([]beads.Bead{step}, opts, graphOwnedRetireOps(store), "/rig", &stderr)
+
+	if len(kept) != 1 || kept[0].ID != step.ID {
+		t.Fatalf("kept = %v, want the graph-owned finalize step %s (stderr=%q)", kept, step.ID, stderr.String())
+	}
+	requireOpen(t, store, root.ID, step.ID)
+}
+
+// TestHookClaimKeepsGraphOwnedTeardownAfterRootSettles: teardown runs after
+// its root settles by contract, so a graph-owned workflow whose root already
+// closed and whose input is terminal keeps its open teardown step servable
+// rather than retiring it as skipped.
+func TestHookClaimKeepsGraphOwnedTeardownAfterRootSettles(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "closed")
+	if err := store.SetMetadata(root.ID, "gc.input_lifecycle", "graph"); err != nil {
+		t.Fatalf("stamp input lifecycle: %v", err)
+	}
+	if err := store.Close(step.ID); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+	teardown, err := store.Create(beads.Bead{Title: "release worktree", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleTeardown,
+		beadmeta.StepIDMetadataKey:     "cleanup",
+		beadmeta.RoutedToMetadataKey:   "rig/worker",
+	}})
+	if err != nil {
+		t.Fatalf("create teardown: %v", err)
+	}
+	if _, err := store.CloseAll([]string{root.ID}, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}); err != nil {
+		t.Fatalf("settle root: %v", err)
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"rig/worker"}}
+
+	var stderr bytes.Buffer
+	kept := retireDoneWorkflowCandidates([]beads.Bead{teardown}, opts, graphOwnedRetireOps(store), "/rig", &stderr)
+
+	if len(kept) != 1 || kept[0].ID != teardown.ID {
+		t.Fatalf("kept = %v, want the teardown step %s (stderr=%q)", kept, teardown.ID, stderr.String())
+	}
+	requireOpen(t, store, teardown.ID)
+}
+
+// TestHookClaimRetiresExternalLifecycleWorkflowWhenInputSettles: a root that
+// declares no gc.input_lifecycle, or declares external explicitly, keeps the
+// anti-repeat retirement: once its input is terminal or handed off to another
+// lane, the candidate is dropped and the root and its open steps close as
+// skipped.
+func TestHookClaimRetiresExternalLifecycleWorkflowWhenInputSettles(t *testing.T) {
+	for _, lifecycle := range []string{"", beadmeta.InputLifecycleExternal} {
+		for _, input := range []string{"closed", "handed_off"} {
+			t.Run(fmt.Sprintf("lifecycle=%q/input=%s", lifecycle, input), func(t *testing.T) {
+				store, root, step := seedDoneWorkflow(t, input)
+				if lifecycle != "" {
+					if err := store.SetMetadata(root.ID, beadmeta.InputLifecycleMetadataKey, lifecycle); err != nil {
+						t.Fatalf("stamp input lifecycle: %v", err)
+					}
+				}
+				opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"rig/worker"}}
+
+				var stderr bytes.Buffer
+				kept := retireDoneWorkflowCandidates([]beads.Bead{step}, opts, graphOwnedRetireOps(store), "/rig", &stderr)
+
+				if len(kept) != 0 {
+					t.Fatalf("kept = %v, want the settled workflow's step retired (stderr=%q)", kept, stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "closed as skipped") {
+					t.Fatalf("stderr = %q, want the skipped-retirement diagnostic", stderr.String())
+				}
+				for _, id := range []string{root.ID, step.ID} {
+					got, err := store.Get(id)
+					if err != nil {
+						t.Fatalf("get %s: %v", id, err)
+					}
+					if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+						t.Fatalf("%s = %s/%q, want closed/skipped", id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestHookClaimInputLifecyclePolicyIgnoresStepCopiesSingleStore is the
+// single-store side of AC-4: a step carrying a copied gc.input_lifecycle=graph
+// stamp never widens into graph ownership when its authoritative root declares
+// nothing — the root decides (#8870).
+func TestHookClaimInputLifecyclePolicyIgnoresStepCopiesSingleStore(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "closed")
+	if err := store.SetMetadata(step.ID, beadmeta.InputLifecycleMetadataKey, beadmeta.InputLifecycleGraph); err != nil {
+		t.Fatalf("stamp step policy copy: %v", err)
+	}
+	if err := store.SetMetadata(step.ID, beadmeta.InputConvoyIDMetadataKey, root.Metadata[beadmeta.InputConvoyIDMetadataKey]); err != nil {
+		t.Fatalf("stamp step convoy copy: %v", err)
+	}
+	ops := hookClaimOps{
+		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputDone(ctx, beadstest.Work(store), candidate, ids, prove)
+		},
+		RetireWorkflow: func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			return skipDoneWorkflow(store, verdict.RootID)
+		},
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"rig/worker"}}
+
+	var stderr bytes.Buffer
+	kept := retireDoneWorkflowCandidates([]beads.Bead{step}, opts, ops, "/rig", &stderr)
+
+	if len(kept) != 0 {
+		t.Fatalf("kept = %v, want retired: the unstamped root, not the step copy, owns the policy (stderr=%q)", kept, stderr.String())
+	}
+	for _, id := range []string{root.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Fatalf("%s status = %q outcome = %q, want closed/skipped", id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+	}
+}
+
+// TestHookClaimWithholdsUnknownInputLifecycle: a root whose persisted
+// gc.input_lifecycle is neither external nor graph declares a policy this
+// claimer cannot interpret. Guessing either way could retire live work or
+// serve a retired run, so the candidate is withheld, the diagnostic names the
+// root and value, and nothing is retired, whether or not the input settled.
+func TestHookClaimWithholdsUnknownInputLifecycle(t *testing.T) {
+	for _, input := range []string{"closed", "open"} {
+		t.Run("input="+input, func(t *testing.T) {
+			store, root, step := seedDoneWorkflow(t, input)
+			if err := store.SetMetadata(root.ID, beadmeta.InputLifecycleMetadataKey, "shared"); err != nil {
+				t.Fatalf("stamp input lifecycle: %v", err)
+			}
+			ops := graphOwnedRetireOps(store)
+			retired := 0
+			ops.RetireWorkflow = func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+				retired++
+				return skipDoneWorkflow(store, verdict.RootID)
+			}
+			opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"rig/worker"}}
+
+			var stderr bytes.Buffer
+			kept := retireDoneWorkflowCandidates([]beads.Bead{step}, opts, ops, "/rig", &stderr)
+
+			if len(kept) != 0 {
+				t.Fatalf("kept = %v, want the step withheld (stderr=%q)", kept, stderr.String())
+			}
+			if retired != 0 {
+				t.Fatalf("RetireWorkflow called %d times, want 0", retired)
+			}
+			for _, want := range []string{root.ID, `"shared"`} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want it to name %s", stderr.String(), want)
+				}
+			}
+			requireOpen(t, store, root.ID, step.ID)
+		})
+	}
+}
+
+// TestDoHookClaimWithholdsUnknownInputLifecycle: the withheld candidate is
+// neither claimed fresh nor handed back as an existing assignment; the claim
+// drains with no work and retires nothing.
+func TestDoHookClaimWithholdsUnknownInputLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		candidate beads.Bead
+	}{
+		{name: "fresh", candidate: beads.Bead{ID: "root-1", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:          beadmeta.KindWorkflow,
+			beadmeta.InputConvoyIDMetadataKey: "convoy-1",
+			beadmeta.RoutedToMetadataKey:      "worker",
+		}}},
+		{name: "adopted", candidate: beads.Bead{ID: "step-1", Status: "in_progress", Assignee: "worker-1", Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:        "root-1",
+			beadmeta.ContinuationGroupMetadataKey: "pool-workflow",
+			beadmeta.RoutedToMetadataKey:          "worker",
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output, err := json.Marshal([]beads.Bead{tc.candidate})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			ops := hookClaimOps{
+				Runner: func(string, string) (string, error) { return string(output), nil },
+				Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+					t.Fatalf("unexpected claim of %s", beadID)
+					return beads.Bead{}, false, nil
+				},
+				InputVerdict: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string, _ workflowInputAbsenceProver) (workflowInputVerdict, error) {
+					return workflowInputVerdict{RootID: "root-1", State: workflowInputComplete, Lifecycle: "shared"}, nil
+				},
+				RetireWorkflow: func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+					t.Fatalf("unexpected retirement of %s", verdict.RootID)
+					return nil
+				},
+				DrainAck: func(io.Writer) error { return nil },
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"worker"},
+				DrainAck:     true,
+				JSON:         true,
+			}, ops, &stdout, &stderr)
+
+			if code != 0 {
+				t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), `"reason":"no_work"`) {
+				t.Fatalf("stdout = %q, want no_work drain", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), `root-1 has unknown gc.input_lifecycle "shared"`) {
+				t.Fatalf("stderr = %q, want the unknown-policy diagnostic", stderr.String())
+			}
+		})
 	}
 }

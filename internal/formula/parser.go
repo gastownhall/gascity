@@ -284,6 +284,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Template:    nil,
 		Compose:     nil,
 	}
+	merged.InputLifecycle = formula.InputLifecycle
 
 	// Apply each parent in order
 	for _, parentName := range formula.Extends {
@@ -315,6 +316,12 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		// declaration wins because merged was seeded from the child.
 		if merged.Phase == "" {
 			merged.Phase = parent.Phase
+		}
+
+		// InputLifecycle cascades the same way, so an explicit child
+		// "external" opts out of a parent's graph ownership.
+		if merged.InputLifecycle == "" {
+			merged.InputLifecycle = parent.InputLifecycle
 		}
 
 		// Pour is an opt-in escalation: any parent or the child requesting

@@ -213,12 +213,15 @@ func TestCompileExpansionFragmentValidatesHostRequirements(t *testing.T) {
 	enableV2ForTest(t)
 
 	dir := t.TempDir()
+	// The floor must sit above whatever this build's compiler capability is,
+	// so use a future major no host satisfies rather than pinning the
+	// current capability (which moves — 2.0.0 → 2.1.0 with input_lifecycle).
 	expansion := `
 formula = "future-expansion"
 type = "expansion"
 
 [requires]
-formula_compiler = ">2.0.0"
+formula_compiler = ">=99.0.0"
 
 [[template]]
 id = "{target}.future"

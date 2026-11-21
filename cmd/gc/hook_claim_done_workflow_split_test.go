@@ -451,3 +451,54 @@ func TestClassRoutedHookReclaimStaleFollowsTheBinding(t *testing.T) {
 		}
 	})
 }
+
+// TestClassRoutedHookInputLifecyclePolicyComesFromTheAuthoritativeRoot: a
+// step may carry copies of the workflow's stamps (the input convoy id, even a
+// policy value). The root in the binding is the only authority: a graph root
+// keeps its tail no matter what the step copies say, and input membership is
+// still read from the work store (#8870).
+func TestClassRoutedHookInputLifecyclePolicyComesFromTheAuthoritativeRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rootPolicy string // stamped on the authoritative root
+		stepPolicy string // copied onto the step bead
+		wantKept   bool
+	}{
+		{name: "graph root wins over an external copy on the step", rootPolicy: beadmeta.InputLifecycleGraph, stepPolicy: beadmeta.InputLifecycleExternal, wantKept: true},
+		{name: "external root ignores a graph copy on the step", rootPolicy: beadmeta.InputLifecycleExternal, stepPolicy: beadmeta.InputLifecycleGraph},
+		{name: "unstamped root ignores a graph copy on the step", stepPolicy: beadmeta.InputLifecycleGraph},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoneWorkflowSplitFixture(t, true)
+			if tc.rootPolicy != "" {
+				if err := f.binding.SetMetadata(f.root.ID, beadmeta.InputLifecycleMetadataKey, tc.rootPolicy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			step, err := f.binding.Create(beads.Bead{Title: "policy-copied step", Type: "task", Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey:     f.root.ID,
+				beadmeta.InputConvoyIDMetadataKey:  f.convoyID,
+				beadmeta.InputLifecycleMetadataKey: tc.stepPolicy,
+				beadmeta.RoutedToMetadataKey:       "worker",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
+
+			kept, stderr := f.retire(t, ops, step)
+
+			if tc.wantKept {
+				if len(kept) != 1 || kept[0].ID != step.ID {
+					t.Fatalf("kept = %v, want the graph-owned step %s (stderr=%q)", kept, step.ID, stderr)
+				}
+				f.assertOpen(t, f.root.ID, f.step.ID, step.ID)
+				return
+			}
+			if len(kept) != 0 {
+				t.Fatalf("kept = %v, want retired: the root, not the step copy, owns the policy (stderr=%q)", kept, stderr)
+			}
+			f.assertSkipped(t, f.root.ID, f.step.ID, step.ID)
+		})
+	}
+}
