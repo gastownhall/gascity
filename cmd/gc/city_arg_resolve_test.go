@@ -932,7 +932,7 @@ func clearCityDiscoveryEnv(t *testing.T) {
 // chdirIntoRemovedDir makes the test process's working directory a directory
 // that has since been removed, the state a check is left in when the close of
 // its bead deletes the work dir while the check runs.
-func chdirIntoRemovedDir(t *testing.T) string {
+func chdirIntoRemovedDir(t *testing.T) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "work")
 	if err := os.Mkdir(dir, 0o755); err != nil {
@@ -942,7 +942,6 @@ func chdirIntoRemovedDir(t *testing.T) string {
 	if err := os.Remove(dir); err != nil {
 		t.Fatal(err)
 	}
-	return dir
 }
 
 // Regression (#6295): on Linux os.Getwd of a removed directory fails with a
@@ -971,4 +970,31 @@ func TestResolveContextFromDirRemovedCwdSaysDirectoryIsGone(t *testing.T) {
 	if strings.Contains(msg, "getwd") {
 		t.Errorf("error = %q, want no raw getwd error", msg)
 	}
+}
+
+// Regression (#6295): the removed-cwd error must read as "no city" to every
+// string-matching caller, and the rig fallback must degrade to "no local
+// city" on Linux exactly as it already does on Darwin.
+func TestRemovedCwdErrorReadsAsNoCity(t *testing.T) {
+	for _, err := range []error{&cwdGoneError{}, &cwdGoneError{Dir: "/gone/work"}} {
+		if !isCityDiscoveryNotFound(err) {
+			t.Errorf("isCityDiscoveryNotFound(%q) = false, want true", err)
+		}
+		if !isNoCityStoreError(err) {
+			t.Errorf("isNoCityStoreError(%q) = false, want true", err)
+		}
+	}
+
+	t.Run("rig fallback", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("Linux getcwd reports ENOENT for a removed directory; Darwin returns its stale path")
+		}
+		clearCityDiscoveryEnv(t)
+		chdirIntoRemovedDir(t)
+
+		cityPath, err := resolveLocalCityForRigFallback()
+		if err != nil || cityPath != "" {
+			t.Fatalf("resolveLocalCityForRigFallback() = (%q, %v), want (\"\", nil)", cityPath, err)
+		}
+	})
 }
