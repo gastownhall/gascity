@@ -23,6 +23,7 @@ func mustCreateExactClaimBead(t *testing.T, store *beads.MemStore) beads.Bead {
 		Status: "open",
 		Metadata: map[string]string{
 			beadmeta.RootBeadIDMetadataKey:        "root-77",
+			beadmeta.StepIDMetadataKey:            "build",
 			beadmeta.ContinuationGroupMetadataKey: "cg-42",
 			beadmeta.RoutedToMetadataKey:          "session-alpha",
 		},
@@ -106,6 +107,7 @@ func TestClaimExact_EachPreconditionFieldMismatchesIndependently(t *testing.T) {
 		{"status", ClaimExactPreconditions{Status: strp("in_progress")}},
 		{"routed_to", ClaimExactPreconditions{RoutedTo: strp("session-bravo")}},
 		{"root_bead_id", ClaimExactPreconditions{RootBeadID: strp("root-99")}},
+		{"step_id", ClaimExactPreconditions{StepID: strp("test")}},
 		{"continuation_group", ClaimExactPreconditions{ContinuationGroup: strp("cg-99")}},
 	}
 	for _, tc := range cases {

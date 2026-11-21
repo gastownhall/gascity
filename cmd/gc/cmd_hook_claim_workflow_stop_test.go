@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // hookWorkflowStopFixture drives `gc hook --claim` against a MemStore that
@@ -115,6 +116,15 @@ func (f *hookWorkflowStopFixture) ops() hookClaimOps {
 			}
 			claimed, err := f.store.Get(id)
 			return claimed, true, err
+		},
+		ClaimExact: func(_ context.Context, _ string, _ []string, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+			f.claims = append(f.claims, req.ID)
+			claimed, verdict, err := hookClaimExactThroughStore(f.store, molecule.ClaimExactWriters{Revision: f.store}, actor, req)
+			if verdict == hookClaimVerdictClaimed && f.afterClaim != nil {
+				f.afterClaim(req.ID)
+				claimed, err = f.store.Get(req.ID)
+			}
+			return claimed, verdict, err
 		},
 		Release: func(_ context.Context, _ string, _ []string, id, assignee string) (bool, error) {
 			current, err := f.store.Get(id)
