@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,17 @@ func deadPaneCity() *config.City {
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "test-cmd"}},
 		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+}
+
+// deadPaneRigCity is deadPaneCity with the named session scoped to rig-a,
+// suspended when suspended is set.
+func deadPaneRigCity(cityPath string, suspended bool) *config.City {
+	return &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Rigs:          []config.Rig{{Name: "rig-a", Path: filepath.Join(cityPath, "rig-a"), SuspendedOnStart: suspended}},
+		Agents:        []config.Agent{{Name: "worker", Scope: "rig", StartCommand: "test-cmd"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always", Scope: "rig", Dir: "rig-a"}},
 	}
 }
 
@@ -316,6 +328,15 @@ func TestReconcileNamedAlwaysCorpseCrashOncePerDeadObject(t *testing.T) {
 	}
 }
 
+func (e *deadPaneEnv) count(method string, eventType string) (calls, recorded int) {
+	for _, ev := range e.rec.Events {
+		if ev.Type == eventType {
+			recorded++
+		}
+	}
+	return e.sp.CountCalls(method, e.name), recorded
+}
+
 // TestReconcileNamedCorpseCrashNotRecordedWithoutCorpse: an incomplete
 // liveness observation, or a live runtime, records no dead-pane crash and
 // neither stops nor starts the row's runtime.
@@ -347,6 +368,58 @@ func TestReconcileNamedCorpseCrashNotRecordedWithoutCorpse(t *testing.T) {
 			}
 			if got := e.sp.CountCalls("Start", e.name); got != starts {
 				t.Fatalf("Start(%s) calls = %d, want %d", e.name, got, starts)
+			}
+		})
+	}
+}
+
+// TestReconcileNamedCorpseCrashUnderSuspension: while the city, the row's
+// rig or the session itself is suspended or held over its corpse, the legacy
+// ticks start nothing and record no wake, and the dead object's crash is
+// recorded at most once.
+func TestReconcileNamedCorpseCrashUnderSuspension(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  func(t *testing.T) *deadPaneEnv
+	}{
+		{"city suspended", func(t *testing.T) *deadPaneEnv {
+			cfg := deadPaneCity()
+			cfg.Workspace.SuspendedOnStart = true
+			return newDeadPaneEnvFor(t, cfg, "worker")
+		}},
+		{"rig suspended", func(t *testing.T) *deadPaneEnv {
+			cfg := deadPaneRigCity(t.TempDir(), true)
+			return newDeadPaneEnvFor(t, cfg, "rig-a/worker")
+		}},
+		{"session held", func(t *testing.T) *deadPaneEnv {
+			e := newDeadPaneEnv(t)
+			b, err := e.store.Get(e.beadID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", e.beadID, err)
+			}
+			e.setSessionMetadata(&b, map[string]string{
+				"sleep_intent": "user-hold",
+				"held_until":   e.clk.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+			})
+			return e
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := tc.env(t)
+			e.sp.SetPeekOutput(e.name, "agent exited")
+			e.sp.kill(e.name, "$7")
+			starts := e.sp.CountCalls("Start", e.name)
+
+			for i := 0; i < 4; i++ {
+				e.tick(t)
+				e.clk.Advance(time.Minute)
+			}
+
+			if got, woke := e.count("Start", events.SessionWoke); got != starts || woke != 0 {
+				t.Fatalf("Start(%s) calls = %d (want %d), session.woke = %d (want 0) while suspended; stderr=%q", e.name, got, starts, woke, e.stderr.String())
+			}
+			if got := len(e.crashes()); got > 1 {
+				t.Fatalf("session.crashed events = %d, want at most 1 for one dead object", got)
 			}
 		})
 	}
