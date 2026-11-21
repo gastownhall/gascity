@@ -227,6 +227,7 @@ func TestManagedDoltRecoverFields(t *testing.T) {
 		Port:              3311,
 		Healthy:           true,
 		Restarted:         true,
+		Deferred:          true,
 	}
 	fields := managedDoltRecoverFields(report)
 	want := []string{
@@ -239,6 +240,7 @@ func TestManagedDoltRecoverFields(t *testing.T) {
 		"port\t3311",
 		"healthy\ttrue",
 		"restarted\ttrue",
+		"deferred\ttrue",
 	}
 	if len(fields) != len(want) {
 		t.Fatalf("got %d fields, want %d", len(fields), len(want))

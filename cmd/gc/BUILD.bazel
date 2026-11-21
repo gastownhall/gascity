@@ -1717,6 +1717,7 @@ go_test(
         "dolt_project_id_apply_test.go",
         "dolt_project_id_decide_test.go",
         "dolt_project_id_test.go",
+        "dolt_recover_deferred_shell_test.go",
         "dolt_recover_managed_probe_timeout_test.go",
         "dolt_recover_managed_test.go",
         "dolt_recover_unresponsive_config_test.go",

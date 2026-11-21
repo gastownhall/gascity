@@ -286,6 +286,7 @@ func managedDoltRecoverFields(report managedDoltRecoverReport) []string {
 		"port\t" + strconv.Itoa(report.Port),
 		"healthy\t" + strconv.FormatBool(report.Healthy),
 		"restarted\t" + strconv.FormatBool(report.Restarted),
+		"deferred\t" + strconv.FormatBool(report.Deferred),
 	}
 }
 
