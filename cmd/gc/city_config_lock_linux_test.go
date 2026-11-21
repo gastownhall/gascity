@@ -552,3 +552,96 @@ func TestCityConfigLockAndSuspensionFenceAreIndependent(t *testing.T) {
 		}
 	})
 }
+
+// readCityFileTree returns every regular file under cityDir keyed by its
+// path relative to cityDir.
+func readCityFileTree(t *testing.T, cityDir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(cityDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(cityDir, path)
+		if err != nil {
+			return err
+		}
+		files[rel] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshotting %s: %v", cityDir, err)
+	}
+	return files
+}
+
+func requireCityFilesUnchanged(t *testing.T, cityDir string, before map[string]string) {
+	t.Helper()
+	after := readCityFileTree(t, cityDir)
+	for rel, data := range before {
+		if got, ok := after[rel]; !ok || got != data {
+			t.Errorf("%s changed:\nbefore:\n%s\nafter (present=%v):\n%s", rel, data, ok, got)
+		}
+	}
+	for rel := range after {
+		if _, ok := before[rel]; !ok {
+			t.Errorf("%s was created", rel)
+		}
+	}
+}
+
+// When the city config lock file cannot be created, a config edit fails with
+// an error naming the lock file and leaves every config file as it was.
+func TestCityConfigEditFailsWhenLockFileCannotBeCreated(t *testing.T) {
+	newCity := func(t *testing.T) string {
+		t.Helper()
+		cityDir := filepath.Join(t.TempDir(), "city")
+		if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfigLockTestCity), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return cityDir
+	}
+	blockLockDir := func(t *testing.T, cityDir string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(cityDir, ".gc", "runtime"), []byte("not a directory\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("API mutation", func(t *testing.T) {
+		cityDir := newCity(t)
+		cs := newCityConfigLockControllerState(t, cityDir)
+		blockLockDir(t, cityDir)
+		before := readCityFileTree(t, cityDir)
+
+		err := cs.SuspendAgent("worker")
+		if err == nil {
+			t.Fatal("SuspendAgent succeeded without the city config lock")
+		}
+		if !strings.Contains(err.Error(), configedit.CityLockFile(cityDir)) {
+			t.Fatalf("SuspendAgent error = %v, want it to name %s", err, configedit.CityLockFile(cityDir))
+		}
+		requireCityFilesUnchanged(t, cityDir, before)
+	})
+	t.Run("CLI writer", func(t *testing.T) {
+		cityDir := newCity(t)
+		blockLockDir(t, cityDir)
+		before := readCityFileTree(t, cityDir)
+
+		var stdout, stderr bytes.Buffer
+		if code := doAgentSuspend(fsys.OSFS{}, cityDir, "worker", &stdout, &stderr); code != 1 {
+			t.Fatalf("gc agent suspend = %d, want 1; stderr:\n%s", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), configedit.CityLockFile(cityDir)) {
+			t.Fatalf("gc agent suspend stderr = %q, want it to name %s", stderr.String(), configedit.CityLockFile(cityDir))
+		}
+		requireCityFilesUnchanged(t, cityDir, before)
+	})
+}
