@@ -296,11 +296,14 @@ func withMutation(b beads.Bead, mutate func(*beads.Bead)) beads.Bead {
 
 // TestReadNeverPushesAPredicateABackendCouldCompareDifferently pins the other
 // half: a predicate whose backend comparison is not provably the Go comparison
-// stays Go-side, so no store can drop a row the Go filter keeps.
+// stays Go-side, so no store can drop a row the Go filter keeps. The ready arm
+// keeps today's ReadyQuery for every form (readyMetadata); the --status arms
+// never carry any of these pairs in ListQuery.Metadata.
 func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		query Query
+		name          string
+		query         Query
+		readyMetadata map[string]string
 	}{
 		{name: "bare key", query: Query{MetadataFields: []string{"gc.routed_to"}}},
 		{name: "JSON boolean value", query: Query{MetadataFields: []string{"gc.flag=true"}}},
@@ -310,6 +313,11 @@ func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) 
 		{name: "key outside bd's grammar", query: Query{MetadataFields: []string{"gc route=x"}}},
 		{name: "excluded type", query: Query{ExcludeTypes: []string{"epic"}}},
 		{name: "excluded label", query: Query{ExcludeLabels: []string{"hold:mayor"}}},
+		// The status legs' two further conditions (listMetadata). The ready arm
+		// pushes these forms today, and keeps doing so.
+		{name: "empty value", query: Query{MetadataFields: []string{"gc.x="}}, readyMetadata: map[string]string{"gc.x": ""}},
+		{name: "value needs JSON escaping", query: Query{MetadataFields: []string{"gc.x=a<b"}}, readyMetadata: map[string]string{"gc.x": "a<b"}},
+		{name: "value with a quote", query: Query{MetadataFields: []string{`gc.x=say "hi"`}}, readyMetadata: map[string]string{"gc.x": `say "hi"`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newNarrowingStore()
@@ -317,10 +325,58 @@ func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) 
 				t.Fatalf("Read: %v", err)
 			}
 			got := store.readyQueries()
-			if len(got) != 1 || len(got[0].MetadataEquals) != 0 || got[0].Unassigned || got[0].Assignee != "" {
-				t.Fatalf("leg asked %+v; this predicate must stay Go-side", got)
+			if len(got) != 1 || !reflect.DeepEqual(got[0].MetadataEquals, tc.readyMetadata) || got[0].Unassigned || got[0].Assignee != "" {
+				t.Fatalf("ready arm asked %+v; want today's query with metadata %v", got, tc.readyMetadata)
+			}
+			for _, status := range knownStatuses {
+				lists := newListRecordingStore()
+				q := tc.query
+				q.Status = status
+				if _, err := Read([]Leg{testLeg("city", lists)}, q); err != nil {
+					t.Fatalf("Read (--status %s): %v", status, err)
+				}
+				queries := lists.listQueries()
+				if len(queries) == 0 {
+					t.Fatalf("--status %s: leg was asked no List query", status)
+				}
+				for _, recorded := range queries {
+					if len(recorded.Metadata) != 0 {
+						t.Errorf("--status %s pushed %v; this predicate must stay Go-side", status, recorded.Metadata)
+					}
+				}
 			}
 		})
+	}
+}
+
+// TestReadyStatusEmptyValueKeepsOnlyThePresentEmptyBead pins the `key=` form's
+// Go-side meaning on the status arms: the pair is never pushed (a stored JSON
+// null decodes as a present empty value that bd's `= ”` and DoltLite's LIKE
+// both miss), and the Go filter keeps exactly the beads carrying the key
+// present and empty.
+func TestReadyStatusEmptyValueKeepsOnlyThePresentEmptyBead(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	withValue := func(v string, ok bool) func(*beads.Bead) {
+		return func(b *beads.Bead) {
+			b.Status = StatusClosed
+			if ok {
+				b.Metadata = beads.StringMap{"gc.x": v}
+			}
+		}
+	}
+	store := newListRecordingStore(
+		readyRow("present-empty", 1, base, withValue("", true)),
+		readyRow("missing", 1, base, withValue("", false)),
+		readyRow("full", 1, base, withValue("v", true)),
+	)
+	got := readIDs(t, []Leg{testLeg("city", store)}, Query{Status: StatusClosed, MetadataFields: []string{"gc.x="}})
+	if !slices.Equal(got, []string{"present-empty"}) {
+		t.Fatalf("answer = %v, want only the bead carrying gc.x present and empty", got)
+	}
+	for _, recorded := range store.listQueries() {
+		if len(recorded.Metadata) != 0 {
+			t.Fatalf("leg was asked %+v; the empty-value form must stay Go-side", recorded)
+		}
 	}
 }
 
