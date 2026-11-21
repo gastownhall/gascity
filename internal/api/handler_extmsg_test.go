@@ -618,3 +618,109 @@ func TestFormatExtmsgNotifyReminderExplicitTargetSanitization(t *testing.T) {
 		t.Fatalf("ExplicitTarget tag breakout survived stripping:\n%s", got)
 	}
 }
+
+// extmsgNudgesBySessionName groups the runtime's Nudge calls by session name.
+func extmsgNudgesBySessionName(fs *fakeState) map[string][]string {
+	nudges := map[string][]string{}
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Nudge" {
+			nudges[call.Name] = append(nudges[call.Name], call.Message)
+		}
+	}
+	return nudges
+}
+
+// TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce covers an inbound
+// on an ungrouped conversation bound to one session whose explicit target
+// names a live session that is not a transcript member: the addressed session
+// is told once, without the self-silence line, and the bound member still
+// hears it with that line.
+func TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target func(worker session.Info) string
+	}{
+		{name: "session id", target: func(worker session.Info) string { return worker.ID }},
+		{name: "alias", target: func(session.Info) string { return "myrig/asker" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			t.Cleanup(srv.waitForBackground)
+
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+			fs.adapterReg = extmsg.NewAdapterRegistry()
+
+			ref := extmsg.ConversationRef{
+				ScopeID:        "scope-1",
+				Provider:       "slack",
+				AccountID:      "acct-1",
+				ConversationID: "C123",
+				Kind:           extmsg.ConversationRoom,
+			}
+			bound := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+			worker := createTestSession(t, fs.cityBeadStore, fs.sp, "Asker")
+			if err := fs.cityBeadStore.Update(worker.ID, beads.UpdateOpts{
+				Metadata: map[string]string{"alias": "myrig/asker"},
+			}); err != nil {
+				t.Fatalf("Update(worker alias): %v", err)
+			}
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+				Conversation: ref,
+				SessionID:    bound.ID,
+				Now:          time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("Bind: %v", err)
+			}
+
+			target := tc.target(worker)
+			body, err := json.Marshal(map[string]any{
+				"message": map[string]any{
+					"provider_message_id": "m1",
+					"conversation": map[string]any{
+						"scope_id":        ref.ScopeID,
+						"provider":        ref.Provider,
+						"account_id":      ref.AccountID,
+						"conversation_id": ref.ConversationID,
+						"kind":            ref.Kind,
+					},
+					"actor":           map[string]any{"id": "u1", "display_name": "Alice", "is_bot": false},
+					"text":            "the answer is 42",
+					"explicit_target": target,
+					"received_at":     time.Now().UTC().Format(time.RFC3339),
+				},
+			})
+			if err != nil {
+				t.Fatalf("Marshal(body): %v", err)
+			}
+			req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(string(body)))
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			srv.waitForBackground()
+
+			nudges := extmsgNudgesBySessionName(fs)
+			workerNudges := nudges[worker.SessionName]
+			if len(workerNudges) != 1 {
+				t.Fatalf("addressed non-member nudges = %d, want 1; nudges=%#v", len(workerNudges), nudges)
+			}
+			if !strings.Contains(workerNudges[0], "the answer is 42") {
+				t.Fatalf("addressed nudge missing message text:\n%s", workerNudges[0])
+			}
+			if strings.Contains(workerNudges[0], "Addressed to:") {
+				t.Fatalf("addressed session saw discriminator:\n%s", workerNudges[0])
+			}
+			boundNudges := nudges[bound.SessionName]
+			if len(boundNudges) != 1 {
+				t.Fatalf("bound member nudges = %d, want 1; nudges=%#v", len(boundNudges), nudges)
+			}
+			if !strings.Contains(boundNudges[0], "Addressed to: @"+target) {
+				t.Fatalf("bound member nudge missing discriminator for %q:\n%s", target, boundNudges[0])
+			}
+		})
+	}
+}
