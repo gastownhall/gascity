@@ -669,3 +669,39 @@ func TestControlReadyFallbackReadyKeepsReadonlyOffProxiedScope(t *testing.T) {
 		})
 	}
 }
+
+// TestControlReadyFallbackReadyFollowsScopeModeEachScan pins the per-scan
+// probe: one process scanning the same scope while its persisted dolt_mode is
+// rewritten server -> proxied-server -> server between scans is served by each
+// scan's own mode, with no dispatcher restart (#7358).
+func TestControlReadyFallbackReadyFollowsScopeModeEachScan(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	installControlReadyBd(t, logPath, false, `[{"id":"ga-scan","status":"open","issue_type":"task"}]`)
+	t.Setenv("GC_BEADS", "bd")
+
+	dir := t.TempDir()
+	modes := []string{"server", "proxied-server", "server"}
+	for i, mode := range modes {
+		writeScopeMetadata(t, dir, map[string]string{"backend": "dolt", "dolt_mode": mode})
+		callsBefore := len(readControlReadyBdCalls(t, logPath))
+		if _, err := controlReadyFallbackReady(dir, dir, nil, false); err != nil {
+			t.Fatalf("scan %d (%s): %v", i+1, mode, err)
+		}
+		calls := readControlReadyBdCalls(t, logPath)
+		if len(calls) != callsBefore+1 {
+			t.Fatalf("scan %d (%s): bd calls = %q, want one new call", i+1, mode, calls)
+		}
+		argv := calls[len(calls)-1]
+		if mode == "proxied-server" {
+			if strings.Contains(argv, "--readonly") {
+				t.Fatalf("scan %d (%s): bd argv %q must not carry --readonly", i+1, mode, argv)
+			}
+			if !strings.HasPrefix(argv, "--sandbox ready ") {
+				t.Fatalf("scan %d (%s): bd argv = %q, want it led by --sandbox ready", i+1, mode, argv)
+			}
+		} else if !strings.HasPrefix(argv, "--readonly --sandbox ready ") {
+			t.Fatalf("scan %d (%s): bd argv = %q, want it led by --readonly --sandbox ready", i+1, mode, argv)
+		}
+	}
+}
