@@ -214,9 +214,9 @@ func TestHookClaimConvergedCancelRootIsWithheldNotReclosed(t *testing.T) {
 
 	var stderr bytes.Buffer
 	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}}
-	withheld := hookClaimWorkflowStop(context.Background(), run.root, "worker-1", opts, graphCancelOps(f, workflowInputComplete, nil), t.TempDir(), &stderr)
-	if !withheld {
-		t.Fatalf("stop gate did not withhold the converged-canceled root; stderr=%s", stderr.String())
+	withheld, settled := hookClaimWorkflowStop(context.Background(), run.root, "worker-1", opts, graphCancelOps(f, workflowInputComplete, nil), t.TempDir(), &stderr)
+	if !withheld || !settled {
+		t.Fatalf("stop gate = withheld %v settled %v, want the converged-canceled root withheld as settled (never released); stderr=%s", withheld, settled, stderr.String())
 	}
 	if reason := f.get(run.root.ID).Metadata["close_reason"]; reason != "converged" {
 		t.Fatalf("root close_reason = %q, want the converged close left as is", reason)
@@ -224,5 +224,184 @@ func TestHookClaimConvergedCancelRootIsWithheldNotReclosed(t *testing.T) {
 	f.wantOpen(run.step.ID, run.teardown.ID)
 	if !strings.Contains(stderr.String(), run.root.ID) {
 		t.Fatalf("stderr = %q, want a diagnostic naming the withheld root %s", stderr.String(), run.root.ID)
+	}
+}
+
+// releaseRecorder wraps the fixture's Release, counting attempts and recording
+// the bead.claim_released records the unwind emits; fail makes every release
+// error without touching the store.
+type releaseRecorder struct {
+	attempts []string
+	records  []hookClaimReleaseRecord
+	fail     error
+}
+
+func (r *releaseRecorder) install(ops *hookClaimOps) {
+	inner := ops.Release
+	ops.Release = func(ctx context.Context, dir string, env []string, id, assignee string) (bool, error) {
+		r.attempts = append(r.attempts, id)
+		if r.fail != nil {
+			return false, r.fail
+		}
+		return inner(ctx, dir, env, id, assignee)
+	}
+	ops.EmitClaimReleased = func(rec hookClaimReleaseRecord) { r.records = append(r.records, rec) }
+	ops.StoreRef = func(string) string { return "" }
+	ops.ForgetWorkStarted = func(string, hookStartedKey) error { return nil }
+}
+
+// cancelAfterClaim makes a run cancel stamp its intent on rootID inside the
+// claim CAS, after it commits: the window the post-claim re-check covers.
+func cancelAfterClaim(f *hookWorkflowStopFixture, rootID string) {
+	f.afterClaim = func(string) {
+		if err := f.store.SetMetadata(rootID, beadmeta.CancelRequestedMetadataKey, "true"); err != nil {
+			f.t.Fatalf("stamp cancel on %s: %v", rootID, err)
+		}
+	}
+}
+
+// claimTiers seeds the standalone graph root for the fresh-claim tier
+// (unassigned) or the ready-assignment tier (open, already assigned to this
+// session).
+var claimTiers = map[string]string{"fresh": "", "ready": "worker-1"}
+
+func seedGraphCancelRunForTier(f *hookWorkflowStopFixture, assignee string) graphCancelRun {
+	run := seedGraphCancelRun(f, beadmeta.InputLifecycleGraph, nil)
+	if assignee != "" {
+		if err := f.store.Update(run.root.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	return run
+}
+
+// TestHookClaimUnwindsGraphRootClaimCanceledAfterCAS: a cancel that lands
+// between the claim CAS and delivery, on a run whose input is still pending,
+// leaves the root open and canceled. The claim this invocation just minted is
+// given back through the ownership-fenced release, nothing is handed out, and
+// the hook exits nonzero rather than reporting an idle drain.
+func TestHookClaimUnwindsGraphRootClaimCanceledAfterCAS(t *testing.T) {
+	for tier, assignee := range claimTiers {
+		t.Run(tier, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			run := seedGraphCancelRunForTier(f, assignee)
+			cancelAfterClaim(f, run.root.ID)
+			ops := graphCancelOps(f, workflowInputPending, nil)
+			var rel releaseRecorder
+			rel.install(&ops)
+
+			code, got, stderr := runHookClaimWith(f, ops)
+			if code != 1 || got != "" {
+				t.Fatalf("doHookClaim = %d handing out %q, want 1 handing out nothing; stderr=%s", code, got, stderr)
+			}
+			if len(rel.attempts) != 1 || rel.attempts[0] != run.root.ID {
+				t.Fatalf("release attempts = %v, want one for %s", rel.attempts, run.root.ID)
+			}
+			if len(rel.records) != 1 || rel.records[0].Reason != hookClaimReleaseReasonUndelivered {
+				t.Fatalf("claim_released records = %+v, want one with reason %q", rel.records, hookClaimReleaseReasonUndelivered)
+			}
+			root := f.get(run.root.ID)
+			if root.Status != "open" || root.Assignee != "" {
+				t.Fatalf("root = %s assigned %q, want open and released", root.Status, root.Assignee)
+			}
+			f.wantOpen(run.step.ID, run.teardown.ID)
+			if !strings.Contains(stderr, run.root.ID) {
+				t.Fatalf("stderr = %q, want a diagnostic naming %s", stderr, run.root.ID)
+			}
+		})
+	}
+}
+
+// TestHookClaimUnwindReportsFailedReleaseOfCanceledGraphRoot: when the release
+// itself fails, the claim stays parked, the failure is on stderr, and the
+// hook still exits nonzero.
+func TestHookClaimUnwindReportsFailedReleaseOfCanceledGraphRoot(t *testing.T) {
+	for tier, assignee := range claimTiers {
+		t.Run(tier, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			run := seedGraphCancelRunForTier(f, assignee)
+			cancelAfterClaim(f, run.root.ID)
+			ops := graphCancelOps(f, workflowInputPending, nil)
+			rel := releaseRecorder{fail: errors.New("release store unavailable")}
+			rel.install(&ops)
+
+			code, got, stderr := runHookClaimWith(f, ops)
+			if code != 1 || got != "" {
+				t.Fatalf("doHookClaim = %d handing out %q, want 1 handing out nothing; stderr=%s", code, got, stderr)
+			}
+			if len(rel.attempts) != 1 || len(rel.records) != 0 {
+				t.Fatalf("release attempts = %v records = %+v, want one failed attempt and no record", rel.attempts, rel.records)
+			}
+			if !strings.Contains(stderr, "release store unavailable") {
+				t.Fatalf("stderr = %q, want the release failure surfaced", stderr)
+			}
+			if root := f.get(run.root.ID); root.Status != "in_progress" || root.Assignee != "worker-1" {
+				t.Fatalf("root = %s assigned %q, want the claim still parked on worker-1", root.Status, root.Assignee)
+			}
+		})
+	}
+}
+
+// TestHookClaimKeepsClosedCanceledGraphRootClaim: when the cancel can be
+// finished after the CAS (the input is already terminal), the root converges
+// closed; the claim is withheld without a release and the hook drains as idle.
+func TestHookClaimKeepsClosedCanceledGraphRootClaim(t *testing.T) {
+	for tier, assignee := range claimTiers {
+		t.Run(tier, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			run := seedGraphCancelRunForTier(f, assignee)
+			cancelAfterClaim(f, run.root.ID)
+			ops := graphCancelOps(f, workflowInputComplete, nil)
+			var rel releaseRecorder
+			rel.install(&ops)
+
+			code, got, stderr := runHookClaimWith(f, ops)
+			if code != 0 || got != "" {
+				t.Fatalf("doHookClaim = %d handing out %q, want 0 handing out nothing; stderr=%s", code, got, stderr)
+			}
+			if len(rel.attempts) != 0 {
+				t.Fatalf("release attempts = %v, want none for a root that closed", rel.attempts)
+			}
+			f.wantClosed(run.root.ID, beadmeta.OutcomeCanceled)
+			f.wantClosed(run.step.ID, beadmeta.OutcomeCanceled)
+			f.wantOpen(run.teardown.ID)
+		})
+	}
+}
+
+// TestHookClaimNeverReleasesCanceledGraphRootItDidNotClaim: adoption of a root
+// this session already holds, and the pre-claim check of an unclaimed one,
+// withhold a canceled graph root with pending input but never release
+// ownership this invocation did not acquire.
+func TestHookClaimNeverReleasesCanceledGraphRootItDidNotClaim(t *testing.T) {
+	cases := map[string]struct {
+		status, assignee string
+	}{
+		"adoption":  {status: "in_progress", assignee: "worker-1"},
+		"pre_claim": {status: "open"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			run := seedGraphCancelRun(f, beadmeta.InputLifecycleGraph, map[string]string{beadmeta.CancelRequestedMetadataKey: "true"})
+			if err := f.store.Update(run.root.ID, beads.UpdateOpts{Status: &tc.status, Assignee: &tc.assignee}); err != nil {
+				t.Fatal(err)
+			}
+			ops := graphCancelOps(f, workflowInputPending, nil)
+			var rel releaseRecorder
+			rel.install(&ops)
+
+			code, got, stderr := runHookClaimWith(f, ops)
+			if code != 0 || got != "" {
+				t.Fatalf("doHookClaim = %d handing out %q, want 0 handing out nothing; stderr=%s", code, got, stderr)
+			}
+			if len(rel.attempts) != 0 {
+				t.Fatalf("release attempts = %v, want none: this invocation minted no claim", rel.attempts)
+			}
+			f.wantNeverClaimed(run.root.ID)
+			if root := f.get(run.root.ID); root.Status != tc.status || root.Assignee != tc.assignee {
+				t.Fatalf("root = %s assigned %q, want %s assigned %q left as it was", root.Status, root.Assignee, tc.status, tc.assignee)
+			}
+		})
 	}
 }
