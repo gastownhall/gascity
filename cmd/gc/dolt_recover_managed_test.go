@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -811,5 +812,62 @@ func TestRecoverManagedDolt_ProceedsWhenHealthCheckErrors(t *testing.T) {
 	}
 	if report.Ready {
 		t.Error("expected Ready=false when health check errors")
+	}
+}
+
+// A single timed-out SQL probe against an owned, live, listening managed Dolt
+// server must not stop that server: recovery defers within the unresponsive
+// window instead of falling through to stop-and-start (gastownhall/gascity#8669).
+func TestRecoverManagedDolt_DefersStopOfLiveListeningServerOnSingleProbeTimeout(t *testing.T) {
+	cityPath := setupRecoveryTestCity(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	portText := fmt.Sprint(port)
+	writeRecoveryRuntimeState(t, cityPath, os.Getpid(), port)
+
+	var stopCalls, startCalls int
+	ops := managedDoltRecoveryOps{
+		queryProbe: func(_, _, _ string) error {
+			return errors.New("dolt query probe: context deadline exceeded after 5s")
+		},
+		healthCheck: func(_, _, _ string) (managedDoltSQLHealthReport, error) {
+			return managedDoltSQLHealthReport{}, errors.New("health: context deadline exceeded")
+		},
+		stop: func(_, _ string) (managedDoltStopReport, error) {
+			stopCalls++
+			return managedDoltStopReport{HadPID: true, PID: os.Getpid()}, nil
+		},
+		preflightCleanup: func(_ string) error { return nil },
+		start: func(_, _, _, _, _ string, _ time.Duration) (managedDoltStartReport, error) {
+			startCalls++
+			return managedDoltStartReport{}, errors.New("start must not run")
+		},
+		publish:       func(_ string) error { return nil },
+		failedCleanup: func(_ string, _, _ int, cause error) error { return cause },
+	}
+
+	report, err := recoverManagedDoltProcessWithOps(cityPath, "127.0.0.1", portText, "root", "warning", 2*time.Second, ops)
+	if stopCalls != 0 || startCalls != 0 || report.Restarted {
+		t.Fatalf("single probe timeout on a live listening owned server: stop calls=%d start calls=%d Restarted=%v, want no stop/start (deferral)", stopCalls, startCalls, report.Restarted)
+	}
+	var deferred *managedDoltRecoveryDeferredError
+	if !errors.As(err, &deferred) {
+		t.Fatalf("recover error = %v, want *managedDoltRecoveryDeferredError", err)
+	}
+	if deferred.Identity.PID != os.Getpid() || deferred.Identity.Port != port {
+		t.Fatalf("deferral identity = %+v, want the listener this test holds (pid %d, port %d)", deferred.Identity, os.Getpid(), port)
 	}
 }
