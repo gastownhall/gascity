@@ -574,7 +574,7 @@ func ProjectLifecycle(input LifecycleInput) LifecycleView {
 	identity := projectIdentity(input, namedIdentity, baseState, continuityEligible)
 
 	wakeCauses := projectWakeCauses(input)
-	runtimeProjection, reconciledState, resetContinuation := projectRuntimeProjection(input, baseState, compatState, sleepReason, wakeCauses)
+	runtimeProjection, reconciledState, resetContinuation := projectRuntimeProjection(input, now, baseState, compatState, sleepReason, wakeCauses)
 	blockers, heldUntil, quarantinedUntil := projectBlockers(input, now, baseState, identity)
 	desired := projectDesiredState(input, terminal, blockers, wakeCauses)
 
@@ -709,6 +709,19 @@ func projectIdentity(input LifecycleInput, namedIdentity string, base BaseState,
 	return IdentityNone
 }
 
+// heldUntilActive reports whether heldUntil parses to a non-zero instant that is
+// still in the future relative to now — i.e. an explicit hold is in force. This
+// is the single source of truth for the BlockerHeld condition; both
+// projectBlockers and the suspended-runtime guard in projectRuntimeProjection
+// rely on it so they never drift apart.
+func heldUntilActive(heldUntil string, now time.Time) bool {
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(heldUntil))
+	if err != nil || t.IsZero() {
+		return false
+	}
+	return now.Before(t)
+}
+
 func projectBlockers(input LifecycleInput, now time.Time, base BaseState, identity IdentityProjection) ([]LifecycleBlocker, time.Time, time.Time) {
 	var blockers []LifecycleBlocker
 	if input.ConfigMissing || base == BaseStateOrphaned {
@@ -724,7 +737,7 @@ func projectBlockers(input LifecycleInput, now time.Time, base BaseState, identi
 	var heldUntil time.Time
 	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(input.HeldUntil)); err == nil && !t.IsZero() {
 		heldUntil = t
-		if now.Before(t) {
+		if heldUntilActive(input.HeldUntil, now) {
 			blockers = appendUniqueBlocker(blockers, BlockerHeld)
 		}
 	}
@@ -755,7 +768,7 @@ func projectBlockers(input LifecycleInput, now time.Time, base BaseState, identi
 // future consumer that reads a projection built without runtime facts.
 const unobservedCreatingTimeout = 15 * time.Minute
 
-func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State, sleepReason string, wakeCauses []WakeCause) (RuntimeProjection, State, bool) {
+func projectRuntimeProjection(input LifecycleInput, now time.Time, base BaseState, compat State, sleepReason string, wakeCauses []WakeCause) (RuntimeProjection, State, bool) {
 	if !input.Runtime.Observed {
 		if base == BaseStateCreating && creatingUnobservedExpired(input) {
 			return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)
@@ -763,6 +776,24 @@ func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State
 		return RuntimeProjectionUnknown, compat, false
 	}
 	if input.Runtime.Alive {
+		// A session suspended with an active hold (gc session suspend) may still
+		// have a live runtime for a tick or two before it drains. Do not heal its
+		// advisory state back to awake while the hold is in force: that clobbers
+		// held_until and re-arms the user-hold drain every reconciler tick, so the
+		// drain never finalizes. Keep it suspended — mirroring the dead-runtime
+		// path below — so the heal is a no-op and the drain can settle. The hold
+		// check matches projectBlockers' BlockerHeld condition (now < held_until).
+		//
+		// Excluded: a suspend that landed mid-start, while pending_create_claim is
+		// still set. That half-committed start must roll back (drain the runtime,
+		// clear the lease) rather than park suspended-but-alive, so it keeps the
+		// existing awake projection that drives the rollback (see
+		// TestRecoverRunningPendingCreateRefusesASuspend and
+		// recoverRunningPendingCreate). This guard targets a fully-started session
+		// an operator parked — the user-hold drain loop — not an in-flight create.
+		if base == BaseStateSuspended && !input.PendingCreateClaim && heldUntilActive(input.HeldUntil, now) {
+			return RuntimeProjectionAlive, StateSuspended, false
+		}
 		return RuntimeProjectionAlive, StateAwake, false
 	}
 	if base == BaseStateNone || base == BaseStateClosed || base == BaseStateClosing {
