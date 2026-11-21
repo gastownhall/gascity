@@ -214,8 +214,9 @@ yet settled.
   limit the store pushes to its backing), its interval ends at
   `usage_closed_at`, and its model-usage sweep is retried until it settles or
   15 minutes past the close. A named session's reopen copies the closed
-  interval's `awake_started_at` and `session_key` onto the marker
-  (`usage_closed_awake_started_at`, `usage_closed_session_key`), so a start
+  interval's `awake_started_at` and `session_key`, and a Copilot row's
+  `copilot_transcript`, onto the marker (`usage_closed_awake_started_at`,
+  `usage_closed_session_key`, `usage_closed_copilot_transcript`), so a start
   that stamps a new epoch before the lane runs does not lose that interval.
   The closed sweep finds a claude transcript by that key alone; a keyless
   closed claude interval records its compute fact without model usage. The
@@ -254,9 +255,17 @@ yet settled.
   payload's `RunID` is wired today, resolved through the shared
   `beadmeta.ResolveRunID` that the compute-fact emitter also uses so a run's model
   and compute facts group together.
-- **Model-fact coverage is per transcript family: claude, codex, opencode.**
-  Families outside `invocationUsageSpecs` are skipped before any transcript
-  discovery. OpenCode mirrors a session as one JSON export named for its
+- **Model-fact coverage is per transcript family: claude, codex, opencode,
+  copilot.** Families outside `invocationUsageSpecs` are skipped before any
+  transcript discovery. Copilot writes `<session-state>/<sessionId>/events.jsonl`;
+  gc learns the `sessionId` from the stock `sessionStart` hook and records it on
+  the row as `copilot_transcript` (`<generation>:<sessionId>`), not as
+  `session_key`, so Copilot's launch and resume are unchanged. A transcript is
+  resolved by that identity and the workdir, and only while the identity's
+  generation is the row's: seats sharing a workdir, and a later runtime
+  incarnation, never borrow another conversation's log. Copilot's `cost` is a
+  premium-request multiplier, not dollars, so USD comes from the price table
+  and is flagged `Unpriced` on a miss. OpenCode mirrors a session as one JSON export named for its
   `session_key` (`<root>/<session_key>.json`), so it is resolved by that key,
   never by workdir (sessions sharing a workdir would be attributed each other's
   export), and the whole export is parsed rather than tail-windowed. The

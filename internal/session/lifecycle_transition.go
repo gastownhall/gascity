@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 	"time"
 
@@ -740,10 +741,11 @@ func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 // clears every key once the interval is settled (UsageCloseClearPatch).
 func UsageClosePatch(now time.Time) MetadataPatch {
 	return MetadataPatch{
-		MetadataKeyUsageClosePending:         "true",
-		MetadataKeyUsageClosedAt:             now.UTC().Format(time.RFC3339Nano),
-		MetadataKeyUsageClosedAwakeStartedAt: "",
-		MetadataKeyUsageClosedSessionKey:     "",
+		MetadataKeyUsageClosePending:            "true",
+		MetadataKeyUsageClosedAt:                now.UTC().Format(time.RFC3339Nano),
+		MetadataKeyUsageClosedAwakeStartedAt:    "",
+		MetadataKeyUsageClosedSessionKey:        "",
+		MetadataKeyUsageClosedCopilotTranscript: "",
 	}
 }
 
@@ -762,10 +764,14 @@ func UsageReopenPatch(closedMeta map[string]string) MetadataPatch {
 		strings.TrimSpace(closedMeta[MetadataKeyUsageClosedAwakeStartedAt]) != "" {
 		return nil
 	}
-	return MetadataPatch{
+	patch := MetadataPatch{
 		MetadataKeyUsageClosedAwakeStartedAt: start,
 		MetadataKeyUsageClosedSessionKey:     closedMeta["session_key"],
 	}
+	if transcript := closedMeta[MetadataKeyCopilotTranscript]; transcript != "" {
+		patch[MetadataKeyUsageClosedCopilotTranscript] = transcript
+	}
+	return patch
 }
 
 // UsageClosedIntervalMetadata returns meta as of the awake interval its
@@ -781,6 +787,12 @@ func UsageClosedIntervalMetadata(meta map[string]string) map[string]string {
 	interval := maps.Clone(meta)
 	interval["awake_started_at"] = start
 	interval["session_key"] = meta[MetadataKeyUsageClosedSessionKey]
+	// A Copilot identity is valid only for the generation that captured it, so
+	// the interval's view also reports that generation as its own.
+	interval[MetadataKeyCopilotTranscript] = meta[MetadataKeyUsageClosedCopilotTranscript]
+	if ref, ok := ParseCopilotTranscriptRef(meta[MetadataKeyUsageClosedCopilotTranscript]); ok {
+		interval["generation"] = strconv.FormatInt(ref.Generation, 10)
+	}
 	return interval
 }
 
@@ -788,10 +800,11 @@ func UsageClosedIntervalMetadata(meta map[string]string) map[string]string {
 // interval start and key a reopen kept.
 func UsageCloseClearPatch() MetadataPatch {
 	return MetadataPatch{
-		MetadataKeyUsageClosePending:         "",
-		MetadataKeyUsageClosedAt:             "",
-		MetadataKeyUsageClosedAwakeStartedAt: "",
-		MetadataKeyUsageClosedSessionKey:     "",
+		MetadataKeyUsageClosePending:            "",
+		MetadataKeyUsageClosedAt:                "",
+		MetadataKeyUsageClosedAwakeStartedAt:    "",
+		MetadataKeyUsageClosedSessionKey:        "",
+		MetadataKeyUsageClosedCopilotTranscript: "",
 	}
 }
 

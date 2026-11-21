@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -394,6 +395,106 @@ func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info, Persi
 		}
 	}
 	return false, nil
+}
+
+// CopilotTranscriptRef is the attribution identity of one Copilot conversation:
+// its sessionId, scoped to the runtime incarnation (generation) that hosted it.
+// Every start mints a new generation, so a Copilot conversation started by a
+// later incarnation can never read an earlier one's identity.
+type CopilotTranscriptRef struct {
+	Generation     int64
+	ConversationID string
+}
+
+// String is the stored form, "<generation>:<conversation id>".
+func (r CopilotTranscriptRef) String() string {
+	return strconv.FormatInt(r.Generation, 10) + ":" + r.ConversationID
+}
+
+// ParseCopilotTranscriptRef reads the stored form. A missing, malformed or
+// unsafe value (a conversation id that could leave the transcript directory)
+// is not an identity.
+func ParseCopilotTranscriptRef(raw string) (CopilotTranscriptRef, bool) {
+	generation, conversationID, found := strings.Cut(strings.TrimSpace(raw), ":")
+	epoch, err := strconv.ParseInt(generation, 10, 64)
+	if !found || err != nil || epoch < 1 || !validCopilotConversationID(conversationID) {
+		return CopilotTranscriptRef{}, false
+	}
+	return CopilotTranscriptRef{Generation: epoch, ConversationID: conversationID}, true
+}
+
+// CopilotTranscriptID returns the conversation id usage attribution may read
+// from a row's metadata: only an identity captured by the row's current
+// generation. An absent, malformed or earlier incarnation's identity is "", so
+// attribution records nothing rather than borrow another conversation's log.
+func CopilotTranscriptID(meta map[string]string) string {
+	ref, ok := ParseCopilotTranscriptRef(meta[MetadataKeyCopilotTranscript])
+	if !ok {
+		return ""
+	}
+	current, err := strconv.ParseInt(strings.TrimSpace(meta["generation"]), 10, 64)
+	if err != nil || current != ref.Generation {
+		return ""
+	}
+	return ref.ConversationID
+}
+
+func validCopilotConversationID(id string) bool {
+	return id != "" && !strings.ContainsAny(id, " \t\r\n/\\") && !strings.Contains(id, "..")
+}
+
+// CaptureCopilotTranscript records the Copilot conversation a managed runtime
+// incarnation is running, for usage attribution only. It writes
+// copilot_transcript, never session_key, so launch flags and resume behavior
+// are unchanged. Every predicate is checked on the same fresh row that
+// UpdateRowFenced conditionally updates (a lost CAS rechecks them): an open
+// row, the exact raw session name, the Copilot provider family, a permitted
+// state, a positive generation equal to the row's, and the row's instance
+// token. The same conversation again is a no-op; a different conversation in
+// the same incarnation is refused; an identity left by an earlier incarnation
+// is replaced. Stale, conflicting, incomplete or unfenceable captures return an
+// error without writing. Errors never carry the token.
+func (s *Store) CaptureCopilotTranscript(id, name, generation, instanceToken, conversationID string) (bool, error) {
+	epoch, err := strconv.ParseInt(generation, 10, 64)
+	if err != nil || epoch <= 0 || name == "" || instanceToken == "" || conversationID == id || !validCopilotConversationID(conversationID) {
+		return false, fmt.Errorf("capturing Copilot transcript for session %q: incomplete hook identity", id)
+	}
+	want := CopilotTranscriptRef{Generation: epoch, ConversationID: conversationID}
+	var rejection error
+	matched := false
+	written, err := s.UpdateRowFenced(id, 5, func(info Info, row PersistedResponse) (RowPatch, bool) {
+		matched = false
+		rejection = fmt.Errorf("capturing Copilot transcript for session %q: hook identity is not current", id)
+		if info.Closed || info.SessionNameMetadata != name || ProviderFamilyFromInfo(info, "") != "copilot" || info.Generation != generation || info.InstanceToken != instanceToken {
+			return RowPatch{}, false
+		}
+		switch State(info.MetadataState) {
+		case StateActive, StateAwake, StateCreating, StateStartPending:
+		default:
+			return RowPatch{}, false
+		}
+		if held, ok := ParseCopilotTranscriptRef(row.Metadata[MetadataKeyCopilotTranscript]); ok && held.Generation == epoch {
+			if held.ConversationID == conversationID {
+				matched = true
+				rejection = nil
+			} else {
+				rejection = fmt.Errorf("capturing Copilot transcript for session %q: another conversation is bound to this incarnation", id)
+			}
+			return RowPatch{}, false
+		}
+		rejection = nil
+		return RowPatch{Metadata: MetadataPatch{MetadataKeyCopilotTranscript: want.String()}}, true
+	})
+	if err != nil {
+		return false, err
+	}
+	if rejection != nil {
+		return false, rejection
+	}
+	if !written && !matched {
+		return false, fmt.Errorf("capturing Copilot transcript for session %q: conditional write contended", id)
+	}
+	return written, nil
 }
 
 // sameLifecycleFacts reports whether a and b agree on every persisted fact the
