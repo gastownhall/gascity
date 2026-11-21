@@ -161,3 +161,74 @@ func TestSweepFailedMoleculesHonorsGraceAndExemptions(t *testing.T) {
 	assertSwept(t, store, "at-cutoff", "created-past")
 	assertOpen(t, store, "inside", "created-inside", "not-failed", "session", "exempt", "exempt-step")
 }
+
+// AC-4: a failed sub-DAG whose gc.root_bead_id names an open workflow that
+// did not fail belongs to that workflow and stays open; once that owner
+// closes, its failed members are orphaned and swept, healthy members left
+// alone. A failed member whose owner is gone is orphaned too.
+func TestSweepFailedMoleculesResolvesOwners(t *testing.T) {
+	store := &strictCloseOrderStore{MemStore: beads.NewMemStore()}
+	owner := mustCreate(t, store, beads.Bead{Title: "live workflow", Metadata: map[string]string{beadmeta.KindMetadataKey: "workflow"}})
+	ownedBy := func(kv ...string) map[string]string {
+		m := map[string]string{beadmeta.RootBeadIDMetadataKey: owner.ID}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	healthy := mustCreate(t, store, beads.Bead{Title: "healthy step", ParentID: owner.ID, Metadata: ownedBy()})
+	attach := mustCreate(t, store, beads.Bead{Title: "failed attach", ParentID: owner.ID, Metadata: ownedBy(beadmeta.MoleculeFailedMetadataKey, "true")})
+	attachStep := mustCreate(t, store, beads.Bead{Title: "failed attach step", ParentID: attach.ID, Metadata: ownedBy(beadmeta.MoleculeFailedMetadataKey, "true")})
+	stray := mustCreate(t, store, beads.Bead{Title: "member of a gone owner", Metadata: map[string]string{
+		beadmeta.MoleculeFailedMetadataKey: "true",
+		beadmeta.RootBeadIDMetadataKey:     "gc-gone",
+	}})
+
+	got, err := SweepFailedMolecules(beadstest.WorkMolecule(store), pastGrace(), 0)
+	if err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+	if len(got.Chains) != 1 || got.Chains[0] != "gc-gone" || got.Closed != 1 {
+		t.Fatalf("first sweep = %+v, want only the gone owner's member closed", got)
+	}
+	assertSwept(t, store, stray.ID)
+	assertOpen(t, store, owner.ID, healthy.ID, attach.ID, attachStep.ID)
+
+	if err := store.Close(owner.ID); err != nil {
+		t.Fatalf("Close(owner): %v", err)
+	}
+	got, err = SweepFailedMolecules(beadstest.WorkMolecule(store), pastGrace(), 0)
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if len(got.Chains) != 1 || got.Chains[0] != owner.ID || got.Closed != 2 {
+		t.Fatalf("second sweep = %+v, want the closed owner's 2 failed members closed", got)
+	}
+	assertSwept(t, store, attach.ID, attachStep.ID)
+	assertOpen(t, store, healthy.ID)
+}
+
+// AC-4: a failed member whose owner also failed but is still inside the grace
+// window waits for its owner.
+func TestSweepFailedMoleculesWaitsForOwnerInsideGrace(t *testing.T) {
+	cutoff := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{
+			ID: "root", Title: "failed root inside grace", Status: "open", CreatedAt: cutoff.Add(-time.Hour), UpdatedAt: cutoff.Add(time.Minute),
+			Metadata: map[string]string{beadmeta.MoleculeFailedMetadataKey: "true"},
+		},
+		{
+			ID: "member", Title: "member past grace", Status: "open", CreatedAt: cutoff.Add(-time.Hour), UpdatedAt: cutoff.Add(-time.Hour),
+			Metadata: map[string]string{beadmeta.MoleculeFailedMetadataKey: "true", beadmeta.RootBeadIDMetadataKey: "root"},
+		},
+	}, nil)
+
+	got, err := SweepFailedMolecules(beadstest.WorkMolecule(store), cutoff, 0)
+	if err != nil {
+		t.Fatalf("SweepFailedMolecules: %v", err)
+	}
+	if len(got.Chains) != 0 || got.Closed != 0 {
+		t.Fatalf("sweep = %+v, want nothing closed while the owner is inside grace", got)
+	}
+	assertOpen(t, store, "root", "member")
+}

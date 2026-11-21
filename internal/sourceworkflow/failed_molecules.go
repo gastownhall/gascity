@@ -59,49 +59,97 @@ func SweepFailedMolecules(store beads.MoleculeTarget, cutoff time.Time, maxChain
 		return out, fmt.Errorf("sweeping failed molecules: listing molecule_failed beads: %w", err)
 	}
 	byID := make(map[string]beads.Bead, len(discovered))
+	candidates := make([]beads.Bead, 0, len(discovered))
 	for _, b := range discovered {
-		byID[b.ID] = b
-	}
-	var errs []error
-	for _, root := range discovered {
-		if root.Status == "closed" || coordclass.ControllerOwned(root) || failureStampAfter(root, cutoff) {
+		if b.Status == "closed" || coordclass.ControllerOwned(b) || failureStampAfter(b, cutoff) {
 			continue
 		}
-		if failedChainOwner(root, byID) != root.ID || root.Metadata[beadmeta.GCExemptMetadataKey] == "true" {
-			continue
+		byID[b.ID] = b
+		candidates = append(candidates, b)
+	}
+	var owners []string
+	grouped := make(map[string]bool)
+	for _, b := range candidates {
+		if owner := failedChainOwner(b, byID); !grouped[owner] {
+			grouped[owner] = true
+			owners = append(owners, owner)
+		}
+	}
+	var errs []error
+	for _, ownerID := range owners {
+		orphaned := false
+		if root, ok := byID[ownerID]; ok {
+			if root.Metadata[beadmeta.GCExemptMetadataKey] == "true" {
+				continue
+			}
+		} else {
+			sweepable, err := ownerReleasedChain(reader, ownerID)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("closing failed molecule %s: %w", ownerID, err))
+				continue
+			}
+			if !sweepable {
+				continue
+			}
+			orphaned = true
 		}
 		if maxChains > 0 && len(out.Chains) >= maxChains {
 			out.More = true
 			break
 		}
-		n, err := closeFailedChain(store, root.ID)
+		n, err := closeFailedChain(store, ownerID, orphaned)
 		out.Closed += n
 		if err != nil {
-			errs = append(errs, fmt.Errorf("closing failed molecule %s: %w", root.ID, err))
+			errs = append(errs, fmt.Errorf("closing failed molecule %s: %w", ownerID, err))
 			continue
 		}
-		out.Chains = append(out.Chains, root.ID)
+		out.Chains = append(out.Chains, ownerID)
 	}
 	return out, errors.Join(errs...)
 }
 
-// failedChainOwner is the ID of the bead that owns b's failed chain: the
-// first gc.root_bead_id naming another bead on the walk up b's failed
-// ancestors in byID, else the topmost such ancestor. The walk stops at a
-// cycle.
+// failedChainOwner is the ID of the bead that owns b's failed chain: the walk
+// up from b follows a gc.root_bead_id naming another bead, else b's ParentID,
+// while the bead it reaches is a sweep candidate in byID, and stops at the
+// first bead it cannot follow, at the ID a gc.root_bead_id names outside
+// byID, or at a cycle.
 func failedChainOwner(b beads.Bead, byID map[string]beads.Bead) string {
-	seen := map[string]bool{}
+	seen := map[string]bool{b.ID: true}
 	for {
-		if owner := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); owner != "" && owner != b.ID {
-			return owner
+		next := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey])
+		named := next != "" && next != b.ID
+		if !named {
+			next = strings.TrimSpace(b.ParentID)
 		}
-		seen[b.ID] = true
-		parent, ok := byID[strings.TrimSpace(b.ParentID)]
-		if !ok || seen[parent.ID] {
+		up, ok := byID[next]
+		if !ok || seen[up.ID] {
+			if named && !ok {
+				return next
+			}
 			return b.ID
 		}
-		b = parent
+		seen[up.ID] = true
+		b = up
 	}
+}
+
+// ownerReleasedChain reports whether the owner a failed sub-DAG names, which
+// is not itself a sweep candidate, has let its failed members go: it is gone
+// or closed, and not stamped gc.gc_exempt=true. An open owner keeps them,
+// whether it failed too and is still inside the grace window or is a live
+// workflow that did not fail.
+func ownerReleasedChain(reader beads.LiveReader, ownerID string) (bool, error) {
+	owner, err := reader.Get(ownerID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading owner: %w", err)
+	}
+	if owner.Metadata[beadmeta.GCExemptMetadataKey] == "true" {
+		return false, nil
+	}
+	return owner.Status == "closed", nil
 }
 
 // failureStampAfter reports whether b's failure stamp, its UpdatedAt or its
@@ -114,23 +162,33 @@ func failureStampAfter(b beads.Bead, cutoff time.Time) bool {
 	return stamp.After(cutoff)
 }
 
-// closeFailedChain closes the open members of the failed chain rooted at
-// ownerID in one ordered batch, read fresh across both tiers.
-func closeFailedChain(store beads.MoleculeTarget, ownerID string) (int, error) {
+// closeFailedChain closes the open members of ownerID's failed chain in one
+// ordered batch, read fresh across both tiers: the owner and every bead naming
+// it by gc.root_bead_id, or, for an orphaned chain whose owner is closed or
+// gone, only the failed beads naming it, each with its failed ParentID
+// descendants.
+func closeFailedChain(store beads.MoleculeTarget, ownerID string, orphaned bool) (int, error) {
 	reader := beads.LiveFor(store)
-	root, err := reader.Get(ownerID)
-	if err != nil {
-		return 0, fmt.Errorf("reading root: %w", err)
+	memberQuery := map[string]string{beadmeta.RootBeadIDMetadataKey: ownerID}
+	var chain []beads.Bead
+	if orphaned {
+		memberQuery[beadmeta.MoleculeFailedMetadataKey] = "true"
+	} else {
+		root, err := reader.Get(ownerID)
+		if err != nil {
+			return 0, fmt.Errorf("reading root: %w", err)
+		}
+		chain = append(chain, root)
 	}
 	members, err := reader.List(beads.ListQuery{
-		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: ownerID},
+		Metadata: memberQuery,
 		TierMode: beads.TierBoth,
 		Live:     true,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("listing members: %w", err)
 	}
-	chain := append([]beads.Bead{root}, members...)
+	chain = append(chain, members...)
 	descendants, err := failedDescendants(reader, chain)
 	if err != nil {
 		return 0, fmt.Errorf("walking children: %w", err)
