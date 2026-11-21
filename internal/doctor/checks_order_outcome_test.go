@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -515,4 +516,128 @@ func orderOutcomeTestDetailNames(details []string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// skippedOrderEvent builds the typed order.skipped declaration the controller
+// records after a successful exec run that declared incomplete work.
+func skippedOrderEvent(subject string, ts time.Time, outcome, reason string, scopes ...events.OrderSkippedScope) events.Event {
+	message := fmt.Sprintf("%s: %s", outcome, reason)
+	names := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		names = append(names, scope.Scope+" ("+scope.Reason+")")
+	}
+	if len(names) > 0 {
+		message += "; not run: " + strings.Join(names, ", ")
+	}
+	if scopes == nil {
+		scopes = []events.OrderSkippedScope{}
+	}
+	return events.Event{
+		Type: events.OrderSkipped, Ts: ts, Subject: subject, Actor: "controller", Message: message,
+		Payload: events.OrderSkippedPayloadJSON(events.OrderSkippedPayload{
+			OrderName: subject, Outcome: outcome, Reason: reason, Scopes: scopes,
+		}),
+	}
+}
+
+// TestOrderOutcomeHealthyRecordedIncompleteOutcomes pins that a monitored
+// order whose run recorded order.completed followed by an order.skipped
+// declaration surfaces the declaration as an advisory warning immediately,
+// instead of reporting the companion completion as success.
+func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	partial := skippedOrderEvent("export-sweep", now.Add(-time.Hour), "partial", "store unreachable",
+		events.OrderSkippedScope{Scope: "rig:st", Reason: "dolt not reachable"})
+	skipped := skippedOrderEvent("nightly-digest", now.Add(-time.Hour), "skipped", "nothing exported",
+		events.OrderSkippedScope{Scope: "rig:a", Reason: "suspended"}, events.OrderSkippedScope{Scope: "rig:b", Reason: "no remote"})
+	unreadable := events.Event{
+		Type: events.OrderSkipped, Ts: now.Add(-time.Hour), Subject: "broken-declarer", Actor: "controller",
+		Message: "unreadable outcome declaration: invalid character 'x' looking for beginning of value",
+	}
+	blank := events.Event{Type: events.OrderSkipped, Ts: now.Add(-time.Hour), Subject: "blank-declarer", Actor: "controller"}
+
+	cases := []struct {
+		name       string
+		trigger    string
+		timing     string
+		order      string
+		evts       []events.Event
+		wantDetail string
+	}{
+		{
+			name: "cooldown partial after completion", trigger: "cooldown", timing: "6h", order: "export-sweep",
+			evts: []events.Event{
+				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "export-sweep", Actor: "controller"},
+				partial,
+			},
+			wantDetail: "export-sweep: recorded incomplete work: partial: store unreachable; not run: rig:st (dolt not reachable)",
+		},
+		{
+			name: "cron skipped after completion", trigger: "cron", timing: "0 3 * * *", order: "nightly-digest",
+			evts: []events.Event{
+				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "nightly-digest", Actor: "controller"},
+				skipped,
+			},
+			wantDetail: "nightly-digest: recorded incomplete work: skipped: nothing exported; not run: rig:a (suspended), rig:b (no remote)",
+		},
+		{
+			name: "declaration without companion completion", trigger: "cooldown", timing: "6h", order: "export-sweep",
+			evts:       []events.Event{partial},
+			wantDetail: "export-sweep: recorded incomplete work: partial: store unreachable",
+		},
+		{
+			name: "unreadable declaration keeps its error text", trigger: "cooldown", timing: "1h", order: "broken-declarer",
+			evts: []events.Event{
+				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "broken-declarer", Actor: "controller"},
+				unreadable,
+			},
+			wantDetail: "broken-declarer: recorded incomplete work: unreadable outcome declaration: invalid character 'x'",
+		},
+		{
+			name: "blank declaration message still warns", trigger: "cooldown", timing: "1h", order: "blank-declarer",
+			evts: []events.Event{
+				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "blank-declarer", Actor: "controller"},
+				blank,
+			},
+			wantDetail: "blank-declarer: recorded incomplete work",
+		},
+		{
+			name: "declaration inside controller-start grace still warns", trigger: "cooldown", timing: "6h", order: "export-sweep",
+			evts: []events.Event{
+				{Type: events.ControllerStarted, Ts: now.Add(-time.Hour - time.Minute), Subject: "gc", Actor: "controller"},
+				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "export-sweep", Actor: "controller"},
+				partial,
+			},
+			wantDetail: "export-sweep: recorded incomplete work: partial: store unreachable",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, tc.order, tc.trigger, tc.timing)
+			writeOrderFiringTestEvents(t, cityPath, tc.evts...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != StatusWarning {
+				t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			if result.Severity != SeverityAdvisory {
+				t.Fatalf("severity = %v, want SeverityAdvisory", result.Severity)
+			}
+			joined := strings.Join(result.Details, "\n")
+			if !strings.Contains(joined, tc.wantDetail) {
+				t.Fatalf("details = %v, want a detail containing %q", result.Details, tc.wantDetail)
+			}
+			if strings.Contains(joined, "last run succeeded") || strings.Contains(joined, "no completed runs yet") {
+				t.Fatalf("details = %v, must not claim success for an order with outstanding incomplete work", result.Details)
+			}
+			if result.Message == "all scheduled orders succeeding" {
+				t.Fatalf("message = %q, must not claim every order succeeded", result.Message)
+			}
+			if want := fmt.Sprintf(orderOutcomeInspectHintFmt, tc.order); result.FixHint != want {
+				t.Fatalf("FixHint = %q, want %q", result.FixHint, want)
+			}
+		})
+	}
 }
