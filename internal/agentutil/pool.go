@@ -54,10 +54,15 @@ func findSessionNameByTemplate(store beads.SessionStore, qualifiedName string) s
 		return ""
 	}
 	for _, b := range beadList {
-		if b.Metadata[beadmeta.TemplateMetadataKey] == qualifiedName {
-			if sn := b.Metadata["session_name"]; sn != "" {
-				return sn
-			}
+		// Production rows stamp the registry key "template"
+		// (internal/session/manager.go's create); the gc.template spelling is
+		// a legacy shape only old fixtures carry, kept as a fallback so rows
+		// written before either convention settled still resolve.
+		if b.Metadata["template"] != qualifiedName && b.Metadata[beadmeta.TemplateMetadataKey] != qualifiedName {
+			continue
+		}
+		if sn := b.Metadata["session_name"]; sn != "" {
+			return sn
 		}
 	}
 	return ""

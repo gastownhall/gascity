@@ -27,6 +27,8 @@ go_test(
     ],
     embed = [":agentutil"],
     deps = [
+        "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/config",
         "//internal/runtime",
         "//internal/testenv",

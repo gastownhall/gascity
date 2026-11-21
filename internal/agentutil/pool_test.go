@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -148,5 +150,27 @@ func TestPoolInstanceName(t *testing.T) {
 	}
 	if got := PoolInstanceName("polecat", 1, a3); got != "alpha" {
 		t.Errorf("namepool: got %q, want alpha", got)
+	}
+}
+
+// TestLookupSessionNameReadsTheTemplateKeySessionRowsCarry pins the stored-name
+// read against the row shape production stamps: session rows carry the registry
+// key "template" (internal/session/manager.go's create), never the legacy
+// "gc.template" spelling this lookup once read alone — which left the stored
+// name unreachable and every caller naming sessions by the computed default.
+func TestLookupSessionNameReadsTheTemplateKeySessionRowsCarry(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "session",
+		Type:     "session",
+		Status:   "open",
+		Labels:   []string{"gc.session"},
+		Metadata: map[string]string{"template": "frontend/worker", "session_name": "s-stored"},
+	}); err != nil {
+		t.Fatalf("creating the worker's session row: %v", err)
+	}
+
+	if got := LookupSessionName(beadstest.Sessions(store), "city", "frontend/worker", ""); got != "s-stored" {
+		t.Errorf("LookupSessionName = %q, want the stored s-stored: the row carries the registry key template that production stamps (internal/session/manager.go), so the stored name is what routing must read", got)
 	}
 }

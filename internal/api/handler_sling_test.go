@@ -1411,6 +1411,71 @@ func TestSlingAdmitsWhenAClosedBindingRootSupersedesItsRetainedTwin(t *testing.T
 	}
 }
 
+// TestSlingGraphRoutingNamesTheSessionTheApiSessionsHandleRecords is #8436's
+// sling acceptance at the API door. The handler hands graph routing
+// st.Sessions() — the sessions-class store, which relocates independently of
+// every rig workflow store — so a rig-scope graph.v2 launch's step must carry
+// the session name that store records for the target agent, never a name
+// recomputed from (or minted into) the rig store the graph itself runs in,
+// where the controller's session reads never look.
+func TestSlingGraphRoutingNamesTheSessionTheApiSessionsHandleRecords(t *testing.T) {
+	srv, state, source := newGraphBindingSlingFixture(t)
+	// Relocate the sessions class to a store no rig workflow reaches: the
+	// bound name must be read from here and only here. The seed keeps its ids
+	// clear of the rig store's minted source id, so the residency resolver
+	// cannot mistake the session row for the sling's source bead.
+	sessions := beads.NewMemStoreFrom(500, nil, nil)
+	state.sessionsBeadStore = sessions
+	if _, err := sessions.Create(beads.Bead{
+		Title:    "session",
+		Type:     "session",
+		Status:   "open",
+		Labels:   []string{"gc.session"},
+		Metadata: map[string]string{"template": "myrig/worker", "session_name": "s-api-bound"},
+	}); err != nil {
+		t.Fatalf("creating the worker's session bead: %v", err)
+	}
+
+	rec := postGraphSling(t, srv, state, source.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status     string `json:"status"`
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "slung" || resp.WorkflowID == "" {
+		t.Fatalf("response = %+v, want a slung launch with a workflow id", resp)
+	}
+
+	rig := state.stores["myrig"]
+	all, err := rig.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("listing the rig store: %v", err)
+	}
+	var step *beads.Bead
+	for i := range all {
+		b := all[i]
+		if b.Type == "session" {
+			t.Errorf("the rig workflow store holds a session bead (%s): a session row materialized there is stranded (#8436)", b.ID)
+		}
+		if b.ID != resp.WorkflowID && b.Metadata[beadmeta.RootBeadIDMetadataKey] == resp.WorkflowID && b.Title == "Do work" {
+			step = &all[i]
+		}
+	}
+	if step == nil {
+		t.Fatalf("no step of workflow %s in the rig store", resp.WorkflowID)
+	}
+	if got := step.Metadata[beadmeta.SessionNameMetadataKey]; got != "s-api-bound" {
+		t.Fatalf("step %s = %q, want the sessions store's s-api-bound: the name came from somewhere other than the sessions-class handle (#8436)",
+			beadmeta.SessionNameMetadataKey, got)
+	}
+}
+
 // TestSlingFailsWhenGraphBindingScanFails pins decision (3): a fault on the
 // store that HOLDS the answer refuses the sling. Degrading it to the
 // non-source-store warning would let a binding outage read as "no conflict" —
