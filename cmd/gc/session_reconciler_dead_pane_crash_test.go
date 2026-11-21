@@ -101,20 +101,32 @@ const deadPaneTestToken = "tok-dead-pane"
 
 func newDeadPaneEnv(t *testing.T) *deadPaneEnv {
 	t.Helper()
-	env := newReconcilerTestEnv(t)
-	rec := events.NewFake()
-	env.rec = rec
-	env.cfg = &config.City{
+	return newDeadPaneEnvFor(t, deadPaneCity(), "worker")
+}
+
+// deadPaneCity is a city with one always-mode named session of worker.
+func deadPaneCity() *config.City {
+	return &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "test-cmd"}},
 		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
 	}
-	name := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+}
+
+// newDeadPaneEnvFor builds the row of identity, cfg's always-mode named
+// session, over its own running runtime.
+func newDeadPaneEnvFor(t *testing.T, cfg *config.City, identity string) *deadPaneEnv {
+	t.Helper()
+	env := newReconcilerTestEnv(t)
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = cfg
+	name := config.NamedSessionRuntimeName(env.cfg.EffectiveCityName(), env.cfg.Workspace, identity)
 	env.desiredState[name] = TemplateParams{
 		Command:                 "test-cmd",
 		SessionName:             name,
-		TemplateName:            "worker",
-		ConfiguredNamedIdentity: "worker",
+		TemplateName:            identity,
+		ConfiguredNamedIdentity: identity,
 		ConfiguredNamedMode:     "always",
 		ResolvedProvider:        &config.ResolvedProvider{Name: "fake", Command: "test-cmd"},
 		Hints:                   agent.StartupHints{ProcessNames: []string{"test-cmd"}},
@@ -126,15 +138,15 @@ func newDeadPaneEnv(t *testing.T) *deadPaneEnv {
 	if err := env.sp.SetMeta(name, "GC_INSTANCE_TOKEN", deadPaneTestToken); err != nil {
 		t.Fatalf("stamp runtime token: %v", err)
 	}
-	session := env.createSessionBead(name, "worker")
+	session := env.createSessionBead(name, identity)
 	env.markSessionActive(&session)
 	env.setSessionMetadata(&session, map[string]string{
 		"last_woke_at":               env.clk.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
 		"instance_token":             deadPaneTestToken,
 		namedSessionMetadataKey:      "true",
-		namedSessionIdentityMetadata: "worker",
+		namedSessionIdentityMetadata: identity,
 		namedSessionModeMetadata:     "always",
-		"alias":                      "worker",
+		"alias":                      identity,
 		"started_config_hash":        runtime.CoreFingerprint(runtimeCfg),
 		"started_live_hash":          runtime.LiveFingerprint(runtimeCfg),
 	})
@@ -144,7 +156,7 @@ func newDeadPaneEnv(t *testing.T) *deadPaneEnv {
 		rec:               rec,
 		name:              name,
 		beadID:            session.ID,
-		desired:           map[string]int{"worker": 1},
+		desired:           map[string]int{identity: 1},
 	}
 }
 
@@ -301,5 +313,41 @@ func TestReconcileNamedAlwaysCorpseCrashOncePerDeadObject(t *testing.T) {
 	e.tick(t)
 	if got := len(e.crashes()); got != 2 {
 		t.Fatalf("session.crashed events after a later object died = %d, want 2", got)
+	}
+}
+
+// TestReconcileNamedCorpseCrashNotRecordedWithoutCorpse: an incomplete
+// liveness observation, or a live runtime, records no dead-pane crash and
+// neither stops nor starts the row's runtime.
+func TestReconcileNamedCorpseCrashNotRecordedWithoutCorpse(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(e *deadPaneEnv)
+	}{
+		{"liveness unavailable", func(e *deadPaneEnv) {
+			e.sp.kill(e.name, "$7")
+			e.sp.obsErr = fmt.Errorf("probing %s: %w", e.name, runtime.ErrRuntimeUnavailable)
+		}},
+		{"runtime running and alive", func(*deadPaneEnv) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newDeadPaneEnv(t)
+			e.sp.SetPeekOutput(e.name, "agent output")
+			tc.setup(e)
+			stops := e.sp.CountCalls("Stop", e.name)
+			starts := e.sp.CountCalls("Start", e.name)
+
+			e.tick(t)
+
+			if got := len(e.crashes()); got != 0 {
+				t.Fatalf("session.crashed events = %d, want 0; events=%#v", got, e.rec.Events)
+			}
+			if got := e.sp.CountCalls("Stop", e.name); got != stops {
+				t.Fatalf("Stop(%s) calls = %d, want %d", e.name, got, stops)
+			}
+			if got := e.sp.CountCalls("Start", e.name); got != starts {
+				t.Fatalf("Start(%s) calls = %d, want %d", e.name, got, starts)
+			}
+		})
 	}
 }
