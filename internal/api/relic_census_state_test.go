@@ -43,7 +43,7 @@ func mintingGraphStore(t *testing.T) beads.Store {
 // soleAPIBinding is the one binding a relocated city's API plane observes.
 func soleAPIBinding(t *testing.T, st *fakeState) storeref.ClassBinding {
 	t.Helper()
-	topo := New(st).residencyTopology()
+	topo := st.Stores().Topology()
 	if len(topo.Bindings) != 1 {
 		t.Fatalf("got %d bindings, want the one this state relocates", len(topo.Bindings))
 	}
@@ -53,7 +53,7 @@ func soleAPIBinding(t *testing.T, st *fakeState) storeref.ClassBinding {
 // apiBindingLegRead reports whether a by-id plan for id would read the binding.
 func apiBindingLegRead(t *testing.T, st *fakeState, id string) bool {
 	t.Helper()
-	topo := New(st).residencyTopology()
+	topo := st.Stores().Topology()
 	plan, err := storeref.Plan(storeref.ByID{ID: id}, topo)
 	if err != nil {
 		t.Fatalf("planning a by-id read of %q: %v", id, err)

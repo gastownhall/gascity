@@ -108,7 +108,7 @@ directory's name) in place of `hello-world`.
 `gc sling` prints a `Dashboard:` link to the formula run, for example:
 
 ```text
-Dashboard: http://127.0.0.1:8372/city/my-city/runs/hw-4up
+Dashboard: http://127.0.0.1:8372/city/my-city/runs/gcg-1025
 ```
 
 That line is the result of getting Gas City running: if you are an agent
@@ -118,11 +118,11 @@ still started: its `Attached workflow <ID>` line names the run, and the link is
 `http://127.0.0.1:8372/city/my-city/runs/<ID>`.
 Open the link to watch the agent work; while the city is still setting up, the page can say "run
 projection is warming", so refresh after a minute. To check from the terminal, pass the run ID (the last part of the link)
-to `gc bd show`; it reports `CLOSED` when the run is done, usually within a
-minute or two, and `hello.sh` is committed in `~/hello-world`:
+to `gc bd show`; its `status:` line reads `closed` when the run is done, usually
+within a minute or two, and `hello.sh` is committed in `~/hello-world`:
 
 ```bash
-gc bd show hw-4up
+gc bd show gcg-1025
 ```
 
 **Next:** work through the seven numbered
@@ -220,7 +220,7 @@ compromised eMudhra CA intermediates.
 
 ### Build from source
 
-Building requires `make`, Go 1.27.3+, and ICU for a transitive Dolt CGO
+Building requires `make`, Go 1.27.4+, and ICU for a transitive Dolt CGO
 dependency (`brew install icu4c` on macOS, `apt install libicu-dev` on Linux;
 on macOS the Makefile auto-detects the keg-only `icu4c` paths):
 

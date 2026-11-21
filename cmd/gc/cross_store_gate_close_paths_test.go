@@ -31,7 +31,7 @@ func TestWispGCRepairClosesACrossStoreGateAsTheController(t *testing.T) {
 		}),
 		gate,
 	})
-	if _, err := closeGeneratedMembersForClosedRoots(store); err != nil {
+	if _, err := closeGeneratedMembersForClosedRoots(store, testWispGCRoots(store, nil)); err != nil {
 		t.Fatalf("closeGeneratedMembersForClosedRoots: %v", err)
 	}
 	got, err := store.Get(gate.ID)

@@ -1688,13 +1688,25 @@ func openExistingScopeLocalFileStore(scopeRoot, cityPath string) (*beads.FileSto
 	return openScopeLocalFileStoreForCity(scopeRoot, cityPath)
 }
 
-func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
+// compatibleFileStoreRoot returns the root of the file store
+// openCompatibleFileStore opens for scopeRoot. A scope with its own
+// .gc/beads.json, and every scope of a city on the scoped-roots layout, opens
+// the store at its own root (scoped is true); on the legacy shared layout
+// every other scope opens the city store.
+func compatibleFileStoreRoot(scopeRoot, cityPath string) (root string, scoped bool) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 	if !samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot) {
-		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
+		return scopeRoot, true
 	}
 	if fileStoreUsesScopedRoots(cityPath) {
-		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
+		return scopeRoot, true
+	}
+	return cityPath, false
+}
+
+func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
+	if root, scoped := compatibleFileStoreRoot(scopeRoot, cityPath); scoped {
+		return openExistingScopeLocalFileStore(root, cityPath)
 	}
 	return openScopeLocalFileStoreForCity(cityPath, cityPath)
 }

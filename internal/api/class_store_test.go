@@ -268,7 +268,7 @@ func TestClassArmStillDoesNotCoverMigratedLegacyIDs(t *testing.T) {
 	if storeref.IDInNamespace("mc-123", prefix) {
 		t.Fatalf("the fixture id mc-123 is inside the %q namespace; it proves nothing about the decline", prefix)
 	}
-	topo := New(st).residencyTopology()
+	topo := st.Stores().Topology()
 	if len(topo.Bindings) != 1 {
 		t.Fatalf("topology has %d bindings, want 1 (the relocated graph store %p)", len(topo.Bindings), graph)
 	}

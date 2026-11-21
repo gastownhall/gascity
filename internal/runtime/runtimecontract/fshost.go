@@ -200,6 +200,24 @@ func probeFSHostRunsWhatItCarries(ctx context.Context, r *runner, hs runtime.Pro
 		return StatusFail, "start did not run the pre_start its config carries: " + err.Error()
 	}
 
+	// A config carrying neither overlay_dir nor pre_start: the script stages
+	// and runs nothing (gc did that host work itself and left it out).
+	for _, rel := range []string{"gc-rpp-fshost-overlay", "gc-rpp-fshost-prestart"} {
+		if err := os.Remove(filepath.Join(work, rel)); err != nil {
+			return StatusFail, "clearing the first start's host work: " + err.Error()
+		}
+	}
+	bare := r.nextName()
+	if status, detail := startFSHostOrFail(ctx, r, bare, fsHostConfig{WorkDir: work, Command: r.opts.Command}); status != StatusPass {
+		return status, detail
+	}
+	r.stop(ctx, bare)
+	for _, rel := range []string{"gc-rpp-fshost-overlay", "gc-rpp-fshost-prestart"} {
+		if _, err := os.Stat(filepath.Join(work, rel)); err == nil {
+			return StatusFail, fmt.Sprintf("start did host work (%s) its config does not carry; a script does exactly what the config carries", rel)
+		}
+	}
+
 	failing := r.nextName()
 	res := r.startFSHost(ctx, failing, fsHostConfig{WorkDir: work, Command: r.opts.Command, PreStart: []string{"exit 1"}})
 	defer r.stop(ctx, failing)
@@ -212,7 +230,7 @@ func probeFSHostRunsWhatItCarries(ctx context.Context, r *runner, hs runtime.Pro
 	if status, detail := expectRunning(ctx, r, failing, false, "after a start whose pre_start failed"); status != StatusPass {
 		return status, detail
 	}
-	return StatusPass, "start stages and runs what its config carries, and a failing pre_start fails it with no box"
+	return StatusPass, "start stages and runs what its config carries and nothing else, and a failing pre_start fails it with no box"
 }
 
 func probeFSHostAgentPIDOnHost(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
@@ -244,4 +262,44 @@ func probeFSHostAgentPIDOnHost(ctx context.Context, r *runner, hs runtime.Protoc
 		return StatusFail, fmt.Sprintf("agent_pid %d: %v", pid, err)
 	}
 	return StatusPass, fmt.Sprintf("agent_pid %d is a live host process of the caller's user", pid)
+}
+
+func probeFSHostHomeView(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if status, detail, ok := fsHostDeclared(hs); !ok {
+		return status, detail
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return StatusFail, "the runner has no home directory to probe: " + err.Error()
+	}
+	marker, err := os.CreateTemp(home, ".gc-rpp-fshost-home-")
+	if err != nil {
+		return StatusFail, "writing the probe file under the runner's HOME: " + err.Error()
+	}
+	defer func() { _ = os.Remove(marker.Name()) }()
+	want := fmt.Sprintf("gc-rpp-fshost-home-%d", time.Now().UnixNano())
+	_, werr := marker.WriteString(want)
+	if cerr := marker.Close(); werr != nil || cerr != nil {
+		return StatusFail, fmt.Sprintf("writing the probe file under the runner's HOME: %v", errors.Join(werr, cerr))
+	}
+	dir, err := r.fsHostDir()
+	if err != nil {
+		return StatusFail, "making the probe's work dir: " + err.Error()
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	out := filepath.Join(dir, "gc-rpp-fshost-home-out")
+	name := r.nextName()
+	cmd := "cp " + shellquote.Quote(marker.Name()) + " " + shellquote.Quote(out) + "; exec " + r.opts.Command
+	if status, detail := startFSHostOrFail(ctx, r, name, fsHostConfig{WorkDir: dir, Command: cmd}); status != StatusPass {
+		return status, detail
+	}
+	defer r.stop(ctx, name)
+	got, err := awaitFile(ctx, out)
+	switch {
+	case err != nil:
+		return StatusFail, "the box could not read a file the caller wrote under its HOME (a box seeing only the work dir?): " + err.Error()
+	case got != want:
+		return StatusFail, fmt.Sprintf("the box's copy of the HOME probe file reads %q, want %q (the box sees another home directory at the same path)", got, want)
+	}
+	return StatusPass, "the box read a file the caller wrote under its HOME, at the same path"
 }

@@ -150,6 +150,7 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
+		NotReadyMarkers:        resolved.NotReadyMarkers,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
@@ -498,10 +499,21 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, err
 	}
 	if store != nil {
-		if info, pr, err := session.ResolveSessionRecordByExactID(sessions, target); err == nil {
+		info, pr, exactErr := session.ResolveSessionRecordByExactID(sessions, target)
+		if exactErr == nil {
 			return factory.SessionByRecord(info, pr)
 		}
-		if id, err := session.ResolveSessionID(sessions, target); err == nil {
+		// target is not an exact bead ID: the name preference falls back to
+		// live session_name/alias matches directly, without a second exact-id
+		// probe (ResolveSessionID would otherwise repeat the Get above). Any
+		// other exact-id error (a hard store failure, say) keeps the original
+		// ResolveSessionID path, which carries its own exact-id probe and
+		// error wrapping.
+		if errors.Is(exactErr, session.ErrSessionNotFound) {
+			if id, err := session.ResolveLiveSessionIDByName(sessions, target); err == nil {
+				return factory.SessionByID(id)
+			}
+		} else if id, err := session.ResolveSessionID(sessions, target); err == nil {
 			return factory.SessionByID(id)
 		}
 		if sp != nil {
@@ -781,6 +793,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
+		NotReadyMarkers:        resolved.NotReadyMarkers,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,

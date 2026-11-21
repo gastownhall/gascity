@@ -5,6 +5,9 @@ go_library(
     srcs = [
         "catalog.go",
         "fshost.go",
+        "input.go",
+        "launch.go",
+        "observation.go",
         "observe.go",
         "ported.go",
         "probes.go",
@@ -18,6 +21,7 @@ go_library(
         "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/exec",
+        "//internal/runtime/runtimecontract/privatecity",
         "//internal/runtime/tmux",
         "//internal/shellquote",
     ],
@@ -27,6 +31,7 @@ go_test(
     name = "runtimecontract_test",
     srcs = [
         "lockstep_test.go",
+        "nontmux_test.go",
         "runner_test.go",
         "screen_reference_test.go",
         "screen_script_test.go",
@@ -41,6 +46,23 @@ go_test(
         "//internal/runtime/runtimetest:conformance.go",
     ],
     embed = [":runtimecontract"],
+    # The 59 tests run one after another (none is t.Parallel), so one process
+    # needed their sum: about 134 s on a quiet host and over the 300 s medium
+    # budget on a loaded gate host (ga-vkhfnj; measured in ga-2p6d5a9j). About
+    # 90 s of it is fixed waiting that load barely moves (the mutants of
+    # TestEveryRequirementIsGated, gc-session-screen's polling); the
+    # full-catalog runs against the shell reference are fork/exec bound and
+    # stretch with CPU contention. Pinned to four CPUs beside 12 busy loops,
+    # one process timed out at 300 s with 22 of the then-51 tests done, while
+    # eight shards passed, the slowest in 88 s.
+    # rules_go gives test i of the declaration order to shard i % shard_count.
+    # TestEveryRequirementIsGated (position 15, 50 to 90 s on its own) is
+    # shard 7's and the floor of any split. The full-catalog tests at
+    # positions 11, 12, 13, 14, 19, 22, 25 and 27 and
+    # TestScreenScriptStartNeedsTheBox (43) spread over shards 1, 3, 4, 5 and
+    # 6. A test added or removed ahead of them shifts those positions:
+    # recheck the split when the test set changes.
+    shard_count = 8,
     deps = [
         "//internal/bazeltest",
         "//internal/runtime",

@@ -26,6 +26,7 @@ go_library(
         "//internal/beads",
         "//internal/beads/proxyendpoint",
         "//internal/events",
+        "//internal/platform/livefile",
         "//internal/runproj",
         "//internal/searchpath",
         "@com_github_shirou_gopsutil_v4//host",

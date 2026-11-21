@@ -29,10 +29,12 @@ const (
 	hostStageSession       = "s1"
 )
 
-// hostStageFixture is a pack that records the start config each `start` or
-// `provision` op received ($S/<op>.<name>.json) and whether, when it ran,
-// the work dir already held the pre_start marker and the session_setup
-// marker. A session is running while $S/<name>.running exists, and
+// hostStageFixture is a pack that records the start config each `start`,
+// `provision` or `launch` op received ($S/<op>.<name>.json) and whether,
+// when a `start` or `provision` ran, the work dir already held the pre_start
+// marker and the session_setup marker. `start`, `provision` and `launch`
+// each mark the session running. A session is running while
+// $S/<name>.running exists, and
 // `is-running` fails while $S/is-running.fails exists. Its `exec` answers
 // `tmux has-session` with 1 (no agent session yet) and every other command
 // with 0, so a separable launch succeeds without a tmux.
@@ -68,6 +70,7 @@ case "$op" in
     if [ -f "$S/is-running.fails" ]; then exit 1; fi
     if [ -f "$S/$name.running" ]; then echo true; else echo false; fi ;;
   exec) cmd=$(cat); case "$cmd" in *has-session*) exit 1 ;; *) exit 0 ;; esac ;;
+  launch) cat > "$S/$op.$name.json"; : > "$S/$name.running" ;;
   *) exit 2 ;;
 esac
 `
@@ -448,6 +451,14 @@ func TestHostCapabilitiesFollowSharesHostFS(t *testing.T) {
 // config a box kept (start.json).
 func hostFSGoldenFixture(t *testing.T) (*seamBackedProvider, func(name string) []string) {
 	t.Helper()
+	sp, received, _ := hostFSGoldenFixtureWith(t, nil)
+	return sp, received
+}
+
+// hostFSGoldenFixtureWith is hostFSGoldenFixture with edit applied to the
+// golden's op bodies; it also returns the directory of a session's box.
+func hostFSGoldenFixtureWith(t *testing.T, edit func(bodies map[string]string)) (*seamBackedProvider, func(name string) []string, func(name string) string) {
+	t.Helper()
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	if err := os.Mkdir(stateDir, 0o755); err != nil {
@@ -455,6 +466,9 @@ func hostFSGoldenFixture(t *testing.T) (*seamBackedProvider, func(name string) [
 	}
 	bodies := reference.HostFSBodies()
 	bodies["exec"] = `cat >/dev/null`
+	if edit != nil {
+		edit(bodies)
+	}
 	script := filepath.Join(dir, "golden")
 	if err := os.WriteFile(script, []byte(reference.Script(stateDir, bodies)), 0o755); err != nil {
 		t.Fatal(err)
@@ -484,7 +498,7 @@ func hostFSGoldenFixture(t *testing.T) (*seamBackedProvider, func(name string) [
 		sort.Strings(names)
 		return names
 	}
-	return sp, received
+	return sp, received, func(name string) string { return filepath.Join(boxes, name) }
 }
 
 // TestExecHostStagingContract runs RUNTIME-CONTRACT-022 against the
@@ -523,5 +537,90 @@ func TestHostStagedFreshStart(t *testing.T) {
 		if _, ok := fileIn(t, f.workDir, rel); !ok {
 			t.Errorf("%s is missing: the fresh start did not do the host work", rel)
 		}
+	}
+}
+
+// TestHostStagingIntoADeadBox pins the host-work decision on a box that
+// died: a dead box holds the name but no live session, so a restart into it
+// (the legacy reconciler's plain Start, not a fresh one) does the host work
+// and leaves it out of the start config, as a start into a vacant name
+// does. The golden is edited so a box holding a "dead" file reads dead in
+// `observe` and is recycled by `start`.
+func TestHostStagingIntoADeadBox(t *testing.T) {
+	sp, received, boxDir := hostFSGoldenFixtureWith(t, func(b map[string]string) {
+		const names = `names=$(cat); `
+		if !strings.Contains(b["observe"], names) {
+			t.Fatal("the golden observe no longer reads its process names first")
+		}
+		b["observe"] = strings.Replace(b["observe"], names, names+
+			`if [ -f "$box/dead" ]; then printf '{"state":"dead","object":{"id":"%s","created":"%s"}}\n' "$(cat "$box/id")" "$(cat "$box/created")"; exit 0; fi; `, 1)
+		b["start"] = `if [ -f "$box/dead" ]; then reap "$box"; rm -rf "$box"; fi; ` + b["start"]
+	})
+	f := hostStageFixture{workDir: t.TempDir()}
+	cfg := f.hostWorkConfig(t)
+	if err := sp.Start(context.Background(), hostStageSession, cfg); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sp.Stop(hostStageSession) })
+	if err := os.WriteFile(filepath.Join(boxDir(hostStageSession), "dead"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{hostStageWorkDirMarker, "claude-only", "gc-setup-ran"} {
+		if err := os.Remove(filepath.Join(f.workDir, rel)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sp.Start(context.Background(), hostStageSession, cfg); err != nil {
+		t.Fatalf("Start into the dead box's name: %v", err)
+	}
+	for _, rel := range []string{hostStageWorkDirMarker, "claude-only", "gc-setup-ran"} {
+		if _, ok := fileIn(t, f.workDir, rel); !ok {
+			t.Errorf("%s is missing: the start into a dead box's name did not do the host work", rel)
+		}
+	}
+	got := received(hostStageSession)
+	for _, field := range handledStartFields {
+		if slices.Contains(got, field) {
+			t.Errorf("the start config carries %q, which gc already handled; fields = %v", field, got)
+		}
+	}
+}
+
+// TestSeparableRelaunchRunsHostSessionSetup pins the separable relaunch:
+// the agent is relaunched in the warm box, over exec or through the launch
+// op, and for a pack sharing the host filesystem gc then runs session_setup
+// on the host again, as the launch after provision does (the tmux provider
+// re-runs it on a relaunch too). Without fs.host the pack owns session_setup and gc runs
+// nothing on the host.
+func TestSeparableRelaunchRunsHostSessionSetup(t *testing.T) {
+	for _, tc := range []struct {
+		name, handshake string
+		want            bool
+	}{
+		{"fs.host", hostFSSeparableLaunch, true},
+		{"without fs.host", `{"version":0,"capabilities":["proc.provision","proc.exec"],"locality":"local"}`, false},
+		{"fs.host, proc.launch", `{"version":0,"capabilities":["fs.host","proc.provision","proc.launch"],"locality":"local"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHostStageFixture(t, tc.handshake)
+			sp := seamBacked(NewProviderForCity(f.script, "city", t.TempDir()))
+			cfg := f.hostWorkConfig(t)
+			if err := sp.Start(context.Background(), hostStageSession, cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			_ = os.Remove(filepath.Join(f.workDir, "gc-setup-ran"))
+			_ = os.Remove(filepath.Join(f.workDir, "gc-setup-script-ran"))
+			if err := sp.Relaunch(context.Background(), hostStageSession, cfg); err != nil {
+				t.Fatalf("Relaunch: %v", err)
+			}
+			for _, rel := range []string{"gc-setup-ran", "gc-setup-script-ran"} {
+				if _, ok := fileIn(t, f.workDir, rel); ok != tc.want {
+					t.Errorf("after Relaunch, %s on the host = %v, want %v", rel, ok, tc.want)
+				}
+			}
+			if f.exists("stops") {
+				t.Error("a separable Relaunch stopped the box; it respawns the agent in place")
+			}
+		})
 	}
 }

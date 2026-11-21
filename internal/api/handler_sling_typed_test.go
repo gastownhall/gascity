@@ -58,7 +58,8 @@ func TestSlingStoresAreTheStoresTheAccessorsServed(t *testing.T) {
 
 			wantGraph := splittest.GateClassView(old)
 			if split {
-				wantGraph = relocatedGraphStore(state)
+				graph, _ := relocatedGraphStore(state)
+				wantGraph = graph.Store
 			}
 			if got := graphAt(st, scope).Store; got != wantGraph {
 				t.Errorf("%s: graph store = %v, want %v", name, got, wantGraph)
@@ -140,11 +141,12 @@ func TestGraphBindingIsTheRelocatedGraphStore(t *testing.T) {
 		if split {
 			state.graphBeadStore = beads.NewMemStore()
 		}
-		got, want := graphBinding(state.Stores()).Store, relocatedGraphStore(state)
+		graph, relocated := relocatedGraphStore(state)
+		got, want := graphBinding(state.Stores()).Store, graph.Store
 		if got != want {
 			t.Errorf("split=%t: graphBinding = %v, want relocatedGraphStore's %v", split, got, want)
 		}
-		if split && want == nil {
+		if split && !relocated {
 			t.Errorf("split=%t: no binding; the fixture does not relocate graph", split)
 		}
 	}

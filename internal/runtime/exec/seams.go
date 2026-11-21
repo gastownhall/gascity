@@ -15,9 +15,9 @@ import (
 // Exec is the first REAL decomposition (subprocess was degenerate): Place.Exec
 // is the live RPP `exec` op, and the Attachment's driving verbs are real — they
 // reuse the provider's existing public methods, which already drive an in-box
-// tmux session via the carrier over the exec op and fall back to the dedicated
-// wire ops when the pack does not declare proc.exec. So the WHERE is the pack
-// (Runtime), the connection is Place.Exec, and the HOW is tmux (Transport).
+// tmux session over exec by default, falling back only on ErrExecUnsupported.
+// An explicit carrier.ops declaration instead selects the dedicated ops.
+// The WHERE is the pack, the connection is Place.Exec, and the HOW is selected.
 //
 // Like subprocess, the pack's `start` op welds provision+launch (it launches the
 // agent in tmux session "main"), so Transport.Launch is a no-op and
@@ -143,23 +143,28 @@ type execTransport struct{ p *Provider }
 var _ runtime.Transport = (*execTransport)(nil)
 
 // Launch launches the agent in the box and returns the live Attachment. For a
-// pack that declares proc.provision (SeparableLaunch), it execs `tmux new-session`
-// (or respawn-pane on a warm box) over the `exec` op — this is the controller-side
-// half of the un-weld (B3b), called after Provision by seamProvider.Start and by
-// the reconciler for a launch-only change. For a welded pack the agent is already
-// running (the `start` op launched it), so launchAgent is a no-op here. After a
-// separable launch into a box whose provision config gc stripped of its host
-// work (provisionBox), gc runs the session_setup it left out of that config,
-// as the welded Start does after its `start` op.
+// pack that declares proc.provision (SeparableLaunch), it runs the `launch` op
+// (proc.launch) or execs `tmux new-session` (or respawn-pane on a warm box) over
+// the `exec` op — this is the controller-side half of the un-weld (B3b), called
+// after Provision by seamProvider.Start and by the reconciler for a launch-only
+// change. For a welded pack the agent is already running (the `start` op
+// launched it), so launchAgent is a no-op here, and so is a launch after a
+// Provision that ran the welded `start` op while the handshake did not yet
+// declare a separable launch (weldedProvision). After a separable launch into a
+// box whose provision config gc stripped of its host work (provisionBox), gc
+// runs the session_setup it left out of that config, as the welded Start does
+// after its `start` op, then hands the config's first turn back for the
+// Start's caller to queue (finishSeparableLaunch).
 func (t *execTransport) Launch(ctx context.Context, place runtime.Place, spec runtime.LaunchSpec) (runtime.Attachment, error) {
 	name := placeName(place)
+	if _, welded := t.p.weldedProvision.LoadAndDelete(name); welded {
+		return &execAttachment{p: t.p, name: name}, nil
+	}
 	_, hostSetup := t.p.hostSetupDue.LoadAndDelete(name)
 	if err := t.p.launchAgent(ctx, name, spec.Config); err != nil {
 		return nil, err
 	}
-	if hostSetup {
-		t.p.runHostSessionSetup(ctx, name, spec.Config)
-	}
+	t.p.finishSeparableLaunch(ctx, name, spec.Config, hostSetup)
 	return &execAttachment{p: t.p, name: name}, nil
 }
 
@@ -178,7 +183,12 @@ func (t *execTransport) Attach(_ context.Context, _ runtime.Place, name string) 
 	return t.p.Attach(name)
 }
 
-func (t *execTransport) Name() string { return "tmux" }
+func (t *execTransport) Name() string {
+	if t.p.opsCarrierSelected() {
+		return "ops"
+	}
+	return "tmux"
+}
 
 func (t *execTransport) Capabilities() runtime.TransportCapabilities {
 	return runtime.TransportCapabilities{
@@ -207,13 +217,13 @@ type execAttachment struct {
 var _ runtime.Attachment = (*execAttachment)(nil)
 
 // The five driving verbs reuse the provider's existing public methods, which
-// drive the in-box tmux session via the carrier over the exec op and fall back
-// to the dedicated wire ops when the pack does not declare proc.exec.
+// use the selected carrier. The undeclared default tries tmux over exec and
+// falls back to dedicated ops only on ErrExecUnsupported.
 func (a *execAttachment) Peek(_ context.Context, lines int) (string, error) {
 	return a.p.Peek(a.name, lines)
 }
 
-// Nudge delivers content as input to the in-box tmux session.
+// Nudge delivers content as input through the selected carrier.
 func (a *execAttachment) Nudge(_ context.Context, content []runtime.ContentBlock) error {
 	return a.p.Nudge(a.name, content)
 }
