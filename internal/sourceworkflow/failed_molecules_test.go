@@ -119,3 +119,45 @@ func TestSweepFailedMoleculesClosesV1ParentLinkedChain(t *testing.T) {
 	}
 	assertSwept(t, store, root.ID, step1.ID, step2.ID, nested.ID)
 }
+
+// assertOpen fails unless every id is still open.
+func assertOpen(t *testing.T, store beads.Store, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if b := mustGet(t, store, id); b.Status != "open" {
+			t.Errorf("bead %s (%q) status = %q, want open", id, b.Title, b.Status)
+		}
+	}
+}
+
+// AC-3: a failure stamped exactly at cutoff is past grace and one a
+// nanosecond later is not; a zero UpdatedAt falls back to CreatedAt. A bead
+// that did not fail, a controller-owned row and a chain whose root is
+// stamped gc.gc_exempt=true are never touched.
+func TestSweepFailedMoleculesHonorsGraceAndExemptions(t *testing.T) {
+	cutoff := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	long := cutoff.Add(-time.Hour)
+	failed := map[string]string{beadmeta.MoleculeFailedMetadataKey: "true"}
+	exempt := map[string]string{beadmeta.MoleculeFailedMetadataKey: "true", beadmeta.GCExemptMetadataKey: "true"}
+	seed := []beads.Bead{
+		{ID: "at-cutoff", Title: "stamped at cutoff", Status: "open", Metadata: failed, CreatedAt: long, UpdatedAt: cutoff},
+		{ID: "inside", Title: "stamped 1ns after cutoff", Status: "open", Metadata: failed, CreatedAt: long, UpdatedAt: cutoff.Add(time.Nanosecond)},
+		{ID: "created-past", Title: "no update stamp, created before cutoff", Status: "open", Metadata: failed, CreatedAt: cutoff.Add(-time.Minute).Add(time.Second)},
+		{ID: "created-inside", Title: "no update stamp, created after cutoff", Status: "open", Metadata: failed, CreatedAt: cutoff.Add(time.Minute)},
+		{ID: "not-failed", Title: "open bead that did not fail", Status: "open", CreatedAt: long.Add(time.Second), UpdatedAt: long},
+		{ID: "session", Title: "controller-owned row", Type: "session", Status: "open", Metadata: failed, CreatedAt: long.Add(2 * time.Second), UpdatedAt: long},
+		{ID: "exempt", Title: "exempt failed root", Status: "open", Metadata: exempt, CreatedAt: long.Add(3 * time.Second), UpdatedAt: long},
+		{ID: "exempt-step", Title: "step of the exempt root", ParentID: "exempt", Status: "open", Metadata: failed, CreatedAt: long.Add(4 * time.Second), UpdatedAt: long},
+	}
+	store := beads.NewMemStoreFrom(0, seed, nil)
+
+	got, err := SweepFailedMolecules(beadstest.WorkMolecule(store), cutoff, 0)
+	if err != nil {
+		t.Fatalf("SweepFailedMolecules: %v", err)
+	}
+	if len(got.Chains) != 2 || got.Chains[0] != "at-cutoff" || got.Chains[1] != "created-past" || got.Closed != 2 {
+		t.Fatalf("sweep = %+v, want chains [at-cutoff created-past], oldest first, with 2 beads closed", got)
+	}
+	assertSwept(t, store, "at-cutoff", "created-past")
+	assertOpen(t, store, "inside", "created-inside", "not-failed", "session", "exempt", "exempt-step")
+}

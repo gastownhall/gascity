@@ -67,7 +67,7 @@ func SweepFailedMolecules(store beads.MoleculeTarget, cutoff time.Time, maxChain
 		if root.Status == "closed" || coordclass.ControllerOwned(root) || failureStampAfter(root, cutoff) {
 			continue
 		}
-		if failedChainOwner(root, byID) != root.ID {
+		if failedChainOwner(root, byID) != root.ID || root.Metadata[beadmeta.GCExemptMetadataKey] == "true" {
 			continue
 		}
 		if maxChains > 0 && len(out.Chains) >= maxChains {
