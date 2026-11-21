@@ -9,8 +9,9 @@
 #
 # Triggers on bead.created — the event the reconciler synthesizes for any
 # newly-appeared bead, regardless of which binary wrote it. The event
-# payload does not carry await_type, so the script re-fetches the gate via
-# `gc bd show --json` to confirm it is an open human gate and to resolve
+# payload does not carry the gate type, so the script re-fetches the gate via
+# `gc bd show --json` to confirm it is an open human gate (bd's await_type,
+# else the gc.gate_type a formula [steps.gate] stamps) and to resolve
 # the addressee (assignee -> gc.deferred_assignee -> escalation recipient).
 #
 # Notification rides `gc mail send --notify`, which mails the addressee and

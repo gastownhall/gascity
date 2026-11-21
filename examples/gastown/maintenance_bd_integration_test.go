@@ -1,11 +1,10 @@
-//go:build integration || dolt_integration
+//go:build (integration || dolt_integration) && unix
 
 package gastown_test
 
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +13,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // These tests drive the shipped maintenance orders against REAL bd scopes of
@@ -83,6 +85,9 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 			t.Fatal(err)
 		}
 	}
+	if err := testutil.SeedDoltGlobalConfig(home); err != nil {
+		t.Fatal(err)
+	}
 	for _, entry := range os.Environ() {
 		key := entry[:strings.IndexByte(entry, '=')]
 		if strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") || strings.HasPrefix(key, "GC_") ||
@@ -108,6 +113,12 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 		"DOLT_ESCALATE_SCRIPT="+filepath.Join(c.binDir, "escalate.sh"),
 		"GC_CALL_LOG="+c.gcLog,
 	)
+	// Every HTTPS request a child makes goes to a normally unroutable proxy. A
+	// proxied scope's `bd init` probes `dolt version`, whose update check is a
+	// network call unless HOME's dolt config disables it; on a healthy network
+	// that call returns in 0.2 s and hides a missing config, so on most hosts
+	// the slow network is reproduced instead of waited for.
+	c.env = append(c.env, testutil.UnroutableHTTPSProxyEnv()...)
 	writeExecutable(t, filepath.Join(c.binDir, "escalate.sh"), "#!/bin/sh\nprintf 'ESCALATION %s\\n' \"$*\" >> \""+c.gcLog+"\"\n")
 	t.Cleanup(c.stopProcesses)
 	return c
@@ -193,47 +204,32 @@ func (c *bdTopologyCity) ensureServer(t *testing.T) int {
 	if c.serverPt != 0 {
 		return c.serverPt
 	}
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
 	dataDir := filepath.Join(c.root, "server-data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("dolt", "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir)
-	cmd.Dir = dataDir
-	cmd.Env = c.env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	logFile, err := os.Create(filepath.Join(c.root, "server.log"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd.Stdout, cmd.Stderr = logFile, logFile
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start dolt sql-server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		_, _ = cmd.Process.Wait()
-		_ = logFile.Close()
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: "dolt",
+		Args: func(port int) []string {
+			return []string{"sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir}
+		},
+		Dir:         dataDir,
+		Env:         c.env,
+		LogPath:     filepath.Join(c.root, "server.log"),
+		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
 	})
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
-		if err == nil {
-			_ = conn.Close()
-			break
+	t.Cleanup(func() {
+		// The server leads its own process group; take the group down with it,
+		// unless the process is already gone and its pid may belong to another.
+		select {
+		case <-srv.Exited:
+		default:
+			_ = syscall.Kill(-srv.PID, syscall.SIGTERM)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("dolt sql-server did not listen on %d", port)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	c.serverPt = port
-	return port
+		srv.Stop()
+	})
+	c.serverPt = srv.Port
+	return srv.Port
 }
 
 // writeRouter installs the `gc` router for the scopes known so far.

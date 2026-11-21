@@ -61,6 +61,28 @@ gc bd show "$WORK_BEAD_ID"
 gc bd show "$WORK_BEAD_ID" --json | jq '.[0].metadata'
 gc mail inbox
 ```
+
+Close this step with its outcome. The step is retry-managed: a close without
+`gc.outcome` counts as a failed attempt (`missing_outcome`), and once its
+attempts run out the workflow hard-fails even though the work succeeded.
+Close the step bead your claim returned; `gc hook current --id-only` prints it:
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+```
+
+Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
+carries them is retried. If the step cannot succeed, close it with
+`gc.outcome=fail`, a short stable `gc.failure_reason`, and
+`gc.failure_class=transient` when a retry can succeed (network, provider,
+flaky checks) or `gc.failure_class=hard` when it cannot (bad input, a broken
+contract):
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=transient --set-metadata gc.failure_reason="<short_reason>" --status=closed
+```
 """
 metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -106,6 +128,28 @@ fi
 cd "$WORKTREE"
 {{setup_command}}
 ```
+
+Close this step with its outcome. The step is retry-managed: a close without
+`gc.outcome` counts as a failed attempt (`missing_outcome`), and once its
+attempts run out the workflow hard-fails even though the work succeeded.
+Close the step bead your claim returned; `gc hook current --id-only` prints it:
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+```
+
+Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
+carries them is retried. If the step cannot succeed, close it with
+`gc.outcome=fail`, a short stable `gc.failure_reason`, and
+`gc.failure_class=transient` when a retry can succeed (network, provider,
+flaky checks) or `gc.failure_class=hard` when it cannot (bad input, a broken
+contract):
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=transient --set-metadata gc.failure_reason="<short_reason>" --status=closed
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -125,6 +169,28 @@ Run the configured checks before implementation.
 {{lint_command}}
 {{test_command}}
 ```
+
+Close this step with its outcome. The step is retry-managed: a close without
+`gc.outcome` counts as a failed attempt (`missing_outcome`), and once its
+attempts run out the workflow hard-fails even though the work succeeded.
+Close the step bead your claim returned; `gc hook current --id-only` prints it:
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+```
+
+Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
+carries them is retried. If the step cannot succeed, close it with
+`gc.outcome=fail`, a short stable `gc.failure_reason`, and
+`gc.failure_class=transient` when a retry can succeed (network, provider,
+flaky checks) or `gc.failure_class=hard` when it cannot (bad input, a broken
+contract):
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=transient --set-metadata gc.failure_reason="<short_reason>" --status=closed
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -139,6 +205,28 @@ needs = ["preflight-tests"]
 description = """
 Make the code changes for convoy `{{convoy_id}}` in the worktree. Commit focused changes
 as needed and keep the branch scoped to this work.
+
+Close this step with its outcome. The step is retry-managed: a close without
+`gc.outcome` counts as a failed attempt (`missing_outcome`), and once its
+attempts run out the workflow hard-fails even though the work succeeded.
+Close the step bead your claim returned; `gc hook current --id-only` prints it:
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+```
+
+Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
+carries them is retried. If the step cannot succeed, close it with
+`gc.outcome=fail`, a short stable `gc.failure_reason`, and
+`gc.failure_class=transient` when a retry can succeed (network, provider,
+flaky checks) or `gc.failure_class=hard` when it cannot (bad input, a broken
+contract):
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=transient --set-metadata gc.failure_reason="<short_reason>" --status=closed
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -161,6 +249,28 @@ git diff origin/{{base_branch}}...HEAD
 {{test_command}}
 git status
 ```
+
+Close this step with its outcome. The step is retry-managed: a close without
+`gc.outcome` counts as a failed attempt (`missing_outcome`), and once its
+attempts run out the workflow hard-fails even though the work succeeded.
+Close the step bead your claim returned; `gc hook current --id-only` prints it:
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+```
+
+Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
+carries them is retried. If the step cannot succeed, close it with
+`gc.outcome=fail`, a short stable `gc.failure_reason`, and
+`gc.failure_class=transient` when a retry can succeed (network, provider,
+flaky checks) or `gc.failure_class=hard` when it cannot (bad input, a broken
+contract):
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=transient --set-metadata gc.failure_reason="<short_reason>" --status=closed
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -181,6 +291,28 @@ Perform the city-specific finalization for this work item. Examples:
 
 This is intentionally generic so cities can opt into the graph contract
 without inheriting Gastown's exact human workflow.
+
+Close this step with its outcome. The step is retry-managed: a close without
+`gc.outcome` counts as a failed attempt (`missing_outcome`), and once its
+attempts run out the workflow hard-fails even though the work succeeded.
+Close the step bead your claim returned; `gc hook current --id-only` prints it:
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+```
+
+Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
+carries them is retried. If the step cannot succeed, close it with
+`gc.outcome=fail`, a short stable `gc.failure_reason`, and
+`gc.failure_class=transient` when a retry can succeed (network, provider,
+flaky checks) or `gc.failure_class=hard` when it cannot (bad input, a broken
+contract):
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=transient --set-metadata gc.failure_reason="<short_reason>" --status=closed
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -219,6 +351,28 @@ if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
   fi
 fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
+```
+
+Close this step with its outcome. The step is retry-managed: a close without
+`gc.outcome` counts as a failed attempt (`missing_outcome`), and once its
+attempts run out the workflow hard-fails even though the work succeeded.
+Close the step bead your claim returned; `gc hook current --id-only` prints it:
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+```
+
+Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
+carries them is retried. If the step cannot succeed, close it with
+`gc.outcome=fail`, a short stable `gc.failure_reason`, and
+`gc.failure_class=transient` when a retry can succeed (network, provider,
+flaky checks) or `gc.failure_class=hard` when it cannot (bad input, a broken
+contract):
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=transient --set-metadata gc.failure_reason="<short_reason>" --status=closed
 ```
 """
 metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }

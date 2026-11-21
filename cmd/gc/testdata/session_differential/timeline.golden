@@ -897,6 +897,8 @@ row:gc-1:state=drained
 row:gc-1:state_reason=drain-ack-stop-pending
 row:gc-1:status=closed
 row:gc-1:synced_at=T+4m0s
+row:gc-1:usage_close_pending=true
+row:gc-1:usage_closed_at=T+4m0s
 runtime:s-gc-1=
 ## 3 past the drain timeout (+12m0s)
 === an unwanted row of a suspended agent
@@ -913,6 +915,8 @@ row:gc-1:state=drained
 row:gc-1:state_reason=drain-ack-stop-pending
 row:gc-1:status=closed
 row:gc-1:synced_at=T+0s
+row:gc-1:usage_close_pending=true
+row:gc-1:usage_closed_at=T+0s
 runtime:s-gc-1=
 ## 1 a minute on (+1m50s)
 === an unwanted row woken by a clock ten minutes ahead
@@ -929,6 +933,8 @@ row:gc-1:state=drained
 row:gc-1:state_reason=drain-ack-stop-pending
 row:gc-1:status=closed
 row:gc-1:synced_at=T+0s
+row:gc-1:usage_close_pending=true
+row:gc-1:usage_closed_at=T+0s
 runtime:s-gc-1=
 ## 1 past the skewed wake's grace (+16m30s)
 === an unwanted row woken by a clock two minutes ahead
@@ -946,6 +952,8 @@ row:gc-1:state=drained
 row:gc-1:state_reason=drain-ack-stop-pending
 row:gc-1:status=closed
 row:gc-1:synced_at=T+7m0s
+row:gc-1:usage_close_pending=true
+row:gc-1:usage_closed_at=T+7m0s
 runtime:s-gc-1=
 === attach, then detach, then idle
 ## 0 seed (+20s)
@@ -1143,6 +1151,8 @@ row:gc-1:closed_at=T+5m20s
 row:gc-1:state=killed
 row:gc-1:status=closed
 row:gc-1:synced_at=T+5m20s
+row:gc-1:usage_close_pending=true
+row:gc-1:usage_closed_at=T+5m20s
 work:gw-1:assignee=
 === kill a seat holding a ready claim
 ## 0 seed (+20s)

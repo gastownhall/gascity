@@ -2035,6 +2035,17 @@ func buildThreadEnv(env map[string]string) map[string]string {
 		threadEnv["BEADS_DOLT_SERVER_MODE"] = "1"
 	}
 	delete(threadEnv, "BEADS_DOLT_SHARED_SERVER")
+	// Forward the controller's shared-server opt-out, never an opt-in. A
+	// session whose managed port gc withheld (gastownhall/gascity#1656) has no
+	// env port to outrank a HOME-level dolt.shared-server: true, so without the
+	// pin the thread's bd would use the host-wide shared server instead of the
+	// managed one the scope's .beads/dolt-server.port mirror tracks.
+	for _, key := range []string{"BEADS_DOLT_SHARED_SERVER", "BD_DOLT_SHARED_SERVER"} {
+		value := strings.TrimSpace(env[key])
+		if on, err := strconv.ParseBool(value); err == nil && !on {
+			threadEnv[key] = value
+		}
+	}
 	return threadEnv
 }
 
@@ -2517,6 +2528,10 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		return
 	}
 	watcher, err := recorder.Watch(ctx, afterSeq)
+	// The watcher reads the log by path, so the recorder is not needed past
+	// this point; holding it for the session's lifetime would keep an append
+	// handle on the city's event log open for nothing.
+	_ = recorder.Close()
 	if err != nil {
 		return
 	}

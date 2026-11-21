@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,6 +23,7 @@ type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string, metad
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
 type FactoryConfig struct {
+	// Store is the sessions store; nil, or a zero class handle, is none.
 	Store    beads.Store
 	Provider runtime.Provider
 	// CityPath is the city whose runtime leases the manager's starts and
@@ -90,6 +92,11 @@ type Factory struct {
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
+	if beads.IsNilStore(cfg.Store) {
+		// A zero class handle boxed into Store is non-nil and panics on its
+		// first call: every nil check below must see it as no store.
+		cfg.Store = nil
+	}
 	opts := make([]sessionpkg.ManagerOption, 0, 5)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
@@ -106,7 +113,7 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	if cfg.DeferredSubmits != nil {
 		opts = append(opts, sessionpkg.WithDeferredSubmitQueue(cfg.DeferredSubmits))
 	}
-	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
+	manager := sessionpkg.NewManagerWithOptions(beads.SessionStore{Store: cfg.Store}, cfg.Provider, opts...)
 	return newFactory(manager, cfg)
 }
 
@@ -285,12 +292,13 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 		return nil, sessionpkg.ErrSessionNotFound
 	}
 	if f.store != nil {
-		if id, err := sessionpkg.ResolveSessionIDByExactID(f.store, target); err == nil {
+		sessions := beads.SessionStore{Store: f.store}
+		if id, err := sessionpkg.ResolveSessionIDByExactID(sessions, target); err == nil {
 			return f.SessionByID(id)
 		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return nil, err
 		}
-		if id, err := sessionpkg.ResolveSessionID(f.store, target); err == nil {
+		if id, err := sessionpkg.ResolveSessionID(sessions, target); err == nil {
 			return f.SessionByID(id)
 		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return nil, err
@@ -314,6 +322,16 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 // RuntimeHandle constructs a runtime-only worker handle using the factory's
 // configured provider and recorder.
 func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, processNames []string) (Handle, error) {
+	return f.SessionRuntimeHandle("", sessionName, providerName, transport, processNames)
+}
+
+// SessionRuntimeHandle is RuntimeHandle for the runtime of session row
+// sessionID: its nudges wait behind a startup turn the session's queue still
+// holds, as the session manager's own sends do
+// (RuntimeHandleConfig.StartupTurnHolds, session.Manager.StartupTurnQueued).
+// An empty sessionID, or a factory without a store, has no row to read: the
+// handle is RuntimeHandle's.
+func (f *Factory) SessionRuntimeHandle(sessionID, sessionName, providerName, transport string, processNames []string) (Handle, error) {
 	if f.provider == nil {
 		return nil, sessionpkg.ErrSessionNotFound
 	}
@@ -328,6 +346,10 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 	if f.manager != nil {
 		if city, err := f.manager.CityDir(); err == nil {
 			cfg.CityPath = city.Path()
+		}
+		if id := strings.TrimSpace(sessionID); id != "" && f.store != nil {
+			manager := f.manager
+			cfg.StartupTurnHolds = func(ctx context.Context) bool { return manager.StartupTurnQueued(ctx, id) }
 		}
 	}
 	return NewRuntimeHandle(cfg)

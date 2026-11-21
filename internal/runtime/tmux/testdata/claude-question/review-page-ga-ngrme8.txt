@@ -1,0 +1,19 @@
+Each question has three options; the FIRST option label of each ends with "
+(Recommended)", the other two are "Beta" and "Gamma" variants. Do not ca
+other tool before it. Step 2: when it returns, print the raw answers you
+received as a fenced JSON block, then stop.
+────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────────
+←  ☒ Q1  ☒ Q2  ☒ Q3  ☒ Q4  ✔ Submit  →
+Review your answers
+● Which approach would you prefer for this feature?
+→ Alpha approach (Recommended)
+● How should we handle configuration?
+→ Environment variables (Recommended)
+● Which testing strategy do you prefer?
+→ Unit tests (Recommended)
+● How should we structure the codebase?
+→ Modular (Recommended)
+Ready to submit your answers?
+❯ 1. Submit answers
+2. Cancel

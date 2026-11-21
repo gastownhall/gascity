@@ -49,6 +49,12 @@ type ConversationLaneHost interface {
 	// API wrote one of its lane ops, so the op does not wait for the host's
 	// anti-entropy scan.
 	PokeConversationLane(conversation string)
+	// AwaitConversationOp waits until op id of conversation closes, or ctx
+	// ends, and returns the op as last read: closed, or still open when ctx
+	// ended. It wakes at the end of each pass over the conversation and
+	// re-reads the op at least every second. A read that fails is an
+	// error.
+	AwaitConversationOp(ctx context.Context, conversation, id string) (opjournal.Op, error)
 }
 
 // conversationLaneKinds is the kinds the city's running lane host executes,
@@ -208,8 +214,8 @@ func (s *Server) humaHandleConversationOpPropose(ctx context.Context, input *Con
 	if err := opjournal.ValidateClientKey(key); err != nil {
 		return nil, apierr.InvalidIdempotencyKey.Msg("invalid_idempotency_key: " + err.Error())
 	}
-	sessions := s.state.SessionsBeadStore()
-	if sessions.Store == nil {
+	sessions := s.state.Stores().Sessions()
+	if sessions == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	st, err := s.conversationOpStore()
@@ -223,7 +229,7 @@ func (s *Server) humaHandleConversationOpPropose(ctx context.Context, input *Con
 	if err != nil {
 		return nil, apierr.ServiceUnavailable.Msg(err.Error())
 	}
-	conv, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, sessions.Store, input.ID)
+	conv, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, sessions, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -325,11 +331,11 @@ func (s *Server) humaHandleConversationOpCancel(_ context.Context, input *Conver
 // conversationOpTarget resolves a read or cancel's session, closed sessions
 // included, and opens the op store.
 func (s *Server) conversationOpTarget(target string) (string, *opjournal.Store, error) {
-	sessions := s.state.SessionsBeadStore()
-	if sessions.Store == nil {
+	sessions := s.state.Stores().Sessions()
+	if sessions == (beads.SessionStore{}) {
 		return "", nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	conv, err := s.resolveSessionIDAllowClosedWithConfig(sessions.Store, target)
+	conv, err := s.resolveSessionIDAllowClosedWithConfig(sessions, target)
 	if err != nil {
 		return "", nil, humaResolveError(err)
 	}

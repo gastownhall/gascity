@@ -38,6 +38,7 @@ case "$1" in
   show) echo '[{"id":"demo-abc","title":"t","status":"open","issue_type":"task"}]' ;;
   list|ready) echo '[]' ;;
   update) echo '{"id":"demo-abc"}' ;;
+  version) echo 'bd version 1.3.2 (test)' ;;
   *) : ;;
 esac
 exit 0
@@ -72,6 +73,7 @@ func newBdParityCity(t *testing.T, opts bdParityOpts) bdParityCity {
 	restoreFlag(t, &rigFlag)
 	resetCLIStorageRoutes(t)
 	captureCLIStorageStderr(t)
+	pinTestBdInventory(t)
 
 	rawRoot := t.TempDir()
 	root, err := filepath.EvalSymlinks(rawRoot)

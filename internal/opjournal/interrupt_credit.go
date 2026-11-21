@@ -28,8 +28,9 @@ const interruptCreditPages = 8
 // out or it has read interruptCreditPages pages.
 //
 // An op counts once its effect may have reached the runtime: executing or
-// settling, or closed succeeded, failed{no_boundary} or
-// failed{deadline_in_flight}. Its turn is Result.Turn, else its scope turn;
+// settling, or closed succeeded, failed{no_boundary},
+// failed{deadline_in_flight} or failed{restart_not_started} (the turn ended
+// with the runtime). Its turn is Result.Turn, else its scope turn;
 // an op with neither names no turn and is left out. A row that does not
 // decode is left out: the lane's pass quarantines it where an operator sees
 // it.
@@ -94,7 +95,7 @@ func interruptRan(op Op) bool {
 		return true
 	case StatusClosed:
 		arm, reason := op.Outcome.Effective()
-		return arm == ArmSucceeded || (arm == ArmFailed && (reason == ReasonNoBoundary || reason == ReasonDeadlineInFlight))
+		return arm == ArmSucceeded || (arm == ArmFailed && (reason == ReasonNoBoundary || reason == ReasonDeadlineInFlight || reason == ReasonRestartNotStarted))
 	default:
 		return false
 	}
