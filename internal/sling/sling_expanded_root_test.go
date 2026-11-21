@@ -442,3 +442,47 @@ func TestSlingNonExpandedBeadsUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// TestSlingExpandedRootRefusesInProgressInstantiation is AC-8: a run whose
+// root or a member still carries gc.instantiating=true is not finished being
+// created, so slinging it fails naming the instantiation and writes nothing,
+// the root included.
+func TestSlingExpandedRootRefusesInProgressInstantiation(t *testing.T) {
+	for _, flagged := range []string{"root", "member"} {
+		t.Run(flagged, func(t *testing.T) {
+			run := newCookedRun(t)
+			mix := run.step(t, "mix batter")
+			flaggedID := mix.ID
+			if flagged == "root" {
+				flaggedID = run.root.ID
+			}
+			if err := run.store.SetMetadata(flaggedID, beadmeta.InstantiatingMetadataKey, "true"); err != nil {
+				t.Fatalf("flag %s instantiating: %v", flaggedID, err)
+			}
+			worker := poolWorker()
+			deps, router := cookedRunDeps(run, worker)
+			opts := testOpts(worker, run.root.ID)
+			opts.Initiator = "human"
+			before := map[string]map[string]string{
+				run.root.ID: maps.Clone(run.get(t, run.root.ID).Metadata),
+				mix.ID:      maps.Clone(run.get(t, mix.ID).Metadata),
+			}
+
+			_, err := DoSling(opts, deps, run.store)
+			if err == nil {
+				t.Fatal("DoSling succeeded, want an error naming the in-progress instantiation")
+			}
+			if !strings.Contains(err.Error(), "instantiat") || !strings.Contains(err.Error(), flaggedID) {
+				t.Errorf("error = %q, want it to name the in-progress instantiation of %s", err, flaggedID)
+			}
+			if len(router.routed) != 0 {
+				t.Errorf("routed = %+v, want nothing routed", router.routed)
+			}
+			for id, meta := range before {
+				if got := run.get(t, id).Metadata; !maps.Equal(got, meta) {
+					t.Errorf("bead %s metadata = %v, want unchanged %v", id, got, meta)
+				}
+			}
+		})
+	}
+}

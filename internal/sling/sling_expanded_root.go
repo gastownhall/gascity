@@ -82,14 +82,17 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, store beads.Wo
 	if !graphroute.IsExpandedWorkflowRoot(root.Metadata) {
 		return nil, nil
 	}
+	members, err := beads.DirectMembersWithRoot(store, root)
+	if err != nil {
+		return nil, fmt.Errorf("listing the members of workflow %s: %w", beadID, err)
+	}
+	if err := refuseInProgressInstantiation(root, members); err != nil {
+		return nil, err
+	}
 	a := opts.Target
 	customQuery := IsCustomSlingQuery(a)
 	if deps.Router == nil && !customQuery {
 		return nil, nil
-	}
-	members, err := beads.DirectMembersWithRoot(store, root)
-	if err != nil {
-		return nil, fmt.Errorf("listing the members of workflow %s: %w", beadID, err)
 	}
 	if customQuery {
 		return customQueryMemberRoutes(root.ID, agentutil.RoutedToIdentity(&a), members)
@@ -192,4 +195,17 @@ func (p *expandedRootMemberRoutes) warnings() []string {
 			p.rootID, p.customQueryUnrouted))
 	}
 	return out
+}
+
+// refuseInProgressInstantiation fails when the run is still being created:
+// the root or a member carries gc.instantiating=true, so its member set is not
+// final and routing part of it would strand the rest.
+func refuseInProgressInstantiation(root beads.Bead, members []beads.Bead) error {
+	for _, b := range append([]beads.Bead{root}, members...) {
+		if b.Metadata[beadmeta.InstantiatingMetadataKey] == "true" {
+			return fmt.Errorf("workflow %s is still being instantiated (%s carries %s=true); wait for the instantiation to finish, then re-run the same gc sling",
+				root.ID, b.ID, beadmeta.InstantiatingMetadataKey)
+		}
+	}
+	return nil
 }
