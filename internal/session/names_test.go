@@ -1390,3 +1390,131 @@ func TestEnsureSessionNameAvailable_RejectsNonReleasablePoolSlotShapes(t *testin
 		})
 	}
 }
+
+// The pool identity lease (issue #8945): a manual session of a pool's
+// template releases the pool's identity lease for identifiers derived from
+// that template, whichever marker proves it manual. Names it explicitly
+// claimed (alias or session_name equal to the pool's canonical name) and
+// every non-manual identifier holder keep blocking, and the ordinary
+// (non-lease) availability checks still treat a manual holder as a
+// collision.
+
+func TestEnsurePoolIdentityLeaseAvailable_ManualIdentifierHolderDoesNotHold(t *testing.T) {
+	cases := []struct {
+		name          string
+		markerKey     string
+		markerVal     string
+		identityField string
+	}{
+		{name: "origin_manual_template", markerKey: "session_origin", markerVal: "manual", identityField: "template"},
+		{name: "origin_manual_agent_name", markerKey: "session_origin", markerVal: "manual", identityField: "agent_name"},
+		{name: "origin_manual_common_name", markerKey: "session_origin", markerVal: "manual", identityField: "common_name"},
+		{name: "legacy_manual_template", markerKey: "manual_session", markerVal: "true", identityField: "template"},
+		{name: "legacy_manual_agent_name", markerKey: "manual_session", markerVal: "true", identityField: "agent_name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, cfg := range []*config.City{nil, {}} {
+				store := beads.NewMemStore()
+				meta := map[string]string{tc.identityField: "worker", tc.markerKey: tc.markerVal}
+				if _, err := store.Create(beads.Bead{
+					Type:     BeadType,
+					Labels:   []string{LabelSession},
+					Metadata: meta,
+				}); err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				cfgDesc := "nil config"
+				if cfg != nil {
+					cfgDesc = "config"
+				}
+				if err := EnsurePoolIdentityLeaseAvailableWithConfig(beadstest.Sessions(store), cfg, "worker", "worker"); err != nil {
+					t.Fatalf("EnsurePoolIdentityLeaseAvailableWithConfig(%s, %s marker) = %v, want nil", tc.identityField, cfgDesc, err)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsurePoolIdentityLeaseAvailable_ManualSessionNameOrAliasStillBlocks(t *testing.T) {
+	cases := []struct {
+		name  string
+		field string
+	}{
+		{name: "session_name_claims_pool_name", field: "session_name"},
+		{name: "alias_claims_pool_name", field: "alias"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			if _, err := store.Create(beads.Bead{
+				Type:   BeadType,
+				Labels: []string{LabelSession},
+				Metadata: map[string]string{
+					"template":       "worker",
+					"session_origin": "manual",
+					tc.field:         "worker",
+				},
+			}); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := EnsurePoolIdentityLeaseAvailableWithConfig(beadstest.Sessions(store), nil, "worker", "worker"); !errors.Is(err, ErrSessionNameExists) {
+				t.Fatalf("EnsurePoolIdentityLeaseAvailableWithConfig(manual %s = pool name) error = %v, want %v", tc.field, err, ErrSessionNameExists)
+			}
+		})
+	}
+}
+
+func TestEnsurePoolIdentityLeaseAvailable_NonManualIdentifierHolderStillBlocks(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "template", meta: map[string]string{"template": "worker"}},
+		{name: "agent_name", meta: map[string]string{"agent_name": "worker"}},
+		{name: "common_name", meta: map[string]string{"common_name": "worker"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			if _, err := store.Create(beads.Bead{
+				Type:     BeadType,
+				Labels:   []string{LabelSession},
+				Metadata: tc.meta,
+			}); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := EnsurePoolIdentityLeaseAvailableWithConfig(beadstest.Sessions(store), nil, "worker", "worker"); !errors.Is(err, ErrSessionNameExists) {
+				t.Fatalf("EnsurePoolIdentityLeaseAvailableWithConfig(non-manual %s holder) error = %v, want %v", tc.name, err, ErrSessionNameExists)
+			}
+		})
+	}
+}
+
+// TestEnsureSessionNameAvailableWithConfigForOwner_ManualTemplateHolderStillBlocks
+// pins the boundary from the other side: only the pool identity-lease variant
+// yields to a manual holder's template-derived identifiers. The ordinary
+// availability checks — the exported configured-owner entry point and the
+// package's base helper — still refuse.
+func TestEnsureSessionNameAvailableWithConfigForOwner_ManualTemplateHolderStillBlocks(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"template":       "worker",
+			"agent_name":     "worker",
+			"alias":          "fixer",
+			"session_name":   "s-fixer",
+			"session_origin": "manual",
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), nil, "worker", "", "worker"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(manual holder) error = %v, want %v", err, ErrSessionNameExists)
+	}
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "worker"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(manual holder) error = %v, want %v", err, ErrSessionNameExists)
+	}
+}
