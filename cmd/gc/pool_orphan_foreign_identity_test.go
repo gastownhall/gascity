@@ -892,7 +892,7 @@ func TestReleaseOrphanedPoolAssignments_ProvenanceLookupFailure(t *testing.T) {
 				[]beads.Bead{foreign, seat},
 				[]beads.Store{rigStore, rigStore},
 				[]string{"repo", "repo"},
-				map[string]beads.Store{"repo": rigStore}, nil, nil, nil)
+				map[string]beads.Store{"repo": rigStore}, nil, nil, nil, time.Now())
 
 			if gotReleased := len(released) == 1 && released[0].ID == seat.ID; gotReleased != tc.wantReleased || len(released) > 1 {
 				t.Fatalf("released = %v, want seat claim %s released = %v", released, seat.ID, tc.wantReleased)
@@ -953,7 +953,7 @@ func TestReleaseOrphanedPoolAssignments_ProvenanceLookupThroughCache(t *testing.
 		[]beads.Bead{foreign, seat},
 		[]beads.Store{rigStore, rigStore},
 		[]string{"repo", "repo"},
-		map[string]beads.Store{"repo": rigStore}, nil, nil, nil)
+		map[string]beads.Store{"repo": rigStore}, nil, nil, nil, time.Now())
 
 	if len(released) != 1 || released[0].ID != seat.ID {
 		t.Fatalf("released = %v, want exactly [%s] (the closed seat's claim)", released, seat.ID)
@@ -1055,7 +1055,7 @@ func TestReleaseOrphanedPoolAssignments_ProvenanceReadBudget(t *testing.T) {
 				}
 				sessions := &provenanceLookupStore{Store: cityStore}
 				releaseOrphanedPoolAssignments(cityStore, beads.SessionStore{Store: sessions}, trimmedNamepoolTestCity(t), t.TempDir(), nil,
-					work, stores, refs, map[string]beads.Store{"repo": rigStore}, nil, nil, nil)
+					work, stores, refs, map[string]beads.Store{"repo": rigStore}, nil, nil, nil, time.Now())
 
 				for _, query := range sessions.closedQueries {
 					if len(query.Metadata) == 0 {

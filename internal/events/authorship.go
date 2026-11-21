@@ -219,6 +219,7 @@ var builtinAuthorship = map[string]Authorship{
 	BeadWorktreeReaped:       AuthorController,
 	BeadWorktreeReapSkipped:  AuthorController,
 	BeadDeadAssigneeReopened: AuthorController,
+	BeadRouteAwayReleased:    AuthorController,
 	// Also recorded by gc rig add, a city-host admin command (rule 4).
 	BeadsBlockedRecomputed: AuthorController,
 	// The API server and the controller's op sweeper, both in the

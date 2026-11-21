@@ -22,12 +22,25 @@ type failRouteStore struct {
 
 func (s failRouteStore) SetMetadata(id, key, value string) error {
 	if id == s.failID && key == beadmeta.RoutedToMetadataKey {
-		if s.err != nil {
-			return s.err
-		}
-		return errors.New("injected route failure")
+		return s.routeErr()
 	}
 	return s.Store.SetMetadata(id, key, value)
+}
+
+// SetMetadataBatch refuses a batch that carries failID's gc.routed_to, the
+// write a route change makes (sling.SetBuiltInRoute).
+func (s failRouteStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, routes := kvs[beadmeta.RoutedToMetadataKey]; id == s.failID && routes {
+		return s.routeErr()
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s failRouteStore) routeErr() error {
+	if s.err != nil {
+		return s.err
+	}
+	return errors.New("injected route failure")
 }
 
 // TestSlingConvoyPartialFailureReturnsPerChildOutcomes pins the partial

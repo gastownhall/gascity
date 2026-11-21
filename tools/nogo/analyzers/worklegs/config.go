@@ -40,6 +40,10 @@ var Analyzer = New(Config{
 		"workAssignment.ReleaseWorkBead":         {"releaseServed": "the verb's release of one claim"},
 		"workAssignment.ReleaseDetachedWorkBead": {"releaseServed": "the verb's release of one claim carrying gc.detached, clearing it in the release write"},
 		"releaseOrphanedPoolAssignment":          {"releaseServed": "the verb's release of one claim (the orphan write)"},
+		"releaseJudgedRow":                       {"releaseServed": "the route-away release's one write, fenced on the judged row"},
+		"releaseJudgedRowIfAssignment": {
+			"releaseJudgedRow": "its fence on the judged row's status and assignee, where the store cannot fence a revision",
+		},
 		"workAssignment.releaseWorkBead": {
 			"workAssignment.ReleaseWorkBead":         "its body",
 			"workAssignment.ReleaseDetachedWorkBead": "its body, clearing gc.detached in the release write",

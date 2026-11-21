@@ -1171,9 +1171,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Same protection as the daemon tick: wake candidates computed before the
 	// release, so the one-shot path cannot reopen work this run is about to wake.
 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, sessionBeads.OpenInfos(), dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), nil, nil); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), nil, nil, time.Now()); len(released) > 0 {
 		for _, r := range released {
-			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
+			fmt.Fprintln(stderr, r.releasedLine()) //nolint:errcheck
 		}
 		// Standalone start has no follow-up patrol tick, so after reopening
 		// orphaned pool work we must immediately rebuild demand and sync once

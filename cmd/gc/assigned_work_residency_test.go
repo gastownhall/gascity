@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -295,6 +296,7 @@ func TestOrphanReleaseSparesALiveHoldersBindingResidentClaim(t *testing.T) {
 	released := releaseOrphanedPoolAssignments(
 		work, beads.SessionStore{Store: work}, cfg, cityPath, infos,
 		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil, nil, nil, nil,
+		time.Now(),
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %v — a LIVE holder's claim was taken back on a leg the release path now reads; that is claim loss, not a strand", released)

@@ -187,6 +187,16 @@ func (s *slingTestStore) SetMetadata(id, key, value string) error {
 	return nil
 }
 
+func (s *slingTestStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.Store.SetMetadataBatch(id, kvs); err == nil || !errors.Is(err, beads.ErrNotFound) {
+		return err
+	}
+	b := s.ensureSynthetic(id)
+	maps.Copy(b.Metadata, kvs)
+	s.synthetic[id] = b
+	return nil
+}
+
 func (s *slingTestStore) Update(id string, opts beads.UpdateOpts) error {
 	if err := s.Store.Update(id, opts); err == nil || !errors.Is(err, beads.ErrNotFound) {
 		return err

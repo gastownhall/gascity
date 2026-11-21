@@ -363,6 +363,7 @@ func sweepOrphanedPoolRow(store beads.Store, wb beads.Bead) []releasedPoolAssign
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 }
 

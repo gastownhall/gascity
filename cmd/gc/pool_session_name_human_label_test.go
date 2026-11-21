@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -68,6 +69,7 @@ func TestReleaseOrphanedPoolAssignments_KeepsHumanLabeledClaims(t *testing.T) {
 		work,
 		stores,
 		nil, nil, nil, nil, nil,
+		time.Now(),
 	)
 
 	if len(released) != 1 || released[0].ID != control.ID {

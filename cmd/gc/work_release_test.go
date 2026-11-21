@@ -35,6 +35,7 @@ func TestReleasePoliciesTable(t *testing.T) {
 		releaseRetired:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 		releaseLadder:         {statuses: []string{"in_progress"}, lane: laneCarried, seatRoute: true},
 		releaseStalled:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
+		releaseRouteAway:      {statuses: []string{"open", "in_progress"}, lane: laneDirect, detached: true, judgedRow: true},
 	}
 	if !reflect.DeepEqual(releasePolicies, want) {
 		t.Fatalf("releasePolicies = %+v\nwant %+v", releasePolicies, want)
@@ -63,6 +64,7 @@ func TestReleaseListedNeverReopensAClaimWithItsDetachedProbe(t *testing.T) {
 		{"retired", releaseRetired},
 		{"ladder", releaseLadder},
 		{"stalled", releaseStalled},
+		{"route away", releaseRouteAway},
 	}
 	if len(paths) != len(releasePolicies) {
 		t.Fatalf("%d paths for %d release policies: give the new policy a row", len(paths), len(releasePolicies))
@@ -277,7 +279,7 @@ func TestReleasePathsKeepEveryStrand(t *testing.T) {
 		if err := c.store.Close(c.seat.ID); err != nil {
 			t.Fatal(err)
 		}
-		releaseOrphanedPoolAssignments(c.store, beads.SessionStore{Store: c.store}, c.cfg, c.path, nil, assigned, nil, nil, nil, nil, nil, nil)
+		releaseOrphanedPoolAssignments(c.store, beads.SessionStore{Store: c.store}, c.cfg, c.path, nil, assigned, nil, nil, nil, nil, nil, nil, time.Now())
 		c.assertStrandTable(t, "open")
 	})
 	t.Run("retired session", func(t *testing.T) {
@@ -939,23 +941,52 @@ func (s *liveListCounter) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(q)
 }
 
-// The dead-assignee keep log logs a keep once per reason; a nil log logs
-// every keep.
+// The dead-assignee keep log logs a keep once per reason and holder kind; a
+// nil log logs every keep. A routed-away claim's keep names its live holder,
+// not a dead assignee.
 func TestDeadAssigneeKeepLogDedupes(t *testing.T) {
+	logs := captureStdLog(t)
 	var l deadAssigneeKeepLog
 	for i, c := range []struct {
-		why  string
-		want bool
-	}{{"detached-held", true}, {"detached-held", false}, {"unserved-route", true}, {"", false}} {
-		if got := l.log("w-1", "gc-dead", c.why); got != c.want {
-			t.Fatalf("step %d (%q): logged %t, want %t", i, c.why, got, c.want)
+		why        string
+		routedAway bool
+		want       bool
+	}{
+		{"detached-held", false, true},
+		{"detached-held", false, false},
+		{"unserved-route", false, true},
+		{"unserved-route", true, true},
+		{"unserved-route", true, false},
+		{"", true, false},
+	} {
+		if got := l.log("w-1", "gc-holder", c.why, c.routedAway); got != c.want {
+			t.Fatalf("step %d (%q, routed away %t): logged %t, want %t", i, c.why, c.routedAway, got, c.want)
+		}
+	}
+	for _, want := range []string{
+		`kept "w-1" of dead assignee "gc-holder": unserved-route`,
+		`kept "w-1" of routed-away live holder "gc-holder": unserved-route`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("keep log = %q, want a line containing %q", logs.String(), want)
 		}
 	}
 	var none *deadAssigneeKeepLog
 	for range 2 {
-		if !none.log("w-1", "gc-dead", "moved") {
+		if !none.log("w-1", "gc-dead", "moved", false) {
 			t.Fatal("a nil log deduped")
 		}
+	}
+}
+
+// The operator's release line names a routed-away release apart from an
+// orphan reclaim, as the typed events do.
+func TestReleasedPoolAssignmentLine(t *testing.T) {
+	if got := (releasedPoolAssignment{ID: "gc-1"}).releasedLine(); got != "released orphaned pool work: gc-1" {
+		t.Fatalf("orphan release line = %q", got)
+	}
+	if got := (releasedPoolAssignment{ID: "gc-2", RoutedAway: true}).releasedLine(); got != "released routed-away pool work: gc-2" {
+		t.Fatalf("route-away release line = %q", got)
 	}
 }
 
