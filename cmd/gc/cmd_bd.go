@@ -180,6 +180,8 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	var err error
 	if target.ScopeKind == "rig" {
 		overrides, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
+	} else if target.ScopeKind == "city" && samePath(cityPath, target.ScopeRoot) {
+		overrides, err = bdRuntimeEnvForCityCommand(cityPath)
 	} else {
 		overrides, err = bdRuntimeEnvWithError(cityPath)
 	}

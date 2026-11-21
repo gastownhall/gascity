@@ -21,15 +21,7 @@ func writeReachableManagedDoltState(t *testing.T, cityPath string) int {
 		t.Fatalf("MkdirAll(city .beads): %v", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = ln.Close()
-	})
-
-	port := ln.Addr().(*net.TCPAddr).Port
+	port := reachableDoltTestPort(t)
 	if err := writeDoltState(cityPath, doltRuntimeState{
 		Running:   true,
 		PID:       os.Getpid(),
@@ -40,6 +32,16 @@ func writeReachableManagedDoltState(t *testing.T, cityPath string) int {
 		t.Fatalf("writeDoltState: %v", err)
 	}
 	return port
+}
+
+func reachableDoltTestPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
 }
 
 func writeReachableProviderManagedDoltState(t *testing.T, cityPath string) int {
