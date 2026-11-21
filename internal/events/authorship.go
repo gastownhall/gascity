@@ -187,6 +187,15 @@ var builtinAuthorship = map[string]Authorship{
 	// and wait for the detector's next pass.
 	SessionStrandedClaims: AuthorWorker,
 
+	// The self-handoff command runs in the handing-off session, so it stages
+	// the brief, accepts the restart and records a failed one (cmd/gc
+	// cmd_handoff.go). session.handoff_failed also has a controller emitter
+	// (the release timeout in session_handoff_release.go); rule 3 makes it
+	// Worker.
+	SessionHandoffStaged:          AuthorWorker,
+	SessionHandoffRestartAccepted: AuthorWorker,
+	SessionHandoffFailed:          AuthorWorker,
+
 	// Controller: the reconciler's session lifecycle.
 	SessionWoke:                           AuthorController,
 	SessionCrashed:                        AuthorController,
@@ -207,10 +216,14 @@ var builtinAuthorship = map[string]Authorship{
 	SessionConversationReset:              AuthorController,
 	SessionPending:                        AuthorController,
 	SessionPendingCleared:                 AuthorController,
-	ReconcilerAlert:                       AuthorController,
-	ProviderHealthGateAlert:               AuthorController,
-	SessionStartupHealthAlert:             AuthorController,
-	ProviderSwapped:                       AuthorController,
+	// The reconciler's staged self-handoff release (Phase 0c) is the only
+	// emitter: it sees the successor incarnation start and releases the brief.
+	SessionHandoffSuccessorStarted: AuthorController,
+	SessionHandoffReleased:         AuthorController,
+	ReconcilerAlert:                AuthorController,
+	ProviderHealthGateAlert:        AuthorController,
+	SessionStartupHealthAlert:      AuthorController,
+	ProviderSwapped:                AuthorController,
 
 	// Controller: bead repairs and graph execution facts the controller
 	// derives. A logged execution.step_completed is read as journal-confirmed

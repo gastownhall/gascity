@@ -163,6 +163,9 @@ const (
 	srcPoolNames  = "cmd/gc/session_name_lookup.go"
 	srcLifecycle  = "cmd/gc/session_lifecycle_parallel.go"
 	srcAbandon    = "cmd/gc/reconcile_effect_abandon.go"
+
+	srcHandoff        = "cmd/gc/cmd_handoff.go"
+	srcHandoffRelease = "cmd/gc/session_handoff_release.go"
 )
 
 // Shared sites. The pending ones' beads: mc-h28bx (C5a3), mc-7je1h (the
@@ -180,7 +183,11 @@ var (
 	opMint = op("internal/session/incarnation.go", "Store.MintIncarnation")
 	// opUnmint withdraws a start's mint no process ran under: it writes back
 	// what opMint replaced while the row still records the mint.
-	opUnmint        = op("internal/session/incarnation.go", "Store.unmintIncarnation")
+	opUnmint = op("internal/session/incarnation.go", "Store.unmintIncarnation")
+	// v2HandoffRelease is the v2 release of a staged self-handoff. It does
+	// not exist: releaseStagedSelfHandoffs runs only in the legacy pass.
+	v2HandoffRelease = Site{Mode: ModeV2, File: srcHandoffRelease}.pending("ga-0thn3ef",
+		"v2 has no release arm for a staged self-handoff; the brief stays staged")
 	v2AwakeHeal     = v2(srcHeals, "armAwakeHeal")     // A6's asleep-to-awake heal clears the wake request (D7 rule 2)
 	v2SatisfiedWake = v2(srcHeals, "armSatisfiedWake") // A6's satisfied-wake clear (D7 rule 2)
 	v2AdoptCommit   = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-h28bx",
@@ -433,6 +440,14 @@ var registry = slices.Concat([]Field{
 	{Key: "unknown_state_first_seen", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionUnknownStateDiagnostic")), Clears: sites(v2("cmd/gc/reconcile_session_decide.go", "timerHealPatch"))},
 	{Key: "unknown_state_value", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionUnknownStateDiagnostic")), Clears: sites(v2("cmd/gc/reconcile_session_decide.go", "timerHealPatch"))},
 	{Key: "unknown_state_escalated_at", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionUnknownStateDiagnostic")), Clears: sites(v2("cmd/gc/reconcile_session_decide.go", "timerHealPatch"))},
+
+	// The staged self-handoff keys: gc handoff stages a brief and stamps them,
+	// and the legacy reconcile pass releases it (or writes it off) from the
+	// projected Info. They stay advisory because no v2 premise compares them.
+	// v2 has no release arm yet, so under it a staged brief is never released.
+	{Key: "handoff_staged_message_id", Class: ClassAdvisory, Writers: sites(op(srcHandoff, "doHandoffWithOutcome"), legacy(srcHandoffRelease, "releaseStagedSelfHandoffs"), v2HandoffRelease), Readers: sites(op(srcHandoff, "outstandingStagedHandoff"), legacy(srcHandoffRelease, "releaseStagedSelfHandoffs"), v2HandoffRelease)},
+	{Key: "handoff_stage_committed_at", Class: ClassAdvisory, Writers: sites(op(srcHandoff, "doHandoffWithOutcome"), legacy(srcHandoffRelease, "releaseStagedSelfHandoffs"), v2HandoffRelease), Readers: sites(legacy(srcHandoffRelease, "releaseStagedSelfHandoffs"), v2HandoffRelease)},
+	{Key: "handoff_release_attempted_at", Class: ClassAdvisory, Writers: sites(op(srcHandoff, "doHandoffWithOutcome"), legacy(srcHandoffRelease, "releaseStagedSelfHandoffs"), v2HandoffRelease), Readers: sites(op(srcHandoff, "outstandingStagedHandoff"), legacy(srcHandoffRelease, "releaseStagedSelfHandoffs"))},
 
 	// Baseline (M2).
 	{Key: "started_config_hash", Class: ClassBaseline, Premise: true, Writers: sites(legacyCommit)},

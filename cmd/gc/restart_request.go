@@ -22,11 +22,12 @@ import (
 // GC_RESTART_REQUESTED follows as a hint, in local mode only, and the
 // controller poke comes last, also only a hint.
 type rowFirstRestart struct {
-	verb        string // the command, as its diagnostics name it
-	cityPath    string
-	sessionName string // the runtime session name: the hint's and the poke's key
-	display     string // the session's address in diagnostics
-	token       string // the caller's GC_INSTANCE_TOKEN; a capability, never printed
+	verb          string // the command, as its diagnostics name it
+	cityPath      string
+	handoffConfig *config.City // the city's config for a self-handoff staging decision
+	sessionName   string       // the runtime session name: the hint's and the poke's key
+	display       string       // the session's address in diagnostics
+	token         string       // the caller's GC_INSTANCE_TOKEN; a capability, never printed
 	// record writes the fenced row marker (worker.FencedResetHandle).
 	record func(token string) error
 	// check decides record's write without making it; nil decides nothing.

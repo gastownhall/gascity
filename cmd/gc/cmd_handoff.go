@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
@@ -263,17 +267,18 @@ func runHandoff(run handoffRun) (int, handoffOpFields) {
 	}
 	cfg, cfgErr := loadCityConfig(current.cityPath, stderr)
 	r := rowFirstRestart{
-		verb:        "gc handoff",
-		cityPath:    current.cityPath,
-		sessionName: current.sessionName,
-		display:     current.display,
-		token:       os.Getenv(runtime.InstanceTokenEnv),
-		record:      sessionRestartRecorder(current.cityPath, sessStore, sp, cfg, current.sessionName),
-		check:       sessionRestartChecker(current.cityPath, sessStore, sp, cfg, current.sessionName),
-		hint:        restartHintOps(current.cityPath, sp),
-		poke:        pokeControllerForRestart,
-		stderr:      stderr,
-		ops:         newRestartOps(cfg, cfgErr, sessStore, run.key, current.sessionName, current.display, run.asJSON, run.jsonOut, stderr),
+		verb:          "gc handoff",
+		cityPath:      current.cityPath,
+		sessionName:   current.sessionName,
+		display:       current.display,
+		token:         os.Getenv(runtime.InstanceTokenEnv),
+		record:        sessionRestartRecorder(current.cityPath, sessStore, sp, cfg, current.sessionName),
+		check:         sessionRestartChecker(current.cityPath, sessStore, sp, cfg, current.sessionName),
+		hint:          restartHintOps(current.cityPath, sp),
+		poke:          pokeControllerForRestart,
+		stderr:        stderr,
+		ops:           newRestartOps(cfg, cfgErr, sessStore, run.key, current.sessionName, current.display, run.asJSON, run.jsonOut, stderr),
+		handoffConfig: loadedHandoffConfig(cfg, cfgErr),
 	}
 
 	outcome := doHandoffWithOutcome(msgStore, sessStore, rec, newDrainOps(sp), r, current.display, current.sessionName, args, stdout, stderr)
@@ -358,7 +363,7 @@ func doHandoff(msgStore, sessStore beads.Store, rec events.Recorder, dops drainO
 func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, dops drainOps, r rowFirstRestart,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
-	restartable, err := sessionRestartableByController(sessStore, sessionName)
+	restartable, instanceToken, sessionID, err := sessionRestartableByController(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
@@ -369,6 +374,8 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 			return handoffOutcome{code: 1}
 		}
 	}
+
+	staged := r.newGuardedStagedHandoff(restartable, instanceToken, sessionID, stderr)
 
 	// A restartable handoff proposes its restart op, then its notice op,
 	// before the mail (OJ-6). A replay of a successful run sends nothing.
@@ -384,10 +391,16 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		defer r.ops.end()
 	}
 
+	msgHandles, sessHandles := beads.HandlesFor(msgStore), beads.HandlesFor(sessStore)
+	if err := staged.findSuperseded(msgHandles, sessHandles); err != nil {
+		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		return handoffOutcome{code: 1}
+	}
+
 	if !restartable {
 		r.ops.unrecordedKey(r.verb)
 	}
-	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
+	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, staged.forToken(), stderr)
 	if restartable {
 		var mailErr error
 		if !ok {
@@ -408,8 +421,17 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		return handoffOutcome{code: 0}
 	}
 
+	if err := staged.commit(msgHandles, sessHandles, rec, sessionAddress, b.ID, stderr); err != nil {
+		return handoffOutcome{code: 1}
+	}
+
 	if err := r.recordRestart(); err != nil {
-		fmt.Fprintf(stderr, "gc handoff: sent mail %s; %s\n", b.ID, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+		if staged.active {
+			fmt.Fprintf(stderr, "gc handoff: staged brief %s is held, not delivered; %s\n", b.ID, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(stderr, "gc handoff: sent mail %s; %s\n", b.ID, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+		}
+		staged.restartFailed(rec, sessionAddress, r.notRecorded(err))
 		return handoffOutcome{code: 1}
 	}
 	rec.Record(events.Event{
@@ -419,8 +441,189 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		Message: "handoff",
 	})
 
-	fmt.Fprintf(stdout, "Handoff: sent mail %s, requesting restart...\n", b.ID) //nolint:errcheck // best-effort stdout
+	staged.announce(rec, stdout, sessionAddress, b.ID)
 	return handoffOutcome{code: 0, restartRequested: true}
+}
+
+// loadedHandoffConfig is the config a self handoff may consult for the
+// reconciler mode: nil when the config did not load, which reads as no mode
+// context.
+func loadedHandoffConfig(cfg *config.City, cfgErr error) *config.City {
+	if cfgErr != nil {
+		return nil
+	}
+	return cfg
+}
+
+// newGuardedStagedHandoff is newStagedHandoff for a self handoff that stages
+// only when the city's reconciler is positively legacy. A caller that does not
+// qualify for staging is never probed.
+func (r rowFirstRestart) newGuardedStagedHandoff(restartable bool, instanceToken, sessionID string, stderr io.Writer) *stagedHandoff {
+	staged := newStagedHandoff(restartable, instanceToken, sessionID)
+	staged.active = staged.active && r.reconcilerStagesSelfHandoff(stderr)
+	return staged
+}
+
+// reconcilerStagesSelfHandoff reports whether the city's session reconciler is
+// positively the legacy one, the only reconciler that releases a staged
+// self-handoff brief. The running controller's latched mode decides; with no
+// controller answer, the mode the config would latch. Anything else, a v2
+// reconciler or a mode that cannot be determined, delivers the brief
+// immediately, and one stderr line says which. A caller that wired no mode
+// context is undetermined, never legacy.
+func (r rowFirstRestart) reconcilerStagesSelfHandoff(stderr io.Writer) bool {
+	if onWorkerSite(r.cityPath) {
+		// A worker site never reaches the controller, so it decides from its
+		// own config and fails closed, as restartRecordsOnlyByCAS does.
+		if !workerSiteRunsV2(r.cityPath, r.handoffConfig) {
+			return true
+		}
+		fmt.Fprintln(stderr, "gc handoff: delivering the brief immediately: this worker site's own config does not show a legacy session reconciler, and only a legacy reconciler releases a staged brief") //nolint:errcheck // best-effort stderr
+		return false
+	}
+	if mode, ok := controllerLatchedReconcilerMode(r.cityPath, r.handoffConfig); ok {
+		return r.stagesForMode(mode, stderr)
+	}
+	if r.handoffConfig != nil {
+		if mode, err := latchReconcilerMode(r.handoffConfig, r.cityPath, reconcilerModeLookupEnv); err == nil {
+			return r.stagesForMode(mode, stderr)
+		}
+	}
+	fmt.Fprintln(stderr, "gc handoff: delivering the brief immediately: the city's session reconciler mode is undetermined, and only a legacy reconciler releases a staged brief") //nolint:errcheck // best-effort stderr
+	return false
+}
+
+func (r rowFirstRestart) stagesForMode(mode reconcilerMode, stderr io.Writer) bool {
+	if mode == reconcilerLegacy {
+		return true
+	}
+	fmt.Fprintln(stderr, "gc handoff: delivering the brief immediately: the city runs the v2 session reconciler, which does not release a staged brief") //nolint:errcheck // best-effort stderr
+	return false
+}
+
+// stagedHandoff is a self handoff's staging decision and state. A restartable
+// session with a live instance token stages its own brief durably (invisible,
+// but committed to the store) before any restart is requested, and only a
+// later, differing instance token — proof a genuine successor incarnation
+// exists — may release it. Without an instance token there is nothing to
+// compare a successor's token against, so the message is sent immediately
+// instead, matching the pre-staging behavior. Every method is a no-op on a
+// handoff that is not staged.
+type stagedHandoff struct {
+	active       bool
+	token        string // the incarnation the brief is staged for
+	sessionID    string
+	supersededID string // the outstanding brief this staging replaces
+}
+
+func newStagedHandoff(restartable bool, instanceToken, sessionID string) *stagedHandoff {
+	return &stagedHandoff{active: restartable && instanceToken != "", token: instanceToken, sessionID: sessionID}
+}
+
+// forToken is the token the brief is staged for; empty sends it unstaged.
+func (s *stagedHandoff) forToken() string {
+	if !s.active {
+		return ""
+	}
+	return s.token
+}
+
+// findSuperseded looks up the outstanding staged brief. A session holds at
+// most one, so this staging replaces it. Look it up before creating anything:
+// a refusal must not leave a new bead behind.
+func (s *stagedHandoff) findSuperseded(msgs, sessions beads.StoreHandles) error {
+	if !s.active {
+		return nil
+	}
+	id, err := outstandingStagedHandoff(msgs, sessions, s.sessionID, s.token)
+	if err != nil {
+		return err
+	}
+	s.supersededID = id
+	return nil
+}
+
+// commit moves the session's pointer to the new brief before touching the old
+// one, so a failure can strand the old brief but never lose the newest. A new
+// staging also starts a new release lifecycle: the controller skips any row
+// carrying the release-attempt marker, so one left by an earlier timeout would
+// leave this brief unreleasable. It reports its own failure on stderr.
+func (s *stagedHandoff) commit(msgs, sessions beads.StoreHandles, rec events.Recorder, sessionAddress, briefID string, stderr io.Writer) error {
+	if !s.active {
+		return nil
+	}
+	if err := sessions.Writer.SetMetadataBatch(s.sessionID, map[string]string{
+		handoffStageCommittedAtKey:   time.Now().UTC().Format(time.RFC3339),
+		handoffStagedMessageIDKey:    briefID,
+		handoffReleaseAttemptedAtKey: "",
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc handoff: recording durable handoff stage: %v\n", err) //nolint:errcheck // best-effort stderr
+		return err
+	}
+	if s.supersededID != "" {
+		// Close and stamp in one call. The old brief keeps mail.staged=true on
+		// purpose: that flag is what keeps it unreadable on every mail surface.
+		_, err := msgs.Writer.CloseAll([]string{s.supersededID}, map[string]string{mail.SupersededByMetadataKey: briefID})
+		if err != nil && !errors.Is(err, beads.ErrNotFound) {
+			fmt.Fprintf(stderr, "gc handoff: staged brief %s is recorded, but the brief it supersedes, %s, could not be closed and remains an orphan: %v\n", briefID, s.supersededID, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	recordHandoffEvent(rec, events.SessionHandoffStaged, sessionAddress, sessionAddress, events.SessionHandoffStagedPayload{
+		SessionKey: sessionAddress,
+		MessageID:  briefID,
+	})
+	return nil
+}
+
+// restartFailed records that the restart behind a staged brief was not
+// recorded.
+func (s *stagedHandoff) restartFailed(rec events.Recorder, sessionAddress, reason string) {
+	if !s.active {
+		return
+	}
+	recordHandoffEvent(rec, events.SessionHandoffFailed, sessionAddress, sessionAddress, events.SessionHandoffFailedPayload{
+		SessionKey: sessionAddress,
+		Reason:     reason,
+	})
+}
+
+// announce records the accepted restart and prints the handoff's outcome line:
+// a staged brief is held until a successor starts, an unstaged one is sent.
+func (s *stagedHandoff) announce(rec events.Recorder, stdout io.Writer, sessionAddress, briefID string) {
+	if !s.active {
+		fmt.Fprintf(stdout, "Handoff: sent mail %s, requesting restart...\n", briefID) //nolint:errcheck // best-effort stdout
+		return
+	}
+	recordHandoffEvent(rec, events.SessionHandoffRestartAccepted, sessionAddress, sessionAddress, events.SessionHandoffRestartAcceptedPayload{
+		SessionKey: sessionAddress,
+		MessageID:  briefID,
+	})
+	superseding := ""
+	if s.supersededID != "" {
+		superseding = ", superseding " + s.supersededID
+	}
+	fmt.Fprintf(stdout, "Handoff: staged brief %s%s, restart accepted (release deferred until a successor session starts)...\n", briefID, superseding) //nolint:errcheck // best-effort stdout
+}
+
+// recordHandoffEvent marshals payload and records it on rec under eventType,
+// with actor and subject both set to the session address involved. Marshal
+// failure or a nil recorder silently drops the event: the staged self-handoff
+// lifecycle these events describe is already durable in bead state, so a lost
+// event is a missed notification, not a lost fact.
+func recordHandoffEvent(rec events.Recorder, eventType, actor, subject string, payload events.Payload) {
+	if rec == nil {
+		return
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	rec.Record(events.Event{
+		Type:    eventType,
+		Actor:   actor,
+		Subject: subject,
+		Payload: data,
+	})
 }
 
 // doHandoffAuto sends handoff mail to self without requesting restart.
@@ -429,7 +632,7 @@ func doHandoffAuto(msgStore, sessStore beads.Store, rec events.Recorder, session
 		mail.AutoHandoffLabel,
 		mail.ArchiveAfterInjectLabel,
 		"priority:1",
-	}, "auto-handoff:"+sessionAddress, stderr)
+	}, "", "auto-handoff:"+sessionAddress, stderr)
 	if !ok {
 		return 1
 	}
@@ -449,12 +652,20 @@ func doHandoffAuto(msgStore, sessStore beads.Store, rec events.Recorder, session
 // (Type="message", thread label, extra labels, sender-route metadata) is
 // confined inside beadmail.Provider.SendHandoff. The returned mail.Message
 // carries the assigned ID for the caller's confirmation output.
-func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stderr io.Writer) (mail.Message, bool) {
-	msg, _, ok := createHandoffMailWithDedup(msgStore, sessStore, rec, senderAddress, recipientAddress, args, defaultSubject, extraLabels, "", stderr)
+//
+// stagedForToken stages the message instead of delivering it: when non-empty,
+// it is the session's current instance_token, recorded on the message so only
+// a later, differing (successor) incarnation can release it (see
+// releaseStagedSelfHandoffs). A staged message is marked durable-but-invisible
+// (mail.StagedHandoffLabel + mail.StagedMetadataKey) and skips the MailSent
+// event, which would otherwise announce delivery before any successor exists.
+// Pass "" for ordinary, immediately visible handoff mail.
+func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stagedForToken string, stderr io.Writer) (mail.Message, bool) {
+	msg, _, ok := createHandoffMailWithDedup(msgStore, sessStore, rec, senderAddress, recipientAddress, args, defaultSubject, extraLabels, stagedForToken, "", stderr)
 	return msg, ok
 }
 
-func createHandoffMailWithDedup(msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, dedupKey string, stderr io.Writer) (mail.Message, bool, bool) {
+func createHandoffMailWithDedup(msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stagedForToken, dedupKey string, stderr io.Writer) (mail.Message, bool, bool) {
 	subject := defaultSubject
 	if len(args) > 0 {
 		subject = args[0]
@@ -462,6 +673,9 @@ func createHandoffMailWithDedup(msgStore, sessStore beads.Store, rec events.Reco
 	var message string
 	if len(args) > 1 {
 		message = args[1]
+	}
+	if stagedForToken != "" {
+		extraLabels = append(extraLabels, mail.StagedHandoffLabel)
 	}
 
 	// Handoff intentionally constructs the concrete bead-backed provider rather
@@ -494,6 +708,24 @@ func createHandoffMailWithDedup(msgStore, sessStore beads.Store, rec events.Reco
 	if suppressed {
 		return msg, true, true
 	}
+	if stagedForToken != "" {
+		// The create above already carried mail.StagedHandoffLabel, which hides
+		// the brief on every mail surface from its first persisted state. This
+		// write records the token only a successor may release it to; if it
+		// fails, the brief is still hidden by its label, and it is closed so no
+		// open, unreferenced brief is left behind.
+		if err := msgStore.SetMetadataBatch(msg.ID, map[string]string{
+			mail.StagedMetadataKey:         "true",
+			mail.StagedForTokenMetadataKey: stagedForToken,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc handoff: staging mail: %v\n", err) //nolint:errcheck // best-effort stderr
+			if closeErr := msgStore.Close(msg.ID); closeErr != nil {
+				fmt.Fprintf(stderr, "gc handoff: closing unstaged brief %s: %v\n", msg.ID, closeErr) //nolint:errcheck // best-effort stderr
+			}
+			return mail.Message{}, false, false
+		}
+		return msg, false, true
+	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
 		Actor:   msg.From,
@@ -505,27 +737,74 @@ func createHandoffMailWithDedup(msgStore, sessStore beads.Store, rec events.Reco
 }
 
 // sessionRestartableByController reports whether the controller is willing to
-// restart the named session: every session but a named one outside "always"
-// mode. A session with no row is restartable.
-func sessionRestartableByController(sessStore beads.Store, sessionName string) (bool, error) {
+// restart the named session (restartable): every session but a named one
+// outside "always" mode. A session with no row is restartable. instanceToken
+// and sessionID are the session bead's own instance_token metadata and
+// resolved bead ID, returned alongside so a staged self-handoff (which must
+// be released only to a later, differing instance_token) doesn't need a
+// second store round-trip to learn them. All facts come off the single bead
+// read.
+func sessionRestartableByController(sessStore beads.Store, sessionName string) (restartable bool, instanceToken, sessionID string, err error) {
 	if sessStore == nil || sessionName == "" {
-		return true, nil
+		return true, "", "", nil
 	}
 	id, err := resolveSessionID(sessStore, sessionName)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return true, nil
+			return true, "", "", nil
 		}
-		return false, fmt.Errorf("resolving session %q: %w", sessionName, err)
+		return false, "", "", fmt.Errorf("resolving session %q: %w", sessionName, err)
 	}
 	b, err := sessStore.Get(id)
 	if err != nil {
-		return false, fmt.Errorf("loading session %q: %w", id, err)
+		return false, "", "", fmt.Errorf("loading session %q: %w", id, err)
 	}
+	instanceToken = strings.TrimSpace(b.Metadata["instance_token"])
 	if !isNamedSessionBead(b) {
-		return true, nil
+		return true, instanceToken, id, nil
 	}
-	return namedSessionMode(b) == "always", nil
+	return namedSessionMode(b) == "always", instanceToken, id, nil
+}
+
+// outstandingStagedHandoff returns the id of the staged self-handoff the session
+// still points at and nothing has resolved, or "" when there is none. A new
+// staging supersedes the brief returned here, leaving the session with one.
+//
+// A brief that was already released, archived, or whose message no longer
+// exists is resolved, not outstanding, and is left alone.
+//
+// It returns an error, and the caller must not stage, when the outstanding
+// brief is already releasable to instanceToken's incarnation and the controller
+// has not written it off: superseding it would discard a brief that incarnation
+// should receive, and only the controller releases. A written-off brief is dead,
+// so it is superseded whatever its token; refusing there would wedge the
+// session behind a brief the controller will never release.
+func outstandingStagedHandoff(msgs, sessions beads.StoreHandles, sessionID, instanceToken string) (string, error) {
+	sessionRow, err := sessions.Live.Get(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("loading session %q: %w", sessionID, err)
+	}
+	priorID := strings.TrimSpace(sessionRow.Metadata[handoffStagedMessageIDKey])
+	if priorID == "" {
+		return "", nil
+	}
+	// Read live: a cached Get can answer not-found from a stale tombstone for a
+	// brief that is still open, which would strand it.
+	prior, err := msgs.Live.Get(priorID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return "", nil
+		}
+		return "", fmt.Errorf("loading staged handoff %s: %w", priorID, err)
+	}
+	if prior.Status == "closed" || prior.Metadata[mail.StagedMetadataKey] != "true" {
+		return "", nil
+	}
+	writtenOff := strings.TrimSpace(sessionRow.Metadata[handoffReleaseAttemptedAtKey]) != ""
+	if !writtenOff && prior.Metadata[mail.StagedForTokenMetadataKey] != instanceToken {
+		return "", fmt.Errorf("staged handoff %s is still awaiting release to this session incarnation; retry once the controller has delivered it", priorID)
+	}
+	return priorID, nil
 }
 
 func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName string) error {
@@ -563,7 +842,7 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, force bool, stdout, stderr io.Writer,
 ) int {
-	restartable, err := sessionRestartableByController(sessStore, sessionName)
+	restartable, _, _, err := sessionRestartableByController(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -584,7 +863,7 @@ func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, 
 		}
 	}
 
-	b, ok := createHandoffMail(msgStore, sessStore, rec, sender, targetAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
+	b, ok := createHandoffMail(msgStore, sessStore, rec, sender, targetAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, "", stderr)
 	if !ok {
 		return 1
 	}
