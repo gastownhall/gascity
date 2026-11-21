@@ -627,3 +627,27 @@ func TestCompletionsStartupSweepRepairsOnlyTheUnstampedGap(t *testing.T) {
 		t.Fatal("the follow-up sweep did not stamp the repaired gap root")
 	}
 }
+
+// TestCompletionsSweepVisitsReopenedStampedRootForEveryReason: the stamp is
+// terminal only while its root stays closed. A stamped root that reopens is no
+// longer converged, so a sweep of every reason visits it and clears the stamp.
+func TestCompletionsSweepVisitsReopenedStampedRootForEveryReason(t *testing.T) {
+	for _, reason := range []string{backstopReasonStartup, backstopReasonCursorGap, backstopReasonCadence} {
+		t.Run(reason, func(t *testing.T) {
+			city := newCompletionsSweepCity(t)
+			rootID := city.addStampedRoots(t, 1)[0]
+			open := "open"
+			if err := city.store.Update(rootID, beads.UpdateOpts{Status: &open}); err != nil {
+				t.Fatal(err)
+			}
+
+			r := city.sweep(t, reason)
+			if r.RootsVisited != 1 || r.RootsSkippedConverged != 0 {
+				t.Fatalf("%s sweep = %+v, want the reopened stamped root visited, not skipped", reason, r)
+			}
+			if got := city.stamp(t, rootID); got != "" {
+				t.Fatalf("%s sweep left stamp %q on a reopened root", reason, got)
+			}
+		})
+	}
+}
