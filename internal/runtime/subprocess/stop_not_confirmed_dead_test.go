@@ -144,8 +144,8 @@ func TestStopSocketTimeoutOutlastsStopGraceAndReapGrace(t *testing.T) {
 	t.Cleanup(func() { sessionStopGrace = old })
 	for _, grace := range []time.Duration{10 * time.Millisecond, runtime.ManagedProcessStopGrace, 30 * time.Second} {
 		sessionStopGrace = grace
-		if got, floor := stopSocketTimeout(), grace+runtime.ManagedProcessReapGrace; got <= floor {
-			t.Errorf("stopSocketTimeout() = %v with a %v stop grace, want more than grace + reap grace = %v", got, grace, floor)
+		if got, floor := stopSocketTimeout(), grace+runtime.ManagedProcessReapGrace+processgroup.ManagedStopSignalRetryBudget; got <= floor {
+			t.Errorf("stopSocketTimeout() = %v with a %v stop grace, want more than grace + reap grace + signal retry budget = %v", got, grace, floor)
 		}
 	}
 }
