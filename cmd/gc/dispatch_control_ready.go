@@ -301,7 +301,7 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 func controlReadyFallbackReady(dir, cityPath string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
 	binding, relocated := controlGraphBinding(cityPath, dir)
 	if !relocated {
-		return controlReadyScopeShellReady(dir, env, includeEphemeral)
+		return controlReadyScopeShellReady(dir, cityPath, env, includeEphemeral)
 	}
 	graphRows, err := controlReadyLegReady(dir, binding, includeEphemeral)
 	if err != nil {
@@ -310,7 +310,7 @@ func controlReadyFallbackReady(dir, cityPath string, env map[string]string, incl
 	if !controlGraphRelicLeg(cityPath, dir) {
 		return graphRows, nil
 	}
-	scoped, err := controlReadyScopeShellReady(dir, env, includeEphemeral)
+	scoped, err := controlReadyScopeShellReady(dir, cityPath, env, includeEphemeral)
 	if err != nil {
 		return nil, err
 	}
@@ -342,10 +342,24 @@ func mergeControlReadyLegs(legs ...[]beads.Bead) []beads.Bead {
 	return merged
 }
 
+// controlReadyBdReadFlags returns the bd global flags for the fallback's
+// batched ready read: --sandbox always, and strict --readonly only where bd
+// honors it. bd refuses --readonly on a proxied-server Dolt store by design
+// (proxy.readonly.unsupported), deciding from the scope's persisted metadata,
+// which scopeUsesProxiedDoltMode reads. It is evaluated on every scan, so a
+// scope migrated to or from proxied-server takes effect on the next scan.
+func controlReadyBdReadFlags(cityPath, dir string) string {
+	if scopeUsesProxiedDoltMode(cityPath, resolveStoreScopeRoot(cityPath, dir)) {
+		return "--sandbox"
+	}
+	return "--readonly --sandbox"
+}
+
 // controlReadyScopeShellReady is the scope leg: the batched ready scan taken by
-// shelling `bd` in the scope directory, exactly as it always was.
-func controlReadyScopeShellReady(dir string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
-	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
+// shelling `bd` in the scope directory, with strict --readonly only where the
+// scope's persisted mode says bd honors it.
+func controlReadyScopeShellReady(dir, cityPath string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
+	query := fmt.Sprintf("bd %s ready --json --exclude-type=%s --limit=%d", controlReadyBdReadFlags(cityPath, dir), controlReadyExcludeType, controlReadyFallbackLimit)
 	if includeEphemeral {
 		query += " --include-ephemeral"
 	}

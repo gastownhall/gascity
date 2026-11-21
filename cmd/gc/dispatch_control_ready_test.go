@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -501,5 +502,249 @@ printf '[{"id":"ga-plain"}]'
 	}
 	if len(got) != 1 || got[0].ID != "ga-plain" {
 		t.Fatalf("nextWorkflowServeBeads = %#v, want [{ga-plain}]", got)
+	}
+}
+
+// installControlReadyBd installs a fake bd first on PATH that logs every
+// invocation's argv to logPath. When refuseReadonly is set it mirrors bd 1.3.1
+// on a proxied-server store (#7358): an argv carrying --readonly prints the
+// proxy.readonly.unsupported refusal JSON and exits 1. Every call that is not
+// refused (and every call when refuseReadonly is false) prints readyJSON, the
+// rows a batched `bd ready --json` scan would return.
+func installControlReadyBd(t *testing.T, logPath string, refuseReadonly bool, readyJSON string) {
+	t.Helper()
+	refusal := ""
+	if refuseReadonly {
+		refusal = `for arg in "$@"; do
+  if [ "$arg" = "--readonly" ]; then
+    printf '{"code":"proxy.readonly.unsupported","error":"strict readonly is unavailable for dolt proxied-server backend; refusing to open a store that cannot guarantee mutation-free access","mutates":false,"reason":"design","schema_version":1}\n'
+    exit 1
+  fi
+done
+`
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> %q
+%sready_json='%s'
+printf '%%s' "$ready_json"
+`, logPath, refusal, readyJSON)
+	installFakeBdOnPath(t, script, nil)
+}
+
+// readControlReadyBdCalls returns the argv lines the fake bd logged so far,
+// and no calls when it has not run yet.
+func readControlReadyBdCalls(t *testing.T, logPath string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("read bd log: %v", err)
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}
+
+var proxiedScopeMetadata = map[string]string{"backend": "dolt", "dolt_mode": "proxied-server"}
+
+// TestControlReadyFallbackReadyOmitsReadonlyOnProxiedScope pins #7358: bd
+// refuses strict --readonly on a proxied-server Dolt store by design, so the
+// fallback's batched ready scan must drop the flag there or the dispatcher's
+// work query fails on every wake and pools are never fed.
+func TestControlReadyFallbackReadyOmitsReadonlyOnProxiedScope(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	installControlReadyBd(t, logPath, true, `[{"id":"ga-proxied-ready","status":"open","issue_type":"task"}]`)
+	t.Setenv("GC_BEADS", "bd")
+
+	dir := t.TempDir()
+	writeScopeMetadata(t, dir, proxiedScopeMetadata)
+	if !scopeUsesProxiedDoltMode(dir, resolveStoreScopeRoot(dir, dir)) {
+		t.Fatalf("fixture sanity: scope with proxied-server metadata must classify as proxied")
+	}
+
+	result, err := controlReadyFallbackReady(dir, dir, nil, false)
+	if err != nil {
+		t.Fatalf("controlReadyFallbackReady: %v", err)
+	}
+	if len(result) != 1 || result[0].ID != "ga-proxied-ready" {
+		t.Fatalf("result = %#v, want the single ga-proxied-ready row the refusing bd returns without --readonly", result)
+	}
+	calls := readControlReadyBdCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %q, want exactly one batched call", calls)
+	}
+	if strings.Contains(calls[0], "--readonly") {
+		t.Fatalf("bd argv %q must not carry --readonly on a proxied-server scope", calls[0])
+	}
+	if want := fmt.Sprintf("--sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit); calls[0] != want {
+		t.Fatalf("bd argv = %q, want %q", calls[0], want)
+	}
+
+	t.Run("externally bound scope keeps --readonly", func(t *testing.T) {
+		configureIsolatedRuntimeEnv(t)
+		logPath := filepath.Join(t.TempDir(), "bd.log")
+		installControlReadyBd(t, logPath, false, `[]`)
+		t.Setenv("GC_BEADS", "bd")
+		dir := t.TempDir()
+		writeScopeMetadata(t, dir, map[string]string{"backend": "dolt", "dolt_mode": "proxied-server", "storage_endpoint": "db.example:3306", "storage_database": "beads"})
+
+		if _, err := controlReadyFallbackReady(dir, dir, nil, false); err != nil {
+			t.Fatalf("controlReadyFallbackReady: %v", err)
+		}
+		calls := readControlReadyBdCalls(t, logPath)
+		if len(calls) != 1 || !strings.HasPrefix(calls[0], "--readonly --sandbox ready ") {
+			t.Fatalf("bd calls = %q, want one call led by --readonly --sandbox ready (an externally bound store is not gc's proxied scope)", calls)
+		}
+	})
+
+	t.Run("initializing journal with proxied intent drops --readonly", func(t *testing.T) {
+		configureIsolatedRuntimeEnv(t)
+		logPath := filepath.Join(t.TempDir(), "bd.log")
+		installControlReadyBd(t, logPath, true, `[{"id":"ga-init-ready","status":"open","issue_type":"task"}]`)
+		t.Setenv("GC_BEADS", "bd")
+		dir := t.TempDir()
+		if err := persistProviderScopeOwnership(dir, dir, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+			t.Fatalf("persist provider ownership: %v", err)
+		}
+
+		result, err := controlReadyFallbackReady(dir, dir, nil, false)
+		if err != nil {
+			t.Fatalf("controlReadyFallbackReady: %v", err)
+		}
+		if len(result) != 1 || result[0].ID != "ga-init-ready" {
+			t.Fatalf("result = %#v, want the single row the refusing bd returns without --readonly", result)
+		}
+		for _, call := range readControlReadyBdCalls(t, logPath) {
+			if strings.Contains(call, "--readonly") {
+				t.Fatalf("bd argv %q must not carry --readonly on a scope initializing proxied", call)
+			}
+		}
+	})
+}
+
+// TestControlReadyFallbackReadyKeepsReadonlyOffProxiedScope guards the other
+// side of #7358: wherever bd honors strict --readonly the fallback keeps it,
+// byte-for-byte as before.
+func TestControlReadyFallbackReadyKeepsReadonlyOffProxiedScope(t *testing.T) {
+	serverScopeMetadata := map[string]string{"backend": "dolt", "dolt_mode": "server"}
+	base := fmt.Sprintf("--readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
+	cases := []struct {
+		name             string
+		metadata         map[string]string
+		env              map[string]string
+		includeEphemeral bool
+		want             string
+	}{
+		{name: "server", metadata: serverScopeMetadata, want: base},
+		{name: "server with ephemeral", metadata: serverScopeMetadata, includeEphemeral: true, want: base + " --include-ephemeral"},
+		{name: "doltlite with stale proxied marker", metadata: map[string]string{"backend": "doltlite", "dolt_mode": "proxied-server"}, want: base},
+		{name: "server with proxied env selector", metadata: serverScopeMetadata, env: map[string]string{"BEADS_DOLT_PROXIED_SERVER": "1"}, want: base},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configureIsolatedRuntimeEnv(t)
+			logPath := filepath.Join(t.TempDir(), "bd.log")
+			installControlReadyBd(t, logPath, false, `[{"id":"ga-direct-ready","status":"open"}]`)
+			t.Setenv("GC_BEADS", "bd")
+
+			dir := t.TempDir()
+			writeScopeMetadata(t, dir, tc.metadata)
+
+			result, err := controlReadyFallbackReady(dir, dir, tc.env, tc.includeEphemeral)
+			if err != nil {
+				t.Fatalf("controlReadyFallbackReady: %v", err)
+			}
+			if got := beadIDs(result); !stringSlicesEqual(got, []string{"ga-direct-ready"}) {
+				t.Fatalf("result ids = %q, want [ga-direct-ready]", got)
+			}
+			calls := readControlReadyBdCalls(t, logPath)
+			if len(calls) != 1 || calls[0] != tc.want {
+				t.Fatalf("bd calls = %q, want exactly [%q]", calls, tc.want)
+			}
+		})
+	}
+}
+
+// TestControlReadyFallbackReadyFollowsScopeModeEachScan pins the per-scan
+// probe: one process scanning the same scope while its persisted dolt_mode is
+// rewritten server -> proxied-server -> server between scans is served by each
+// scan's own mode, with no dispatcher restart (#7358).
+func TestControlReadyFallbackReadyFollowsScopeModeEachScan(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	installControlReadyBd(t, logPath, false, `[{"id":"ga-scan","status":"open","issue_type":"task"}]`)
+	t.Setenv("GC_BEADS", "bd")
+
+	dir := t.TempDir()
+	modes := []string{"server", "proxied-server", "server"}
+	for i, mode := range modes {
+		writeScopeMetadata(t, dir, map[string]string{"backend": "dolt", "dolt_mode": mode})
+		callsBefore := len(readControlReadyBdCalls(t, logPath))
+		if _, err := controlReadyFallbackReady(dir, dir, nil, false); err != nil {
+			t.Fatalf("scan %d (%s): %v", i+1, mode, err)
+		}
+		calls := readControlReadyBdCalls(t, logPath)
+		if len(calls) != callsBefore+1 {
+			t.Fatalf("scan %d (%s): bd calls = %q, want one new call", i+1, mode, calls)
+		}
+		argv := calls[len(calls)-1]
+		if mode == "proxied-server" {
+			if strings.Contains(argv, "--readonly") {
+				t.Fatalf("scan %d (%s): bd argv %q must not carry --readonly", i+1, mode, argv)
+			}
+			if !strings.HasPrefix(argv, "--sandbox ready ") {
+				t.Fatalf("scan %d (%s): bd argv = %q, want it led by --sandbox ready", i+1, mode, argv)
+			}
+		} else if !strings.HasPrefix(argv, "--readonly --sandbox ready ") {
+			t.Fatalf("scan %d (%s): bd argv = %q, want it led by --readonly --sandbox ready", i+1, mode, argv)
+		}
+	}
+}
+
+// TestNextWorkflowServeBeadsControlFallbackServesProxiedScope is #7358 end to
+// end: the control-dispatcher work query on a proxied-server scope whose
+// in-process legs cannot be opened falls back to shelling bd, which must not
+// carry --readonly there, so the dispatcher is handed its ready bead instead
+// of a work-query failure.
+func TestNextWorkflowServeBeadsControlFallbackServesProxiedScope(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) (sources, owned []beads.Store, err error) {
+		return nil, nil, fmt.Errorf("legs unavailable for this test")
+	})
+	const session = "gascity--control-dispatcher"
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	installControlReadyBd(t, logPath, true, `[{"id":"ga-cd-1","assignee":"`+session+`","status":"open","issue_type":"task"}]`)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	writeScopeMetadata(t, cityDir, proxiedScopeMetadata)
+
+	query := workflowServeControlReadyQueryForBeads(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		config.BeadsConfig{},
+		session,
+	)
+	got, err := nextWorkflowServeBeads(query, cityDir, map[string]string{"GC_SESSION_NAME": session})
+	if err != nil {
+		t.Fatalf("nextWorkflowServeBeads on a proxied scope: %v", err)
+	}
+	if want := []hookBead{{ID: "ga-cd-1"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("nextWorkflowServeBeads = %#v, want %#v", got, want)
+	}
+	calls := readControlReadyBdCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %q, want exactly one batched fallback call", calls)
+	}
+	if strings.Contains(calls[0], "--readonly") {
+		t.Fatalf("bd argv %q must not carry --readonly on a proxied-server scope", calls[0])
 	}
 }
