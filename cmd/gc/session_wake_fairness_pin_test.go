@@ -211,3 +211,62 @@ func mustParseRFC3339(t *testing.T, s string) time.Time {
 	}
 	return parsed
 }
+
+// TestWakeFairnessResetPendingRanksByResetCommit pins wake order after a
+// fresh-mode cycle or restart handoff. RestartRequestPatch clears last_woke_at
+// while the runtime it described is stopped. A reset-pending session ranks by
+// reset_committed_at, the moment its last incarnation stopped, so it sorts
+// after a pool session created before that commit and before one created after
+// it. A pending flag without a parseable commit time is not a reset tier.
+func TestWakeFairnessResetPendingRanksByResetCommit(t *testing.T) {
+	base := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	resetAt := base.Add(-time.Minute)
+
+	seed := func(id string, created time.Time, meta map[string]string) startCandidate {
+		return startCandidate{info: sessiontest.SeedBead(t, beads.Bead{
+			ID:        id,
+			Type:      session.BeadType,
+			Title:     id,
+			Labels:    []string{session.LabelSession},
+			CreatedAt: created,
+			Metadata:  meta,
+		})}
+	}
+
+	cycledMeta := map[string]string{
+		"template":     "worker",
+		"last_woke_at": base.Add(-6 * time.Minute).Format(time.RFC3339),
+		"slept_at":     base.Add(-5 * 24 * time.Hour).Format(time.RFC3339),
+	}
+	for k, v := range session.RestartRequestPatchAt("", resetAt) {
+		cycledMeta[k] = v
+	}
+	cycled := seed("cycled-session", base.Add(-16*24*time.Hour), cycledMeta)
+
+	if got := wakeFairnessTime(cycled); !got.Equal(resetAt) {
+		t.Fatalf("wakeFairnessTime(reset-pending) = %v, want reset_committed_at %v", got, resetAt)
+	}
+
+	// A reset marker without its commit time is not a reset tier: fall through.
+	half := seed("half-reset", base.Add(-16*24*time.Hour), map[string]string{
+		"template":                   "worker",
+		"continuation_reset_pending": "true",
+		"slept_at":                   base.Add(-5 * 24 * time.Hour).Format(time.RFC3339),
+	})
+	if got, want := wakeFairnessTime(half), base.Add(-5*24*time.Hour); !got.Equal(want) {
+		t.Fatalf("wakeFairnessTime(pending without commit) = %v, want slept_at %v", got, want)
+	}
+
+	waitingPool := seed("pool-waiting", resetAt.Add(-3*time.Minute), map[string]string{"template": "worker"})
+	newPool := seed("pool-new", resetAt.Add(time.Minute), map[string]string{"template": "worker"})
+
+	cands := []startCandidate{cycled, newPool, waitingPool}
+	sortCandidatesByWakeFairness(cands)
+	got := []string{cands[0].info.ID, cands[1].info.ID, cands[2].info.ID}
+	want := []string{"pool-waiting", "cycled-session", "pool-new"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("fairness sort order = %v, want %v", got, want)
+		}
+	}
+}
