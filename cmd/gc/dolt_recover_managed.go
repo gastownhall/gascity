@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,6 +21,9 @@ type managedDoltRecoverReport struct {
 	Port              int
 	Healthy           bool
 	Restarted         bool
+	// Deferred reports that recovery left a live or uncertain server running
+	// instead of restarting it.
+	Deferred bool
 }
 
 type managedDoltRecoveryOps struct {
@@ -30,6 +34,15 @@ type managedDoltRecoveryOps struct {
 	start            func(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error)
 	publish          func(cityPath string) error
 	failedCleanup    func(cityPath string, pid, port int, cause error) error
+	// observeEndpoint, identify, restartAfter and now feed the
+	// unresponsiveness gate; unset hooks use the live implementations.
+	observeEndpoint func(host, port string) managedDoltEndpointObservation
+	identify        func(cityPath, port string) (managedDoltServerIncarnation, error)
+	restartAfter    func(cityPath string) (time.Duration, error)
+	now             func() time.Time
+	// diagnostics receives recovery-history failures that must not change
+	// a measured result; unset uses os.Stderr.
+	diagnostics io.Writer
 }
 
 func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
@@ -69,6 +82,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	ops = ops.withGateDefaults()
 	// Refuse before opening or waiting on the legacy lock: that wait probes a
 	// listener and can publish state while a provider-owned scope is pending.
 	if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
@@ -128,15 +142,31 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
+			if !report.ReadyInconclusive {
+				reused := managedDoltRecoveryGate{cityPath: cityPath, host: host, port: strconv.Itoa(report.Port), logFile: layout.LogFile, ops: ops}
+				reused.noteHealthyMeasurement()
+			}
 			return report, nil
 		}
 	}
 
-	if err := ops.queryProbe(host, port, user); err == nil {
+	// A completed health response that diagnoses the server keeps the
+	// restart path; a probe or health transport failure goes through the
+	// unresponsiveness gate first.
+	gate := managedDoltRecoveryGate{cityPath: cityPath, host: host, port: port, logFile: layout.LogFile, ops: ops}
+	var observedFailure error
+	diagnosis := ""
+	if err := ops.queryProbe(host, port, user); err != nil {
+		observedFailure = fmt.Errorf("query probe: %w", err)
+	} else {
 		health, healthErr := ops.healthCheck(host, port, user)
-		if healthErr == nil && health.ReadOnly == "true" {
+		switch {
+		case healthErr != nil:
+			observedFailure = fmt.Errorf("health check: %w", healthErr)
+		case health.ReadOnly == "true":
 			report.DiagnosedReadOnly = true
-		} else if healthErr == nil && health.QueryReady && health.ReadOnly == "false" {
+			diagnosis = managedDoltRecoveryReasonReadOnly
+		case health.QueryReady && health.ReadOnly == "false":
 			report.Ready = true
 			report.Healthy = true
 			if err := recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, port); err != nil {
@@ -146,8 +176,25 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
 			recoverManagedDoltPopulateReportFromRuntimeState(cityPath, port, &report)
+			gate.noteHealthyMeasurement()
 			return report, nil
+		default:
+			diagnosis = managedDoltRecoveryReasonNotQueryReady
 		}
+	}
+
+	if err := managedDoltRecoveryCooldownError(cityPath, layout.LogFile, ops.now().UTC(), providerRecoverCooldown()); err != nil {
+		report.Deferred = true
+		return report, err
+	}
+	if observedFailure != nil {
+		if err := gate.evaluate(observedFailure); err != nil {
+			report.Deferred = true
+			return report, err
+		}
+	} else if err := gate.recordConclusiveStop(diagnosis, ""); err != nil {
+		report.Deferred = true
+		return report, err
 	}
 
 	stopReport, stopErr := ops.stop(cityPath, port)
@@ -239,6 +286,7 @@ func managedDoltRecoverFields(report managedDoltRecoverReport) []string {
 		"port\t" + strconv.Itoa(report.Port),
 		"healthy\t" + strconv.FormatBool(report.Healthy),
 		"restarted\t" + strconv.FormatBool(report.Restarted),
+		"deferred\t" + strconv.FormatBool(report.Deferred),
 	}
 }
 

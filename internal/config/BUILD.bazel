@@ -126,6 +126,7 @@ go_test(
         "diagnostic_locations_test.go",
         "doctor_config_test.go",
         "doctor_discovery_test.go",
+        "dolt_unresponsive_restart_after_test.go",
         "duplicate_agent_error_test.go",
         "endpoint_compat_edit_test.go",
         "events_mirror_test.go",
