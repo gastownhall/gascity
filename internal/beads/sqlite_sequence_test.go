@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // sessionHexIDs are caller-pinned session ids whose hex tails end in long digit
@@ -29,6 +31,15 @@ func openSeqStore(t *testing.T, dir string) *SQLiteStore {
 	store := opened.(*SQLiteStore)
 	t.Cleanup(func() { _ = store.CloseStore() })
 	return store
+}
+
+// seqMintCtx is the generous bounded wait the direct, non-transactional nextID
+// callers use: contention on the directory lock is waited out, not refused.
+func seqMintCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 func mustMint(t *testing.T, store *SQLiteStore) string {
@@ -272,6 +283,7 @@ func TestSQLiteTwoStoresOnOneDirNeverMintSameID(t *testing.T) {
 	dir := t.TempDir()
 	stores := []*SQLiteStore{openSeqStore(t, dir), openSeqStore(t, dir)}
 	const perStore = 3 * sqliteSequenceBlockSize / 2 // crosses a block boundary
+	mintCtx := seqMintCtx(t)
 	results := make([][]string, len(stores))
 	var wg sync.WaitGroup
 	for i, store := range stores {
@@ -279,7 +291,7 @@ func TestSQLiteTwoStoresOnOneDirNeverMintSameID(t *testing.T) {
 		go func(i int, store *SQLiteStore) {
 			defer wg.Done()
 			for n := int64(0); n < perStore; n++ {
-				id, err := store.nextID()
+				id, err := store.nextID(mintCtx)
 				if err != nil {
 					t.Errorf("store %d nextID: %v", i, err)
 					return
@@ -310,7 +322,7 @@ func TestSQLiteCrashBetweenReserveAndUseNeverReissues(t *testing.T) {
 	store := openSeqStore(t, dir)
 	// Ids handed out whose rows never became durable: one handed out with no
 	// row at all, and one whose committed row is lost as a WAL tail would be.
-	escapedNoRow, err := store.nextID()
+	escapedNoRow, err := store.nextID(seqMintCtx(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +398,7 @@ func TestSQLiteReadOnlyStoreNeverWritesFloor(t *testing.T) {
 	}
 	ro := opened.(*SQLiteStore)
 	defer ro.CloseStore() //nolint:errcheck
-	if _, err := ro.nextID(); err == nil {
+	if _, err := ro.nextID(seqMintCtx(t)); err == nil {
 		t.Fatal("read-only store minted an id")
 	}
 	if _, err := os.Stat(filepath.Join(dir, sqliteGraphSequenceFloorFilename)); !os.IsNotExist(err) {
