@@ -17,10 +17,15 @@ import (
 type hookClaimVerdict string
 
 const (
-	// hookClaimVerdictNone means no claim landed for this session: the claim
-	// errored, or a --claim was lost to another claimant.
+	// hookClaimVerdictNone means no claim is confirmed for this session: the
+	// claim errored, or a --claim was lost to another claimant. An exact claim
+	// reports it with an error only once its write is known not to have
+	// landed; one that may have landed is hookClaimVerdictClaimed.
 	hookClaimVerdictNone hookClaimVerdict = ""
-	// hookClaimVerdictClaimed means this session now holds the bead.
+	// hookClaimVerdictClaimed means this session now holds the bead. Paired
+	// with an error, the claim landed or may have landed but could not be
+	// confirmed: the tiers stop rather than skip the bead, because claiming
+	// other work in its place would strand it.
 	hookClaimVerdictClaimed hookClaimVerdict = "claimed"
 	// hookClaimVerdictRejected means an exact claim wrote nothing because the
 	// bead no longer matched the observation it was fenced on, or its
@@ -167,13 +172,16 @@ func hookClaimExactWithBdStore(ctx context.Context, dir string, env []string, ac
 // hookClaimExactThroughStore runs one exact claim and classifies it the way
 // hookClaimThroughStore classifies a --claim: a claim whose readback names
 // another owner is not ours, and an answered precondition or fence mismatch
-// is a lost race rather than an error. A claim whose write landed but whose
-// re-read failed (molecule.ErrClaimExactReadback) is claimed plus that error:
-// this session owns the bead, so the tiers stop rather than skip it.
+// is a lost race rather than an error. A claim that landed, or may have, but
+// could not be confirmed is claimed plus its error: a landed write whose
+// re-read failed (molecule.ErrClaimExactReadback), and a write that failed
+// without an answer its re-read could not settle
+// (molecule.ErrClaimExactUnsettled). This session holds or may hold the
+// bead, so the tiers stop rather than skip it.
 func hookClaimExactThroughStore(reader molecule.ClaimExactReader, writers molecule.ClaimExactWriters, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
 	res, err := molecule.ClaimExactWithWriters(reader, writers, req)
 	if err != nil {
-		if res.Outcome == molecule.ClaimExactClaimed {
+		if res.Outcome == molecule.ClaimExactClaimed || errors.Is(err, molecule.ErrClaimExactUnsettled) {
 			return res.Bead, hookClaimVerdictClaimed, err
 		}
 		return res.Bead, hookClaimVerdictNone, err

@@ -93,17 +93,23 @@ const (
 	// claimed→started latency-watch transitions (OBS-001).
 	ClaimedAtMetadataKey = "gc.claimed_at"
 	// ClaimGenerationMetadataKey is the scheduler-owned generation-fencing
-	// token for molecule.ClaimExact. It is a counter fenced through
-	// beads.ConditionalWriter.UpdateIfMatch on the bead's revision (distinct
-	// from gc.claimed_at's write-once and gc.control_epoch's
+	// token for molecule.ClaimExact and molecule.ClaimExactWithWriters, the
+	// exact claim `gc hook --claim` makes of a graph step. It is a counter
+	// (distinct from gc.claimed_at's write-once and gc.control_epoch's
 	// compare-and-overwrite mechanisms): a caller reads the current value,
-	// computes the next generation, and applies a single UpdateIfMatch call
-	// that advances this key AND commits the claim's effects (assignee,
-	// status, session identity) together in one atomic, revision-fenced
-	// write. A stale or racing claimant loses that write outright
-	// (*beads.PreconditionFailedError) with no fallback and no partial
-	// effect ever lands. See molecule.ClaimExact's doc for the exact
-	// guarantee this does and does not provide.
+	// computes the next generation, and applies one fenced write that
+	// advances this key AND commits the claim's effects (assignee, status,
+	// session identity) together, so no partial effect ever lands. Fenced
+	// through beads.ConditionalWriter.UpdateIfMatch on the bead's revision, a
+	// stale or racing claimant loses that write outright
+	// (*beads.PreconditionFailedError). Through the status-and-assignee
+	// guard (beads.AssignmentGuardedUpdater, for a bd without
+	// --if-revision), only the status and assignee are fenced inside the
+	// write; the generation is checked at read time and on the readback, and
+	// a claim and release landing between a claimant's read and its write can
+	// leave two claims carrying the same generation. See
+	// molecule.ClaimExactWithWriters' doc for the exact guarantee each fence
+	// does and does not provide.
 	ClaimGenerationMetadataKey           = "gc.claim_generation"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"

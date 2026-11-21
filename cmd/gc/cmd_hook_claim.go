@@ -1207,9 +1207,11 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		landedAt := ops.nowOrWallClock()
 		if err != nil {
 			if ok {
-				// The atomic mutation committed, but its canonical readback failed.
-				// Stop immediately: trying another candidate or draining would strand
-				// the assignment while falsely reporting idle work.
+				// The atomic mutation committed (or, for an exact claim whose
+				// re-read could not settle its write, may have), but its canonical
+				// readback failed. Stop immediately: trying another candidate or
+				// draining would strand the assignment while falsely reporting idle
+				// work.
 				fmt.Fprintf(stderr, "gc hook --claim: claimed %s but loading canonical bead failed: %v\n", candidate.ID, err) //nolint:errcheck
 				return hookClaimResult{terminal: true, code: 1}
 			}

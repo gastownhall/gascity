@@ -920,6 +920,7 @@ func TestClassRoutedClaimExactEscalatesOnlyOnAnAbsentWorkLeg(t *testing.T) {
 		{"write error", hookClaimVerdictNone, errors.New("claim exact \"gcg-e10\": applying claim effects: database is locked")},
 		{"write error naming a not-found", hookClaimVerdictNone, fmt.Errorf("claim exact %q: applying claim effects: %w", "gcg-e10", beads.ErrNotFound)},
 		{"committed claim whose readback failed", hookClaimVerdictClaimed, fmt.Errorf("claim exact %q: %w", "gcg-e10", molecule.ErrClaimExactReadback)},
+		{"claim write its re-read could not settle", hookClaimVerdictClaimed, fmt.Errorf("claim exact %q: %w", "gcg-e10", molecule.ErrClaimExactUnsettled)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			class := newClaimRouteClassStore(t)

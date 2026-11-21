@@ -363,6 +363,14 @@ type fakeAssignmentGuardBd struct {
 	beads   map[string]beads.Bead
 	noGuard bool
 	ran     [][]string
+	// timeout names a bead whose first update answers bd's ambiguous
+	// transport error, an i/o timeout to its server: after the update
+	// applied, or instead of applying it when timeoutDropsWrite is set. Once
+	// it has answered, showFailsAfterTimeout fails every later show of it.
+	timeout               string
+	timeoutDropsWrite     bool
+	showFailsAfterTimeout bool
+	timedOut              bool
 }
 
 func newFakeAssignmentGuardBd(rows ...beads.Bead) *fakeAssignmentGuardBd {
@@ -382,7 +390,11 @@ func (f *fakeAssignmentGuardBd) runner(_ context.Context, env map[string]string)
 		}
 		switch args[0] {
 		case "show":
-			b, ok := f.beads[args[len(args)-1]]
+			id := args[len(args)-1]
+			if f.timedOut && f.showFailsAfterTimeout && id == f.timeout {
+				return nil, errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+			}
+			b, ok := f.beads[id]
 			if !ok {
 				return nil, fmt.Errorf("unexpected show %q", args)
 			}
@@ -466,6 +478,13 @@ func (f *fakeAssignmentGuardBd) update(actor string, args []string) ([]byte, err
 			k, v, _ := strings.Cut(set[1], "=")
 			next.Metadata[k] = v
 		}
+	}
+	if id == f.timeout && !f.timedOut {
+		f.timedOut = true
+		if !f.timeoutDropsWrite {
+			f.beads[id] = next
+		}
+		return nil, errors.New("dial tcp 127.0.0.1:3307: i/o timeout")
 	}
 	f.beads[id] = next
 	return json.Marshal([]beads.Bead{next})
@@ -784,4 +803,94 @@ func TestHookClaimExactCommittedClaimWithFailedReadbackStopsTheEligibleTier(t *t
 		t.Fatalf("work-1 = status %q assignee %q, want the committed claim kept", got.Status, got.Assignee)
 	}
 	f.assertUntouched("work-2")
+}
+
+// TestHookClaimExactSettlesAnAmbiguousWriteByRereading: on a bd without
+// --if-revision (the pinned v1.3.4), a graph step's guarded claim write
+// answers an i/o timeout, which can follow a commit. bd never replays such a
+// write, so the claim's re-read decides it. A write that landed is this
+// session's claim and is handed out on either tier, never skipped for the
+// next candidate (which would strand it in_progress under this session); a
+// write that did not land is skipped as before; and when the re-read fails
+// too, the eligible tier stops, because the claim may have landed.
+func TestHookClaimExactSettlesAnAmbiguousWriteByRereading(t *testing.T) {
+	const self = "gc__role-mc-sess1"
+	for _, tc := range []struct {
+		name string
+		// observedAssignee is work-1's assignee as stored and observed:
+		// self makes it the ready tier's.
+		observedAssignee string
+		dropsWrite       bool
+		rereadFails      bool
+		wantCode         int
+		// wantWork is the bead handed out, "" for none.
+		wantWork   string
+		wantFailed []string
+	}{
+		{name: "eligible tier, write landed", wantWork: "work-1"},
+		{name: "ready tier, write landed", observedAssignee: self, wantWork: "work-1"},
+		{name: "eligible tier, write did not land", dropsWrite: true, wantWork: "work-2", wantFailed: []string{"work-1"}},
+		{name: "eligible tier, re-read failed", rereadFails: true, wantCode: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []beads.Bead{
+				{ID: "work-1", Title: "step", Status: "open", Type: "task", Assignee: tc.observedAssignee, Metadata: graphStepMeta("build")},
+				{ID: "work-2", Title: "next", Status: "open", Type: "task", Metadata: graphStepMeta("test")},
+			}
+			bd := newFakeAssignmentGuardBd(rows...)
+			bd.timeout = "work-1"
+			bd.timeoutDropsWrite = tc.dropsWrite
+			bd.showFailsAfterTimeout = tc.rereadFails
+			originalRunner := hookClaimCommandRunnerWithEnvContext
+			t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+			hookClaimCommandRunnerWithEnvContext = bd.runner
+
+			f := newExactClaimFixture(t)
+			f.observed = rows
+			ops := f.ops()
+			ops.ClaimExact = hookClaimExactWithBdStore
+			ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) {
+				return bd.beads[id], nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("bd ready --json", t.TempDir(), poolClaimOpts(), ops, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("doHookClaim = %d, want %d; stdout=%s stderr=%s", code, tc.wantCode, stdout.String(), stderr.String())
+			}
+			if !bd.timedOut {
+				t.Fatalf("work-1's claim write never ran; commands=%q", bd.ran)
+			}
+			if strings.Join(f.failed, ",") != strings.Join(tc.wantFailed, ",") {
+				t.Fatalf("claim failures = %v, want %v; stderr=%s", f.failed, tc.wantFailed, stderr.String())
+			}
+			if work1 := bd.beads["work-1"]; tc.dropsWrite {
+				if work1.Status != "open" || work1.Assignee != tc.observedAssignee || work1.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" {
+					t.Fatalf("work-1 = status %q assignee %q generation %q, want the write that did not land to leave it unclaimed",
+						work1.Status, work1.Assignee, work1.Metadata[beadmeta.ClaimGenerationMetadataKey])
+				}
+			} else if work1.Status != "in_progress" || work1.Assignee != self {
+				t.Fatalf("work-1 = status %q assignee %q, want the landed claim held by this session", work1.Status, work1.Assignee)
+			}
+			if work2 := bd.beads["work-2"]; tc.wantWork != "work-2" && (work2.Status != "open" || work2.Assignee != "") {
+				t.Fatalf("work-2 = status %q assignee %q, want it untouched: the hook must not claim a second bead", work2.Status, work2.Assignee)
+			}
+			if tc.wantWork == "" {
+				if strings.Contains(stdout.String(), `"action":"work"`) {
+					t.Fatalf("hook wrote a receipt for a claim it could not settle: %s", stdout.String())
+				}
+				if !strings.Contains(stderr.String(), "work-1") || !strings.Contains(stderr.String(), "may have landed") {
+					t.Fatalf("stderr = %q, want work-1 named as a claim that may have landed", stderr.String())
+				}
+				return
+			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("decode result %q: %v; stderr=%s", stdout.String(), err, stderr.String())
+			}
+			if result.Action != "work" || result.BeadID != tc.wantWork {
+				t.Fatalf("result = %+v, want work on %s; stderr=%s", result, tc.wantWork, stderr.String())
+			}
+		})
+	}
 }
