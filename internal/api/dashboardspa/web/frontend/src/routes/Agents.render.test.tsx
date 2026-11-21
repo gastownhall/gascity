@@ -562,6 +562,58 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     expect(fetchCalls.filter((call) => call.method === 'POST')).toHaveLength(0);
   });
 
+  // R12 (ga-ua63vxk): the Read-only badge labels a disabled mutating control, so a row with no
+  // response controls carries none. Pins the badge leaving WITH the controls.
+  it('shows no Read-only badge when an empty-options prompt has no response controls', async () => {
+    stubFetch({
+      pending: {
+        request_id: 'req-badge',
+        kind: 'question',
+        prompt: 'Choose an environment.',
+        options: [],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <NowProvider intervalMs={1_000_000}>
+          <ReadOnlyProvider readOnly={true}>
+            <AgentsPage />
+          </ReadOnlyProvider>
+        </NowProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('needs you')).toBeTruthy();
+    expect(within(screen.getByRole('table')).getByText('Choose an environment.')).toBeTruthy();
+    expect(screen.queryByText('Read-only')).toBeNull();
+  });
+
+  // The gate is "at least one advertised option": a single option still offers both responses
+  // (whether the runtime can satisfy each is the server's call, a 409 otherwise).
+  it('offers Approve and Deny when the runtime advertises exactly one option', async () => {
+    stubFetch({
+      pending: {
+        request_id: 'req-one-option',
+        kind: 'approval',
+        prompt: 'Run this command?',
+        options: ['Allow once'],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <NowProvider intervalMs={1_000_000}>
+          <AgentsPage />
+        </NowProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('needs you')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^approve$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^deny$/i })).toBeTruthy();
+  });
+
   it.each(['approve', 'deny'] as const)(
     'disables both offered responses while %s is in flight and restores them on success',
     async (action) => {
