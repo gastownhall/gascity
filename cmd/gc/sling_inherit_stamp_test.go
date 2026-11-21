@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // In-session inheritance (sling_inherit.go) and sling's initiator stamping
@@ -307,8 +308,11 @@ func TestInSessionSlingInheritsTheRunOfItsClaimedDrainItem(t *testing.T) {
 		t.Fatalf("launch doSling = %d; stderr: %s", code, stderr.String())
 	}
 	drain := inheritOneBead(t, store, map[string]string{beadmeta.KindMetadataKey: beadmeta.KindDrain})
+	// Compose the native input handles as the control dispatcher does; this
+	// fixture keeps work and graph classes in the same backing store.
 	if _, err := dispatch.ProcessControl(beadstest.Graph(store), drain, dispatch.ProcessOptions{
 		Work:               beadstest.Work(store),
+		InputStores:        &sourceworkflow.InputStores{Graph: beadstest.Graph(store), Work: []beads.WorkStore{beadstest.Work(store)}},
 		FormulaSearchPaths: cfg.FormulaLayers.City,
 	}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)

@@ -629,3 +629,16 @@ event watcher derives them from session beads' `bead.*` notifications
 (SESSION-OBSERVE-LIST-EVENTS in `internal/session/REQUIREMENTS.md`), and
 `POST /v0/events` and `gc event emit` refuse them
 (`events.IsSessionListDerived`).
+
+## Native input readiness
+
+`/beads/ready` applies `readywork.LegGate` in both unified and split layouts.
+Compose work legs with one `State.Stores()` epoch's `Work`/`Rig` and
+`GraphInWork` handles and the relocated graph leg with its `Graph` handle.
+Admission follows the work scope that served an existing graph; `GraphFor`
+places new graphs and may point to a different, relocated store. Never
+mint class handles in the handler or bypass input admission when no class binding
+exists. The domain predicate owns input relations and parks; the handler only
+projects its result and read failures.
+Retain failed readiness scopes in the named input frame: a missing read cannot
+prove unique residence for another scope's native inputs.

@@ -353,18 +353,18 @@ func v2Allocation(t *testing.T, c diffCity) allocOutcome {
 // before the lane's first publish.
 func diffRecording(t *testing.T, c diffCity, cityPath string, store beads.Store) *externalReadsRecording {
 	t.Helper()
+	rec := fixtureDemandRecording(diffNow, externalReadsEnv{CityPath: cityPath, CityName: c.cfg.Workspace.Name, Cfg: c.cfg, CityStore: store})
+	rec.FreshFor = diffScaleCheckFreshFor
 	if !c.scaleCheck {
-		return nil
+		return rec
 	}
 	res := sourceResult{StartedAt: diffNow.Add(-c.scaleCheckAge), EndedAt: diffNow.Add(-c.scaleCheckAge), Err: c.scaleCheckErr}
 	if c.scaleCheckErr == nil {
 		res.ScaleCheck = runCustomScaleChecks(externalReadsEnv{CityPath: cityPath, CityName: c.cfg.Workspace.Name, Cfg: c.cfg, CityStore: store},
 			shellScaleCheck, controllerQueryRuntimeEnv, io.Discard)
 	}
-	return &externalReadsRecording{
-		Seq: 1, FreshFor: diffScaleCheckFreshFor,
-		Sources: map[sourceKey]sourceResult{{kind: sourceScaleCheck, cfg: c.cfg}: res},
-	}
+	rec.Sources[sourceKey{kind: sourceScaleCheck, cfg: c.cfg}] = res
+	return rec
 }
 
 // diffScaleCheckFreshFor is the recording's freshness: 3 × a nominal 20s

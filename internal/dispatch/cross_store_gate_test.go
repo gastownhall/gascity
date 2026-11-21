@@ -1775,8 +1775,8 @@ func TestARevivedCanceledRunHoldsItsItemBehindAnOpenCrossRigBlocker(t *testing.T
 	}
 	graph, drain, memberIDs, dir := splitSQLiteDrain(t, work)
 	mustDepAdd(t, work, memberIDs[0], "rg-77", "blocks")
-	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
-	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true, InputStores: nativeFixtureInputs(graph, work, rig)}
+	if _, err := processNativeControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}
 	if _, err := ReleaseCrossStoreGates(beadstest.Graph(graph), storesResolver(work, rig)); err != nil {
@@ -1802,7 +1802,7 @@ func TestARevivedCanceledRunHoldsItsItemBehindAnOpenCrossRigBlocker(t *testing.T
 		t.Fatal(err)
 	}
 	for tick := 0; tick < 3; tick++ {
-		if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
+		if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
 			t.Fatal(err)
 		}
 		if _, err := ReleaseCrossStoreGates(beadstest.Graph(graph), storesResolver(work, rig)); err != nil {

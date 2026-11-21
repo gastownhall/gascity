@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"io"
+	"path/filepath"
+	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // hookCity is the city one `gc hook` invocation works in: resolved once, its
@@ -83,6 +87,26 @@ func (h *hookCity) recorder() events.Recorder {
 // seam is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
 	var ops hookClaimOps
+	ops.InputWorkStores = func(ctx context.Context, dir string, env []string, primary beads.WorkStore) ([]beads.WorkStore, error) {
+		scopePath := dir
+		if beadsDir := strings.TrimSpace(envListValue(workQueryEnvForDir(env, dir), "BEADS_DIR")); beadsDir != "" {
+			scopePath = filepath.Dir(beadsDir)
+		}
+		return inputWorkStoresForScope(ctx, h.path, scopePath, h.cfg, primary)
+	}
+	ops.InputAdmission = func(ctx context.Context, dir string, env []string, candidate beads.Bead) (sourceworkflow.InputAdmission, error) {
+		if !hookClaimWorkflowLinked(candidate) && strings.TrimSpace(candidate.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
+			return sourceworkflow.InputAdmission{Ready: true}, nil
+		}
+		work := hookClaimBdStoreContext(ctx, dir, env, "")
+		classes := scopeStores(h.path, nil, work)
+		return (sourceworkflow.InputStores{
+			Graph: classes.Graph(),
+			OpenWork: func(ctx context.Context) ([]beads.WorkStore, error) {
+				return ops.InputWorkStores(ctx, dir, env, classes.Work())
+			},
+		}).Admission(ctx, candidate)
+	}
 	ops.DrainPending = func(sessionID string) (bool, error) {
 		return sessionDrainPendingVia(h.sessionFront, sessionID)
 	}

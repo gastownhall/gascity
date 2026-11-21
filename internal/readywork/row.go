@@ -86,7 +86,8 @@ type ReadyBeadDep struct {
 type ReadyBeadBlocker struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
-	// Reason is set only on a split city, which judges every blocker from
+	// Reason names a native input-admission hold, or on a split city the
+	// cross-store verdict, which judges every blocker from
 	// every store that holds it: where the federation found it ("closed in the
 	// graph store", "held unreleased in the work store"), that every
 	// unreleased copy is closed blocked (Status BlockerClosedBlocked), or that

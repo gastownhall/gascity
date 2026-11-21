@@ -28,7 +28,7 @@ func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
 
-	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
@@ -81,7 +81,7 @@ func TestProcessDrainSeparateProjectsMemberDependenciesOntoItemWorkflows(t *test
 	secondMember := members[1]
 	mustDepAdd(t, store, secondMember.ID, firstMember.ID, "blocks")
 
-	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
@@ -162,7 +162,7 @@ func TestProcessDrainSeparateCreatesDependentItemWorkflowsBlocked(t *testing.T) 
 		},
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
@@ -208,7 +208,7 @@ func TestProcessDrainSeparateTopologicallyOrdersMembersBeforeCreation(t *testing
 		},
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
@@ -347,7 +347,7 @@ func TestProcessDrainSeparateSucceedsForEmptyInputConvoy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(empty drain): %v", err)
 	}
@@ -373,7 +373,7 @@ func TestProcessDrainSeparateFailsClosedWhenMaxUnitsExceeded(t *testing.T) {
 		t.Fatalf("SetMetadata(max units): %v", err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(limit exceeded): %v", err)
 	}
@@ -405,7 +405,7 @@ func TestProcessDrainSharedAdvancesOneItemAtATime(t *testing.T) {
 	}
 	drain = mustGetBead(t, store, drain.ID)
 
-	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(shared first): %v", err)
 	}
@@ -432,7 +432,7 @@ func TestProcessDrainSharedAdvancesOneItemAtATime(t *testing.T) {
 	if err := updateMetadataAndClose(beadstest.Graph(store), firstRoot.ID, map[string]string{"gc.outcome": "pass"}); err != nil {
 		t.Fatalf("close first root pass: %v", err)
 	}
-	result, err = ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err = processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(shared second): %v", err)
 	}
@@ -447,7 +447,7 @@ func TestProcessDrainSharedAdvancesOneItemAtATime(t *testing.T) {
 	if err := updateMetadataAndClose(beadstest.Graph(store), secondRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
 		t.Fatalf("close second root pass: %v", err)
 	}
-	result, err = ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err = processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(shared complete): %v", err)
 	}
@@ -476,7 +476,7 @@ func TestProcessDrainSharedSkipsRemainingAfterFailure(t *testing.T) {
 		t.Fatalf("SetMetadataBatch(shared drain): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(shared first): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
@@ -488,7 +488,7 @@ func TestProcessDrainSharedSkipsRemainingAfterFailure(t *testing.T) {
 		t.Fatalf("close first root fail: %v", err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(shared failure): %v", err)
 	}
@@ -521,7 +521,7 @@ func TestProcessDrainSharedContinuesAfterFailure(t *testing.T) {
 		t.Fatalf("SetMetadataBatch(shared drain): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(shared first): %v", err)
 	}
 	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -532,7 +532,7 @@ func TestProcessDrainSharedContinuesAfterFailure(t *testing.T) {
 		t.Fatalf("close first root fail: %v", err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(shared continue): %v", err)
 	}
@@ -553,7 +553,7 @@ func TestProcessDrainSharedContinuesAfterFailure(t *testing.T) {
 	if err := updateMetadataAndClose(beadstest.Graph(store), manifest.Rows[1].ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
 		t.Fatalf("close second root pass: %v", err)
 	}
-	result, err = ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err = processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(shared complete after continue): %v", err)
 	}
@@ -637,7 +637,7 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 		t.Fatalf("SetMetadata(reservation): %v", err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(exclusive conflict): %v", err)
 	}
@@ -674,12 +674,12 @@ func TestProcessDrainSeparateCompletesAfterItemRootsClose(t *testing.T) {
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
 
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
 	manifest := mustDrainManifest(t, drain)
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(drain before item close) error = %v, want pending", err)
 	}
 	for _, row := range manifest.Rows {
@@ -688,7 +688,7 @@ func TestProcessDrainSeparateCompletesAfterItemRootsClose(t *testing.T) {
 		}
 	}
 	drain = mustGetBead(t, store, drain.ID)
-	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(drain complete): %v", err)
 	}
@@ -710,7 +710,7 @@ func TestProcessDrainSeparateReleasesExclusiveReservationsOnCompletion(t *testin
 		t.Fatalf("SetMetadata(exclusive): %v", err)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
@@ -724,7 +724,7 @@ func TestProcessDrainSeparateReleasesExclusiveReservationsOnCompletion(t *testin
 			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
 		}
 	}
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(drain complete): %v", err)
 	}
@@ -746,7 +746,7 @@ func TestProcessDrainSeparateFailsOnNonPassItemOutcome(t *testing.T) {
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
 
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
@@ -758,7 +758,7 @@ func TestProcessDrainSeparateFailsOnNonPassItemOutcome(t *testing.T) {
 		t.Fatalf("close item root skipped: %v", err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(drain complete): %v", err)
 	}
@@ -781,7 +781,7 @@ func TestProcessDrainExpandingReusesPersistedManifest(t *testing.T) {
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
 
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
@@ -798,7 +798,7 @@ func TestProcessDrainExpandingReusesPersistedManifest(t *testing.T) {
 		t.Fatalf("track late member: %v", err)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain replay): %v", err)
 	}
 	replayed := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -839,7 +839,16 @@ func TestProcessDrainReplayUsesManifestWhenMemberWasDeletedBeforeUnitCreation(t 
 		t.Fatalf("persist manifest: %v", err)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	// A dangling live tracks relation withholds new expansion. Once the
+	// relation is repaired, the persisted manifest can recover its missing row.
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("dangling input relation: %v", err)
+	}
+	if err := store.DepRemove(parentConvoyID, missingID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain replay): %v", err)
 	}
 	replayed := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -887,25 +896,13 @@ func TestProcessDrainFailsClosedWhenInitialMembershipHasUnresolvedMember(t *test
 		t.Fatalf("Delete(%s): %v", missingID, err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
-	if err != nil {
-		t.Fatalf("ProcessControl(drain unresolved): %v", err)
+	result, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	if !errors.Is(err, beads.ErrNotFound) || result.Processed {
+		t.Fatalf("unresolved membership = %+v, %v; want explicit not-found", result, err)
 	}
-	if result.Action != "drain-unresolved-member" {
-		t.Fatalf("Action = %q, want drain-unresolved-member", result.Action)
-	}
-	drain = mustGetBead(t, store, drain.ID)
-	if drain.Status != "closed" || drain.Metadata["gc.outcome"] != "fail" {
-		t.Fatalf("drain = status %q outcome %q, want closed/fail", drain.Status, drain.Metadata["gc.outcome"])
-	}
-	if got := drain.Metadata["gc.drain_state"]; got != "failed" {
-		t.Fatalf("gc.drain_state = %q, want failed", got)
-	}
-	if got := drain.Metadata["gc.failure_reason"]; got != "unresolved_member" {
-		t.Fatalf("gc.failure_reason = %q, want unresolved_member", got)
-	}
-	if got := drain.Metadata["gc.failure_subject"]; got != missingID {
-		t.Fatalf("gc.failure_subject = %q, want %s", got, missingID)
+	after := mustGetBead(t, store, drain.ID)
+	if after.Status != "open" || after.Metadata["gc.drain_manifest"] != "" {
+		t.Fatalf("unresolved input changed control: %+v", after)
 	}
 }
 
@@ -915,7 +912,7 @@ func TestProcessDrainReplayReusesClosedItemRootByKey(t *testing.T) {
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
 
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
@@ -930,7 +927,7 @@ func TestProcessDrainReplayReusesClosedItemRootByKey(t *testing.T) {
 		t.Fatalf("persist rewound manifest: %v", err)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain replay): %v", err)
 	}
 	replayed := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -952,7 +949,7 @@ func TestProcessDrainReplayClosesFailedItemRootBeforeRecreate(t *testing.T) {
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
 
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
@@ -967,7 +964,7 @@ func TestProcessDrainReplayClosesFailedItemRootBeforeRecreate(t *testing.T) {
 		t.Fatalf("persist rewound manifest: %v", err)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain replay): %v", err)
 	}
 	replayed := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -999,7 +996,7 @@ func TestProcessDrainReplayConvoyOrderedManifestBlocksOnItemRootNotSourceMember(
 		t.Fatalf("persist manifest: %v", err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(drain replay): %v", err)
 	}
@@ -1050,7 +1047,7 @@ func TestProcessDrainCompleteRepairsEmbeddedSourceMemberDeps(t *testing.T) {
 	secondMember := members[1]
 	mustDepAdd(t, store, secondMember.ID, firstMember.ID, "blocks")
 
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -1066,7 +1063,7 @@ func TestProcessDrainCompleteRepairsEmbeddedSourceMemberDeps(t *testing.T) {
 	mustDepAdd(t, store, secondRow.ItemRootID, firstMember.ID, "blocks")
 	mustDepAdd(t, store, secondWork.ID, firstMember.ID, "blocks")
 
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(drain complete): %v", err)
 	}
 
@@ -1101,7 +1098,7 @@ func TestProcessDrainSharedRepairsEmbeddedSourceMemberDeps(t *testing.T) {
 		t.Fatalf("persist manifest: %v", err)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(shared advance): %v", err)
 	}
 	replayed := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -1118,7 +1115,7 @@ func TestProcessDrainSharedRepairsEmbeddedSourceMemberDeps(t *testing.T) {
 		t.Fatalf("dependent item work step %s should be blocked before repair", dependentWork.ID)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(shared repair): %v", err)
 	}
 
@@ -1139,7 +1136,7 @@ func TestProcessDrainSharedMaterializesInDependencyOrderAndBlocksOnItemRoot(t *t
 	}
 	mustDepAdd(t, store, dependent.ID, blocker.ID, "blocks")
 
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(shared first): %v", err)
 	}
@@ -1158,7 +1155,7 @@ func TestProcessDrainSharedMaterializesInDependencyOrderAndBlocksOnItemRoot(t *t
 	if err := updateMetadataAndClose(beadstest.Graph(store), blockerRow.ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
 		t.Fatalf("close blocker root pass: %v", err)
 	}
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(shared second): %v", err)
 	}
 	manifest = mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -1187,7 +1184,7 @@ func TestProcessDrainPassesParentRuntimeVarsToItemFormula(t *testing.T) {
 		t.Fatalf("SetMetadata(runtime vars): %v", err)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
@@ -1230,7 +1227,7 @@ func TestProcessDrainPropagatesSourceMemberWorkDirToItemWorkflow(t *testing.T) {
 		t.Fatalf("SetMetadata(launcher work dir): %v", err)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -1264,7 +1261,7 @@ func TestProcessDrainAppliesItemFormulaDefaultsToRootMetadata(t *testing.T) {
 	writeDrainItemFormulaWithDefault(t, dir)
 	store, drain := seedDrainWorkflow(t)
 
-	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	drain = mustGetBead(t, store, drain.ID)
@@ -1425,7 +1422,7 @@ func TestProcessDrainExclusiveFailsClosedForInvalidItemFormula(t *testing.T) {
 		t.Fatalf("Members: %v", err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(non-graph item formula): %v", err)
 	}
@@ -1802,7 +1799,7 @@ func TestProcessDrainTerminalCloseReconcilesEnclosingScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(scoped empty drain): %v", err)
 	}
@@ -1855,7 +1852,7 @@ func TestProcessDrainFailureCloseAbortsEnclosingScope(t *testing.T) {
 		}
 	}
 
-	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(scoped limit exceeded): %v", err)
 	}
@@ -1890,7 +1887,7 @@ func TestProcessDrainFailsWhenBlockingPredecessorFailed(t *testing.T) {
 		"gc.failure_reason": "context_validation_failed",
 	})
 
-	result, err := ProcessControl(beadstest.Graph(fx.store), mustGetBead(t, fx.store, fx.drain.ID), ProcessOptions{Work: beadstest.Work(fx.store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(fx.store, mustGetBead(t, fx.store, fx.drain.ID), ProcessOptions{Work: beadstest.Work(fx.store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(drain behind failed predecessor): %v", err)
 	}
@@ -1970,7 +1967,7 @@ func TestProcessDrainBehindFailedPredecessorAbortsEnclosingScope(t *testing.T) {
 		}
 	}
 
-	result, err := ProcessControl(beadstest.Graph(fx.store), mustGetBead(t, fx.store, fx.drain.ID), ProcessOptions{Work: beadstest.Work(fx.store), FormulaSearchPaths: []string{dir}})
+	result, err := processNativeControl(fx.store, mustGetBead(t, fx.store, fx.drain.ID), ProcessOptions{Work: beadstest.Work(fx.store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(scoped drain behind failed predecessor): %v", err)
 	}
@@ -1998,7 +1995,7 @@ func TestProcessDrainExpandsWhenBlockingPredecessorSucceeded(t *testing.T) {
 			writeDrainItemFormula(t, dir)
 			fx := seedDrainBehindPredecessor(t, metadata)
 
-			result, err := ProcessControl(beadstest.Graph(fx.store), mustGetBead(t, fx.store, fx.drain.ID), ProcessOptions{Work: beadstest.Work(fx.store), FormulaSearchPaths: []string{dir}})
+			result, err := processNativeControl(fx.store, mustGetBead(t, fx.store, fx.drain.ID), ProcessOptions{Work: beadstest.Work(fx.store), FormulaSearchPaths: []string{dir}})
 			if err != nil {
 				t.Fatalf("ProcessControl(drain behind passed predecessor): %v", err)
 			}
@@ -2098,7 +2095,7 @@ func TestDrainBehindFailedPredecessorFinalizesRunFailed(t *testing.T) {
 			// control dispatcher runs them.
 			waitedOn := validate.ID
 			for _, drain := range drains {
-				result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), opts)
+				result, err := processNativeControl(store, mustGetBead(t, store, drain.ID), opts)
 				if err != nil {
 					t.Fatalf("ProcessControl(drain %s): %v", drain.Title, err)
 				}
@@ -2133,7 +2130,7 @@ func TestDrainBehindFailedPredecessorFinalizesRunFailed(t *testing.T) {
 				}
 			}
 
-			result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, finalizer.ID), opts)
+			result, err := processNativeControl(store, mustGetBead(t, store, finalizer.ID), opts)
 			if err != nil {
 				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 			}
@@ -2399,6 +2396,10 @@ func TestProcessDrainRefusesAWorkLegTheTailDisagreesWith(t *testing.T) {
 			work, graph, drain, _ := seedSplitClassDrainWorkflow(t, false)
 			opts := tc.opts(work)
 			opts.FormulaSearchPaths = []string{dir}
+			// The seeded root carries gc.input_convoy_id, so execution admission
+			// runs before the work-leg guard. Name the convoy's stores here;
+			// the cases below still withhold or mismatch opts.Work.
+			opts.InputStores = nativeFixtureInputs(graph, work)
 
 			_, err := ProcessControl(beadstest.Graph(graph), drain, opts)
 			if !errors.Is(err, tc.want) {
@@ -2531,7 +2532,7 @@ func TestProcessDrainNeverPassesAConvoyItCouldNotRead(t *testing.T) {
 			writeDrainItemFormula(t, dir)
 			work, graph, drain, memberIDs := seedSplitClassDrainWorkflow(t, tc.carryConvoyCopy)
 
-			result, _ := ProcessControl(beadstest.Graph(graph), drain, ProcessOptions{
+			result, _ := processNativeControl(graph, drain, ProcessOptions{
 				Work:               beadstest.Work(work),
 				FormulaSearchPaths: []string{dir},
 				MemberTail:         true,
@@ -2584,7 +2585,7 @@ func TestProcessDrainSplitCityExpandsAndCompletes(t *testing.T) {
 			writeDrainItemFormula(t, dir)
 			work, graph, drain, memberIDs := seedSplitClassDrainWorkflow(t, tc.carryConvoyCopy)
 
-			result, err := ProcessControl(beadstest.Graph(graph), drain, ProcessOptions{
+			result, err := processNativeControl(graph, drain, ProcessOptions{
 				Work:               beadstest.Work(work),
 				FormulaSearchPaths: []string{dir},
 				MemberTail:         true,
@@ -2775,7 +2776,7 @@ func TestProcessDrainSplitCityResumeCompletesAfterAMemberVanishes(t *testing.T) 
 	work, graph, drain, memberIDs := seedSplitClassDrainWorkflow(t, false)
 	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
 
-	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil {
+	if _, err := processNativeControl(graph, drain, opts); err != nil {
 		t.Fatalf("ProcessControl(first pass): %v", err)
 	}
 	expanded := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
@@ -2788,7 +2789,16 @@ func TestProcessDrainSplitCityResumeCompletesAfterAMemberVanishes(t *testing.T) 
 		t.Fatalf("Delete(%s): %v", memberIDs[0], err)
 	}
 
-	result, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), opts)
+	if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), opts); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("dangling input relation: %v", err)
+	}
+	parentID := mustGetBead(t, graph, drain.Metadata["gc.root_bead_id"]).Metadata["gc.input_convoy_id"]
+	if err := work.DepRemove(parentID, memberIDs[0]); err != nil {
+		t.Fatal(err)
+	}
+	// The unit also has a dangling edge, but expansion reads the parent scope.
+
+	result, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), opts)
 	if err != nil {
 		t.Fatalf("ProcessControl(resume after a member vanished): %v; a non-transient control error is quarantined by the caller, and the drain never expands its remaining rows", err)
 	}
@@ -2877,7 +2887,14 @@ func TestProcessDrainSplitCityUnitConvoyForAVanishedMember(t *testing.T) {
 				t.Fatalf("persist manifest: %v", err)
 			}
 
-			if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), ProcessOptions{
+			if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}, Work: beadstest.Work(work), MemberTail: true}); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("dangling input relation: %v", err)
+			}
+			if err := work.DepRemove(parentConvoyID, missingID); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), ProcessOptions{
 				Work:               beadstest.Work(work),
 				FormulaSearchPaths: []string{dir},
 				MemberTail:         true,
@@ -3053,7 +3070,7 @@ func TestProcessDrainSplitCityDoesNotWriteACrossStoreBlockerEdge(t *testing.T) {
 				}
 				mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
 
-				result, err := ProcessControl(beadstest.Graph(graph), drain, ProcessOptions{
+				result, err := processNativeControl(graph, drain, ProcessOptions{
 					Work:               beadstest.Work(work),
 					FormulaSearchPaths: []string{dir},
 					MemberTail:         true,
@@ -3115,7 +3132,7 @@ func TestProcessDrainSplitCityDoesNotWriteACrossStoreBlockerEdge(t *testing.T) {
 					t.Fatalf("release with the blocker open = %+v, %v (row 0 runnable=%v); want the gate kept", report, err, runnable(0))
 				}
 				// A second pass over the drain mints no second gate.
-				if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}); err != nil && !errors.Is(err, ErrControlPending) {
+				if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}); err != nil && !errors.Is(err, ErrControlPending) {
 					t.Fatalf("ProcessControl(second pass): %v", err)
 				}
 				if again := crossStoreGatesIn(t, graph); len(again) != 1 {
@@ -3496,7 +3513,7 @@ func TestProcessDrainGatesAnExternalRefOnTheRealBead(t *testing.T) {
 	}
 	mustDepAdd(t, work, memberIDs[0], "external:"+blocker.ID, "blocks")
 	mustDepAdd(t, work, memberIDs[1], "external:rig:some-capability", "blocks")
-	if _, err := ProcessControl(beadstest.Graph(graph), drain, ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(graph, drain, ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl: %v", err)
 	}
 	gates := crossStoreGatesIn(t, graph)
@@ -3537,7 +3554,7 @@ func TestProcessDrainHoldsItsItemAgainWhenAReleasedBlockerReopens(t *testing.T) 
 	}
 	mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
 	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
-	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}
 	manifest := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
@@ -3573,7 +3590,7 @@ func TestProcessDrainHoldsItsItemAgainWhenAReleasedBlockerReopens(t *testing.T) 
 	if err := work.Reopen(blocker.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}
 	if runnable() {
@@ -3610,8 +3627,8 @@ func TestProcessDrainDoesNotFlapAClosedCrossRigBlocker(t *testing.T) {
 				return store
 			})
 			mustDepAdd(t, work, memberIDs[0], target, "blocks")
-			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
-			if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true, InputStores: nativeFixtureInputs(graph, work, rig)}
+			if _, err := processNativeControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 				t.Fatal(err)
 			}
 			manifest := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
@@ -3645,7 +3662,7 @@ func TestProcessDrainDoesNotFlapAClosedCrossRigBlocker(t *testing.T) {
 				if !runnable() {
 					t.Fatalf("tick %d: the item is held after the release pass, though rg-77 is closed", tick)
 				}
-				if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
+				if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
 					t.Fatal(err)
 				}
 				if !runnable() {
@@ -3712,7 +3729,7 @@ func TestProcessDrainHonorsAnOperatorCloseWithAReason(t *testing.T) {
 			}
 			mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
 			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
-			if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+			if _, err := processNativeControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 				t.Fatal(err)
 			}
 			gates := crossStoreGatesIn(t, graph)
@@ -3731,7 +3748,7 @@ func TestProcessDrainHonorsAnOperatorCloseWithAReason(t *testing.T) {
 				t.Fatal(err)
 			}
 			for tick := 0; tick < 2; tick++ {
-				if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
+				if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
 					t.Fatal(err)
 				}
 				if _, err := ReleaseCrossStoreGates(beadstest.Graph(graph), storesResolver(work)); err != nil {
@@ -3762,8 +3779,8 @@ func TestProcessDrainReHoldsAReopenedControlsItemBehindARetiredGate(t *testing.T
 	}
 	graph, drain, memberIDs, dir := splitSQLiteDrain(t, work)
 	mustDepAdd(t, work, memberIDs[0], "rg-77", "blocks")
-	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
-	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true, InputStores: nativeFixtureInputs(graph, work, rig)}
+	if _, err := processNativeControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}
 	if drainRowRunnable(t, graph, drain.ID) {
@@ -3779,7 +3796,7 @@ func TestProcessDrainReHoldsAReopenedControlsItemBehindARetiredGate(t *testing.T
 		t.Fatal(err)
 	}
 	for tick := 0; tick < 2; tick++ {
-		if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
+		if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
 			t.Fatal(err)
 		}
 		if _, err := ReleaseCrossStoreGates(beadstest.Graph(graph), storesResolver(work, rig)); err != nil {
@@ -3819,7 +3836,7 @@ func TestProcessDrainGatesABlockerClosedBlocked(t *testing.T) {
 			}
 			mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
 			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
-			if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+			if _, err := processNativeControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 				t.Fatal(err)
 			}
 			assertNoUnresolvableBlockingDeps(t, graph)
@@ -3841,7 +3858,7 @@ func TestProcessDrainGatesABlockerClosedBlocked(t *testing.T) {
 				if err != nil || len(report.Released) != 0 {
 					t.Fatalf("pass %d: release = %+v, %v; want the gate kept: a blocker closed blocked does not release", pass, report, err)
 				}
-				if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
+				if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
 					t.Fatal(err)
 				}
 			}
@@ -3866,7 +3883,7 @@ func TestProcessDrainReHoldsItsItemWhenAReleasedBlockerClosesBlocked(t *testing.
 	}
 	mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
 	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
-	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}
 	if err := work.Close(blocker.ID); err != nil {
@@ -3881,7 +3898,7 @@ func TestProcessDrainReHoldsItsItemWhenAReleasedBlockerClosesBlocked(t *testing.
 	if _, err := work.CloseAll([]string{blocker.ID}, map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := processNativeControl(graph, mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}
 	if drainRowRunnable(t, graph, drain.ID) {
@@ -3956,7 +3973,7 @@ func TestProcessDrainItemDerivesConvoyDefaultFromItsUnitConvoy(t *testing.T) {
 				}
 			}
 
-			if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+			if _, err := processNativeControl(store, drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 				t.Fatalf("ProcessControl(drain expand): %v", err)
 			}
 			manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
@@ -4055,7 +4072,7 @@ func TestProcessDrainItemRootsInheritRunInitiator(t *testing.T) {
 				}
 			}
 
-			if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+			if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 				t.Fatalf("ProcessControl(drain expand): %v", err)
 			}
 			created := assertDrainItemRootsInitiator(t, store, drain.ID, "kid-alice")
@@ -4078,7 +4095,7 @@ func TestProcessDrainItemRootsDoNotInventInitiator(t *testing.T) {
 		t.Fatalf("SetMetadata(control initiator): %v", err)
 	}
 
-	if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := processNativeControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(drain expand): %v", err)
 	}
 	if created := assertDrainItemRootsInitiator(t, store, drain.ID, ""); created == 0 {

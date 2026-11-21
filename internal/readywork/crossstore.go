@@ -688,8 +688,9 @@ func blockerStatuses(ctx context.Context, cs *crossStore, legs []Leg, own int, t
 // cached snapshot of each store) so reads each of them once, not once per
 // snapshot. Build one for each pass.
 type LegGate struct {
-	cs *crossStore
-	q  beads.ReadyQuery
+	cs     *crossStore
+	inputs *inputAdmissionGate
+	q      beads.ReadyQuery
 
 	mu       sync.Mutex
 	listings map[int]*legListing
@@ -701,24 +702,25 @@ type legListing struct {
 	res  legResult
 }
 
-// NewLegGate returns the gate over legs, whose stranded rows are listed as
-// Ready would select them for q, or nil when legs are not a split city's.
+// NewLegGate returns the input-admission gate over legs. On a split city it
+// also lists stranded rows as Ready would select them for q and judges their
+// cross-store blockers.
 func NewLegGate(legs []Leg, q beads.ReadyQuery) *LegGate {
 	cs := newCrossStore(legs)
-	if cs == nil {
-		return nil
-	}
-	return &LegGate{cs: cs, q: q, listings: make(map[int]*legListing)}
+	return &LegGate{cs: cs, inputs: &inputAdmissionGate{legs: legs}, q: q, listings: make(map[int]*legListing)}
 }
 
 // Gate gates rows, which legs[own] served from its own Ready. An own outside
 // the legs returns rows as they are.
 func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads.Bead, error) {
-	if g == nil || own < 0 || own >= len(g.cs.legs) {
+	if g == nil || own < 0 || own >= len(g.inputs.legs) {
 		return rows, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if g.cs == nil {
+		return g.inputs.filter(ctx, own, rows)
 	}
 	owners := make(map[string]int, len(rows))
 	items := make([]beads.Bead, 0, len(rows))
@@ -734,7 +736,11 @@ func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads
 		return nil, fmt.Errorf("%s store: %w", g.cs.legs[own].Label, listed.err)
 	}
 	items = g.cs.mergeStranded(own, listed.rows, items, owners)
-	return g.cs.gate(ctx, owners, items, 0)
+	items, err := g.cs.gate(ctx, owners, items, 0)
+	if err != nil {
+		return nil, err
+	}
+	return g.inputs.filter(ctx, own, items)
 }
 
 // listing reads legs[own]'s absent-blocker listing, once for the gate's life.
