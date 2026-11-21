@@ -136,7 +136,7 @@ func TestDoRegisterWithNameOverrideStoresAliasInRegistryWithoutMutatingCityToml(
 
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "my-city")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"workspace-name\"\n"), 0o644); err != nil {
@@ -144,6 +144,10 @@ func TestDoRegisterWithNameOverrideStoresAliasInRegistryWithoutMutatingCityToml(
 	}
 	packToml := "[pack]\nname = \"pack-name\"\nschema = 2\n"
 	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	siteToml := "workspace_name = \"workspace-name\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "site.toml"), []byte(siteToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GC_HOME", dir)
@@ -183,6 +187,13 @@ func TestDoRegisterWithNameOverrideStoresAliasInRegistryWithoutMutatingCityToml(
 	}
 	if string(gotPackToml) != packToml {
 		t.Fatalf("pack.toml changed during register --name:\n%s", string(gotPackToml))
+	}
+	gotSiteToml, err := os.ReadFile(filepath.Join(cityPath, ".gc", "site.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotSiteToml) != siteToml {
+		t.Fatalf(".gc/site.toml mutated during register --name (gascity#8959):\n--- want\n%s\n--- got\n%s", siteToml, string(gotSiteToml))
 	}
 }
 

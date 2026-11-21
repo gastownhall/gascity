@@ -2364,12 +2364,15 @@ func startOneCity(
 	}
 	emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
 
-	// Use registered name as authoritative identity. city.toml may keep a
-	// different workspace.name because registration aliases are machine-local.
+	// The registered name is the runtime identity. Registration aliases are
+	// machine-local and are never written into config, so the config may
+	// declare a different name; reloads stay locked to that config-declared
+	// name, captured here before the registered name is applied.
 	cityName := name // from entry.EffectiveName()
-	if liveName := cfg.Workspace.Name; liveName != "" && liveName != cityName {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; city.toml workspace.name is %q\n", //nolint:errcheck
-			cityName, liveName)
+	configName := lockedConfigName(cfg, path)
+	if configName != cityName {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; config name is %q\n", //nolint:errcheck
+			cityName, configName)
 	}
 	applyRuntimeCityIdentity(cfg, cityName)
 
@@ -2533,6 +2536,7 @@ func startOneCity(
 		cityRuntime, runtimeErr = newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 			CityPath:                path,
 			CityName:                cityName,
+			ConfigName:              configName,
 			TomlPath:                tomlPath,
 			WatchTargets:            watchTargets,
 			ConfigRev:               configRev,
