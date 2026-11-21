@@ -1754,6 +1754,52 @@ test_routed_revoked_bead_blocks_under_zsh() {
     _routed_ownership_case "live-claim-allows-under-zsh" "in_progress" "agent-x" "tmpl-x" '[]' allow zsh
 }
 
+# _routed_pinned_case <label> <pin-assignments...>: the caller's BEADS_DIR is
+# its own store and each NAME=VALUE pin (a VALUE of "@current" means that
+# store) is exported too; mc-k2p9x is closed in the mc-rig store only. A pin
+# leaking into a routed read would answer from the caller's store, where
+# mc-k2p9x is absent, and let the push through.
+_routed_pinned_case() {
+    local label="$1"
+    shift
+    local root repo fbd out rc current routed_reads want_env assignment
+    root="$(new_city_with_branch "builder/mc-k2p9x-fix")"
+    repo="$root/gascity"
+    current="$repo/.beads"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}'
+    mkdir -p "$current/fake/show"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    store_put "$root/mc-rig/.beads" "mc-k2p9x" "closed" "agent-x" "tmpl-x"
+    local -a pins=()
+    for assignment in "$@"; do
+        pins+=("${assignment/@current/$current}")
+    done
+    out="$(export BEADS_DIR="$current" "${pins[@]}"; run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    routed_reads="$(fake_calls "$fbd" | grep -F -- 'mc-k2p9x' || true)"
+    want_env="BEADS_DIR=$repo/../mc-rig/.beads BEADS_DB=<unset> BD_DB=<unset> BEADS_DOLT_SERVER_DATABASE=<unset> BEADS_DOLT_DATABASE=<unset> BEADS_DOLT_DATA_DIR=<unset> "
+    if [[ $rc -eq 0 ]] || ! grep -q "status is 'closed'" <<<"$out"; then
+        record_fail "routed/$label" "expected the closed routed bead to block, got rc=$rc, output: $out; calls: $(fake_calls "$fbd")"
+    elif [[ "$(grep -c . <<<"$routed_reads")" -lt 2 ]] || grep -vqF "$want_env" <<<"$routed_reads"; then
+        record_fail "routed/$label" "expected every read of mc-k2p9x to carry only BEADS_DIR=<mc-rig store>, calls: $(fake_calls "$fbd")"
+    elif ! fake_calls "$fbd" | grep -F -- '--assignee=' | grep -qF "${pins[0]} "; then
+        record_fail "routed/$label" "expected the caller's own-store reads to keep its environment (${pins[0]}), calls: $(fake_calls "$fbd")"
+    else
+        record_pass "routed/$label (rc=$rc, routed reads drop every database pin)"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# AC-2: a database pin in the caller's environment (BEADS_DB, BD_DB,
+# BEADS_DOLT_SERVER_DATABASE, BEADS_DOLT_DATABASE, BEADS_DOLT_DATA_DIR) never
+# reaches a read of a routed store; the caller's own-store reads keep it.
+test_routed_reads_drop_database_pins() {
+    _routed_pinned_case "server-database-pin-dropped" "BEADS_DOLT_SERVER_DATABASE=@current"
+    _routed_pinned_case "bd-db-pin-dropped" "BD_DB=@current"
+    _routed_pinned_case "all-pins-dropped" "BEADS_DB=@current" "BD_DB=@current" \
+        "BEADS_DOLT_SERVER_DATABASE=@current" "BEADS_DOLT_DATABASE=current-db" "BEADS_DOLT_DATA_DIR=@current"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1816,6 +1862,7 @@ run_all() {
     test_rebase_lib_calls_guard_before_force_with_lease
     test_routed_revoked_bead_blocks
     test_routed_revoked_bead_blocks_under_zsh
+    test_routed_reads_drop_database_pins
 
     echo
     echo "pass=$pass fail=$fail"
