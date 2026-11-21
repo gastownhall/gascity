@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -68,14 +69,14 @@ assignee = "wf/refinery"
 	restoreFlag(t, &rigFlag)
 	restoreFlag(t, &cityFlag)
 	rigFlag = "wf"
-	var opened []*closeStoreSpy
+	var opened []*backedCloseCounter
 	prevOpen := slingOpenCityStore
 	slingOpenCityStore = func(path string) (beads.Store, error) {
 		store, err := prevOpen(path)
 		if err != nil {
 			return nil, err
 		}
-		spy := &closeStoreSpy{Store: store}
+		spy := &backedCloseCounter{Store: store}
 		opened = append(opened, spy)
 		return spy, nil
 	}
@@ -98,13 +99,36 @@ assignee = "wf/refinery"
 	if err != nil {
 		t.Fatalf("open city store: %v", err)
 	}
-	if _, err := rig.Get(res.RootID); err != nil {
-		t.Fatalf("cooked root %s is not in the rig store: %v", res.RootID, err)
+	// Read each store through its class handles: on this unsplit city they
+	// are the store itself, and under the split-strict gate the class view of
+	// it, where the gate places graph and session rows.
+	rigStores := cliStores(cityDir, rig)
+	if _, err := rigStores.Graph().Get(res.RootID); err != nil {
+		t.Fatalf("cooked root %s is not in the rig scope's graph store: %v", res.RootID, err)
 	}
-	if n := countSessionBeads(t, rig); n != 0 {
+	if n := countSessionBeads(t, rigStores.Sessions()); n != 0 {
 		t.Errorf("the rig workflow store holds %d session bead(s); the cook materialized the named session where no session reader reads", n)
 	}
-	if n := countSessionBeads(t, city); n != 1 {
+	if n := countSessionBeads(t, cliStores(cityDir, city).Sessions()); n != 1 {
 		t.Errorf("the city store holds %d session bead(s), want the one named session", n)
 	}
 }
+
+// backedCloseCounter counts the closes of the store it wraps, which it leaves
+// open. Unlike closeStoreSpy it exposes the wrapped store as its Backing, so
+// the split-strict gate unwraps it to the work view the open handed out and
+// hands the cook's sessions handle that view's class side, as it would the
+// store unwrapped, instead of stacking a class view on the work view.
+type backedCloseCounter struct {
+	beads.Store
+	closed atomic.Int32
+}
+
+func (s *backedCloseCounter) Backing() beads.Store { return s.Store }
+
+func (s *backedCloseCounter) CloseStore() error { //nolint:unparam // must satisfy the CloseStore() error store interface closeBeadStoreHandle asserts
+	s.closed.Add(1)
+	return nil
+}
+
+func (s *backedCloseCounter) closeCount() int { return int(s.closed.Load()) }

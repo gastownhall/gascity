@@ -95,18 +95,23 @@ assignee = "myrig/refinery"
 	}
 
 	// Phase B — the controller tick over the split stores: desired state with
-	// the rig store as a census leg, then the named-demand reconcile.
+	// the rig store as a census leg, then the named-demand reconcile. The tick
+	// hands every session reader the city store's sessions handle
+	// (cr.sessionsBeadStore) and its seat work the work store: on this unsplit
+	// city both are the city store, under the split-strict gate its class and
+	// work views.
+	sessionStore := cliStores(cityPath, cityStore).Sessions().Store
 	sp := runtime.NewFake()
 	clk := &clock.Fake{Time: time.Date(2026, 11, 21, 6, 0, 0, 0, time.UTC)}
 	var stdout, stderr bytes.Buffer
-	sessionSnap, err := loadSessionBeadSnapshot(cityStore)
+	sessionSnap, err := loadSessionBeadSnapshot(sessionStore)
 	if err != nil {
 		t.Fatalf("listing session beads: %v", err)
 	}
-	result := buildDesiredStateWithSessionBeadsAt("test-city", cityPath, clk.Now().UTC(), clk.Now().UTC(), cfg, sp, cityStore, rigStores, sessionSnap, nil, &stderr)
-	cfgNames := configuredSessionNames(cfg, "test-city", cityStore)
-	syncSessionBeads(cityPath, cityStore, result.State, sp, cfgNames, cfg, clk, &stderr, true)
-	sessions, err := loadSessionBeads(cityStore)
+	result := buildDesiredStateWithSessionBeadsAt("test-city", cityPath, clk.Now().UTC(), clk.Now().UTC(), cfg, sp, sessionStore, rigStores, sessionSnap, nil, &stderr)
+	cfgNames := configuredSessionNames(cfg, "test-city", sessionStore)
+	syncSessionBeads(cityPath, sessionStore, result.State, sp, cfgNames, cfg, clk, &stderr, true)
+	sessions, err := loadSessionBeads(sessionStore)
 	if err != nil {
 		t.Fatalf("loading session beads: %v", err)
 	}
@@ -118,7 +123,7 @@ assignee = "myrig/refinery"
 	reconcileSnap := newSessionBeadSnapshot(sessions)
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, reconcileSnap.OpenForReconcile(), reconcileSnap, result.State, cfgNames, cfg, sp,
-		cityStore, testSeatWork(cityPath, cfg, cityStore, rigStores), nil, result.AssignedWorkBeads, rigStores, nil, newDrainTracker(), nil, poolDesired,
+		sessionStore, testSeatWork(cityPath, cfg, cityStore, rigStores), nil, result.AssignedWorkBeads, rigStores, nil, newDrainTracker(), nil, poolDesired,
 		result.NamedSessionDemand, result.NamedSessionRoutedDemand, result.StoreQueryPartial, nil, "test-city",
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)),
@@ -127,7 +132,7 @@ assignee = "myrig/refinery"
 	// 1. Visible to session listing: the sessions leg lists exactly the
 	// materialized named session under its runtime name.
 	runtimeName := config.NamedSessionRuntimeName("test-city", cfg.Workspace, "myrig/refinery")
-	listed, err := sessionFrontDoor(cityStore).ListAll(sessionpkg.ListAllOptions{})
+	listed, err := sessionFrontDoor(sessionStore).ListAll(sessionpkg.ListAllOptions{})
 	if err != nil {
 		t.Fatalf("listing sessions: %v", err)
 	}

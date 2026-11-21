@@ -72,9 +72,8 @@ var allowedNonMetadata = map[string]string{
 	"gc.endpoint_origin": "city config YAML key (internal/beads/contract/files.go)",
 	"gc.endpoint_status": "city config YAML key (internal/beads/contract/files.go)",
 
-	// Bead LABEL value (not a Metadata key) and a test-binary name marker.
-	"gc.session": "bead Label value, not a Metadata key (internal/agentutil/pool.go)",
-	"gc.test":    "go test binary name marker (cmd/gc/test_guard.go)",
+	// Test-binary name marker.
+	"gc.test": "go test binary name marker (cmd/gc/test_guard.go)",
 }
 
 // excludedDirs are package directories whose gc.* literals belong to a different

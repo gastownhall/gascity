@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -210,4 +211,67 @@ func TestOrderDispatchReopensPlainlyClosedNamedSessionInTheCitySessionStore(t *t
 		t.Errorf("route after a plain close bound session %q, want the reopened %q", again, first)
 	}
 	f.assertResidency(t, first)
+}
+
+// TestCityRuntimeBindsTheOrderDispatcherToItsSessionsStore is AC-7's wiring:
+// the controller's order dispatcher resolves and materializes the sessions a
+// dispatched step names through the runtime's own sessions store, both the
+// dispatcher the runtime is built with and one a reload installs. Unbound, the
+// dispatcher would open the city store once per dispatch instead, past the
+// runtime's cache, so the session census would not see a new row until a poke.
+func TestCityRuntimeBindsTheOrderDispatcherToItsSessionsStore(t *testing.T) {
+	t.Setenv(fsPressureThresholdEnv, "100")
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	if err := os.MkdirAll(filepath.Join(cityPath, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	digest := "[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"1h\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "orders", "digest.toml"), []byte(digest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	assertBound := func(when string, od orderDispatcher) {
+		t.Helper()
+		mem, ok := od.(*memoryOrderDispatcher)
+		if !ok {
+			t.Fatalf("%s: order dispatcher = %T, want *memoryOrderDispatcher", when, od)
+		}
+		if mem.sessions == nil {
+			t.Fatalf("%s: the order dispatcher has no sessions accessor; graph routing would open the city store per dispatch", when)
+		}
+		if got, want := mem.sessions(), cr.sessionsBeadStore(); !beads.SameStore(got, want) {
+			t.Errorf("%s: the order dispatcher routes sessions through %v, want the runtime's sessions store %v", when, got, want)
+		}
+	}
+	assertBound("as built", cr.od)
+
+	next := buildOrderDispatcherFromOrderSet(cr.storageRoutes, cityPath, cfg, []orders.Order{{Name: "digest", Exec: "true", Trigger: "cooldown", Interval: "1h"}}, events.Discard, io.Discard)
+	built := cr.od
+	cr.replaceOrderDispatcher(next)
+	cancelInflight(built)
+	assertBound("after a reload's rebuild", next)
 }

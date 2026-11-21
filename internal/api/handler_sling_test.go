@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -1428,9 +1429,9 @@ func TestSlingGraphRoutingNamesTheSessionTheApiSessionsHandleRecords(t *testing.
 	state.sessionsBeadStore = sessions
 	if _, err := sessions.Create(beads.Bead{
 		Title:    "session",
-		Type:     "session",
+		Type:     session.BeadType,
 		Status:   "open",
-		Labels:   []string{"gc.session"},
+		Labels:   []string{session.LabelSession, "template:myrig/worker"},
 		Metadata: map[string]string{"template": "myrig/worker", "session_name": "s-api-bound"},
 	}); err != nil {
 		t.Fatalf("creating the worker's session bead: %v", err)

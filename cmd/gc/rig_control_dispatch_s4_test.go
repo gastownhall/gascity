@@ -40,13 +40,18 @@ func TestRigControlDispatchOnARealSplitCity(t *testing.T) {
 		}
 	}
 
+	// Both trees exist before either dispatch, as a pre-S4 tree predates it. A
+	// rig dispatch mints class handles over the rig store, which under the
+	// split-strict gate gives the rig store's file root the gate's class id
+	// prefix, so a rig tree created after it would take ids the binding holds.
 	inBinding := newCanceledTree(t, f.binding)
+	inRig := newCanceledTree(t, rig)
+
 	dispatch(t, rig, inBinding.ID)
 	if got := beadByID(t, f.binding, inBinding.ID); got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeCanceled {
 		t.Errorf("binding-resident control = (%s, %q), want closed and canceled in the binding", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
 	}
 
-	inRig := newCanceledTree(t, rig)
 	dispatch(t, rig, inRig.ID)
 	if got := beadByID(t, rig, inRig.ID); got.Status != "closed" {
 		t.Errorf("pre-S4 rig control status = %q, want closed in the rig store", got.Status)
