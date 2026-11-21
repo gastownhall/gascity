@@ -93,3 +93,181 @@ base = "builtin:codex"
 		t.Fatalf("imported codex provider should count as explicit: %v", result.Details)
 	}
 }
+
+// stubProviderReadiness swaps the readiness probe seam for the duration of
+// the test. Providers absent from items report not_installed.
+func stubProviderReadiness(t *testing.T, items map[string]api.ReadinessItem) {
+	t.Helper()
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("readiness advisory must use fresh probes")
+		}
+		out := make(map[string]api.ReadinessItem, len(providers))
+		for _, provider := range providers {
+			if item, ok := items[provider]; ok {
+				out[provider] = item
+				continue
+			}
+			out[provider] = api.ReadinessItem{Name: provider, DisplayName: provider, Status: api.ProbeStatusNotInstalled}
+		}
+		return out, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+}
+
+func writeDoctorCityToml(t *testing.T, body string) string {
+	t.Helper()
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir
+}
+
+func runProviderReadinessAdvisory(cityDir string) *doctor.CheckResult {
+	return newProviderCatalogReadinessAdvisoryCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
+}
+
+var claudeNeedsAuthItem = api.ReadinessItem{
+	Name:        "claude",
+	DisplayName: "Claude Code",
+	Status:      api.ProbeStatusNeedsAuth,
+	Detail:      "claude is installed but not logged in",
+}
+
+func TestProviderCatalogReadinessAdvisoryNeedsAuthResult(t *testing.T) {
+	claudeHint := providerStatusFixHint("claude", api.ProbeStatusNeedsAuth)
+	if claudeHint == "" {
+		t.Fatal("claude needs_auth fix hint is empty")
+	}
+	cases := []struct {
+		name string
+		toml string
+	}{
+		{
+			name: "workspace provider",
+			toml: "[workspace]\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n",
+		},
+		{
+			name: "agent provider",
+			toml: "[workspace]\nname = \"c\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n\n[[agent]]\nname = \"worker\"\nprovider = \"claude\"\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := writeDoctorCityToml(t, tc.toml)
+			stubProviderReadiness(t, map[string]api.ReadinessItem{"claude": claudeNeedsAuthItem})
+
+			result := runProviderReadinessAdvisory(cityDir)
+			if result.Status != doctor.StatusWarning {
+				t.Fatalf("status = %v (message %q), want warning", result.Status, result.Message)
+			}
+			if result.Severity != doctor.SeverityAdvisory {
+				t.Fatalf("severity = %v, want advisory", result.Severity)
+			}
+			if want := "1 referenced provider(s) need authentication: Claude Code"; result.Message != want {
+				t.Fatalf("message = %q, want %q", result.Message, want)
+			}
+			wantDetail := `Claude Code needs authentication (referenced as provider "claude"): claude is installed but not logged in`
+			if len(result.Details) != 1 || result.Details[0] != wantDetail {
+				t.Fatalf("details = %q, want [%q]", result.Details, wantDetail)
+			}
+			if want := "Claude Code: " + claudeHint; result.FixHint != want {
+				t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+			}
+		})
+	}
+}
+
+func TestProviderCatalogReadinessAdvisoryNeedsAuthUsesDetailWhenNoInitHint(t *testing.T) {
+	if hint := providerStatusFixHint("zcode", api.ProbeStatusNeedsAuth); hint != "" {
+		t.Fatalf("precondition: zcode has an init hint %q; this test covers the detail fallback", hint)
+	}
+	cityDir := writeDoctorCityToml(t, "[workspace]\nprovider = \"zcode\"\n\n[providers.zcode]\nbase = \"builtin:zcode\"\n")
+	stubProviderReadiness(t, map[string]api.ReadinessItem{
+		"zcode": {Name: "zcode", DisplayName: "ZCode", Status: api.ProbeStatusNeedsAuth, Detail: "set ZCODE_API_KEY"},
+	})
+
+	result := runProviderReadinessAdvisory(cityDir)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v (message %q), want warning", result.Status, result.Message)
+	}
+	if want := "ZCode: set ZCODE_API_KEY"; result.FixHint != want {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+	}
+}
+
+func TestProviderCatalogReadinessAdvisoryNeedsAuthOrdersFindingsByProbeOrder(t *testing.T) {
+	cityDir := writeDoctorCityToml(t, `[workspace]
+provider = "codex"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
+
+[[agent]]
+name = "worker"
+provider = "claude"
+`)
+	stubProviderReadiness(t, map[string]api.ReadinessItem{
+		"claude": claudeNeedsAuthItem,
+		"codex":  {Name: "codex", DisplayName: "Codex", Status: api.ProbeStatusNeedsAuth, Detail: "codex is not signed in"},
+	})
+
+	first, second := "Claude Code", "Codex"
+	for _, name := range api.ProviderReadinessNames() {
+		if name == "codex" {
+			first, second = second, first
+			break
+		}
+		if name == "claude" {
+			break
+		}
+	}
+	result := runProviderReadinessAdvisory(cityDir)
+	if want := "2 referenced provider(s) need authentication: " + first + ", " + second; result.Message != want {
+		t.Fatalf("message = %q, want %q", result.Message, want)
+	}
+	if len(result.Details) != 2 || !strings.HasPrefix(result.Details[0], first+" ") || !strings.HasPrefix(result.Details[1], second+" ") {
+		t.Fatalf("details = %q, want %s then %s", result.Details, first, second)
+	}
+	hints := strings.Split(result.FixHint, "\n")
+	if len(hints) != 2 || !strings.HasPrefix(hints[0], first+": ") || !strings.HasPrefix(hints[1], second+": ") {
+		t.Fatalf("fix hint = %q, want one line each for %s then %s", result.FixHint, first, second)
+	}
+}
+
+func TestProviderCatalogReadinessAdvisoryReportsNeedsAuthProvider(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, providers []string, _ bool) (map[string]api.ReadinessItem, error) {
+		out := make(map[string]api.ReadinessItem, len(providers))
+		for _, provider := range providers {
+			out[provider] = api.ReadinessItem{Name: provider, DisplayName: provider, Status: api.ProbeStatusNotInstalled}
+		}
+		out["claude"] = api.ReadinessItem{Name: "claude", DisplayName: "Claude Code", Status: api.ProbeStatusNeedsAuth}
+		return out, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	result := newProviderCatalogReadinessAdvisoryCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status == doctor.StatusOK {
+		t.Fatalf("status = OK (message %q), want a warning: a city provider whose CLI needs auth must be surfaced by gc doctor", result.Message)
+	}
+	report := result.Message + "\n" + strings.Join(result.Details, "\n")
+	if !strings.Contains(report, "Claude Code") && !strings.Contains(report, "claude") {
+		t.Fatalf("doctor result does not name the logged-out provider: message=%q details=%v", result.Message, result.Details)
+	}
+}
