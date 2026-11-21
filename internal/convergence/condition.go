@@ -599,10 +599,9 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			code := exitErr.ExitCode()
+			var note string
 			if workDirChangedSince(env.WorkDir, workDirAtStart) {
-				var cut bool
-				errStr, cut = appendGateNote(errStr, workDirChangedNote(env.WorkDir))
-				truncated = truncated || cut
+				note = workDirChangedNote(env.WorkDir)
 			}
 			return GateResult{
 				Outcome:   GateFail,
@@ -611,6 +610,7 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 				Stderr:    errStr,
 				Duration:  duration,
 				Truncated: truncated,
+				Note:      note,
 			}
 		}
 		// Non-exit error (e.g., script not found, permission denied).
@@ -649,30 +649,8 @@ func workDirChangedSince(dir string, start os.FileInfo) bool {
 	return !os.SameFile(start, now)
 }
 
-// workDirChangedNote is the line appended to a failed check's stderr when its
-// working directory was removed or replaced while the check ran.
+// workDirChangedNote is the GateResult.Note of a failed check whose working
+// directory was removed or replaced while the check ran.
 func workDirChangedNote(dir string) string {
-	return "gc: check working directory " + dir + " was removed or replaced while the check ran\n"
-}
-
-// appendGateNote appends note to a check's captured stderr on its own line,
-// keeping the result within MaxOutputBytes. The script's stderr is cut to
-// make room for the note, and the note itself is cut if it alone exceeds the
-// cap. It reports whether any of the script's stderr was dropped.
-func appendGateNote(stderr, note string) (string, bool) {
-	if len(note) >= MaxOutputBytes {
-		cutNote, _ := TruncateOutput([]byte(note), MaxOutputBytes)
-		return cutNote, stderr != ""
-	}
-	// One byte is reserved for the newline that separates the note from a
-	// stderr that does not end in one.
-	room := MaxOutputBytes - len(note) - 1
-	cut := false
-	if len(stderr) > room {
-		stderr, cut = TruncateOutput([]byte(stderr), room)
-	}
-	if stderr != "" && !strings.HasSuffix(stderr, "\n") {
-		stderr += "\n"
-	}
-	return stderr + note, cut
+	return "gc: check working directory " + dir + " was removed or replaced while the check ran"
 }

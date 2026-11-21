@@ -491,6 +491,79 @@ func TestProcessRalphControlWorkDirRemovedMidRunNotesAttemptLog(t *testing.T) {
 	}
 }
 
+// TestProcessRalphControlWorkDirRemovedMidRunKeepsInfraRetry pins that the
+// work-dir note cannot turn a blind read into a verdict: a check whose stderr
+// ends in an infrastructure marker near the output cap, and whose work dir
+// vanished while it ran, still takes the attempt-free infrastructure re-run.
+func TestProcessRalphControlWorkDirRemovedMidRunKeepsInfraRetry(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	checkPath := ".gc/scripts/checks/verify.sh"
+	writeExecutableScript(t, filepath.Join(cityPath, checkPath),
+		"#!/bin/sh\nhead -c 4000 /dev/zero | tr '\\0' x >&2\necho >&2\necho 'Error 1045: Access denied for user' >&2\nrm -rf \"$GC_WORK_DIR\"\nexit 1\n")
+	store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+	workDir := filepath.Join(cityPath, "worktrees", "attempt-1")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(control.ID, beadmeta.WorkDirMetadataKey, workDir); err != nil {
+		t.Fatalf("set work_dir: %v", err)
+	}
+	beadsBefore := countAllBeads(t, store)
+
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl = (%+v, %v), want ErrControlPending (a blind read re-runs without spending the iteration)", result, err)
+	}
+	assertRalphControlInfraRetryPending(t, store, control.ID, "1", beadsBefore)
+}
+
+// TestProcessRalphCheckWorkDirRemovedMidRunRecordsNote covers the legacy
+// kind=check lane: a failed check whose work dir vanished while it ran is
+// graded as a verdict, its gc.stderr ends with the work-dir note, and
+// gc.truncated reports the script stderr the note displaced even though the
+// capture itself kept all of it.
+func TestProcessRalphCheckWorkDirRemovedMidRunRecordsNote(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "verify.sh",
+		"#!/bin/sh\nhead -c 4000 /dev/zero | tr '\\0' e >&2\nrm -rf \"$GC_WORK_DIR\"\nexit 1\n")
+	store, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 3)
+	if err := store.Close(run1.ID); err != nil {
+		t.Fatalf("close run1: %v", err)
+	}
+	workDir := filepath.Join(cityPath, "worktrees", "attempt-1")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(check1.ID, beadmeta.WorkDirMetadataKey, workDir); err != nil {
+		t.Fatalf("set work_dir: %v", err)
+	}
+
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, check1.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("ProcessControl error = %v, want the failed check graded", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("result = %+v, want processed retry (the failed check is a verdict)", result)
+	}
+	got := mustGetBead(t, store, check1.ID)
+	stderr := got.Metadata[beadmeta.StderrMetadataKey]
+	wantNote := "gc: check working directory " + workDir + " was removed or replaced while the check ran"
+	if !strings.HasSuffix(stderr, "\n"+wantNote+"\n") {
+		t.Errorf("gc.stderr ends %q, want it to end with the note %q on its own line", stderr[max(0, len(stderr)-200):], wantNote)
+	}
+	if !strings.HasPrefix(stderr, "eee") {
+		t.Errorf("gc.stderr starts %q, want the check's own stderr kept ahead of the note", stderr[:min(len(stderr), 20)])
+	}
+	if len(stderr) > convergence.MaxOutputBytes {
+		t.Errorf("len(gc.stderr) = %d, want <= %d", len(stderr), convergence.MaxOutputBytes)
+	}
+	if tr := got.Metadata[beadmeta.TruncatedMetadataKey]; tr != "true" {
+		t.Errorf("gc.truncated = %q, want true (the note displaced part of the check's stderr)", tr)
+	}
+}
+
 // TestProcessRalphCheckUnlaunchableScriptStaysOpen covers the legacy
 // kind=check lane: a missing script holds the check and its logical bead open,
 // spends no infrastructure budget, and clones no next attempt.

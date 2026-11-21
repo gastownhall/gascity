@@ -1,6 +1,7 @@
 package convergence
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -216,5 +217,90 @@ func TestGateManualResult(t *testing.T) {
 	}
 	if r.Truncated {
 		t.Error("Truncated = true, want false")
+	}
+}
+
+func TestGateResultRecordedStderr(t *testing.T) {
+	const note = "n"
+	// room is how much of the script's stderr fits beside note: the cap less
+	// the note, its newline, and a separator newline.
+	room := MaxOutputBytes - len(note) - 2
+	longNote := strings.Repeat("n", MaxOutputBytes)
+	tests := []struct {
+		name    string
+		stderr  string
+		note    string
+		want    string
+		wantCut bool
+	}{
+		{name: "no note keeps stderr", stderr: "x", want: "x"},
+		{name: "no note and no stderr", want: ""},
+		{name: "note alone", note: note, want: "n\n"},
+		{name: "stderr ending in a newline", stderr: "a\n", note: note, want: "a\nn\n"},
+		{name: "stderr without a trailing newline", stderr: "a", note: note, want: "a\nn\n"},
+		{
+			name:   "stderr that fills the room",
+			stderr: strings.Repeat("e", room),
+			note:   note,
+			want:   strings.Repeat("e", room) + "\nn\n",
+		},
+		{
+			name:    "stderr one byte over the room",
+			stderr:  strings.Repeat("e", room+1),
+			note:    note,
+			want:    strings.Repeat("e", room) + "\nn\n",
+			wantCut: true,
+		},
+		{
+			name:    "cut that ends on a newline adds no blank line",
+			stderr:  strings.Repeat("e", room-1) + "\ntail",
+			note:    note,
+			want:    strings.Repeat("e", room-1) + "\nn\n",
+			wantCut: true,
+		},
+		{
+			name:    "cut backs off to a rune boundary",
+			stderr:  strings.Repeat("e", room-1) + "é" + "tail",
+			note:    note,
+			want:    strings.Repeat("e", room-1) + "\nn\n",
+			wantCut: true,
+		},
+		{
+			name:    "note line exactly at the cap",
+			stderr:  "a",
+			note:    strings.Repeat("n", MaxOutputBytes-1),
+			want:    strings.Repeat("n", MaxOutputBytes-1) + "\n",
+			wantCut: true,
+		},
+		{
+			name:    "note over the cap is cut and drops stderr",
+			stderr:  "a",
+			note:    longNote,
+			want:    longNote,
+			wantCut: true,
+		},
+		{
+			name: "note over the cap without stderr",
+			note: longNote,
+			want: longNote,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := GateResult{Outcome: GateFail, Stderr: tt.stderr, Note: tt.note}
+			got, cut := r.RecordedStderr()
+			if got != tt.want {
+				t.Errorf("RecordedStderr() = %q (len %d), want %q (len %d)", truncateForLog(got), len(got), truncateForLog(tt.want), len(tt.want))
+			}
+			if cut != tt.wantCut {
+				t.Errorf("RecordedStderr() cut = %v, want %v", cut, tt.wantCut)
+			}
+			if len(got) > MaxOutputBytes {
+				t.Errorf("len(RecordedStderr()) = %d, want <= %d", len(got), MaxOutputBytes)
+			}
+			if r.Stderr != tt.stderr {
+				t.Errorf("Stderr = %q after RecordedStderr, want it unchanged", truncateForLog(r.Stderr))
+			}
+		})
 	}
 }

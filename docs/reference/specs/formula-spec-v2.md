@@ -894,7 +894,9 @@ while the check runs, as it can be when the step's own bead closes. A check
 must not clear its environment (`env -i`) or `cd` elsewhere to find a city.
 When the working directory is removed or replaced while the check runs and
 the check then exits nonzero, the orchestrator appends a line saying so to
-the recorded stderr. The run is still graded by its exit status.
+the recorded stderr. The line is added to the record only: the run is still
+graded by its exit status, and the stderr fallback above reads the check's
+own stderr without it.
 
 A `check.path` refused on safety grounds is not in this lane: one that escapes
 the trusted roots, climbs out with `../`, or follows a symlink outside the city
