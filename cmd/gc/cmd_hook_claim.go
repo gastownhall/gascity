@@ -248,6 +248,7 @@ func continuationPinAssignee(opts hookClaimOptions) string {
 type hookClaimOps struct {
 	Runner             WorkQueryRunner
 	Claim              hookClaimFunc
+	ClaimExact         hookClaimExactFunc
 	ListContinuation   hookListContinuationFunc
 	AssignContinuation hookAssignContinuationFunc
 	DrainAck           hookDrainAckFunc
@@ -676,6 +677,9 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 func (ops *hookClaimOps) applyDefaults() {
 	if ops.Claim == nil {
 		ops.Claim = hookClaimWithBdStore
+	}
+	if ops.ClaimExact == nil {
+		ops.ClaimExact = hookClaimExactWithBdStore
 	}
 	if ops.ListContinuation == nil {
 		ops.ListContinuation = hookListContinuationWithBdStore
@@ -1184,10 +1188,20 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		claimed, ok, moved, err := hookClaimEligibleTierClaim(ctx, candidate, reclaimedFrom != "", opts, ops, dir)
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// workflow re-check below spends any more store time.
 		landedAt := ops.nowOrWallClock()
+		if moved {
+			// The guarded write committed onto a row that is no longer the
+			// step this hook observed. This session owns the bead, so give it
+			// back before trying any other candidate; a failed release fails
+			// closed rather than leak the claim.
+			if !releaseMovedHookExactClaim(claimed, opts, ops, dir, stderr) {
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			continue
+		}
 		if err != nil {
 			if ok {
 				// The atomic mutation committed, but its canonical readback failed.
