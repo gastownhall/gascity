@@ -343,7 +343,7 @@ const (
 	// both join the needs of Check and CI / required, whose allow_skipped is
 	// unchanged. Reviewed delta: two jobs and four needs entries; no new
 	// trigger or permission.
-	expectedCIExecutionHash     = "2c0db5f4a5ba7390f63fccfcee565f6936801bee8f51f2f2ebae8c75688ed5f4"
+	expectedCIExecutionHash     = "6d4dd0e8f812902ef9ae72af9eb029421fdb9ce88baa5b241852937137e1d611"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
