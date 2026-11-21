@@ -309,3 +309,78 @@ func TestArchiveKeepsRetentionSweepReason(t *testing.T) {
 		t.Errorf("close_reason after archiving a swept message = %q, want %q", got, RetentionSweepCloseReason)
 	}
 }
+
+// stampRefusingStore refuses every metadata write once refuse is set and
+// counts Close calls.
+type stampRefusingStore struct {
+	*beads.MemStore
+	refuse bool
+	closes int
+}
+
+var errStampRefused = errors.New("stamp refused")
+
+func (s *stampRefusingStore) Update(id string, opts beads.UpdateOpts) error {
+	if s.refuse {
+		return errStampRefused
+	}
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *stampRefusingStore) SetMetadata(id, key, value string) error {
+	if s.refuse {
+		return errStampRefused
+	}
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s *stampRefusingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if s.refuse {
+		return errStampRefused
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (s *stampRefusingStore) Close(id string) error {
+	s.closes++
+	return s.MemStore.Close(id)
+}
+
+// TestArchivePreCloseWriteFailureDoesNotClose covers AC-5: when the write that
+// stamps the close reason fails, Archive returns that error and never closes
+// the message, whether it was read or unread.
+func TestArchivePreCloseWriteFailureDoesNotClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read bool
+	}{{"unread", false}, {"read", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &stampRefusingStore{MemStore: beads.NewMemStore()}
+			p := newTestProvider(store)
+			m, err := p.Send("sender", "recipient", "archive me", "body")
+			if err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if tc.read {
+				if err := p.MarkRead(m.ID); err != nil {
+					t.Fatalf("MarkRead: %v", err)
+				}
+			}
+			store.refuse = true
+
+			if err := p.Archive(m.ID); !errors.Is(err, errStampRefused) {
+				t.Fatalf("Archive = %v, want the stamp failure reported", err)
+			}
+			if store.closes != 0 {
+				t.Errorf("Close calls = %d, want 0 after the stamp write failed", store.closes)
+			}
+			b, err := store.Get(m.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if b.Status != "open" {
+				t.Errorf("status after a failed stamp write = %q, want open", b.Status)
+			}
+		})
+	}
+}
