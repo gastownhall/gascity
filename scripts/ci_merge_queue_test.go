@@ -250,7 +250,7 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.rbe.steps[splitpaths].env.PR_NUMBER":                                   "", // the compare-API arm is used instead
 	"bazel.yml jobs.rbe.steps[splitpaths].env.BASE_SHA":                                    mergeQueueBaseSHA,
 	"bazel.yml jobs.rbe.steps[splitpaths].env.HEAD_SHA":                                    mergeQueueHeadSHA,
-	"bazel.yml jobs.lane.steps[Split-strict downward ratchet].if":                          "false", // nightly and dispatch only; the lane never runs in a merge group
+	"bazel.yml jobs.lane.steps[Split-strict downward ratchet].if":                          "false", // nightly and dispatch only
 	"bazel.yml jobs.rbe.steps[base].env.BASE_REF":                                          "",      // (step skipped)
 	"bazel.yml jobs.rbe.steps[Pre-warm the OSS worker pool (rbe-west)].env.DEFAULT_BRANCH": "main",
 	"bazel.yml jobs.lane.steps[worker-env].env.DEFAULT_BRANCH":                             "main",

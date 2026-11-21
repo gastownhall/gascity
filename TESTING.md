@@ -461,7 +461,7 @@ does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
 |---|---|---|
 | Merge method | `SQUASH` | The ruleset allows merge and squash; `main` history is squash-shaped |
 | Grouping strategy | `ALLGREEN` | Every group's checks must pass; a red entry is ejected, not merged with the rest |
-| Build concurrency (`max_entries_to_build`) | 4 | About 3x the hourly peak. Each entry runs 4 remote lanes, so going higher mostly adds rbe-west load |
+| Build concurrency (`max_entries_to_build`) | 4 | About 3x the hourly peak. Each entry runs 4 remote lanes, 5 when the entry touches the split-strict paths, so going higher mostly adds rbe-west load |
 | Group size (`max_entries_to_merge`) | 5 | Bursts merge together |
 | `min_entries_to_merge` / wait | 1 / 5 min | Never wait for a batch (the wait is inert at 1) |
 | Status check timeout (`check_response_timeout_minutes`) | 60 | A cold rbe-west scale-up plus a queued Windows job can pass 30 minutes; a timeout ejects the entry and rebuilds everything behind it |

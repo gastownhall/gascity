@@ -270,7 +270,11 @@ jobs:
       # storage change past this stopgap and past the lane cannot also slip
       # past a same-repo PR that touches the same paths later
       # (ga-splitstrict-mergegroup-stopgap). If either list cannot be read the
-      # lane runs.
+      # lane runs. The compare lists files on its first page only, at most 300
+      # for the whole comparison and without saying it cut the list, so a
+      # list that reaches 300 counts as unread: a storage file past the 300th
+      # would go unseen (TestSplitStrictPathsStepJudgesTheChange runs this
+      # step against a stub gh).
       - name: Split-strict paths
         id: splitpaths
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -286,7 +290,8 @@ jobs:
             if [ "$EVENT" = pull_request ]; then
               gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename'
             else
-              gh api --paginate "repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[].filename'
+              gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA" \
+                --jq '.files | if length >= 300 then error("compare lists at most 300 files: the list may be cut short") else .[].filename end'
             fi
           }
           touched=true
@@ -385,17 +390,23 @@ jobs:
           # the lane by role in the queue instead); never every push. Mode
           # remote only, so a fork run still mints at most 4 rbe-fork
           # certificates and a cache/local run does not execute both suites
-          # again on its runner (a merge group is always mode remote, so this
-          # never excludes one).
+          # again on its runner. A merge group takes mode remote whenever
+          # rbe-west is on (vars.RBE_WEST_WORKERS and the executor secret);
+          # otherwise it runs in mode cache and, like a pull request, says
+          # below that the lane did not run.
           if [ "$MODE" = remote ]; then
             case "$EVENT/$SPLIT_STRICT_PATHS" in
               schedule/*|workflow_dispatch/*|pull_request/true|merge_group/true) lanes+=",$splitstrict" ;;
             esac
-          elif [ "$EVENT/$SPLIT_STRICT_PATHS" = pull_request/true ]; then
-            # The PR touches the storage paths but this mode cannot run the
-            # gating lane: say so instead of passing silently.
-            echo "::notice title=split-strict not run::this pull request touches the split-strict storage paths, but mode $MODE does not start the split-strict lane; it gates only same-repo PRs in mode remote"
-            echo "split-strict: not run (mode $MODE); this PR touches the storage paths" >> "$GITHUB_STEP_SUMMARY"
+          else
+            case "$EVENT/$SPLIT_STRICT_PATHS" in
+              pull_request/true|merge_group/true)
+                # The change touches the storage paths but this mode cannot
+                # run the gating lane: say so instead of passing silently.
+                echo "::notice title=split-strict not run::this change touches the split-strict storage paths, but mode $MODE does not start the split-strict lane; it starts only in mode remote"
+                echo "split-strict: not run (mode $MODE); this change touches the storage paths" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+            esac
           fi
           echo "lanes=[$lanes]" >> "$GITHUB_OUTPUT"
 
@@ -1111,7 +1122,7 @@ jobs:
           title="split-strict: the nightly split-strict lane is red on main"
           body="The nightly split-strict lane (//cmd/gc:gc_split_strict_test, //internal/api:api_split_strict_test under GC_TEST_SPLIT_STRICT=1) concluded \`$conclusion\`: $RUN_URL
 
-          Open the run's split-strict job and start at its \"Split-strict verdicts\" and \"Split-strict downward ratchet\" steps. An error titled split-strict ratchet, split-strict tests or split-strict combined line caps, or a downward-ratchet FAIL, names the cause: a NEW ratchet key (a read or write of one class through another class's store), a NEW FAILING test, a hung shard, a baseline row no run reached, or a known failure that now passes or no longer runs. If the verdicts step reports no report or no logs, or never ran, it is a build, setup, worker-env preflight or timeout failure. Fix or regenerate with scripts/split-strict-baseline (TESTING.md, split-strict). Until the verdicts step is green, every pull request that runs the lane fails its required check on it, whatever it changed; a downward-ratchet failure alone affects only the nightly."
+          Open the run's split-strict job and start at its \"Split-strict verdicts\" and \"Split-strict downward ratchet\" steps. An error titled split-strict ratchet, split-strict tests or split-strict combined line caps, or a downward-ratchet FAIL, names the cause: a NEW ratchet key (a read or write of one class through another class's store), a NEW FAILING test, a hung shard, a baseline row no run reached, or a known failure that now passes or no longer runs. If the verdicts step reports no report or no logs, or never ran, it is a build, setup, worker-env preflight or timeout failure. Fix or regenerate with scripts/split-strict-baseline (TESTING.md, split-strict). Until the verdicts step is green, every pull request and merge-queue entry that runs the lane fails its required check on it, whatever it changed (a queue entry is ejected); a downward-ratchet failure alone affects only the nightly."
           gh label create split-strict-nightly -R "$GITHUB_REPOSITORY" --color B60205 \
             --description "The nightly split-strict lane is red on main" 2>/dev/null || true
           n=$(gh issue list -R "$GITHUB_REPOSITORY" --label split-strict-nightly --state open --json number --jq '.[0].number // empty')
