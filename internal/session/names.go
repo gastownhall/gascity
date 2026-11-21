@@ -191,13 +191,24 @@ func EnsureAliasAvailableWithConfigForOwner(store beads.SessionStore, cfg *confi
 // EnsureSessionNameAvailableWithConfig extends session-name reservation checks
 // with configured named-session runtime names.
 func EnsureSessionNameAvailableWithConfig(store beads.SessionStore, cfg *config.City, name, selfID string) error {
-	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, "")
+	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, "", false)
 }
 
 // EnsureSessionNameAvailableWithConfigForOwner extends session-name
 // reservation checks with an explicit configured named-session owner.
 func EnsureSessionNameAvailableWithConfigForOwner(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string) error {
-	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, selfOwner)
+	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, selfOwner, false)
+}
+
+// EnsurePoolIdentityLeaseAvailableWithConfig reports whether a pool may claim
+// name as its identity lease. It runs exactly the checks of
+// EnsureSessionNameAvailableWithConfigForOwner, except that an open holder with
+// manual origin does not hold the name through the identifiers derived from its
+// template (agent_name, template, common_name), whatever its sleep state: a
+// manual session runs under its own explicitly claimed alias and session_name,
+// and those lanes still hold the name. cfg may be nil.
+func EnsurePoolIdentityLeaseAvailableWithConfig(store beads.SessionStore, cfg *config.City, name, selfOwner string) error {
+	return ensureConfiguredSessionNameAvailable(store, cfg, name, "", selfOwner, true)
 }
 
 func withSessionAliasReservationLock(alias string, fn func() error) error {
@@ -337,10 +348,14 @@ func ensureSessionNameAvailable(store beads.SessionStore, name string) error {
 }
 
 func ensureSessionNameAvailableForSelf(store beads.SessionStore, name, selfID string) error {
-	return ensureSessionNameAvailableForSelfAndOwner(store, name, selfID, "")
+	return ensureSessionNameAvailableForSelfAndOwner(store, name, selfID, "", false)
 }
 
-func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, selfID, selfOwner string) error {
+// ensureSessionNameAvailableForSelfAndOwner is the base name-availability
+// check. manualIdentifiersYieldToPoolLease lifts, for a pool's identity-lease
+// claim, the identifier lane's hold of an open manual-origin holder; every
+// other lane keeps its reservation (see EnsurePoolIdentityLeaseAvailableWithConfig).
+func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, selfID, selfOwner string, manualIdentifiersYieldToPoolLease bool) error {
 	if name == "" {
 		return nil
 	}
@@ -423,6 +438,9 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, s
 			if continuityIneligibleConfiguredOwner(b, selfOwner) {
 				continue
 			}
+			if manualIdentifiersYieldToPoolLease && manualOriginBead(b) {
+				continue
+			}
 			return fmt.Errorf("%w: %q conflicts with existing identifier on %s", ErrSessionNameExists, name, b.ID)
 		}
 	}
@@ -459,6 +477,13 @@ func sessionNameConflictsWithExistingIdentifier(b beads.Bead, name string) bool 
 	return false
 }
 
+// manualOriginBead reports whether b was created as a manual session; it is
+// the bead-level twin of isManualSessionInfo.
+func manualOriginBead(b beads.Bead) bool {
+	return strings.TrimSpace(b.Metadata["session_origin"]) == "manual" ||
+		strings.TrimSpace(b.Metadata["manual_session"]) == "true"
+}
+
 func configuredOwnerCanReusePoolIdentifier(b beads.Bead, name, selfOwner string) bool {
 	name = strings.TrimSpace(name)
 	selfOwner = strings.TrimSpace(selfOwner)
@@ -488,8 +513,8 @@ func configuredNamedSessionOwnerForSessionName(cfg *config.City, b beads.Bead, r
 	return identity
 }
 
-func ensureConfiguredSessionNameAvailable(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string) error {
-	if err := ensureSessionNameAvailableForSelfAndOwner(store, name, selfID, selfOwner); err != nil {
+func ensureConfiguredSessionNameAvailable(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string, manualIdentifiersYieldToPoolLease bool) error {
+	if err := ensureSessionNameAvailableForSelfAndOwner(store, name, selfID, selfOwner, manualIdentifiersYieldToPoolLease); err != nil {
 		// When a closed bead blocks the name and the caller is materializing
 		// a configured named session that owns this name, allow it. This
 		// handles legacy beads that predate the configured_named_session flag
@@ -502,7 +527,7 @@ func ensureConfiguredSessionNameAvailable(store beads.SessionStore, cfg *config.
 		if !isConfiguredNamedSessionRuntimeName(cfg, name, selfOwner) {
 			return err
 		}
-		if !noLiveSessionNameCollisions(store, name, selfID, selfOwner) {
+		if !noLiveSessionNameCollisions(store, name, selfID, selfOwner, manualIdentifiersYieldToPoolLease) {
 			return err
 		}
 		// All holders are closed and the name belongs to a configured named
@@ -552,7 +577,7 @@ func isConfiguredNamedSessionRuntimeName(cfg *config.City, name, owner string) b
 // fields. This mirrors the full collision check in
 // ensureSessionNameAvailableForSelf so the legacy-bypass path cannot
 // suppress rejections from live alias or identifier collisions.
-func noLiveSessionNameCollisions(store beads.SessionStore, name, selfID, selfOwner string) bool {
+func noLiveSessionNameCollisions(store beads.SessionStore, name, selfID, selfOwner string, manualIdentifiersYieldToPoolLease bool) bool {
 	all, err := ExactMetadataSessionCandidates(store, true,
 		map[string]string{"session_name": name},
 		map[string]string{"alias": name},
@@ -586,6 +611,9 @@ func noLiveSessionNameCollisions(store beads.SessionStore, name, selfID, selfOwn
 		// Live identifier collision blocks.
 		if sessionNameConflictsWithExistingIdentifier(b, name) {
 			if configuredOwnerCanReusePoolIdentifier(b, name, selfOwner) {
+				continue
+			}
+			if manualIdentifiersYieldToPoolLease && manualOriginBead(b) {
 				continue
 			}
 			return false

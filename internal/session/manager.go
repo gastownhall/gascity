@@ -1067,7 +1067,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", aliasOwner); err != nil {
 			return err
 		}
-		if err := ensureSessionNameAvailableForSelfAndOwner(m.store, explicitName, "", aliasOwner); err != nil {
+		if err := ensureSessionNameAvailableForSelfAndOwner(m.store, explicitName, "", aliasOwner, false); err != nil {
 			return err
 		}
 
@@ -1391,7 +1391,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", aliasOwner); err != nil {
 			return err
 		}
-		if err := ensureSessionNameAvailableForSelfAndOwner(m.store, explicitName, "", aliasOwner); err != nil {
+		if err := ensureSessionNameAvailableForSelfAndOwner(m.store, explicitName, "", aliasOwner, false); err != nil {
 			return err
 		}
 

@@ -242,7 +242,7 @@ func TestReconcileSessionBeads_RetiredDrainDeadlineSlotUnblocksPoolMinting(t *te
 	if err != nil {
 		t.Fatalf("loadSessionBeadSnapshot(before): %v", err)
 	}
-	if err := ensurePoolSessionNameAvailable(env.store, env.cfg, before, poolSeatName, "worker-1"); err == nil {
+	if err := ensurePoolSessionNameAvailable(env.store, env.cfg, before, poolSeatName, "worker-1", false); err == nil {
 		t.Fatal("precondition broken: the stuck open bead must hold its runtime name")
 	}
 
@@ -252,7 +252,7 @@ func TestReconcileSessionBeads_RetiredDrainDeadlineSlotUnblocksPoolMinting(t *te
 	if err != nil {
 		t.Fatalf("loadSessionBeadSnapshot(after): %v", err)
 	}
-	if err := ensurePoolSessionNameAvailable(env.store, env.cfg, after, poolSeatName, "worker-1"); err != nil {
+	if err := ensurePoolSessionNameAvailable(env.store, env.cfg, after, poolSeatName, "worker-1", false); err != nil {
 		t.Fatalf("pool still cannot mint %q after the deadline retirement: %v", poolSeatName, err)
 	}
 }

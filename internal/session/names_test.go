@@ -1316,7 +1316,7 @@ func TestEnsureSessionNameAvailable_RetiredPoolSlotReleasesConfiguredName(t *tes
 		t.Fatalf("Close(retired pool slot): %v", err)
 	}
 
-	if err := ensureSessionNameAvailableForSelfAndOwner(beadstest.Sessions(store), "loial", "gc-999", ""); err != nil {
+	if err := ensureSessionNameAvailableForSelfAndOwner(beadstest.Sessions(store), "loial", "gc-999", "", false); err != nil {
 		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(retired pool slot holding configured name) = %v, want nil", err)
 	}
 }

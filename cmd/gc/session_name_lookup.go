@@ -641,7 +641,13 @@ func ensurePoolSessionIdentifiersAvailable(
 	identifiers poolSessionIdentifiers,
 ) error {
 	for index, name := range identifiers.availabilityNames {
-		if err := ensurePoolSessionNameAvailable(store, cfg, snapshot, name, identity.AgentName); err != nil {
+		// Index 0 of a beadScoped pool's availability names is the identity
+		// lease and lock identifier, not a runtime name, so the pool-lease
+		// check applies: a manual session's template-derived identifiers do
+		// not hold the lease, while the alias and session_name it explicitly
+		// claimed still do (issue #8945). Every other name keeps the full
+		// check.
+		if err := ensurePoolSessionNameAvailable(store, cfg, snapshot, name, identity.AgentName, identifiers.beadScoped && index == 0); err != nil {
 			if errors.Is(err, sessionpkg.ErrSessionNameExists) {
 				if index == 0 {
 					return fmt.Errorf("%w: template %q identity %q wants %q: %w", errPoolSessionNameUnavailable, template, identity.AgentName, name, err)
@@ -660,11 +666,22 @@ func ensurePoolSessionIdentifiersAvailable(
 // its own runtime name" from "a stranger squatting it", and they reject the
 // pool's own name forever (the config-reservation and identifier-collision
 // lanes both key off it).
-func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapshot *sessionBeadSnapshot, name, selfOwner string) error {
+//
+// identityLease marks name as the identity lease of a beadScoped pool (index 0
+// of its availability names) rather than a runtime name. The store check then
+// swaps to the pool-lease variant, under which a manual session's
+// template-derived identifiers do not hold the name while the alias and
+// session_name it explicitly claimed still do. The live-snapshot session_name
+// leg holds either way.
+func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapshot *sessionBeadSnapshot, name, selfOwner string, identityLease bool) error {
 	if openSessionNameTaken(snapshot, name) {
 		return fmt.Errorf("%w: %q conflicts with live pool snapshot", sessionpkg.ErrSessionNameExists, name)
 	}
-	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, name, "", selfOwner)
+	handle := beads.SessionStore{Store: store}
+	if identityLease {
+		return sessionpkg.EnsurePoolIdentityLeaseAvailableWithConfig(handle, cfg, name, selfOwner)
+	}
+	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(handle, cfg, name, "", selfOwner)
 }
 
 // poolRuntimeSessionName is the identity-derived name for a pool instance with
