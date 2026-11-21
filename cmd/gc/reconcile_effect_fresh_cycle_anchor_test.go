@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -281,6 +282,93 @@ func TestFreshCycleAnchorReadOnlyAfterPreviousGoesOn(t *testing.T) {
 			}
 			if gets != want {
 				t.Fatalf("live anchor Gets = %d, want %d", gets, want)
+			}
+		})
+	}
+}
+
+// withAnchorEntry is v over a copy of its allocation whose own entry is
+// edited by set; the pass's allocation is left as it was.
+func withAnchorEntry(v txView, set func(*selectionEntry)) txView {
+	snap := *v.Alloc.Snapshot
+	snap.Entries = make(map[rowKey]*selectionEntry, len(v.Alloc.Snapshot.Entries))
+	for k, e := range v.Alloc.Snapshot.Entries {
+		snap.Entries[k] = e
+	}
+	entry := *snap.Entries[v.It.Key]
+	if entry.AssignedWork != nil {
+		aw := *entry.AssignedWork
+		entry.AssignedWork = &aw
+	}
+	set(&entry)
+	snap.Entries[v.It.Key] = &entry
+	alloc := *v.Alloc
+	alloc.Snapshot = &snap
+	v.Alloc = &alloc
+	return v
+}
+
+// TestFreshCycleAnchorFailsClosed (#9320, AC-7): an anchor whose owner the
+// probe cannot prove refuses the cycle, and never panics: a failed or
+// expired live read, a bead no leg holds, an allocation that names no
+// anchor, or no world or environment to name the session's identities from.
+func TestFreshCycleAnchorFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fails error
+		edit  func(*anchorCycle)
+		view  func(txView) txView
+	}{
+		{name: "the live read fails", fails: fmt.Errorf("store down")},
+		{name: "the live read expired", fails: errProbeExpired},
+		{name: "no leg holds the anchor", edit: func(a *anchorCycle) {
+			if err := a.backing.Delete("gw-new"); err != nil {
+				a.t.Fatal(err)
+			}
+		}},
+		{name: "no allocation", view: func(v txView) txView { v.Alloc = nil; return v }},
+		{name: "no allocation snapshot", view: func(v txView) txView {
+			alloc := *v.Alloc
+			alloc.Snapshot = nil
+			v.Alloc = &alloc
+			return v
+		}},
+		{name: "no allocation entry", view: func(v txView) txView {
+			v = withAnchorEntry(v, func(*selectionEntry) {})
+			delete(v.Alloc.Snapshot.Entries, v.It.Key)
+			return v
+		}},
+		{name: "no assigned work", view: func(v txView) txView {
+			return withAnchorEntry(v, func(e *selectionEntry) { e.AssignedWork = nil })
+		}},
+		{name: "a blank anchor ID", view: func(v txView) txView {
+			return withAnchorEntry(v, func(e *selectionEntry) { e.AssignedWork.BeadID = " \t " })
+		}},
+		{name: "no world", view: func(v txView) txView { v.World = nil; return v }},
+		{name: "no environment", view: func(v txView) txView {
+			w := *v.World
+			w.Env = nil
+			v.World = &w
+			return v
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAnchorCycle(t)
+			gets := 0
+			a.readFrom(anchorLiveCounter{Store: a.backing, id: "gw-new", gets: &gets, fails: tc.fails})
+			if tc.edit != nil {
+				tc.edit(a)
+			}
+			v, reads := a.view()
+			if tc.view != nil {
+				v = tc.view(v)
+			}
+			got := probeAnchorCycle(v, reads)
+			if !got.refused() {
+				t.Fatalf("step %+v, probe err %v; want %s", got.step, got.err, causeFreshCycleDefer)
+			}
+			if tc.fails != nil && !errors.Is(got.err, tc.fails) {
+				t.Fatalf("probe err = %v, want the live read's %v", got.err, tc.fails)
 			}
 		})
 	}
