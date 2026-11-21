@@ -46,7 +46,10 @@ func hookClaimCandidateIsGraphStep(candidate beads.Bead) bool {
 // claim's preconditions, and the claim's effects are the transition to
 // in_progress (plus the assignee when assign is set, i.e. the bead is
 // unassigned). A routing or group key the projection did not carry is left
-// unfenced rather than fenced on an absent value it never saw.
+// unfenced rather than fenced on an absent value it never saw. The same goes
+// for the claim generation: an observed gc.claim_generation is the one the
+// claim must advance, and an unobserved one leaves the claim to advance
+// whatever generation it reads.
 //
 // reclaimed means this invocation just reverted the candidate's stale lease:
 // the observation predates that revert, so the claim is fenced on the open,
@@ -86,7 +89,11 @@ func hookClaimExactPlan(candidate beads.Bead, actor string, assign, reclaimed bo
 	if identity := hookClaimExactIdentity(candidate, env, now); len(identity) > 0 {
 		onSuccess.Metadata = identity
 	}
-	return molecule.ClaimExactRequest{ID: candidate.ID, Want: want, OnSuccess: onSuccess}
+	req := molecule.ClaimExactRequest{ID: candidate.ID, Want: want, OnSuccess: onSuccess}
+	if generation, ok := candidate.Metadata[beadmeta.ClaimGenerationMetadataKey]; ok {
+		req.FromGeneration = &generation
+	}
+	return req
 }
 
 // hookClaimExactIdentity is the session back-reference and claim timestamp an
