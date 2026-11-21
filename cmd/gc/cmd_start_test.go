@@ -1364,24 +1364,24 @@ func TestResolveTemplateAddsKimiHookConfigArgWhenHooksInstalled(t *testing.T) {
 		{
 			name:        "tmux without provider option",
 			session:     config.SessionTransportTmux,
-			wantCommand: "kimi --yolo --no-thinking --config-file .kimi/config.toml",
+			wantCommand: "kimi --yolo --config-file .kimi/config.toml --model kimi-code/k3",
 		},
 		{
 			name:           "tmux with provider option",
 			session:        config.SessionTransportTmux,
 			optionDefaults: map[string]string{"model": "kimi-k2-thinking-turbo"},
-			wantCommand:    "kimi --yolo --no-thinking --config-file .kimi/config.toml --model kimi-k2-thinking-turbo",
+			wantCommand:    "kimi --yolo --config-file .kimi/config.toml --model kimi-k2-thinking-turbo",
 		},
 		{
 			name:        "acp without provider option",
 			session:     config.SessionTransportACP,
-			wantCommand: "kimi --yolo --no-thinking --config-file .kimi/config.toml acp",
+			wantCommand: "kimi --yolo --config-file .kimi/config.toml --model kimi-code/k3 acp",
 		},
 		{
 			name:           "acp with provider option",
 			session:        config.SessionTransportACP,
 			optionDefaults: map[string]string{"model": "kimi-k2-thinking-turbo"},
-			wantCommand:    "kimi --yolo --no-thinking --config-file .kimi/config.toml acp --model kimi-k2-thinking-turbo",
+			wantCommand:    "kimi --yolo --config-file .kimi/config.toml --model kimi-k2-thinking-turbo acp",
 		},
 	}
 	for _, tt := range tests {
