@@ -1260,6 +1260,7 @@ go_test(
         "charharness_test.go",
         "chat_autosuspend_test.go",
         "city_arg_resolve_test.go",
+        "city_config_lock_linux_test.go",
         "city_discovery_symlink_test.go",
         "city_layout_test.go",
         "city_registry_test.go",

@@ -33,6 +33,11 @@ func FenceFile(cityPath string) string {
 // The lock is released when the returned func is called, or by the kernel if
 // the process dies; the lock file itself carries no state. The release func
 // is safe to call more than once.
+//
+// Lock ordering: the suspension fence is always taken after the city config
+// edit lock (configedit.LockCity), never before it. Callers that hold both
+// take the config lock first; code holding this fence must not call
+// configedit.LockCity.
 func Fence(cityPath string) (release func(), err error) {
 	path := FenceFile(cityPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
