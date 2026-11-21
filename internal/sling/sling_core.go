@@ -1102,6 +1102,9 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 	// Poke controller.
 	if !opts.SkipPoke && deps.Notify != nil {
 		deps.Notify.PokeController(deps.CityPath)
+		if members.routesControls() {
+			deps.Notify.PokeControlDispatch(deps.CityPath)
+		}
 	}
 
 	// Signal nudge.

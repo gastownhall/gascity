@@ -115,3 +115,9 @@ func (p *expandedRootMemberRoutes) routedMembers() int {
 	}
 	return len(p.controls) + len(p.steps)
 }
+
+// routesControls reports whether the plan gives any control bead an
+// execution route, so the control dispatcher should look again.
+func (p *expandedRootMemberRoutes) routesControls() bool {
+	return p != nil && len(p.controls) > 0
+}

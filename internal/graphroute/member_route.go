@@ -47,15 +47,32 @@ func SlingTargetBinding(a config.Agent, routedTo string, store beads.SessionStor
 // binding when b carries no route of its own, or nil when b needs none. It
 // only fills empty routes: it never rewrites an existing route and never
 // deletes a key, so applying the patch cannot move work between agents.
+//
+// Workflow-topology beads, closed beads, claimed beads and beads bound to a
+// concrete session get no patch. A control bead keeps its control-dispatcher
+// route and gains binding as its execution route, as a --formula launch
+// stamps it (AssignGraphStepRoute). Any other member gets the keys
+// ApplyGraphRouteBinding sets for binding. A formula-declared continuation
+// group on the member is honored; a "drain:" group is the drain router's own
+// transient bookkeeping, not an opt-in, so it never earns session affinity.
 func UnroutedMemberPatch(b beads.Bead, binding GraphRouteBinding) (map[string]string, error) {
 	kind := b.Metadata[beadmeta.KindMetadataKey]
-	if IsWorkflowTopologyKind(kind) {
+	switch {
+	case IsWorkflowTopologyKind(kind),
+		b.Status == "closed",
+		strings.TrimSpace(b.Assignee) != "",
+		strings.TrimSpace(b.Metadata[beadmeta.SessionIDMetadataKey]) != "":
+		return nil, nil
+	case IsControlDispatcherKind(kind):
+		return unroutedControlPatch(b, binding), nil
+	case strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "":
 		return nil, nil
 	}
-	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
-		return nil, nil
+	binding.ContinuationGroup = strings.TrimSpace(b.Metadata[beadmeta.ContinuationGroupMetadataKey])
+	if strings.HasPrefix(binding.ContinuationGroup, "drain:") {
+		binding.ContinuationGroup = ""
 	}
-	step := formula.RecipeStep{ID: b.ID, Assignee: b.Assignee, Metadata: maps.Clone(b.Metadata)}
+	step := formula.RecipeStep{ID: b.ID, Metadata: maps.Clone(b.Metadata)}
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
@@ -72,4 +89,24 @@ func UnroutedMemberPatch(b beads.Bead, binding GraphRouteBinding) (map[string]st
 		return nil, nil
 	}
 	return patch, nil
+}
+
+// unroutedControlPatch fills a control bead's empty execution route with
+// binding. The control keeps the control-dispatcher route it already carries.
+func unroutedControlPatch(b beads.Bead, binding GraphRouteBinding) map[string]string {
+	if strings.TrimSpace(b.Metadata[GraphExecutionRouteMetaKey]) != "" {
+		return nil
+	}
+	route := strings.TrimSpace(binding.QualifiedName)
+	if route == "" {
+		route = strings.TrimSpace(binding.DirectSessionID)
+	}
+	if route == "" {
+		return nil
+	}
+	patch := map[string]string{GraphExecutionRouteMetaKey: route}
+	if rigContext := graphBindingRigContext(binding); rigContext != "" && b.Metadata[GraphExecutionRigContextMetaKey] != rigContext {
+		patch[GraphExecutionRigContextMetaKey] = rigContext
+	}
+	return patch
 }
