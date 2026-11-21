@@ -406,33 +406,42 @@ export function AgentsPage() {
           // Render an empty cell rather than collapsing the column width.
           if (!r.session) return null;
           const pending = pendingByAgent.get(r.name);
+          // Approve/Deny/Read-only render only when the runtime advertises response
+          // options; absent, null and [] all mean nothing is advertised. Gate on
+          // non-empty, never on kind, prompt or a specific verb (R12).
+          const offersResponse = (pending?.pending.options?.length ?? 0) > 0;
           return (
             <div className="flex justify-end gap-2">
               {pending !== undefined && (
                 <>
-                  {readOnly && <ReadOnlyBadge />}
-                  <Button
-                    size="sm"
-                    tone="quiet"
-                    title={readOnly ? READ_ONLY_CONTROL_TITLE : undefined}
-                    disabled={readOnly || responding?.sessionId === pending.sessionId}
-                    onClick={() => void handlePendingResponse(pending, 'approve')}
-                  >
-                    {responding?.sessionId === pending.sessionId && responding.action === 'approve'
-                      ? 'Approving'
-                      : 'Approve'}
-                  </Button>
-                  <Button
-                    size="sm"
-                    tone="quiet"
-                    title={readOnly ? READ_ONLY_CONTROL_TITLE : undefined}
-                    disabled={readOnly || responding?.sessionId === pending.sessionId}
-                    onClick={() => void handlePendingResponse(pending, 'deny')}
-                  >
-                    {responding?.sessionId === pending.sessionId && responding.action === 'deny'
-                      ? 'Denying'
-                      : 'Deny'}
-                  </Button>
+                  {offersResponse && (
+                    <>
+                      {readOnly && <ReadOnlyBadge />}
+                      <Button
+                        size="sm"
+                        tone="quiet"
+                        title={readOnly ? READ_ONLY_CONTROL_TITLE : undefined}
+                        disabled={readOnly || responding?.sessionId === pending.sessionId}
+                        onClick={() => void handlePendingResponse(pending, 'approve')}
+                      >
+                        {responding?.sessionId === pending.sessionId &&
+                        responding.action === 'approve'
+                          ? 'Approving'
+                          : 'Approve'}
+                      </Button>
+                      <Button
+                        size="sm"
+                        tone="quiet"
+                        title={readOnly ? READ_ONLY_CONTROL_TITLE : undefined}
+                        disabled={readOnly || responding?.sessionId === pending.sessionId}
+                        onClick={() => void handlePendingResponse(pending, 'deny')}
+                      >
+                        {responding?.sessionId === pending.sessionId && responding.action === 'deny'
+                          ? 'Denying'
+                          : 'Deny'}
+                      </Button>
+                    </>
+                  )}
                   <CopyAttachButton command={attachCommand(r.name)} />
                 </>
               )}

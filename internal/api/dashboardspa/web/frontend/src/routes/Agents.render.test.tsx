@@ -8,6 +8,7 @@ import { invalidate } from '../api/cache';
 import { NowProvider } from '../contexts/NowContext';
 import { ReadOnlyProvider } from '../contexts/ReadOnlyContext';
 import { resetSupervisorApiForTests } from '../supervisor/client';
+import type { PendingInteraction } from 'gas-city-dashboard-shared/gc-supervisor';
 
 // Regression tests for two bugs that shipped with the ay6 Agents-view rewrite
 // (PR #45, surfaced post-deploy):
@@ -36,6 +37,8 @@ const fetchUrls = () => fetchCalls.map((call) => call.url);
 interface StubFetchOptions {
   agentsPayload?: unknown;
   agentsStatus?: number;
+  pending?: PendingInteraction;
+  respond?: () => Promise<Response>;
 }
 
 // Minimal fetch stub that mimics the surface the AgentsPage hits: dashboard
@@ -111,10 +114,11 @@ function stubFetch(options: StubFetchOptions = {}) {
       if (url === '/v0/city/test-city/session/gc-2568/pending' && method === 'GET') {
         return jsonResponse({
           supported: true,
-          pending: {
+          pending: options.pending ?? {
             kind: 'tool_approval',
             prompt: 'Approve deployment?',
             request_id: 'req-1',
+            options: ['approve', 'deny'],
           },
         });
       }
@@ -126,6 +130,7 @@ function stubFetch(options: StubFetchOptions = {}) {
         return jsonResponse({ items: [], total: 0 });
       }
       if (url === '/v0/city/test-city/session/gc-2568/respond' && method === 'POST') {
+        if (options.respond !== undefined) return options.respond();
         return jsonResponse({ id: 'gc-2568', status: 'accepted' }, { status: 202 });
       }
       if (
@@ -201,6 +206,7 @@ beforeEach(() => {
   invalidate('agents');
   invalidate('sessions');
   invalidate('beads:in-flight');
+  invalidate('agent-pending:');
   stubFetch();
 });
 
@@ -379,32 +385,225 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     });
   });
 
-  it('responds to pending interactions through the generated supervisor respond endpoint', async () => {
+  it.each([
+    { action: 'approve', kind: 'tool_approval', prompt: 'Approve deployment?' },
+    { action: 'deny', kind: 'tool_approval', prompt: 'Approve deployment?' },
+    { action: 'approve', kind: 'question', prompt: 'Choose an environment.' },
+  ] as const)(
+    'responds with $action to an options-bearing $kind through the generated supervisor endpoint',
+    async ({ action, kind, prompt }) => {
+      stubFetch({
+        pending: { request_id: 'req-offered', kind, prompt, options: ['approve', 'deny'] },
+      });
+      render(
+        <MemoryRouter>
+          <NowProvider intervalMs={1_000_000}>
+            <AgentsPage />
+          </NowProvider>
+        </MemoryRouter>,
+      );
+
+      expect(await screen.findByText('needs you')).toBeTruthy();
+
+      fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${action}$`, 'i') }));
+
+      await screen.findByText('responded to mayor');
+
+      expect(fetchCalls).toContainEqual({
+        url: '/v0/city/test-city/session/gc-2568/respond',
+        method: 'POST',
+        gcRequest: 'dashboard',
+        body: {
+          action,
+          request_id: 'req-offered',
+        },
+      });
+      expect(fetchUrls()).not.toContain('/api/city/test-city/sessions/gc-2568/respond');
+      expect(fetchCalls.filter((call) => call.method === 'POST')).toHaveLength(1);
+    },
+  );
+
+  // Real runtimes advertise display labels ("Yes"/"No", "Allow once"/"Reject"),
+  // not the dashboard's approve/deny words, and the dashboard still POSTs the
+  // canonical word. These pass before and after a correct change and FAIL a
+  // per-verb gate (one that looks for "approve"/"deny" inside options).
+  it.each(['approve', 'deny'] as const)(
+    'offers %s and POSTs the canonical word when options are runtime labels',
+    async (action) => {
+      stubFetch({
+        pending: {
+          request_id: 'req-labels',
+          kind: 'approval',
+          prompt: 'Run this command?',
+          options: ['Yes', 'No'],
+        },
+      });
+      render(
+        <MemoryRouter>
+          <NowProvider intervalMs={1_000_000}>
+            <AgentsPage />
+          </NowProvider>
+        </MemoryRouter>,
+      );
+
+      expect(await screen.findByText('needs you')).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^approve$/i })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^deny$/i })).toBeTruthy();
+
+      fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${action}$`, 'i') }));
+
+      await screen.findByText('responded to mayor');
+
+      expect(fetchCalls).toContainEqual({
+        url: '/v0/city/test-city/session/gc-2568/respond',
+        method: 'POST',
+        gcRequest: 'dashboard',
+        body: { action, request_id: 'req-labels' },
+      });
+      expect(fetchCalls.filter((call) => call.method === 'POST')).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    {
+      label: 'empty-options question',
+      pending: {
+        request_id: 'req-empty',
+        kind: 'question',
+        prompt: 'Choose an environment.',
+        options: [],
+      },
+    },
+    {
+      label: 'empty-options approval',
+      pending: {
+        request_id: 'req-empty-approval',
+        kind: 'tool_approval',
+        prompt: 'Approve deployment?',
+        options: [],
+      },
+    },
+    // The typed API returns runtime.PendingInteraction directly. Its
+    // json:"options,omitempty" tag omits an empty slice on the wire.
+    {
+      label: 'absent-options question',
+      pending: { request_id: 'req-absent', kind: 'question', prompt: 'Choose an environment.' },
+    },
+    // The generated supervisor type also accepts null. No response verbs
+    // are advertised in either representation; the runtime is unchanged.
+    {
+      label: 'null-options question',
+      pending: {
+        request_id: 'req-null',
+        kind: 'question',
+        prompt: 'Choose an environment.',
+        options: null,
+      },
+    },
+  ] satisfies { label: string; pending: PendingInteraction }[])(
+    'offers no response controls for $label',
+    async ({ pending }) => {
+      stubFetch({ pending });
+
+      render(
+        <MemoryRouter>
+          <NowProvider intervalMs={1_000_000}>
+            <AgentsPage />
+          </NowProvider>
+        </MemoryRouter>,
+      );
+
+      expect(await screen.findByText('needs you')).toBeTruthy();
+      expect(within(screen.getByRole('table')).getByText(pending.prompt)).toBeTruthy();
+      expect.soft(screen.queryByRole('button', { name: /^approve$/i })).toBeNull();
+      expect.soft(screen.queryByRole('button', { name: /^deny$/i })).toBeNull();
+      expect(fetchCalls.filter((call) => call.method === 'POST')).toHaveLength(0);
+    },
+  );
+
+  it('keeps the prompt, Copy Attach and Peek usable for an empty-options question in read-only mode', async () => {
+    stubFetch({
+      pending: {
+        request_id: 'req-question',
+        kind: 'question',
+        prompt: 'Choose an environment.',
+        options: [],
+      },
+    });
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
     render(
       <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
-          <AgentsPage />
+          <ReadOnlyProvider readOnly={true}>
+            <AgentsPage />
+          </ReadOnlyProvider>
         </NowProvider>
       </MemoryRouter>,
     );
 
     expect(await screen.findByText('needs you')).toBeTruthy();
+    const roster = within(screen.getByRole('table'));
+    expect(roster.getByText('Choose an environment.')).toBeTruthy();
+    expect(screen.getByRole('region', { name: /agents needing you/i })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /deny/i }));
-
-    await screen.findByText('responded to mayor');
-
-    expect(fetchCalls).toContainEqual({
-      url: '/v0/city/test-city/session/gc-2568/respond',
-      method: 'POST',
-      gcRequest: 'dashboard',
-      body: {
-        action: 'deny',
-        request_id: 'req-1',
-      },
-    });
-    expect(fetchUrls()).not.toContain('/api/city/test-city/sessions/gc-2568/respond');
+    const copy = roster.getByRole('button', { name: /copy attach/i }) as HTMLButtonElement;
+    const peek = roster.getByRole('button', { name: /^peek$/i }) as HTMLButtonElement;
+    expect(copy.disabled).toBe(false);
+    expect(peek.disabled).toBe(false);
+    fireEvent.click(copy);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('gc agent attach mayor'));
+    fireEvent.click(peek);
+    expect(await screen.findByText('mayor transcript snapshot')).toBeTruthy();
+    expect(fetchCalls.filter((call) => call.method === 'POST')).toHaveLength(0);
   });
+
+  it.each(['approve', 'deny'] as const)(
+    'disables both offered responses while %s is in flight and restores them on success',
+    async (action) => {
+      let finishResponse!: (response: Response) => void;
+      const response = new Promise<Response>((resolve) => {
+        finishResponse = resolve;
+      });
+      stubFetch({ respond: () => response });
+
+      render(
+        <MemoryRouter>
+          <NowProvider intervalMs={1_000_000}>
+            <AgentsPage />
+          </NowProvider>
+        </MemoryRouter>,
+      );
+
+      const approve = (await screen.findByRole('button', {
+        name: /^approve$/i,
+      })) as HTMLButtonElement;
+      const deny = screen.getByRole('button', { name: /^deny$/i }) as HTMLButtonElement;
+      const selected = action === 'approve' ? approve : deny;
+      fireEvent.click(selected);
+      await waitFor(() =>
+        expect(fetchCalls.filter((call) => call.method === 'POST')).toHaveLength(1),
+      );
+      expect(approve.disabled).toBe(true);
+      expect(selected.textContent).toBe(action === 'approve' ? 'Approving' : 'Denying');
+      expect(deny.disabled).toBe(true);
+      fireEvent.click(approve);
+      fireEvent.click(deny);
+      expect(fetchCalls.filter((call) => call.method === 'POST')).toHaveLength(1);
+
+      finishResponse(jsonResponse({ id: 'gc-2568', status: 'accepted' }, { status: 202 }));
+      await screen.findByText('responded to mayor');
+      await waitFor(() => {
+        expect(approve.disabled).toBe(false);
+        expect(deny.disabled).toBe(false);
+      });
+      expect(selected.textContent).toBe(action === 'approve' ? 'Approve' : 'Deny');
+    },
+  );
 
   it('disables the pending Approve/Deny controls in read-only mode (gascity-dashboard-uzhr)', async () => {
     render(
@@ -429,6 +628,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     expect(screen.getByText('Read-only')).toBeTruthy();
 
     // The disabled control must not reach the supervisor respond mutation.
+    fireEvent.click(approve);
     fireEvent.click(deny);
     expect(fetchUrls()).not.toContain('/v0/city/test-city/session/gc-2568/respond');
   });
