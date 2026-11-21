@@ -1826,6 +1826,53 @@ test_routed_reads_drop_database_pins() {
         "BEADS_DOLT_SERVER_DATABASE=@current" "BEADS_DOLT_DATABASE=current-db" "BEADS_DOLT_DATA_DIR=@current"
 }
 
+# _alias_case <label> <config-line> <dg-real-route:yes|no>: routes.jsonl maps
+# snk to ../gc-demo-game, whose .beads/config.yaml holds <config-line>, so
+# that scope mints dg- beads; HEAD is builder/dg-bnd3x-fix and dg-bnd3x is
+# closed in the store the guard must read. With <dg-real-route>=yes a routes
+# entry also maps dg itself to ../dg-real (listed after snk): that entry, not
+# the config alias, decides, so dg-bnd3x is closed in dg-real and live in
+# gc-demo-game.
+_alias_case() {
+    local label="$1" config_line="$2" dg_route="$3"
+    local root repo fbd out rc want_store
+    root="$(new_city_with_branch "builder/dg-bnd3x-fix")"
+    repo="$root/gascity"
+    mkdir -p "$root/gc-demo-game/.beads"
+    printf '%s\n' "$config_line" > "$root/gc-demo-game/.beads/config.yaml"
+    if [[ "$dg_route" == "yes" ]]; then
+        mkdir -p "$root/dg-real/.beads"
+        write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"snk","path":"../gc-demo-game"}' '{"prefix":"dg","path":"../dg-real"}'
+        store_put "$root/dg-real/.beads" "dg-bnd3x" "closed" "agent-x" "tmpl-x"
+        store_put "$root/gc-demo-game/.beads" "dg-bnd3x" "in_progress" "agent-x" "tmpl-x"
+        want_store="dg-real"
+    else
+        write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"snk","path":"../gc-demo-game"}'
+        store_put "$root/gc-demo-game/.beads" "dg-bnd3x" "closed" "agent-x" "tmpl-x"
+        want_store="gc-demo-game"
+    fi
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "dg-bnd3x status is 'closed'" <<<"$out" \
+        && ! fake_calls "$fbd" | grep -F -- 'dg-bnd3x' | grep -vqF "/../$want_store/.beads "; then
+        record_pass "routed/$label (rc=$rc, dg-bnd3x read from $want_store)"
+    else
+        record_fail "routed/$label" "expected dg-bnd3x closed in $want_store to block, got rc=$rc, output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# AC-3: a routed scope whose .beads/config.yaml names a different issue
+# prefix than its route (snk routes to a scope that mints dg- beads) still
+# has its dg- branches checked against its store, in either config key
+# spelling; a config alias never overrides an explicit routes entry.
+test_routed_config_issue_prefix_alias() {
+    _alias_case "config-alias-issue_prefix-blocks" 'issue_prefix: dg' no
+    _alias_case "config-alias-quoted-issue-prefix-blocks" 'issue-prefix: "dg"' no
+    _alias_case "config-alias-never-overrides-route" 'issue_prefix: dg' yes
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1890,6 +1937,7 @@ run_all() {
     test_routed_revoked_bead_blocks_under_zsh
     test_routes_hygiene_dashed_and_invalid_entries
     test_routed_reads_drop_database_pins
+    test_routed_config_issue_prefix_alias
 
     echo
     echo "pass=$pass fail=$fail"
