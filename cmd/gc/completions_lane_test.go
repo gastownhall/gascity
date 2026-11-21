@@ -589,3 +589,41 @@ func TestCompletionsStartupSweepSkipsConvergedStampedRoots(t *testing.T) {
 		t.Fatalf("cadence sweep issued %d step listing(s) over converged roots, want 0", city.store.stepLists)
 	}
 }
+
+// TestCompletionsStartupSweepRepairsOnlyTheUnstampedGap: the startup sweep's job
+// is the crash-window gap — a closed step whose completion fact never landed.
+// It repairs that root, and only that root, without paying a step listing for
+// each converged neighbor. The emitting pass does not stamp; the next one does.
+func TestCompletionsStartupSweepRepairsOnlyTheUnstampedGap(t *testing.T) {
+	const n = 8
+	city := newCompletionsSweepCity(t)
+	city.addStampedRoots(t, n)
+	gapRoot, gapStep := addClosedGraphRoot(t, city.store, "gcg-gap")
+
+	city.store.stepLists = 0
+	startup := city.sweep(t, backstopReasonStartup)
+	if startup.Emitted != 1 {
+		t.Fatalf("startup sweep = %+v, want exactly one repaired completion fact", startup)
+	}
+	if startup.RootsVisited != 1 || startup.RootsSkippedConverged != n || city.store.stepLists != 1 {
+		t.Fatalf("startup sweep = %+v with %d step listing(s), want only the gap root visited (1 listing) and %d converged roots skipped", startup, city.store.stepLists, n)
+	}
+	completed, err := city.ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: gapStep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 || completed[0].RunID != gapRoot {
+		t.Fatalf("completion facts for the gap step = %#v, want one for root %s", completed, gapRoot)
+	}
+	if got := city.stamp(t, gapRoot); got != "" {
+		t.Fatalf("the pass that emitted the gap root's fact stamped it (%q); a dropped Record would become a permanent loss", got)
+	}
+
+	next := city.sweep(t, backstopReasonCadence)
+	if next.Emitted != 0 || next.RootsVisited != 1 {
+		t.Fatalf("follow-up sweep = %+v, want a verifying visit of the gap root only", next)
+	}
+	if city.stamp(t, gapRoot) == "" {
+		t.Fatal("the follow-up sweep did not stamp the repaired gap root")
+	}
+}
