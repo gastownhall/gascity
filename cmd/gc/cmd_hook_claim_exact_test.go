@@ -730,3 +730,58 @@ func TestHookClaimExactFailsClosedWithoutAnyFence(t *testing.T) {
 		})
 	}
 }
+
+// readbackFailingReader serves the work store's rows, except that every read
+// of failID after the first fails: the exact claim's own Get succeeds and its
+// post-write re-read does not.
+type readbackFailingReader struct {
+	store  *beads.MemStore
+	failID string
+	reads  int
+}
+
+func (r *readbackFailingReader) Get(id string) (beads.Bead, error) {
+	if id == r.failID {
+		r.reads++
+		if r.reads > 1 {
+			return beads.Bead{}, errors.New("bd unreachable")
+		}
+	}
+	return r.store.Get(id)
+}
+
+// TestHookClaimExactCommittedClaimWithFailedReadbackStopsTheEligibleTier: an
+// exact claim whose fenced write landed but whose re-read failed is a bead this
+// session now owns. The eligible tier stops with exit 1 rather than skipping it
+// as an unclaimable candidate: it emits no claim failure, writes no receipt,
+// and does not go on to claim the next candidate.
+func TestHookClaimExactCommittedClaimWithFailedReadbackStopsTheEligibleTier(t *testing.T) {
+	f := newExactClaimFixture(t)
+	f.add(beads.Bead{ID: "work-1", Title: "claimed", Status: "open", Metadata: graphStepMeta("build")},
+		beads.Bead{ID: "work-1", Status: "open", Metadata: graphStepMeta("build")})
+	f.add(beads.Bead{ID: "work-2", Title: "next", Status: "open", Metadata: graphStepMeta("build")},
+		beads.Bead{ID: "work-2", Status: "open", Metadata: graphStepMeta("build")})
+	reader := &readbackFailingReader{store: f.store, failID: "work-1"}
+	ops := f.ops()
+	ops.ClaimExact = func(_ context.Context, _ string, _ []string, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+		return hookClaimExactThroughStore(reader, f.writers(), actor, req)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 1 {
+		t.Fatalf("doHookClaim = %d, want 1 for a committed claim whose readback failed; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "claimed work-1 but loading canonical bead failed") {
+		t.Fatalf("stderr = %q, want the committed claim of work-1 named", stderr.String())
+	}
+	if len(f.failed) != 0 {
+		t.Fatalf("claim failures = %v, want none: the claim committed", f.failed)
+	}
+	if strings.Contains(stdout.String(), `"action":"work"`) {
+		t.Fatalf("hook wrote a receipt after a failed readback: %s", stdout.String())
+	}
+	if got := f.get("work-1"); got.Status != "in_progress" || got.Assignee != "gc__role-mc-sess1" {
+		t.Fatalf("work-1 = status %q assignee %q, want the committed claim kept", got.Status, got.Assignee)
+	}
+	f.assertUntouched("work-2")
+}

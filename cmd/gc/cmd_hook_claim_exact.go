@@ -167,10 +167,15 @@ func hookClaimExactWithBdStore(ctx context.Context, dir string, env []string, ac
 // hookClaimExactThroughStore runs one exact claim and classifies it the way
 // hookClaimThroughStore classifies a --claim: a claim whose readback names
 // another owner is not ours, and an answered precondition or fence mismatch
-// is a lost race rather than an error.
+// is a lost race rather than an error. A claim whose write landed but whose
+// re-read failed (molecule.ErrClaimExactReadback) is claimed plus that error:
+// this session owns the bead, so the tiers stop rather than skip it.
 func hookClaimExactThroughStore(reader molecule.ClaimExactReader, writers molecule.ClaimExactWriters, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
 	res, err := molecule.ClaimExactWithWriters(reader, writers, req)
 	if err != nil {
+		if res.Outcome == molecule.ClaimExactClaimed {
+			return res.Bead, hookClaimVerdictClaimed, err
+		}
 		return res.Bead, hookClaimVerdictNone, err
 	}
 	switch res.Outcome {

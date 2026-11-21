@@ -430,3 +430,81 @@ func TestClaimExact_MaxInt64GenerationFailsClosed(t *testing.T) {
 		t.Fatalf("generation mutated: got %q", got.Metadata[beadmeta.ClaimGenerationMetadataKey])
 	}
 }
+
+// exactReaderFunc adapts a Get function to ClaimExactReader so tests can
+// script reads (and read failures) without a full store.
+type exactReaderFunc func(id string) (beads.Bead, error)
+
+func (f exactReaderFunc) Get(id string) (beads.Bead, error) { return f(id) }
+
+// exactAssignmentWriterStub records the guarded write a claim issued and can
+// simulate the straddle the assignment tier exists for: the guard passes and
+// the write lands while the row's step identity has already moved. When
+// landed and store is set it applies the effects the way a real guarded
+// write would, so the confirmation read observes the claim's own result.
+type exactAssignmentWriterStub struct {
+	landed         bool
+	err            error
+	calls          int
+	expectedStat   string
+	expectedAssign string
+	opts           beads.UpdateOpts
+	store          *beads.MemStore
+	onLanded       func(id string)
+}
+
+func (w *exactAssignmentWriterStub) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts beads.UpdateOpts) (bool, error) {
+	w.calls++
+	w.expectedStat = expectedStatus
+	w.expectedAssign = expectedAssignee
+	w.opts = opts
+	if w.err != nil {
+		return false, w.err
+	}
+	if !w.landed {
+		return false, nil
+	}
+	if w.store != nil {
+		if err := w.store.Update(id, opts); err != nil {
+			return false, err
+		}
+	}
+	if w.onLanded != nil {
+		w.onLanded(id)
+	}
+	return true, nil
+}
+
+func exactClaimRequest(id string, want ClaimExactPreconditions, onSuccess beads.UpdateOpts) ClaimExactRequest {
+	return ClaimExactRequest{ID: id, Want: want, OnSuccess: onSuccess}
+}
+
+// TestClaimExactWithWriters_ReadbackFailureAfterCommittedWriteIsClaimed: a
+// write that committed but cannot be re-read is a claimed outcome paired with
+// ErrClaimExactReadback — the caller must stop and reconcile, never drain as
+// if nothing was minted.
+func TestClaimExactWithWriters_ReadbackFailureAfterCommittedWriteIsClaimed(t *testing.T) {
+	store := beads.NewMemStore()
+	b := mustCreateExactClaimBead(t, store)
+	calls := 0
+	reader := exactReaderFunc(func(id string) (beads.Bead, error) {
+		calls++
+		if calls > 1 {
+			return beads.Bead{}, fmt.Errorf("store evaporated")
+		}
+		return store.Get(id)
+	})
+
+	res, err := ClaimExactWithWriters(reader, ClaimExactWriters{Assignment: &exactAssignmentWriterStub{landed: true}}, exactClaimRequest(b.ID,
+		ClaimExactPreconditions{Status: strp("open"), Assignee: strp("")},
+		beads.UpdateOpts{Status: strp("in_progress"), Assignee: strp("worker-9")}))
+	if err == nil {
+		t.Fatal("expected the readback error to surface")
+	}
+	if !errors.Is(err, ErrClaimExactReadback) {
+		t.Fatalf("error = %v, want ErrClaimExactReadback", err)
+	}
+	if res.Outcome != ClaimExactClaimed {
+		t.Fatalf("outcome = %q, want %q (the write committed)", res.Outcome, ClaimExactClaimed)
+	}
+}
