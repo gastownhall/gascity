@@ -1281,6 +1281,9 @@ func processWorkflowFinalize(store beads.GraphStore, bead beads.Bead, opts Proce
 	if _, err := molecule.CloseMembersWithMetadataExcept(storeMolecule, members, sweep, excludeFromSweep); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
+	if _, err := retireWorkflowDrainUnitConvoys(store, members, sweep[beadmeta.OutcomeMetadataKey], opts); err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: retiring drain unit convoys: %w", rootID, err))
+	}
 	if outcome == beadmeta.OutcomePass {
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing source bead chain: %w", rootID, err))

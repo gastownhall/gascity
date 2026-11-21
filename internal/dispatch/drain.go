@@ -35,14 +35,13 @@ const (
 	drainPredecessorFailedCloseReason = "drain failed: a blocking predecessor closed with a failed outcome"
 	// drainUnitConvoySyntheticKind is the gc.synthetic_kind of the unit
 	// convoys a drain mints, one per manifest row.
-	drainUnitConvoySyntheticKind = "drain-unit-convoy"
+	drainUnitConvoySyntheticKind = beadmeta.SyntheticKindDrainUnitConvoy
 )
 
 // DrainUnitRetiredCloseReason is stamped as close_reason on each unit convoy
-// retired because its drain control reached a terminal state. It is prose
-// rather than a token for the same reason as drainPredecessorFailedCloseReason:
-// bd rejects close reasons shorter than 20 characters.
-const DrainUnitRetiredCloseReason = "drain unit retired: its drain control reached a terminal state"
+// retired because its drain control reached a terminal state, by the drain's
+// own close and by the workflow finalizer alike.
+const DrainUnitRetiredCloseReason = sourceworkflow.DrainUnitRetiredCloseReason
 
 type drainManifest struct {
 	Version        int                `json:"version"`
