@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "events",
     srcs = [
+        "attribution.go",
         "authorship.go",
         "backend_payloads.go",
         "claims_payloads.go",
@@ -60,6 +61,7 @@ go_library(
 go_test(
     name = "events_test",
     srcs = [
+        "attribution_test.go",
         "authorship_test.go",
         "backend_payloads_test.go",
         "conformance_test.go",

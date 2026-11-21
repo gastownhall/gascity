@@ -607,7 +607,7 @@ func (p poolExecutionBackstop) executedSinceWake(s beads.Bead, beadID string) bo
 		return false
 	}
 	for _, e := range evts {
-		if e.SessionID == s.ID || e.Actor == s.ID {
+		if e.SessionID == s.ID || e.AttributionActor() == s.ID {
 			return true
 		}
 	}
