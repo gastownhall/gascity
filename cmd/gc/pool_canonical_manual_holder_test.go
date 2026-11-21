@@ -301,3 +301,33 @@ func TestCanonicalSingletonPool_SeatBesideManualSessionIsReusedNextTick(t *testi
 		})
 	}
 }
+
+func TestCanonicalSingletonPool_ManualSessionClaimingTemplateNameStillHoldsSeat(t *testing.T) {
+	for _, field := range []string{"alias", "session_name"} {
+		for _, populated := range []bool{false, true} {
+			name := field + "/empty_snapshot"
+			if populated {
+				name = field + "/populated_snapshot"
+			}
+			t.Run(name, func(t *testing.T) {
+				store := beads.NewMemStore()
+				metadata := manualTemplateHolderMetadata("fixer", "asleep")
+				metadata[field] = "worker"
+				manual := createManualTemplateHolderBead(t, store, "worker", metadata)
+				var snapshot []beads.Bead
+				if populated {
+					snapshot = []beads.Bead{manual}
+				}
+				worker := canonicalSingletonWorker(t)
+				bp := canonicalSingletonBuildParams(t, store, worker, snapshot)
+				_, err := selectOrCreateDependencyPoolSessionBead(bp, &worker, "worker")
+				if !errors.Is(err, errPoolSessionNameUnavailable) {
+					t.Fatalf("selectOrCreateDependencyPoolSessionBead error = %v, want errPoolSessionNameUnavailable", err)
+				}
+				if seats := poolManagedWorkerBeads(t, store); len(seats) != 0 {
+					t.Fatalf("open pool_managed worker beads = %d, want none", len(seats))
+				}
+			})
+		}
+	}
+}
