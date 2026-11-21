@@ -1732,12 +1732,27 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cs.cityPath)
 	}
+	var cityCloseRequest beadStoreCloseRequest
+	if cityStore != nil {
+		key, _ := storePointerKey(cityStore)
+		stopper, _ := beads.As[interface{ StopReconciler() }](cityStore)
+		cityCloseRequest = newBeadStoreCloseRequest("city bead store", func() error { return closeBeadStoreHandle(cityStore) }, stopper, key)
+	}
+	storeCloseRequests := make(map[string]beadStoreCloseRequest, len(stores))
+	for name, store := range stores {
+		if store == nil {
+			continue
+		}
+		key, _ := storePointerKey(store)
+		stopper, _ := beads.As[interface{ StopReconciler() }](store)
+		storeCloseRequests[name] = newBeadStoreCloseRequest(fmt.Sprintf("rig bead store %q", name), func() error { return closeBeadStoreHandle(store) }, stopper, key)
+	}
 	// closeUnpublished releases stores built for a swap that will not happen.
 	// The city store is kept out of the rig requests so a rig entry sharing
 	// its handle is closed once.
 	closeUnpublished := func() {
-		requests := []beadStoreCloseRequest{newBeadStoreCloseRequest(nil, "city bead store", cityStore)}
-		requests = append(requests, replacedBeadStoreCloseRequests(nil, stores, map[string]beads.Store{"": cityStore})...)
+		requests := []beadStoreCloseRequest{cityCloseRequest}
+		requests = append(requests, replacedBeadStoreCloseRequests(nil, storeCloseRequests, map[string]beadStoreCloseRequest{"": cityCloseRequest})...)
 		for _, request := range requests {
 			request.run("unpublished")
 		}
@@ -1772,13 +1787,26 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		cs.cityMailProv = cityMailProv
 		cs.storeMetadataSignature = storeSignature
 		if oldCityStore != nil && oldCityStore != cityStore {
-			closeRequests = append(closeRequests, newBeadStoreCloseRequest(cs, "city bead store", oldCityStore))
+			key, _ := storePointerKey(oldCityStore)
+			stopper, _ := beads.As[interface{ StopReconciler() }](oldCityStore)
+			request := newBeadStoreCloseRequest("city bead store", func() error { return closeBeadStoreHandle(oldCityStore) }, stopper, key)
+			request.untrackRetiring = trackRetiringBeadStoreHandle(cs, request.reconciler)
+			closeRequests = append(closeRequests, request)
 		}
 	}
 	if extSvc != nil {
 		cs.extmsgSvc = extSvc
 	}
-	closeRequests = append(closeRequests, replacedBeadStoreCloseRequests(cs, oldRigStores, stores)...)
+	retiredCloseRequests := make(map[string]beadStoreCloseRequest, len(oldRigStores))
+	for name, store := range oldRigStores {
+		if store == nil {
+			continue
+		}
+		key, _ := storePointerKey(store)
+		stopper, _ := beads.As[interface{ StopReconciler() }](store)
+		retiredCloseRequests[name] = newBeadStoreCloseRequest(fmt.Sprintf("rig bead store %q", name), func() error { return closeBeadStoreHandle(store) }, stopper, key)
+	}
+	closeRequests = append(closeRequests, replacedBeadStoreCloseRequests(cs, retiredCloseRequests, storeCloseRequests)...)
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
 	afterControllerStateStoreSwapForTest()
@@ -1793,6 +1821,8 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 type beadStoreCloseRequest struct {
 	label           string
 	close           func() error
+	reconciler      interface{ StopReconciler() }
+	handleKey       uintptr
 	untrackRetiring func()
 }
 
@@ -1821,17 +1851,14 @@ func (r beadStoreCloseRequest) run(kind string) {
 	}
 }
 
-// newBeadStoreCloseRequest marks store as retiring for cs and returns the
-// request that closes it; the caller runs or schedules it once cs.mu is
-// released.
-func newBeadStoreCloseRequest(cs *controllerState, label string, store beads.Store) beadStoreCloseRequest {
-	if store == nil {
-		return beadStoreCloseRequest{}
-	}
+// newBeadStoreCloseRequest retains the close and reconciler capabilities of
+// one physical handle, without handing lifecycle code a bead store.
+func newBeadStoreCloseRequest(label string, closeHandle func() error, reconciler interface{ StopReconciler() }, handleKey uintptr) beadStoreCloseRequest {
 	return beadStoreCloseRequest{
-		label:           label,
-		close:           func() error { return closeBeadStoreHandle(store) },
-		untrackRetiring: trackRetiringBeadStoreHandle(cs, store),
+		label:      label,
+		close:      closeHandle,
+		reconciler: reconciler,
+		handleKey:  handleKey,
 	}
 }
 
@@ -1859,20 +1886,20 @@ func closeBeadStoreHandle(store beads.Store) error {
 
 // replacedBeadStoreCloseRequests returns close requests for the rig stores in
 // retired that kept does not hold, one per distinct handle.
-func replacedBeadStoreCloseRequests(cs *controllerState, retired, kept map[string]beads.Store) []beadStoreCloseRequest {
+func replacedBeadStoreCloseRequests(cs *controllerState, retired, kept map[string]beadStoreCloseRequest) []beadStoreCloseRequest {
 	if len(retired) == 0 {
 		return nil
 	}
 	requests := make([]beadStoreCloseRequest, 0, len(retired))
 	keptKeys := make(map[uintptr]struct{}, len(kept))
-	for _, store := range kept {
-		if key, ok := storePointerKey(store); ok {
-			keptKeys[key] = struct{}{}
+	for _, request := range kept {
+		if request.handleKey != 0 {
+			keptKeys[request.handleKey] = struct{}{}
 		}
 	}
 	closed := make(map[uintptr]struct{}, len(retired))
-	for name, store := range retired {
-		if key, ok := storePointerKey(store); ok {
+	for _, request := range retired {
+		if key := request.handleKey; key != 0 {
 			if _, reused := keptKeys[key]; reused {
 				continue
 			}
@@ -1881,7 +1908,8 @@ func replacedBeadStoreCloseRequests(cs *controllerState, retired, kept map[strin
 			}
 			closed[key] = struct{}{}
 		}
-		requests = append(requests, newBeadStoreCloseRequest(cs, fmt.Sprintf("rig bead store %q", name), store))
+		request.untrackRetiring = trackRetiringBeadStoreHandle(cs, request.reconciler)
+		requests = append(requests, request)
 	}
 	return requests
 }

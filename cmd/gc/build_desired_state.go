@@ -653,16 +653,32 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			"partial": storePartial,
 		})
 		if !storePartial {
-			assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned = refreshDrainAckedOrExitedClaimedWorkForDemand(
+			readerForIndex := func(index int) beads.LiveReader {
+				if index >= len(assignedWorkStores) || assignedWorkStores[index] == nil {
+					return nil
+				}
+				return beads.LiveFor(assignedWorkStores[index])
+			}
+			var assignedWorkIndexes []int
+			assignedWorkBeads, assignedWorkIndexes, assignedWorkStoreRefs, readyAssigned = refreshDrainAckedOrExitedClaimedWorkForDemand(
 				cfg,
 				sp,
 				assignedWorkBeads,
-				assignedWorkStores,
+				readerForIndex,
 				assignedWorkStoreRefs,
 				readyAssigned,
 				sessionBeads,
 				stderr,
 			)
+			if assignedWorkIndexes != nil {
+				refreshedStores := make([]beads.Store, len(assignedWorkIndexes))
+				for i, index := range assignedWorkIndexes {
+					if index < len(assignedWorkStores) {
+						refreshedStores[i] = assignedWorkStores[index]
+					}
+				}
+				assignedWorkStores = refreshedStores
+			}
 		}
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck

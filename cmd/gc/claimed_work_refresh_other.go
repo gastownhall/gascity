@@ -15,17 +15,18 @@ import (
 // exited sessions before demand is computed.
 //
 // residency:allow — pass-through of the caller's own snapshot: it returns the
-// bead, store and store-ref slices it was handed, opens no store, and consults
-// no binding, namespace or leg order.
+// bead and store-ref slices it was handed, opens no store, and consults no
+// binding, namespace or leg order. Nil indexes mean no filtering; a platform
+// refresh returns original indexes to retain store provenance when filtering.
 func refreshDrainAckedOrExitedClaimedWorkForDemand(
 	_ *config.City,
 	_ runtime.Provider,
 	assignedWorkBeads []beads.Bead,
-	assignedWorkStores []beads.Store,
+	_ func(int) beads.LiveReader,
 	assignedWorkStoreRefs []string,
 	readyAssigned map[storeScopedBeadKey]bool,
 	_ *sessionBeadSnapshot,
 	_ io.Writer,
-) ([]beads.Bead, []beads.Store, []string, map[storeScopedBeadKey]bool) {
-	return assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned
+) ([]beads.Bead, []int, []string, map[storeScopedBeadKey]bool) {
+	return assignedWorkBeads, nil, assignedWorkStoreRefs, readyAssigned
 }

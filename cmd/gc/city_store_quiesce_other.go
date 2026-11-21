@@ -2,11 +2,7 @@
 
 package main
 
-import (
-	"io"
-
-	"github.com/gastownhall/gascity/internal/beads"
-)
+import "io"
 
 // quiesceCityStoreWork does nothing outside Windows: the city stop keeps its
 // upstream order.
@@ -27,7 +23,7 @@ type managedCityPlatformState struct{}
 // markPublished records nothing off Windows.
 func (*managedCityPlatformState) markPublished(string) {}
 
-func trackRetiringBeadStoreHandle(*controllerState, beads.Store) func() {
+func trackRetiringBeadStoreHandle(*controllerState, interface{ StopReconciler() }) func() {
 	return func() {}
 }
 
