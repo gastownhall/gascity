@@ -13,7 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -33,7 +33,6 @@ type rigNamedSessionOrderFixture struct {
 
 func newRigNamedSessionOrderFixture(t *testing.T) rigNamedSessionOrderFixture {
 	t.Helper()
-	formulatest.EnableV2ForTest(t)
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "myrig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -62,7 +61,11 @@ assignee = "myrig/refinery"
 			{Name: config.ControlDispatcherAgentName, Dir: "myrig", MaxActiveSessions: &maxOne},
 		},
 		NamedSessions: []config.NamedSession{{Template: "refinery", Dir: "myrig", Mode: "on_demand"}},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
 	}
+	prevFlags := featureflags.Snapshot()
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { featureflags.Apply(prevFlags) })
 	return rigNamedSessionOrderFixture{
 		cityPath: cityPath,
 		rigPath:  rigPath,
