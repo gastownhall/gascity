@@ -40,6 +40,14 @@ The remedy names the ref because a plain `git fetch <remote>` can skip the tip
 from a push URL. `githooks_pre_push_stdin_test.go` covers large diffs,
 unfetched remote tips, credentialed push URLs and unreadable comparisons.
 
+`gascity.prePushSkipRef` (repeatable git config, shell globs) names destination
+refs that stay out of that scan, for branches another gate checks before they
+merge. Patterns match the full remote ref name, never the local one, so a
+detached `git push origin HEAD:refs/heads/<ref>` skips too. A push skips the
+suite only when every ref it sends is skipped or Go-free, and the ownership
+guard runs either way. Unset means no skips. `githooks_pre_push_skip_ref_test.go`
+covers it.
+
 ## Make targets run Bazel; `-go` twins are the escape hatch
 
 `make test`, `check`, `check-all`, `check-docs`, `test-acceptance` and
