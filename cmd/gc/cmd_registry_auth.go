@@ -61,7 +61,11 @@ func newRegistryLoginCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Log in to Gas City Registry and store a local API token.
 
 By default this opens a browser for GitHub or Google Workspace sign-in. Use
---device for headless shells, or --token to store an existing registry token.`,
+--device for headless shells, or --token to store an existing registry token.
+
+Prefer --device or the GC_REGISTRY_TOKEN environment variable over a literal
+--token value: a token typed on the command line stays in shell history and
+is visible to other local users in the process list while gc runs.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if doRegistryLogin(cmd.Context(), opts, stdout, stderr) != 0 {
