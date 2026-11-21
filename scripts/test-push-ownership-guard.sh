@@ -2260,6 +2260,46 @@ test_empty_array_probe_never_shows_failure() {
     rm -rf "$root" "$fbd"
 }
 
+# AC-7: with no routes.jsonl anywhere (BEADS_DIR unset, no
+# <top>/.beads/routes.jsonl) the guard behaves exactly as before routes
+# existed: the built-in ga entry is the whole table, every read goes to the
+# current store as a plain bd call (no BEADS_DIR-prefixed read is ever
+# issued), and outcomes and messages are unchanged — a local closed bead
+# blocks with today's message, and a branch with a non-ga token simply has
+# no id, falling to the assignment fallback. The pre-existing tests above
+# (which all run without routes) pin the rest of today's behavior.
+test_no_routes_reads_identical() {
+    local repo fbd out rc routed_reads
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "(current)" "ga-abc123.1" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    routed_reads="$(grep -cv 'BEADS_DIR= ' <<<"$(routed_calls "$fbd")" || true)"
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — ga-abc123.1" <<<"$out" &&
+        grep -qF "status is 'closed'" <<<"$out" && [[ "$routed_reads" == "0" ]]; then
+        record_pass "no-routes/reads-identical (local block, zero routed reads)"
+    else
+        record_fail "no-routes/reads-identical" "expected today's block with only current-store reads, got rc=$rc routed-reads=$routed_reads calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+
+    # A non-ga token with no route is simply not an id — no probe, and the
+    # assignment fallback decides, exactly as the ga-only regex did.
+    repo="$(new_repo_with_branch "builder/mc-k2p9x-fix")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    routed_reads="$(grep -cv 'BEADS_DIR= ' <<<"$(routed_calls "$fbd")" || true)"
+    if [[ $rc -eq 0 ]] && [[ "$routed_reads" == "0" ]] &&
+        [[ "$(routed_calls "$fbd" | grep -c 'args=list --assignee=agent-x')" -eq 1 ]]; then
+        record_pass "no-routes/unrouted-token-ignored (fallback decides, zero routed reads)"
+    else
+        record_fail "no-routes/unrouted-token-ignored" "expected rc=0 via the fallback with zero routed reads, got rc=$rc routed-reads=$routed_reads calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2334,6 +2374,7 @@ run_all() {
     test_routed_probe_failure_blocks
     test_routed_missing_store_blocks
     test_empty_array_probe_never_shows_failure
+    test_no_routes_reads_identical
 
     echo
     echo "pass=$pass fail=$fail"
