@@ -1580,6 +1580,7 @@ go_test(
         "controller_test.go",
         "controller_token_child_env_test.go",
         "controller_watcher_fd_test.go",
+        "converge_create_timeout_repro_test.go",
         "converge_scope_store_test.go",
         "convergence_integration_test.go",
         "conversation_lane_api_test.go",
