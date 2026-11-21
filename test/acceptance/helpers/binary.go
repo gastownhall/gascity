@@ -103,7 +103,7 @@ func FindBD() string {
 			if rf == "" {
 				continue
 			}
-			if bin := filepath.Join(rf, "+http_archive+bd_bin_v1_3_4", "bd"); statBinary(bin) {
+			if bin := filepath.Join(rf, "+http_archive+bd_bin_v1_4_0_rc_1", "bd"); statBinary(bin) {
 				return bin
 			}
 		}
