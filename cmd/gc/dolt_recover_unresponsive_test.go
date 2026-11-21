@@ -29,6 +29,7 @@ type recoveryGateHarness struct {
 	identErr error
 	window   time.Duration
 	calls    []string
+	diag     strings.Builder
 }
 
 func newRecoveryGateHarness(t *testing.T) *recoveryGateHarness {
@@ -73,6 +74,7 @@ func (h *recoveryGateHarness) ops() managedDoltRecoveryOps {
 		},
 		restartAfter: func(string) (time.Duration, error) { return h.window, nil },
 		now:          func() time.Time { return h.now },
+		diagnostics:  &h.diag,
 	}
 }
 
@@ -386,6 +388,61 @@ func TestRecoverManagedDoltHealthyObservationClosesStreak(t *testing.T) {
 			t.Fatalf("last record = %+v, want the open defer streak kept", last)
 		}
 	})
+}
+
+// AC-3: a server measured healthy stays healthy when its recovery history
+// cannot be read or the healthy record cannot be appended; the failure is a
+// diagnostic, never an unhealthy verdict or a restart.
+func TestRecoverManagedDoltHealthyMeasurementSurvivesHistoryFailure(t *testing.T) {
+	unreadable := func(h *recoveryGateHarness) {
+		h.t.Helper()
+		if err := os.MkdirAll(h.logFile(), 0o755); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	unwritable := func(h *recoveryGateHarness) {
+		h.t.Helper()
+		if os.Geteuid() == 0 {
+			h.t.Skip("root ignores file permissions")
+		}
+		since := h.now.Add(-170 * time.Second)
+		h.seedDefer(since, since, h.ident)
+		if err := os.Chmod(h.logFile(), 0o444); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(h *recoveryGateHarness)
+	}{
+		{name: "unreadable dolt.log", setup: unreadable},
+		{name: "unwritable dolt.log with an open streak", setup: unwritable},
+	} {
+		t.Run("recovery/"+tc.name, func(t *testing.T) {
+			h := newRecoveryGateHarness(t)
+			tc.setup(h)
+			h.probeErr = nil
+			report, err := h.recover()
+			if err != nil || !report.Healthy || report.Deferred || h.restarted() {
+				t.Fatalf("report=%+v err=%v calls=%v, want Healthy=true with no error, stop or start", report, err, h.calls)
+			}
+			if !strings.Contains(h.diag.String(), "close dolt unresponsiveness streak") {
+				t.Fatalf("diagnostics = %q, want the history failure reported", h.diag.String())
+			}
+		})
+		t.Run("provider health/"+tc.name, func(t *testing.T) {
+			h := newRecoveryGateHarness(t)
+			tc.setup(h)
+			h.probeErr = nil
+			noteManagedDoltStreakAfterProviderHealth(h.city, h.port, "root", h.ops())
+			if h.restarted() {
+				t.Fatalf("calls = %v, want no stop or start", h.calls)
+			}
+			if !strings.Contains(h.diag.String(), "healthy, but close dolt unresponsiveness streak") {
+				t.Fatalf("diagnostics = %q, want the history failure reported", h.diag.String())
+			}
+		})
+	}
 }
 
 // AC-3: keeping an unmeasured server after an inconclusive readiness wait is

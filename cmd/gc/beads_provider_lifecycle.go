@@ -2538,9 +2538,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 			if err := reconcileHealthyManagedRuntimePublication(ctx, cityPath, waitForScopes, deps); err != nil {
 				return err
 			}
-			if err := closeManagedDoltStreakAfterProviderHealth(cityPath, currentManagedDoltPort(cityPath), managedDoltUserFromEnv(providerEnv), defaultManagedDoltRecoveryOps()); err != nil {
-				return fmt.Errorf("healthy but %w", err)
-			}
+			noteManagedDoltStreakAfterProviderHealth(cityPath, currentManagedDoltPort(cityPath), managedDoltUserFromEnv(providerEnv), defaultManagedDoltRecoveryOps())
 		}
 		return nil
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,6 +40,9 @@ type managedDoltRecoveryOps struct {
 	identify        func(cityPath, port string) (managedDoltServerIncarnation, error)
 	restartAfter    func(cityPath string) (time.Duration, error)
 	now             func() time.Time
+	// diagnostics receives recovery-history failures that must not change
+	// a measured result; unset uses os.Stderr.
+	diagnostics io.Writer
 }
 
 func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
@@ -140,9 +144,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			}
 			if !report.ReadyInconclusive {
 				reused := managedDoltRecoveryGate{cityPath: cityPath, host: host, port: strconv.Itoa(report.Port), logFile: layout.LogFile, ops: ops}
-				if err := reused.closeStreakAfterHealthy(); err != nil {
-					return report, err
-				}
+				reused.noteHealthyMeasurement()
 			}
 			return report, nil
 		}
@@ -174,9 +176,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
 			recoverManagedDoltPopulateReportFromRuntimeState(cityPath, port, &report)
-			if err := gate.closeStreakAfterHealthy(); err != nil {
-				return report, err
-			}
+			gate.noteHealthyMeasurement()
 			return report, nil
 		default:
 			diagnosis = managedDoltRecoveryReasonNotQueryReady

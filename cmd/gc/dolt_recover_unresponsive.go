@@ -138,6 +138,9 @@ func (ops managedDoltRecoveryOps) withGateDefaults() managedDoltRecoveryOps {
 	if ops.now == nil {
 		ops.now = time.Now
 	}
+	if ops.diagnostics == nil {
+		ops.diagnostics = os.Stderr
+	}
 	return ops
 }
 
@@ -404,6 +407,27 @@ func (g managedDoltRecoveryGate) closeStreakAfterHealthy() error {
 		return fmt.Errorf("close dolt unresponsiveness streak for %s: %w", g.endpoint(), err)
 	}
 	return nil
+}
+
+// noteHealthyMeasurement closes an open unresponsiveness streak after the
+// caller measured the gate's endpoint healthy. The measurement stands on its
+// own: a failure to read or append recovery history is reported on the
+// diagnostics writer and never turns a healthy result into an error.
+func (g managedDoltRecoveryGate) noteHealthyMeasurement() {
+	if err := g.closeStreakAfterHealthy(); err != nil {
+		_, _ = fmt.Fprintf(g.ops.diagnostics, "gc: %v\n", err)
+	}
+}
+
+// noteManagedDoltStreakAfterProviderHealth closes an open unresponsiveness
+// streak after a provider health check passed. A history or lock failure is
+// reported on the diagnostics writer and never turns the healthy verdict into
+// an error.
+func noteManagedDoltStreakAfterProviderHealth(cityPath, port, user string, ops managedDoltRecoveryOps) {
+	ops = ops.withGateDefaults()
+	if err := closeManagedDoltStreakAfterProviderHealth(cityPath, port, user, ops); err != nil {
+		_, _ = fmt.Fprintf(ops.diagnostics, "gc: healthy, but %v\n", err)
+	}
 }
 
 // closeManagedDoltStreakAfterProviderHealth closes an open unresponsiveness
