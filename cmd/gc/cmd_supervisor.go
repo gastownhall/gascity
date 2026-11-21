@@ -1311,6 +1311,7 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 
 // managedCity tracks a running CityRuntime inside the supervisor.
 type managedCity struct {
+	managedCityPlatformState
 	cr         *CityRuntime
 	name       string // city name at launch — used for name-drift detection
 	started    bool
@@ -1385,17 +1386,24 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if mc == nil {
 		return nil
 	}
+	defer func() {
+		if mc.closer != nil {
+			mc.closer.Close() //nolint:errcheck
+		}
+	}()
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
 	var stopErr error
 	if timeout > 0 {
 		select {
 		case <-mc.done:
+			quiesced, err := waitForCityStoreQuiesce(mc, stderr)
+			if err != nil {
+				stopBeadsProviderAfterQuiesceDrain(mc, cityPath, quiesced)
+				return err
+			}
 			if err := shutdownBeadsProvider(cityPath); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
-			}
-			if mc.closer != nil {
-				mc.closer.Close() //nolint:errcheck
 			}
 			return nil
 		case <-time.After(timeout):
@@ -1437,11 +1445,13 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
 		}
 	}
+	quiesced, err := waitForCityStoreQuiesce(mc, stderr)
+	if err != nil {
+		stopBeadsProviderAfterQuiesceDrain(mc, cityPath, quiesced)
+		return errors.Join(stopErr, err)
+	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
-	}
-	if mc.closer != nil {
-		mc.closer.Close() //nolint:errcheck
 	}
 	return stopErr
 }
@@ -2800,8 +2810,13 @@ func startOneCity(
 					defer func() { recover() }() //nolint:errcheck
 					cityRuntime.shutdown()
 				}()
-				if err := shutdownBeadsProvider(p); err != nil {
-					fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
+				quiesceErr := quiesceCityStoreWork(mc, stderr)
+				if quiesceErr == nil {
+					if err := shutdownBeadsProvider(p); err != nil {
+						fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
+					}
+				} else {
+					fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, quiesceErr) //nolint:errcheck
 				}
 				// Close the file recorder. A normal exit leaves it to the
 				// stop that removed the city (mc.closer), unless none did.
@@ -2985,6 +3000,7 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 		// runs after that reconciliation completes.
 		mc.status = "starting_agents"
 		cities[path] = mc
+		mc.markPublished(path)
 		delete(initStatus, path)
 		delete(initFailures, path) // clear backoff on successful init
 	})
