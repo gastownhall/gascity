@@ -670,7 +670,12 @@ func importSvcDeps() importsvc.Deps {
 //nolint:unparam // keep fs injectable for parity with the other import helpers and direct tests.
 func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
 	mcpBefore, mcpBeforeErr := loadMCPCapabilityReport(cityPath)
+	release, ok := lockImportRootConfigForCommand(fs, cityPath, "gc import add", stderr)
+	if !ok {
+		return 1
+	}
 	res, err := importsvc.AddImportWith(fs, cityPath, source, nameOverride, versionFlag, importSvcDeps())
+	release()
 	if err != nil {
 		fmt.Fprintln(stderr, importAddErrorLine(source, nameOverride, err)) //nolint:errcheck
 		printCredentialHint(stderr, err)
@@ -752,7 +757,12 @@ func importAddErrorLine(source, nameOverride string, err error) string {
 
 //nolint:unparam // FS seam is intentional for command tests and symmetry with doImportAdd.
 func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) int {
+	release, ok := lockImportRootConfigForCommand(fs, cityPath, "gc import remove", stderr)
+	if !ok {
+		return 1
+	}
 	res, err := importsvc.RemoveImportWith(fs, cityPath, name, importSvcDeps())
+	release()
 	if err != nil {
 		// Failures during the lock-sync/save tail carry the name; earlier scope
 		// and ownership failures keep the bare prefix, mirroring the old CLI.
@@ -779,6 +789,11 @@ func intoRepoCacheRoot(root string) string {
 }
 
 func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
+	release, ok := lockImportRootConfigForCommand(fsys.OSFS{}, cityPath, "gc import install", stderr)
+	if !ok {
+		return 1
+	}
+	defer release()
 	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
@@ -879,6 +894,11 @@ func writeImportCheckIssues(w io.Writer, issues []packman.CheckIssue) {
 }
 
 func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
+	release, ok := lockImportRootConfigForCommand(fsys.OSFS{}, cityPath, "gc import upgrade", stderr)
+	if !ok {
+		return 1
+	}
+	defer release()
 	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck

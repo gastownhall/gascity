@@ -137,6 +137,7 @@ go_library(
         "census_residency.go",
         "chat_autosuspend.go",
         "city_arg_resolve.go",
+        "city_config_lock.go",
         "city_context.go",
         "city_discovery.go",
         "city_layout.go",

@@ -286,7 +286,12 @@ func (c *gascityPackBindingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Chec
 	return r
 }
 
-func (c *gascityPackBindingDoctorCheck) Fix(_ *doctor.CheckContext) error {
+func (c *gascityPackBindingDoctorCheck) Fix(ctx *doctor.CheckContext) error {
+	release, err := lockCityConfigForDoctorFix(ctx, c.cityPath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return fixGascityPackBindingFS(fsys.OSFS{}, c.cityPath)
 }
 

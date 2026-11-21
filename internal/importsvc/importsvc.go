@@ -317,6 +317,8 @@ func AddImport(fs fsys.FS, cityPath, source, nameOverride, versionConstraint str
 }
 
 // AddImportWith is AddImport with injectable seams and rig scope.
+// The caller serializes with other config writers through configedit.LockCity
+// (the controller in withConfigTransaction, the CLI in its command).
 func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint string, deps Deps) (*AddResult, error) {
 	scope, err := loadImportScope(fs, cityPath, deps.Rig)
 	if err != nil {
@@ -410,6 +412,8 @@ func RemoveImport(fs fsys.FS, cityPath, name string) (*RemoveResult, error) {
 }
 
 // RemoveImportWith is RemoveImport with injectable seams and rig scope.
+// The caller serializes with other config writers through configedit.LockCity
+// (the controller in withConfigTransaction, the CLI in its command).
 func RemoveImportWith(fs fsys.FS, cityPath, name string, deps Deps) (*RemoveResult, error) {
 	scope, err := loadImportScope(fs, cityPath, deps.Rig)
 	if err != nil {
