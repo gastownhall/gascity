@@ -52,7 +52,7 @@ type ExtMsgOutboundOutput struct {
 // ExtMsgBindingListInput is the Huma input for GET /v0/city/{cityName}/extmsg/bindings.
 type ExtMsgBindingListInput struct {
 	CityScope
-	SessionID string `query:"session_id" required:"false" doc:"Session ID to list bindings for."`
+	SessionID string `query:"session_id" required:"false" doc:"Session bead ID, session name, or alias. Returns 1:1 bindings and group-participant conversations the selector can publish into."`
 }
 
 // ExtMsgBindInput is the Huma input for POST /v0/city/{cityName}/extmsg/bind.
