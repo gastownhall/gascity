@@ -124,6 +124,7 @@ func (s ignoringStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 
 func (s ignoringStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	query.Assignee = ""
+	query.Metadata = nil
 	return s.MemStore.List(query)
 }
 
@@ -640,6 +641,57 @@ func TestReadBoundedBindingReadIsNeverEndedByRelics(t *testing.T) {
 	}
 }
 
+// TestReadStatusLegsSurviveMigrationRelics pins the exactness guard on the
+// --status arms' metadata pushdown. A relic the class binding holds under a
+// work-shaped id can differ from the work store's copy in exactly the pushed
+// predicate, and first-leg-wins must still serve the work copy's verdict. The
+// closed case fails if the narrowed read is served without the relic probe;
+// the open case fails if the open cut happens only after the merge, because
+// the probe window is sized by predicates that do not judge status.
+func TestReadStatusLegsSurviveMigrationRelics(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	withRoot := func(b *beads.Bead) { b.Metadata = beads.StringMap{"gc.root_bead_id": "R"} }
+	inStatus := func(status string) func(*beads.Bead) {
+		return func(b *beads.Bead) { b.Status = status }
+	}
+	binding := func(store beads.Store) Leg {
+		return Leg{Label: "graph", Store: store, ClassBinding: true, ReservedPrefixes: []string{"g"}}
+	}
+	t.Run("closed", func(t *testing.T) {
+		// The work store's w-1 is closed WITHOUT the root; the binding's relic
+		// copy carries it, beside the binding's own g-1.
+		workRows := []beads.Bead{readyRow("w-1", 1, base, inStatus(StatusClosed))}
+		graphRows := []beads.Bead{
+			readyRow("w-1", 0, base, inStatus(StatusClosed), withRoot),
+			readyRow("g-1", 1, base, inStatus(StatusClosed), withRoot),
+		}
+		legs := []Leg{testLeg("city", newNarrowingStore(workRows...)), binding(newNarrowingStore(graphRows...))}
+		plain := []Leg{testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, workRows, nil)}), binding(ignoringStore{beads.NewMemStoreFrom(0, graphRows, nil)})}
+		q := Query{Status: StatusClosed, MetadataFields: []string{"gc.root_bead_id=R"}}
+		got, want := readIDs(t, legs, q), readIDs(t, plain, q)
+		if !slices.Equal(got, want) || !slices.Equal(got, []string{"g-1"}) {
+			t.Fatalf("pushed answer = %v, want the un-pushed %v ([g-1]): the binding's relic copy of w-1 must not be served", got, want)
+		}
+	})
+	t.Run("open with limit", func(t *testing.T) {
+		// w-0 is in_progress with the root at priority 0; the work copy of w-1
+		// is open without it; the binding's relic copy of w-1 is open with it.
+		// The plain answer is empty, and so must the narrowed one be.
+		workRows := []beads.Bead{
+			readyRow("w-0", 0, base, inStatus(StatusInProgress), withRoot),
+			readyRow("w-1", 1, base, inStatus(StatusOpen)),
+		}
+		graphRows := []beads.Bead{readyRow("w-1", 1, base, inStatus(StatusOpen), withRoot)}
+		legs := []Leg{testLeg("city", newNarrowingStore(workRows...)), binding(newNarrowingStore(graphRows...))}
+		plain := []Leg{testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, workRows, nil)}), binding(ignoringStore{beads.NewMemStoreFrom(0, graphRows, nil)})}
+		q := Query{Status: StatusOpen, MetadataFields: []string{"gc.root_bead_id=R"}, Limit: 1}
+		got, want := readIDs(t, legs, q), readIDs(t, plain, q)
+		if len(want) != 0 || !slices.Equal(got, want) {
+			t.Fatalf("pushed answer = %v, want the un-pushed answer %v (empty): the relic w-1 must not survive the limit unprobed", got, want)
+		}
+	})
+}
+
 // TestReadPushdownNeverChangesTheAnswer is the property the pushdown rests on:
 // over random cities and random queries, every arm, legs that apply every pushed
 // predicate and cut bounded reads in order give exactly the answer of legs that
@@ -699,7 +751,7 @@ func TestReadPushdownNeverChangesTheAnswer(t *testing.T) {
 				Unassigned: rng.Intn(3) == 0,
 				Limit:      []int{0, 1, 3, 20}[rng.Intn(4)],
 				Sort:       []string{"", "", SortOldest, SortNewest}[rng.Intn(4)],
-				Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked}[rng.Intn(6)],
+				Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked, StatusClosed}[rng.Intn(7)],
 			}
 			if rng.Intn(2) == 0 {
 				q.MetadataFields = []string{"gc.routed_to=" + routes[1+rng.Intn(len(routes)-1)]}

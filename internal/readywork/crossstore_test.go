@@ -73,6 +73,51 @@ func setInProgress(t *testing.T, store beads.Store, id, assignee string) {
 	}
 }
 
+// TestReadStatusMetadataNarrowsTheRealSplitStores is ga-8g39ur's incident
+// shape on the real backends: a --status closed --metadata-field read over a
+// native work store and a SQLite binding returns exactly the closed beads
+// carrying the root from both stores, and the open arm the open ones — the
+// stores narrow the read, and the Go filter keeps every row it should.
+func TestReadStatusMetadataNarrowsTheRealSplitStores(t *testing.T) {
+	work := splittest.NewNativeWorkStore(t, "gc")
+	binding := sqliteBinding(t)
+	legs := splitLegs(work, binding)
+	withRoot := func(id string) {
+		t.Helper()
+		if err := work.SetMetadata(id, "gc.root_bead_id", "root-1"); err != nil {
+			t.Fatalf("setting the root on %s: %v", id, err)
+		}
+	}
+	bindingRoot := func(id string) {
+		t.Helper()
+		if err := binding.SetMetadata(id, "gc.root_bead_id", "root-1"); err != nil {
+			t.Fatalf("setting the root on %s: %v", id, err)
+		}
+	}
+	closedWork := mustCreate(t, work, beads.Bead{Title: "closed work", Type: "task"})
+	withRoot(closedWork.ID)
+	closeBead(t, work, closedWork.ID)
+	closedGraph := mustCreate(t, binding, beads.Bead{Title: "closed graph", Type: "task"})
+	bindingRoot(closedGraph.ID)
+	closeBead(t, binding, closedGraph.ID)
+	closedOther := mustCreate(t, work, beads.Bead{Title: "closed without the root", Type: "task"})
+	closeBead(t, work, closedOther.ID)
+	openWork := mustCreate(t, work, beads.Bead{Title: "open work", Type: "task"})
+	withRoot(openWork.ID)
+	openGraph := mustCreate(t, binding, beads.Bead{Title: "open graph", Type: "task"})
+	bindingRoot(openGraph.ID)
+	mustCreate(t, work, beads.Bead{Title: "open without the root", Type: "task"})
+
+	got := readyIDs(t, legs, Query{Status: StatusClosed, MetadataFields: []string{"gc.root_bead_id=root-1"}})
+	if !sameSet(got, []string{closedWork.ID, closedGraph.ID}) {
+		t.Fatalf("closed with the root = %v, want exactly %s and %s", got, closedWork.ID, closedGraph.ID)
+	}
+	got = readyIDs(t, legs, Query{Status: StatusOpen, MetadataFields: []string{"gc.root_bead_id=root-1"}})
+	if !sameSet(got, []string{openWork.ID, openGraph.ID}) {
+		t.Fatalf("open with the root = %v, want exactly %s and %s", got, openWork.ID, openGraph.ID)
+	}
+}
+
 // TestReadInProgressUnresolvableBlockerBlocksItsRowNotTheTier is R8: one work
 // row whose blocking edge names an id no store holds (an edge the migration
 // clear kept into an id since purged from the binding) used to fail the WHOLE
