@@ -32,12 +32,16 @@ const (
 
 // workflowInputVerdict is the claim-time input check's answer for one
 // candidate: the workflow root it resolved to ("" for a candidate outside any
-// workflow), the state of that root's input, and, for purged input, the ids
-// proven absent.
+// workflow), the state of that root's input, for purged input the ids proven
+// absent, and the gc.input_lifecycle the authoritative root carries (verbatim,
+// "" when it declares none). The state is the input's fact alone; whether that
+// fact retires the workflow is the lifecycle's to say
+// (hookRetireIfInputSettled).
 type workflowInputVerdict struct {
 	RootID     string
 	State      workflowInputState
 	MissingIDs []string
+	Lifecycle  string
 }
 
 // workflowInputAbsenceProver reports whether every one of ids is proven to
@@ -111,7 +115,7 @@ func purgedIfProven(ctx context.Context, pending workflowInputVerdict, legs []wo
 	if err != nil || !absent {
 		return pending, err
 	}
-	return workflowInputVerdict{RootID: pending.RootID, State: workflowInputPurged, MissingIDs: ids}, nil
+	return workflowInputVerdict{RootID: pending.RootID, State: workflowInputPurged, MissingIDs: ids, Lifecycle: pending.Lifecycle}, nil
 }
 
 // unresolvedMemberIDs returns the ids of the convoy members no store the

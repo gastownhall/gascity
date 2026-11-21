@@ -2357,6 +2357,12 @@ func hookRetireIfInputSettled(candidate beads.Bead, opts hookClaimOptions, ops h
 		fmt.Fprintf(stderr, "gc hook --claim: checking input convoy for %s: %v\n", candidate.ID, err) //nolint:errcheck
 		return false
 	}
+	if verdict.State == workflowInputComplete && verdict.Lifecycle == beadmeta.InputLifecycleGraph {
+		// The workflow's own steps settled its input: its remaining tail
+		// (finalization, reporting, teardown) is still its to run, under the
+		// ordinary readiness, stop and control rules.
+		return false
+	}
 	switch verdict.State {
 	case workflowInputComplete:
 		if err := ops.RetireWorkflow(ctx, dir, opts.Env, verdict); err != nil {
@@ -2426,7 +2432,8 @@ func workflowInputDoneAcross(ctx context.Context, graph beads.Store, work beads.
 			return workflowInputVerdict{RootID: rootID}, fmt.Errorf("loading workflow root %s: %w", rootID, err)
 		}
 	}
-	pending := workflowInputVerdict{RootID: rootID, State: workflowInputPending}
+	lifecycle := strings.TrimSpace(root.Metadata[beadmeta.InputLifecycleMetadataKey])
+	pending := workflowInputVerdict{RootID: rootID, State: workflowInputPending, Lifecycle: lifecycle}
 	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	if convoyID == "" {
 		return pending, nil
@@ -2468,7 +2475,7 @@ func workflowInputDoneAcross(ctx context.Context, graph beads.Store, work beads.
 	if err != nil || !settled {
 		return pending, err
 	}
-	return workflowInputVerdict{RootID: rootID, State: workflowInputComplete}, nil
+	return workflowInputVerdict{RootID: rootID, State: workflowInputComplete, Lifecycle: lifecycle}, nil
 }
 
 // workflowInputMembersSettled reports whether every one of members is

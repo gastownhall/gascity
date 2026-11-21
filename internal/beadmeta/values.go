@@ -95,6 +95,16 @@ const (
 // contract — the single most-branched-on metadata value in the engine.
 const FormulaContractGraphV2 = "graph.v2"
 
+// Values of InputLifecycleMetadataKey ("gc.input_lifecycle"), the formulas-v2
+// input_lifecycle declaration a compiled workflow root carries. External (the
+// default, never stamped) lets input settlement retire the workflow at claim
+// time; graph means the workflow's own steps settle its input, so its
+// remaining tail (finalization, reporting, teardown) still runs afterwards.
+const (
+	InputLifecycleExternal = "external"
+	InputLifecycleGraph    = "graph"
+)
+
 // Values of ScopeRoleMetadataKey ("gc.scope_role"): the role a bead plays
 // inside a scope. The scope reconciler in internal/dispatch/runtime.go branches
 // on exact agreement between writers (dispatch, formula, cmd/gc) and readers.
