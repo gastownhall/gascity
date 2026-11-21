@@ -1388,6 +1388,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The work-record close gate skipped every bead carrying a `gc.kind`.**
+  The gate exempted any non-empty `gc.kind`, so tasks an operator tags with
+  its own kind (`gc.kind=work`, `gc.kind=review`) were never checked. Only
+  the engine's own kinds (`beadmeta.EngineKinds`) are exempt now: with
+  `GC_WORK_RECORD_ENFORCE` set, closing an operator-kinded task with no valid
+  `gc.work_outcome` through `gc bd close`, `gc bd update --status closed` or
+  the HTTP close doors is refused. Without enforcement the close logs a
+  warning and goes ahead, as it does for a plain task.
+
+- **Order tracking beads could not be closed under work-record enforcement.**
+  The tracking bead `orders` writes for each run has no type and no
+  `gc.kind`, so the close gate read it as a work bead and, with
+  `GC_WORK_RECORD_ENFORCE` set, refused its close through `gc bd close` or
+  `gc bd update --status closed` for a missing `gc.work_outcome`, leaving it
+  open. The gate now skips infrastructure
+  beads that Ready already excludes by label (`order-tracking`,
+  `gc:order-tracking`, `gc:session`, `gc:op`, `gc:fact`, `gc:rt`).
+
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues
   were given, so an empty convoy created with `--rig <rig>` could never
