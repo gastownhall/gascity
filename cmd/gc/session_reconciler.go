@@ -3127,7 +3127,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Dead pane: a remain-on-exit corpse of a committed named row. It is
 		// recorded here, before the heal and wake sections below restart the
 		// row, so its session.crashed precedes the restart's session.woke.
-		recordDeadPaneCrash(infoByID[id], name, obs, tp, peek, rec, stderr)
+		recordDeadPaneCrash(infoByID[id], name, obs, tp, peek, dt, rec, stderr)
 		// The snapshot is already current after the zombie-capture block:
 		// markProviderTerminalError advanced infoByID[id] in place via
 		// write-returns-Info (its only same-tick session write on the paths that reach

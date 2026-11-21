@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -23,8 +24,9 @@ import (
 // does.
 type deadPaneProvider struct {
 	*runtime.Fake
-	corpses map[string]runtime.Liveness
-	obsErr  error // every liveness read fails with it when set
+	corpses  map[string]runtime.Liveness
+	obsErr   error // every liveness read fails with it when set
+	startErr error // every Start fails with it, the corpse left listed, when set
 }
 
 func newDeadPaneProvider(f *runtime.Fake) *deadPaneProvider {
@@ -61,6 +63,9 @@ func (p *deadPaneProvider) ProcessAlive(name string, processNames []string) bool
 }
 
 func (p *deadPaneProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.startErr != nil {
+		return p.startErr
+	}
 	if _, ok := p.corpses[name]; ok {
 		delete(p.corpses, name)
 		if err := p.Fake.Stop(name); err != nil {
@@ -259,5 +264,42 @@ func TestReconcileNamedAlwaysCorpseRecoversAfterCrash(t *testing.T) {
 	}
 	if crashAt < 0 || wokeAt < 0 || crashAt > wokeAt {
 		t.Fatalf("session.crashed at %d, first session.woke at %d, want the crash recorded before the wake; events=%#v", crashAt, wokeAt, e.rec.Events)
+	}
+}
+
+// claimLive puts the row back on its committed active state, as a row that
+// still claims its runtime live reads.
+func (e *deadPaneEnv) claimLive(t *testing.T) {
+	t.Helper()
+	b, err := e.store.Get(e.beadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", e.beadID, err)
+	}
+	e.setSessionMetadata(&b, map[string]string{"state": "active", "instance_token": deadPaneTestToken, "sleep_reason": "", "wake_attempts": "0", "quarantined_until": ""})
+}
+
+// TestReconcileNamedAlwaysCorpseCrashOncePerDeadObject: the same dead
+// object observed again under a row that still claims it live records no
+// further session.crashed; a later object of the row dying records one more.
+func TestReconcileNamedAlwaysCorpseCrashOncePerDeadObject(t *testing.T) {
+	e := newDeadPaneEnv(t)
+	e.sp.SetPeekOutput(e.name, "agent exited")
+	e.sp.startErr = errors.New("start held for the test")
+
+	for i := 0; i < 3; i++ {
+		e.sp.kill(e.name, "$7")
+		e.claimLive(t)
+		e.tick(t)
+		e.clk.Advance(time.Minute)
+	}
+	if got := len(e.crashes()); got != 1 {
+		t.Fatalf("session.crashed events over 3 ticks of one dead object = %d, want 1; stderr=%q", got, e.stderr.String())
+	}
+
+	e.sp.kill(e.name, "$8")
+	e.claimLive(t)
+	e.tick(t)
+	if got := len(e.crashes()); got != 2 {
+		t.Fatalf("session.crashed events after a later object died = %d, want 2", got)
 	}
 }

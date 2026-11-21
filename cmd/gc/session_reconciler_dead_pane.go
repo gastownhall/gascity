@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/events"
@@ -30,9 +31,14 @@ func deadPaneCrashCandidate(info session.Info, obs runtime.Liveness) bool {
 // whose runtime name is observed as a remain-on-exit corpse: the pane is
 // gone, so without this record the restart that follows reads the same as
 // an operator's wake (#6298). The pane tail rides on the event; a failed
-// peek is logged and leaves it empty, and the crash is still recorded.
-func recordDeadPaneCrash(info session.Info, name string, obs runtime.Liveness, tp TemplateParams, peek func(int) (string, error), rec events.Recorder, stderr io.Writer) {
-	if !deadPaneCrashCandidate(info, obs) {
+// peek is logged and leaves it empty, and the crash is still recorded. One
+// record is made per dead object (markCorpseCrash).
+func recordDeadPaneCrash(info session.Info, name string, obs runtime.Liveness, tp TemplateParams, peek func(int) (string, error), dt *drainTracker, rec events.Recorder, stderr io.Writer) {
+	if obs.Alive {
+		dt.clearCorpseCrash(info.ID)
+		return
+	}
+	if !deadPaneCrashCandidate(info, obs) || !dt.markCorpseCrash(info.ID, deadObjectKey(info, obs)) {
 		return
 	}
 	output, err := peek(rateLimitPeekLines)
@@ -42,6 +48,16 @@ func recordDeadPaneCrash(info session.Info, name string, obs runtime.Liveness, t
 	}
 	rec.Record(sessionCrashedEvent(info.ID, tp, output, deadPaneCrashReason))
 	telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
+}
+
+// deadObjectKey names the dead runtime object obs observed: the provider's
+// object id pinned by its creation time, or, from a provider without object
+// ids, the incarnation token the row records.
+func deadObjectKey(info session.Info, obs runtime.Liveness) string {
+	if obs.ObjectID != "" {
+		return obs.ObjectID + "@" + obs.ObjectCreated
+	}
+	return "token:" + strings.TrimSpace(info.InstanceToken)
 }
 
 // sessionCrashedEvent is the legacy reconciler's session.crashed for session
