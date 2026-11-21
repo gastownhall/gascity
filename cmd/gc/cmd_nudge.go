@@ -1261,6 +1261,15 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			}
 			return 1
 		}
+		// A session can retain a runtime pane after its durable lifecycle has
+		// become asleep, suspended or terminal. Never keep its per-session
+		// poller alive (or type another nudge into that stale pane) merely
+		// because the runtime still reports Running. The queued work is
+		// durable; the next authorized wake/claim starts its own poller.
+		if nudgePollLifecycleShouldExit(obs.LifecycleState) {
+			fmt.Fprintf(stderr, "gc nudge poll: session %q lifecycle is %q; exiting; queued nudges remain durable for wake/successor\n", target.sessionName, obs.LifecycleState) //nolint:errcheck
+			return 0
+		}
 		if !obs.Running {
 			now := time.Now()
 			if shouldKeepNudgePollerAlive(target, missingSince, now) {
@@ -1421,6 +1430,19 @@ func (s *nudgePollSkips) flush(now time.Time, stderr io.Writer) {
 	}
 	s.counts = nil
 	s.lastFlush = now
+}
+
+// nudgePollLifecycleShouldExit retires only the poller, never the worker.
+// The bead-backed lifecycle takes precedence over an outdated runtime "running"
+// bit. Unknown/active/draining states retain their existing delivery behavior.
+func nudgePollLifecycleShouldExit(state session.State) bool {
+	switch state {
+	case session.StateAsleep, session.StateSuspended, session.StateDrained,
+		session.StateArchived, session.StateClosed, session.StateFailedCreate:
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time) bool {
