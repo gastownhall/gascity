@@ -46,9 +46,11 @@
 //
 // The selective predicates (--assignee, --unassigned, plain-string
 // --metadata-field key=value) and, under the two orders a store can reproduce,
-// --limit are pushed into each leg's query. A store may narrow its answer by
-// them, and never widen it; the predicates are always re-applied to the merged
-// set here, which stays the authority. See pushdown.go for why each pushed
-// predicate is no stricter than the Go filter, and for the limit's exactness
-// rules.
+// --limit are pushed into each leg's query. A --status arm pushes its
+// plain-string, non-empty key=value pairs into every leg's list (and the
+// in_progress arm its --assignee), so a large tier such as closed is not read
+// whole to keep a handful of rows. A store may narrow its answer by them, and
+// never widen it; the predicates are always re-applied to the merged set here,
+// which stays the authority. See pushdown.go for why each pushed predicate is
+// no stricter than the Go filter, and for the limit's exactness rules.
 package readywork
