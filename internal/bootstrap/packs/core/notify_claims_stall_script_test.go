@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -134,6 +135,23 @@ func TestNotifyClaimsStallMailsOncePerEpisode(t *testing.T) {
 	sends = claimsStallMailSends(t, logPath)
 	if len(sends) != 2 || !strings.Contains(sends[1], "Agent gascity/review-codex claims its work again on cursor-grok") {
 		t.Fatalf("sends after the resumption = %q, want the stall then one resumption", sends)
+	}
+}
+
+func TestNotifyClaimsStallDoesNotRemailWhenResumptionWindowIsLarge(t *testing.T) {
+	work := t.TempDir()
+	binDir, logPath := claimsStallGC(t, work, `echo "Sent message m-1 to human"`)
+	padding := fmt.Sprintf(`{"seq":181,"type":"agent.claims_resumed","payload":{"episode":%q}}`, strings.Repeat("x", 1<<20))
+	claimsStallEvents(t, work, []string{stalledEvent}, []string{resumedEvent, padding})
+
+	out, err := runPackScript(t, notifyClaimsStallScriptPath, binDir, escalationEnvKeys, claimsStallEnv(work, coreEscalateScript(t)))
+	if err != nil {
+		t.Fatalf("notify-claims-stall: %v\n%s", err, out)
+	}
+
+	sends := claimsStallMailSends(t, logPath)
+	if len(sends) != 1 || !strings.Contains(sends[0], "Agent gascity/review-codex claims its work again on cursor-grok") {
+		t.Fatalf("sends = %q, want only the resumption message", sends)
 	}
 }
 
