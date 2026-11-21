@@ -1299,14 +1299,14 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 // busy session whose next delivery has not yet starved past
 // queuedNudgeStarvedAfter (a starved delivery goes without waiting on the
 // activity clock once the leaf's turn look, where it takes one, says no turn
-// runs). A running session with nothing it may claim (nothing queued,
-// or only items fenced to a live sibling) is the dispatcher's separate
-// "not-matched" class and is deliberately not counted: the poll loop never
-// exits while the session runs, so counting it would turn this into a tick
-// counter. See #5317. The gate is asked afresh (not the tick's pre-observe
-// answer) because the delivery attempt just run can itself have consumed the
-// only due item. The counts are flushed at most every
-// nudgePollSkipFlushInterval, not once per tick.
+// runs). A running session with nothing it may claim is one of the
+// dispatcher's separate classes, "not-matched" when nothing is queued for it
+// and "not-claimable" when every due item is fenced to a live sibling, and is
+// deliberately not counted: the poll loop never exits while the session runs,
+// so counting it would turn this into a tick counter. See #5317. The gate is
+// asked afresh (not the tick's pre-observe answer) because the delivery
+// attempt just run can itself have consumed the only due item. The counts are
+// flushed at most every nudgePollSkipFlushInterval, not once per tick.
 func countNudgePollSkip(gate *nudgePollGate, skips *nudgePollSkips, target nudgeTarget, launch func() (string, bool), pollErr error, now time.Time, stderr io.Writer) {
 	if !gate.hasDue(target, launch, now) {
 		return
@@ -3724,20 +3724,53 @@ func loadLiveNudgeFenceSessionIDsFromCity(cityPath string) map[string]struct{} {
 }
 
 // sessionHoldsNudgeFence reports whether a session still occupies its seat
-// for nudge-fence purposes. Drained, archived, failed-create, and closed
-// sessions are superseded: their queued nudges may rebind to a successor.
-// Asleep, draining, and quarantined sessions still own their fence so a
-// concurrent sibling (or an in-flight drain) is not stolen.
+// for nudge-fence purposes. Closed, archived, and failed-create sessions are
+// superseded, and so is a drained pool seat that only pool demand could start
+// again (drainedPoolSeatReleasesNudgeFence): their queued nudges may rebind
+// to a successor. Every other session still owns its fence so a concurrent
+// sibling (or an in-flight drain) is not stolen: asleep for any other reason,
+// draining, quarantined, and every other drained session, which the
+// reconciler may start again in place under the same bead id (an explicit
+// wake, assigned work or an attach starts a drained named or manual session).
 func sessionHoldsNudgeFence(info session.Info) bool {
 	if info.Closed || strings.TrimSpace(info.ID) == "" {
 		return false
 	}
+	if drainedPoolSeatReleasesNudgeFence(info) {
+		return false
+	}
 	switch info.State {
-	case session.StateDrained, session.StateArchived, session.StateFailedCreate:
+	case session.StateArchived, session.StateFailedCreate:
 		return false
 	default:
 		return true
 	}
+}
+
+// drainedPoolSeatReleasesNudgeFence reports whether info is a drained seat of
+// a controller pool that only pool demand could start again. Pool demand
+// never reselects a drained seat (collectActiveBeads), so the seat's queued
+// nudges belong to a live seat of the pool (#6991). The seat is stamped
+// pool_managed or pool_slot and is neither manual nor named (the controller
+// pool of wakeWillNotStart), in either drained shape (isDrainedSessionInfo:
+// raw state "drained", or "asleep" with sleep_reason "drained", both of which
+// the codec decodes as asleep). A drained seat that something else starts
+// again in place keeps its fence: one with an explicit wake requested
+// (wakeRequested), and one an operator hold or a wait keeps
+// (Disposition.KeepsSlot, Disposition.Wait) for the resume or the ready wait
+// that starts it. Work assigned to the seat itself starts it in place too,
+// and the census reads no work, so a nudge fenced to such a seat may still go
+// to a live sibling.
+func drainedPoolSeatReleasesNudgeFence(info session.Info) bool {
+	if !isDrainedSessionInfo(info) || wakeRequested(info) {
+		return false
+	}
+	poolSeat := info.PoolManaged || strings.TrimSpace(info.PoolSlot) != ""
+	if !poolSeat || isManualSessionInfo(info) || isNamedSessionInfo(info) {
+		return false
+	}
+	hold := session.DispositionOfInfo(info)
+	return !hold.KeepsSlot() && !hold.Wait
 }
 
 // nudgeQueueIsEmpty reports whether the city's persisted nudge queue holds no
