@@ -592,6 +592,241 @@ func TestFormatExtmsgNotifyReminderExplicitTargetDiscriminator(t *testing.T) {
 	}
 }
 
+// extmsgNudgesBySessionName collects every Nudge the fake runtime recorded,
+// keyed by session name, preserving repeat notices per session.
+func extmsgNudgesBySessionName(fs *fakeState) map[string][]string {
+	nudges := map[string][]string{}
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Nudge" {
+			nudges[call.Name] = append(nudges[call.Name], call.Message)
+		}
+	}
+	return nudges
+}
+
+// TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce covers the
+// reported bug (ga-9xbn7u): an inbound on an ungrouped conversation whose
+// explicit_target names a live session that is not a transcript member must
+// notify that session once, with the message text and no "Addressed to:"
+// discriminator, while the bound member still hears the message with the
+// discriminator so it can self-silence.
+func TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		selector func(target session.Info) string
+	}{
+		{
+			name:     "target by session id",
+			selector: func(target session.Info) string { return target.ID },
+		},
+		{
+			name:     "target by alias",
+			selector: func(session.Info) string { return "myrig/asker" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			t.Cleanup(srv.waitForBackground)
+
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+			fs.adapterReg = extmsg.NewAdapterRegistry()
+
+			ref := extmsg.ConversationRef{
+				ScopeID:        "guild-1",
+				Provider:       "slack",
+				AccountID:      "acct-1",
+				ConversationID: "C123",
+				Kind:           extmsg.ConversationRoom,
+			}
+			bound := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+			target := createTestSession(t, fs.cityBeadStore, fs.sp, "Asker")
+			if tc.name == "target by alias" {
+				if err := fs.cityBeadStore.Update(target.ID, beads.UpdateOpts{
+					Metadata: map[string]string{"alias": "myrig/asker"},
+				}); err != nil {
+					t.Fatalf("Update(target alias): %v", err)
+				}
+			}
+			explicitTarget := tc.selector(target)
+
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			now := time.Now().UTC()
+			if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+				Conversation: ref,
+				SessionID:    bound.ID,
+				Now:          now,
+			}); err != nil {
+				t.Fatalf("Bind: %v", err)
+			}
+			if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+				Caller:         caller,
+				Conversation:   ref,
+				SessionID:      bound.ID,
+				BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+				Owner:          extmsg.MembershipOwnerManual,
+				Now:            now,
+			}); err != nil {
+				t.Fatalf("EnsureMembership(bound): %v", err)
+			}
+
+			body, err := json.Marshal(map[string]any{
+				"message": map[string]any{
+					"provider_message_id": "m1",
+					"conversation": map[string]any{
+						"scope_id":        ref.ScopeID,
+						"provider":        ref.Provider,
+						"account_id":      ref.AccountID,
+						"conversation_id": ref.ConversationID,
+						"kind":            ref.Kind,
+					},
+					"actor":           map[string]any{"id": "u1", "display_name": "Alice", "is_bot": false},
+					"text":            "the answer is 42",
+					"explicit_target": explicitTarget,
+					"received_at":     time.Now().UTC().Format(time.RFC3339),
+				},
+			})
+			if err != nil {
+				t.Fatalf("Marshal(body): %v", err)
+			}
+			req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(string(body)))
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			srv.waitForBackground()
+
+			nudges := extmsgNudgesBySessionName(fs)
+			targetNudges := nudges[target.SessionName]
+			if len(targetNudges) != 1 {
+				t.Fatalf("explicit target (non-member) nudges = %d, want 1; nudges=%#v", len(targetNudges), nudges)
+			}
+			if !strings.Contains(targetNudges[0], "the answer is 42") {
+				t.Fatalf("target nudge missing message text:\n%s", targetNudges[0])
+			}
+			if strings.Contains(targetNudges[0], "Addressed to:") {
+				t.Fatalf("addressed target saw discriminator:\n%s", targetNudges[0])
+			}
+			boundNudges := nudges[bound.SessionName]
+			if len(boundNudges) != 1 {
+				t.Fatalf("bound member nudges = %d, want 1; nudges=%#v", len(boundNudges), nudges)
+			}
+			if !strings.Contains(boundNudges[0], "Addressed to: @"+explicitTarget) {
+				t.Fatalf("bound member nudge missing discriminator:\n%s", boundNudges[0])
+			}
+			if len(nudges) != 2 {
+				t.Fatalf("nudged sessions = %d, want exactly the member and the target; nudges=%#v", len(nudges), nudges)
+			}
+		})
+	}
+}
+
+// TestExtmsgNotifyMembersNotifiesExplicitTargetOutsideMembers covers an
+// inbound whose explicit target names a live session that is not a
+// transcript member of the conversation: the named session must be told.
+func TestExtmsgNotifyMembersNotifiesExplicitTargetOutsideMembers(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+	fs.extmsgSvc = &services
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "guild-1",
+		Provider:       "slack",
+		AccountID:      "acct-1",
+		ConversationID: "C123",
+		Kind:           extmsg.ConversationRoom,
+	}
+	bound := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+	target := createTestSession(t, fs.cityBeadStore, fs.sp, "Asker")
+
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+		Caller:         caller,
+		Conversation:   ref,
+		SessionID:      bound.ID,
+		BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+		Owner:          extmsg.MembershipOwnerManual,
+		Now:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("EnsureMembership(bound): %v", err)
+	}
+
+	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "the answer is 42", "", target.ID)
+
+	nudgesBySessionName := map[string][]string{}
+	for _, call := range fs.sp.Calls {
+		if call.Method == "Nudge" {
+			nudgesBySessionName[call.Name] = append(nudgesBySessionName[call.Name], call.Message)
+		}
+	}
+	if got := nudgesBySessionName[bound.SessionName]; len(got) != 1 {
+		t.Fatalf("bound member nudges = %d, want 1; calls=%#v", len(got), fs.sp.Calls)
+	}
+	targetNudges := nudgesBySessionName[target.SessionName]
+	if len(targetNudges) != 1 {
+		t.Fatalf("explicit target (non-member) nudges = %d, want 1; calls=%#v", len(targetNudges), fs.sp.Calls)
+	}
+	if !strings.Contains(targetNudges[0], "the answer is 42") {
+		t.Fatalf("target nudge missing message text:\n%s", targetNudges[0])
+	}
+	if strings.Contains(targetNudges[0], "Addressed to:") {
+		t.Fatalf("addressed target saw discriminator:\n%s", targetNudges[0])
+	}
+}
+
+// TestExtmsgNotifyMembersClosedExplicitTargetNotNudged pins the edge case of
+// explicit-target delivery: a target given as the exact ID of a closed
+// session still resolves (exact-ID matches accept closed beads), but its
+// notice fails delivery as a closed member's would — no nudge reaches it and
+// the transcript members are still notified.
+func TestExtmsgNotifyMembersClosedExplicitTargetNotNudged(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+	fs.extmsgSvc = &services
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "guild-1",
+		Provider:       "slack",
+		AccountID:      "acct-1",
+		ConversationID: "C123",
+		Kind:           extmsg.ConversationRoom,
+	}
+	bound := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+	closed := createTestSession(t, fs.cityBeadStore, fs.sp, "Gone")
+	closedStatus := "closed"
+	if err := fs.cityBeadStore.Update(closed.ID, beads.UpdateOpts{Status: &closedStatus}); err != nil {
+		t.Fatalf("close target session: %v", err)
+	}
+
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+		Caller:         caller,
+		Conversation:   ref,
+		SessionID:      bound.ID,
+		BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+		Owner:          extmsg.MembershipOwnerManual,
+		Now:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("EnsureMembership(bound): %v", err)
+	}
+
+	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hi again", "", closed.ID)
+
+	nudges := extmsgNudgesBySessionName(fs)
+	if got := nudges[closed.SessionName]; len(got) != 0 {
+		t.Fatalf("closed explicit target nudges = %d, want 0; nudges=%#v", len(got), nudges)
+	}
+	if got := nudges[bound.SessionName]; len(got) != 1 || !strings.Contains(got[0], "hi again") {
+		t.Fatalf("bound member nudges = %v, want exactly one carrying the text; nudges=%#v", got, nudges)
+	}
+}
+
 // TestFormatExtmsgNotifyReminderExplicitTargetSanitization ensures the
 // new ExplicitTarget field goes through extmsg.SanitizeForSystemReminder
 // (defense-in-depth: provider adapters resolve targets, but a hostile
