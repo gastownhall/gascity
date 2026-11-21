@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -43,7 +44,7 @@ func TestFactoryReconcileTranscriptMetaPageWritesExactClaudeAndCodexSidecars(t *
 		transcriptMetaSession("gc-01-claude", "claude", claudeWorkDir, claudeKey, time.Now().Add(-time.Minute)),
 		transcriptMetaSession("gc-02-codex", "codex", codexWorkDir, codexKey, time.Now().Add(-time.Minute)),
 	}, nil)
-	manager := sessionpkg.NewManagerWithOptions(store, runtime.NewFake())
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake())
 	factory, err := NewFactoryFromManager(manager, []string{root})
 	if err != nil {
 		t.Fatalf("NewFactoryFromManager: %v", err)
@@ -74,7 +75,7 @@ func TestFactoryReconcileTranscriptMetaPageSkipsDisabledMissingAndAmbiguousRecor
 	store := beads.NewMemStoreFrom(1, []beads.Bead{
 		transcriptMetaSession("gc-01-missing", "claude", workDir, key, time.Now()),
 	}, nil)
-	manager := sessionpkg.NewManagerWithOptions(store, runtime.NewFake())
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake())
 	factory, err := NewFactoryFromManager(manager, []string{root})
 	if err != nil {
 		t.Fatalf("NewFactoryFromManager: %v", err)
@@ -141,7 +142,7 @@ func TestFactoryReconcileTranscriptMetaPageIsLexicalAndIdempotent(t *testing.T) 
 		paths[id] = path
 	}
 	store := beads.NewMemStoreFrom(3, records, nil)
-	manager := sessionpkg.NewManagerWithOptions(store, runtime.NewFake())
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake())
 	factory, err := NewFactoryFromManager(manager, []string{root})
 	if err != nil {
 		t.Fatalf("NewFactoryFromManager: %v", err)
@@ -212,7 +213,7 @@ func TestFactoryTranscriptMetaReconcilerUsesOneSnapshotAcrossBatchesAndCompletes
 			t.Fatal(err)
 		}
 	}
-	factory, err := NewFactoryFromManager(sessionpkg.NewManagerWithOptions(store, runtime.NewFake()), []string{root})
+	factory, err := NewFactoryFromManager(sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake()), []string{root})
 	if err != nil {
 		t.Fatalf("NewFactoryFromManager: %v", err)
 	}
@@ -278,7 +279,7 @@ func TestTranscriptMetaReconcilerContinuesAfterPerSidecarWriteFailure(t *testing
 		transcriptMetaSession("gc-a-fails", "claude", firstWorkDir, "failing-key", time.Now()),
 		transcriptMetaSession("gc-b-works", "claude", secondWorkDir, "working-key", time.Now()),
 	}, nil)
-	factory, err := NewFactoryFromManager(sessionpkg.NewManagerWithOptions(store, runtime.NewFake()), []string{root})
+	factory, err := NewFactoryFromManager(sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake()), []string{root})
 	if err != nil {
 		t.Fatalf("NewFactoryFromManager: %v", err)
 	}

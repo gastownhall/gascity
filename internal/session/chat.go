@@ -355,6 +355,9 @@ func (m *Manager) retainFailedResume(id, sessName string, env map[string]string,
 // the failed start's identity with no read: the legacy runtime-only start,
 // whose caller commits against the incarnation its PreWake minted, so a mint
 // under it would make its own commit stale (deleted with legacy at P6).
+// turn holds the first turn the start's last successful Start handed back:
+// a relaunch that starts replaces it with its own (takeStartupTurn), and
+// one that does not leaves it, since that launch may still stand.
 func (m *Manager) retryFreshStartAfterStaleKey(
 	ctx context.Context,
 	id string,
@@ -366,6 +369,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	unroute func(),
 	lease *RuntimeLease,
 	inc *Incarnation,
+	turn *startupTurn,
 ) (bool, error) {
 	if retainsCommittedConversation(infoFromPersistedBead(*b)) {
 		return false, m.retainFailedResume(id, sessName, cfg.Env, startErr, unroute)
@@ -507,6 +511,9 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if inc != nil {
 		*inc = next
 	}
+	// The relaunch replaced the launch turn came from: its own first turn,
+	// if it handed one back, is the one that stands.
+	*turn = m.takeStartupTurn(sessName, cfg.Env[runtime.InstanceTokenEnv])
 	return true, nil
 }
 
@@ -516,7 +523,11 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 // marker cleared), as commitPendingContinuationReset does, when the mint's
 // read still records it. The start was decided on b, so a reset recorded
 // after b was read stays pending for the next start, and one consumed since
-// bumps nothing. What it wrote is folded onto b.
+// bumps nothing. A consumed reset takes the restart handoff's
+// reset_committed_at with it: no start commit follows a Manager start to
+// clear it, and left behind it would read as a restart still in flight once
+// a stale-key recovery records the reset marker again. What it wrote is
+// folded onto b.
 func (m *Manager) mintStart(ctx context.Context, lease *RuntimeLease, by ActorKind, b *beads.Bead, consumeReset bool) (Incarnation, error) {
 	expect := infoFromPersistedBead(*b)
 	inc, err := m.PersistedStore().MintIncarnation(ctx, lease, MintRequest{
@@ -524,6 +535,7 @@ func (m *Manager) mintStart(ctx context.Context, lease *RuntimeLease, by ActorKi
 		FreshContext: func(fresh Info) bool {
 			return consumeReset && strings.TrimSpace(fresh.ContinuationResetPending) != ""
 		},
+		ConsumeResetCommit: true,
 	})
 	if err != nil {
 		return Incarnation{}, err
@@ -886,6 +898,11 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		return err
 	}
 	defer release()
+	// The first turn the last Start that succeeded handed back, taken right
+	// after that Start and queued once the start ends, whatever it returns:
+	// its launch may stand (settleStartupTurnLocked).
+	var turn startupTurn
+	defer func() { m.settleStartupTurnLocked(ctx, b, sessName, turn) }()
 	if lease != nil {
 		var cancel context.CancelFunc
 		if ctx, cancel, err = lease.Watch(ctx, runtimeLeaseWatchEvery); err != nil {
@@ -986,7 +1003,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			// it falls through to the plain failure below instead of the
 			// stale-key recovery.
 			case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-				retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, lease, inc)
+				retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, lease, inc, &turn)
 				if retryErr != nil {
 					return retryErr
 				}
@@ -1021,6 +1038,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			}
 		} else {
 			started = true
+			turn = m.takeStartupTurn(sessName, minted.Fence().Token)
 		}
 		if started {
 			provisional = false // a process runs under inc
@@ -1038,14 +1056,14 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			// This is self-healing via NDI — the next ensureRunning call
 			// sees the suspended-state bead, reads the runtime up, and
 			// persists "active" with the runtime's binding. The mint stands:
-			// the process launched carries it.
+			// the process launched carries it, and so does its first turn.
 			if unroute != nil {
 				unroute()
 			}
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, lease, inc)
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, lease, inc, &turn)
 			if err != nil {
 				return err
 			}
@@ -1205,6 +1223,8 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	if !inc.recordedBy(b.Metadata) {
 		return fmt.Errorf("%w: session %s no longer records %s", ErrMintSuperseded, id, inc)
 	}
+	var turn startupTurn // as in ensureRunningOn
+	defer func() { m.settleStartupTurnLocked(ctx, b, sessName, turn) }()
 
 	cfg := hints
 	cfg.Command = resumeCommand
@@ -1242,7 +1262,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		// A capacity refusal says nothing about the resume key; it takes the
 		// plain failure path, not the stale-key recovery (see ensureRunning).
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, nil, nil)
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, nil, nil, &turn)
 			if retryErr != nil {
 				return retryErr
 			}
@@ -1265,6 +1285,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		}
 	} else {
 		started = true
+		turn = m.takeStartupTurn(sessName, inc.Fence().Token)
 	}
 	if started && b.Metadata["session_key"] != "" {
 		if err := m.staleKeyDetectionWaiter(ctx, sessName); err != nil {
@@ -1274,7 +1295,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil); err != nil {
+			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil, &turn); err != nil {
 				return err
 			}
 		}
@@ -1408,11 +1429,27 @@ func normalizeWaitIdleNudgeSource(source string) string {
 	return source
 }
 
+// idleBoundaryOutOfReach takes the wait-idle nudge's pre-read of b's session
+// sessName before its idle wait (runtime.IdleBoundaryNow): a session that
+// reads busy, or whose input a pending interaction owns, will not reach a
+// boundary within the wait, so the nudge is reported undelivered at once for
+// its caller to queue. Any other reading leaves the wait to decide. Under
+// the program-status shadow switch the pre-read is recorded beside the
+// program's record read fresh with it (wait_idle_preread); the reading
+// never feeds the delivery.
+func (m *Manager) idleBoundaryOutOfReach(b beads.Bead, sessName string) bool {
+	return runtime.ShadowIdleBoundaryNow(m.sp, sessName, b.ID, providerKind(b)).OutOfReach()
+}
+
 func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	ctx, started := withStartupNudgeRecorder(ctx)
 	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); errors.Is(err, ErrAgentDead) {
 		return false, nil // not delivered: the caller queues it for the healed agent
 	} else if err != nil {
 		return false, err
+	}
+	if started.queued || m.startupTurnAhead(ctx, b, sessName) {
+		return false, nil // not delivered: the caller queues it behind the first turn
 	}
 	if transportFromMetadata(b) == "acp" {
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
@@ -1425,6 +1462,9 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
 	if !ok {
+		return false, nil
+	}
+	if m.idleBoundaryOutOfReach(b, sessName) {
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
@@ -1440,6 +1480,9 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	if !m.liveAgent(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
 		return false, nil
 	}
+	if m.startupTurnAhead(ctx, b, sessName) {
+		return false, nil // not delivered: the caller queues it behind the first turn
+	}
 	if transportFromMetadata(b) == "acp" {
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
 			return false, err
@@ -1451,6 +1494,9 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
 	if !ok {
+		return false, nil
+	}
+	if m.idleBoundaryOutOfReach(b, sessName) {
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
@@ -1477,7 +1523,9 @@ func (m *Manager) pendingInteractionLocked(sessName string) error {
 
 // PendingInteractionError returns an error wrapping ErrPendingInteraction that
 // names the pending request, so callers can tell the operator what must be
-// answered (with Respond) before text can be delivered.
+// answered before text can be delivered: a permission prompt with Respond's
+// approve or deny, a question with Respond's select (naming one of its
+// options) or in the terminal.
 func PendingInteractionError(pending *runtime.PendingInteraction) error {
 	what := strings.TrimSpace(pending.Kind)
 	if what == "" {
@@ -1488,6 +1536,11 @@ func PendingInteractionError(pending *runtime.PendingInteraction) error {
 	}
 	if pending.RequestID != "" {
 		what += " (request " + pending.RequestID + ")"
+	}
+	if strings.TrimSpace(pending.Kind) == "question" {
+		// A question is answered by picking one of its options; free text
+		// and chat are answered in the terminal.
+		return fmt.Errorf("%w: %s is waiting for an answer; respond to it (select one of its options) or answer it in the terminal (gc session attach <session>); text sent now would select one of its options", ErrPendingInteraction, what)
 	}
 	return fmt.Errorf("%w: %s is waiting for an answer; respond to it (approve or deny) before sending text", ErrPendingInteraction, what)
 }
@@ -1519,10 +1572,13 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 
 // sendLocked delivers message, starting or resuming the runtime as by
 // allows; a row it may not resume, or whose agent is dead in a pane still
-// up, gets the message queued (reports true). So does a live session the
-// runtime would not type into because it is running a turn the submit keys
-// would interrupt (runtime.ErrSessionBusy): the queue delivers it later.
+// up, gets the message queued (reports true), and so does a session whose
+// start, made by this send, queued its first turn: the queue delivers the
+// message after it. So does a live session the runtime would not type into
+// because it is running a turn the submit keys would interrupt
+// (runtime.ErrSessionBusy): the queue delivers it later.
 func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool, queueSource string) (bool, error) {
+	ctx, started := withStartupNudgeRecorder(ctx)
 	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); err != nil {
 		if !errors.Is(err, ErrResumeHeld) && !errors.Is(err, ErrAgentDead) {
 			return false, err
@@ -1532,6 +1588,14 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 	verifyDeferredDialogs := needsDeferredStartupDialogVerification(b)
 	if verifyDeferredDialogs {
 		m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay)
+	}
+	if started.queued || m.startupTurnAhead(ctx, b, sessName) {
+		// The session's first turn is still queued, by the start this send
+		// made or by an earlier one (an un-welded exec launch hands back
+		// every first turn): the message waits behind it in the queue
+		// rather than reach the agent ahead of its startup prompt. Nothing
+		// was typed, so the dialogs stay unverified until a send types.
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, queueSource)
 	}
 	if err := m.pendingInteractionLocked(sessName); err != nil {
 		return false, err
@@ -1548,6 +1612,30 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 	return false, nil
 }
 
+// queueBehindPendingInteractionLocked turns a send's pending-interaction
+// refusal (err wrapping ErrPendingInteraction: the manager's look, or the
+// runtime's own refusal to type into a prompt) into a deferred delivery of
+// message under source, delivered once the interaction is answered. Any
+// other answer passes through as queued and err. A refusal whose queueing
+// fails is not queued: its error wraps the refusal and the queue's failure.
+//
+// A runtime's refusal may come after it typed the message and before it
+// submitted it (tmux's last look before the submit key), leaving the text
+// unsent in the input box. tmux's delivery of the queued message clears the
+// input box before its paste, which removes that leftover, except while a
+// client is attached: it leaves the input box alone then, and the delivery
+// joins the leftover text.
+func (m *Manager) queueBehindPendingInteractionLocked(b beads.Bead, sessName, message, source string, queued bool, err error) (bool, error) {
+	if !errors.Is(err, ErrPendingInteraction) {
+		return queued, err
+	}
+	if qerr := m.enqueueDeferredSubmitLocked(b, sessName, message, source); qerr != nil {
+		return false, fmt.Errorf("%w; queueing the message behind it failed: %w", err, qerr)
+	}
+	log.Printf("session: %q: queued a message behind a pending interaction: %v", sessName, err)
+	return true, nil
+}
+
 func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, immediate bool) (SubmitOutcome, error) {
 	if err := m.checkStarter(by); err != nil {
 		return SubmitOutcome{}, err
@@ -1559,6 +1647,12 @@ func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand
 			return err
 		}
 		outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, immediate, deferredNudgeSource)
+		if !immediate {
+			// A send that may wait for a safe boundary waits behind a
+			// pending interaction too: queued for after it is answered,
+			// never refused and dropped. Only an immediate send refuses.
+			outcome.Queued, err = m.queueBehindPendingInteractionLocked(b, sessName, message, deferredNudgeSource, outcome.Queued, err)
+		}
 		outcome.Deferred = outcome.Queued
 		return err
 	})
@@ -1568,7 +1662,7 @@ func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand
 func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool, processNames []string) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {
-		_, sessName, err := m.sessionBead(id)
+		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
@@ -1576,6 +1670,16 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 		if err != nil || !live.Running || !live.Alive { // a dead agent's pane takes nothing (mc-wdjni)
 			delivered = false
 			return runtime.LivenessFenceMiss(ctx, sessName, live, err)
+		}
+		if m.startupTurnAhead(ctx, b, sessName) {
+			// The session's first turn is still in the queue, waiting or
+			// being delivered by the queue's own send: this send would
+			// reach the agent ahead of it. Undelivered, so the lane waits
+			// and its other callers queue it behind the turn.
+			return nil
+		}
+		if err := m.pendingInteractionLocked(sessName); err != nil {
+			return err
 		}
 		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
 			return err
@@ -1640,7 +1744,10 @@ func (m *Manager) SendImmediate(ctx context.Context, by Actor, id, message, resu
 // resumes or restarts the session. Under an input fence in ctx, a session it
 // finds not running, or with its agent exited, is a miss rather than
 // undelivered, and a liveness read that fails is runtime.ErrRuntimeUnavailable
-// (runtime.LivenessFenceMiss).
+// (runtime.LivenessFenceMiss). A session whose startup turn is still in the
+// queue, waiting or being delivered, reports the send undelivered, typing
+// nothing ahead of it, unless the send is the queue's delivery of that turn
+// (made under the delivery key the turn is pinned to).
 func (m *Manager) SendLiveOnly(ctx context.Context, id, message string, processNames []string) (bool, error) {
 	return m.sendLiveOnly(ctx, id, message, false, processNames)
 }
@@ -1676,6 +1783,10 @@ func (m *Manager) TryWaitIdleNudge(ctx context.Context, by Actor, id, source, me
 // TryWaitIdleNudgeLiveOnly delivers a best-effort nudge at a safe boundary
 // only when the runtime is already live with its agent alive (by
 // processNames; none reads alive). It never resumes or restarts the session.
+// A session whose startup turn is still in the queue, waiting or being
+// delivered, reports it undelivered, typing nothing ahead of it, unless the
+// nudge is the queue's delivery of that turn (made under the delivery key
+// the turn is pinned to).
 func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string, processNames []string) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {
@@ -1831,7 +1942,7 @@ func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string, restart 
 		if !restarts || !errors.Is(err, runtime.ErrTurnNotEnded) {
 			return err
 		}
-		if err := restartWithheld(ctx, fmt.Sprintf("interrupting turn %q of %s", turnID, id), nil, err); err != nil {
+		if err := restartWithheld(ctx, fmt.Sprintf("interrupting turn %q of %s", turnID, id), nil, false, err); err != nil {
 			return err
 		}
 		if err := m.restartAfterFailedInterruptLocked(ctx, by, id, b, sessName, restart); err != nil {
@@ -1985,6 +2096,14 @@ func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, b
 		return nil, true, fmt.Errorf("getting pending interaction: %w", err)
 	}
 	return pending, true, nil
+}
+
+// ProgramStatusByName reads the judged OSC 7501 program status of the runtime
+// session sessName from the backend serving it (runtime.ReadProgramStatus):
+// an Unread reading when that backend takes no such reading, otherwise the
+// backend's reading and error unchanged. It is observation only.
+func (m *Manager) ProgramStatusByName(sessName string) (runtime.ProgramStatus, error) {
+	return runtime.ReadProgramStatus(m.sp, sessName)
 }
 
 // Respond resolves the current pending interaction for a session.

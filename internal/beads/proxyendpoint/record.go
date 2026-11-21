@@ -44,6 +44,12 @@ const (
 	// ConfigFileName is the sql-server config bd renders in the proxy root and
 	// hands its Dolt child with --config.
 	ConfigFileName = "config.yaml"
+	// RuntimeConfigFileName is the config bd's proxy launches its Dolt child
+	// from, with --config, after it moved the child off a Beads-chosen port
+	// another process took first (bd v1.3.3, beads#7184): a copy of
+	// ConfigFileName with only listener.port changed, in the same proxy root,
+	// removed when the server stops. config.yaml itself is never rewritten.
+	RuntimeConfigFileName = "proxy-child.runtime-config.yaml"
 	// SidecarFileName is the per-scope client info bd writes under .beads/ when
 	// it initializes a proxied workspace.
 	SidecarFileName = "proxied_server_client_info.json"

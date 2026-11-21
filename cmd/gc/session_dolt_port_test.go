@@ -464,15 +464,23 @@ func TestSessionBackendEnvLeavesUnmirroredTopologiesUnchanged(t *testing.T) {
 // read from a map a password is written into, so logging env["GC_DOLT_PORT"]
 // reads as clear-text logging of sensitive information.
 func TestWithholdDriftLogOmitsEnvValues(t *testing.T) {
-	cityPath := t.TempDir()
-	livePort := writeManagedDirectCityFixture(t, cityPath)
+	// The drift line names the scope path, so a leak probe that is also a
+	// substring of that path would read as a leak with none. Name the city
+	// directory after the probe so that overlap is forced on every run rather
+	// than left to the random temp suffix.
+	const envPort = "44829"
+	cityPath := filepath.Join(t.TempDir(), "city-"+envPort)
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeManagedDirectCityFixture(t, cityPath)
 	// Force the mismatch path: the mirror reads a different port than the one
 	// the env projects.
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "dolt-server.port"), []byte("31364"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	env := map[string]string{
-		"GC_DOLT_PORT":     livePort,
+		"GC_DOLT_PORT":     envPort,
 		"GC_DOLT_PASSWORD": "s3cret-probe",
 	}
 
@@ -487,14 +495,16 @@ func TestWithholdDriftLogOmitsEnvValues(t *testing.T) {
 	if out == "" {
 		t.Fatal("expected a drift log line when the mirror cannot stand in for the projected port")
 	}
-	if strings.Contains(out, livePort) {
-		t.Fatalf("drift log contains the env-derived port %q: %s", livePort, out)
+	// The scope path is the one place the line may legitimately carry the
+	// probe's digits; every other occurrence is a leak.
+	if strings.Contains(strings.ReplaceAll(out, cityPath, "<scope>"), envPort) {
+		t.Fatalf("drift log contains the env-derived port %q: %s", envPort, out)
 	}
 	if strings.Contains(out, "s3cret-probe") {
 		t.Fatalf("drift log contains an env-derived credential: %s", out)
 	}
 	// The mismatch must keep the projection, logged or not.
-	if got := env["GC_DOLT_PORT"]; got != livePort {
-		t.Fatalf("GC_DOLT_PORT = %q, want projected %q kept when the mirror cannot stand in", got, livePort)
+	if got := env["GC_DOLT_PORT"]; got != envPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want projected %q kept when the mirror cannot stand in", got, envPort)
 	}
 }

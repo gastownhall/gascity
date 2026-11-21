@@ -8,12 +8,13 @@ import (
 )
 
 // TestDoltConfigTimeoutsUseNamedConstants statically guards the class of bug
-// fixed in ga-gajll3: runBDInitCompat and startDoltServerOnAllInterfaces each
-// carried their own hardcoded timeout literal that silently drifted out of
-// sync with bdInitTimeout, the constant their siblings in bdstore_test.go use
-// for the same class of wait. It parses dolt_config_test.go and asserts each
-// call site passes a named constant, not a bare literal, so a future edit
-// can't reintroduce the drift without this test going red.
+// fixed in ga-gajll3: runBDInitCompat carried its own hardcoded timeout literal
+// that silently drifted out of sync with bdInitTimeout, the constant its
+// siblings in bdstore_test.go use for the same class of wait. It parses
+// dolt_config_test.go and asserts the call site passes a named constant, not a
+// bare literal, so a future edit can't reintroduce the drift without this test
+// going red. Server readiness is not budgeted here: dolttest.StartSQLServer
+// owns that wait.
 func TestDoltConfigTimeoutsUseNamedConstants(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "dolt_config_test.go", nil, 0)
@@ -21,7 +22,7 @@ func TestDoltConfigTimeoutsUseNamedConstants(t *testing.T) {
 		t.Fatalf("parsing dolt_config_test.go: %v", err)
 	}
 
-	var initTimeoutArgs, readyDeadlineArgs []ast.Expr
+	var initTimeoutArgs []ast.Expr
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -32,17 +33,9 @@ func TestDoltConfigTimeoutsUseNamedConstants(t *testing.T) {
 		if !ok {
 			return true
 		}
-		switch {
-		case sel.Sel.Name == "WithTimeout" && len(call.Args) == 2:
+		if sel.Sel.Name == "WithTimeout" && len(call.Args) == 2 {
 			// context.WithTimeout(context.Background(), <budget>)
 			initTimeoutArgs = append(initTimeoutArgs, call.Args[1])
-		case sel.Sel.Name == "Add" && len(call.Args) == 1:
-			// time.Now().Add(<budget>) — receiver must itself be time.Now().
-			if recv, ok := sel.X.(*ast.CallExpr); ok {
-				if recvSel, ok := recv.Fun.(*ast.SelectorExpr); ok && recvSel.Sel.Name == "Now" {
-					readyDeadlineArgs = append(readyDeadlineArgs, call.Args[0])
-				}
-			}
 		}
 		return true
 	})
@@ -50,12 +43,8 @@ func TestDoltConfigTimeoutsUseNamedConstants(t *testing.T) {
 	if len(initTimeoutArgs) != 1 {
 		t.Fatalf("expected exactly 1 context.WithTimeout call in dolt_config_test.go, found %d — update this test's scoping", len(initTimeoutArgs))
 	}
-	if len(readyDeadlineArgs) != 1 {
-		t.Fatalf("expected exactly 1 time.Now().Add call in dolt_config_test.go, found %d — update this test's scoping", len(readyDeadlineArgs))
-	}
 
 	requireNamedConstant(t, "runBDInitCompat's context.WithTimeout budget", initTimeoutArgs[0], "bdInitTimeout")
-	requireNamedConstant(t, "startDoltServerOnAllInterfaces's readiness deadline", readyDeadlineArgs[0], "doltServerReadyTimeout")
 }
 
 func requireNamedConstant(t *testing.T, what string, expr ast.Expr, want string) {

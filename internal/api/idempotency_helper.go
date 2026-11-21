@@ -35,6 +35,15 @@ import "github.com/gastownhall/gascity/internal/api/apierr"
 // described above); supervisor-scope handlers (POST /v0/city, where no per-city
 // Server exists yet) pass sm.idem, the SupervisorMux's own process-wide cache.
 func withIdempotency[T any](idem *idempotencyCache, path, key string, body any, create func() (T, error)) (T, error) {
+	return withIdempotencyKeeping(idem, path, key, body, create, nil)
+}
+
+// withIdempotencyKeeping is withIdempotency for an endpoint whose success can
+// be provisional: a success keep reports false for is answered but not
+// cached, and its reservation is released as an error's is, so a same-key
+// retry runs create() again and answers from what the first call stopped
+// waiting for. A nil keep keeps every success.
+func withIdempotencyKeeping[T any](idem *idempotencyCache, path, key string, body any, create func() (T, error), keep func(T) bool) (T, error) {
 	var zero T
 	if key == "" {
 		return create()
@@ -58,10 +67,11 @@ func withIdempotency[T any](idem *idempotencyCache, path, key string, body any, 
 		// serve a wrong-typed replay.
 	}
 
-	// Release the reservation on any non-success exit — an error return OR a
-	// panic in create(). unreserve only drops a *pending* entry, so on the
-	// wrong-typed fall-through above (where this caller holds no reservation) it
-	// is a harmless no-op against the completed entry.
+	// Release the reservation on any exit that caches nothing — an error
+	// return, a panic in create(), or a success keep does not keep. unreserve
+	// only drops a *pending* entry, so on the wrong-typed fall-through above
+	// (where this caller holds no reservation) it is a harmless no-op against
+	// the completed entry.
 	settled := false
 	defer func() {
 		if !settled {
@@ -72,6 +82,9 @@ func withIdempotency[T any](idem *idempotencyCache, path, key string, body any, 
 	v, err := create()
 	if err != nil {
 		return zero, err
+	}
+	if keep != nil && !keep(v) {
+		return v, nil
 	}
 	settled = true
 	idem.storeResponse(scopedKey, bodyHash, v)

@@ -8,7 +8,7 @@
 #   make docker-base
 #   # or: docker build -f contrib/k8s/Dockerfile.base -t gc-agent-base:latest .
 
-FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS go-toolchain
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS go-toolchain
 
 FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b AS tool-builder
 
@@ -22,22 +22,29 @@ ARG DOLT_SOURCE_SHA256=8bd82ec8f9693d5e69d79fb26e361438859e4af96c48f99a40f324c0f
 ARG GRPC_VERSION=1.83.2
 # Patched module versions forced into the gh and Dolt rebuilds below, matching
 # the versions this repo's own go.mod carries. The rebuilt bd tracks its own
-# GRPC_VERSION, THRIFT_VERSION and XNET_VERSION in contrib/k8s/Dockerfile.agent;
-# both files carry the same thrift floor, 0.24.0, which is where CVE-2026-43871
-# is fixed, and the same x/net floor, 0.60.0, which is where CVE-2026-78669 is
-# fixed. The other overrides here are gh/Dolt only.
+# GRPC_VERSION, THRIFT_VERSION, XNET_VERSION, JOSE_VERSION and COMPRESS_VERSION
+# in contrib/k8s/Dockerfile.agent; both files carry the same thrift floor,
+# 0.24.0, which is where CVE-2026-43871 is fixed, and the same x/net floor,
+# 0.62.0, which is where CVE-2026-78669 (0.60.0) and GO-2026-6860 /
+# GO-2026-6866 (0.62.0) are fixed. The x/crypto, x/text and x/mod overrides
+# here are gh/Dolt only.
 # Each build applies these in ascending-constraint order: a later `go get` can
 # roll an earlier one back, and only the rolled-back module's own assertion
 # would catch it. XMOD_VERSION is the newest constraint, so it goes last.
-ARG XCRYPTO_VERSION=0.57.0
-ARG XNET_VERSION=0.60.0
-ARG XTEXT_VERSION=0.42.0
+ARG XCRYPTO_VERSION=0.58.0
+ARG XNET_VERSION=0.62.0
+ARG XTEXT_VERSION=0.43.0
 ARG XMOD_VERSION=0.41.0
 ARG THRIFT_VERSION=0.24.0
 # Both pinned sources select klauspost/compress below 1.18.7 (gh v1.18.6, Dolt
-# v1.18.0), where CVE-2026-63209 is fixed. 1.18.7 requires no other module, so
-# its `go get` cannot move any of the pins above.
-ARG COMPRESS_VERSION=1.18.7
+# v1.18.0), where CVE-2026-63209 is fixed; go.mod now pins 1.20.2, which also
+# fixes GO-2026-6865 (panic on two-block frames). 1.20.2 requires no other
+# module, so its `go get` cannot move any of the pins above.
+ARG COMPRESS_VERSION=1.20.2
+# Dolt's pinned source selects go-jose/v4 4.1.4, which CVE-2026-116587 (DoS
+# parsing JWKs with RSA keys) affects; 4.1.6 is fixed and requires no other
+# module, so its `go get` cannot move any of the pins above.
+ARG JOSE_VERSION=4.1.6
 ARG DOLT_TOOLCHAIN_RELEASE=20260611_0.0.5_trixie
 ARG DOLT_OPTCROSS_X86_64_SHA256=caf703fb1cbc0c9ff9a5b506f73da6c6f5233c04a455e638cdc50267a4d0c0c0
 ARG DOLT_OPTCROSS_AARCH64_SHA256=5635d0b38343fefb0c2b600d61c49ad9ceeaa1107bccdec8a60b1789100dc0ce
@@ -122,6 +129,7 @@ RUN case "${TARGETARCH}" in \
        "golang.org/x/text@v${XTEXT_VERSION}" \
        "github.com/apache/thrift@v${THRIFT_VERSION}" \
        "github.com/klauspost/compress@v${COMPRESS_VERSION}" \
+       "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}" \
     && CGO_ENABLED=1 GOOS=linux GOARCH="${TARGETARCH}" \
        CC="${dolt_cc}" CXX="${dolt_cxx}" AS="${dolt_as}" \
        CGO_LDFLAGS="-static -s" go build \
@@ -136,19 +144,22 @@ RUN case "${TARGETARCH}" in \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} " \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} " \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} " \
-    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/klauspost/compress v${COMPRESS_VERSION} "
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/klauspost/compress v${COMPRESS_VERSION} " \
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "
 
 FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
 
 ENV DEBIAN_FRONTEND=noninteractive
 ARG CLAUDE_CODE_VERSION=2.1.308
 
-# System packages.
+# System packages. apt and libapt-pkg6.0t64 carry CVE-2026-109518, fixed in
+# 2.8.4ubuntu0.1. The pinned base image ships them, and an install leaves an
+# installed package where it is, so they are upgraded by name, together: Trivy
+# reports each binary package of the source separately.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
     curl \
-    git \
     jq \
     # lsof: TCP-LISTEN / port discovery for Dolt — runtime hard dep (gc doctor), not optional diagnostics.
     lsof \
@@ -159,7 +170,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     # util-linux: provides flock(1) for the bd/Dolt beads lock — runtime hard dep, not optional diagnostics.
     util-linux \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+    apt \
+    libapt-pkg6.0t64 \
     && rm -rf /var/lib/apt/lists/*
+
+# git comes from the git-core PPA ("Ubuntu Git Maintainers", signing key
+# F911AB184317630C59970973E363C90F8F1B6217, the fingerprint Launchpad publishes
+# for ~git-core/+archive/ubuntu/ppa). CVE-2026-105437, a heap overflow in
+# xdiff's three-way merge reachable from a committed .gitattributes, is fixed in
+# 2.50.2, 2.51.3, 2.52.1, 2.53.1, 2.54.1, 2.55.1 and 2.56.1, and the Ubuntu
+# archive has no fixed git yet (noble is 1:2.43.0-1ubuntu7.4). The PPA keeps
+# only its newest build, so the version is asserted as a floor, not pinned.
+# The source stays configured so a later apt upgrade keeps following it.
+ARG GIT_MIN_VERSION=1:2.56.1
+COPY contrib/k8s/git-core-ppa.asc /etc/apt/keyrings/git-core-ppa.asc
+RUN printf '%s\n' \
+        'Types: deb' \
+        'URIs: https://ppa.launchpadcontent.net/git-core/ppa/ubuntu' \
+        "Suites: $(. /etc/os-release && echo "${VERSION_CODENAME}")" \
+        'Components: main' \
+        'Signed-By: /etc/apt/keyrings/git-core-ppa.asc' \
+        > /etc/apt/sources.list.d/git-core-ppa.sources \
+    && chmod 0644 /etc/apt/keyrings/git-core-ppa.asc \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' git)" ge "${GIT_MIN_VERSION}" \
+    && rm -rf /var/lib/apt/lists/* \
+    && git --version
 
 COPY .github/scripts/install-claude-native.sh /tmp/install-claude-native.sh
 RUN /tmp/install-claude-native.sh "${CLAUDE_CODE_VERSION}" \

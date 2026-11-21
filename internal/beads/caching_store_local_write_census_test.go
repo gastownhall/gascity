@@ -14,6 +14,7 @@ import (
 // beginLocalWrite registration. Every other exported method is a write and
 // must register, directly or through a method of the cache it calls.
 var localWriteCensusExempt = map[string]string{
+	"CachingStore.RefreshIDs": "cache maintenance",
 	// Reads.
 	"CachingStore.CachedList":                            "read",
 	"CachingStore.CachedReady":                           "read",
@@ -36,12 +37,15 @@ var localWriteCensusExempt = map[string]string{
 	"CachingStore.OwnsBeadID":                            "read",
 	"CachingStore.Ping":                                  "read",
 	"CachingStore.Ready":                                 "read",
+	"CachingStore.ReadyBlockedByAbsent":                  "read",
 	"CachingStore.ReadyContext":                          "read",
+	"CachingStore.ReadyJudgmentContext":                  "read",
 	"CachingStore.ReadyOrdered":                          "read",
 	"CachingStore.ReadyPreferCache":                      "read",
 	"CachingStore.SawRows":                               "read",
 	"CachingStore.Stats":                                 "read",
 	"CachingStore.Stopped":                               "read",
+	"CachingStore.StrandsAbsentTargets":                  "read",
 	"CachingStore.WaitForParentProjection":               "read",
 	"CachingStore.WriteRev":                              "read",
 	"CachingStore.AtomicTx":                              "read: reports a backing capability",
@@ -55,6 +59,7 @@ var localWriteCensusExempt = map[string]string{
 	"cachedStoreReader.Ready":                            "read",
 	"liveStoreReader.DepList":                            "read",
 	"liveStoreReader.Get":                                "read",
+	"liveStoreReader.GetExactBatch":                      "read",
 	"liveStoreReader.List":                               "read",
 	"liveStoreReader.Ready":                              "read",
 	// Handle constructors: the handles' own methods are in the census.

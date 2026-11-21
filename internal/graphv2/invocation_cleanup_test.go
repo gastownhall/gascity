@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 func TestCloseSyntheticInputConvoy(t *testing.T) {
@@ -27,7 +28,7 @@ func TestCloseSyntheticInputConvoy(t *testing.T) {
 	t.Run("closes the pour's synthetic convoy", func(t *testing.T) {
 		store := beads.NewMemStore()
 		c := newSynthetic(t, store)
-		CloseSyntheticInputConvoy(store, c.ID, "bd-target")
+		CloseSyntheticInputConvoy(beadstest.Work(store), c.ID, "bd-target")
 		if got := status(t, store, c.ID); got != "closed" {
 			t.Fatalf("synthetic convoy status = %q, want closed", got)
 		}
@@ -36,7 +37,7 @@ func TestCloseSyntheticInputConvoy(t *testing.T) {
 	t.Run("never closes a caller-provided convoy target", func(t *testing.T) {
 		store := beads.NewMemStore()
 		c := newSynthetic(t, store)
-		CloseSyntheticInputConvoy(store, c.ID, c.ID)
+		CloseSyntheticInputConvoy(beadstest.Work(store), c.ID, c.ID)
 		if got := status(t, store, c.ID); got == "closed" {
 			t.Fatal("caller-provided convoy target was closed")
 		}
@@ -48,14 +49,14 @@ func TestCloseSyntheticInputConvoy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		CloseSyntheticInputConvoy(store, c.ID, "bd-target")
+		CloseSyntheticInputConvoy(beadstest.Work(store), c.ID, "bd-target")
 		if got := status(t, store, c.ID); got == "closed" {
 			t.Fatal("non-synthetic convoy was closed")
 		}
 	})
 
 	t.Run("tolerates missing beads and nil store", func(_ *testing.T) {
-		CloseSyntheticInputConvoy(nil, "c-1", "t-1")
-		CloseSyntheticInputConvoy(beads.NewMemStore(), "c-absent", "t-1")
+		CloseSyntheticInputConvoy(beads.WorkStore{}, "c-1", "t-1")
+		CloseSyntheticInputConvoy(beadstest.Work(beads.NewMemStore()), "c-absent", "t-1")
 	})
 }
