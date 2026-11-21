@@ -646,6 +646,61 @@ func TestReadBoundedBindingReadIsNeverEndedByRelics(t *testing.T) {
 	}
 }
 
+// TestReadStatusLegsNeverServeARelicThePlainReadDrops pins answer preservation
+// on the --status arms (ga-8g39ur) over a migration relic: an id the work leg
+// holds whose class-binding copy carries the pushed pair and the work copy does
+// not. The plain read keeps the work copy (first leg wins) and the filter drops
+// it; a narrowed read must not serve the binding's copy instead.
+func TestReadStatusLegsNeverServeARelicThePlainReadDrops(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	rooted := func(b *beads.Bead) { b.Metadata = beads.StringMap{"gc.root_bead_id": "R"} }
+	status := func(s string) func(*beads.Bead) { return func(b *beads.Bead) { b.Status = s } }
+	for _, tc := range []struct {
+		name        string
+		work, graph []beads.Bead
+		query       Query
+		want        []string
+	}{
+		{
+			name: "closed",
+			work: []beads.Bead{readyRow("w-1", 1, base, status(StatusClosed))},
+			graph: []beads.Bead{
+				readyRow("w-1", 1, base, status(StatusClosed), rooted),
+				readyRow("g-1", 1, base.Add(time.Minute), status(StatusClosed), rooted),
+			},
+			query: Query{Status: StatusClosed, MetadataFields: []string{"gc.root_bead_id=R"}},
+			want:  []string{"g-1"},
+		},
+		{
+			// The work leg's in_progress row ranks first. Left in the narrowed
+			// open read's window, it would fill --limit 1 and leave the
+			// binding's relic unprobed, and the open cut would then serve it.
+			name: "open with a limit",
+			work: []beads.Bead{
+				readyRow("w-0", 0, base, status(StatusInProgress), rooted),
+				readyRow("w-1", 1, base.Add(time.Minute)),
+			},
+			graph: []beads.Bead{readyRow("w-1", 1, base.Add(time.Minute), rooted)},
+			query: Query{Status: StatusOpen, MetadataFields: []string{"gc.root_bead_id=R"}, Limit: 1},
+			want:  []string{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binding := func(store beads.Store) Leg {
+				return Leg{Label: "graph", Store: store, ClassBinding: true, ReservedPrefixes: []string{"g"}}
+			}
+			legs := []Leg{testLeg("city", newNarrowingStore(tc.work...)), binding(newNarrowingStore(tc.graph...))}
+			plain := []Leg{testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, tc.work, nil)}), binding(ignoringStore{beads.NewMemStoreFrom(0, tc.graph, nil)})}
+			if got := readIDs(t, plain, tc.query); !slices.Equal(got, tc.want) {
+				t.Fatalf("unpushed answer = %v, want %v", got, tc.want)
+			}
+			if got := readIDs(t, legs, tc.query); !slices.Equal(got, tc.want) {
+				t.Fatalf("pushed answer = %v, want the unpushed %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestReadPushdownNeverChangesTheAnswer is the property the pushdown rests on:
 // over random cities and random queries, every arm, legs that apply every pushed
 // predicate and cut bounded reads in order give exactly the answer of legs that
@@ -705,7 +760,7 @@ func TestReadPushdownNeverChangesTheAnswer(t *testing.T) {
 				Unassigned: rng.Intn(3) == 0,
 				Limit:      []int{0, 1, 3, 20}[rng.Intn(4)],
 				Sort:       []string{"", "", SortOldest, SortNewest}[rng.Intn(4)],
-				Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked}[rng.Intn(6)],
+				Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked, StatusClosed}[rng.Intn(7)],
 			}
 			if rng.Intn(2) == 0 {
 				q.MetadataFields = []string{"gc.routed_to=" + routes[1+rng.Intn(len(routes)-1)]}
