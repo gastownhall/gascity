@@ -216,6 +216,20 @@ func TestCompletionBackstopStaleStampHealsByDeltaPassOrOperatorClear(t *testing.
 		assertNotStamped(t, backing, rootID, "the delta pass emitted for a stamped root but left its stale stamp")
 		assertSweepRestamps(t, backing, journal, rootID)
 	})
+
+	t.Run("operator", func(t *testing.T) {
+		backing, journal, rootID, stepID := seedStaleStampedRoot(t)
+		stores := []beads.GraphStore{{Store: backing}}
+		// gc bd update <root> --unset-metadata gc.completion_facts_converged
+		if err := backing.SetMetadata(rootID, beadmeta.CompletionFactsConvergedMetadataKey, ""); err != nil {
+			t.Fatal(err)
+		}
+		if r := (&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile"); r.Emitted != 1 || r.RootsVisited != 1 {
+			t.Fatalf("sweep after the operator clear = %+v, want the root visited and the owed fact emitted", r)
+		}
+		assertResurrectedFact(t, journal, stepID)
+		assertSweepRestamps(t, backing, journal, rootID)
+	})
 }
 
 // assertResurrectedFact fails unless the journal holds exactly one completion
