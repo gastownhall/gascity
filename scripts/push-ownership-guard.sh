@@ -182,6 +182,19 @@ _pog_table_add() {
     _POG_PREFIX_ARR+=("$prefix")
 }
 
+# _pog_table_add_store <prefix> <store>: record a routed prefix whose owning
+# store is already known (the config-alias pass). First entry wins, like
+# _pog_table_add.
+_pog_table_add_store() {
+    local prefix="$1" store="$2"
+    if [[ -n "${_POG_PREFIX_KIND[$prefix]:-}" ]]; then
+        return 0
+    fi
+    _POG_PREFIX_KIND[$prefix]="routed"
+    _POG_PREFIX_STORE[$prefix]="$store"
+    _POG_PREFIX_ARR+=("$prefix")
+}
+
 # _pog_build_prefix_table: build the prefix table once per guard run. D is
 # $BEADS_DIR when set (what bd itself honors), else <git top level>/.beads;
 # the route base B is D's parent, because route paths are relative to the
@@ -235,6 +248,29 @@ _pog_build_prefix_table() {
     if [[ -z "${_POG_PREFIX_KIND[ga]:-}" ]]; then
         _pog_table_add "ga" "."
     fi
+    # Second pass, after routes and the built-in entry so neither can be
+    # overridden: a routed store names its own issue prefix in its
+    # config.yaml (bd's issue_prefix / issue-prefix — the snk rig's store
+    # issues dg-*). Register that prefix as an alias for the same store so
+    # a branch carrying the store's own ids resolves there too. A missing
+    # config.yaml or key adds nothing; an invalid value gets the same one
+    # WARNING-per-entry treatment as an invalid routes line.
+    local p alias_line alias_prefix
+    for p in "${_POG_PREFIX_ARR[@]}"; do
+        [[ "${_POG_PREFIX_KIND[$p]:-}" == "routed" ]] || continue
+        if [[ ! -f "${_POG_PREFIX_STORE[$p]:-}/config.yaml" ]]; then
+            continue
+        fi
+        alias_line="$(sed -n 's/^[[:space:]]*issue[-_]prefix:[[:space:]]*//p' "${_POG_PREFIX_STORE[$p]}/config.yaml" 2>/dev/null | head -n 1)"
+        read -r alias_prefix _ <<<"${alias_line%%#*}"
+        alias_prefix="${alias_prefix%-}"
+        if [[ -n "$alias_prefix" ]] && ! _pog_prefix_valid "$alias_prefix"; then
+            echo "push-ownership-guard: WARNING store ${_POG_PREFIX_STORE[$p]} names issue prefix '${alias_prefix}', which is not ^[a-z0-9]+(-[a-z0-9]+)*\$; ignoring that alias" >&2
+            continue
+        fi
+        [[ -n "$alias_prefix" ]] || continue
+        _pog_table_add_store "$alias_prefix" "${_POG_PREFIX_STORE[$p]}"
+    done
 }
 
 # _pog_scan_candidates <branch>: print the bead-id-shaped tokens in

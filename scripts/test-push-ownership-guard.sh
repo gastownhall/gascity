@@ -1927,6 +1927,54 @@ test_current_store_reads_keep_caller_pins() {
     rm -rf "$root" "$fbd"
 }
 
+# AC-3: a routed store names its own issue prefix in its config.yaml
+# (issue_prefix / issue-prefix — bd's per-store setting; the snk rig's
+# store issues dg-*). That prefix resolves to the same store, so a branch
+# carrying the store's own ids is verified there — in both config spellings,
+# with or without the trailing dash. An explicit routes.jsonl entry for the
+# same prefix still wins over the config alias.
+test_config_alias_prefix_resolves() {
+    local root repo fbd snkstore out rc cfg
+    for cfg in 'issue_prefix: dg' 'issue-prefix: dg-'; do
+        root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+        mkdir -p "$root/snk-rig/.beads"
+        printf '%s\n' "$cfg" > "$root/snk-rig/.beads/config.yaml"
+        repo="$(new_repo_with_branch_at "$root" "builder/dg-bnd3x-fix")"
+        write_routes "$repo" "ga:." "snk:../snk-rig"
+        snkstore="$repo/../snk-rig/.beads"
+        fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+        write_routed_fake_bd "$fbd"
+        routed_show "$fbd" "$snkstore" "dg-bnd3x" "closed" "agent-x" "tmpl-x" "[]"
+        out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+        if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — dg-bnd3x" <<<"$out" &&
+            grep -qF "status is 'closed'" <<<"$out"; then
+            record_pass "routed/config-alias-resolves ($cfg blocks via the snk store)"
+        else
+            record_fail "routed/config-alias-resolves ($cfg)" "expected block on closed dg-bnd3x, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+        fi
+        rm -rf "$root" "$fbd"
+    done
+    # routes.jsonl wins: an explicit dg:. entry keeps dg local even though
+    # the snk store's config.yaml would alias dg to itself.
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/snk-rig/.beads"
+    printf 'issue_prefix: dg\n' > "$root/snk-rig/.beads/config.yaml"
+    repo="$(new_repo_with_branch_at "$root" "builder/dg-bnd3x-fix")"
+    write_routes "$repo" "ga:." "snk:../snk-rig" "dg:."
+    snkstore="$repo/../snk-rig/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "(current)" "dg-bnd3x" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — dg-bnd3x" <<<"$out" &&
+        [[ -z "$(routed_store_calls "$fbd" "$snkstore")" ]]; then
+        record_pass "routed/config-alias-resolves (routes entry wins over the alias)"
+    else
+        record_fail "routed/config-alias-resolves (routes win)" "expected the local dg entry to win with zero snk-store reads, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1993,6 +2041,7 @@ run_all() {
     test_routes_hygiene_dashed_and_invalid_entries
     test_routed_reads_drop_store_pins
     test_current_store_reads_keep_caller_pins
+    test_config_alias_prefix_resolves
 
     echo
     echo "pass=$pass fail=$fail"
