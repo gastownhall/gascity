@@ -31,10 +31,13 @@ const (
 type hookClaimExactFunc func(ctx context.Context, dir string, env []string, actor string, req molecule.ClaimExactRequest) (molecule.ClaimExactResult, error)
 
 // hookClaimExactWithBdStore is the default ClaimExact seam: the work
-// directory's bd context as both the reader and the conditional writer.
+// directory's bd context as the reader and both conditional-write tiers. A
+// bd with --if-revision commits through the revision CAS; one without it
+// drops to the status+assignee guard (bd update --if-status --if-assignee),
+// which fences the same observed row on the facts that guard can see.
 func hookClaimExactWithBdStore(ctx context.Context, dir string, env []string, actor string, req molecule.ClaimExactRequest) (molecule.ClaimExactResult, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, actor)
-	return molecule.ClaimExactWithWriters(store, molecule.ClaimExactWriters{Revision: store}, req)
+	return molecule.ClaimExactWithWriters(store, molecule.ClaimExactWriters{Revision: store, Assignment: store}, req)
 }
 
 // hookClaimExactCandidate reports whether the hook's work query returned a

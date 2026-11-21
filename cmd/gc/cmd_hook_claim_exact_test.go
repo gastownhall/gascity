@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -564,5 +566,109 @@ func TestDoHookClaimExactClaimLeavesGenerationFenceOpenWhenUnobserved(t *testing
 	}
 	if from := h.exactReqs[0].FromGeneration; from != nil {
 		t.Fatalf("exact claim FromGeneration = %v, want nil (generation unobserved)", from)
+	}
+}
+
+// TestDoHookClaimExactClaimDropsToAssignmentGuardWithoutIfRevision: against a
+// bd whose update lacks --if-revision (the revision tier reports the
+// capability missing), the exact claim re-fences the same observed row on the
+// status+assignee guard - bd update --if-status open --if-assignee "" - and
+// still never issues an unfenced bd update --claim.
+func TestDoHookClaimExactClaimDropsToAssignmentGuardWithoutIfRevision(t *testing.T) {
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+
+	rootRow := `{"id":"root-1","title":"root","status":"open","issue_type":"task","created_at":"2026-11-21T00:00:00Z",` +
+		`"metadata":{"gc.kind":"workflow"}}`
+	openRow := `{"id":"work-1","title":"work","status":"open","issue_type":"task","created_at":"2026-11-21T00:00:00Z",` +
+		`"metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"build"}}`
+	claimedRow := `{"id":"work-1","title":"work","status":"in_progress","assignee":"worker-1","issue_type":"task","created_at":"2026-11-21T00:00:00Z",` +
+		`"metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"build","gc.claim_generation":"1","gc.claimed_at":"2026-11-21T00:01:00Z"}}`
+	claimed := false
+	var guardedWrites []string
+	hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			switch {
+			case name == "bd" && len(args) == 2 && args[1] == "--help":
+				// A bd old enough to lack --if-revision on every write verb.
+				return []byte("usage: bd " + args[0] + " [flags]"), nil
+			case name == "bd" && len(args) >= 2 && args[0] == "show":
+				// bd show --json prints an array of issues, and the reader's
+				// fuzzy-ID guard demands each answer carry the row it asked
+				// for, so root-1 and work-1 get their own rows.
+				for _, arg := range args {
+					switch arg {
+					case "root-1":
+						return []byte("[" + rootRow + "]"), nil
+					case "work-1":
+						if claimed {
+							return []byte("[" + claimedRow + "]"), nil
+						}
+						return []byte("[" + openRow + "]"), nil
+					}
+				}
+				return nil, fmt.Errorf("unexpected show in assignment-tier test: %s %s", name, strings.Join(args, " "))
+			case name == "bd" && args[0] == "update" && containsArg(args, "--if-status") && containsArg(args, "--if-assignee"):
+				guardedWrites = append(guardedWrites, strings.Join(args, " "))
+				claimed = true
+				return []byte(claimedRow), nil
+			case name == "bd" && args[0] == "update":
+				t.Fatalf("unguarded bd update issued for an exact claim: %s", strings.Join(args, " "))
+				return nil, nil
+			case name == "bd" && args[0] == "close" || name == "bd" && args[0] == "assign":
+				return []byte(`{}`), nil
+			default:
+				return nil, fmt.Errorf("unexpected command in assignment-tier test: %s %s", name, strings.Join(args, " "))
+			}
+		}
+	}
+
+	observed, err := json.Marshal([]beads.Bead{{
+		ID: "work-1", Status: "open",
+		Metadata: map[string]string{"gc.routed_to": "worker", "gc.root_bead_id": "root-1", "gc.step_id": "build"},
+	}})
+	if err != nil {
+		t.Fatalf("marshal candidate: %v", err)
+	}
+	wf := beads.NewMemStore()
+	if _, err := wf.Create(beads.Bead{ID: "root-1", Title: "root", Status: "open", Metadata: map[string]string{"gc.kind": "workflow"}}); err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	ops := hookClaimOps{
+		Runner:            func(string, string) (string, error) { return string(observed), nil },
+		DrainAck:          func(io.Writer) error { return nil },
+		EmitClaimFailed:   func(string, hookClaimOptions, error) {},
+		EmitClaimRejected: func(string, string, string) {},
+		StampWorkMeta:     func(context.Context, string, []string, string, string, map[string]string) error { return nil },
+		PublishRunMap:     func(string, string, ...string) error { return nil },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
+		WorkflowStore:     func(context.Context, string, []string, string, string) beads.Store { return wf },
+	}
+	// No ClaimExact override: the default bd-context seam must find the
+	// assignment guard on its own.
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}, ops, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(guardedWrites) != 1 {
+		t.Fatalf("guarded writes = %q, want exactly one assignment-guarded claim write (stdout=%s stderr=%s)", guardedWrites, stdout.String(), stderr.String())
+	}
+	write := guardedWrites[0]
+	for _, want := range []string{"--if-status open", "--if-assignee ", "--status in_progress", "--assignee worker-1", "gc.claim_generation=1"} {
+		if !strings.Contains(write, want) {
+			t.Fatalf("guarded write %q lacks %q", write, want)
+		}
+	}
+	if !strings.Contains(stdout.String(), `"action":"work"`) {
+		t.Fatalf("no work receipt through the assignment tier: %s (stderr=%s)", stdout.String(), stderr.String())
 	}
 }
