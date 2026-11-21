@@ -6,6 +6,7 @@ go_library(
         "artifact.go",
         "claim_exact.go",
         "cleanup.go",
+        "continuation.go",
         "graph_apply.go",
         "molecule.go",
         "native_step_topology.go",

@@ -45,11 +45,22 @@ func (s WorkflowStop) Outcome() string {
 // terminal state by contract, so a settled or canceled root is the condition
 // it waits for, not a reason to skip it.
 func WorkflowStopReason(store beads.MoleculeTarget, bead beads.Bead) (WorkflowStop, error) {
-	stop, err := StoppedWorkflowAncestor(store, bead)
+	return workflowStopReason(store, bead, false)
+}
+
+// WorkflowStopReasonStrict is WorkflowStopReason with every named ancestry
+// link required to resolve. Missing ancestors and unreadable teardown membership
+// are errors, including wrapped beads.ErrNotFound, rather than evidence of live work.
+func WorkflowStopReasonStrict(store beads.MoleculeTarget, bead beads.Bead) (WorkflowStop, error) {
+	return workflowStopReason(store, bead, true)
+}
+
+func workflowStopReason(store beads.MoleculeTarget, bead beads.Bead, requireLinks bool) (WorkflowStop, error) {
+	stop, err := stoppedWorkflowAncestor(store, bead, requireLinks)
 	if err != nil || !stop.Stopped() {
 		return WorkflowStop{}, err
 	}
-	teardown, err := IsTeardownTailMember(store, bead)
+	teardown, err := isTeardownTailMember(store, bead, requireLinks)
 	if err != nil {
 		return WorkflowStop{}, err
 	}
@@ -75,7 +86,21 @@ func WorkflowStopReason(store beads.MoleculeTarget, bead beads.Bead) (WorkflowSt
 // ancestry is not evidence that the workflow stopped. Any other read error is
 // returned.
 func StoppedWorkflowAncestor(store beads.MoleculeTarget, bead beads.Bead) (WorkflowStop, error) {
+	return stoppedWorkflowAncestor(store, bead, false)
+}
+
+// StoppedWorkflowAncestorStrict is StoppedWorkflowAncestor with every named
+// root and drain-control link required to resolve. Read errors preserve their
+// cause, including beads.ErrNotFound. It does not exempt teardown work.
+func StoppedWorkflowAncestorStrict(store beads.MoleculeTarget, bead beads.Bead) (WorkflowStop, error) {
+	return stoppedWorkflowAncestor(store, bead, true)
+}
+
+func stoppedWorkflowAncestor(store beads.MoleculeTarget, bead beads.Bead, requireLinks bool) (WorkflowStop, error) {
 	if store.Absent() {
+		if requireLinks {
+			return WorkflowStop{}, fmt.Errorf("reading workflow ancestry for %s: store is absent", bead.ID)
+		}
 		return WorkflowStop{}, nil
 	}
 	current := bead
@@ -95,7 +120,7 @@ func StoppedWorkflowAncestor(store beads.MoleculeTarget, bead beads.Bead) (Workf
 			return WorkflowStop{}, nil
 		default:
 			visited[rootID] = true
-			loaded, found, err := getWorkflowLink(store, rootID)
+			loaded, found, err := getWorkflowLink(store, rootID, requireLinks)
 			if err != nil || !found {
 				return WorkflowStop{}, err
 			}
@@ -109,7 +134,7 @@ func StoppedWorkflowAncestor(store beads.MoleculeTarget, bead beads.Bead) (Workf
 			return WorkflowStop{}, nil
 		}
 		visited[controlID] = true
-		control, found, err := getWorkflowLink(store, controlID)
+		control, found, err := getWorkflowLink(store, controlID, requireLinks)
 		if err != nil || !found {
 			return WorkflowStop{}, err
 		}
@@ -132,10 +157,10 @@ func workflowRootStop(root beads.Bead) (WorkflowStop, bool) {
 	return WorkflowStop{}, false
 }
 
-func getWorkflowLink(store beads.MoleculeTarget, id string) (beads.Bead, bool, error) {
+func getWorkflowLink(store beads.MoleculeTarget, id string, requireLinks bool) (beads.Bead, bool, error) {
 	b, err := store.Get(id)
 	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
+		if !requireLinks && errors.Is(err, beads.ErrNotFound) {
 			return beads.Bead{}, false, nil
 		}
 		return beads.Bead{}, false, fmt.Errorf("loading workflow ancestor %s: %w", id, err)
@@ -148,6 +173,16 @@ func getWorkflowLink(store beads.MoleculeTarget, id string) (beads.Bead, bool, e
 // that carries gc.scope_role=teardown itself; an attempt linked to a teardown
 // step only by gc.step_id needs the subtree read.
 func IsTeardownTailMember(store beads.MoleculeTarget, bead beads.Bead) (bool, error) {
+	return isTeardownTailMember(store, bead, false)
+}
+
+// IsTeardownTailMemberStrict is IsTeardownTailMember without suppressing
+// beads.ErrNotFound from the teardown subtree read.
+func IsTeardownTailMemberStrict(store beads.MoleculeTarget, bead beads.Bead) (bool, error) {
+	return isTeardownTailMember(store, bead, true)
+}
+
+func isTeardownTailMember(store beads.MoleculeTarget, bead beads.Bead, requireLinks bool) (bool, error) {
 	if bead.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return true, nil
 	}
@@ -157,7 +192,7 @@ func IsTeardownTailMember(store beads.MoleculeTarget, bead beads.Bead) (bool, er
 	}
 	exclude, err := TeardownTailExclusion(store, rootID)
 	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
+		if !requireLinks && errors.Is(err, beads.ErrNotFound) {
 			return false, nil
 		}
 		return false, err

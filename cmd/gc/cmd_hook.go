@@ -33,6 +33,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var claim bool
 	var drainAck bool
 	var jsonOut bool
+	var rootID string
 	var worktree bool
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
@@ -57,6 +58,20 @@ directory for that work: the controller starts a session there for it. When
 that leaves the session nothing to claim, each such bead is named on stderr
 with where its session runs. Without --claim, that session's output leaves
 the same work out.
+
+With --claim --root <root-bead-id>: continue only that workflow, using the
+canonical ready frontier with the root predicate applied before selection.
+Pass root_bead_id from the prior claim result explicitly. With --json, this
+returns schema_version "2": action "work" names an owned same-root step;
+"wait" means the root is live with no eligible work; "complete" means the
+root is terminal. Every result echoes root_bead_id. Wait reasons are
+workflow_blocked, workflow_no_ready, or different_workflow_assignment when
+this session already owns work in another workflow. Wait never acquires other
+work or acknowledges a drain. A missing root or failed store read exits
+nonzero. --root requires --claim and refuses --drain-ack and --worktree
+(--worktree provisions a separate checkout per claimed bead). Without --root,
+generic acquisition retains schema_version "1". After continuation completes
+or is released, the caller may explicitly invoke generic acquisition.
 
 A work query that gets no answer from the bead store (a connection error, a
 timeout, a killed query, a locked database, or bd's circuit breaker failing
@@ -105,7 +120,10 @@ still the started claim the session must finish.
 
 The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("root") && strings.TrimSpace(rootID) == "" {
+				return fmt.Errorf("--root requires a non-empty workflow root bead ID")
+			}
 			opts := hookCommandOptions{
 				Inject:     inject,
 				HookFormat: hookFormat,
@@ -113,6 +131,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 				Worktree:   worktree,
+				RootBeadID: strings.TrimSpace(rootID),
 			}
 			// exitForCode, not `!= 0 → errExit`: the store-unavailable
 			// contract is exit 2 (reportWorkQueryFailure), and folding it
@@ -124,6 +143,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 	cmd.Flags().BoolVar(&inject, "inject", false, "silent legacy Stop-hook compatibility; skip work query and exit 0")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
+	cmd.Flags().StringVar(&rootID, "root", "", "with --claim, continue only this workflow root; emit v2 work/wait/complete results")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged)")
@@ -310,6 +330,7 @@ type hookCommandOptions struct {
 	JSON       bool
 	Worktree   bool
 	DrainAckFn hookDrainAckFunc
+	RootBeadID string
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -324,6 +345,17 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 }
 
 func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr io.Writer) int {
+	if opts.RootBeadID != "" && (!opts.Claim || opts.DrainAck || opts.Inject) {
+		fmt.Fprintln(stderr, "gc hook: --root requires --claim and cannot be combined with --drain-ack or --inject") //nolint:errcheck
+		return 1
+	}
+	// --worktree provisions a fresh checkout per claimed bead ID, so each step
+	// of a continued workflow would land in its own tree without the earlier
+	// steps' changes. Refuse the pair before any store is read.
+	if opts.RootBeadID != "" && opts.Worktree {
+		fmt.Fprintln(stderr, "gc hook: --root cannot be combined with --worktree: --worktree provisions a separate checkout per claimed bead, so workflow steps would not share one") //nolint:errcheck
+		return 1
+	}
 	if opts.Inject {
 		return 0
 	}
@@ -414,7 +446,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		// makes its refusal something the provider actually receives rather than
 		// something its timeout truncates.
 		if marker := hookClaimNonTurnMarker(os.Environ()); marker != "" {
-			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON}, stdout, stderr)
+			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON, RootBeadID: opts.RootBeadID}, stdout, stderr)
 		}
 		code, handled, info := fenceHookClaimSession(city, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr)
 		if handled {
@@ -549,7 +581,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// maintainer-city) the claim would discard. No-op on a single-store city and
 	// for a custom work_query, where both forms are the same string.
 	var stores []hookStore
-	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
+	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); opts.RootBeadID == "" && hookStoresScopeToPrimary(workQuery, singleStore) {
 		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
 	} else {
 		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
@@ -604,6 +636,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	strictDrainAck := func() bool { return cityRunsV2(cityPath, cfg) }
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
+			RootBeadID:         opts.RootBeadID,
 			Assignee:           assignee,
 			SessionID:          sessionID,
 			IdentityCandidates: identityCandidates,
@@ -764,6 +797,9 @@ func fenceHookClaimSession(city *hookCity, sessionID string, opts hookCommandOpt
 		fmt.Fprintf(stderr, "gc hook --claim: refusing stale session %s: %s\n", sessionID, reason) //nolint:errcheck
 		return writeHookClaimStaleSessionDrain(opts, stdout, stderr), true, nil
 	case hookClaimSessionStoreUnavailable:
+		if opts.RootBeadID != "" {
+			return reportClaimWorkQueryFailure(fmt.Errorf("scoped session fence: %s", reason), stderr), true, nil
+		}
 		// Fail open: let the claim path run and surface/escalate its own store
 		// error rather than reporting a false stale session. Name the fault
 		// without the alarming "stale session" wording.
@@ -995,6 +1031,9 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 // writes ownership into the binding (claim_class_route.go). Nil on a city that
 // relocates nothing.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	if claimOpts.RootBeadID != "" {
+		return claimRootHookWorkWithRunner(workDir, queryEnv, stores, claimOpts, ops, run, stdout, stderr)
+	}
 	ops.applyDefaults()
 	ops.ClassRoute.observeWorkLegs(stores)
 	// primary is the agent's own store (the first entry). It is captured once
