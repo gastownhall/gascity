@@ -263,6 +263,28 @@ run_guard() {
     )
 }
 
+# run_guard_env <repo> <fbd> <agent> <template> [NAME=VALUE...]: run_guard
+# with extra environment assignments exported inside the guard's subshell,
+# after the store-variable scrub — for testing how caller-pinned store
+# variables (BD_DB, BEADS_DOLT_SERVER_DATABASE, ...) interact with routed
+# reads (AC-2). Remaining args are NAME=VALUE pairs, exported verbatim.
+run_guard_env() {
+    local repo="$1" fbd="$2" agent="$3" template="$4" kv
+    shift 4
+    local read_attempts="${POG_READ_ATTEMPTS:-1}"
+    (
+        cd "$repo" || exit 1
+        unset BEADS_DIR BEADS_DB BD_DB BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_DATABASE BEADS_DOLT_DATA_DIR
+        for kv in "$@"; do
+            export "${kv?}"
+        done
+        PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
+            GC_SESSION_ID="" GC_SESSION_NAME="" \
+            POG_TIMEOUT_SECONDS=5 POG_READ_ATTEMPTS="$read_attempts" LIB="$LIB" \
+            bash -c '. "$LIB"; assert_bead_still_claimed'
+    )
+}
+
 # run_guard_zsh: identical to run_guard, but sources and calls the guard
 # under a real zsh subprocess instead of bash. push-ownership-guard.sh is
 # SOURCED into the deployer's ambient interactive shell (zsh, in this fork —
@@ -1831,6 +1853,80 @@ test_routes_hygiene_dashed_and_invalid_entries() {
     rm -rf "$root" "$fbd"
 }
 
+# AC-2: a routed read (probe, inactive check, final verify) pins the owning
+# store with BEADS_DIR only. The five variables bd lets override that choice
+# (BEADS_DB, BD_DB, BEADS_DOLT_SERVER_DATABASE, BEADS_DOLT_DATABASE,
+# BEADS_DOLT_DATA_DIR — bd's own precedence puts any of them ahead of
+# BEADS_DIR) must be unset for the read, so a caller environment that pins
+# the current store cannot redirect the verification or make it fail.
+test_routed_reads_drop_store_pins() {
+    local root repo fbd mcstore out rc pin calls routed bad
+    for pin in "BD_DB" "BEADS_DOLT_SERVER_DATABASE"; do
+        root="$(new_routed_mc_root "builder/mc-k2p9x-fix")"
+        repo="$root/gascity"
+        mcstore="$repo/../mc-rig/.beads"
+        fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+        write_routed_fake_bd "$fbd"
+        routed_show "$fbd" "$mcstore" "mc-k2p9x" "in_progress" "agent-x" "tmpl-x" "[]"
+        out="$(run_guard_env "$repo" "$fbd" "agent-x" "tmpl-x" "$pin=$repo/.beads" 2>&1)"; rc=$?
+        # Every read of the routed bead must have gone to the mc store with
+        # all five pin variables empty in the fake's pin log. The assignment
+        # read (bd list --assignee) always runs against the current store —
+        # today's behavior — and keeps the caller's pin, so it is the one
+        # permitted non-mc call. With the pin honored and the variables not
+        # unset, bd's precedence puts BD_DB ahead of BEADS_DIR, so the guard
+        # reads the current store instead: this fails before AC-2.
+        calls="$(routed_calls "$fbd")"
+        routed="$(routed_store_calls "$fbd" "$mcstore")"
+        bad="$(grep -v 'pins=\[BEADS_DB= BD_DB= BEADS_DOLT_SERVER_DATABASE= BEADS_DOLT_DATABASE= BEADS_DOLT_DATA_DIR=\]' <<<"$routed" || true)"
+        others="$(grep -v "key=$(routed_store_key "$mcstore") " <<<"$calls" | grep -v 'cmd=list args=list --assignee=' || true)"
+        if [[ $rc -eq 0 ]] && [[ -n "$routed" ]] && [[ -z "$bad" ]] && [[ -z "$others" ]]; then
+            record_pass "routed/reads-drop-store-pins ($pin unset on every mc-rig read)"
+        else
+            record_fail "routed/reads-drop-store-pins ($pin)" "expected rc=0 with every routed read from the mc-rig store and no pins set, got rc=$rc, pinned mc reads: $bad, unexpected calls: $others, output: $out"
+        fi
+        rm -rf "$root" "$fbd"
+    done
+    # A pin whose target does not exist must not break the routed read either.
+    root="$(new_routed_mc_root "builder/mc-k2p9x-fix")"
+    repo="$root/gascity"
+    mcstore="$repo/../mc-rig/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "$mcstore" "mc-k2p9x" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard_env "$repo" "$fbd" "agent-x" "tmpl-x" "BEADS_DB=/nonexistent-store" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && [[ "$(routed_store_calls "$fbd" "$mcstore" | grep -c 'cmd=show')" -eq 1 ]]; then
+        record_pass "routed/reads-drop-store-pins (unreachable BEADS_DB pin ignored)"
+    else
+        record_fail "routed/reads-drop-store-pins (unreachable pin)" "expected rc=0 with the mc-rig show still served, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# AC-2 companion: only routed reads drop the caller's store pins. A read the
+# guard was already making against the current store (the assignee fallback
+# when the branch yields no token) keeps the caller's pin untouched.
+test_current_store_reads_keep_caller_pins() {
+    local root repo fbd out rc pinned
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/mc-rig/.beads"
+    repo="$(new_repo_with_branch_at "$root" "feature/plain")"
+    write_routes "$repo" "ga:." "mc:../mc-rig"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    # With BD_DB pinning the current store, the fake keys it by that path.
+    routed_list "$fbd" "$repo/.beads" '[{"id":"ga-fff111","status":"in_progress","assignee":"agent-x"}]'
+    routed_show "$fbd" "$repo/.beads" "ga-fff111" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard_env "$repo" "$fbd" "agent-x" "tmpl-x" "BD_DB=$repo/.beads" 2>&1)"; rc=$?
+    pinned="$(routed_store_calls "$fbd" "$repo/.beads" | grep -c "BD_DB=$repo/.beads")"
+    if [[ $rc -eq 0 ]] && [[ "$pinned" -ge 1 ]]; then
+        record_pass "routed/current-store-keeps-pins (assignee fallback still sees BD_DB)"
+    else
+        record_fail "routed/current-store-keeps-pins" "expected rc=0 with the fallback read carrying BD_DB, got rc=$rc pinned-count=$pinned calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1895,6 +1991,8 @@ run_all() {
     test_routed_clean_claim_allows
     test_routed_cases_under_zsh
     test_routes_hygiene_dashed_and_invalid_entries
+    test_routed_reads_drop_store_pins
+    test_current_store_reads_keep_caller_pins
 
     echo
     echo "pass=$pass fail=$fail"

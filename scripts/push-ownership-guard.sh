@@ -317,7 +317,17 @@ _pog_token_prefix() {
 _pog_routed_bd() {
     local store="$1"
     shift
-    _pog_read_with_retry env "BEADS_DIR=$store" bd "$@"
+    # bd resolves its store as BEADS_DB, then BD_DB, then the Dolt server
+    # variables, and only then BEADS_DIR — so pinning the owning store with
+    # BEADS_DIR alone is not enough. Unset every variable that outranks it
+    # for this one read, or a caller environment that pins the current store
+    # silently redirects the routed verification there (or breaks it).
+    # Options must precede the assignments: env stops parsing flags at the
+    # first operand.
+    _pog_read_with_retry env \
+        -u BEADS_DB -u BD_DB -u BEADS_DOLT_SERVER_DATABASE \
+        -u BEADS_DOLT_DATABASE -u BEADS_DOLT_DATA_DIR \
+        "BEADS_DIR=$store" bd "$@"
 }
 
 # _pog_block_routed_missing_store <token> <prefix> <store>: the routed-block
