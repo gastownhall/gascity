@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -33,12 +34,29 @@ func (s *listHookSQLiteStore) List(q ListQuery) ([]Bead, error) {
 	return out, err
 }
 
+// verdictSQLiteDir returns a fresh directory for a verdict store, removed when
+// the test ends. Under bazel test it is rooted at TEST_TMPDIR, the tmpfs that
+// --test_tmpdir names, not at t.TempDir()'s TMPDIR, which the linux-sandbox
+// forces onto a disk-backed /tmp. The tests that build many stores here commit
+// with synchronous=FULL, so on a disk each commit pays an fsync that stretches
+// under host load until a shard's 300 s budget is gone (gate tracker
+// ga-0auozqq0). With TEST_TMPDIR unset it falls back to the default temp dir.
+func verdictSQLiteDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(os.Getenv("TEST_TMPDIR"), "verdict-sqlite-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // newVerdictSQLite opens a SQLite engine, whose rows carry their edges and an
 // is_blocked verdict, holding n edge-less rows and then a blocker and a step
 // it blocks, so a wipe is visible on both verdicts.
 func newVerdictSQLite(t *testing.T, n int) (*listHookSQLiteStore, []string) {
 	t.Helper()
-	opened, err := OpenSQLiteStore(t.TempDir(), WithSQLiteStoreIDPrefix("gcg"))
+	opened, err := OpenSQLiteStore(verdictSQLiteDir(t), WithSQLiteStoreIDPrefix("gcg"))
 	if err != nil {
 		t.Fatalf("OpenSQLiteStore: %v", err)
 	}
