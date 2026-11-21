@@ -25,7 +25,15 @@ const (
 	// bead no longer matched the observation it was fenced on, or its
 	// readback names another owner: a lost race, not an error.
 	hookClaimVerdictRejected hookClaimVerdict = "rejected"
+	// hookClaimVerdictMoved means an exact claim landed, so this session holds
+	// the bead, but its readback no longer matches the observation the claim
+	// was decided on. The caller gives it back (releaseMovedHookClaim).
+	hookClaimVerdictMoved hookClaimVerdict = "moved"
 )
+
+// hookClaimReleaseReasonObservationMoved: an exact claim landed on a bead whose
+// readback no longer matched the work query's observation of it.
+const hookClaimReleaseReasonObservationMoved = "observation_moved"
 
 // hookClaimExactFunc (ctx, dir, env, actor, req) claims exactly the bead req
 // names, only while it still matches what the work query observed on it.
@@ -165,9 +173,43 @@ func hookClaimExactThroughStore(reader molecule.ClaimExactReader, writers molecu
 			return res.Bead, hookClaimVerdictRejected, nil
 		}
 		return res.Bead, hookClaimVerdictClaimed, nil
+	case molecule.ClaimExactObservationMoved:
+		if !hookClaimHasIdentity(res.Bead.Assignee, []string{actor}) {
+			return res.Bead, hookClaimVerdictRejected, nil
+		}
+		return res.Bead, hookClaimVerdictMoved, nil
 	case molecule.ClaimExactPreconditionFailed, molecule.ClaimExactStale:
 		return res.Bead, hookClaimVerdictRejected, nil
 	default:
 		return res.Bead, hookClaimVerdictNone, fmt.Errorf("claim exact %q: unknown outcome %q", req.ID, res.Outcome)
 	}
+}
+
+// releaseMovedHookClaim gives back a claim this session won on a bead whose
+// readback no longer matches the observation the claim was decided on, through
+// the same assignee CAS as releaseExcludedHookClaim, and records the release
+// as bead.claim_released with reason observation_moved. No receipt is written
+// for it. It reports false only when the release itself failed: ownership is
+// then unresolved and the caller must stop.
+func releaseMovedHookClaim(claimed beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	assignee := strings.TrimSpace(claimed.Assignee)
+	if assignee == "" {
+		assignee = actor
+	}
+	forgetHookWorkStarted(opts, ops, hookStartedKeyFor(ops, dir, claimed.ID, hookClaimMinted))
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	released, err := ops.Release(ctx, dir, opts.Env, claimed.ID, assignee)
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "gc hook --claim: claimed %s but it no longer matches the work query's observation of it, and releasing it failed: %v (recover with: bd update %s --status open --assignee \"\")\n", //nolint:errcheck
+			claimed.ID, err, claimed.ID)
+		return false
+	case !released:
+		fmt.Fprintf(stderr, "gc hook --claim: claimed %s but it no longer matches the work query's observation of it; it was no longer ours to release\n", claimed.ID) //nolint:errcheck
+	default:
+		ops.EmitClaimReleased(hookClaimReleaseRecord{BeadID: claimed.ID, Assignee: assignee, Reason: hookClaimReleaseReasonObservationMoved})
+		fmt.Fprintf(stderr, "gc hook --claim: released %s: it no longer matches the work query's observation of it\n", claimed.ID) //nolint:errcheck
+	}
+	return true
 }

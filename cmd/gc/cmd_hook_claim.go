@@ -1026,6 +1026,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			// unrelated fresh work after an operational mutation failure.
 			return hookClaimResult{terminal: true, code: 1}
 		}
+		if verdict == hookClaimVerdictMoved {
+			if !releaseMovedHookClaim(claimed, claimActor, opts, ops, dir, stderr) {
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			continue
+		}
 		// Deliberately unlike the err != nil branch above: a rejected claim is a
 		// lost race, not an operational failure. Another claimant genuinely owns
 		// the bead, so ownership is resolved and this session is free to fall
@@ -1219,6 +1225,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// guard can withhold a bead from (claim_loop_guard.go).
 			ops.emitClaimFailed(candidate.ID, opts, err)
 			claimsErrored = true
+			continue
+		}
+		if verdict == hookClaimVerdictMoved {
+			if !releaseMovedHookClaim(claimed, opts.Assignee, opts, ops, dir, stderr) {
+				return hookClaimResult{terminal: true, code: 1}
+			}
 			continue
 		}
 		if !ok {
