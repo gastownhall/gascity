@@ -22,6 +22,9 @@ type exactClaimFixture struct {
 	rejected []string
 	failed   []string
 	claims   []string
+	// revision, when set, is the revision fence claims write through in
+	// place of the store itself.
+	revision beads.ConditionalWriter
 }
 
 func newExactClaimFixture(t *testing.T) *exactClaimFixture {
@@ -54,7 +57,22 @@ func (f *exactClaimFixture) add(stored, observed beads.Bead) {
 }
 
 func (f *exactClaimFixture) writers() molecule.ClaimExactWriters {
+	if f.revision != nil {
+		return molecule.ClaimExactWriters{Revision: f.revision}
+	}
 	return molecule.ClaimExactWriters{Revision: f.store}
+}
+
+// recordingRevisionWriter is a revision fence over a MemStore that records
+// every conditional update it is asked to make.
+type recordingRevisionWriter struct {
+	beads.ConditionalWriter
+	updates []beads.UpdateOpts
+}
+
+func (w *recordingRevisionWriter) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	w.updates = append(w.updates, opts)
+	return w.ConditionalWriter.UpdateIfMatch(id, expectedRevision, opts)
 }
 
 func (f *exactClaimFixture) ops() hookClaimOps {
@@ -217,4 +235,80 @@ func TestHookClaimExactFencesObservedAssignee(t *testing.T) {
 			t.Fatalf("work-1 = status %q assignee %q, want in_progress owned by this session; stderr=%s", got.Status, got.Assignee, stderr.String())
 		}
 	})
+}
+
+// TestHookClaimExactWritesClaimAndIdentityInOneFencedWrite: a session-bound
+// claim of a matching graph step lands as exactly one conditional write that
+// carries the transition, the assignee, the session back-reference, the
+// write-once gc.claimed_at (only when absent) and the advanced generation, and
+// no later write rewrites any of those keys.
+func TestHookClaimExactWritesClaimAndIdentityInOneFencedWrite(t *testing.T) {
+	identityKeys := []string{
+		beadmeta.SessionIDMetadataKey, beadmeta.SessionNameMetadataKey,
+		beadmeta.ClaimedAtMetadataKey, beadmeta.ClaimGenerationMetadataKey,
+	}
+	for _, tc := range []struct {
+		name           string
+		extra          map[string]string
+		wantGeneration string
+		wantClaimedAt  bool
+	}{
+		{name: "first claim", wantGeneration: "1", wantClaimedAt: true},
+		{
+			name: "claimed before",
+			extra: map[string]string{
+				beadmeta.ClaimGenerationMetadataKey: "4",
+				beadmeta.ClaimedAtMetadataKey:       "2026-01-01T00:00:00Z",
+			},
+			wantGeneration: "5",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := graphStepMeta("build")
+			for k, v := range tc.extra {
+				meta[k] = v
+			}
+			f := newExactClaimFixture(t)
+			f.add(
+				beads.Bead{ID: "work-1", Title: "step", Status: "open", Metadata: meta},
+				beads.Bead{ID: "work-1", Status: "open", Metadata: meta},
+			)
+			writer := &recordingRevisionWriter{ConditionalWriter: f.store}
+			f.revision = writer
+			ops := f.ops()
+			var stamps []map[string]string
+			ops.StampWorkMeta = func(_ context.Context, _ string, _ []string, _, _ string, patch map[string]string) error {
+				stamps = append(stamps, patch)
+				return nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
+				t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			if len(writer.updates) != 1 {
+				t.Fatalf("conditional writes = %d, want exactly 1: %+v", len(writer.updates), writer.updates)
+			}
+			w := writer.updates[0]
+			if w.Status == nil || *w.Status != "in_progress" || w.Assignee == nil || *w.Assignee != "gc__role-mc-sess1" {
+				t.Fatalf("write = %+v, want status in_progress and assignee gc__role-mc-sess1", w)
+			}
+			if w.Metadata[beadmeta.SessionIDMetadataKey] != "mc-sess1" || w.Metadata[beadmeta.SessionNameMetadataKey] != "gc__role-mc-sess1" {
+				t.Fatalf("write metadata = %v, want the session back-reference", w.Metadata)
+			}
+			if got := w.Metadata[beadmeta.ClaimGenerationMetadataKey]; got != tc.wantGeneration {
+				t.Fatalf("write %s = %q, want %q", beadmeta.ClaimGenerationMetadataKey, got, tc.wantGeneration)
+			}
+			if _, ok := w.Metadata[beadmeta.ClaimedAtMetadataKey]; ok != tc.wantClaimedAt {
+				t.Fatalf("write carries %s = %v, want %v (metadata %v)", beadmeta.ClaimedAtMetadataKey, ok, tc.wantClaimedAt, w.Metadata)
+			}
+			for _, patch := range stamps {
+				for _, key := range identityKeys {
+					if v, ok := patch[key]; ok {
+						t.Fatalf("later stamp rewrote %s=%q (patch %v)", key, v, patch)
+					}
+				}
+			}
+		})
+	}
 }
