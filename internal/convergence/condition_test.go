@@ -745,6 +745,90 @@ func TestRunConditionUsesWorkDir(t *testing.T) {
 	}
 }
 
+// workDirGateFixture writes script outside a fresh work dir and returns a
+// ConditionEnv whose WorkDir is that work dir.
+func workDirGateFixture(t *testing.T, script string) (string, ConditionEnv) {
+	t.Helper()
+	cityDir := t.TempDir()
+	workDir := filepath.Join(cityDir, "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(cityDir, "check.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return scriptPath, ConditionEnv{
+		BeadID:      "b-workdir",
+		CityPath:    cityDir,
+		WorkDir:     workDir,
+		WispID:      "w-workdir",
+		ArtifactDir: cityDir,
+	}
+}
+
+// Regression (#6295): when the close of a check's bead removes its work dir
+// while the check runs, the failed check's recorded stderr must say so, so the
+// producer can tell a vanished directory from a genuine verdict.
+func TestRunConditionNotesWorkDirRemovedDuringRun(t *testing.T) {
+	cases := []struct {
+		name          string
+		script        string
+		wantTruncated bool
+	}{
+		{
+			name:   "removed",
+			script: "rm -rf \"$GC_WORK_DIR\"\necho 'artifact invalid' >&2\nexit 1\n",
+		},
+		{
+			// The replacement is created before the original is removed so
+			// it cannot reuse the original's inode.
+			name:   "replaced",
+			script: "mkdir \"$GC_WORK_DIR.new\"\nrm -rf \"$GC_WORK_DIR\"\nmv \"$GC_WORK_DIR.new\" \"$GC_WORK_DIR\"\necho 'artifact invalid' >&2\nexit 1\n",
+		},
+		{
+			name:          "stderr at cap",
+			script:        "head -c 8192 /dev/zero | tr '\\0' 'e' >&2\nrm -rf \"$GC_WORK_DIR\"\nexit 1\n",
+			wantTruncated: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script, env := workDirGateFixture(t, tc.script)
+			note := "gc: check working directory " + env.WorkDir + " was removed or replaced while the check ran"
+
+			result := RunCondition(context.Background(), script, env, 5*time.Second, 0)
+			if result.Outcome != GateFail {
+				t.Fatalf("Outcome = %q, want %q (stderr=%q)", result.Outcome, GateFail, result.Stderr)
+			}
+			if result.ExitCode == nil || *result.ExitCode != 1 {
+				t.Fatalf("ExitCode = %v, want 1", result.ExitCode)
+			}
+			if !strings.HasSuffix(strings.TrimRight(result.Stderr, "\n"), note) {
+				t.Errorf("Stderr = %q, want it to end with %q", truncateForLog(result.Stderr), note)
+			}
+			if len(result.Stderr) > MaxOutputBytes {
+				t.Errorf("len(Stderr) = %d, want <= %d", len(result.Stderr), MaxOutputBytes)
+			}
+			if tc.wantTruncated && !result.Truncated {
+				t.Error("Truncated = false, want true when the script's stderr was cut to fit the note")
+			}
+			if reason, blind := ClassifyInfraBlind(result); blind {
+				t.Errorf("ClassifyInfraBlind() = (%q, true), want the note to leave infra classification unchanged", reason)
+			}
+		})
+	}
+}
+
+// truncateForLog keeps a failure message readable when stderr is large.
+func truncateForLog(s string) string {
+	const keep = 200
+	if len(s) <= keep {
+		return s
+	}
+	return "..." + s[len(s)-keep:]
+}
+
 func TestRunConditionUsesStorePathAsDefaultWorkDir(t *testing.T) {
 	cityDir := t.TempDir()
 	storeDir := t.TempDir()

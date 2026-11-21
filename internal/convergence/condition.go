@@ -555,6 +555,13 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
+	var workDirAtStart os.FileInfo
+	if env.WorkDir != "" {
+		// Recorded only to notice a work dir removed while the check runs;
+		// a work dir already missing here fails at chdir below.
+		workDirAtStart, _ = os.Stat(env.WorkDir)
+	}
+
 	start := time.Now()
 	err := cmd.Run()
 	duration := time.Since(start)
@@ -592,6 +599,11 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			code := exitErr.ExitCode()
+			if workDirChangedSince(env.WorkDir, workDirAtStart) {
+				var cut bool
+				errStr, cut = appendGateNote(errStr, workDirChangedNote(env.WorkDir))
+				truncated = truncated || cut
+			}
 			return GateResult{
 				Outcome:   GateFail,
 				ExitCode:  &code,
@@ -620,4 +632,47 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 		Duration:  duration,
 		Truncated: truncated,
 	}
+}
+
+// workDirChangedSince reports whether dir, which was start when the check
+// was forked, has since been removed or replaced by a different directory.
+// It reports false when dir was not recorded at fork or when its current
+// state cannot be determined.
+func workDirChangedSince(dir string, start os.FileInfo) bool {
+	if dir == "" || start == nil {
+		return false
+	}
+	now, err := os.Stat(dir)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return !os.SameFile(start, now)
+}
+
+// workDirChangedNote is the line appended to a failed check's stderr when its
+// working directory was removed or replaced while the check ran.
+func workDirChangedNote(dir string) string {
+	return "gc: check working directory " + dir + " was removed or replaced while the check ran\n"
+}
+
+// appendGateNote appends note to a check's captured stderr on its own line,
+// keeping the result within MaxOutputBytes. The script's stderr is cut to
+// make room for the note, and the note itself is cut if it alone exceeds the
+// cap. It reports whether any of the script's stderr was dropped.
+func appendGateNote(stderr, note string) (string, bool) {
+	if len(note) >= MaxOutputBytes {
+		cutNote, _ := TruncateOutput([]byte(note), MaxOutputBytes)
+		return cutNote, stderr != ""
+	}
+	// One byte is reserved for the newline that separates the note from a
+	// stderr that does not end in one.
+	room := MaxOutputBytes - len(note) - 1
+	cut := false
+	if len(stderr) > room {
+		stderr, cut = TruncateOutput([]byte(stderr), room)
+	}
+	if stderr != "" && !strings.HasSuffix(stderr, "\n") {
+		stderr += "\n"
+	}
+	return stderr + note, cut
 }
