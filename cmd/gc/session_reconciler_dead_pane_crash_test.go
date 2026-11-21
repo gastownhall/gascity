@@ -207,3 +207,57 @@ func TestReconcileNamedAlwaysCorpseRecordsDeadPaneCrash(t *testing.T) {
 		t.Fatalf("session.crashed actor = %q, want gc", crashes[0].Actor)
 	}
 }
+
+// TestReconcileNamedAlwaysCorpseRecoversAfterCrash: after the dead pane's
+// crash is recorded, the legacy ticks replace the corpse with a fresh
+// runtime on a new incarnation, the first session.woke follows the
+// session.crashed, and the row keeps its durable identity (#2437).
+func TestReconcileNamedAlwaysCorpseRecoversAfterCrash(t *testing.T) {
+	e := newDeadPaneEnv(t)
+	e.sp.SetPeekOutput(e.name, "agent exited")
+	e.sp.kill(e.name, "$7")
+	startsBefore := e.sp.CountCalls("Start", e.name)
+
+	for i := 0; i < 5; i++ {
+		e.tick(t)
+		if e.sp.CountCalls("Start", e.name) > startsBefore {
+			break
+		}
+		e.clk.Advance(time.Minute)
+	}
+
+	if got := e.sp.CountCalls("Start", e.name); got != startsBefore+1 {
+		t.Fatalf("Start(%s) calls = %d, want %d: the corpse is not replaced; stderr=%q", e.name, got, startsBefore+1, e.stderr.String())
+	}
+	if _, corpse := e.sp.corpses[e.name]; corpse || !e.sp.IsRunning(e.name) {
+		t.Fatalf("runtime %s: corpse=%v running=%v, want a fresh running runtime", e.name, corpse, e.sp.IsRunning(e.name))
+	}
+	after, err := e.store.Get(e.beadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", e.beadID, err)
+	}
+	if after.Status == "closed" {
+		t.Fatalf("named row closed over its dead pane; want it kept open (state %q)", after.Metadata["state"])
+	}
+	if state := after.Metadata["state"]; state != "active" && state != "awake" {
+		t.Fatalf("row state = %q, want active after the restart committed", state)
+	}
+	if tok := after.Metadata["instance_token"]; tok == "" || tok == deadPaneTestToken {
+		t.Fatalf("row instance_token = %q, want a new incarnation's token", tok)
+	}
+	if after.Metadata["alias"] != "worker" || after.Metadata["session_name"] != e.name {
+		t.Fatalf("row alias=%q session_name=%q, want worker and %q unchanged", after.Metadata["alias"], after.Metadata["session_name"], e.name)
+	}
+	crashAt, wokeAt := -1, -1
+	for i, ev := range e.rec.Events {
+		switch {
+		case ev.Type == events.SessionCrashed && crashAt < 0:
+			crashAt = i
+		case ev.Type == events.SessionWoke && wokeAt < 0:
+			wokeAt = i
+		}
+	}
+	if crashAt < 0 || wokeAt < 0 || crashAt > wokeAt {
+		t.Fatalf("session.crashed at %d, first session.woke at %d, want the crash recorded before the wake; events=%#v", crashAt, wokeAt, e.rec.Events)
+	}
+}
