@@ -328,9 +328,11 @@ func TestReadClosedStatusAsksBdListForTheMetadataField(t *testing.T) {
 //
 // The --status arms' list legs push less than the ready arm does: an empty
 // value ("key=" is present-and-empty in Go, which a backend's = ” or LIKE
-// misses for a stored JSON null) and a value whose JSON string form is not the
-// value between quotes (DoltLite's LIKE prefilter matches one encoding of it)
-// stay Go-side there. The ready arm's query for those forms is unchanged.
+// misses for a stored JSON null), a value outside printable ASCII and a value
+// whose JSON string form is not the value between quotes (DoltLite's LIKE
+// prefilter matches only Go's encoding of it, and other writers spell those
+// values differently) stay Go-side there. The ready arm's query for those
+// forms is unchanged.
 func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -349,6 +351,7 @@ func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) 
 		{name: "empty value", query: Query{MetadataFields: []string{"gc.x="}}, readyPushes: map[string]string{"gc.x": ""}},
 		{name: "value needs JSON escaping", query: Query{MetadataFields: []string{"gc.x=a<b"}}, readyPushes: map[string]string{"gc.x": "a<b"}},
 		{name: "value with a quote", query: Query{MetadataFields: []string{`gc.x=say "hi"`}}, readyPushes: map[string]string{"gc.x": `say "hi"`}},
+		{name: "value outside printable ASCII", query: Query{MetadataFields: []string{"gc.x=café"}}, readyPushes: map[string]string{"gc.x": "café"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newNarrowingStore()
@@ -393,8 +396,8 @@ func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) 
 }
 
 // metadataFormRows seeds, in every status, one row per form gc.x can be stored
-// in: present and empty, missing, each JSON literal, and values whose JSON
-// string form needs escaping.
+// in: present and empty, missing, each JSON literal, values whose JSON string
+// form needs escaping, and a value outside printable ASCII.
 func metadataFormRows() []beads.Bead {
 	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	forms := []struct {
@@ -409,6 +412,7 @@ func metadataFormRows() []beads.Bead {
 		{name: "object", value: new(`{"a":1}`)},
 		{name: "angle", value: new("a<b")},
 		{name: "quote", value: new(`say "hi"`)},
+		{name: "accent", value: new("café")},
 	}
 	var rows []beads.Bead
 	for _, status := range []string{StatusOpen, StatusInProgress, StatusBlocked, StatusClosed} {
@@ -721,6 +725,18 @@ func TestReadStatusLegsNeverServeARelicThePlainReadDrops(t *testing.T) {
 			},
 			graph: []beads.Bead{readyRow("w-1", 1, base.Add(time.Minute), rooted)},
 			query: Query{Status: StatusOpen, MetadataFields: []string{"gc.root_bead_id=R"}, Limit: 1},
+			want:  []string{},
+		},
+		{
+			// The work leg holds the id in_progress and the binding's copy is
+			// open. The guard falls back to the plain read, whose merge keeps
+			// the work copy (first leg wins) before the open cut drops it; cut
+			// per leg, that read would answer with the binding's copy and put
+			// one id in two status inventories.
+			name:  "open over an in_progress work copy",
+			work:  []beads.Bead{readyRow("w-1", 1, base, status(StatusInProgress), rooted)},
+			graph: []beads.Bead{readyRow("w-1", 1, base, rooted)},
+			query: Query{Status: StatusOpen, MetadataFields: []string{"gc.root_bead_id=R"}},
 			want:  []string{},
 		},
 	} {

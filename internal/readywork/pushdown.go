@@ -40,11 +40,16 @@ import (
 //     pair only under two more conditions. The value is not empty: "key="
 //     means present and empty in Go, which keeps a stored JSON null (decoded
 //     as a present ""), and bd's JSON_UNQUOTE(...) = '' and DoltLite's LIKE
-//     prefilter both miss that row. And the value's JSON string form is the
-//     value itself between quotes: DoltLite prefilters with LIKE on Go's
-//     escaped encoding, and a value carrying a quote, a backslash, <, >, &, a
-//     control character, U+2028/U+2029 or invalid UTF-8 can be stored under
-//     another valid encoding the prefilter misses.
+//     prefilter both miss that row. And every writer of a stored row spells
+//     the value the same way: DoltLite prefilters with LIKE on the encoding
+//     Go writes and matches no other, so a row whose JSON spells the value
+//     another way is dropped before the exact filter sees it (Go writes café
+//     as "café", Python's json.dumps as "caf\u00e9"). So the value is
+//     printable ASCII with no character Go escapes (a quote, a backslash, <,
+//     >, &): its JSON string form is the value itself between quotes, as
+//     every JSON writer here produces it. That is a floor, not a proof: valid
+//     JSON can spell even a plain ASCII value with \u escapes or break a line
+//     at the colon, and no writer here does either.
 //   - --exclude-type (bd expands type aliases), --exclude-label (bd normalizes
 //     labels) and bare-key --metadata-field are never pushed.
 //
@@ -136,15 +141,27 @@ func readyReadQuery(c compiled) beads.ReadyQuery {
 
 // pushableListMetadata reports whether f can be pushed into a --status arm's
 // list read (beads.ListQuery.Metadata) with the Go comparison's semantics: it
-// is pushable into a ready read, its value is not empty, and its value's JSON
-// string form is the value itself between quotes (see the package comment
-// above).
+// is pushable into a ready read, its value is not empty, and its value is
+// printable ASCII whose JSON string form is the value itself between quotes
+// (see the package comment above).
 func pushableListMetadata(f metadataFieldFilter) bool {
-	if !pushableMetadata(f) || f.value == "" {
+	if !pushableMetadata(f) || f.value == "" || !isPrintableASCII(f.value) {
 		return false
 	}
 	encoded, err := json.Marshal(f.value)
 	return err == nil && string(encoded) == `"`+f.value+`"`
+}
+
+// isPrintableASCII reports whether every byte of s is in ' '..'~'. The bd-query
+// wisp leg applies the same floor for a reason of its own (bd's lexer reads a
+// quoted value a byte at a time), so the two rules stay separate.
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < ' ' || c > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 // listMetadata returns the --metadata-field pairs a --status arm's list legs are
