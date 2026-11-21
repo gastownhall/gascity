@@ -224,10 +224,34 @@ func shouldEmitLoadCityConfigWarning(warning string) bool {
 	if config.IsLegacyWorkspaceFieldWarning(warning) {
 		return false
 	}
+	// The always+fresh advisory describes a deliberate setting and has no off
+	// switch, so printing it on every config load buries the result of nearly
+	// every command. gc start and gc config show print prov.Warnings directly,
+	// and gc doctor calls emitAlwaysFreshAdvisories.
+	if config.IsAlwaysFreshWakeModeWarning(warning) {
+		return false
+	}
 	if strings.Contains(warning, "both [agent_defaults] and [agents] are present") {
 		return true
 	}
 	return isNonFatalLoadConfigWarning(warning)
+}
+
+// emitAlwaysFreshAdvisories prints the always+fresh advisory for a command that
+// checks config, since the ordinary config load no longer does.
+func emitAlwaysFreshAdvisories(w io.Writer, cfg *config.City) {
+	if w == nil || cfg == nil {
+		return
+	}
+	warnings, err := config.ValidateNamedSessions(cfg)
+	if err != nil {
+		return
+	}
+	for _, warning := range warnings {
+		if config.IsAlwaysFreshWakeModeWarning(warning) {
+			fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
+		}
+	}
 }
 
 func strictFatalLoadConfigWarnings(warnings []string) []string {
