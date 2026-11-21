@@ -283,20 +283,27 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("%w: ssh session %q", runtime.ErrSessionExists, name)
 	}
 
+	// Secret env values never travel in a command line — not the box's, not this
+	// ssh client's. They are staged into private files on the box and referenced
+	// by path (see [stagedEnv]). Staging runs before PreStart because the prelude
+	// PreStart carries is what names the staged file. With no secret, nothing is
+	// staged and new-session goes out as argv.
+	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
+	argvLaunch := len(secretEnv) == 0
+
 	args := []string{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name}
 	if cfg.WorkDir != "" {
 		args = append(args, "-c", cfg.WorkDir)
 	}
 	for _, k := range sortedKeys(cfg.Env) {
-		args = append(args, "-e", k+"="+cfg.Env[k])
+		kv := k + "=" + cfg.Env[k]
+		if argvLaunch {
+			kv = tmuxArgvArg(kv)
+		}
+		args = append(args, "-e", kv)
 	}
 	args = append(args, resolveCommand(cfg))
 
-	// Secret env values never travel in a command line — not the box's, not this
-	// ssh client's. They are staged into private files on the box and referenced
-	// by path (see [stagedEnv]). Staging runs before PreStart because the prelude
-	// PreStart carries is what names the staged file.
-	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
 	staged, err := p.stageSecretEnv(ctx, secretEnv, args)
 	if err != nil {
 		return fmt.Errorf("ssh start %q: %w", name, startStepErr(ctx, "staging session env", err))
@@ -348,6 +355,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
 	}
 	return nil
+}
+
+// tmuxArgvArg returns s as a tmux argv argument that tmux reads back as s.
+// tmux's command parser reads an argument ending in ";" as a command separator
+// and turns a trailing "\;" into ";", so a final ";" gets a "\" before it, as
+// in [runtime.TmuxLiteralArgs]. A staged tmux command file needs no such
+// escape: there every argument is single-quoted (see [tmuxQuote]), and ";" is
+// literal inside quotes.
+func tmuxArgvArg(s string) string {
+	if strings.HasSuffix(s, ";") {
+		return s[:len(s)-1] + `\;`
+	}
+	return s
 }
 
 // startStepErr is the error a Start or Relaunch step fails with: err, or,
