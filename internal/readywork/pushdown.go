@@ -125,6 +125,24 @@ func readyReadQuery(c compiled) beads.ReadyQuery {
 	return q
 }
 
+// listMetadata returns the --metadata-field pairs a --status arm's list legs are
+// asked to match (beads.ListQuery.Metadata), or nil when there are none.
+func listMetadata(c compiled) map[string]string {
+	var out map[string]string
+	for _, f := range c.metadata {
+		if !pushableMetadata(f) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(c.metadata))
+		}
+		// Two values for one key match nothing in Go; pushing either one still
+		// returns a superset of nothing.
+		out[f.key] = f.value
+	}
+	return out
+}
+
 // boundedOrder reports the order a bounded leg read cuts in, or false when the
 // limit is not pushed at all.
 func boundedOrder(c compiled) (beads.ReadyOrder, bool) {
