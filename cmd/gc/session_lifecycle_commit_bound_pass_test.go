@@ -28,7 +28,7 @@ func (p *wedgeOnStartProvider) Start(ctx context.Context, name string, cfg runti
 
 // The async start pass hands the async goroutine the slot-only release; the
 // lease it took is ended by the start itself, bounded with the commit
-// (SESSION-RUNTIME-017). This drives the real executePlannedStartsTraced, so
+// (SESSION-RUNTIME-035). This drives the real executePlannedStartsTraced, so
 // the release the pass builds for the goroutine is the one under test: a pass
 // that handed over the lease-then-slot composition would run the lease's
 // release, which reads and writes the wedged store, before freeing the slot

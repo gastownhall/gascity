@@ -269,7 +269,7 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenTheCommitHangs(t *testing.T)
 		}
 		// The waiter writes nothing: the row is exactly what the start phase
 		// left, and the runtime is not touched. The age of the lease is the
-		// repair path's input (SESSION-RUNTIME-017).
+		// repair path's input (SESSION-RUNTIME-035).
 		got := mustGetBead(t, inner, bead.ID)
 		if got.Status != "open" || got.Metadata["pending_create_claim"] != "true" {
 			t.Fatalf("session after the abandoned commit: status=%q pending_create_claim=%q, want it open and still claimed", got.Status, got.Metadata["pending_create_claim"])
@@ -354,7 +354,7 @@ func TestAbandonedCommitRunsToCompletionOnTheControllerContext(t *testing.T) {
 // finds the record cleared and stops a healthy runtime. The commit's own
 // goroutine releases the lease when it returns; until then the name's flock
 // stays held and another start of the session defers on it
-// (SESSION-RUNTIME-017).
+// (SESSION-RUNTIME-035).
 func TestAbandonedCommitLandsUnderTheProductionLeaseAndThenReleasesIt(t *testing.T) {
 	testCity := t.TempDir()
 	workDir := t.TempDir()

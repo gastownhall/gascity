@@ -21,7 +21,7 @@ import (
 
 // waiterCallStore counts the store calls the async start goroutine itself makes
 // once runPreparedStartCandidate has returned: the waiter of the bounded commit
-// (SESSION-RUNTIME-017). The commit closure runs on a goroutine of its own, and
+// (SESSION-RUNTIME-035). The commit closure runs on a goroutine of its own, and
 // the start phase runs under runPreparedStartCandidate, so neither counts. The
 // waiter makes none.
 type waiterCallStore struct {
@@ -33,7 +33,10 @@ type waiterCallStore struct {
 }
 
 // inWaiterAfterStart reports whether the calling goroutine is an async start
-// goroutine outside runPreparedStartCandidate.
+// goroutine outside runPreparedStartCandidate. The commit closure is a literal
+// inside enqueuePreparedStartWaveForCity, so its frame carries that name too;
+// it runs only under runHandedOffCommit, on a goroutine of its own, and is not
+// the waiter.
 func inWaiterAfterStart() bool {
 	pcs := make([]uintptr, 64)
 	frames := goruntime.CallersFrames(pcs[:goruntime.Callers(3, pcs)])
@@ -41,7 +44,8 @@ func inWaiterAfterStart() bool {
 	for {
 		frame, more := frames.Next()
 		switch {
-		case strings.Contains(frame.Function, "runPreparedStartCandidate"):
+		case strings.Contains(frame.Function, "runPreparedStartCandidate"),
+			strings.Contains(frame.Function, "runHandedOffCommit"):
 			return false
 		case strings.Contains(frame.Function, "enqueuePreparedStartWaveForCity"):
 			inEnqueue = true
@@ -75,6 +79,7 @@ func (s *waiterCallStore) hungNow() int64 {
 }
 
 func (s *waiterCallStore) Get(id string) (beads.Bead, error) { s.note("Get"); return s.Store.Get(id) }
+
 func (s *waiterCallStore) Update(id string, opts beads.UpdateOpts) error {
 	s.note("Update")
 	return s.Store.Update(id, opts)
@@ -115,7 +120,7 @@ func leaseFree(t *testing.T, city, name string) bool {
 // busy to every other holder until it returns. When the store answers, the late
 // commit lands under its own lease: the row is committed, the runtime is left
 // running and exactly one session.woke is recorded, then the lease is released
-// and the name is takeable (ga-hlod480, SESSION-RUNTIME-017).
+// and the name is takeable (ga-hlod480, SESSION-RUNTIME-035).
 func TestLateHealthyCommitKeepsItsLeaseAndTheWaiterTouchesNothing(t *testing.T) {
 	testCity := t.TempDir()
 	workDir := t.TempDir()

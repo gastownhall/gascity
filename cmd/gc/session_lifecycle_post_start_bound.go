@@ -9,9 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -40,7 +38,7 @@ const startFailureProbeBudget = 10 * time.Second
 // commit and settle phase that follows runPreparedStartCandidate while it holds
 // its start slot. The phase reads and writes the session store and can stop or
 // probe the runtime, none of it cancellable, so on expiry the wait is abandoned
-// and the slot is released (SESSION-RUNTIME-017). The bound covers the whole
+// and the slot is released (SESSION-RUNTIME-035). The bound covers the whole
 // phase, so it is wider than one post-start observation.
 const commitPhaseBound = 30 * time.Second
 
@@ -169,8 +167,8 @@ const (
 	leaseAbandoned        = "runtime lease abandoned (flock released, record left to lapse)"
 )
 
-// commitAsyncStartBounded is commitAsyncStartResultWithContext held to
-// commitPhaseBound, under the same per-session key as the post-start
+// commitAsyncStartBounded runs commit, the start's
+// commitAsyncStartResultWithContext call, held to commitPhaseBound, under the same per-session key as the post-start
 // observations. It returns whether the commit succeeded. When the commit does
 // not answer in time, or an observation of the session is already outstanding
 // so it is refused without running, it logs commit_unavailable and returns
@@ -202,15 +200,11 @@ func commitAsyncStartBounded(
 	ctx context.Context,
 	cityPath string,
 	result startResult,
-	sp runtime.Provider,
-	store beads.Store,
-	clk clock.Clock,
-	rec events.Recorder,
 	wave int,
-	stdout, stderr io.Writer,
-	trace *sessionReconcilerTraceCycle,
+	stderr io.Writer,
 	lease *sessionpkg.RuntimeLease,
 	unwatch func(),
+	commit func() bool,
 ) (committed bool) {
 	name := result.prepared.candidate.name()
 	template := result.prepared.candidate.tp.TemplateName
@@ -234,9 +228,7 @@ func commitAsyncStartBounded(
 	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(base), commitPhaseBound)
 	defer cancel()
 	committed, err := observeSessionBounded(waitCtx, cityPath, name, func() (bool, error) {
-		return runHandedOffCommit(&handoff, lease, unwatch, func() bool {
-			return commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
-		})
+		return runHandedOffCommit(&handoff, lease, unwatch, commit)
 	})
 	abandoned := handoff.abandon(lease)
 	waiterDone = true

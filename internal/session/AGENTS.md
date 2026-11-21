@@ -129,7 +129,7 @@ evidence from tests, source, an issue, or a commit.
 
 ## Runtime Lease Ownership When a Commit Is Bounded
 
-- A bounded commit phase (`commitAsyncStartBounded`, SESSION-RUNTIME-017) means
+- A bounded commit phase (`commitAsyncStartBounded`, SESSION-RUNTIME-035) means
   the goroutine that holds the start slot is not the one that finishes the
   commit. One word (`commitHandoff`: waiter-owned, closure-owned, abandoned,
   compare-and-swap only) decides who ends the start's runtime lease. The commit

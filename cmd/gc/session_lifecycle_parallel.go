@@ -2386,12 +2386,15 @@ func enqueuePreparedStartWaveForCity(
 			// commit cannot lose the endpoint verdict.
 			result = resolveStartCapacity(result, rec, stderr)
 			// Bounded: a commit that wedges on the store or the runtime must not
-			// hold the slot (SESSION-RUNTIME-017). Resolving the endpoint
+			// hold the slot (SESSION-RUNTIME-035). Resolving the endpoint
 			// verdict above stays outside the bound. The lease and the watch
 			// move to the commit: it releases the lease when it returns, and
 			// the wait abandons it only if the commit never claimed it.
 			leaseHandedOff = true
-			commitAsyncStartBounded(ctx, cityPath, result, sp, store, clk, rec, wave, stdout, stderr, trace, lease, unwatch)
+			commitAsyncStartBounded(ctx, cityPath, result, wave, stderr, lease, unwatch,
+				func() bool {
+					return commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
+				})
 			// The commit is done or abandoned: the lease is released, or its
 			// flock abandoned, or held by the commit that is still running, so
 			// give the slot back before the follow-up.

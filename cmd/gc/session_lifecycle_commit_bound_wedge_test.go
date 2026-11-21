@@ -133,7 +133,7 @@ func (s *wedgedStore) SetMetadataBatch(id string, kvs map[string]string) error {
 // (RuntimeLease.Release). When the store is wedged for everyone, as a stalled
 // Dolt is, that release hangs too, so a waiter that runs it before freeing the
 // slot pins the slot behind the very store the commit bound gave up on. The
-// abandon path (SESSION-RUNTIME-017) must free the slot, run the follow-up and
+// abandon path (SESSION-RUNTIME-035) must free the slot, run the follow-up and
 // finish without any store I/O of its own.
 func TestAbandonedCommitFreesTheSlotUnderTheProductionLeaseWhenTheStoreIsWedged(t *testing.T) {
 	testCity := t.TempDir()

@@ -100,7 +100,7 @@ func abandonedCommitRepairScenario(t *testing.T, testCity, workDir string, advan
 	return mustGetBead(t, inner, bead.ID), sp, env, store, cleanup
 }
 
-// The abandon path leaves the row a pending create (SESSION-RUNTIME-017), so
+// The abandon path leaves the row a pending create (SESSION-RUNTIME-035), so
 // the repair that already exists for a pending create whose start went quiet
 // has to take it from there. With the runtime alive and the start's in-flight
 // window over, the reconciler commits the start itself and leaves the runtime
