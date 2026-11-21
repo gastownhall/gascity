@@ -861,3 +861,71 @@ func TestExtmsgNotifyMembersUnresolvedExplicitTargetMaterializesNothing(t *testi
 		})
 	}
 }
+
+// TestExtmsgNotifyMembersGroupedNoMatchTargetStaysParticipantOnly covers a
+// grouped room whose explicit target is no participant handle but names a
+// live session outside the group: the room stays participant-only.
+func TestExtmsgNotifyMembersGroupedNoMatchTargetStaysParticipantOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target func(outsider session.Info) string
+	}{
+		{name: "session id", target: func(outsider session.Info) string { return outsider.ID }},
+		{name: "alias", target: func(session.Info) string { return "myrig/outsider" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+
+			ref := extmsg.ConversationRef{
+				ScopeID:        "guild-1",
+				Provider:       "discord",
+				AccountID:      "acct-1",
+				ConversationID: "thread-1",
+				Kind:           extmsg.ConversationThread,
+			}
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			group, err := services.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
+				RootConversation: ref,
+				Mode:             extmsg.GroupModeLauncher,
+				DefaultHandle:    "lead",
+			})
+			if err != nil {
+				t.Fatalf("EnsureGroup: %v", err)
+			}
+			participant := createTestSession(t, fs.cityBeadStore, fs.sp, "Lead")
+			if _, err := services.Groups.UpsertParticipant(context.Background(), caller, extmsg.UpsertParticipantInput{
+				GroupID:   group.ID,
+				Handle:    "lead",
+				SessionID: participant.ID,
+				Public:    true,
+			}); err != nil {
+				t.Fatalf("UpsertParticipant(lead): %v", err)
+			}
+			outsider := createTestSession(t, fs.cityBeadStore, fs.sp, "Outsider")
+			if err := fs.cityBeadStore.Update(outsider.ID, beads.UpdateOpts{
+				Metadata: map[string]string{"alias": "myrig/outsider"},
+			}); err != nil {
+				t.Fatalf("Update(outsider alias): %v", err)
+			}
+			target := tc.target(outsider)
+
+			srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hi", "", target)
+
+			nudges := extmsgNudgesBySessionName(fs)
+			if got := nudges[outsider.SessionName]; len(got) != 0 {
+				t.Fatalf("outsider of grouped room was nudged: %#v", got)
+			}
+			got := nudges[participant.SessionName]
+			if len(got) != 1 {
+				t.Fatalf("participant nudges = %d, want 1; nudges=%#v", len(got), nudges)
+			}
+			if !strings.Contains(got[0], "Addressed to: @"+target) {
+				t.Fatalf("participant notice missing discriminator for %q:\n%s", target, got[0])
+			}
+		})
+	}
+}
