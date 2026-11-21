@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/mail"
 )
 
 // bdValidateCloseReason mirrors bd's ValidateCloseReason under
@@ -236,5 +237,75 @@ func TestArchiveThroughBdStoreSendsCloseReason(t *testing.T) {
 	}
 	if runner.msg.Status != "closed" {
 		t.Errorf("bead status = %q, want closed", runner.msg.Status)
+	}
+}
+
+// TestArchivedMessageReadsAsUserRemoved covers AC-4: a message Archive closes
+// with ArchiveCloseReason is no longer addressable by ID, unlike retention-swept
+// mail, and the reason itself satisfies bd's on-close validation.
+func TestArchivedMessageReadsAsUserRemoved(t *testing.T) {
+	if err := bdValidateCloseReason(ArchiveCloseReason); err != nil {
+		t.Fatalf("ArchiveCloseReason %q fails bd on-close validation: %v", ArchiveCloseReason, err)
+	}
+	if ArchiveCloseReason == RetentionSweepCloseReason || ArchiveCloseReason == UnreadRetentionSweepCloseReason {
+		t.Fatalf("ArchiveCloseReason %q must differ from the retention-sweep reasons", ArchiveCloseReason)
+	}
+	if !isRemovedMessageBead(beads.Bead{
+		Type:     messageBeadType,
+		Status:   "closed",
+		Metadata: map[string]string{"close_reason": ArchiveCloseReason},
+	}) {
+		t.Errorf("isRemovedMessageBead = false for a message closed with ArchiveCloseReason, want true")
+	}
+
+	store := onCloseValidatingStore{MemStore: beads.NewMemStore()}
+	p := newTestProvider(store)
+	m, err := p.Send("sender", "recipient", "archive me", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := p.Archive(m.ID); err != nil {
+		t.Fatalf("Archive(%s): %v", m.ID, err)
+	}
+	if _, err := p.Get(m.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get(archived) = %v, want mail.ErrNotFound", err)
+	}
+	if _, err := p.Read(m.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Read(archived) = %v, want mail.ErrNotFound", err)
+	}
+	if err := p.MarkRead(m.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("MarkRead(archived) = %v, want mail.ErrNotFound", err)
+	}
+	if _, err := p.Reply(m.ID, "recipient", "re", "body"); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Reply(archived) = %v, want mail.ErrNotFound", err)
+	}
+}
+
+// TestArchiveKeepsRetentionSweepReason guards the order in Archive: a message
+// the retention sweep already closed is reported as already archived and keeps
+// its addressable sweep reason rather than being re-stamped.
+func TestArchiveKeepsRetentionSweepReason(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	m, err := p.Send("sender", "recipient", "swept", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := p.MarkRead(m.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	if _, _, err := SweepReadMessagesBefore(
+		beads.MailStore{Store: store}, time.Now().Add(time.Hour), 0, RetentionSweepCloseReason); err != nil {
+		t.Fatalf("SweepReadMessagesBefore: %v", err)
+	}
+	if err := p.Archive(m.ID); !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Fatalf("Archive(swept) = %v, want mail.ErrAlreadyArchived", err)
+	}
+	b, err := store.Get(m.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata["close_reason"]; got != RetentionSweepCloseReason {
+		t.Errorf("close_reason after archiving a swept message = %q, want %q", got, RetentionSweepCloseReason)
 	}
 }
