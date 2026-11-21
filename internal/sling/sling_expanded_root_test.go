@@ -260,3 +260,50 @@ func TestSlingExpandedRootReslingRepairsStuckRun(t *testing.T) {
 		t.Errorf("ConvoyID = %q, want the existing %s", result.ConvoyID, convoy.ID)
 	}
 }
+
+// metadataWriteRecorder records the bead IDs whose metadata is written.
+type metadataWriteRecorder struct {
+	*beads.MemStore
+	written []string
+}
+
+func (r *metadataWriteRecorder) SetMetadata(id, key, value string) error {
+	r.written = append(r.written, id)
+	return r.MemStore.SetMetadata(id, key, value)
+}
+
+func (r *metadataWriteRecorder) SetMetadataBatch(id string, kvs map[string]string) error {
+	r.written = append(r.written, id)
+	return r.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// TestSlingExpandedRootFullyRoutedReslingIsIdempotent is AC-4: once the root
+// and every executable member are routed to the target, a re-sling is the
+// idempotent no-op it always was and writes no member metadata.
+func TestSlingExpandedRootFullyRoutedReslingIsIdempotent(t *testing.T) {
+	run := newCookedRun(t)
+	mix := run.member(t, "mix batter", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	cook := run.member(t, "cook", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	run.slungBeforeFix(t, "worker")
+	recorder := &metadataWriteRecorder{MemStore: run.store}
+	worker := poolWorker()
+	deps, _ := cookedRunDeps(run, worker)
+	deps = withStore(deps, recorder)
+	deps.Router = &storeStampingRouter{fallback: recorder}
+
+	result, err := DoSling(testOpts(worker, run.root.ID), deps, recorder)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if !result.Idempotent {
+		t.Error("Idempotent = false, want true for a fully routed cooked run")
+	}
+	for _, id := range recorder.written {
+		if id == mix.ID || id == cook.ID {
+			t.Errorf("idempotent re-sling wrote metadata on member %s", id)
+		}
+	}
+	if result.RoutedMembers != 0 {
+		t.Errorf("RoutedMembers = %d, want 0", result.RoutedMembers)
+	}
+}
