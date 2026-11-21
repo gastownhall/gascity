@@ -406,6 +406,54 @@ func TestHookClaimNeverReleasesCanceledGraphRootItDidNotClaim(t *testing.T) {
 	}
 }
 
+// TestHookClaimAdoptionFinishesFailedCancelOfExpandedGraphRoot: the path a
+// tail-bearing run takes in production. Pouring a graph root with steps stamps
+// gc.workflow_expanded=true, so no claim tier hands that root out fresh; it
+// reaches a session only as a root the session already holds. Offered for
+// adoption with its cancel unfinished and its input settled, the root is not
+// adopted: the run closes canceled, the teardown tail is spared, and nothing is
+// handed out, claimed or released.
+func TestHookClaimAdoptionFinishesFailedCancelOfExpandedGraphRoot(t *testing.T) {
+	for name, cancel := range map[string]map[string]string{
+		"cancel_requested": {beadmeta.CancelRequestedMetadataKey: "true"},
+		"outcome_canceled": {beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			rootMeta := map[string]string{beadmeta.WorkflowExpandedMetadataKey: "true"}
+			for k, v := range cancel {
+				rootMeta[k] = v
+			}
+			run := seedGraphCancelRun(f, beadmeta.InputLifecycleGraph, rootMeta)
+			status, holder := "in_progress", "worker-1"
+			if err := f.store.Update(run.root.ID, beads.UpdateOpts{Status: &status, Assignee: &holder}); err != nil {
+				t.Fatal(err)
+			}
+			ops := graphCancelOps(f, workflowInputComplete, nil)
+			var rel releaseRecorder
+			rel.install(&ops)
+
+			code, got, stderr := runHookClaimWith(f, ops)
+			if code != 0 || got != "" {
+				t.Fatalf("doHookClaim = %d handing out %q, want 0 handing out nothing; stderr=%s", code, got, stderr)
+			}
+			if len(rel.attempts) != 0 {
+				t.Fatalf("release attempts = %v, want none: adoption mints no claim to give back", rel.attempts)
+			}
+			f.wantNeverClaimed(run.root.ID)
+			f.wantClosed(run.root.ID, beadmeta.OutcomeCanceled)
+			f.wantClosed(run.step.ID, beadmeta.OutcomeCanceled)
+			f.wantOpen(run.teardown.ID)
+			if marker := f.get(run.root.ID).Metadata[beadmeta.CancelRequestedMetadataKey]; marker != "true" {
+				t.Fatalf("root gc.cancel_requested = %q, want true", marker)
+			}
+			if !strings.Contains(stderr, run.root.ID) || !strings.Contains(stderr, "canceled") {
+				t.Fatalf("stderr = %q, want a diagnostic naming the recovered root %s", stderr, run.root.ID)
+			}
+		})
+	}
+}
+
 // TestHookClaimLinkedGraphWorkKeepsStepScopedStop: graph work linked to a
 // canceled graph-owned run — a step naming the root, or a drain item root
 // naming a drain control of the run — is closed alone by the existing stop

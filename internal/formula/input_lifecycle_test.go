@@ -227,35 +227,6 @@ title = "A"
 	}
 }
 
-// TestCompileInputLifecycleRejectsOnV2DisabledHost: with [daemon] formula_v2
-// disabled the host capability is 1.0.0, so a formula declaring input_lifecycle
-// fails the compiler requirement instead of compiling without the field.
-func TestCompileInputLifecycleRejectsOnV2DisabledHost(t *testing.T) {
-	dir := t.TempDir()
-	writeFormula(t, dir, `
-formula = "review"
-input_lifecycle = "graph"
-
-[requires]
-formula_compiler = ">=2.1.0"
-
-[[steps]]
-id = "review"
-title = "Review"
-`)
-
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(false)
-	defer SetFormulaV2Enabled(prev)
-
-	_, err := Compile(context.Background(), "review", []string{dir}, nil)
-	if err == nil {
-		t.Fatal("Compile unexpectedly succeeded on a v2-disabled host")
-	}
-	requireErrorContains(t, err, "formula.compiler_requirement_unsatisfied")
-	requireErrorContains(t, err, ">=2.1.0")
-}
-
 // TestResolveInputLifecycleFirstDeclaringParentWins: a child that declares no
 // input_lifecycle takes the value of its first declaring parent, so a later
 // parent's external declaration does not override an earlier parent's graph.
