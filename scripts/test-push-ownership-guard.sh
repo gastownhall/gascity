@@ -1975,6 +1975,55 @@ test_config_alias_prefix_resolves() {
     rm -rf "$root" "$fbd"
 }
 
+# AC-4: a branch token the owning store has never heard of is a definitive
+# miss, not a failure. The probe answers a successful [], no bd show of the
+# token happens, and the push falls to the assignment fallback (which finds
+# no single assignment, so it is allowed). fix/bd-show-json with bd routed:
+# the token is bd-show, which no store issues.
+test_absent_routed_token_skips_to_fallback() {
+    local root repo fbd bdstore out rc
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/beads/.beads"
+    repo="$(new_repo_with_branch_at "$root" "fix/bd-show-json")"
+    write_routes "$repo" "ga:." "bd:../beads"
+    bdstore="$repo/../beads/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    # Nothing seeded: the probe answers a definitive [].
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] &&
+        [[ "$(routed_store_calls "$fbd" "$bdstore" | grep -c 'cmd=list')" -eq 1 ]] &&
+        [[ "$(routed_store_calls "$fbd" "$bdstore" | grep -c 'cmd=show')" -eq 0 ]] &&
+        [[ "$(routed_calls "$fbd" | grep -c 'args=list --assignee=agent-x')" -eq 1 ]]; then
+        record_pass "routed/absent-token-skips (probe [], no show, assignment fallback, allowed)"
+    else
+        record_fail "routed/absent-token-skips" "expected rc=0, one bd-store probe, zero shows, one fallback list, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# AC-4 companion: a successful [] probe is definitive — POG_READ_ATTEMPTS
+# does not retry it (only failing reads retry), and the push still ends
+# allowed through the fallback.
+test_absent_routed_token_not_retried() {
+    local root repo fbd bdstore out rc
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/beads/.beads"
+    repo="$(new_repo_with_branch_at "$root" "fix/bd-show-json")"
+    write_routes "$repo" "ga:." "bd:../beads"
+    bdstore="$repo/../beads/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] &&
+        [[ "$(routed_store_calls "$fbd" "$bdstore" | grep -c 'cmd=list')" -eq 1 ]]; then
+        record_pass "routed/absent-token-not-retried (one probe under POG_READ_ATTEMPTS=3)"
+    else
+        record_fail "routed/absent-token-not-retried" "expected rc=0 and exactly one probe with POG_READ_ATTEMPTS=3, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2042,6 +2091,8 @@ run_all() {
     test_routed_reads_drop_store_pins
     test_current_store_reads_keep_caller_pins
     test_config_alias_prefix_resolves
+    test_absent_routed_token_skips_to_fallback
+    test_absent_routed_token_not_retried
 
     echo
     echo "pass=$pass fail=$fail"
