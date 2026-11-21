@@ -36,6 +36,13 @@ import (
 //     the Go string comparison for a stored JSON string; for a value that is a
 //     JSON literal (true, 42, null, an object) the two can disagree, and a key
 //     outside the grammar is refused by the backend rather than matched.
+//   - The --status list legs push the same pairs under two further conditions
+//     (listMetadata): the value is not empty, and its JSON string form is the
+//     value itself between quotes. bd's `= ''` and DoltLite's LIKE prefilter
+//     both miss a stored JSON null, which the Go `key=` form keeps as a present
+//     empty value, and DoltLite's LIKE runs over Go's escaped encoding, so a
+//     value needing an escape can be stored under another encoding the
+//     prefilter misses while the Go filter keeps the row.
 //   - --exclude-type (bd expands type aliases), --exclude-label (bd normalizes
 //     labels) and bare-key --metadata-field are never pushed.
 //
@@ -123,6 +130,40 @@ func readyReadQuery(c compiled) beads.ReadyQuery {
 		q.MetadataEquals[f.key] = f.value
 	}
 	return q
+}
+
+// listMetadata is the metadata a --status list leg is narrowed by: every
+// key=value pair that passes pushableMetadata and two further conditions the
+// list legs' backends need, or nil when no pair does.
+//
+//   - The value is not empty. `key=` means "present and empty" in Go, and bd's
+//     SQL comparison and DoltLite's LIKE prefilter both miss a stored JSON
+//     null, which beads.StringMap decodes as a present "".
+//   - The value's JSON string form is the value itself between quotes.
+//     DoltLite prefilters with LIKE over Go's escaped encoding, so a value
+//     containing a character encoding escapes (", \, <, >, &, a control
+//     character, U+2028/U+2029, invalid UTF-8) can be stored under another
+//     valid encoding the prefilter misses, while the Go filter keeps the row.
+//
+// A repeated key keeps its LAST eligible value, as the ready arm's
+// readyReadQuery does: two values for one key match nothing in Go, so pushing
+// either one still returns a superset of nothing.
+func listMetadata(c compiled) map[string]string {
+	var out map[string]string
+	for _, f := range c.metadata {
+		if !pushableMetadata(f) || f.value == "" {
+			continue
+		}
+		encoded, err := json.Marshal(f.value)
+		if err != nil || string(encoded) != `"`+f.value+`"` {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(c.metadata))
+		}
+		out[f.key] = f.value
+	}
+	return out
 }
 
 // boundedOrder reports the order a bounded leg read cuts in, or false when the

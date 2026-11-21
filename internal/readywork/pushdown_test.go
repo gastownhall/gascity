@@ -163,6 +163,117 @@ func TestReadPushesTheSelectivePredicatesIntoEveryLeg(t *testing.T) {
 	}
 }
 
+// listRecordingStore is a leg that records every ListQuery it is asked and
+// answers from the MemStore it wraps, which applies ListQuery.Metadata
+// exactly: the contract a pushdown-capable backend honors.
+type listRecordingStore struct {
+	*beads.MemStore
+	mu    sync.Mutex
+	lists []beads.ListQuery
+}
+
+func (s *listRecordingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	s.lists = append(s.lists, q)
+	s.mu.Unlock()
+	return s.MemStore.List(q)
+}
+
+func (s *listRecordingStore) listQueries() []beads.ListQuery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.lists)
+}
+
+func newListRecordingStore(rows ...beads.Bead) *listRecordingStore {
+	return &listRecordingStore{MemStore: beads.NewMemStoreFrom(0, rows, nil)}
+}
+
+// TestReadyStatusLegsFilterMetadataInTheStore pins ga-8g39ur: a plain
+// key=value --metadata-field travels into each --status leg's List as
+// ListQuery.Metadata, so a store with a large closed tier is narrowed by the
+// store rather than read whole and filtered in Go afterwards (where the read
+// runs past bd's list timeout). Each leg's FIRST List query is the arm's
+// query of today plus Metadata, and the Go filter still decides every row.
+func TestReadyStatusLegsFilterMetadataInTheStore(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	withRoot := func(v string) func(*beads.Bead) {
+		return func(b *beads.Bead) { b.Metadata = beads.StringMap{"gc.root_bead_id": v} }
+	}
+	inStatus := func(status string) func(*beads.Bead) {
+		return func(b *beads.Bead) { b.Status = status }
+	}
+	for _, tc := range []struct {
+		name  string
+		query Query
+		want  beads.ListQuery
+	}{
+		{
+			name:  "closed",
+			query: Query{Status: StatusClosed, MetadataFields: []string{"gc.root_bead_id=root-1"}},
+			// Live:true is what the live handle stamps on every leg read
+			// (beads.LiveFor).
+			want: beads.ListQuery{Status: StatusClosed, TierMode: beads.FederatedReadTier, Live: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := tc.query.Status
+			var rows []beads.Bead
+			rows = append(rows,
+				readyRow("hit-1", 1, base, inStatus(status), withRoot("root-1")),
+				readyRow("hit-2", 2, base.Add(time.Minute), inStatus(status), withRoot("root-1")),
+				readyRow("other-root", 1, base, inStatus(status), withRoot("root-2")),
+				readyRow("no-root", 1, base, inStatus(status)),
+			)
+			for _, other := range knownStatuses {
+				if other == status {
+					continue
+				}
+				rows = append(rows, readyRow("else-"+other, 1, base, inStatus(other), withRoot("root-1")))
+			}
+			if tc.query.Assignee != "" {
+				assigned := func(b *beads.Bead) { b.Assignee = tc.query.Assignee }
+				rows[0], rows[1] = withMutation(rows[0], assigned), withMutation(rows[1], assigned)
+			}
+			rigRows := make([]beads.Bead, len(rows))
+			for i, r := range rows {
+				r.ID, r.Title = "r-"+r.ID, "r-"+r.ID
+				rigRows[i] = r
+			}
+			city, rig := newListRecordingStore(rows...), newListRecordingStore(rigRows...)
+			legs := []Leg{testLeg("city", city), testLeg("rig r", rig)}
+			got := readIDs(t, legs, tc.query)
+			plain := []Leg{
+				testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, rows, nil)}),
+				testLeg("rig r", ignoringStore{beads.NewMemStoreFrom(0, rigRows, nil)}),
+			}
+			if want := readIDs(t, plain, tc.query); !slices.Equal(got, want) {
+				t.Fatalf("pushed answer = %v, want the un-pushed answer %v", got, want)
+			}
+			if want := []string{"hit-1", "r-hit-1", "hit-2", "r-hit-2"}; !slices.Equal(got, want) {
+				t.Fatalf("answer = %v, want exactly the %s beads carrying the root, %v", got, status, want)
+			}
+			wantQuery := tc.want
+			wantQuery.Metadata = map[string]string{"gc.root_bead_id": "root-1"}
+			for _, store := range []*listRecordingStore{city, rig} {
+				lists := store.listQueries()
+				if len(lists) == 0 {
+					t.Fatalf("leg was asked no List query")
+				}
+				if !reflect.DeepEqual(lists[0], wantQuery) {
+					t.Fatalf("leg's first List query = %+v, want the arm's query of today plus the metadata: %+v", lists[0], wantQuery)
+				}
+			}
+		})
+	}
+}
+
+// withMutation returns a copy of b with mutate applied.
+func withMutation(b beads.Bead, mutate func(*beads.Bead)) beads.Bead {
+	mutate(&b)
+	return b
+}
+
 // TestReadNeverPushesAPredicateABackendCouldCompareDifferently pins the other
 // half: a predicate whose backend comparison is not provably the Go comparison
 // stays Go-side, so no store can drop a row the Go filter keeps.

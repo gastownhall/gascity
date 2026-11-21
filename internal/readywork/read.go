@@ -232,18 +232,32 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore)
 		// assignee is pushed into each leg's list; it is matched exactly on every
 		// backend, and re-applied to the merged set like every predicate.
 		plain := beads.ListQuery{Status: c.status, TierMode: beads.FederatedReadTier}
-		if c.assignee == "" {
-			return federate(ctx, legs, listRead(plain))
-		}
 		narrowed := plain
 		narrowed.Assignee = c.assignee
-		return readNarrowed(ctx, legs, c, listRead(narrowed), listRead(plain))
+		narrowed.Metadata = listMetadata(c)
+		return narrowOrFederateList(ctx, legs, c, plain, narrowed)
 	default:
-		return federate(ctx, legs, listRead(beads.ListQuery{
+		plain := beads.ListQuery{
 			Status:   c.status,
 			TierMode: beads.FederatedReadTier,
-		}))
+		}
+		narrowed := plain
+		narrowed.Metadata = listMetadata(c)
+		return narrowOrFederateList(ctx, legs, c, plain, narrowed)
 	}
+}
+
+// narrowOrFederateList reads a --status arm's candidates: the plain query of
+// today when nothing is pushed, and that query narrowed by the pushed
+// predicates (the pushable metadata pairs, and the assignee on the in_progress
+// arm) through the exactness guard otherwise. narrowed must differ from plain
+// only by predicates a leg may apply exactly or ignore, so each leg's narrowed
+// answer is a superset of what the plain read returns from it.
+func narrowOrFederateList(ctx context.Context, legs []Leg, c compiled, plain, narrowed beads.ListQuery) ([]beads.Bead, map[string]int, error) {
+	if narrowed.Assignee == "" && len(narrowed.Metadata) == 0 {
+		return federate(ctx, legs, listRead(plain))
+	}
+	return readNarrowed(ctx, legs, c, listRead(narrowed), listRead(plain))
 }
 
 // readOpenStatusCandidates answers `--status open` with Gas City's "open": every
