@@ -55,6 +55,10 @@ func TestDogPromptNamesTheHookClaimCommand(t *testing.T) {
 	for _, want := range []string{
 		"gc hook --claim --drain-ack --json",
 		"41 hours without running",
+		// A --drain-ack call that exits non-zero did not acknowledge the
+		// drain, and a plain poll acknowledges nothing.
+		"acknowledgement failed: run `gc runtime drain-ack`, then exit.",
+		"acknowledges nothing",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("dog prompt missing %q", want)

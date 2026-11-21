@@ -1659,3 +1659,309 @@ func TestRenderPromptCityRootFragmentsAbsentNoEffect(t *testing.T) {
 		t.Errorf("renderPrompt(no city-root fragments) = %q, want %q", got, want)
 	}
 }
+
+// renderCorePoolWorkerPrompt renders the shipped pool-worker prompt with the
+// core pack on the pack-dir list, the way a composed city does, and returns
+// it with whitespace runs folded to single spaces so assertions do not depend
+// on line wrapping.
+func renderCorePoolWorkerPrompt(t *testing.T) string {
+	t.Helper()
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	promptPath := filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", promptPath, PromptContext{AgentName: "claude"}, "", &stderr,
+		[]string{coreDir}, nil, nil)
+	if stderr.Len() != 0 {
+		t.Fatalf("renderPrompt(pool-worker) wrote to stderr: %s", stderr.String())
+	}
+	return strings.Join(strings.Fields(got), " ")
+}
+
+// flatPromptSection returns the section of a whitespace-folded prompt that
+// starts at the "## <heading>" line, up to the next "## " heading, and its
+// offset in the prompt. A missing section fails the test.
+func flatPromptSection(t *testing.T, flat, heading string) (string, int) {
+	t.Helper()
+	start := strings.Index(flat, "## "+heading)
+	if start < 0 {
+		t.Fatalf("rendered pool-worker prompt has no %q section:\n%s", "## "+heading, flat)
+	}
+	body := flat[start+len("## "+heading):]
+	if end := strings.Index(body, " ## "); end >= 0 {
+		body = body[:end]
+	}
+	return body, start
+}
+
+// requireInOrder fails unless every want appears in text, each after the
+// one before it.
+func requireInOrder(t *testing.T, where, text string, wants ...string) {
+	t.Helper()
+	at := 0
+	for _, want := range wants {
+		i := strings.Index(text[at:], want)
+		if i < 0 {
+			t.Errorf("%s: missing %q after offset %d:\n%s", where, want, at, text)
+			return
+		}
+		at += i + len(want)
+	}
+}
+
+// TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules pins the
+// two execution contracts the pool-worker prompt serves. A graph.v2 step the
+// hook claimed is the worker's whole assignment: it executes and closes that
+// step only, leaves siblings, roots and control beads to the orchestrator,
+// and gets its next step from the hook. A legacy molecule attachment is
+// navigated with gc bd mol current, but only after its root is read and shown
+// not to be a graph workflow, because molecule_id alone can name either. Each
+// subtest asserts within the section that carries the guidance, so a guard
+// moved to the wrong place fails.
+func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T) {
+	flat := renderCorePoolWorkerPrompt(t)
+
+	t.Run("AC-1 claimed workflow step owns only itself", func(t *testing.T) {
+		startup, startupAt := flatPromptSection(t, flat, "Startup Protocol")
+		classify, classifyAt := flatPromptSection(t, flat, "Classify Your Assignment")
+		_, moleculesAt := flatPromptSection(t, flat, "Molecules")
+		_, formulaAt := flatPromptSection(t, flat, "Following Your Formula")
+		if startupAt >= classifyAt || classifyAt >= moleculesAt || classifyAt >= formulaAt {
+			t.Errorf("Classify Your Assignment must follow the Startup Protocol and precede Molecules and Following Your Formula (offsets startup=%d classify=%d molecules=%d formula=%d)",
+				startupAt, classifyAt, moleculesAt, formulaAt)
+		}
+		// Classification reads the bead the claim fragment just returned, so
+		// it must be the very next section, not merely a later one.
+		if nextAt := startupAt + len("## Startup Protocol") + len(startup) + len(" "); nextAt != classifyAt {
+			t.Errorf("Classify Your Assignment (offset %d) must be the first section after the Startup Protocol; the next section starts at offset %d",
+				classifyAt, nextAt)
+		}
+		// The step cue is checked before molecule_id, so a step that also
+		// carries molecule_id is still a single step.
+		requireInOrder(t, "Classify Your Assignment", classify,
+			"gc.root_bead_id", `"Workflow Steps"`, "molecule_id", `"Molecules"`, `"Following Your Formula"`)
+		for _, want := range []string{
+			"even when the step also carries `molecule_id`",
+			"never widen the assignment to the step's siblings or root",
+			"Classify only the hook-returned bead",
+		} {
+			if !strings.Contains(classify, want) {
+				t.Errorf("Classify Your Assignment missing %q:\n%s", want, classify)
+			}
+		}
+
+		steps, _ := flatPromptSection(t, flat, "Workflow Steps")
+		for _, want := range []string{
+			"Execute exactly the claimed step's description",
+			"gc.outcome=pass",
+			"gc.outcome=fail",
+			`"Closing a Bead"`,
+			"leave it closed and keep its outcome",
+			"Do NOT run `gc bd mol current`",
+			"Do NOT select, claim, execute or close sibling steps",
+			"the workflow root, an expanded root, scope latches",
+			"control beads",
+			"`gc.kind=check`",
+			"`workflow-finalize`",
+			"The orchestrator owns the rest of the graph",
+			"a sibling is yours only once a later `gc hook --claim` returns it",
+			"`gc.scope_role=teardown`",
+			"run it even if earlier steps failed",
+		} {
+			if !strings.Contains(steps, want) {
+				t.Errorf("Workflow Steps missing %q:\n%s", want, steps)
+			}
+		}
+	})
+
+	t.Run("AC-2 graph steps continue through the hook", func(t *testing.T) {
+		// A workflow step does not end the session on its own: the opening
+		// and GUPP lines must not teach an unconditional exit.
+		for _, forbidden := range []string{
+			"Find it, execute it, close it, and exit.",
+			"When you're done, exit.",
+		} {
+			if strings.Contains(flat, forbidden) {
+				t.Errorf("pool-worker prompt still teaches an unconditional exit with %q", forbidden)
+			}
+		}
+
+		after, _ := flatPromptSection(t, flat, "After a Workflow Step")
+		requireInOrder(t, "After a Workflow Step", after,
+			"gc hook --claim --json",
+			"one hook invocation per tool call",
+			`"action":"work"`,
+			"`no_work`",
+			"at most three times, each in a new tool call",
+			"gc hook --claim --drain-ack --json",
+			"If that returns `work`",
+			"`drain_pending`",
+			"gc runtime drain-ack",
+		)
+		for _, want := range []string{
+			"Never wrap the claim in a `sleep`/retry loop inside one tool call",
+			"never another query",
+			"one-step lane",
+			"already ran `gc runtime drain-ack`",
+			"do not poll the hook again",
+		} {
+			if !strings.Contains(after, want) {
+				t.Errorf("After a Workflow Step missing %q:\n%s", want, after)
+			}
+		}
+
+		steps, _ := flatPromptSection(t, flat, "Workflow Steps")
+		if !strings.Contains(steps, `"After a Workflow Step"`) {
+			t.Errorf("Workflow Steps does not route the next assignment through \"After a Workflow Step\":\n%s", steps)
+		}
+
+		howTo, _ := flatPromptSection(t, flat, "How to Work")
+		requireInOrder(t, "How to Work", howTo,
+			"**Workflow step:**", `"After a Workflow Step"`,
+			"**Molecule attachment:**",
+			"**Plain bead or formula root:**",
+		)
+		// The mandatory final drain-ack is the one-assignment lifetime of a
+		// legacy or plain bead, not of a workflow step.
+		mandatory := strings.Index(howTo, "**MANDATORY")
+		if mandatory < 0 {
+			t.Fatalf("How to Work lost the mandatory final drain-ack:\n%s", howTo)
+		}
+		lead := howTo[mandatory:]
+		if end := strings.Index(lead, "gc runtime drain-ack"); end >= 0 {
+			lead = lead[:end]
+		}
+		if !strings.Contains(lead, "molecule attachment or plain bead") {
+			t.Errorf("How to Work makes the final drain-ack mandatory for every assignment; scope it to molecule attachments and plain beads:\n%s", lead)
+		}
+
+		restart, _ := flatPromptSection(t, flat, "Context Exhaustion")
+		if !strings.Contains(restart, "gc hook --claim --drain-ack --json") {
+			t.Errorf("Context Exhaustion does not recover the assignment through the hook:\n%s", restart)
+		}
+	})
+
+	t.Run("AC-3 molecules are verified before navigation", func(t *testing.T) {
+		molecules, _ := flatPromptSection(t, flat, "Molecules")
+		if strings.Contains(molecules, "in step 4") {
+			t.Errorf("Molecules still cites a How to Work step number that no longer reads the bead:\n%s", molecules)
+		}
+		// Workflow steps that carry molecule_id are routed away before
+		// anything else, then the root read comes before any navigation.
+		requireInOrder(t, "Molecules", molecules,
+			"`molecule_id` but no `gc.root_bead_id`",
+			`"Workflow Steps"`,
+			"gc bd show <molecule-id>",
+			"`gc.formula_contract=graph.v2`",
+			"`gc.kind=workflow`",
+			"Do NOT run `gc bd mol current` on it",
+			"If the read fails or the molecule does not exist",
+			"not a legacy molecule",
+			"gc bd mol current <molecule-id>",
+		)
+		if first, read := strings.Index(molecules, "gc bd mol current <molecule-id>"), strings.Index(molecules, "gc bd show <molecule-id>"); read < 0 || first < read {
+			t.Errorf("Molecules runs gc bd mol current before reading the molecule root:\n%s", molecules)
+		}
+		for _, want := range []string{
+			"do NOT close it or its steps",
+			`(see "Escalation")`,
+			"`[ready]`",
+			"gc bd show <step-id>",
+			"gc bd update <step-id> --set-metadata gc.outcome=pass",
+			`gc bd close <step-id> --reason "<what the step did>"`,
+			`Do not close a step that cannot be done (see "Closing a Bead")`,
+			"Do NOT close steps you didn't execute",
+		} {
+			if !strings.Contains(molecules, want) {
+				t.Errorf("Molecules missing %q:\n%s", want, molecules)
+			}
+		}
+	})
+
+	t.Run("AC-4 plain beads and root-only formulas keep their guidance", func(t *testing.T) {
+		if strings.Contains(flat, "Steps are NOT materialized as individual beads") {
+			t.Errorf("pool-worker prompt still denies materialized step beads universally")
+		}
+		formula, _ := flatPromptSection(t, flat, "Following Your Formula")
+		requireInOrder(t, "Following Your Formula", formula,
+			"A plain bead",
+			"from its description",
+			"the root of a formula",
+			"live only in the formula definition",
+			"**THE RULE**: Execute one step at a time.",
+			"On crash or restart",
+			formulaFilesystemSearchGuidance,
+		)
+		for _, want := range []string{
+			"the hook returned the root itself",
+			"do not invent steps",
+			"already exist as beads",
+			"is not your work",
+			"`gc` introspection command",
+		} {
+			if !strings.Contains(formula, want) {
+				t.Errorf("Following Your Formula missing %q:\n%s", want, formula)
+			}
+		}
+		// An unexpanded executable root is work in its own right; only a root
+		// already expanded into step beads is left to the orchestrator.
+		requireInOrder(t, "Following Your Formula", formula,
+			"An unexpanded workflow root can itself be the work",
+			"execute its description",
+			"already exist as beads",
+			"is not your work",
+		)
+	})
+
+	t.Run("AC-5 startup protocol separates drain-aware calls from plain polls", func(t *testing.T) {
+		startup, _ := flatPromptSection(t, flat, "Startup Protocol")
+		if strings.Contains(startup, "the drain was acknowledged for you") {
+			t.Errorf("Startup Protocol says every drain was acknowledged, but a plain poll acknowledges nothing and a drain-ack can fail:\n%s", startup)
+		}
+		requireInOrder(t, "Startup Protocol", startup,
+			"gc hook --claim --drain-ack --json",
+			"A `--drain-ack` call like this one acknowledges the drain itself",
+			"if it exited 0, your session is done",
+			"`drain_acknowledged: true`",
+			"also exits 0 without that field",
+			"If it exited non-zero, the acknowledgement failed: run `gc runtime drain-ack`, then exit.",
+			"A plain `gc hook --claim --json` poll (no `--drain-ack`) acknowledges nothing",
+			"is a fault, not a drain",
+		)
+	})
+}
+
+// TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps pins that the
+// rendered pool-worker prompt does not tell a worker its formula steps are
+// never materialized as beads. Under graph.v2 the hook hands the worker one
+// materialized step bead (gc.root_bead_id set); a prompt denying that steers
+// the worker into navigating molecule siblings it never claimed. The legacy
+// Molecules section must survive alongside the graph guidance.
+func TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps(t *testing.T) {
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	promptPath := filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", promptPath, PromptContext{AgentName: "claude"}, "", &stderr,
+		[]string{coreDir}, nil, nil)
+	if stderr.Len() != 0 {
+		t.Fatalf("renderPrompt(pool-worker) wrote to stderr: %s", stderr.String())
+	}
+	flat := strings.Join(strings.Fields(got), " ")
+	if strings.Contains(flat, "Steps are NOT materialized as individual beads") {
+		t.Errorf("pool-worker prompt denies materialized step beads, contradicting graph.v2 hook-claimed steps:\n%s", got)
+	}
+	if !strings.Contains(got, "## Molecules") {
+		t.Errorf("pool-worker prompt lost the legacy Molecules section:\n%s", got)
+	}
+}
