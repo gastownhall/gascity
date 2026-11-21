@@ -465,7 +465,7 @@ esac
 func TestRecoverManagedDoltConclusiveFailuresRecordStopAndRestart(t *testing.T) {
 	t.Run("refused endpoint", func(t *testing.T) {
 		h := newRecoveryGateHarness(t)
-		h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointRefused, Err: syscall.ECONNREFUSED}
+		h.refuse()
 		report, err := h.recover()
 		if err != nil || !report.Restarted || report.Deferred {
 			t.Fatalf("report = %+v err = %v, want restart", report, err)
@@ -542,7 +542,7 @@ func TestRecoverManagedDoltDurableCooldownAcrossProcesses(t *testing.T) {
 				})
 			},
 			setup: func(h *recoveryGateHarness) {
-				h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointRefused, Err: syscall.ECONNREFUSED}
+				h.refuse()
 			},
 		},
 		{
@@ -590,7 +590,7 @@ func TestRecoverManagedDoltDurableCooldownAcrossProcesses(t *testing.T) {
 			At: h.now.Add(-31 * time.Second), Decision: managedDoltRecoveryDecisionStop, Reason: managedDoltRecoveryReasonEndpointRefused,
 			PID: replaced.PID, StartTime: replaced.StartTime,
 		})
-		h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointRefused, Err: syscall.ECONNREFUSED}
+		h.refuse()
 		if report, err := h.recover(); err != nil || !report.Restarted {
 			t.Fatalf("report = %+v err = %v, want restart after the cooldown", report, err)
 		}
@@ -646,4 +646,129 @@ func TestHealthBeadsProviderHonorsDurableRecoveryCooldown(t *testing.T) {
 	if _, loaded := lastBeadsProviderRecover.Load(cityKey); loaded {
 		t.Fatalf("durable cooldown skip must not record an in-memory recover timestamp")
 	}
+}
+
+// refuse makes the endpoint conclusively refuse connections with no process
+// holding its port.
+func (h *recoveryGateHarness) refuse() {
+	h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointRefused, Err: syscall.ECONNREFUSED}
+	h.ident = managedDoltServerIncarnation{}
+	h.identErr = errors.New("no live process identified as the listener")
+}
+
+// AC-8: missing or invalid history, uncertain identity or liveness, and
+// history read/write failures never authorize a stop; an inconclusive current
+// observation stays non-authorizing even with an expired streak or a zero
+// window.
+func TestRecoverManagedDoltUncertaintyNeverAuthorizesStop(t *testing.T) {
+	t.Run("malformed, future-dated and impossible records start a fresh window", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		old := h.now.Add(-400 * time.Second)
+		future := managedDoltRecoveryRecord{
+			At: h.now.Add(time.Hour), Decision: managedDoltRecoveryDecisionDefer, Reason: managedDoltRecoveryReasonWithinWindow,
+			Scope: normalizePathForCompare(h.city), Endpoint: net.JoinHostPort("127.0.0.1", h.port),
+			PID: h.ident.PID, StartTime: h.ident.StartTime, UnresponsiveSince: old, Window: h.window, Caller: "seed",
+		}
+		impossible := future
+		impossible.At = h.now.Add(-60 * time.Second)
+		impossible.UnresponsiveSince = h.now.Add(-50 * time.Second)
+		raw := managedDoltRecoveryRecordTag + " at=bogus decision=defer since=" + old.Format(time.RFC3339Nano) + "\n" +
+			future.format() + impossible.format()
+		if err := os.MkdirAll(filepath.Dir(h.logFile()), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(h.logFile(), []byte(raw), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		report, err := h.recover()
+		assertDeferredWithoutRestart(t, h, report, err)
+		if !strings.Contains(err.Error(), "ignored 3 malformed") {
+			t.Fatalf("err = %v, want the ignored malformed records reported", err)
+		}
+		if last := h.lastRecoveryRecord(); !last.UnresponsiveSince.Equal(h.now) || last.Reason != managedDoltRecoveryReasonFirstObservation {
+			t.Fatalf("last record = %+v, want a fresh streak at %s", last, h.now)
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		setup func(h *recoveryGateHarness)
+	}{
+		{name: "listening server", setup: func(*recoveryGateHarness) {}},
+		{name: "zero window", setup: func(h *recoveryGateHarness) { h.window = 0 }},
+		{name: "refused endpoint", setup: func(h *recoveryGateHarness) { h.refuse() }},
+		{name: "completed read-only response", setup: func(h *recoveryGateHarness) {
+			h.probeErr = nil
+			h.health = managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "true"}
+		}},
+	} {
+		t.Run("unusable dolt.log defers without stopping/"+tc.name, func(t *testing.T) {
+			h := newRecoveryGateHarness(t)
+			tc.setup(h)
+			if err := os.MkdirAll(h.logFile(), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			report, err := h.recover()
+			assertDeferredWithoutRestart(t, h, report, err)
+		})
+	}
+	t.Run("an inconclusive observation with an expired streak defers and keeps it", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-400 * time.Second)
+		h.seedDefer(h.now.Add(-60*time.Second), since, h.ident)
+		h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointInconclusive, Err: context.DeadlineExceeded}
+		report, err := h.recover()
+		assertDeferredWithoutRestart(t, h, report, err)
+		if last := h.lastRecoveryRecord(); !last.Inconclusive || last.Decision != managedDoltRecoveryDecisionDefer {
+			t.Fatalf("last record = %+v, want an inconclusive defer", last)
+		}
+		history, err := readManagedDoltRecoveryHistory(h.logFile(), h.now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := history.openStreak(normalizePathForCompare(h.city), net.JoinHostPort("127.0.0.1", h.port), h.ident); !got.Equal(since) {
+			t.Fatalf("open streak = %s, want the prior streak %s kept", got, since)
+		}
+	})
+	t.Run("an inconclusive observation with a zero window defers", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		h.window = 0
+		h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointInconclusive, Err: context.DeadlineExceeded}
+		report, err := h.recover()
+		assertDeferredWithoutRestart(t, h, report, err)
+	})
+	t.Run("an unknown identity with an expired streak defers", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-400 * time.Second)
+		h.seedDefer(h.now.Add(-60*time.Second), since, h.ident)
+		h.ident = managedDoltServerIncarnation{}
+		h.identErr = errors.New("inspection failed")
+		report, err := h.recover()
+		assertDeferredWithoutRestart(t, h, report, err)
+		if last := h.lastRecoveryRecord(); !last.Inconclusive || last.Reason != managedDoltRecoveryReasonUnknownIdentity {
+			t.Fatalf("last record = %+v, want an inconclusive unknown-identity defer", last)
+		}
+	})
+	t.Run("an invalid restart window setting defers without stopping", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		if err := os.WriteFile(filepath.Join(h.city, "city.toml"), []byte("[workspace]\nname = \"w\"\n\n[daemon]\ndolt_unresponsive_restart_after = \"soon\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ops := h.ops()
+		ops.restartAfter = nil
+		h.calls = nil
+		report, err := recoverManagedDoltProcessWithOps(h.city, "127.0.0.1", h.port, "root", "warning", 2*time.Second, ops)
+		assertDeferredWithoutRestart(t, h, report, err)
+		if !strings.Contains(err.Error(), "dolt_unresponsive_restart_after") {
+			t.Fatalf("err = %v, want the invalid setting named", err)
+		}
+	})
+	t.Run("a refused dial while a live process still holds the port defers", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointRefused, Err: syscall.ECONNREFUSED}
+		report, err := h.recover()
+		assertDeferredWithoutRestart(t, h, report, err)
+		if last := h.lastRecoveryRecord(); !last.Inconclusive || last.PID != h.ident.PID {
+			t.Fatalf("last record = %+v, want an inconclusive defer naming pid %d", last, h.ident.PID)
+		}
+	})
 }

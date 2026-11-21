@@ -104,18 +104,21 @@ func observeManagedDoltEndpoint(host, port string) managedDoltEndpointObservatio
 
 // identifyManagedDoltListener returns the incarnation of the process that
 // holds the endpoint's listening socket, verified from the live process
-// table. A cached runtime-state PID is never taken as the listener.
+// table. A cached runtime-state PID is never taken as the listener. When the
+// process table shows a port holder whose identity cannot be completed, the
+// returned incarnation still carries that PID alongside the error, so callers
+// can tell a live holder from an empty port.
 func identifyManagedDoltListener(cityPath, port string) (managedDoltServerIncarnation, error) {
 	info, err := inspectManagedDoltProcess(cityPath, port)
 	if err != nil {
-		return managedDoltServerIncarnation{}, fmt.Errorf("inspect managed dolt listener on port %s: %w", port, err)
+		return managedDoltServerIncarnation{PID: max(info.PortHolderPID, 0)}, fmt.Errorf("inspect managed dolt listener on port %s: %w", port, err)
 	}
 	if info.PortHolderPID <= 0 {
 		return managedDoltServerIncarnation{}, fmt.Errorf("no live process identified as the listener on port %s", port)
 	}
 	startTime, err := pidutil.StartTime(info.PortHolderPID)
 	if err != nil {
-		return managedDoltServerIncarnation{}, fmt.Errorf("read start time of listener pid %d: %w", info.PortHolderPID, err)
+		return managedDoltServerIncarnation{PID: info.PortHolderPID}, fmt.Errorf("read start time of listener pid %d: %w", info.PortHolderPID, err)
 	}
 	return managedDoltServerIncarnation{PID: info.PortHolderPID, StartTime: startTime}, nil
 }
@@ -160,6 +163,7 @@ const (
 	managedDoltRecoveryReasonEndpointRefused  = "endpoint_refused"
 	managedDoltRecoveryReasonReadOnly         = "read_only_response"
 	managedDoltRecoveryReasonNotQueryReady    = "not_query_ready_response"
+	managedDoltRecoveryReasonRefusedHeldPort  = "refused_endpoint_port_still_held"
 )
 
 // managedDoltRecoveryRecordTag starts every recovery decision line appended to
@@ -300,6 +304,17 @@ func (g managedDoltRecoveryGate) evaluate(failure error) error {
 	observation := g.ops.observeEndpoint(g.host, g.port)
 	switch observation.State {
 	case managedDoltEndpointRefused:
+		if ident, identErr := g.ops.identify(g.cityPath, g.port); ident.PID > 0 {
+			base.Reason = managedDoltRecoveryReasonRefusedHeldPort
+			base.Inconclusive = true
+			base.PID = ident.PID
+			base.StartTime = ident.StartTime
+			detail := fmt.Sprintf("endpoint %s refused a connection (%v) after %v but pid %d still holds the port; leaving it running", g.endpoint(), observation.Err, failure, ident.PID)
+			if identErr != nil {
+				detail += fmt.Sprintf(" (identity incomplete: %s)", identErr.Error())
+			}
+			return g.deferRecovery(base, detail)
+		}
 		return g.recordConclusiveStop(managedDoltRecoveryReasonEndpointRefused, probeError)
 	case managedDoltEndpointListening:
 	default:
