@@ -77,6 +77,7 @@ const (
 	TraceSiteSessionSync                    TraceSiteCode = "session_sync.update_index"
 	TraceSiteSessionReconcileBuildDeps      TraceSiteCode = "session_reconcile.build_deps"
 	TraceSiteSessionReconcileHealRetire     TraceSiteCode = "session_reconcile.heal_retire"
+	TraceSiteSessionReconcileHandoffRelease TraceSiteCode = "session_reconcile.handoff_release"
 	TraceSiteSessionReconcileTopoOrder      TraceSiteCode = "session_reconcile.topo_order"
 	TraceSiteSessionReconcileCircuitBreaker TraceSiteCode = "session_reconcile.circuit_breaker"
 	TraceSiteSessionReconcileForwardPass    TraceSiteCode = "session_reconcile.forward_pass"

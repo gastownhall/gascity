@@ -1229,6 +1229,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		withParkedSeats(parked),
 		withAssignedWorkStores(awakeAssignedStores),
+		withHandoffMailStore(cliMailStore(oneShotStore, cfg, cityPath)),
 	)
 
 	// Post-reconcile sync: update bead state to reflect post-start reality.

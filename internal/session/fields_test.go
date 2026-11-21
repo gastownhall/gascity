@@ -16,7 +16,7 @@ import (
 
 // The session field registry's table tests.
 
-var beadID = regexp.MustCompile(`^mc-[a-z0-9]+(\.[0-9]+)*$`)
+var beadID = regexp.MustCompile(`^(mc|ga)-[a-z0-9]+(\.[0-9]+)*$`)
 
 // liveModes are the controller modes that see f written: an operator write
 // lands under either, except a new key's, which only a v2 city writes.

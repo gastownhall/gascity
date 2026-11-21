@@ -2099,7 +2099,9 @@ func TestWorkerSiteHandoffRecordsTheRestart(t *testing.T) {
 			if code := handoffForTest([]string{"HANDOFF: context full"}, "", false, &stdout, &stderr); code != 0 {
 				t.Fatalf("gc handoff = %d on a worker site, want 0; stderr=%s", code, stderr.String())
 			}
-			if !strings.Contains(stdout.String(), "requesting restart") {
+			// The seeded row carries an instance token, so the handoff stages its
+			// brief and reports the accepted restart instead of the plain request.
+			if !strings.Contains(stdout.String(), "requesting restart") && !strings.Contains(stdout.String(), "restart accepted") {
 				t.Fatalf("stdout = %q, want the restart request", stdout.String())
 			}
 			assertWorkerSitePokeNotice(t, stderr.String())

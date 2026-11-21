@@ -29,6 +29,7 @@ const (
 	fromDisplayMetadataKey   = mail.FromDisplayMetadataKey
 	toSessionIDMetadataKey   = mail.ToSessionIDMetadataKey
 	toDisplayMetadataKey     = mail.ToDisplayMetadataKey
+	stagedHandoffMetadataKey = mail.StagedMetadataKey
 
 	// messageBeadType is the bead Type every mail message carries. It is the
 	// single confined spelling of the message-bead class marker.
@@ -433,7 +434,7 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 	if b.Type != messageBeadType {
 		return mail.Message{}, fmt.Errorf("beadmail get: bead %s is type %q, not message", id, b.Type)
 	}
-	if isRemovedMessageBead(b) {
+	if isRemovedMessageBead(b) || isStagedHandoff(b) {
 		return mail.Message{}, beadmailError("get", beads.ErrNotFound)
 	}
 	return beadToMessage(b), nil
@@ -446,7 +447,7 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 	if err != nil {
 		return mail.Message{}, beadmailError("read", err)
 	}
-	if isRemovedMessageBead(b) {
+	if isRemovedMessageBead(b) || isStagedHandoff(b) {
 		return mail.Message{}, beadmailError("read", beads.ErrNotFound)
 	}
 	if !hasLabel(b.Labels, "read") {
@@ -577,7 +578,7 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	}
 	matches := make([]mail.Message, 0, len(candidates))
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if b.Status != "open" || isStagedHandoff(b) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
@@ -831,7 +832,8 @@ func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error
 			(len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee)) ||
 			hasLabel(b.Labels, "read") ||
 			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
-			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
+			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) ||
+			isStagedHandoff(b) {
 			continue
 		}
 		messages = append(messages, beadToMessage(b))
@@ -948,6 +950,20 @@ func isRemovedMessageBead(b beads.Bead) bool {
 	return reason != RetentionSweepCloseReason && reason != UnreadRetentionSweepCloseReason
 }
 
+// isStagedHandoff reports whether b is a self-handoff message bead staged
+// durably ahead of a restart request. A staged message remains open in the
+// store but must be invisible on every read surface until the reconciler
+// releases it to a genuine successor incarnation.
+//
+// Either marker hides it. [mail.StagedHandoffLabel] is written in the same
+// create as the bead, so the brief is hidden from its first persisted state,
+// before the separate write that sets [stagedHandoffMetadataKey] to "true".
+// Release removes the label and flips the metadata to "false", so a released
+// brief carries neither; a superseded brief keeps both and stays hidden.
+func isStagedHandoff(b beads.Bead) bool {
+	return b.Metadata[stagedHandoffMetadataKey] == "true" || hasLabel(b.Labels, mail.StagedHandoffLabel)
+}
+
 // deriveReplyTitle returns a non-empty title for a reply message. Callers
 // that go through bd create fail validation ("title is required") if the
 // reply's title is empty, so this fallback chain always returns a usable
@@ -1016,6 +1032,9 @@ func (p *Provider) Thread(id string) ([]mail.Message, error) {
 			// like the list views, it is retired from these aggregate views.)
 			continue
 		}
+		if isStagedHandoff(b) {
+			continue
+		}
 		msgs = append(msgs, beadToMessage(b))
 	}
 	// Note: store.List already sorts by SortCreatedAsc with an ID tie-break
@@ -1051,6 +1070,9 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
 			continue
 		}
+		if isStagedHandoff(b) {
+			continue
+		}
 		total++
 		if !hasLabel(b.Labels, "read") {
 			unread++
@@ -1082,6 +1104,9 @@ func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead 
 			continue
 		}
 		if !includeRead && hasLabel(b.Labels, "read") {
+			continue
+		}
+		if isStagedHandoff(b) {
 			continue
 		}
 		msgs = append(msgs, beadToMessage(b))

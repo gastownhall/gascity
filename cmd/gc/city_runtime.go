@@ -3638,6 +3638,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// effect does: demand counts ready work from a live read, and an
 		// out-of-process pin reaches the cache only at its next re-scan.
 		withTriggerBeadResolver(legsTriggerResolver(sw.Legs())),
+		// Staged self-handoff briefs live in the messaging class, which may be a
+		// different store from the session rows the tick reads.
+		withHandoffMailStore(cr.mailBeadStore()),
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on
@@ -4507,6 +4510,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// its lease; it rolls back as it did before the memo.
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
+		withHandoffMailStore(cr.mailBeadStore()),
 		withParkedSeats(parked),
 	)
 	cr.requestDeferredDrainFollowUpTick()
