@@ -35,6 +35,53 @@ func TestSupervisorUnitOwnershipCheck_WarmupEligible(t *testing.T) {
 // outside its MainPID's process tree), and only warn, naming the probe
 // error, when the supervisor's process ancestry could not be read. "No
 // supervisor running" and "no unit installed" are OK.
+// TestSupervisorUnitOwnershipCheckSystemScopeFixHint pins the city-8xj7 hazard
+// directly: when the unit lives in the SYSTEM scope, the check must not tell an
+// operator to run `systemctl --user start`. With a user unit also installed
+// that starts a second supervisor — the two-unit crash loop city-5tas and
+// city-irg6 exist to prevent. The user-scope remedy is still expected where it
+// is actually correct.
+func TestSupervisorUnitOwnershipCheckSystemScopeFixHint(t *testing.T) {
+	const livePID = 4242
+
+	systemScope := SupervisorUnitOwnership{
+		Status:     "outside_unit",
+		Unit:       "gascity-supervisor.service",
+		Scope:      "system",
+		UnitActive: true,
+		UnitPID:    9999,
+	}
+	check := NewSupervisorUnitOwnershipCheck(true, livePID, systemScope)
+	result := check.Run(&CheckContext{})
+	if result.Status != StatusError {
+		t.Fatalf("system-scope Status = %v, want StatusError", result.Status)
+	}
+	// The hint necessarily MENTIONS `--user start` — that is the point, it warns
+	// against it. What must never appear is the user-scope remedy presented as
+	// the fix: `reset-failed <unit> && systemctl --user start <unit>`.
+	if strings.Contains(result.FixHint, "reset-failed") {
+		t.Errorf("system-scope FixHint carries the user-scope remedy (reset-failed + --user start): %q", result.FixHint)
+	}
+	if !strings.Contains(result.FixHint, "systemctl restart") {
+		t.Errorf("system-scope FixHint = %q, want it to name the system-scope remedy", result.FixHint)
+	}
+	if !strings.Contains(result.FixHint, "Do NOT") {
+		t.Errorf("system-scope FixHint = %q, want it to warn against --user", result.FixHint)
+	}
+	if !strings.Contains(result.Message, "system") {
+		t.Errorf("Message = %q, want it to name the system scope", result.Message)
+	}
+
+	// The user-scope remedy must survive unchanged where it is correct.
+	userScope := systemScope
+	userScope.Scope = "user"
+	check = NewSupervisorUnitOwnershipCheck(true, livePID, userScope)
+	result = check.Run(&CheckContext{})
+	if !strings.Contains(result.FixHint, "systemctl --user") {
+		t.Errorf("user-scope FixHint = %q, want the user-scope remedy", result.FixHint)
+	}
+}
+
 func TestSupervisorUnitOwnershipCheckRun(t *testing.T) {
 	const livePID = 4242
 
