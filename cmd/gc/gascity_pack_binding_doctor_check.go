@@ -286,8 +286,8 @@ func (c *gascityPackBindingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Chec
 	return r
 }
 
-func (c *gascityPackBindingDoctorCheck) Fix(ctx *doctor.CheckContext) error {
-	release, err := lockCityConfigForDoctorFix(ctx, c.cityPath)
+func (c *gascityPackBindingDoctorCheck) Fix(_ *doctor.CheckContext) error {
+	release, err := lockCityConfigForDoctorFix(c.cityPath)
 	if err != nil {
 		return err
 	}

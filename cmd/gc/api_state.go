@@ -154,9 +154,11 @@ type controllerState struct {
 	// reload can neither swap an older config over a mutation that refreshed
 	// in between nor publish or cache a rejected write before its rollback,
 	// and concurrent mutations cannot roll back over each other. Lock order:
-	// configTransactionMu, then publishMu, then the cross-process city config
-	// lock (lockCityConfig), then the configedit.Editor lock, then updateMu,
-	// then mu.
+	// the cross-process city config lock (lockCityConfig), then
+	// configTransactionMu, then publishMu, then the configedit.Editor lock,
+	// then updateMu, then mu. The city config lock comes first, so an edit
+	// waiting for another process's edit of the city holds none of the others,
+	// and the runtime reload keeps loading and publishing meanwhile.
 	publishMu           sync.Mutex
 	beadEventStartSeq   uint64
 	beadEventStartSeqOK bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
@@ -211,13 +213,15 @@ type controllerState struct {
 	// candidate load, so it never reads a half-written generation and its read
 	// never waits behind a slow import. A transaction also holds publishMu for
 	// its whole body, pack fetch or rig provisioning included, so a reload whose
-	// candidate was read before the transaction began, and every other API
-	// config edit, waits at publication until the transaction ends. That stall
-	// is accepted: it is bounded by the transaction, and publication then
-	// rejects a candidate the transaction's generation superseded. Lock order:
-	// configTransactionMu, then publishMu, then the cross-process city config
-	// lock (lockCityConfig), then the configedit.Editor lock, then updateMu,
-	// then mu.
+	// candidate was read before the transaction began waits at publication
+	// until the transaction ends. That stall is accepted: it is bounded by the
+	// transaction, and publication then rejects a candidate the transaction's
+	// generation superseded. Every other API config edit waits at the city
+	// config lock, which the transaction holds throughout. A transaction that
+	// waits for another process's edit of the city holds neither lock: it
+	// takes the city config lock first. Lock order: the cross-process city
+	// config lock (lockCityConfig), then configTransactionMu, then publishMu,
+	// then the configedit.Editor lock, then updateMu, then mu.
 	configTransactionMu sync.Mutex
 
 	// rolloutFlags is the boot-latched rollout-gate snapshot: written once in
@@ -2564,13 +2568,15 @@ func (cs *controllerState) DisableOrder(name, rig string) error {
 }
 
 // SerializeConfigWrite runs a multi-file pack import write (pack.toml,
-// packs.lock, and sometimes city.toml) as one config transaction:
+// packs.lock, and sometimes city.toml) as one config transaction
+// (withConfigTransaction):
 //
-//   - it holds the config transaction fence, so the runtime reload cannot read
-//     the generation while it is half-written, the publication lock, so no
-//     reload or other API mutation publishes until it ends, and the
-//     configedit.Editor lock, so it serializes with every other API config
-//     mutation;
+//   - it holds, in this order, the city config lock, so it serializes with
+//     every other config edit, from another process or another API request,
+//     and waits for one holding no other lock; the config transaction fence,
+//     so the runtime reload cannot read the generation while it is
+//     half-written; the publication lock, so no reload publishes until it
+//     ends; and the configedit.Editor lock;
 //   - if fn fails after writing some of the files, the pack files are restored,
 //     so a half-written pack set never stays on disk for a later reload;
 //   - on success the generation is published to the controller state (refresh,
@@ -2598,41 +2604,45 @@ func (cs *controllerState) SerializeConfigWrite(fn func() error) error {
 	})
 }
 
-// withConfigTransaction runs fn holding the config transaction fence, the
-// publication lock, the cross-process city config lock and the
-// configedit.Editor lock, taken in that order: a plain API edit holds the
-// publication lock when its mutation takes the Editor lock, so taking the
-// Editor lock first would deadlock against it. The city config lock spans fn's
-// snapshot restores too, so another process's edit never lands between a
-// write and its rollback. None of the four locks is reentrant, so fn must not
-// call mutateAndPoke, enter another config transaction, or call Editor methods
-// that take the Editor lock themselves; it publishes only through
-// mutateAndPokeLocked.
+// withConfigTransaction runs fn holding the cross-process city config lock,
+// the config transaction fence, the publication lock and the
+// configedit.Editor lock, taken in that order. The city config lock comes
+// first, so a transaction waiting for another process's edit holds no
+// in-process lock and the runtime reload keeps loading and publishing; it
+// spans fn's snapshot restores too, so another process's edit never lands
+// between a write and its rollback. A plain API edit holds the publication
+// lock when its mutation takes the Editor lock, so taking the Editor lock
+// first would deadlock against it. None of the four locks is reentrant, so fn
+// must not call mutateAndPoke, enter another config transaction, or call
+// Editor methods that take the Editor lock themselves; it publishes only
+// through mutateAndPokeLocked.
 func (cs *controllerState) withConfigTransaction(fn func() error) error {
-	cs.configTransactionMu.Lock()
-	defer cs.configTransactionMu.Unlock()
-	cs.publishMu.Lock()
-	defer cs.publishMu.Unlock()
 	release, err := cs.lockCityConfig()
 	if err != nil {
 		return err
 	}
 	defer release()
+	cs.configTransactionMu.Lock()
+	defer cs.configTransactionMu.Unlock()
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
 	return cs.editor.Do(fn)
 }
 
 // lockCityConfig takes the cross-process city config lock for an API edit
 // transaction, so the edit's snapshot, write, validating refresh and any
 // rollback never interleave with another process's edit of the same city
-// (configedit.LockCity). A state with no city path snapshots nothing on disk
-// and takes no lock.
+// (configedit.LockCity). Concurrent API edits exclude each other through it
+// as well, each on its own open lock file. It is taken before every other
+// config lock (see publishMu). A state with no city path snapshots nothing on
+// disk and takes no lock.
 func (cs *controllerState) lockCityConfig() (func(), error) {
 	if cs.cityPath == "" {
 		return func() {}, nil
 	}
 	lockPath := configedit.CityLockFile(cs.cityPath)
 	return configedit.LockCity(fsys.OSFS{}, cs.cityPath, func() {
-		log.Printf("api: config edit waiting for another process's edit of %s", lockPath)
+		log.Printf("api: config edit waiting for another config edit of %s to finish", lockPath)
 	})
 }
 
@@ -3782,24 +3792,27 @@ func (s *configMutationSnapshot) changedOnDisk() bool {
 }
 
 func (cs *controllerState) mutateAndPoke(mutate func() error) error {
-	// Keep unvalidated writes and rollback inside the publication transaction.
-	// A reload must not cache a rejected raw patch while publishing an older
-	// accepted composed config. This also serializes config snapshots across
-	// concurrent API edits, so rollback cannot overwrite another edit; the
-	// city config lock extends that to edits made by other processes.
-	cs.publishMu.Lock()
-	defer cs.publishMu.Unlock()
+	// The city config lock serializes this edit with every other config edit,
+	// from another process or another API request, so a rollback never
+	// overwrites another edit. It comes before publishMu, so an edit waiting
+	// for another process's edit holds no in-process lock and the runtime
+	// reload keeps publishing meanwhile.
 	release, err := cs.lockCityConfig()
 	if err != nil {
 		return err
 	}
 	defer release()
+	// Keep unvalidated writes and rollback inside the publication transaction.
+	// A reload must not cache a rejected raw patch while publishing an older
+	// accepted composed config.
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
 	return cs.mutateAndPokeLocked(mutate)
 }
 
 // mutateAndPokeLocked is mutateAndPoke for a config transaction, which
-// already holds publishMu and the city config lock (withConfigTransaction
-// takes both before the configedit.Editor lock).
+// already holds the city config lock and publishMu (withConfigTransaction
+// takes both, in that order, before the configedit.Editor lock).
 func (cs *controllerState) mutateAndPokeLocked(mutate func() error) (err error) {
 	// The write changes the config files before it marks the reload pending,
 	// so ReadyWork must see it in progress throughout (configFreshness).

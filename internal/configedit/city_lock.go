@@ -41,11 +41,30 @@ func CityLockFile(cityRoot string) string {
 //     transaction ([Editor] methods, config writers) never do.
 //   - Never call the controller API or wait on the controller while holding
 //     it: the controller takes the same lock for its API edits.
-//   - Lock order: the city config lock before the suspension fence
+//   - Lock order: the city config lock before any in-process lock the edit
+//     takes (the controller's config transaction and publication locks, the
+//     [Editor] lock), so an edit waiting for another process holds nothing
+//     other work in its own process needs; and before the suspension fence
 //     (suspensionstate.Fence), never the reverse.
 //
 // The returned release is safe to call more than once.
 func LockCity(fs fsys.FS, cityRoot string, onWait func()) (release func(), err error) {
+	return lockCity(fs, cityRoot, true, onWait)
+}
+
+// ErrCityLocked is the error TryLockCity returns, in place of waiting, when
+// another holder has the city config lock.
+var ErrCityLocked = errors.New("another config edit of this city is in progress")
+
+// TryLockCity is LockCity for a caller that must not wait: when another holder
+// has the lock it takes nothing and returns an error that wraps
+// [ErrCityLocked] and names the lock file. The holder contract is LockCity's.
+func TryLockCity(fs fsys.FS, cityRoot string) (release func(), err error) {
+	return lockCity(fs, cityRoot, false, nil)
+}
+
+// lockCity is LockCity when wait is set and TryLockCity when it is not.
+func lockCity(fs fsys.FS, cityRoot string, wait bool, onWait func()) (func(), error) {
 	if _, ok := fs.(fsys.OSFS); !ok {
 		return func() {}, nil
 	}
@@ -60,6 +79,9 @@ func LockCity(fs fsys.FS, cityRoot string, onWait func()) (release func(), err e
 	opts := filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path}
 	lock, err := filelock.Acquire(f, opts)
 	if errors.Is(err, filelock.ErrBusy) {
+		if !wait {
+			return nil, errors.Join(fmt.Errorf("%w (%s)", ErrCityLocked, path), f.Close())
+		}
 		if onWait != nil {
 			onWait()
 		}

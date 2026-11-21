@@ -58,8 +58,8 @@ func (c *providerCatalogDoctorCheck) CanFix() bool {
 	return len(missingBuiltinProviderRefs(config.MissingProviderReferences(cfg))) > 0
 }
 
-func (c *providerCatalogDoctorCheck) Fix(ctx *doctor.CheckContext) error {
-	release, err := lockCityConfigForDoctorFix(ctx, c.cityPath)
+func (c *providerCatalogDoctorCheck) Fix(_ *doctor.CheckContext) error {
+	release, err := lockCityConfigForDoctorFix(c.cityPath)
 	if err != nil {
 		return err
 	}

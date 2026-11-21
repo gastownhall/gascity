@@ -498,8 +498,8 @@ func (c *builtinImportDoctorCheck) uninspectableWithRetiredTree(scan legacySyste
 
 func (c *builtinImportDoctorCheck) CanFix() bool { return true }
 
-func (c *builtinImportDoctorCheck) Fix(ctx *doctor.CheckContext) error {
-	release, err := lockCityConfigForDoctorFix(ctx, c.cityPath)
+func (c *builtinImportDoctorCheck) Fix(_ *doctor.CheckContext) error {
+	release, err := lockCityConfigForDoctorFix(c.cityPath)
 	if err != nil {
 		return err
 	}

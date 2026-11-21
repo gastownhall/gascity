@@ -501,7 +501,7 @@ func (v2RigPathSiteBindingCheck) Name() string { return "v2-rig-path-site-bindin
 func (v2RigPathSiteBindingCheck) CanFix() bool { return true }
 
 func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
-	release, err := lockCityConfigForDoctorFix(ctx, ctx.CityPath)
+	release, err := lockCityConfigForDoctorFix(ctx.CityPath)
 	if err != nil {
 		return err
 	}
@@ -1130,7 +1130,7 @@ type v2WorkspaceNameCheck struct{}
 func (v2WorkspaceNameCheck) Name() string { return "v2-workspace-name" }
 func (v2WorkspaceNameCheck) CanFix() bool { return true }
 func (v2WorkspaceNameCheck) Fix(ctx *doctor.CheckContext) error {
-	release, err := lockCityConfigForDoctorFix(ctx, ctx.CityPath)
+	release, err := lockCityConfigForDoctorFix(ctx.CityPath)
 	if err != nil {
 		return err
 	}
@@ -1272,7 +1272,7 @@ func errorCheck(name, message, hint string, details []string) *doctor.CheckResul
 // forever. The warnings are emitted to warnSink so Doctor.Run callers see
 // them in the same captured output stream as the check results.
 func runV2PackMigration(ctx *doctor.CheckContext, warnSink io.Writer) error {
-	release, err := lockCityConfigForDoctorFix(ctx, ctx.CityPath)
+	release, err := lockCityConfigForDoctorFix(ctx.CityPath)
 	if err != nil {
 		return err
 	}

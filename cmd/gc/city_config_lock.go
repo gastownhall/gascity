@@ -1,9 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -50,13 +50,19 @@ func lockImportRootConfigForCommand(fs fsys.FS, root, cmdName string, stderr io.
 }
 
 // lockCityConfigForDoctorFix takes the city config lock around one gc doctor
-// --fix repair's read through its write. Each fix takes and releases the lock
-// on its own; its wait notice goes to the doctor's output stream (stderr for a
-// direct Fix call) and a lock failure is the fix's error.
-func lockCityConfigForDoctorFix(ctx *doctor.CheckContext, cityPath string) (release func(), err error) {
-	out := io.Writer(os.Stderr)
-	if ctx != nil && ctx.Output != nil {
-		out = ctx.Output
+// --fix repair's read through its write; each repair takes and releases it on
+// its own. A repair never waits for the lock: gc doctor abandons a fix that
+// outlasts its check timeout and may exit while the fix still runs, so a
+// repair that finds another config edit of the city in progress changes
+// nothing and fails with a *doctor.FixHintError telling the user to re-run
+// gc doctor --fix. Any other lock failure is the repair's error.
+func lockCityConfigForDoctorFix(cityPath string) (release func(), err error) {
+	release, err = configedit.TryLockCity(fsys.OSFS{}, cityPath)
+	if errors.Is(err, configedit.ErrCityLocked) {
+		return nil, &doctor.FixHintError{
+			Err:  err,
+			Hint: `run "gc doctor --fix" again once the other config edit of this city finishes`,
+		}
 	}
-	return lockCityConfig(fsys.OSFS{}, cityPath, "gc doctor --fix", out)
+	return release, err
 }

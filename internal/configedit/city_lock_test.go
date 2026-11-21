@@ -1,8 +1,10 @@
 package configedit_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,4 +56,58 @@ func TestLockCityOnFakeFSTakesNoLock(t *testing.T) {
 	case <-time.After(testutil.GoroutineRaceTimeout):
 		t.Fatal("LockCity(fake) waited on the OS lock")
 	}
+}
+
+// TryLockCity takes the city config lock when it is free. While another holder
+// has it, TryLockCity takes nothing and fails at once with ErrCityLocked,
+// naming the lock file; on a filesystem other processes cannot share it takes
+// no lock even then.
+func TestTryLockCityFailsAtOnceWhileTheLockIsHeld(t *testing.T) {
+	cityDir := t.TempDir()
+	releaseHeld, err := configedit.LockCity(fsys.OSFS{}, cityDir, nil)
+	if err != nil {
+		t.Fatalf("LockCity: %v", err)
+	}
+	t.Cleanup(releaseHeld)
+
+	done := make(chan error, 1)
+	go func() {
+		release, err := configedit.TryLockCity(fsys.OSFS{}, cityDir)
+		if err == nil {
+			release()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, configedit.ErrCityLocked) {
+			t.Fatalf("TryLockCity with the lock held = %v, want ErrCityLocked", err)
+		}
+		if !strings.Contains(err.Error(), configedit.CityLockFile(cityDir)) {
+			t.Fatalf("TryLockCity error = %q, want it to name %s", err, configedit.CityLockFile(cityDir))
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("TryLockCity waited for the held lock")
+	}
+	releaseFake, err := configedit.TryLockCity(fsys.NewFake(), cityDir)
+	if err != nil {
+		t.Fatalf("TryLockCity(fake) with the OS lock held: %v", err)
+	}
+	releaseFake()
+
+	releaseHeld()
+	release, err := configedit.TryLockCity(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("TryLockCity with the lock free: %v", err)
+	}
+	if _, err := configedit.TryLockCity(fsys.OSFS{}, cityDir); !errors.Is(err, configedit.ErrCityLocked) {
+		t.Fatalf("TryLockCity while an earlier TryLockCity holds the lock = %v, want ErrCityLocked", err)
+	}
+	release()
+	release()
+	again, err := configedit.TryLockCity(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("TryLockCity after the release: %v", err)
+	}
+	again()
 }

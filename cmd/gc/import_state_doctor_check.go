@@ -118,8 +118,8 @@ func durableRegistryImportDetails(imports map[string]config.Import) []string {
 
 func (c *importStateDoctorCheck) CanFix() bool { return true }
 
-func (c *importStateDoctorCheck) Fix(ctx *doctor.CheckContext) error {
-	release, err := lockCityConfigForDoctorFix(ctx, c.cityPath)
+func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
+	release, err := lockCityConfigForDoctorFix(c.cityPath)
 	if err != nil {
 		return err
 	}

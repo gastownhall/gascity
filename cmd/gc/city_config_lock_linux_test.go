@@ -5,13 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -38,18 +41,24 @@ func holdCityConfigLock(t *testing.T, cityDir string) func() {
 	return release
 }
 
+// appendInlineAgent appends an inline agent to city.toml. It returns its error
+// rather than failing the test, so an edit running off the test goroutine can
+// use it.
+func appendInlineAgent(cityDir, name string) error {
+	path := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, "\n[[agent]]\nname = \""+name+"\"\nprovider = \"claude\"\n"...), 0o644)
+}
+
 // appendAgentToCityToml stands in for another process's edit: it appends an
 // inline agent to city.toml.
 func appendAgentToCityToml(t *testing.T, cityDir, name string) {
 	t.Helper()
-	path := filepath.Join(cityDir, "city.toml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading city.toml: %v", err)
-	}
-	data = append(data, []byte("\n[[agent]]\nname = \""+name+"\"\nprovider = \"claude\"\n")...)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("writing city.toml: %v", err)
+	if err := appendInlineAgent(cityDir, name); err != nil {
+		t.Fatalf("appending agent %s to city.toml: %v", name, err)
 	}
 }
 
@@ -90,31 +99,118 @@ func awaitErr(t *testing.T, ch <-chan error, what string) error {
 	}
 }
 
-// An API config mutation that finds another process mid-edit waits for that
-// edit and applies its own change on top, so city.toml keeps both.
+// awaitExitCode is awaitErr for a command that reports an exit code.
+func awaitExitCode(t *testing.T, ch <-chan int, what string) int {
+	t.Helper()
+	select {
+	case code := <-ch:
+		return code
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatalf("%s did not finish after the city config lock was released", what)
+		return 0
+	}
+}
+
+// apiConfigEditCase is one way an API config edit reaches the city's config
+// files.
+type apiConfigEditCase struct {
+	name string
+	// edit makes the edit. It runs off the test goroutine.
+	edit func(cs *controllerState, cityDir string) error
+	// applied reports whether the edit's own change is on disk.
+	applied func(agents map[string]config.Agent) bool
+}
+
+// apiConfigEditCases are a plain API mutation (mutateAndPoke) and an API
+// config transaction (withConfigTransaction, through SerializeConfigWrite).
+func apiConfigEditCases() []apiConfigEditCase {
+	return []apiConfigEditCase{
+		{
+			name:    "API mutation",
+			edit:    func(cs *controllerState, _ string) error { return cs.SuspendAgent("worker") },
+			applied: func(agents map[string]config.Agent) bool { return agents["worker"].Suspended },
+		},
+		{
+			name: "API config transaction",
+			edit: func(cs *controllerState, cityDir string) error {
+				return cs.SerializeConfigWrite(func() error { return appendInlineAgent(cityDir, "packer") })
+			},
+			applied: func(agents map[string]config.Agent) bool {
+				_, ok := agents["packer"]
+				return ok
+			},
+		},
+	}
+}
+
+// An API config edit, a plain mutation or a config transaction, that finds
+// another process mid-edit waits for that edit and applies its own change on
+// top, so city.toml keeps both.
 func TestControllerConfigMutationWaitsForCityConfigLock(t *testing.T) {
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfigLockTestCity), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cs := newCityConfigLockControllerState(t, cityDir)
+	for _, tc := range apiConfigEditCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfigLockTestCity), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cs := newCityConfigLockControllerState(t, cityDir)
 
-	release := holdCityConfigLock(t, cityDir)
-	done := make(chan error, 1)
-	go func() { done <- cs.SuspendAgent("worker") }()
-	testutil.AwaitFlockWaiters(t, configedit.CityLockFile(cityDir), 1)
-	appendAgentToCityToml(t, cityDir, "builder")
-	release()
-	if err := awaitErr(t, done, "SuspendAgent"); err != nil {
-		t.Fatalf("SuspendAgent: %v", err)
-	}
+			release := holdCityConfigLock(t, cityDir)
+			done := make(chan error, 1)
+			go func() { done <- tc.edit(cs, cityDir) }()
+			testutil.AwaitFlockWaiters(t, configedit.CityLockFile(cityDir), 1)
+			appendAgentToCityToml(t, cityDir, "builder")
+			release()
+			if err := awaitErr(t, done, tc.name); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
 
-	agents := loadAgentsByName(t, cityDir)
-	if _, ok := agents["builder"]; !ok {
-		t.Error("agent builder written by the other process was lost")
+			agents := loadAgentsByName(t, cityDir)
+			if _, ok := agents["builder"]; !ok {
+				t.Error("agent builder written by the other process was lost")
+			}
+			if !tc.applied(agents) {
+				t.Errorf("the %s's own change was lost", tc.name)
+			}
+		})
 	}
-	if !agents["worker"].Suspended {
-		t.Error("worker is not suspended: the API mutation was lost")
+}
+
+// An API config edit waiting for another process's edit of the city holds no
+// in-process lock while it waits: the runtime reload still loads its candidate
+// and publishes it, so the reconciler is never frozen behind another process's
+// edit.
+func TestRuntimeReloadPublishesWhileAPIConfigEditWaitsForCityConfigLock(t *testing.T) {
+	for _, tc := range apiConfigEditCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfigLockTestCity), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cs := newCityConfigLockControllerState(t, cityDir)
+			cfg, revision, err := cs.loadCurrentConfigSnapshot()
+			if err != nil {
+				t.Fatalf("loading the reload candidate: %v", err)
+			}
+
+			release := holdCityConfigLock(t, cityDir)
+			done := make(chan error, 1)
+			go func() { done <- tc.edit(cs, cityDir) }()
+			testutil.AwaitFlockWaiters(t, configedit.CityLockFile(cityDir), 1)
+			requireFinishesPromptly(t, "runtime reload", func() error {
+				if !cs.tryWithConfigTransactionIdle(func() {}) {
+					return errors.New("the candidate load was skipped: the waiting edit holds the config transaction fence")
+				}
+				if !cs.updateFromRuntime(cfg, runtime.NewFake(), revision) {
+					return errors.New("the publication rejected the current on-disk config")
+				}
+				return nil
+			})
+			release()
+			if err := awaitErr(t, done, tc.name); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+		})
 	}
 }
 
@@ -155,6 +251,43 @@ func requireFileContains(t *testing.T, path, want string) {
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("%s does not contain %q:\n%s", path, want, data)
 	}
+}
+
+func requireFileLacks(t *testing.T, path, unwanted string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if strings.Contains(string(data), unwanted) {
+		t.Fatalf("%s still contains %q:\n%s", path, unwanted, data)
+	}
+}
+
+// cityConfigLockToolsSource is the remote pack the gc import writer cases
+// import as "tools"; cityConfigLockToolsPackToml is a root pack.toml that
+// imports it.
+const (
+	cityConfigLockToolsSource   = "https://github.com/example/tools.git"
+	cityConfigLockToolsPackToml = "[pack]\nname = \"city1\"\nschema = 1\n\n[imports.tools]\nsource = \"" + cityConfigLockToolsSource + "\"\nversion = \"^1.4\"\n"
+)
+
+// stubImportResolution makes syncImports resolve every import to packs, and
+// installLockedImports and the post-install config load succeed without
+// fetching anything.
+func stubImportResolution(t *testing.T, packs map[string]packman.LockedPack) {
+	t.Helper()
+	prevSync, prevInstall, prevValidate := syncImports, installLockedImports, validateComposedConfigAfterInstall
+	t.Cleanup(func() {
+		syncImports, installLockedImports, validateComposedConfigAfterInstall = prevSync, prevInstall, prevValidate
+	})
+	syncImports = func(string, map[string]config.Import, packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: packs}, nil
+	}
+	installLockedImports = func(cityRoot string) (*packman.Lockfile, error) {
+		return packman.ReadLockfile(fsys.OSFS{}, cityRoot)
+	}
+	validateComposedConfigAfterInstall = func(string) error { return nil }
 }
 
 // cliCityConfigWriterCase is one CLI entry point that rewrites an existing
@@ -254,43 +387,104 @@ func cliCityConfigWriterCases() []cliCityConfigWriterCase {
 			},
 		},
 		{
-			name: "gc doctor --fix provider aliases",
+			name: "gc import remove",
 			setup: func(t *testing.T, cityDir string) {
-				if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nprovider = \"claude\"\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
+				clearGCEnv(t)
+				writeCityToml(t, cityDir, "[workspace]\nname = \"city1\"\n")
+				writePackToml(t, cityDir, cityConfigLockToolsPackToml)
+				stubImportResolution(t, map[string]packman.LockedPack{})
 			},
-			run: func(cityDir string, _, stderr *bytes.Buffer) int {
-				return doctorFixExitCode(newProviderCatalogDoctorCheck(cityDir).Fix(&doctor.CheckContext{CityPath: cityDir, Output: stderr}), stderr)
+			run: func(cityDir string, stdout, stderr *bytes.Buffer) int {
+				return doImportRemove(fsys.OSFS{}, cityDir, "tools", stdout, stderr)
 			},
 			verify: func(t *testing.T, cityDir string) {
-				requireFileContains(t, filepath.Join(cityDir, "city.toml"), "[providers.claude]")
+				requireFileLacks(t, filepath.Join(cityDir, "pack.toml"), "[imports.tools]")
 			},
 		},
 		{
-			name: "gc doctor --fix v2 pack migration",
+			name: "gc import install",
 			setup: func(t *testing.T, cityDir string) {
-				writeDoctorFile(t, cityDir, "city.toml", "[workspace]\nname = \"legacy-city\"\n\n[[agent]]\nname = \"worker\"\nprompt_template = \"prompts/worker.md\"\n")
-				writeDoctorFile(t, cityDir, "prompts/worker.md", "Hello {{.Agent}}\n")
+				clearGCEnv(t)
+				writeCityToml(t, cityDir, "[workspace]\nname = \"city1\"\n")
+				writePackToml(t, cityDir, cityConfigLockToolsPackToml)
+				stubImportResolution(t, map[string]packman.LockedPack{cityConfigLockToolsSource: {Version: "1.4.2", Commit: "abc123"}})
 			},
-			run: func(cityDir string, _, stderr *bytes.Buffer) int {
-				return doctorFixExitCode(v2AgentFormatCheck{}.Fix(&doctor.CheckContext{CityPath: cityDir, Output: stderr}), stderr)
+			run: func(cityDir string, stdout, stderr *bytes.Buffer) int {
+				return doImportInstall(cityDir, stdout, stderr)
 			},
 			verify: func(t *testing.T, cityDir string) {
-				if _, err := os.Stat(filepath.Join(cityDir, "agents", "worker")); err != nil {
-					t.Fatalf("migrated agent dir: %v", err)
+				requireFileContains(t, filepath.Join(cityDir, packman.LockfileName), "abc123")
+			},
+		},
+		{
+			name: "gc import upgrade",
+			setup: func(t *testing.T, cityDir string) {
+				clearGCEnv(t)
+				writeCityToml(t, cityDir, "[workspace]\nname = \"city1\"\n")
+				writePackToml(t, cityDir, cityConfigLockToolsPackToml)
+				if err := packman.WriteLockfile(fsys.OSFS{}, cityDir, &packman.Lockfile{
+					Schema: packman.LockfileSchema,
+					Packs:  map[string]packman.LockedPack{cityConfigLockToolsSource: {Version: "1.4.2", Commit: "abc123"}},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				stubImportResolution(t, map[string]packman.LockedPack{cityConfigLockToolsSource: {Version: "1.5.0", Commit: "def456"}})
+			},
+			run: func(cityDir string, stdout, stderr *bytes.Buffer) int {
+				return doImportUpgrade(cityDir, "", stdout, stderr)
+			},
+			verify: func(t *testing.T, cityDir string) {
+				requireFileContains(t, filepath.Join(cityDir, packman.LockfileName), "def456")
+			},
+		},
+		{
+			name: "gc rig remove",
+			setup: func(t *testing.T, cityDir string) {
+				gcHome := t.TempDir()
+				t.Setenv("GC_HOME", gcHome)
+				resetFlags(t)
+				rigDir := filepath.Join(filepath.Dir(cityDir), "frontend")
+				if err := os.MkdirAll(rigDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				bindRigForRigResolution(t, cityDir, "city1", "frontend", rigDir)
+				registerCityForRigResolution(t, gcHome, cityDir, "city1")
+				cityFlag = cityDir
+			},
+			run: func(_ string, stdout, stderr *bytes.Buffer) int {
+				return cmdRigRemove("frontend", stdout, stderr)
+			},
+			verify: func(t *testing.T, cityDir string) {
+				requireFileLacks(t, filepath.Join(cityDir, "city.toml"), "frontend")
+			},
+		},
+		{
+			name: "gc rig set-endpoint",
+			setup: func(t *testing.T, cityDir string) {
+				t.Setenv("GC_BEADS", "bd")
+				rigDir := filepath.Join(filepath.Dir(cityDir), "frontend")
+				if err := os.MkdirAll(rigDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeRigEndpointCityConfig(t, cityDir, rigDir)
+				writeRigEndpointMetadata(t, rigDir, "fe")
+			},
+			run: func(cityDir string, stdout, stderr *bytes.Buffer) int {
+				return doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{
+					External:        true,
+					Host:            "rig-db.example.com",
+					Port:            "4406",
+					AdoptUnverified: true,
+				}, stdout, stderr)
+			},
+			verify: func(t *testing.T, cityDir string) {
+				state := readRigEndpointConfigState(t, filepath.Join(filepath.Dir(cityDir), "frontend"))
+				if state.EndpointStatus != contract.EndpointStatusUnverified {
+					t.Fatalf("frontend endpoint status = %q, want %q", state.EndpointStatus, contract.EndpointStatusUnverified)
 				}
 			},
 		},
 	}
-}
-
-func doctorFixExitCode(err error, stderr *bytes.Buffer) int {
-	if err != nil {
-		stderr.WriteString(err.Error())
-		return 1
-	}
-	return 0
 }
 
 // A CLI config writer that finds another process mid-edit waits for that
@@ -696,4 +890,156 @@ func TestCLICityConfigWriterWaitNotice(t *testing.T) {
 			t.Fatalf("stderr has a wait notice with the lock free:\n%s", stderr.String())
 		}
 	})
+}
+
+// gc storage split's two city.toml writes, P4's [storage] append and
+// --abandon's removal, hold the city config lock from their read of city.toml
+// through their write: each waits for another process's edit, and --abandon
+// keeps that edit.
+func TestStorageSplitCityTOMLWritesWaitForCityConfigLock(t *testing.T) {
+	t.Run("P4 configure", func(t *testing.T) {
+		c := newGuidedSplitCity(t)
+		request := c.reload()
+		release := holdCityConfigLock(t, c.request.CityPath)
+		var stdout, stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() { done <- doStorageSplit(context.Background(), request, splitOptions{}, &stdout, &stderr) }()
+		testutil.AwaitFlockWaiters(t, configedit.CityLockFile(c.request.CityPath), 1)
+		release()
+		if code := awaitExitCode(t, done, "gc storage split"); code != 0 {
+			t.Fatalf("gc storage split = %d:\n%s\n%s", code, stdout.String(), stderr.String())
+		}
+		c.assertSplit()
+	})
+	t.Run("--abandon", func(t *testing.T) {
+		c := newGuidedSplitCity(t)
+		c.killSplitAt("copying rows")
+		request := c.reload()
+		release := holdCityConfigLock(t, c.request.CityPath)
+		var stdout, stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() {
+			done <- doStorageSplit(context.Background(), request, splitOptions{Abandon: true}, &stdout, &stderr)
+		}()
+		testutil.AwaitFlockWaiters(t, configedit.CityLockFile(c.request.CityPath), 1)
+		appendToCityToml(t, c.request.CityPath, otherProcessDaemonEdit)
+		release()
+		if code := awaitExitCode(t, done, "gc storage split --abandon"); code != 0 {
+			t.Fatalf("gc storage split --abandon = %d:\n%s\n%s", code, stdout.String(), stderr.String())
+		}
+		if got := c.readTOML(); strings.Contains(got, "[storage") {
+			t.Fatalf("city.toml after --abandon still declares [storage]:\n%s", got)
+		}
+		requireOtherProcessDaemonEdit(t, c.request.CityPath)
+	})
+}
+
+// doctorConfigFixChecks are the gc doctor checks whose --fix repair rewrites
+// the city's config files, built for cityDir.
+func doctorConfigFixChecks(cityDir string) []doctor.Check {
+	return []doctor.Check{
+		newProviderCatalogDoctorCheck(cityDir),
+		newBuiltinImportDoctorCheck(cityDir),
+		newImportStateDoctorCheck(cityDir),
+		newGascityPackBindingDoctorCheck(cityDir),
+		v2AgentFormatCheck{},
+		v2ImportFormatCheck{},
+		v2DefaultRigImportFormatCheck{},
+		v2PackSourcesCheck{},
+		v2RigPathSiteBindingCheck{},
+		v2WorkspaceNameCheck{},
+	}
+}
+
+// A gc doctor --fix repair never waits for the city config lock: gc doctor
+// abandons a fix that outlasts its check timeout and may exit while the fix
+// still runs. A repair that finds another config edit of the city in progress
+// changes nothing and fails at once, naming the lock file and hinting to
+// re-run gc doctor --fix.
+func TestDoctorConfigFixesFailAtOnceWhileCityConfigLockHeld(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfigLockTestCity), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	holdCityConfigLock(t, cityDir)
+	before := readCityFileTree(t, cityDir)
+	for _, check := range doctorConfigFixChecks(cityDir) {
+		t.Run(check.Name(), func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() { done <- check.Fix(&doctor.CheckContext{CityPath: cityDir, Output: io.Discard}) }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("the fix waited for the city config lock")
+			}
+			var hinted *doctor.FixHintError
+			if !errors.As(err, &hinted) || !errors.Is(err, configedit.ErrCityLocked) {
+				t.Fatalf("fix with the city config lock held = %v, want a *doctor.FixHintError wrapping configedit.ErrCityLocked", err)
+			}
+			if !strings.Contains(err.Error(), configedit.CityLockFile(cityDir)) {
+				t.Errorf("fix error %q does not name %s", err, configedit.CityLockFile(cityDir))
+			}
+			if !strings.Contains(hinted.Hint, "gc doctor --fix") {
+				t.Errorf("fix hint %q does not say to re-run gc doctor --fix", hinted.Hint)
+			}
+			requireCityFilesUnchanged(t, cityDir, before)
+		})
+	}
+}
+
+// A plain API edit and a config transaction (a pack import) serialize on the
+// city config lock: a pack import started while a plain edit is paused waits
+// for the edit there, holding none of the in-process config locks, so the two
+// never interleave their publication and Editor locks, and both finish once
+// the edit goes on.
+func TestControllerStatePlainEditFinishesBesideConfigTransaction(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	editEntered := make(chan struct{})
+	releaseEdit := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseEdit) }) }
+	defer release()
+	editDone := make(chan error, 1)
+	go func() {
+		editDone <- cs.mutateAndPoke(func() error {
+			close(editEntered)
+			<-releaseEdit
+			return cs.editor.SuspendAgent("rig1/worker")
+		})
+	}()
+	awaitClose(t, editEntered, "plain edit holding the city config and publication locks")
+
+	txDone := make(chan error, 1)
+	go func() { txDone <- cs.SerializeConfigWrite(func() error { return nil }) }()
+	testutil.AwaitFlockWaiters(t, configedit.CityLockFile(cs.cityPath), 1)
+	if !cs.configTransactionMu.TryLock() {
+		t.Fatal("the pack import holds the config transaction fence while it waits for the city config lock")
+	}
+	cs.configTransactionMu.Unlock()
+
+	release()
+	for _, w := range []struct {
+		name string
+		done <-chan error
+	}{{"plain edit", editDone}, {"pack import", txDone}} {
+		select {
+		case err := <-w.done:
+			if err != nil {
+				t.Fatalf("%s: %v", w.name, err)
+			}
+		case <-time.After(hangBudget):
+			t.Fatalf("%s did not finish after the plain edit went on", w.name)
+		}
+	}
+	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Agents) != 1 || !cfg.Agents[0].Suspended {
+		t.Fatalf("agents after the edit = %+v, want rig1/worker suspended", cfg.Agents)
+	}
 }
