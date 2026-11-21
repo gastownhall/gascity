@@ -312,3 +312,36 @@ func TestHookClaimExactWritesClaimAndIdentityInOneFencedWrite(t *testing.T) {
 		})
 	}
 }
+
+// TestHookClaimExactFencesObservedGeneration: the work query observed
+// gc.claim_generation=3, but the bead's generation advanced to 4 before the
+// claim ran. The hook writes nothing and reports a rejection.
+func TestHookClaimExactFencesObservedGeneration(t *testing.T) {
+	observed := graphStepMeta("build")
+	observed[beadmeta.ClaimGenerationMetadataKey] = "3"
+	stored := graphStepMeta("build")
+	stored[beadmeta.ClaimGenerationMetadataKey] = "4"
+	f := newExactClaimFixture(t)
+	f.add(
+		beads.Bead{ID: "work-1", Title: "advanced", Status: "open", Metadata: stored},
+		beads.Bead{ID: "work-1", Status: "open", Metadata: observed},
+	)
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), f.ops(), &stdout, &stderr)
+
+	got := f.get("work-1")
+	if got.Status != "open" || got.Assignee != "" || got.Metadata[beadmeta.ClaimGenerationMetadataKey] != "4" {
+		t.Fatalf("work-1 = status %q assignee %q generation %q, want open, unassigned, generation 4",
+			got.Status, got.Assignee, got.Metadata[beadmeta.ClaimGenerationMetadataKey])
+	}
+	if strings.Contains(stdout.String(), `"action":"work"`) {
+		t.Fatalf("handed out work: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "exact claim of work-1 rejected") {
+		t.Fatalf("stderr = %q, want the rejection of work-1 named", stderr.String())
+	}
+	if len(f.failed) != 0 {
+		t.Fatalf("claim failures = %v, want a rejection, not claims_errored", f.failed)
+	}
+}
