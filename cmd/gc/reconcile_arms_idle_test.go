@@ -299,13 +299,20 @@ func TestIdleMemoryTracesDeferrals(t *testing.T) {
 // WantContent wiring): a pass on a Claude row asks the observation cache
 // for its pane.
 func TestPassWantsTheContentClocksPanes(t *testing.T) {
-	c := idleCase(t, idleCity(), -1, contentUnread, "provider", "claude")
-	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
-	cache := newObserveCache()
-	p.observations = func() *ObservationCache { return cache.ObservationCache }
-	p.idleWants(c.w, c.a)
-	if !cache.contentWanted()["s-heal"] {
-		t.Fatalf("content wanted %v, want the Claude row's pane", cache.contentWanted())
+	for _, meta := range [][]string{
+		{"provider", "claude"},
+		// A custom provider with base = "builtin:claude" records its family
+		// as builtin_ancestor; it repaints like Claude (gascity#9054).
+		{"provider", "claude-light", "builtin_ancestor", "claude"},
+	} {
+		c := idleCase(t, idleCity(), -1, contentUnread, meta...)
+		p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+		cache := newObserveCache()
+		p.observations = func() *ObservationCache { return cache.ObservationCache }
+		p.idleWants(c.w, c.a)
+		if !cache.contentWanted()["s-heal"] {
+			t.Fatalf("%v: content wanted %v, want the Claude row's pane", meta, cache.contentWanted())
+		}
 	}
 }
 
