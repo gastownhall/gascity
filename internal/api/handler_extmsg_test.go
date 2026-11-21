@@ -865,6 +865,55 @@ func TestExtmsgNotifyMembersGroupedNoMatchTargetStaysParticipantOnly(t *testing.
 	}
 }
 
+// TestExtmsgNotifyMembersDoesNotNotifyExcludedExplicitTarget guards the
+// sender skip of explicit-target delivery: when the explicit target resolves
+// to the excluded sender — the session whose outbound reply this fan-out
+// echoes back — that session receives no notice, while every other eligible
+// member is notified normally.
+func TestExtmsgNotifyMembersDoesNotNotifyExcludedExplicitTarget(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+	fs.extmsgSvc = &services
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "guild-1",
+		Provider:       "slack",
+		AccountID:      "acct-1",
+		ConversationID: "C123",
+		Kind:           extmsg.ConversationRoom,
+	}
+	bound := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+	sender := createTestSession(t, fs.cityBeadStore, fs.sp, "Sender")
+
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+		Caller:         caller,
+		Conversation:   ref,
+		SessionID:      bound.ID,
+		BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+		Owner:          extmsg.MembershipOwnerManual,
+		Now:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("EnsureMembership(bound): %v", err)
+	}
+
+	srv.extmsgNotifyMembers(context.Background(), ref, "Sender", "agent", "self update", sender.ID, sender.ID)
+
+	nudges := extmsgNudgesBySessionName(fs)
+	if got := nudges[sender.SessionName]; len(got) != 0 {
+		t.Fatalf("excluded explicit target nudges = %d, want 0; nudges=%#v", len(got), nudges)
+	}
+	boundNudges := nudges[bound.SessionName]
+	if len(boundNudges) != 1 || !strings.Contains(boundNudges[0], "self update") {
+		t.Fatalf("member nudges = %v, want exactly one carrying the text; nudges=%#v", boundNudges, nudges)
+	}
+	if len(nudges) != 1 {
+		t.Fatalf("nudged sessions = %d, want only the member; nudges=%#v", len(nudges), nudges)
+	}
+}
+
 // TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
 // pins the member side of explicit-target delivery: when the target of an
 // inbound names a transcript member, that member is notified exactly once —
