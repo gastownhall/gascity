@@ -255,12 +255,15 @@ func ClaimExactWithWriters(reader ClaimExactReader, writers ClaimExactWriters, r
 		}
 	}
 	if writers.Assignment == nil {
-		return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: store supports neither a revision fence nor an assignment guard: %w", id, beads.ErrConditionalWriteUnsupported)
+		return ClaimExactResult{Bead: b}, claimExactNoFence(id)
 	}
 	if req.Want.Status == nil || req.Want.Assignee == nil {
 		return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: the assignment guard needs an observed status and assignee: %w", id, beads.ErrConditionalWriteUnsupported)
 	}
 	landed, err := writers.Assignment.UpdateIfAssignment(id, *req.Want.Status, *req.Want.Assignee, effects)
+	if errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		return ClaimExactResult{Bead: b}, claimExactNoFence(id)
+	}
 	if err != nil {
 		return ClaimExactResult{Bead: bestEffortGet(reader, id, b)}, fmt.Errorf("claim exact %q: applying claim effects: %w", id, err)
 	}
@@ -283,6 +286,12 @@ func claimExactObservationHolds(b beads.Bead, want ClaimExactPreconditions, toGe
 	identity.Status, identity.Assignee = nil, nil
 	return claimExactPreconditionsMatch(b, identity) &&
 		b.Metadata[beadmeta.ClaimGenerationMetadataKey] == toGeneration
+}
+
+// claimExactNoFence is the error of a claim that wrote nothing because the
+// store offered neither a revision fence nor an assignment guard.
+func claimExactNoFence(id string) error {
+	return fmt.Errorf("claim exact %q: store supports neither a revision fence nor an assignment guard: %w", id, beads.ErrConditionalWriteUnsupported)
 }
 
 // claimExactReadback re-reads a claim whose write landed through fence. A
