@@ -203,6 +203,55 @@ func TestCompletionBackstopStaleStampHealsByDeltaPassOrOperatorClear(t *testing.
 			t.Fatal("a sweep cleared the stamp of a root it skipped")
 		}
 	})
+
+	t.Run("delta", func(t *testing.T) {
+		backing, journal, rootID, stepID := seedStaleStampedRoot(t)
+		stores := []beads.GraphStore{{Store: backing}}
+		// The controller hands the delta pass a root an observed bead.closed or
+		// execution.step_* event names, stamped or not.
+		if emitted := (&CompletedFactIndex{}).ReconcileRoots(journal, stores, []string{rootID}, "execution-reconcile"); emitted != 1 {
+			t.Fatalf("delta pass emitted %d fact(s), want the owed one", emitted)
+		}
+		assertResurrectedFact(t, journal, stepID)
+		assertNotStamped(t, backing, rootID, "the delta pass emitted for a stamped root but left its stale stamp")
+		assertSweepRestamps(t, backing, journal, rootID)
+	})
+}
+
+// assertResurrectedFact fails unless the journal holds exactly one completion
+// fact for stepID under the re-closed session.
+func assertResurrectedFact(t *testing.T, journal events.Provider, stepID string) {
+	t.Helper()
+	facts, err := journal.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: stepID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resurrected := 0
+	for _, fact := range facts {
+		if fact.SessionID == "gcs-resurrected" {
+			resurrected++
+		}
+	}
+	if resurrected != 1 {
+		t.Fatalf("completion facts for %s = %#v, want exactly one under session gcs-resurrected", stepID, facts)
+	}
+}
+
+// assertSweepRestamps runs one sweep once the owed fact reads back from the
+// journal and fails unless it emits nothing and re-stamps rootID.
+func assertSweepRestamps(t *testing.T, backing beads.Store, journal events.Provider, rootID string) {
+	t.Helper()
+	stores := []beads.GraphStore{{Store: backing}}
+	if r := (&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile"); r.Emitted != 0 || r.RootsVisited != 1 {
+		t.Fatalf("verifying sweep = %+v, want the root visited with nothing emitted", r)
+	}
+	root, err := backing.Get(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
+		t.Fatal("the verifying sweep did not re-stamp the healed root")
+	}
 }
 
 // TestCompletionBackstopClearsStampWhenStampedRootReopens: the converged stamp's
