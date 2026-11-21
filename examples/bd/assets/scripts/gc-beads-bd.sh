@@ -1444,12 +1444,69 @@ server_reachable() {
 # read that fails outright (bd_runtime_schema_cursor returns
 # non-numeric/empty) is treated as a stalled attempt rather than progress
 # -- there is no evidence of advancement to reset the counters on.
+#
+# Ready means the cursor has reached the schema version this bd migrates to,
+# not that the config table exists: the config table comes from migration 28
+# of 66, so a store stalled anywhere after it (a #5920 refusal, a SIGKILL, a
+# host crash) has one and bd then refuses writes. The target is learned once
+# per call by migrating a throwaway database (the technique
+# test/acceptance/helpers/bd_schema_parity.go uses), never by asking the real
+# store, and never by running `bd migrate schema` against it: promoting a
+# shared database's schema is the operator's consent to give (beads#5920), so a
+# store that stays behind is reported, not completed. A cursor ahead of the
+# target is schema skew, which bd's own open reports; it passes through here.
 wait_for_bd_runtime_schema() {
     local db="$1"
     local backoff_ms stalls last_cursor cursor cap_ms now deadline
     local stall_budget=8
+    local target probe_dir probe_out probe_rc probe_tail probe_runner
+    local probe_timeout_s="${GC_BD_SCHEMA_PROBE_TIMEOUT_S:-60}"
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
+
+    # The probe runs with the live scope's routing removed: BEADS_DIR (op_init
+    # exports the live scope's .beads) and every BEADS_DOLT_* server setting
+    # are unset, server auto-start is off, and HOME and the XDG directories
+    # are re-homed so neither an inherited variable nor a user-level bd config
+    # naming a shared Dolt server can turn the throwaway probe into a dial of
+    # that server or of the live store. The database sits one level below
+    # probe_dir so bd's workspace gate file lands inside the directory
+    # removed below.
+    #
+    # Exit codes: 0 ready; 1 no cursor was ever readable (or it never passed
+    # the ready check); 2 the target schema version could not be learned;
+    # 3 the cursor was read and stayed behind the target.
+    probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/gc-bd-schema-target.XXXXXX") || {
+        echo "error: cannot learn the target bd schema version for '$db' (mktemp failed)" >&2
+        return 2
+    }
+    mkdir -p "$probe_dir/home" "$probe_dir/db"
+    # The probe is bounded so a wedged bd cannot block init before the settle
+    # deadline below even starts; without timeout(1) it runs bare.
+    case "$probe_timeout_s" in
+        ''|*[!0-9]*) probe_timeout_s=60 ;;
+    esac
+    probe_runner=""
+    if command -v timeout >/dev/null 2>&1; then
+        probe_runner="timeout $probe_timeout_s"
+    fi
+    probe_rc=0
+    trace_bd_argv migrate schema --db "$probe_dir/db/probe.db"
+    # probe_runner is unquoted on purpose: empty, or `timeout <digits>`.
+    probe_out=$(cd "$probe_dir" && env -u BEADS_DIR -u BEADS_DOLT_SERVER_MODE -u BEADS_DOLT_SERVER_HOST -u BEADS_DOLT_SERVER_PORT -u BEADS_DOLT_SERVER_SOCKET -u BEADS_DOLT_SERVER_USER -u BEADS_DOLT_SERVER_DATABASE -u BEADS_DOLT_PASSWORD -u BEADS_DOLT_SHARED_SERVER -u BEADS_DOLT_PROXIED_SERVER -u BEADS_DOLT_DATABASE -u BEADS_DOLT_PORT HOME="$probe_dir/home" XDG_CONFIG_HOME="$probe_dir/home/.config" XDG_DATA_HOME="$probe_dir/home/.local/share" XDG_CACHE_HOME="$probe_dir/home/.cache" BEADS_DOLT_AUTO_START=0 BEADS_TEST_MODE=1 $probe_runner "${BD_BIN:-bd}" migrate schema --db "$probe_dir/db/probe.db" 2>&1 </dev/null) || probe_rc=$?
+    rm -rf "$probe_dir"
+    target=""
+    if [ "$probe_rc" -eq 0 ]; then
+        target=$(printf '%s\n' "$probe_out" | grep -Eo '(^|[^[:alnum:]_])v[0-9]+' | grep -Eo '[0-9]+' | sort -n | tail -n 1)
+    fi
+    case "$target" in
+        ''|*[!0-9]*)
+            probe_tail=$(printf '%s\n' "$probe_out" | tail -n 5)
+            echo "error: cannot learn the target bd schema version for '$db' (throwaway 'bd migrate schema --db' exited $probe_rc and gave no version); not treating the config table as proof the schema is ready. Probe output (last lines):" >&2
+            printf '%s\n' "$probe_tail" >&2
+            return 2
+            ;;
+    esac
 
     cap_ms="${GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS:-120000}"
     case "$cap_ms" in
@@ -1462,14 +1519,14 @@ wait_for_bd_runtime_schema() {
     stalls=0
     last_cursor=""
     while :; do
-        if bd_runtime_schema_ready "$db"; then
-            return 0
-        fi
-
         cursor=$(bd_runtime_schema_cursor "$db") || cursor=""
         case "$cursor" in
             ''|*[!0-9]*) cursor="" ;;
         esac
+        if [ -n "$cursor" ] && [ "$cursor" -ge "$target" ] && bd_runtime_schema_ready "$db"; then
+            return 0
+        fi
+
         if [ -n "$cursor" ] && [ "$cursor" != "$last_cursor" ]; then
             stalls=0
             last_cursor="$cursor"
@@ -1478,12 +1535,12 @@ wait_for_bd_runtime_schema() {
         else
             stalls=$((stalls + 1))
             if [ "$stalls" -ge "$stall_budget" ]; then
-                return 1
+                break
             fi
 
             now=$(date +%s 2>/dev/null) || now=0
             if [ "$now" -ge "$deadline" ]; then
-                return 1
+                break
             fi
         fi
 
@@ -1495,6 +1552,11 @@ wait_for_bd_runtime_schema() {
             fi
         fi
     done
+    echo "error: bd schema migration for '$db' is not at its target: cursor ${last_cursor:-unknown} of $target. A store stalled mid-migration (an interrupted migration, a refusal under beads#5920) is not ready, and gc does not complete it. Once every bd client of this server is upgraded, run 'bd migrate schema' once, from one designated migrator." >&2
+    if [ -n "$last_cursor" ] && [ "$last_cursor" -lt "$target" ]; then
+        return 3
+    fi
+    return 1
 }
 
 # bd_runtime_bd_table_count prints how many of bd's own tables exist in the
@@ -4654,7 +4716,9 @@ op_init() {
                 # is empty, which is the ordinary fresh-init path.
                 bd_runtime_store_holds_bd_tables "$dolt_database" || holds_bd_tables=$?
                 if [ "$holds_bd_tables" -ne 1 ]; then
-                    if wait_for_bd_runtime_schema "$dolt_database"; then
+                    local wait_rc=0
+                    wait_for_bd_runtime_schema "$dolt_database" || wait_rc=$?
+                    if [ "$wait_rc" -eq 0 ]; then
                         schema_ready=true
                     elif [ "$holds_bd_tables" -eq 0 ]; then
                         # holds_bd_tables=0 covers two distinct give-up states that
@@ -4669,6 +4733,10 @@ op_init() {
                         else
                             die "database '$dolt_database' has a schema_migrations cursor in progress but it never settled; refusing to force-reinitialize (data-safety). this means a concurrent initializer is still migrating '$dolt_database', or a previous migration crashed mid-way. a forced reinit cannot succeed here -- beads refuses to auto-apply pending migrations to a database with existing history -- and would only corrupt the store further. wait for the concurrent init to finish, or inspect the stalled migration with 'bd dolt status' before retrying."
                         fi
+                    elif [ "$wait_rc" -eq 2 ]; then
+                        die "could not learn the target bd schema version for '$dolt_database' and could not determine whether it holds bd tables; refusing to force-reinitialize (data-safety). fix the throwaway schema probe (see the error above), then inspect the store and run 'bd migrate schema' from one designated migrator if it is behind."
+                    elif [ "$wait_rc" -eq 3 ]; then
+                        die "bd schema cursor for '$dolt_database' is behind its target and it could not be determined whether the database holds bd tables; refusing to force-reinitialize (data-safety). a stalled migration is not an empty store: once every bd client of this server is upgraded, run 'bd migrate schema' once, from one designated migrator."
                     else
                         # Undetermined: the table count never answered, so there is
                         # no evidence either way. Keep the pre-existing behaviour

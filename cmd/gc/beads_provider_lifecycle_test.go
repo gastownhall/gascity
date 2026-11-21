@@ -6521,6 +6521,9 @@ case "$cmd" in
     ;;
   migrate)
     record migrate.env
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
     exit 0
     ;;
   list)
@@ -6536,10 +6539,7 @@ esac
 		t.Fatal(err)
 	}
 
-	fakeDolt := filepath.Join(binDir, "dolt")
-	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeDoltSchemaCursor(t, binDir, 62)
 
 	rigDir := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -7738,7 +7738,21 @@ case "$cmd" in
     printf '%%s\n' "$@" > %q
     exit 0
     ;;
-  config|migrate|list)
+  migrate)
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
+    exit 0
+    ;;
+  config|list)
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n62\n'
     exit 0
     ;;
   *)
@@ -7898,7 +7912,21 @@ case "$cmd" in
     printf '%%s\n' "$@" > %q
     exit 0
     ;;
-  config|migrate|list)
+  migrate)
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
+    exit 0
+    ;;
+  config|list)
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n62\n'
     exit 0
     ;;
   *)
@@ -7992,7 +8020,13 @@ func TestGcBeadsBdInitWaitsForSchemaVisibilityBeforeRuntimeRepair(t *testing.T) 
 	fakeBdScript := `#!/bin/sh
 set -eu
 case "${1:-}" in
-  init|config|migrate|list)
+  migrate)
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
+    exit 0
+    ;;
+  init|config|list)
     exit 0
     ;;
   *)
@@ -8106,7 +8140,21 @@ case "${1:-}" in
     printf '%%s\n' "$*" >> %q
     exit 0
     ;;
-  config|migrate|list)
+  migrate)
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
+    exit 0
+    ;;
+  config|list)
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n62\n'
     exit 0
     ;;
   *)
@@ -8171,6 +8219,14 @@ case "$query" in
       echo "table not found: config" >&2
       exit 1
     fi
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n62\n'
     exit 0
     ;;
   *)
@@ -8263,7 +8319,21 @@ case "${1:-}" in
     printf '%%s\n' "$*" >> %q
     exit 0
     ;;
-  config|migrate|list)
+  migrate)
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
+    exit 0
+    ;;
+  config|list)
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n62\n'
     exit 0
     ;;
   *)
@@ -8312,6 +8382,14 @@ case "$query" in
     exit 0
     ;;
   'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''issue_prefix'\'', '\''gc'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n62\n'
     exit 0
     ;;
   *)
@@ -8508,6 +8586,12 @@ case "${1:-}" in
     : > "$dir/init-done"
     ;;
   migrate)
+    case "$*" in
+      *" --db "*)
+        echo "Schema migrated to v62"
+        exit 0
+        ;;
+    esac
     if [ -f "$dir/migrate-remote-refusal" ]; then
       echo "Error: refusing to auto-apply 2 pending schema migrations to a remote-backed database (v60 -> v62): migrating clones independently forks the schema (#4259)" >&2
       echo "    - You are the designated migrator (only ONE machine should be): migrate," >&2
@@ -8555,7 +8639,14 @@ case "$query" in
     exit 0
     ;;
   *"FROM information_schema.tables WHERE table_schema = 'hq'"*)
-    if [ ! -f "$dir/database-absent" ]; then exit 0; fi
+    if [ ! -f "$dir/database-absent" ]; then
+      # Once bd init ran, the schema wait sees a migrated store (its cursor
+      # answer is below); before it, nothing is answered, as for any probe.
+      case "$query" in
+        *"schema_migrations"*) if [ -f "$dir/init-done" ]; then printf 'cnt\n1\n'; fi ;;
+      esac
+      exit 0
+    fi
     if [ -f "$dir/tables-present" ]; then printf 'cnt\n4\n'; else printf 'cnt\n0\n'; fi
     exit 0
     ;;
@@ -8612,6 +8703,14 @@ case "$query" in
         : > "$dir/init-lock-held"
       fi
     fi
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n62\n'
     exit 0
     ;;
   *)

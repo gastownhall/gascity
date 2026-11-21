@@ -69,6 +69,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"GetLocalString": nativeStoreRead,
 	"Ping":           nativeStoreRead,
 	"DepList":        nativeStoreRead,
+	"SchemaCursor":   nativeStoreRead,
 
 	// Optional capabilities that write. ApplyGraphPlanWithStorage is the one
 	// H4 is about: policy middleware selects the graph applier at wrap time, so

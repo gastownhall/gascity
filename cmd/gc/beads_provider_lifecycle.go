@@ -2593,11 +2593,24 @@ func waitForBeadsScopeReadyAfterRecovery(ctx context.Context, scopeRoot, cityPat
 	if scopeUsesProxiedDoltMode(cityPath, scopeRoot) || (!scopeOverridesCityBackend(cityPath, scopeRoot) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
 		return nil
 	}
-	var lastErr error
+	var lastErr, lastSchemaErr error
 	for {
 		store, err := openStoreAtForCity(scopeRoot, cityPath)
 		if err == nil {
+			// Ping needs only the issues table (migration 1), so it passes a
+			// store whose schema migration stalled part-way; ready also means
+			// the migration cursor reached this build's target. A scope that
+			// stays behind is reported, never completed (beads#5920).
 			pingErr := store.Ping()
+			if pingErr == nil {
+				cursorCtx, cancel := context.WithDeadline(ctx, deadline)
+				pingErr = beads.CheckSchemaAtTarget(cursorCtx, store)
+				cancel()
+				if pingErr != nil {
+					pingErr = fmt.Errorf("beads scope %s: %w", scopeRoot, pingErr)
+				}
+				lastSchemaErr = keepSchemaErrPastDeadline(lastSchemaErr, pingErr)
+			}
 			if pingErr == nil {
 				return nil
 			}
@@ -2606,13 +2619,34 @@ func waitForBeadsScopeReadyAfterRecovery(ctx context.Context, scopeRoot, cityPat
 			lastErr = err
 		}
 		if time.Now().After(deadline) {
-			if lastErr == nil {
-				lastErr = fmt.Errorf("timed out waiting for beads store readiness")
-			}
-			return lastErr
+			return beadsScopeReadyTimeoutErr(lastErr, lastSchemaErr)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+}
+
+// keepSchemaErrPastDeadline returns err when it is a schema-cursor error that
+// is not a context error, and prev otherwise. A cursor read that runs into the
+// shared deadline fails with context.DeadlineExceeded; the stalled-migration
+// error seen before it is the one worth reporting.
+func keepSchemaErrPastDeadline(prev, err error) error {
+	if err == nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return prev
+	}
+	return err
+}
+
+// beadsScopeReadyTimeoutErr picks the error the scope-ready wait returns at its
+// deadline: the last schema-cursor error when the last attempt only ran out of
+// time, else the last error seen.
+func beadsScopeReadyTimeoutErr(lastErr, lastSchemaErr error) error {
+	if lastErr == nil {
+		return fmt.Errorf("timed out waiting for beads store readiness")
+	}
+	if lastSchemaErr != nil && errors.Is(lastErr, context.DeadlineExceeded) {
+		return lastSchemaErr
+	}
+	return lastErr
 }
 
 // isExternalDolt returns true when the city uses an explicitly configured
