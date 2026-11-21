@@ -164,3 +164,35 @@ func TestRouteRecoveryLedgerPassWaitsOutQuiescence(t *testing.T) {
 		t.Fatalf("ledger queue after the quiescent pass = %v, want [CW-1] kept for the resume", pending)
 	}
 }
+
+// TestRouteRecoveryBackstopNamesTheRigImportForRigResidue: routed graph
+// residue in a RIG's own store is pre-S4 history that `gc storage migrate
+// --from-rigs` moves (S4b), so the alarm names that command for the rig;
+// residue in the city work store keeps the operator-decision wording.
+func TestRouteRecoveryBackstopNamesTheRigImportForRigResidue(t *testing.T) {
+	work := &countingRouteStore{Store: beads.NewMemStoreFrom(0, nil, nil)}
+	rig := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
+		routedOpenBead("gp-step", map[string]string{beadmeta.RootBeadIDMetadataKey: "gp-root"}),
+	}, nil)}
+	binding := &countingRouteStore{Store: beads.NewMemStoreFrom(0, nil, nil)}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "packs", Prefix: "gp", Path: t.TempDir()}}}
+	topo := assembleResidencyTopology(cfg, work, map[string]beads.Store{"packs": rig},
+		[]storeref.ClassBinding{{
+			Classes: []coordclass.Class{coordclass.ClassGraph},
+			Leg:     storeref.Leg{Ref: storeref.ClassRef([]coordclass.Class{coordclass.ClassGraph}), Store: binding},
+		}}, nil)
+	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+	if err != nil {
+		t.Fatalf("Plan(RoutedWork): %v", err)
+	}
+	report := newRouteRecoveryLane().backstopPass(plan, backstopReasonCadence)
+	if report.offPlaneInfra != 1 || len(report.offPlaneRigs) != 1 || report.offPlaneRigs[0] != "packs" {
+		t.Fatalf("off_plane_infra=%d rigs=%v, want 1 in rig packs", report.offPlaneInfra, report.offPlaneRigs)
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{logPrefix: "gc", stderr: &stderr}
+	cr.logRouteRecovery(report)
+	if line := stderr.String(); !strings.Contains(line, "gc storage migrate --from-rigs --rig packs --fleet-stopped") {
+		t.Errorf("the alarm %q does not name the rig import", line)
+	}
+}

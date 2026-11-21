@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -18,7 +19,7 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(t.TempDir()))
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -86,7 +87,7 @@ func TestAutoSuspendSuspendsLabelLostActiveSession(t *testing.T) {
 	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(t.TempDir()))
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -122,7 +123,7 @@ func TestAutoSuspendSkipsAttachedSessions(t *testing.T) {
 	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(t.TempDir()))
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -165,7 +166,7 @@ func TestAutoSuspendHoldsOnAttachProbeError(t *testing.T) {
 	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(t.TempDir()))
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 

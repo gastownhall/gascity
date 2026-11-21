@@ -39,7 +39,8 @@ type OpsConfig struct {
 	// process start. With message listed in authoritative, a surface that
 	// proposes lane message ops (the API's submit and messages, a provider
 	// session create's initial message, extmsg member notices, gc session
-	// nudge, planner notices) is not governed by this gate.
+	// nudge, gc session submit, planner notices) is not governed by this
+	// gate.
 	ContentMode string `toml:"content,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Records interrupt (stop) and respond requests as ops. "auto" is the
 	// default. Left unset, it records only over a SQLite sessions store and
@@ -62,13 +63,20 @@ type OpsConfig struct {
 	// effect. A change takes effect at the next process start.
 	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Authoritative lists the op kinds the conversation lane executes instead
-	// of their legacy path. The default is empty, and message is not on by
-	// default anywhere yet. This build accepts message, interrupt and respond.
-	// Experimental: listing message switches on the producers that write lane
+	// of their legacy path. This build accepts message, interrupt and respond.
+	// Left unset, a city whose sessions store is SQLite and applies guarded
+	// batches (a SQLite storage split) runs all three on the lane; any other
+	// city keeps their legacy delivery until it splits its storage (gc
+	// storage migrate). An explicit list, the empty list included, always
+	// wins: authoritative = [] on such a city keeps legacy delivery, and is
+	// warned, since legacy delivery (the nudge queue, its pollers and the
+	// supervisor's dispatcher) is removed in a future release.
+	// Listing message switches on the producers that write lane
 	// ops, whose messages the lane host then delivers: the API's POST
 	// /v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an
 	// operator proposing a message) and, for sessions a lane host can type
-	// into (a keystroke-mode runtime, or one a box host serves), the
+	// into (a keystroke-mode runtime, a protocol-mode one whose runtime
+	// records its turn starts, such as t3bridge, or one a box host serves), the
 	// controller's planner notices (the work ladder's nudges, drain reminders,
 	// the nudge backstop) and
 	// gc session nudge. gc session nudge delivers inline what its delivery
@@ -100,11 +108,12 @@ type OpsConfig struct {
 	// other way can leave its notice open. A ready wait's nudge is a lane
 	// notice from gc:wait to a session a lane host can type into, and its
 	// outcome finalizes the wait; for a session no lane serves, or a note the
-	// op store refuses, it keeps its legacy delivery. gc session submit's
-	// local fallback keeps its legacy delivery in this build; it answers
-	// from the API's lane op under its key rather than delivering again, on
-	// any sessions store, the content gate's builtin default
-	// notwithstanding.
+	// op store refuses, it keeps its legacy delivery. gc session submit sends
+	// the API its key whatever the content gate says; when the API call
+	// fails, it accepts the message as the API does, for every session the
+	// API accepts. It delivers inline only at an idle boundary of a
+	// keystroke-mode runtime, and never an interrupt_now, so a submit to a
+	// protocol-mode session waits for the controller.
 	// Listing interrupt switches the API's POST
 	// /v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:
 	// each proposes interrupt ops the controller's lane host runs, and
@@ -130,9 +139,33 @@ type OpsConfig struct {
 	// lane host interrupts the session's running turn, then delivers the
 	// message at the boundary the interrupt leaves.
 	// A listed kind needs a sessions store with guarded batches. A change
-	// takes effect at the controller's next start; gc session nudge reads it
-	// at once.
-	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=interrupt,enum=respond"`
+	// takes effect at the controller's next start; gc session nudge and gc
+	// session submit read it at once.
+	Authoritative *[]string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=interrupt,enum=respond"`
+}
+
+// OpsKinds is an [ops] authoritative list set to kinds; with none it is the
+// explicit empty list.
+func OpsKinds(kinds ...string) *[]string {
+	list := append([]string{}, kinds...)
+	return &list
+}
+
+// AuthoritativeSet reports whether [ops] authoritative is set, an explicit
+// empty list included. Authoritative is a pointer so that unset (nil) stays
+// distinct from an explicit [] through decoding, fragment composition and
+// encoding: gc config show and a city.toml rewrite keep the rollback. Read
+// it through AuthoritativeSet and AuthoritativeKinds.
+func (o OpsConfig) AuthoritativeSet() bool {
+	return o.Authoritative != nil
+}
+
+// AuthoritativeKinds is the [ops] authoritative list as set, nil when unset.
+func (o OpsConfig) AuthoritativeKinds() []string {
+	if o.Authoritative == nil {
+		return nil
+	}
+	return *o.Authoritative
 }
 
 // laneAuthoritativeKinds are the op kinds this build's conversation lane can
@@ -141,7 +174,7 @@ var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage, opjournal.K
 
 // LaneExecutes reports whether [ops] authoritative lists kind.
 func (o OpsConfig) LaneExecutes(kind string) bool {
-	return slices.Contains(o.Authoritative, kind)
+	return slices.Contains(o.AuthoritativeKinds(), kind)
 }
 
 // validateOpsModes rejects an out-of-enum value in any [ops] gate, and an
@@ -167,7 +200,7 @@ func validateOpsModes(o OpsConfig) error {
 			return fmt.Errorf("%s: %w", f.key, err)
 		}
 	}
-	return validateOpsAuthoritative(o.Authoritative)
+	return validateOpsAuthoritative(o.AuthoritativeKinds())
 }
 
 // validateOpsAuthoritative checks [ops] authoritative entry by entry. Entries

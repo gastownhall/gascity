@@ -16,7 +16,7 @@ import (
 func newConversationLanesCheckForTest(kinds []string, store beads.Store, st conversationLaneStatus, queryErr error) (*conversationLanesDoctorCheck, *int) {
 	opened := 0
 	c := &conversationLanesDoctorCheck{
-		cfg: &config.City{Ops: config.OpsConfig{Authoritative: kinds}},
+		cfg: &config.City{Ops: config.OpsConfig{Authoritative: config.OpsKinds(kinds...)}},
 		open: func() (beads.Store, error) {
 			opened++
 			return store, nil
@@ -157,5 +157,54 @@ func TestConversationLanesDoctorMessageUnderV2(t *testing.T) {
 				t.Fatalf("severity %v, fix hint %q; want no advisory", r.Severity, r.FixHint)
 			}
 		})
+	}
+}
+
+// TestConversationLanesDoctorDefault pins the check with [ops] authoritative
+// unset (OJ-21 21a): over a SQLite sessions store it reports the default
+// kinds as listed, marked default; over any other store it is OK and names
+// legacy delivery and the split that ends it, a store that cannot batch with
+// its binding, never the explicit list's remedy.
+func TestConversationLanesDoctorDefault(t *testing.T) {
+	sqlite := newLaneKindsSQLiteStore(t)
+	bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) {
+		return nil, errors.New("the bd CLI must not run")
+	})
+	running := conversationLaneStatus{State: laneHostStateRunning, Kinds: laneDefaultKinds, KindsDefault: true, LastPassAt: "2026-10-16T12:00:00Z", LastPassAgeMS: 2000}
+	for _, tc := range []struct {
+		name   string
+		store  beads.Store
+		st     conversationLaneStatus
+		status doctor.CheckStatus
+		want   string
+	}{
+		{name: "sqlite, host running the default", store: sqlite, st: running, status: doctor.StatusOK, want: "conversation lanes on (default: message, interrupt, respond): last pass 2s ago"},
+		{name: "sqlite, no host", store: sqlite, st: conversationLaneStatus{State: laneHostStateNone}, status: doctor.StatusError, want: "conversation lanes on (default: message, interrupt, respond): the controller runs no lane host"},
+		{name: "memory store", store: newLaneTestStore(), status: doctor.StatusOK, want: "conversation lanes are off by default here (the sessions store is not SQLite); this city keeps legacy delivery until its storage is split (" + legacyDeliverySplitRemedy + ")"},
+		{name: "bd", store: bd, status: doctor.StatusOK, want: "off by default here (its sessions class is bound to the bd CLI (BdStore), which cannot apply guarded batches); this city keeps legacy delivery until its storage is split (" + legacyDeliverySplitRemedy + ")"},
+		{name: "no sessions store", status: doctor.StatusWarning, want: "conversation lanes default undecided: the city store has no sessions store"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, opened := newConversationLanesCheckForTest(nil, tc.store, tc.st, nil)
+			c.cfg.Ops.Authoritative = nil
+			r := c.Run(&doctor.CheckContext{CityPath: "/city"})
+			if r.Status != tc.status || !strings.Contains(r.Message, tc.want) {
+				t.Fatalf("Run = %v %q, want %v containing %q", r.Status, r.Message, tc.status, tc.want)
+			}
+			// No kind is listed, so the explicit list's refusal remedy
+			// does not apply.
+			if strings.Contains(r.Message, "Remove the kind") {
+				t.Fatalf("Run = %q, want no explicit-list remedy with the list unset", r.Message)
+			}
+			if *opened != 1 {
+				t.Fatalf("store opened %d times, want once", *opened)
+			}
+		})
+	}
+	c, _ := newConversationLanesCheckForTest(nil, nil, conversationLaneStatus{}, nil)
+	c.cfg.Ops.Authoritative = nil
+	c.open = func() (beads.Store, error) { return nil, errors.New("dolt: connection refused") }
+	if r := c.Run(&doctor.CheckContext{CityPath: "/city"}); r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "default undecided: opening the city store failed: dolt: connection refused") {
+		t.Fatalf("Run = %v %q, want the open failure", r.Status, r.Message)
 	}
 }

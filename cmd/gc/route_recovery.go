@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -87,6 +88,22 @@ func (cr *CityRuntime) claimLoopGuardOf() *claimLoopGuard {
 		cr.claimLoop = newClaimLoopGuard(record, cr.stderr)
 	})
 	return cr.claimLoop
+}
+
+// claimStallGuardOf is the runtime's claims-stall guard, created on first use
+// and configured from the runtime's config. Its alerts go to the runtime's
+// recorder and stderr.
+func (cr *CityRuntime) claimStallGuardOf() *claimStallGuard {
+	cr.claimStallOnce.Do(func() {
+		record := func(e events.Event) {
+			if cr.rec != nil {
+				cr.rec.Record(e)
+			}
+		}
+		cr.claimStall = newClaimStallGuard(record, cr.stderr)
+		cr.claimStall.configure(cr.cfg)
+	})
+	return cr.claimStall
 }
 
 // routeRecoveryEventProvider is the journal the delta feed tails, or nil when
@@ -258,6 +275,10 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 	// change is covered by the hold's own expiry.
 	claimLoop := cr.claimLoopGuardOf()
 	registerClaimLoopGuard(ctx, cr.cityPath, claimLoop)
+	// So does the claims-stall guard: a missed event delays a stall by a
+	// seat at most, and its holds run out on their own.
+	claimStall := cr.claimStallGuardOf()
+	registerClaimStallGuard(ctx, cr.cityPath, claimStall)
 	watchJournalForDeltaLanes(ctx, prov,
 		func() {
 			route.force(backstopReasonCursorGap)
@@ -271,6 +292,7 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 			orphans.observe(evt)
 			cr.absorbCompletionFact(evt)
 			claimLoop.observe(evt)
+			claimStall.observe(evt)
 		})
 	go cr.runRouteRecoveryBackstopLoop(ctx, route)
 	// The cross-store gate lane reads work stores, so it polls off the tick
@@ -351,10 +373,21 @@ func (cr *CityRuntime) logRouteRecovery(report routeRecoveryReport) {
 	}
 	if report.offPlaneInfra > 0 {
 		// Loud, because no runtime reader looks for an infrastructure-class row
-		// in a work store. Not `gc storage migrate`: a work-class bead never
-		// moves, a single-store city has nothing to move (#7410), and the
-		// migration never reads a rig store, so the remedy is the operator's.
-		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %d open routed infrastructure-class bead(s) sit in a work store, outside the class binding their class is served from, where no runtime reader looks for them (e.g. %s); they are pre-split residue the storage migration did not move and need an operator decision\n", cr.logPrefix, report.lane, report.offPlaneInfra, strings.Join(report.offPlaneSample, " ")) //nolint:errcheck // best-effort stderr
+		// in a work store. A work-class bead never moves and a single-store
+		// city has nothing to move (#7410). Rig-resident residue is pre-S4
+		// graph history, which `gc storage migrate --from-rigs` moves (S4b),
+		// so it names that command per rig; residue in the city work store
+		// stays the operator's decision.
+		remedy := "need an operator decision"
+		if len(report.offPlaneRigs) > 0 {
+			rigs := slices.Sorted(slices.Values(report.offPlaneRigs))
+			commands := make([]string, 0, len(rigs))
+			for _, rig := range rigs {
+				commands = append(commands, "`"+rigImportInstruction(rig)+"`")
+			}
+			remedy = "are rig graph history; import them with " + strings.Join(commands, ", ")
+		}
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %d open routed infrastructure-class bead(s) sit in a work store, outside the class binding their class is served from, where no runtime reader looks for them (e.g. %s); they are pre-split residue the storage migration did not move and %s\n", cr.logPrefix, report.lane, report.offPlaneInfra, strings.Join(report.offPlaneSample, " "), remedy) //nolint:errcheck // best-effort stderr
 	}
 	if report.quarantined > 0 {
 		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): quarantined %d bead(s) for operator review (`gc doctor` route-recovery-quarantine)\n", cr.logPrefix, report.lane, report.quarantined) //nolint:errcheck // best-effort stderr

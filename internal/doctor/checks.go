@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -29,6 +28,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -115,7 +116,7 @@ func NewConfigValidCheck(cfg *config.City) *ConfigValidCheck {
 func (c *ConfigValidCheck) Name() string { return "config-valid" }
 
 // Run validates agents and rigs in the config.
-func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
+func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if err := config.ValidateAgents(c.cfg.Agents); err != nil {
 		r.Status = StatusError
@@ -123,6 +124,15 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if err := config.ValidateRigs(c.cfg.Rigs, config.EffectiveHQPrefix(c.cfg)); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("rig validation: %v", err)
+		return r
+	}
+	cityPath := ""
+	if ctx != nil {
+		cityPath = ctx.CityPath
+	}
+	if err := config.ValidateRigFederationLayout(cityPath, c.cfg); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
@@ -140,6 +150,11 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 	if err := workspacesvc.ValidateRuntimeSupport(c.cfg.Services); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("service validation: %v", err)
+		return r
+	}
+	if warnings := config.RigFederationWarnings(c.cfg.Rigs); len(warnings) > 0 {
+		r.Status = StatusWarning
+		r.Message = "agents, rigs, and services valid; " + strings.Join(warnings, "; ")
 		return r
 	}
 	r.Status = StatusOK
@@ -457,17 +472,37 @@ func (c *BinaryCheck) Fix(_ *CheckContext) error { return nil }
 
 // --- Session checks (skipped when controller is running) ---
 
+// SessionRegistry reads the open session rows from the store the city keeps
+// its sessions in and returns each row's runtime session name mapped to the
+// qualified name of the agent it runs. It leaves out a row whose agent or
+// named session is no longer configured, so that row's runtime stays an
+// orphan. The runtime names a pool instance or a bead-named session after its
+// session row, not after agent.SessionNameFor, so the session checks read the
+// registry to know which running sessions the city accounts for. A nil
+// SessionRegistry knows only the agent.SessionNameFor names.
+type SessionRegistry func() (map[string]string, error)
+
+func (r SessionRegistry) read() (map[string]string, error) {
+	if r == nil {
+		return nil, nil
+	}
+	return r()
+}
+
 // AgentSessionsCheck verifies non-suspended agents have running sessions.
 type AgentSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	registry        SessionRegistry
 }
 
-// NewAgentSessionsCheck creates a check for agent session liveness.
-func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider) *AgentSessionsCheck {
-	return &AgentSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp}
+// NewAgentSessionsCheck creates a check for agent session liveness. An agent
+// has a session when a registry session mapped to it is running, or when its
+// agent.SessionNameFor name is.
+func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider, registry SessionRegistry) *AgentSessionsCheck {
+	return &AgentSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp, registry: registry}
 }
 
 // Name returns the check identifier.
@@ -476,13 +511,26 @@ func (c *AgentSessionsCheck) Name() string { return "agent-sessions" }
 // Run checks that each non-suspended agent has a running session.
 func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	registered, err := c.registry.read()
+	if err != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("cannot tell which agents have sessions: reading the session registry: %v", err)
+		return r
+	}
+	byAgent := make(map[string][]string)
+	for sn, qn := range registered {
+		byAgent[qn] = append(byAgent[qn], sn)
+	}
+	for _, names := range byAgent {
+		sort.Strings(names)
+	}
+	listed := c.attestedRunning()
 	var missing []string
 	for _, a := range c.cfg.Agents {
 		if a.Suspended {
 			continue
 		}
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		if !c.sp.IsRunning(sn) {
+		if !c.hasRunningSession(listed, byAgent[a.QualifiedName()], a.QualifiedName()) {
 			missing = append(missing, a.QualifiedName())
 		}
 	}
@@ -496,6 +544,38 @@ func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r.Details = missing
 	r.FixHint = "run gc start to reconcile sessions"
 	return r
+}
+
+// attestedRunning lists the running sessions once, when the provider attests
+// that an error-free listing is complete. It returns nil when the listing
+// proves no absence: the provider does not attest it, or it failed.
+func (c *AgentSessionsCheck) attestedRunning() map[string]bool {
+	running, attested, err := runtime.ListRunningWithAttestation(c.sp, "") // per-city socket isolation: all sessions belong to this city
+	if !attested || err != nil {
+		return nil
+	}
+	listed := make(map[string]bool, len(running))
+	for _, s := range running {
+		listed[s] = true
+	}
+	return listed
+}
+
+// hasRunningSession reports whether one of the agent's registry sessions, or
+// its agent.SessionNameFor name, is running. A name absent from an attested
+// listing is not running and is not probed; any other name is confirmed through
+// IsRunning, stopping at the first running session.
+func (c *AgentSessionsCheck) hasRunningSession(listed map[string]bool, registered []string, qualifiedName string) bool {
+	names := append(append([]string(nil), registered...), agent.SessionNameFor(c.cityName, qualifiedName, c.sessionTemplate))
+	for _, sn := range names {
+		if listed != nil && !listed[sn] {
+			continue
+		}
+		if c.sp.IsRunning(sn) {
+			return true
+		}
+	}
+	return false
 }
 
 // CanFix returns false.
@@ -571,23 +651,49 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// OrphanSessionsCheck finds sessions with the city prefix not in config.
+// OrphanSessionsCheck finds running sessions that neither a configured agent
+// nor an open session registry row accounts for.
 type OrphanSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	registry        SessionRegistry
 }
 
-// NewOrphanSessionsCheck creates a check for orphaned sessions.
-func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider) *OrphanSessionsCheck {
-	return &OrphanSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp}
+// NewOrphanSessionsCheck creates a check for orphaned sessions. A running
+// session is accounted for when it carries a configured agent's
+// agent.SessionNameFor name or an open registry row's session name.
+func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider, registry SessionRegistry) *OrphanSessionsCheck {
+	return &OrphanSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp, registry: registry}
+}
+
+// expectedSessions returns every session name the city accounts for: each
+// configured agent's agent.SessionNameFor name and each open registry row's
+// session name. It reads the registry afresh, so a caller that lists the
+// running sessions first never takes a session whose row was written meanwhile
+// for an orphan.
+func (c *OrphanSessionsCheck) expectedSessions() (map[string]bool, error) {
+	registered, err := c.registry.read()
+	if err != nil {
+		return nil, fmt.Errorf("reading the session registry: %w", err)
+	}
+	expected := make(map[string]bool, len(c.cfg.Agents)+len(registered))
+	for _, a := range c.cfg.Agents {
+		expected[agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)] = true
+	}
+	for sn := range registered {
+		expected[sn] = true
+	}
+	return expected, nil
 }
 
 // Name returns the check identifier.
 func (c *OrphanSessionsCheck) Name() string { return "orphan-sessions" }
 
-// Run finds sessions with the city prefix that don't match any configured agent.
+// Run finds running sessions that neither a configured agent's
+// agent.SessionNameFor name nor an open registry row of a configured agent
+// accounts for.
 func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	prefix := "" // per-city socket isolation: all sessions belong to this city
@@ -599,11 +705,11 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	// Build set of expected session names.
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
+	expected, registryErr := c.expectedSessions()
+	if registryErr != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("cannot tell which sessions are orphaned: %v", registryErr)
+		return r
 	}
 
 	var orphans []string
@@ -640,7 +746,9 @@ func (c *OrphanSessionsCheck) CanFix() bool { return true }
 // (GH#5742): the controller's own health patrol already reconciles orphan
 // sessions, and an uncoordinated Stop here would race it. Like
 // ZombieSessionsCheck.Fix, it stops through runtime.StopForCleanup, so an
-// orphan whose tmux server died after the listing counts as removed.
+// orphan whose tmux server died after the listing counts as removed. It stops
+// nothing when the session registry cannot be read: every bead-named session
+// would otherwise look orphaned.
 func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -653,10 +761,9 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if err != nil {
 		return err
 	}
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
+	expected, err := c.expectedSessions()
+	if err != nil {
+		return fmt.Errorf("stopping no session: %w", err)
 	}
 	for _, s := range running {
 		if !expected[s] {
@@ -1361,7 +1468,7 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
-		r.FixHint = resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath)
+		r.FixHint = withManagedDoltInfraScopeHint(c.cityPath, resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath))
 		return r
 	}
 	if target.DoltMode == "proxied-server" && target.Host == "" && target.Port == "" && target.Socket == "" {
@@ -1374,6 +1481,9 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
 		r.FixHint = doltServerFixHint(target)
+		if target.EndpointOrigin == contract.EndpointOriginManagedCity {
+			r.FixHint = withManagedDoltInfraScopeHint(c.cityPath, r.FixHint)
+		}
 		return r
 	}
 	conn.Close() //nolint:errcheck // best-effort close
@@ -1531,8 +1641,9 @@ func (c *EventsLogCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = "events.jsonl not found (events will not be logged)"
 		return r
 	}
-	// Check writable by opening for append.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, fi.Mode())
+	// Check writable by opening for append, without blocking a concurrent
+	// rotation of the log.
+	f, err := livefile.OpenFile(path, os.O_WRONLY|os.O_APPEND, fi.Mode())
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("events.jsonl not writable: %v", err)
@@ -1931,6 +2042,47 @@ type managedDoltDoctorRuntimeState struct {
 	PID     int    `json:"pid"`
 	Port    int    `json:"port"`
 	DataDir string `json:"data_dir"`
+	// InfraScope names the transient systemd user scope unit gc started the
+	// server in; empty when it was started unscoped.
+	InfraScope string `json:"infra_scope"`
+}
+
+// managedDoltInfraScopeHint tells the operator where to look when a managed
+// Dolt server gc started in a transient systemd user scope is not running:
+// the scope is collected once its processes exit, but the user manager's
+// journal records for it remain. It reads the published runtime state, then
+// the provider state, and returns "" when neither records a scope.
+func managedDoltInfraScopeHint(cityPath string) string {
+	for _, name := range []string{"dolt-state.json", "dolt-provider-state.json"} {
+		data, err := os.ReadFile(filepath.Join(doctorDoltPackStateDir(cityPath), name)) //nolint:gosec // path is derived from managed city layout
+		if err != nil {
+			continue
+		}
+		var state managedDoltDoctorRuntimeState
+		if json.Unmarshal(data, &state) != nil {
+			continue
+		}
+		unit := strings.TrimSpace(state.InfraScope)
+		if unit == "" {
+			continue
+		}
+		return fmt.Sprintf("the managed Dolt server (pid %d) was started in systemd user scope %s, which is removed once it exits; "+
+			"its journal records remain: journalctl --user-unit=%s (all such scopes: journalctl -g 'gascity infra:'; without per-user journals this needs adm or systemd-journal group access), and its own output is in the managed dolt.log",
+			state.PID, unit, unit)
+	}
+	return ""
+}
+
+// withManagedDoltInfraScopeHint appends managedDoltInfraScopeHint to hint.
+func withManagedDoltInfraScopeHint(cityPath, hint string) string {
+	scopeHint := managedDoltInfraScopeHint(cityPath)
+	if scopeHint == "" {
+		return hint
+	}
+	if hint == "" {
+		return scopeHint
+	}
+	return hint + "; " + scopeHint
 }
 
 func publishedManagedDoltDataDir(cityPath string) string {
@@ -3063,12 +3215,17 @@ func IsControllerRunning(cityPath string) bool {
 	}
 	defer f.Close() //nolint:errcheck // probe only
 
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
 	if err != nil {
-		// EWOULDBLOCK means the lock is held — controller is running.
+		// A busy lock means the controller holds it; an unknown lock error is
+		// treated as running so fixers do not race a controller they cannot rule out.
 		return true
 	}
 	// We got the lock, release immediately — no controller running.
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	lock.Release() //nolint:errcheck // best-effort unlock
 	return false
 }

@@ -14,6 +14,7 @@ import (
 // beginLocalWrite registration. Every other exported method is a write and
 // must register, directly or through a method of the cache it calls.
 var localWriteCensusExempt = map[string]string{
+	"CachingStore.RefreshIDs": "cache maintenance",
 	// Reads.
 	"CachingStore.CachedList":                            "read",
 	"CachingStore.CachedReady":                           "read",
@@ -38,6 +39,7 @@ var localWriteCensusExempt = map[string]string{
 	"CachingStore.Ready":                                 "read",
 	"CachingStore.ReadyBlockedByAbsent":                  "read",
 	"CachingStore.ReadyContext":                          "read",
+	"CachingStore.ReadyJudgmentContext":                  "read",
 	"CachingStore.ReadyOrdered":                          "read",
 	"CachingStore.ReadyPreferCache":                      "read",
 	"CachingStore.SawRows":                               "read",

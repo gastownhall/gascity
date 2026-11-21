@@ -21,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
@@ -462,7 +461,7 @@ func TestMailNotifyOpRequireRefusalIsAnError(t *testing.T) {
 // dedup-suppressed send proposes nothing.
 func TestMailSendNotifyOpsPerRecipient(t *testing.T) {
 	c := newContentOpCity(t, "auto")
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	nf := func(_, messageID string) (string, error) {
 		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
 	}
@@ -883,11 +882,11 @@ func TestSessionSubmitFallbackResumesTheHoldOfAnOpenLaneOp(t *testing.T) {
 				laneOp = proposeAsAPILane(t, h, c.bead.ID, key, text, session.SubmitIntentDefault, nil)
 			})
 			h, c = submitOpCity(t, "auto", srv)
-			if _, err := sessionFrontDoor(c.reload(t)).OperatorSuspend(c.bead.ID, tc.suspended); err != nil {
+			if _, err := sessionFrontDoor(c.reloadSessions(t)).OperatorSuspend(c.bead.ID, tc.suspended); err != nil {
 				t.Fatalf("suspending the session: %v", err)
 			}
 			if tc.draining {
-				if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{"state": string(session.StateDraining)}); err != nil {
+				if err := c.reloadSessions(t).SetMetadataBatch(c.bead.ID, map[string]string{"state": string(session.StateDraining)}); err != nil {
 					t.Fatalf("draining the session: %v", err)
 				}
 			}
@@ -922,89 +921,14 @@ func TestSessionSubmitFallbackResumesTheHoldOfAnOpenLaneOp(t *testing.T) {
 	}
 }
 
-// listMessageAuthoritative lists message in the city's [ops] authoritative,
-// as a city whose lane host executes message does.
-func listMessageAuthoritative(t *testing.T, dir string) {
-	t.Helper()
-	f, err := os.OpenFile(filepath.Join(dir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatalf("opening city.toml: %v", err)
-	}
-	defer f.Close() //nolint:errcheck // the write's error is checked
-	if _, err := f.WriteString("\n[ops]\nauthoritative = [\"message\"]\n"); err != nil {
-		t.Fatalf("writing city.toml: %v", err)
-	}
-}
-
 // The content gate's builtin default (no [ops] gate, no GC_OPS_CONTENT)
 // records nothing on a sessions store that is not SQLite-backed, as this
-// city's is not, but it does not govern the API's lane op. With message
-// listed, a fallback after a lost answer opens the op store all the same: it
-// answers from the lane op under the key it sent, open or closed, and
-// delivers nothing; a key that names no op it claims with its own op before
-// it delivers, so an API that commits the lane op later finds the key taken.
-// With message unlisted the default stands: nothing opens or records.
-func TestSessionSubmitFallbackUnderTheBuiltinDefaultAnswersFromTheAPIsLaneOp(t *testing.T) {
+// city's is not: with message unlisted, a fallback after a lost answer opens
+// no op store and records nothing. A city that lists message accepts through
+// lanesubmit.Accept instead
+// (TestSessionSubmitLaneFallbackClaimsTheKeyUnderTheBuiltinDefault).
+func TestSessionSubmitFallbackUnderTheBuiltinDefaultRecordsNothingWhenMessageIsUnlisted(t *testing.T) {
 	const text = testSubmitText
-	t.Run("open lane op: reports it", func(t *testing.T) {
-		var h *cliOpHarness
-		var c *cliOpCity
-		var laneOp opjournal.Op
-		srv := lostAnswerServer(t, func(key string) {
-			laneOp = proposeAsAPILane(t, h, c.bead.ID, key, text, session.SubmitIntentFollowUp, nil)
-		})
-		h, c = submitOpCity(t, "", srv)
-		listMessageAuthoritative(t, c.dir)
-		var stdout, stderr bytes.Buffer
-		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentFollowUp, "", false, &stdout, &stderr); code != 0 {
-			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
-		}
-		if n := submitDeliveries(c.sp); n != 0 {
-			t.Fatalf("deliveries = %d, want none: the API's lane host delivers it", n)
-		}
-		if !strings.Contains(stdout.String(), "Accepted by the controller") || !strings.Contains(stdout.String(), laneOp.ID) {
-			t.Fatalf("stdout = %q, want the lane op %s accepted", stdout.String(), laneOp.ID)
-		}
-		if ops := cliOpRows(t, h.opStore); len(ops) != 1 || ops[0].Executor != opjournal.ExecutorLane {
-			t.Fatalf("ops = %+v, want only the API's lane op", ops)
-		}
-	})
-	t.Run("closed lane op: replays it", func(t *testing.T) {
-		var h *cliOpHarness
-		var c *cliOpCity
-		srv := lostAnswerServer(t, func(key string) {
-			proposeAsAPILane(t, h, c.bead.ID, key, text, session.SubmitIntentDefault, &opjournal.Outcome{Arm: opjournal.ArmSucceeded})
-		})
-		h, c = submitOpCity(t, "", srv)
-		listMessageAuthoritative(t, c.dir)
-		var stdout, stderr bytes.Buffer
-		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, "", true, &stdout, &stderr); code != 0 {
-			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
-		}
-		if n := submitDeliveries(c.sp); n != 0 {
-			t.Fatalf("deliveries = %d, want none: the lane host delivered it", n)
-		}
-		if got := cliOpJSON(t, stdout.Bytes()); got["replayed"] != true || !strings.Contains(stderr.String(), "replayed op") {
-			t.Fatalf("JSON = %v, stderr = %q; want the replayed outcome", got, stderr.String())
-		}
-	})
-	t.Run("no op under the key: claims it and delivers once", func(t *testing.T) {
-		var sent string
-		srv := lostAnswerServer(t, func(key string) { sent = key })
-		h, c := submitOpCity(t, "", srv)
-		listMessageAuthoritative(t, c.dir)
-		var stdout, stderr bytes.Buffer
-		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 0 {
-			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
-		}
-		if n := submitDeliveries(c.sp); n != 1 {
-			t.Fatalf("deliveries = %d, want the local delivery", n)
-		}
-		op := cliOpOnly(t, h.opStore)
-		if op.ClientKey != sent || op.Executor != opjournal.ExecutorLegacyCLI || op.Status != opjournal.StatusClosed {
-			t.Fatalf("op = %+v, want the CLI's own closed op under the key %q the API was sent", op, sent)
-		}
-	})
 	t.Run("message unlisted: the default stands", func(t *testing.T) {
 		srv := lostAnswerServer(t, func(string) {})
 		h, c := submitOpCity(t, "", srv)
@@ -1188,7 +1112,7 @@ func TestSessionSubmitLocalQueuedClosesQueued(t *testing.T) {
 	h, c := submitOpCity(t, "auto", nil)
 	// A session still being created, with no runtime yet, queues the
 	// message for its first start.
-	if err := c.store.SetMetadata(c.bead.ID, "state", string(session.StateCreating)); err != nil {
+	if err := c.sessions.SetMetadata(c.bead.ID, "state", string(session.StateCreating)); err != nil {
 		t.Fatalf("marking the session creating: %v", err)
 	}
 	if err := c.sp.Stop(c.name); err != nil {
@@ -1309,7 +1233,7 @@ func TestCLIMessageOpResult(t *testing.T) {
 // gc mail reply --json names the notice's op.
 func TestMailReplyJSONNamesTheNotifyOp(t *testing.T) {
 	c := newContentOpCity(t, "auto")
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	if _, err := mp.Send("alice", "bob", "Hello", "first"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -1565,7 +1489,7 @@ func TestMailBroadcastNotifyDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
 	c.h.opStore = cliOpIncapableStore{c.h.opStore}
 	var warn bytes.Buffer
 	nudgeWarningWriter = &warn
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	nf := func(_, messageID string) (string, error) {
 		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
 	}

@@ -424,56 +424,73 @@ func TestExternalReadsReloadServesLastScaleCheckUntilNewRunEnds(t *testing.T) {
 // is served, so after resume the custom templates read partial until the
 // first new run ends, as legacy's first tick after resume runs the checks
 // before it trusts them.
+//
+// Each case runs in a synctest bubble at the production source deadline: a
+// pass waits for an ungated run however loaded the host (the bubble's clock
+// moves only once every goroutine is blocked), and returns at the deadline
+// without a gated one.
 func TestExternalReadsResumeServesNoPreSuspensionScaleCheck(t *testing.T) {
 	for _, straddle := range []bool{false, true} {
 		t.Run(fmt.Sprintf("straddle=%t", straddle), func(t *testing.T) {
-			tc := suspendCases[0]
-			ctx := context.Background()
-			cityPath := t.TempDir()
-			cfg := scaleCheckCity()
-			checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-named": "1"}}
-			lane, _ := newScaleCheckSourceLane(cityPath, cfg, checks)
-			lane.sourceDeadline = time.Millisecond
-			if !passAndJoin(ctx, at(lane, censusNow)) || lane.recording().scaleCheck(censusNow).partial("ok") {
-				t.Fatal("before suspending: ok not trusted")
-			}
-			gate := make(chan struct{})
-			lane.runner = func(command, dir string, env map[string]string) (string, error) {
-				<-gate
-				return checks.run(command, dir, env)
-			}
-			if straddle { // a run starts before the suspension and ends during it
-				if !at(lane, censusNow.Add(time.Second)).pass(ctx) {
-					t.Fatal("pass before suspending declined")
+			synctest.Test(t, func(t *testing.T) {
+				tc := suspendCases[0]
+				ctx := context.Background()
+				cityPath := t.TempDir()
+				cfg := scaleCheckCity()
+				checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-named": "1"}}
+				lane, _ := newScaleCheckSourceLane(cityPath, cfg, checks)
+				if !passAndJoin(ctx, at(lane, censusNow)) || lane.recording().scaleCheck(censusNow).partial("ok") {
+					t.Fatal("before suspending: ok not trusted")
 				}
-			}
-			tc.suspend(t, cfg, cityPath)
-			lane.now = func() time.Time { return censusNow.Add(2 * time.Second) }
-			if !lane.pass(ctx) {
-				t.Fatal("a pass declined while the city is suspended")
-			}
-			close(gate)
-			_ = lane.join(ctx) // the straddling run ends while the city is suspended
-			tc.resume(t, cfg, cityPath)
-			gate2 := make(chan struct{})
-			lane.runner = func(command, dir string, env map[string]string) (string, error) {
-				<-gate2
-				return checks.run(command, dir, env)
-			}
-			resumed := censusNow.Add(3 * time.Second)
-			if !at(lane, resumed).pass(ctx) {
-				t.Fatal("pass after resume declined")
-			}
-			src, _ := scaleCheckSource(lane.recording())
-			if r := lane.recording().scaleCheck(resumed); !r.partial("ok") {
-				t.Errorf("after resume, before the new run ended: %+v served (started %v), want ok partial", r, src.StartedAt)
-			}
-			close(gate2)
-			if !passAndJoin(ctx, at(lane, resumed)) || lane.recording().scaleCheck(resumed).partial("ok") {
-				t.Error("after the new run ended: ok still partial")
-			}
+				gate, openGate := scaleCheckGate(t)
+				lane.runner = func(command, dir string, env map[string]string) (string, error) {
+					<-gate
+					return checks.run(command, dir, env)
+				}
+				if straddle { // a run starts before the suspension and ends during it
+					if !at(lane, censusNow.Add(time.Second)).pass(ctx) {
+						t.Fatal("pass before suspending declined")
+					}
+				}
+				tc.suspend(t, cfg, cityPath)
+				lane.now = func() time.Time { return censusNow.Add(2 * time.Second) }
+				if !lane.pass(ctx) {
+					t.Fatal("a pass declined while the city is suspended")
+				}
+				openGate()
+				_ = lane.join(ctx) // the straddling run ends while the city is suspended
+				tc.resume(t, cfg, cityPath)
+				gate2, openGate2 := scaleCheckGate(t)
+				lane.runner = func(command, dir string, env map[string]string) (string, error) {
+					<-gate2
+					return checks.run(command, dir, env)
+				}
+				resumed := censusNow.Add(3 * time.Second)
+				if !at(lane, resumed).pass(ctx) {
+					t.Fatal("pass after resume declined")
+				}
+				src, _ := scaleCheckSource(lane.recording())
+				if r := lane.recording().scaleCheck(resumed); !r.partial("ok") {
+					t.Errorf("after resume, before the new run ended: %+v served (started %v), want ok partial", r, src.StartedAt)
+				}
+				openGate2()
+				if !passAndJoin(ctx, at(lane, resumed)) || lane.recording().scaleCheck(resumed).partial("ok") {
+					t.Error("after the new run ended: ok still partial")
+				}
+			})
 		})
 	}
+}
+
+// scaleCheckGate returns a gate for a scripted run and the func that opens
+// it. A test that fails before opening it opens it on cleanup, so the bubble
+// reports the failure rather than a deadlock over the gated run.
+func scaleCheckGate(t *testing.T) (<-chan struct{}, func()) {
+	gate := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	return gate, open
 }
 
 // settableClock is a planner clock that reads at, so a test pins when the
