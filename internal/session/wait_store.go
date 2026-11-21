@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -452,11 +453,11 @@ func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo
 // CancelWaits marks all non-terminal waits for the session canceled (closing the
 // terminal ones idempotently) and returns every queued wait-nudge ID discovered
 // across capped lookup pages, plus whether any lookup page was capped.
-func (s *Store) CancelWaits(sessionID string, now time.Time) (nudgeIDs []string, capped bool, err error) {
-	return s.cancelWaitsAndCollectNudgeIDs(sessionID, now)
+func (s *Store) CancelWaits(ctx context.Context, sessionID string, now time.Time) (nudgeIDs []string, capped bool, err error) {
+	return s.cancelWaitsAndCollectNudgeIDs(ctx, sessionID, now)
 }
 
-func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) ([]string, bool, error) {
+func (s *Store) cancelWaitsAndCollectNudgeIDs(_ context.Context, sessionID string, now time.Time) ([]string, bool, error) {
 	ids := []string(nil)
 	seen := map[string]bool{}
 	capped := false
@@ -613,7 +614,7 @@ func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]st
 	if state, conflict := lifecycleWakeConflictState(view); conflict {
 		return nil, &WakeConflictError{SessionID: sessionBead.ID, State: state}
 	}
-	nudgeIDs, capped, err := s.cancelWaitsAndCollectNudgeIDs(sessionBead.ID, now)
+	nudgeIDs, capped, err := s.cancelWaitsAndCollectNudgeIDs(context.Background(), sessionBead.ID, now)
 	if err != nil {
 		return nil, err
 	}
