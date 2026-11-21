@@ -187,6 +187,125 @@ func IsProviderCredentialEnv(key string) bool {
 	return false
 }
 
+// providerRoutingWords are the words of a provider-prefixed env name that say
+// where a call goes or what it asks for, not who makes it.
+var providerRoutingWords = map[string]bool{
+	"URL":        true,
+	"URI":        true,
+	"ENDPOINT":   true,
+	"HOST":       true,
+	"BASE":       true,
+	"PROXY":      true,
+	"MODEL":      true,
+	"DEPLOYMENT": true,
+}
+
+// providerSecretWords are the words of a provider-prefixed env name that may
+// carry a secret. Any one of them makes the name secret-class whatever routing
+// words it also holds, so the routing classification never withholds a
+// credential. The list errs long. A name wrongly called secret-class still
+// persists; it only counts as a credential when the supervisor install decides
+// which tier a provider's credentials come from. A credential wrongly called
+// anything else could persist beside withheld routing and reach the default
+// endpoint.
+var providerSecretWords = map[string]bool{
+	"KEY":         true,
+	"KEYS":        true,
+	"TOKEN":       true,
+	"TOKENS":      true,
+	"SECRET":      true,
+	"SECRETS":     true,
+	"PASSWORD":    true,
+	"PASSWD":      true,
+	"PASS":        true,
+	"AUTH":        true,
+	"CREDENTIAL":  true,
+	"CREDENTIALS": true,
+	"CERT":        true,
+	"CERTIFICATE": true,
+	"BASE64":      true,
+	// Gateways take their key in a header.
+	"HEADER":  true,
+	"HEADERS": true,
+}
+
+// ProviderEnvClass is the part a provider-prefixed env name plays in a
+// provider call.
+type ProviderEnvClass int
+
+const (
+	// ProviderEnvNone is a name with no provider prefix: an exact-name
+	// provider key (the AWS_ set) or a name outside the provider allowlist.
+	ProviderEnvNone ProviderEnvClass = iota
+	// ProviderEnvSecret is a name that may carry a credential, such as
+	// ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN_ZAI.
+	ProviderEnvSecret
+	// ProviderEnvRouting is a name that says where a call goes or which model
+	// it asks for, such as ANTHROPIC_BASE_URL or ANTHROPIC_MODEL.
+	ProviderEnvRouting
+	// ProviderEnvSetting is any other provider name: a setting that neither
+	// carries a credential nor routes a call, such as OPENAI_ORG_ID or
+	// OLLAMA_MODELS.
+	ProviderEnvSetting
+)
+
+// String returns the class's name.
+func (c ProviderEnvClass) String() string {
+	switch c {
+	case ProviderEnvSecret:
+		return "secret"
+	case ProviderEnvRouting:
+		return "routing"
+	case ProviderEnvSetting:
+		return "setting"
+	default:
+		return "none"
+	}
+}
+
+// providerEnvPrefix returns the provider prefix (for example "ANTHROPIC_")
+// that key starts with. Exact-name provider keys (the AWS_ set) and names
+// outside the provider allowlist report false.
+func providerEnvPrefix(key string) (string, bool) {
+	for _, prefix := range providerCredentialEnvPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return prefix, true
+		}
+	}
+	return "", false
+}
+
+// ClassifyProviderEnv returns the provider prefix key starts with and key's
+// class, read from its words after the prefix, split on "_": ProviderEnvSecret
+// when any word is a secret word (matched as written or with trailing digits
+// trimmed), otherwise ProviderEnvRouting when a word is a routing word
+// (matched with trailing digits trimmed), and otherwise ProviderEnvSetting. A
+// key with no provider prefix reports "" and ProviderEnvNone.
+func ClassifyProviderEnv(key string) (string, ProviderEnvClass) {
+	prefix, ok := providerEnvPrefix(key)
+	if !ok {
+		return "", ProviderEnvNone
+	}
+	class := ProviderEnvSetting
+	for _, word := range strings.Split(strings.TrimPrefix(key, prefix), "_") {
+		trimmed := strings.TrimRight(word, "0123456789")
+		if providerSecretWords[word] || providerSecretWords[trimmed] {
+			return prefix, ProviderEnvSecret
+		}
+		if providerRoutingWords[trimmed] {
+			class = ProviderEnvRouting
+		}
+	}
+	return prefix, class
+}
+
+// IsProviderRoutingEnv reports whether key is a routing-class provider name
+// (ClassifyProviderEnv reports ProviderEnvRouting).
+func IsProviderRoutingEnv(key string) bool {
+	_, class := ClassifyProviderEnv(key)
+	return class == ProviderEnvRouting
+}
+
 // ProviderProcessPassthroughEnv returns non-GC process context that provider
 // sessions need to start reliably: user/home, provider auth/config, locale,
 // time zone, XDG, telemetry, and Claude nesting resets. It also pins

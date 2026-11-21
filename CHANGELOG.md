@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **The supervisor may stop persisting a shell's provider endpoint and model
+  names (#9257).** If a provider's credentials live only in
+  `${GC_HOME}/secrets.env` or launchctl while your shell exports that
+  provider's endpoint or model names under the same prefix (for example
+  `ANTHROPIC_AUTH_TOKEN` in secrets.env, `ANTHROPIC_BASE_URL` and
+  `ANTHROPIC_MODEL` in the shell), the first `gc start`, `gc register`,
+  `gc init` or `gc supervisor install` after the upgrade stops persisting
+  those shell names, and the supervisor's agent sessions stop getting them,
+  so that credential goes to the provider's default endpoint and models. That
+  install names the dropped names on stderr, and the sources report it prints
+  on stdout lists which tier supplied each name it kept. To keep a routing
+  setting, put it in secrets.env beside the credential, list it in
+  `GC_SUPERVISOR_ENV`, or bind the endpoint to its credential with an
+  `[upstreams.<name>]` entry. Agent sessions on tmux also stop inheriting
+  endpoint and model names from the city's tmux server, which keeps the
+  environment it started with until `gc stop`: a new or relaunched session
+  takes them only from the supervisor's environment and the city's settings.
+  Sessions already running keep the environment they started with, so run
+  `gc restart` after the upgrade and after you change where routing comes
+  from. "Provider Credentials Dropped When the Supervisor Starts" in the
+  troubleshooting guide has the details.
 - **gc no longer migrates an existing bd database's schema; an operator
   does.** `bd migrate schema` is bd's consent to a one-way schema change for
   every client of a database (gastownhall/beads#5920 on a shared server,
@@ -1388,6 +1409,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc supervisor install` paired a shell endpoint with a file credential
+  (#9257).** The install that `gc supervisor install` and every `gc start`
+  run took each provider-prefixed variable from whichever tier had it, so a
+  shell-exported `ANTHROPIC_BASE_URL` or `ANTHROPIC_*_MODEL` was persisted
+  beside an `ANTHROPIC_AUTH_TOKEN` that only `${GC_HOME}/secrets.env`
+  supplied, sending that credential to the wrong endpoint. When every
+  credential under a provider prefix (a name with a word such as `KEY`,
+  `TOKEN`, `SECRET`, `AUTH` or `HEADERS`) comes from secrets.env or
+  launchctl, the calling shell's routing names under that same prefix (names
+  with a word such as `URL`, `ENDPOINT`, `HOST`, `BASE`, `PROXY` or `MODEL`
+  and no credential word) are no longer persisted. secrets.env's own value is
+  used when it has one, and stderr names the dropped names and those that
+  took a different secrets.env value. A tmux agent session also no longer
+  inherits a provider routing name from the city's tmux server when its own
+  environment does not set it, so a server started under an earlier
+  supervisor or from a shell cannot hand a new or relaunched session an
+  endpoint the supervisor no longer carries. Other provider settings, such as
+  `OPENAI_ORG_ID` or `OLLAMA_MODELS`, persist as before and do not count as
+  credentials. Names listed in `GC_SUPERVISOR_ENV` and credentials keep their
+  old precedence. The check groups names by prefix only: a credential under
+  another prefix or with none, such as `GEMINI_API_KEY` beside a shell
+  `GOOGLE_GEMINI_BASE_URL` or `CLAUDE_CODE_OAUTH_TOKEN` beside a shell
+  `ANTHROPIC_BASE_URL`, withholds nothing. Every successful install now
+  prints which tier (shell, `GC_SUPERVISOR_ENV`, secrets.env, launchctl or
+  gc) supplied each persisted name, never a value.
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues
   were given, so an empty convoy created with `--rig <rig>` could never

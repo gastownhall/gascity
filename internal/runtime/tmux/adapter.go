@@ -1623,9 +1623,16 @@ const (
 	setupCancelGrace = 10 * time.Second
 )
 
+// createSession creates the session. One with a command or an env also
+// withholds the provider routing the tmux server's global environment holds
+// and env does not set (withServerRoutingWithheld).
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
 	if command != "" || len(env) > 0 {
-		return o.tm.newSessionWithCommandAndEnv(name, workDir, command, env, o.programStatus)
+		sessionEnv, err := o.tm.withServerRoutingWithheld(env)
+		if err != nil {
+			return err
+		}
+		return o.tm.newSessionWithCommandAndEnv(name, workDir, command, sessionEnv, o.programStatus)
 	}
 	return o.tm.NewSession(name, workDir)
 }
@@ -1642,11 +1649,22 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // because a warm box is explicitly long-lived — one provisioned by an older gc,
 // whose create path only built the one-shot `env -u` prefix (or exported the
 // seat's own trigger ids with -e), would otherwise hand the respawned agent that
-// value for the rest of the box's life. Re-marking a key already marked is a
-// no-op, and only the keys durableWithholdKeys names are marked, so a relaunch
-// that withholds none of them costs no extra tmux call at all.
+// value for the rest of the box's life. The provider routing the server's
+// global environment holds and env does not set is withheld the same way
+// (withServerRoutingWithheld), as at create. Re-marking a key already marked is
+// a no-op, and only the keys durableWithholdKeys names are marked, so a relaunch
+// that withholds none of them adds only the read of the server's global
+// environment.
 func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
-	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
+	// Reject a malformed withheld key before any tmux call.
+	if err := validateUnsetEnvKeys(env); err != nil {
+		return err
+	}
+	sessionEnv, err := o.tm.withServerRoutingWithheld(env)
+	if err != nil {
+		return err
+	}
+	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(sessionEnv)); err != nil {
 		return err
 	}
 	// A warm box created before the agent-pane marker (or whose mark failed)
