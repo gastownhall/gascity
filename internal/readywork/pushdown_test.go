@@ -286,10 +286,18 @@ func TestReadyStatusLegsFilterMetadataInTheStore(t *testing.T) {
 // TestReadNeverPushesAPredicateABackendCouldCompareDifferently pins the other
 // half: a predicate whose backend comparison is not provably the Go comparison
 // stays Go-side, so no store can drop a row the Go filter keeps.
+//
+// The --status arms' list legs push less than the ready arm does: an empty
+// value ("key=" is present-and-empty in Go, which a backend's = ” or LIKE
+// misses for a stored JSON null) and a value whose JSON string form is not the
+// value between quotes (DoltLite's LIKE prefilter matches one encoding of it)
+// stay Go-side there. The ready arm's query for those forms is unchanged.
 func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		query Query
+		// readyPushes is what the ready arm pushes for this form.
+		readyPushes map[string]string
 	}{
 		{name: "bare key", query: Query{MetadataFields: []string{"gc.routed_to"}}},
 		{name: "JSON boolean value", query: Query{MetadataFields: []string{"gc.flag=true"}}},
@@ -299,6 +307,9 @@ func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) 
 		{name: "key outside bd's grammar", query: Query{MetadataFields: []string{"gc route=x"}}},
 		{name: "excluded type", query: Query{ExcludeTypes: []string{"epic"}}},
 		{name: "excluded label", query: Query{ExcludeLabels: []string{"hold:mayor"}}},
+		{name: "empty value", query: Query{MetadataFields: []string{"gc.x="}}, readyPushes: map[string]string{"gc.x": ""}},
+		{name: "value needs JSON escaping", query: Query{MetadataFields: []string{"gc.x=a<b"}}, readyPushes: map[string]string{"gc.x": "a<b"}},
+		{name: "value with a quote", query: Query{MetadataFields: []string{`gc.x=say "hi"`}}, readyPushes: map[string]string{"gc.x": `say "hi"`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newNarrowingStore()
@@ -306,11 +317,73 @@ func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) 
 				t.Fatalf("Read: %v", err)
 			}
 			got := store.readyQueries()
-			if len(got) != 1 || len(got[0].MetadataEquals) != 0 || got[0].Unassigned || got[0].Assignee != "" {
+			if len(got) != 1 || got[0].Unassigned || got[0].Assignee != "" {
 				t.Fatalf("leg asked %+v; this predicate must stay Go-side", got)
+			}
+			if len(got[0].MetadataEquals) != 0 || len(tc.readyPushes) != 0 {
+				if !reflect.DeepEqual(got[0].MetadataEquals, tc.readyPushes) {
+					t.Fatalf("ready leg asked MetadataEquals %v, want %v", got[0].MetadataEquals, tc.readyPushes)
+				}
+			}
+			for _, status := range []string{StatusOpen, StatusInProgress, StatusBlocked, StatusClosed} {
+				q := tc.query
+				q.Status = status
+				rows := metadataFormRows()
+				store := newNarrowingStore(rows...)
+				gotIDs := readIDs(t, []Leg{testLeg("city", store)}, q)
+				for _, lq := range store.listQueries() {
+					if lq.Metadata != nil {
+						t.Fatalf("--status %s leg asked %+v; this pair must stay Go-side", status, lq)
+					}
+				}
+				wantIDs := readIDs(t, []Leg{testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, rows, nil)})}, q)
+				if !slices.Equal(gotIDs, wantIDs) {
+					t.Fatalf("--status %s answer = %v, want the unpushed %v", status, gotIDs, wantIDs)
+				}
 			}
 		})
 	}
+	t.Run("empty value keeps only the present-empty bead", func(t *testing.T) {
+		for _, status := range []string{StatusOpen, StatusInProgress, StatusBlocked, StatusClosed} {
+			got := readIDs(t, []Leg{testLeg("city", newNarrowingStore(metadataFormRows()...))}, Query{Status: status, MetadataFields: []string{"gc.x="}})
+			if want := []string{status + "-empty"}; !slices.Equal(got, want) {
+				t.Fatalf("--status %s gc.x= answer = %v, want %v", status, got, want)
+			}
+		}
+	})
+}
+
+// metadataFormRows seeds, in every status, one row per form gc.x can be stored
+// in: present and empty, missing, each JSON literal, and values whose JSON
+// string form needs escaping.
+func metadataFormRows() []beads.Bead {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	forms := []struct {
+		name  string
+		value *string
+	}{
+		{name: "empty", value: new("")},
+		{name: "missing"},
+		{name: "true", value: new("true")},
+		{name: "42", value: new("42")},
+		{name: "null", value: new("null")},
+		{name: "object", value: new(`{"a":1}`)},
+		{name: "angle", value: new("a<b")},
+		{name: "quote", value: new(`say "hi"`)},
+	}
+	var rows []beads.Bead
+	for _, status := range []string{StatusOpen, StatusInProgress, StatusBlocked, StatusClosed} {
+		for _, form := range forms {
+			rows = append(rows, readyRow(status+"-"+form.name, 1, base.Add(time.Duration(len(rows))*time.Minute), func(b *beads.Bead) {
+				b.Status = status
+				b.Metadata = beads.StringMap{"gc.routed_to": "pool/a", "gc.flag": "true", "gc.count": "42", "gc route": "x"}
+				if form.value != nil {
+					b.Metadata["gc.x"] = *form.value
+				}
+			}))
+		}
+	}
+	return rows
 }
 
 // TestReadPushesABoundedOrderedReadAndKeepsTheTopN pins the limit pushdown: a

@@ -36,6 +36,15 @@ import (
 //     the Go string comparison for a stored JSON string; for a value that is a
 //     JSON literal (true, 42, null, an object) the two can disagree, and a key
 //     outside the grammar is refused by the backend rather than matched.
+//   - A --status arm's list legs (beads.ListQuery.Metadata) push a key=value
+//     pair only under two more conditions. The value is not empty: "key="
+//     means present and empty in Go, which keeps a stored JSON null (decoded
+//     as a present ""), and bd's JSON_UNQUOTE(...) = '' and DoltLite's LIKE
+//     prefilter both miss that row. And the value's JSON string form is the
+//     value itself between quotes: DoltLite prefilters with LIKE on Go's
+//     escaped encoding, and a value carrying a quote, a backslash, <, >, &, a
+//     control character, U+2028/U+2029 or invalid UTF-8 can be stored under
+//     another valid encoding the prefilter misses.
 //   - --exclude-type (bd expands type aliases), --exclude-label (bd normalizes
 //     labels) and bare-key --metadata-field are never pushed.
 //
@@ -125,12 +134,25 @@ func readyReadQuery(c compiled) beads.ReadyQuery {
 	return q
 }
 
+// pushableListMetadata reports whether f can be pushed into a --status arm's
+// list read (beads.ListQuery.Metadata) with the Go comparison's semantics: it
+// is pushable into a ready read, its value is not empty, and its value's JSON
+// string form is the value itself between quotes (see the package comment
+// above).
+func pushableListMetadata(f metadataFieldFilter) bool {
+	if !pushableMetadata(f) || f.value == "" {
+		return false
+	}
+	encoded, err := json.Marshal(f.value)
+	return err == nil && string(encoded) == `"`+f.value+`"`
+}
+
 // listMetadata returns the --metadata-field pairs a --status arm's list legs are
 // asked to match (beads.ListQuery.Metadata), or nil when there are none.
 func listMetadata(c compiled) map[string]string {
 	var out map[string]string
 	for _, f := range c.metadata {
-		if !pushableMetadata(f) {
+		if !pushableListMetadata(f) {
 			continue
 		}
 		if out == nil {
