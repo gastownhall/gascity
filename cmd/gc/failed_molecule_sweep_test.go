@@ -264,3 +264,75 @@ func TestFailedMoleculeSweepWatchdogSweepsEveryStoreOnce(t *testing.T) {
 		t.Errorf("sweep reads after a pass inside the interval = %d, want still 2", got)
 	}
 }
+
+// faultyCloseStore refuses any CloseAll batch that closes a bead in refuse.
+type faultyCloseStore struct {
+	beads.Store
+	mu     sync.Mutex
+	refuse map[string]bool
+}
+
+func (s *faultyCloseStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range ids {
+		if s.refuse[id] {
+			return 0, errors.New("injected close fault")
+		}
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+func (s *faultyCloseStore) clearFaults() {
+	s.mu.Lock()
+	s.refuse = nil
+	s.mu.Unlock()
+}
+
+// AC-8: a close that fails for one chain is logged with that chain's owner
+// ID, the other chains in that store and in the rig store still close, and
+// the first pass after the fault clears closes the failed chain.
+func TestFailedMoleculeSweepWatchdogRetriesAChainWhoseCloseFailed(t *testing.T) {
+	city := &faultyCloseStore{Store: beads.NewMemStore()}
+	rig := beads.NewMemStore()
+	stuck := seedFailedChain(t, city, "stuck chain")
+	healthy := seedFailedChain(t, city, "healthy chain")
+	rigChain := seedFailedChain(t, rig, "rig chain")
+	city.refuse = map[string]bool{stuck[0]: true}
+
+	var stderr strings.Builder
+	cr := &CityRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs:      []config.Rig{{Name: "r1", Path: t.TempDir()}},
+		},
+		standaloneCityStore: city,
+		standaloneRigStores: map[string]beads.Store{"r1": rig},
+		stdout:              io.Discard,
+		stderr:              &stderr,
+		logPrefix:           "gc test",
+	}
+	now := time.Now().Add(failedMoleculeSweepGrace + time.Minute)
+	cr.runFailedMoleculeSweepWatchdog(cr.cfg, now)
+
+	assertBeadStatus(t, city, "open", stuck...)
+	assertBeadStatus(t, city, "closed", healthy...)
+	assertBeadStatus(t, rig, "closed", rigChain...)
+	wantErr := "failed-molecule sweep: graph store: closing failed molecule " + stuck[0] + ": "
+	if !strings.Contains(stderr.String(), wantErr) || !strings.Contains(stderr.String(), "injected close fault") {
+		t.Errorf("stderr = %q, want an error line %q naming the injected fault", stderr.String(), wantErr)
+	}
+	if pass := cr.takeFailedMoleculeSweepPass(); pass == nil || pass.errors != 1 || pass.closedChains != 2 {
+		t.Errorf("pass = %+v, want 2 chains closed and 1 error", pass)
+	}
+
+	city.clearFaults()
+	stderr.Reset()
+	cr.runFailedMoleculeSweepWatchdog(cr.cfg, now.Add(failedMoleculeSweepWatchdogInterval))
+	assertBeadStatus(t, city, "closed", stuck...)
+	if want := "closed failed chain " + stuck[0] + " (2 bead(s)) in graph store"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}

@@ -2,6 +2,7 @@ package sourceworkflow
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,4 +275,52 @@ func TestSweepFailedMoleculesCapsChainsPerPassOldestFirst(t *testing.T) {
 	}
 	assertSwept(t, store, roots...)
 	assertOpen(t, store, "live", "held-1", "held-2", "held-3")
+}
+
+// failCloseForStore fails every close batch that holds failFor and behaves
+// as the inner store otherwise.
+type failCloseForStore struct {
+	*beads.MemStore
+	failFor string
+}
+
+func (s *failCloseForStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		if id == s.failFor {
+			return 0, fmt.Errorf("injected close failure for %s", id)
+		}
+	}
+	return s.MemStore.CloseAll(ids, metadata)
+}
+
+// AC-8: one chain's close failing does not stop the pass: the other chains
+// still close, the joined error names the faulting chain's owner, and the
+// next pass after the fault clears closes it.
+func TestSweepFailedMoleculesContinuesPastAFailingChain(t *testing.T) {
+	store := &failCloseForStore{MemStore: beads.NewMemStore()}
+	faulting := mustCreate(t, store, beads.Bead{Title: "faulting chain", Type: "molecule", Metadata: failedMeta()})
+	faultingStep := mustCreate(t, store, beads.Bead{Title: "faulting step", ParentID: faulting.ID, Metadata: failedMeta()})
+	healthy := mustCreate(t, store, beads.Bead{Title: "healthy chain", Type: "molecule", Metadata: failedMeta()})
+	healthyStep := mustCreate(t, store, beads.Bead{Title: "healthy step", ParentID: healthy.ID, Metadata: failedMeta()})
+	store.failFor = faulting.ID
+
+	got, err := SweepFailedMolecules(beadstest.WorkMolecule(store), pastGrace(), 0)
+	if err == nil || !strings.Contains(err.Error(), "closing failed molecule "+faulting.ID) {
+		t.Fatalf("sweep error = %v, want it to name the faulting owner %s", err, faulting.ID)
+	}
+	if fmt.Sprint(got.Chains) != fmt.Sprint([]string{healthy.ID}) || fmt.Sprint(got.ChainClosed) != "[2]" || got.Closed != 2 {
+		t.Fatalf("sweep = %+v, want only the healthy chain %s closed with 2 beads", got, healthy.ID)
+	}
+	assertSwept(t, store, healthy.ID, healthyStep.ID)
+	assertOpen(t, store, faulting.ID, faultingStep.ID)
+
+	store.failFor = ""
+	next, err := SweepFailedMolecules(beadstest.WorkMolecule(store), pastGrace(), 0)
+	if err != nil {
+		t.Fatalf("sweep after the fault cleared: %v", err)
+	}
+	if fmt.Sprint(next.Chains) != fmt.Sprint([]string{faulting.ID}) || next.Closed != 2 {
+		t.Fatalf("sweep after the fault cleared = %+v, want the faulting chain %s closed", next, faulting.ID)
+	}
+	assertSwept(t, store, faulting.ID, faultingStep.ID)
 }

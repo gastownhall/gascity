@@ -1834,6 +1834,10 @@ type unconfirmedStamps struct {
 // idempotent, so the retry also completes a batch a key-by-key store
 // half-applied. It returns the beads whose retry was refused too, and one
 // error per such bead.
+//
+// A stamped chain is terminal but left open: a same-key caller closes it when
+// it re-enters, and otherwise the controller's failed-molecule sweep
+// (sourceworkflow.SweepFailedMolecules) closes it once its grace has passed.
 func markFailed(store beads.MoleculeTarget, ids []string) unconfirmedStamps {
 	stamp := map[string]string{
 		beadmeta.MoleculeFailedMetadataKey: "true",
