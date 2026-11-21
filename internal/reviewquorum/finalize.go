@@ -59,6 +59,37 @@ func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
 		if len(laneFailures) > 0 {
 			continue
 		}
+		if strings.TrimSpace(lane.Summary) != "" {
+			laneSummaries = append(laneSummaries, fmt.Sprintf("%s: %s", lane.LaneID, strings.TrimSpace(lane.Summary)))
+		}
+		if lane.FailureClass != "" || lane.FailureReason != "" {
+			class, reason := ClassifyFailure(lane.FailureClass, lane.FailureReason)
+			if class != FailureClassNone {
+				if class == FailureClassTransient {
+					transientFailures = append(transientFailures, formatLaneFailure(lane.LaneID, reason))
+				} else {
+					hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
+				}
+				continue
+			}
+		}
+
+		verdict := normalizeToken(lane.Verdict)
+		switch verdict {
+		case VerdictBlocked:
+			class, reason := ClassifyFailure(lane.FailureClass, lane.FailureReason)
+			if class == FailureClassTransient {
+				transientFailures = append(transientFailures, formatLaneFailure(lane.LaneID, reason))
+			} else {
+				hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
+			}
+			continue
+		case VerdictPass, VerdictPassWithFindings, VerdictFail:
+		default:
+			hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, "unknown_verdict_value"))
+			continue
+		}
+
 		mergeLaneFindings(findingAccumulators, &findingOrder, lane)
 		summary.Evidence = append(summary.Evidence, cloneEvidence(lane.Evidence)...)
 		summary.Usage = addUsage(summary.Usage, lane.Usage)
@@ -74,33 +105,12 @@ func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
 			hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
 		}
 
-		if strings.TrimSpace(lane.Summary) != "" {
-			laneSummaries = append(laneSummaries, fmt.Sprintf("%s: %s", lane.LaneID, strings.TrimSpace(lane.Summary)))
-		}
-		if lane.FailureClass != "" || lane.FailureReason != "" {
-			class, reason := ClassifyFailure(lane.FailureClass, lane.FailureReason)
-			if class != FailureClassNone {
-				if class == FailureClassTransient {
-					transientFailures = append(transientFailures, formatLaneFailure(lane.LaneID, reason))
-				} else {
-					hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
-				}
-				continue
-			}
-		}
-		switch normalizeToken(lane.Verdict) {
+		switch verdict {
 		case VerdictPass:
 		case VerdictPassWithFindings:
 			summary.Verdict = VerdictPassWithFindings
 		case VerdictFail:
 			hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, "lane_failed"))
-		case VerdictBlocked:
-			class, reason := ClassifyFailure(lane.FailureClass, lane.FailureReason)
-			if class == FailureClassTransient {
-				transientFailures = append(transientFailures, formatLaneFailure(lane.LaneID, reason))
-			} else {
-				hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
-			}
 		default:
 			hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, "unknown_verdict_value"))
 		}
