@@ -437,6 +437,55 @@ func containsStartupDialog(content string) bool {
 	return containsThemeSelectionDialog(content) || containsPostThemeStartupDialog(content)
 }
 
+// StartupDialogAwaitingAnswer reports whether screen, the visible screen of an
+// agent's pane, shows a startup dialog that AcceptStartupDialogs can leave
+// unanswered, still waiting for its answer: Claude's external CLAUDE.md
+// imports modal, which the pass leaves for a human when an import lies outside
+// the trusted root and whose pre-selected option allows the imports, or a
+// workspace-trust dialog the pass could not confirm, whose cursor can rest on
+// "No, exit". The pass answers every other dialog it recognizes. A runtime
+// that types into the session after a pass checks the screen with it first:
+// the typed text would land in such a dialog, and the submit Enter would
+// answer it.
+//
+// A dialog waits for its answer only while no prompt of the agent's is drawn
+// below it. The dialogs' wording can also appear in the agent's own output,
+// such as a resumed transcript, and wording with the agent's prompt below it
+// is history, not a dialog on screen.
+func StartupDialogAwaitingAnswer(screen string) bool {
+	return (containsExternalImportsDialog(screen) && drawnBelowLastPrompt(screen, containsExternalImportsAllowOption)) ||
+		drawnBelowLastPrompt(screen, containsWorkspaceTrustDialog)
+}
+
+// drawnBelowLastPrompt reports whether a line of screen that isDialogLine
+// accepts lies below every prompt the agent drew on it (isAgentPromptLine).
+func drawnBelowLastPrompt(screen string, isDialogLine func(line string) bool) bool {
+	lines := strings.Split(screen, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if isDialogLine(lines[i]) {
+			return true
+		}
+		if isAgentPromptLine(lines[i]) {
+			return false
+		}
+	}
+	return false
+}
+
+// isAgentPromptLine reports whether line is a prompt the agent drew
+// (containsPromptIndicator) rather than the selected row of a Claude menu.
+// Claude marks both its composer and the selected row of an unnumbered menu
+// ("❯ No, exit") with ❯, and its composer is empty while it waits for its
+// first input, so a ❯ row with a label is a menu row.
+func isAgentPromptLine(line string) bool {
+	if !containsPromptIndicator(line) {
+		return false
+	}
+	row := stripLeadingBoxBorder(strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " ")))
+	label, selected := strings.CutPrefix(row, "❯ ")
+	return !selected || strings.TrimSpace(label) == ""
+}
+
 func containsCodexBanner(content string) bool {
 	return strings.Contains(content, "OpenAI Codex")
 }
@@ -1179,9 +1228,23 @@ func acceptExternalImportsDialogFromStream(
 	})
 }
 
+// The external imports modal's title, and the label of its pre-selected
+// option, which allows the imports.
+const (
+	externalImportsDialogTitle       = "Allow external CLAUDE.md"
+	externalImportsDialogAllowOption = "allow external imports"
+)
+
 func containsExternalImportsDialog(content string) bool {
-	return strings.Contains(content, "Allow external CLAUDE.md") &&
-		strings.Contains(content, "allow external imports")
+	return strings.Contains(content, externalImportsDialogTitle) &&
+		containsExternalImportsAllowOption(content)
+}
+
+// containsExternalImportsAllowOption reports whether content holds the label
+// of the imports modal's option that allows the imports. The modal draws that
+// option below its title.
+func containsExternalImportsAllowOption(content string) bool {
+	return strings.Contains(content, externalImportsDialogAllowOption)
 }
 
 func containsPostExternalImportsStartupDialog(content string) bool {

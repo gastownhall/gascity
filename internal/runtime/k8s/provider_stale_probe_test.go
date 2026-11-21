@@ -119,6 +119,8 @@ func TestStartDeletesStalePodOnDefinitiveTmuxNegative(t *testing.T) {
 		return "", nil
 	}
 
+	paneShowsReadyPrompt(fake)
+
 	if err := p.Start(context.Background(), "gc-test-agent", staleProbeConfig()); err != nil {
 		t.Fatalf("Start on a definitively stale pod: %v", err)
 	}
