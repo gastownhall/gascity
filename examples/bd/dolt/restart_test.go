@@ -359,6 +359,14 @@ echo "/dev/fake 99999999 1 %d 1%% /"
 				if err == nil || !strings.Contains(string(out), "recent Dolt log shows ENOSPC") {
 					t.Fatalf("restart with the disk short did not refuse (err=%v):\n%s", err, out)
 				}
+				if !strings.HasPrefix(string(out), "gc dolt restart: recent Dolt log shows ENOSPC") {
+					t.Fatalf("refusal does not start with the ENOSPC prefix:\n%s", out)
+				}
+				for _, want := range []string{dataDir, fmt.Sprint(tc.availKB * 1024), "2147483648"} {
+					if !strings.Contains(string(out), want) {
+						t.Errorf("refusal does not state %q:\n%s", want, out)
+					}
+				}
 				if gotOps != "" {
 					t.Fatalf("restart invoked gc-beads-bd despite ENOSPC refusal: %q\n%s", gotOps, out)
 				}
