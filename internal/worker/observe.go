@@ -19,6 +19,9 @@ type LiveObservation struct {
 	RuntimeSessionID string
 	SessionID        string
 	SessionName      string
+	// LifecycleState is the durable Beads lifecycle of a bead-backed session.
+	// Empty for runtime-only handles; callers must not infer state from runtime liveness.
+	LifecycleState sessionpkg.State
 
 	// AttachedErr is set when the attachment probe could not tell (any error
 	// other than runtime.ErrSessionNotFound); Attached is false then. Running
@@ -60,6 +63,7 @@ func (h *SessionHandle) LiveObservation(_ context.Context) (LiveObservation, err
 		RuntimeSessionID: info.ID,
 		SessionID:        info.ID,
 		SessionName:      runtimeObs.SessionName,
+		LifecycleState:   info.State,
 	}
 	if !runtimeObs.LastActive.IsZero() {
 		last := runtimeObs.LastActive

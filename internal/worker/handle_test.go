@@ -970,6 +970,9 @@ func TestSessionHandleLiveObservationUsesProviderRuntimeState(t *testing.T) {
 	if obs.Alive {
 		t.Fatalf("LiveObservation.Alive = true, want false after runtime stop; obs=%#v", obs)
 	}
+	if obs.LifecycleState != info.State {
+		t.Fatalf("LiveObservation.LifecycleState = %q, want Beads lifecycle %q", obs.LifecycleState, info.State)
+	}
 }
 
 func TestSessionHandleLiveObservationTracksProcessLiveness(t *testing.T) {
