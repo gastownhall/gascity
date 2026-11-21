@@ -49,7 +49,7 @@ WINDOW="${GC_NUDGE_ON_ROUTE_WINDOW:-${GC_NUDGE_ON_ROUTE_LOOKBACK:-1h}}"
 # Must comfortably exceed WINDOW so an active routing — which keeps
 # re-emitting bead.updated as the reconciler refreshes it — is never
 # pruned and re-nudged. Accepts a simple Ns / Nm / Nh duration.
-RETENTION="${GC_NUDGE_ON_ROUTE_RETENTION:-1h}"
+RETENTION="${GC_NUDGE_ON_ROUTE_RETENTION:-2h}"
 NUDGE_MESSAGE="${GC_NUDGE_ON_ROUTE_MESSAGE:-check for assigned work}"
 
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
@@ -103,6 +103,23 @@ EVENTS="$(gc events --since "$WINDOW" 2>/dev/null)" || exit 0
 LAST_SEQ="$(cat "$SEQ_FILE" 2>/dev/null || true)"
 case "$LAST_SEQ" in ''|*[!0-9]*) LAST_SEQ=0 ;; esac
 
+# Newest event seq this run read (the next high-water mark).
+HEAD_SEQ="$(printf '%s\n' "$EVENTS" | jq -r '.seq // 0' 2>/dev/null | sort -n | tail -1)" || HEAD_SEQ=""
+case "$HEAD_SEQ" in ''|*[!0-9]*) HEAD_SEQ=0 ;; esac
+# Event log reset/rebuilt below our mark: start over rather than wedge.
+if [ "$LAST_SEQ" -gt 0 ] && [ "$HEAD_SEQ" -gt 0 ] && [ "$HEAD_SEQ" -lt "$LAST_SEQ" ]; then
+    echo "nudge-on-route: event seq went backwards ($HEAD_SEQ < $LAST_SEQ); resetting mark" >&2
+    LAST_SEQ=0
+fi
+
+# Warn when the read did not reach back to the previous mark (the walk was
+# bounded by WINDOW or truncated): routings in that gap are not seen.
+MIN_SEQ="$(printf '%s\n' "$EVENTS" | jq -r '.seq // empty' 2>/dev/null | sort -n | head -1)" || MIN_SEQ=""
+case "$MIN_SEQ" in ''|*[!0-9]*) MIN_SEQ=0 ;; esac
+if [ "$LAST_SEQ" -gt 0 ] && [ "$MIN_SEQ" -gt $((LAST_SEQ + 1)) ]; then
+    echo "nudge-on-route: events $((LAST_SEQ + 1))..$((MIN_SEQ - 1)) were not read (outside WINDOW or truncated walk); routings in that range are skipped" >&2
+fi
+
 # Reduce to unique "<bead_id>\t<routed_to>" pairs from events newer than the
 # previous run's high-water seq. Only events that actually carry a non-empty
 # gc.routed_to target are considered. The bead payload is read as
@@ -126,8 +143,6 @@ PAIRS="$(printf '%s\n' "$EVENTS" \
 # primes it), so holding the mark back for it would stall every later
 # routing behind it; a routing that still matters re-emits bead.updated as
 # the reconciler refreshes it and is picked up then.
-HEAD_SEQ="$(printf '%s\n' "$EVENTS" | jq -r '.seq // 0' 2>/dev/null | sort -n | tail -1)" || HEAD_SEQ=""
-case "$HEAD_SEQ" in ''|*[!0-9]*) HEAD_SEQ=0 ;; esac
 advance_seq() {
     [ "$HEAD_SEQ" -gt "$LAST_SEQ" ] || return 0
     _tmp="$(mktemp "$PACK_STATE_DIR/.nudge-on-route-seq.XXXXXX")"
