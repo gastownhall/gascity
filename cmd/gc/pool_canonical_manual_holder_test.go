@@ -143,3 +143,93 @@ func TestCanonicalSingletonPool_GuardedCreateBesideManualSession(t *testing.T) {
 		t.Fatalf("seat alias = %q, want deferred while the manual holder keeps agent_name worker", seat.Alias)
 	}
 }
+
+// TestCanonicalSingletonPool_ManualSessionOfTemplateDoesNotHoldSeat is the
+// issue #8945 matrix: an open manual session of a canonical singleton pool's
+// template never holds the pool's seat, whatever its agent_name shape
+// (its own alias or the template), whether the tick's snapshot sees it or not,
+// and whether it is asleep-drained or awake. The release depends on origin,
+// not sleep state. The controls keep the legitimate blocks and frees.
+func TestCanonicalSingletonPool_ManualSessionOfTemplateDoesNotHoldSeat(t *testing.T) {
+	cases := []struct {
+		name          string
+		seed          bool // seed a manual session bead of the pool's template
+		agentName     string
+		state         string
+		sleepReason   string
+		inSnapshot    bool
+		closeBead     bool
+		otherTemplate bool
+	}{
+		{name: "asleep_drained_agent_alias", seed: true, agentName: "fixer", state: "asleep", sleepReason: "drained"},
+		{name: "asleep_drained_agent_template", seed: true, agentName: "worker", state: "asleep", sleepReason: "drained"},
+		{name: "asleep_drained_agent_template_in_snapshot", seed: true, agentName: "worker", state: "asleep", sleepReason: "drained", inSnapshot: true},
+		{name: "awake_agent_alias", seed: true, agentName: "fixer", state: "active"},
+		{name: "awake_agent_alias_in_snapshot", seed: true, agentName: "fixer", state: "active", inSnapshot: true},
+		{name: "awake_agent_template", seed: true, agentName: "worker", state: "active"},
+		{name: "awake_agent_template_in_snapshot", seed: true, agentName: "worker", state: "active", inSnapshot: true},
+		{name: "control_manual_session_closed", seed: true, agentName: "fixer", state: "asleep", sleepReason: "drained", closeBead: true},
+		{name: "control_manual_session_of_other_template", seed: true, agentName: "fixer", state: "asleep", sleepReason: "drained", otherTemplate: true},
+		{name: "control_no_manual_session"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			if tc.seed {
+				b := seedManualSessionOfPoolTemplate(t, store, tc.agentName, tc.state, tc.sleepReason)
+				if tc.otherTemplate {
+					if err := store.Update(b.ID, beads.UpdateOpts{Metadata: map[string]string{"template": "other"}}); err != nil {
+						t.Fatalf("retargeting manual session template: %v", err)
+					}
+				}
+				if tc.closeBead {
+					if err := store.Close(b.ID); err != nil {
+						t.Fatalf("closing manual session: %v", err)
+					}
+				}
+			}
+			worker := canonicalSingletonWorker(t)
+			snapshot := &sessionBeadSnapshot{}
+			if tc.inSnapshot {
+				for _, b := range sessionBeadsInStore(t, store) {
+					snapshot.addInfo(sessiontest.SeedBead(t, b))
+				}
+			}
+			bp := &agentBuildParams{
+				cityPath:     t.TempDir(),
+				beadStore:    store,
+				sessionBeads: snapshot,
+				agents:       []config.Agent{worker},
+			}
+			if tc.inSnapshot {
+				bp.sessionOccupancyInfos = snapshot.OpenInfos()
+				bp.sessionSnapshotCompletenessKnown = true
+				bp.sessionSnapshotComplete = true
+			}
+
+			seat, err := selectOrCreateDependencyPoolSessionBead(bp, &worker, "worker")
+			if err != nil {
+				t.Fatalf("pool worker cannot start beside its manual session: %v", err)
+			}
+			if seat.ID == "" {
+				t.Fatal("pool worker created no seat")
+			}
+			if !seat.PoolManaged {
+				t.Fatalf("seat %s is not pool-managed", seat.ID)
+			}
+			if seat.Template != "worker" || seat.AgentName != "worker" {
+				t.Fatalf("seat template/agent_name = %q/%q, want worker/worker", seat.Template, seat.AgentName)
+			}
+		})
+	}
+}
+
+// sessionBeadsInStore lists the store's session beads for snapshot seeding.
+func sessionBeadsInStore(t testing.TB, store beads.Store) []beads.Bead {
+	t.Helper()
+	rows, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing session beads: %v", err)
+	}
+	return append(make([]beads.Bead, 0, len(rows)), rows...)
+}
