@@ -2157,6 +2157,62 @@ test_routed_missing_store_and_definitive_answers() {
     rm -rf "$root" "$fbd"
 }
 
+# Branch reuse with a routed branch id: HEAD is builder/mc-k2p9x-fix, mc-k2p9x
+# lives in the mc-rig store, and this session's in-progress ga-newsuc lives in
+# the caller's store. A closed mc-k2p9x hands the push to ga-newsuc, through a
+# declared continuation (metadata.build_bead=mc-k2p9x) or the undeclared
+# single match, and every read of mc-k2p9x (probe, inactive check) reaches the
+# mc-rig store while ga-newsuc is read from the caller's. A `bd show mc-k2p9x`
+# there that describes another bead (mc-k2p9x9) is no confirmation that
+# mc-k2p9x is inactive, so no reuse happens and the final check of mc-k2p9x
+# blocks on the mismatch.
+test_routed_branch_reuse_reads_branch_bead_from_its_store() {
+    local list label root repo fbd out rc mc_store mc_shows
+    for list in 'declared:[{"id":"ga-newsuc","metadata":{"build_bead":"mc-k2p9x"}}]' 'undeclared:[{"id":"ga-newsuc"}]'; do
+        label="${list%%:*}"; list="${list#*:}"
+        root="$(new_city_with_branch "builder/mc-k2p9x-fix")"
+        repo="$root/gascity"
+        mc_store="$(git -C "$repo" rev-parse --show-toplevel)/../mc-rig/.beads"
+        write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}'
+        fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+        write_routed_fake_bd "$fbd"
+        printf '%s' "$list" > "$fbd/default-store/fake/list-json"
+        store_put "$root/mc-rig/.beads" "mc-k2p9x" "closed" "agent-x" "tmpl-x"
+        store_put "$fbd/default-store" "ga-newsuc" "in_progress" "agent-x" "tmpl-x"
+        out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+        mc_shows="$(fake_calls "$fbd" | grep -F -- '| show mc-k2p9x ' || true)"
+        if [[ $rc -eq 0 ]] && grep -qF "reused after mc-k2p9x closed" <<<"$out" && grep -qF "ga-newsuc" <<<"$out" \
+            && [[ -n "$mc_shows" ]] && ! grep -vqF "store=$mc_store " <<<"$mc_shows" \
+            && fake_calls "$fbd" | grep -F -- '| show ga-newsuc ' | grep -qF "store=$fbd/default-store "; then
+            record_pass "routed/branch-reuse-to-local-successor ($label, rc=0, mc-k2p9x read from the mc-rig store)"
+        else
+            record_fail "routed/branch-reuse-to-local-successor ($label)" "expected rc=0 with the reuse note for ga-newsuc and every show of mc-k2p9x against $mc_store, got rc=$rc, output: $out; calls: $(fake_calls "$fbd")"
+        fi
+        rm -rf "$root" "$fbd"
+
+        root="$(new_city_with_branch "builder/mc-k2p9x-fix")"
+        repo="$root/gascity"
+        mc_store="$(git -C "$repo" rev-parse --show-toplevel)/../mc-rig/.beads"
+        write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}'
+        fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+        write_routed_fake_bd "$fbd"
+        printf '%s' "$list" > "$fbd/default-store/fake/list-json"
+        printf '[{"id":"mc-k2p9x"}]' > "$root/mc-rig/.beads/fake/probe-out"
+        printf '[{"id":"mc-k2p9x9","status":"closed","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' \
+            > "$root/mc-rig/.beads/fake/show/mc-k2p9x.json"
+        store_put "$fbd/default-store" "ga-newsuc" "in_progress" "agent-x" "tmpl-x"
+        out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+        mc_shows="$(fake_calls "$fbd" | grep -F -- '| show mc-k2p9x ' || true)"
+        if [[ $rc -ne 0 ]] && ! grep -q "reused" <<<"$out" \
+            && grep -qF "bd show mc-k2p9x returned bead mc-k2p9x9, not mc-k2p9x" <<<"$out" \
+            && [[ -n "$mc_shows" ]] && ! grep -vqF "store=$mc_store " <<<"$mc_shows"; then
+            record_pass "routed/branch-reuse-ignores-routed-id-mismatch ($label, rc=$rc, no reuse, blocked on the mismatch)"
+        else
+            record_fail "routed/branch-reuse-ignores-routed-id-mismatch ($label)" "expected non-zero rc with no reuse note, the mc-k2p9x9 mismatch named and every show of mc-k2p9x against $mc_store, got rc=$rc, output: $out; calls: $(fake_calls "$fbd")"
+        fi
+        rm -rf "$root" "$fbd"
+    done
+}
 
 # AC-7: with no routes.jsonl the prefix table is the built-in ga alone, so a
 # routed-looking token (even one a local config.yaml issue_prefix names) is
@@ -2295,6 +2351,7 @@ run_all() {
     test_routed_walk_overlap_order_and_batching
     test_routed_probe_failure_blocks
     test_routed_missing_store_and_definitive_answers
+    test_routed_branch_reuse_reads_branch_bead_from_its_store
     test_no_routes_behavior_unchanged
     test_routes_present_local_first_and_deploy_gate_skip_probe
 
