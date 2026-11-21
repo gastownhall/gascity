@@ -55,8 +55,13 @@ func nearControllerStart(ts time.Time, starts []time.Time, grace time.Duration) 
 
 // consecutiveOrderFailures counts trailing order.failed events for one order.
 //
-// outcomes must hold order.completed and order.failed events ordered by Seq
-// ascending; the walk runs newest-first and stops at the first success.
+// outcomes holds order.completed, order.failed and order.skipped events ordered
+// by Seq ascending; the walk runs newest-first and stops at the first success.
+//
+// order.skipped declarations are ignored entirely: they neither count toward nor
+// end the streak, and do not set sawOutcome. Every output equals the result for
+// the same stream with declarations removed; latestIncompleteOrderOutcome
+// reports declarations separately.
 //
 // A success always ends the streak, even if it falls within the post-start grace
 // window. The grace window skips only spurious FAILURES (neither counting them nor
@@ -78,7 +83,7 @@ func consecutiveOrderFailures(outcomes []events.Event, subject string, starts []
 
 	for i := len(outcomes) - 1; i >= 0; i-- {
 		event := outcomes[i]
-		if event.Subject != subject {
+		if event.Subject != subject || event.Type == events.OrderSkipped {
 			continue
 		}
 		sawOutcome = true
@@ -265,14 +270,21 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		outcomes := log.bySubject[order.ScopedName()]
 		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(outcomes, order.ScopedName(), log.starts, c.grace)
 		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
+		details := []string{detail}
 		if declaration, ok := latestIncompleteOrderOutcome(outcomes, order.ScopedName()); ok {
-			// An outstanding declaration means work did not run, so the
+			// An outstanding declaration means work did not run. Trailing
+			// failures keep their own detail alongside it; otherwise the
 			// classifier's success or no-outcome detail would be false.
 			status = worseStatus(status, StatusWarning)
-			detail = incompleteOrderOutcomeDetail(order, declaration)
+			declarationDetail := incompleteOrderOutcomeDetail(order, declaration)
+			if streak > 0 || skipped > 0 {
+				details = append(details, declarationDetail)
+			} else {
+				details = []string{declarationDetail}
+			}
 		}
 		worst = worseStatus(worst, status)
-		result.Details = append(result.Details, detail)
+		result.Details = append(result.Details, details...)
 		if status != StatusOK {
 			failing++
 			if firstFailingHint == "" {

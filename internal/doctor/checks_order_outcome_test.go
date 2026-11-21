@@ -754,3 +754,152 @@ func TestOrderOutcomeHealthyCompletionClearsIncompleteOutcome(t *testing.T) {
 		})
 	}
 }
+
+// TestConsecutiveOrderFailuresIgnoresDeclarations pins that order.skipped
+// declarations are invisible to the hard-failure calculation: all four outputs
+// equal those for the same stream with declarations removed.
+func TestConsecutiveOrderFailuresIgnoresDeclarations(t *testing.T) {
+	start := time.Date(2026, 8, 4, 23, 0, 0, 0, time.UTC)
+	const subject = "export-sweep"
+	at := func(seq uint64, eventType string, ts time.Time) events.Event {
+		message := ""
+		switch eventType {
+		case events.OrderFailed:
+			message = fmt.Sprintf("exit status %d", seq)
+		case events.OrderSkipped:
+			message = "partial: store unreachable"
+		}
+		return outcomeEvent(seq, subject, eventType, ts, message)
+	}
+	old := start.Add(-24 * time.Hour)
+	inGrace := start.Add(time.Minute)
+	cases := []struct {
+		name     string
+		outcomes []events.Event
+	}{
+		{"[C,F,F,F,S] keeps the streak", []events.Event{
+			at(1, events.OrderCompleted, old), at(2, events.OrderFailed, old), at(3, events.OrderFailed, old),
+			at(4, events.OrderFailed, old), at(5, events.OrderSkipped, old),
+		}},
+		{"[C,S,F,F,F] counts failures past the declaration", []events.Event{
+			at(1, events.OrderCompleted, old), at(2, events.OrderSkipped, old), at(3, events.OrderFailed, old),
+			at(4, events.OrderFailed, old), at(5, events.OrderFailed, old),
+		}},
+		{"[F,S,F] declaration does not reset", []events.Event{
+			at(1, events.OrderFailed, old), at(2, events.OrderSkipped, old), at(3, events.OrderFailed, old),
+		}},
+		{"declaration only is not an outcome", []events.Event{at(1, events.OrderSkipped, old)}},
+		{"other subjects are ignored", []events.Event{
+			at(1, events.OrderFailed, old),
+			outcomeEvent(2, "other-order", events.OrderSkipped, old, "partial: x"),
+			outcomeEvent(3, "other-order", events.OrderCompleted, old, ""),
+			at(4, events.OrderSkipped, old),
+		}},
+		{"completion inside grace still ends the walk", []events.Event{
+			at(1, events.OrderFailed, old), at(2, events.OrderCompleted, inGrace), at(3, events.OrderSkipped, inGrace),
+		}},
+		{"grace-skipped failures around a declaration", []events.Event{
+			at(1, events.OrderCompleted, old), at(2, events.OrderFailed, inGrace), at(3, events.OrderSkipped, inGrace),
+			at(4, events.OrderFailed, inGrace),
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withoutDeclarations := make([]events.Event, 0, len(tc.outcomes))
+			for _, event := range tc.outcomes {
+				if event.Type != events.OrderSkipped {
+					withoutDeclarations = append(withoutDeclarations, event)
+				}
+			}
+			starts := []time.Time{start}
+			gotStreak, gotMessage, gotSaw, gotSkipped := consecutiveOrderFailures(tc.outcomes, subject, starts, 10*time.Minute)
+			wantStreak, wantMessage, wantSaw, wantSkipped := consecutiveOrderFailures(withoutDeclarations, subject, starts, 10*time.Minute)
+			if gotStreak != wantStreak || gotMessage != wantMessage || gotSaw != wantSaw || gotSkipped != wantSkipped {
+				t.Fatalf("with declarations = (%d, %q, %v, %d), want (%d, %q, %v, %d) as without them",
+					gotStreak, gotMessage, gotSaw, gotSkipped, wantStreak, wantMessage, wantSaw, wantSkipped)
+			}
+		})
+	}
+}
+
+// TestOrderOutcomeHealthyIncompleteOutcomeWithFailures pins that a recorded
+// declaration and trailing failures are reported side by side: the failure
+// detail is kept exactly and the newest declaration is added to it.
+func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	const declDetail = "export-sweep: recorded incomplete work: partial: store unreachable; not run: rig:st (dolt not reachable)"
+	completed := func(ts time.Time) events.Event {
+		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: "export-sweep", Actor: "controller"}
+	}
+	failed := func(ts time.Time) events.Event {
+		return events.Event{Type: events.OrderFailed, Ts: ts, Subject: "export-sweep", Actor: "controller", Message: "exit status 1"}
+	}
+	declared := func(ts time.Time) events.Event {
+		return skippedOrderEvent("export-sweep", ts, "partial", "store unreachable",
+			events.OrderSkippedScope{Scope: "rig:st", Reason: "dolt not reachable"})
+	}
+	older := func(ts time.Time) events.Event {
+		return skippedOrderEvent("export-sweep", ts, "skipped", "older declaration")
+	}
+	started := func(ts time.Time) events.Event {
+		return events.Event{Type: events.ControllerStarted, Ts: ts, Subject: "gc", Actor: "controller"}
+	}
+
+	cases := []struct {
+		name        string
+		evts        []events.Event
+		wantDetails []string
+	}{
+		{
+			name: "[C,S,F,F,F] keeps streak and declaration",
+			evts: []events.Event{
+				completed(now.Add(-5 * time.Hour)), declared(now.Add(-5 * time.Hour)),
+				failed(now.Add(-3 * time.Hour)), failed(now.Add(-2 * time.Hour)), failed(now.Add(-time.Hour)),
+			},
+			wantDetails: []string{`export-sweep: 3 consecutive failures, last "exit status 1"`, declDetail},
+		},
+		{
+			name: "[C,F,F,F,S] declaration does not reset the streak",
+			evts: []events.Event{
+				completed(now.Add(-5 * time.Hour)), failed(now.Add(-4 * time.Hour)), failed(now.Add(-3 * time.Hour)),
+				failed(now.Add(-2 * time.Hour)), declared(now.Add(-time.Hour)),
+			},
+			wantDetails: []string{`export-sweep: 3 consecutive failures, last "exit status 1"`, declDetail},
+		},
+		{
+			name: "[C,S,C,S,F] keeps only the newest declaration",
+			evts: []events.Event{
+				completed(now.Add(-5 * time.Hour)), older(now.Add(-5 * time.Hour)),
+				completed(now.Add(-3 * time.Hour)), declared(now.Add(-3 * time.Hour)), failed(now.Add(-time.Hour)),
+			},
+			wantDetails: []string{"export-sweep: 1 consecutive failure(s), under threshold 3", declDetail},
+		},
+		{
+			name: "grace-skipped failure keeps its grace detail",
+			evts: []events.Event{
+				completed(now.Add(-5 * time.Hour)), declared(now.Add(-5 * time.Hour)),
+				started(now.Add(-time.Hour)), failed(now.Add(-time.Hour + time.Minute)),
+			},
+			wantDetails: []string{"export-sweep: 1 recent failure(s) within controller-start grace window", declDetail},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "export-sweep", "cooldown", "6h")
+			writeOrderFiringTestEvents(t, cityPath, tc.evts...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != StatusWarning {
+				t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			if result.Severity != SeverityAdvisory {
+				t.Fatalf("severity = %v, want SeverityAdvisory", result.Severity)
+			}
+			if strings.Join(result.Details, "\n") != strings.Join(tc.wantDetails, "\n") {
+				t.Fatalf("details = %q, want %q", result.Details, tc.wantDetails)
+			}
+		})
+	}
+}
