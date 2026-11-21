@@ -645,3 +645,55 @@ func TestCityConfigEditFailsWhenLockFileCannotBeCreated(t *testing.T) {
 		requireCityFilesUnchanged(t, cityDir, before)
 	})
 }
+
+// A CLI config writer that finds the city config lock held says so once on
+// stderr, naming the lock file; one that finds it free says nothing.
+func TestCLICityConfigWriterWaitNotice(t *testing.T) {
+	const notice = "waiting for another config edit of this city to finish"
+	newCity := func(t *testing.T) string {
+		t.Helper()
+		cityDir := filepath.Join(t.TempDir(), "city")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfigLockTestCity), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return cityDir
+	}
+
+	t.Run("lock held", func(t *testing.T) {
+		cityDir := newCity(t)
+		release := holdCityConfigLock(t, cityDir)
+		var stdout, stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() { done <- doAgentSuspend(fsys.OSFS{}, cityDir, "worker", &stdout, &stderr) }()
+		testutil.AwaitFlockWaiters(t, configedit.CityLockFile(cityDir), 1)
+		release()
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("gc agent suspend = %d, stderr:\n%s", code, stderr.String())
+			}
+		case <-time.After(testutil.GoroutineRaceTimeout):
+			t.Fatal("gc agent suspend did not finish after the city config lock was released")
+		}
+		want := "gc agent suspend: " + notice + " (" + configedit.CityLockFile(cityDir) + ")\n"
+		if got := strings.Count(stderr.String(), notice); got != 1 {
+			t.Fatalf("stderr has %d wait notices, want 1:\n%s", got, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want the notice %q", stderr.String(), want)
+		}
+	})
+	t.Run("lock free", func(t *testing.T) {
+		cityDir := newCity(t)
+		var stdout, stderr bytes.Buffer
+		if code := doAgentSuspend(fsys.OSFS{}, cityDir, "worker", &stdout, &stderr); code != 0 {
+			t.Fatalf("gc agent suspend = %d, stderr:\n%s", code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), notice) {
+			t.Fatalf("stderr has a wait notice with the lock free:\n%s", stderr.String())
+		}
+	})
+}
