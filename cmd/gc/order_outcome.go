@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -50,6 +52,27 @@ func (f *orderOutcomeFile) read() (orders.ExecOutcome, bool, error) {
 func (f *orderOutcomeFile) remove() error {
 	if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing exec order outcome file: %w", err)
+	}
+	return nil
+}
+
+// declareOrderOutcome is the order's side of the outcome file: a gc command
+// running as an exec order writes its skipped/partial declaration to the
+// file named by GC_ORDER_OUTCOME_FILE. When the variable is unset (the command
+// was run by hand) there is no order runner to tell, and it does nothing. A
+// declaration that cannot be written is an error: the run would otherwise be
+// recorded as a plain success.
+func declareOrderOutcome(out orders.ExecOutcome) error {
+	path := os.Getenv(orders.ExecOutcomeFileEnv)
+	if path == "" {
+		return nil
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return fmt.Errorf("encoding exec order outcome: %w", err)
+	}
+	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o600); err != nil {
+		return fmt.Errorf("writing exec order outcome declaration to %s: %w", path, err)
 	}
 	return nil
 }
