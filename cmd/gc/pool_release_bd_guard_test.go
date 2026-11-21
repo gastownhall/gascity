@@ -33,14 +33,16 @@ func (e bdGuardExit) ExitCode() int { return e.code }
 // models a bd without the flags, and beforeUpdate lands a concurrent write
 // just before a guarded update is evaluated. `bd list` filters on the RAW
 // stored status, as bd does, so a row bd records deferred is absent from
-// --status=open; a label filter matches nothing, since the row carries none,
-// and the ephemeral-tier `bd query` leg is empty.
+// --status=open, and with no --status it lists the row while it is not
+// closed; a label filter matches nothing, since the row carries none, and the
+// ephemeral-tier `bd query` leg is empty. lists records every `bd list`.
 type bdGuardLedger struct {
 	mu           sync.Mutex
 	bead         beads.Bead
 	noGuards     bool
 	beforeUpdate func(*beads.Bead)
 	updates      [][]string
+	lists        [][]string
 }
 
 func (l *bdGuardLedger) run(_, name string, args ...string) ([]byte, error) {
@@ -87,6 +89,7 @@ func (l *bdGuardLedger) renderRow() map[string]any {
 }
 
 func (l *bdGuardLedger) list(args []string) ([]byte, error) {
+	l.lists = append(l.lists, append([]string(nil), args...))
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "--label") {
 			return []byte(`[]`), nil
@@ -337,6 +340,130 @@ func TestReleaseWorkBead_BdStoreGuardedRelease(t *testing.T) {
 	})
 }
 
+// bdGuardSeat creates a live-looking session bead in sessions, the seat a
+// ledger's row is assigned to.
+func bdGuardSeat(t *testing.T, sessions beads.Store) beads.Bead {
+	t.Helper()
+	seat, err := sessions.Create(beads.Bead{
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "state": "active"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return seat
+}
+
+// listsStatus reports whether a recorded `bd list` carried a status filter.
+func listsStatus(args []string) bool {
+	return slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--status") })
+}
+
+// TestRetiredSweepReleasesParkedClaimFromAnUncachedBdStore is #7685 through a
+// real BdStore with no cache, as a one-shot command reads a bd city (`gc
+// session close`): the seat's open and in_progress reads pass bd's raw
+// statuses, so they miss a claim its holder parked as blocked, and the
+// close-time re-read reads no uncached bd leg. The parked read lists the leg
+// live, per identity and with no status filter, and the release lands as one
+// update guarded on the status bd recorded that writes no status: the claim
+// is unassigned and stays blocked.
+func TestRetiredSweepReleasesParkedClaimFromAnUncachedBdStore(t *testing.T) {
+	sessions := beads.NewMemStore()
+	seat := bdGuardSeat(t, sessions)
+	ledger := newBdGuardLedger("blocked", seat.ID, nil)
+	work := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+
+	var stderr bytes.Buffer
+	out := unclaimWorkAssignedToRetiredSessionBeadVia(testWorkLegs("", servingCity("worker"), work, nil), sessions, seat, "worker", nil, &stderr)
+
+	if len(out.Released) != 1 || out.Released[0].bead.ID != ledger.row().ID {
+		t.Fatalf("released %d claims (kept %v), want the parked claim; stderr: %s", len(out.Released), out.Why, stderr.String())
+	}
+	if !slices.ContainsFunc(ledger.lists, func(args []string) bool { return !listsStatus(args) }) {
+		t.Fatalf("bd lists = %v, want the parked read's list with no status filter", ledger.lists)
+	}
+	if len(ledger.updates) != 1 {
+		t.Fatalf("bd updates = %v, want one guarded write", ledger.updates)
+	}
+	update := ledger.updates[0]
+	if testFlagValue(update, "--if-status") != "blocked" || testFlagValue(update, "--if-assignee") != seat.ID || hasBdFlag(update, "--status") {
+		t.Fatalf("bd update = %v, want it guarded on blocked/%s, writing no status", update, seat.ID)
+	}
+	if got := ledger.row(); got.Status != "blocked" || got.Assignee != "" {
+		t.Fatalf("row = status %q assignee %q, want blocked and unassigned", got.Status, got.Assignee)
+	}
+}
+
+// TestCloseCascadeReportsParkedClaimsItCannotReadOnABdLeg: a bd-backed leg
+// with a cache answers the parked read from that cache alone. When the cache
+// cannot answer not-closed, the read does not list bd live, and the release
+// log names the leg it left unread rather than missing the claim in silence.
+// The claim stays assigned for a later read. Such a cache is never primed,
+// dirty, or primed in part: PrimeActive, as a controller's cache is until its
+// full prime lands, lists bd's raw open and in_progress, which leave the
+// blocked claim out, so its open rows are no answer either.
+func TestCloseCascadeReportsParkedClaimsItCannotReadOnABdLeg(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		prime func(*beads.CachingStore) error
+	}{
+		{name: "never primed", prime: func(*beads.CachingStore) error { return nil }},
+		{name: "primed in part", prime: (*beads.CachingStore).PrimeActive},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessions := beads.NewMemStore()
+			seat := bdGuardSeat(t, sessions)
+			ledger := newBdGuardLedger("blocked", seat.ID, nil)
+			cache := beads.NewCachingStore(beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd"), nil)
+			if err := tc.prime(cache); err != nil {
+				t.Fatalf("prime: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			out := releaseWorkFromClosedSessionBeadExcept(sessions, testSeatWork("", servingCity("worker"), cache, nil), seat, nil, &stderr)
+
+			if len(out.Released) != 0 || len(ledger.updates) != 0 {
+				t.Fatalf("released %d, bd updates %v; want nothing released from a leg the read could not list", len(out.Released), ledger.updates)
+			}
+			if !strings.Contains(stderr.String(), "leg city work store: parked claims not read") {
+				t.Fatalf("stderr = %q, want the unread leg named", stderr.String())
+			}
+			for _, args := range ledger.lists {
+				if !listsStatus(args) {
+					t.Fatalf("bd list %v: the parked read listed the bd leg live", args)
+				}
+			}
+			if got := ledger.row(); got.Status != "blocked" || got.Assignee != seat.ID {
+				t.Fatalf("row = status %q assignee %q, want it left blocked on %s", got.Status, got.Assignee, seat.ID)
+			}
+		})
+	}
+}
+
+// TestStrandedRepairDoesNotDeferOnAParkedReadItCannotMake: the stranded
+// repair reads no parked claims, so a bd leg whose cache cannot answer the
+// parked read fails nothing in the repair's release: a failure there would
+// hold the seat open on every tick. The close the repair ends in runs the
+// cascade, which reports the unread leg
+// (TestCloseCascadeReportsParkedClaimsItCannotReadOnABdLeg).
+func TestStrandedRepairDoesNotDeferOnAParkedReadItCannotMake(t *testing.T) {
+	sessions := beads.NewMemStore()
+	seat := bdGuardSeat(t, sessions)
+	ledger := newBdGuardLedger("blocked", seat.ID, nil)
+	cold := beads.NewCachingStore(beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd"), nil)
+
+	var stderr bytes.Buffer
+	res := unclaimWorkAssignedToRetiredSessionInfo(testSeatWork("", servingCity("worker"), cold, nil), sessions, seedSessionInfo(seat), &stderr)
+	if res.Failed != 0 || res.Held != 0 {
+		t.Fatalf("unclaim = %+v, want nothing failed or held (stderr: %s)", res, stderr.String())
+	}
+	if got := ledger.row(); got.Status != "blocked" || got.Assignee != seat.ID || len(ledger.updates) != 0 {
+		t.Fatalf("row = status %q assignee %q, bd updates %v; want the parked claim left to the cascade", got.Status, got.Assignee, ledger.updates)
+	}
+}
+
 // sweepBdGuardLedger runs the pool orphan-release loop once over the ledger's
 // row, snapshotted through the bd-backed store as the reconciler reads it.
 func sweepBdGuardLedger(t *testing.T, store beads.Store, ledger *bdGuardLedger) []releasedPoolAssignment {
@@ -366,50 +493,59 @@ func sweepOrphanedPoolRow(store beads.Store, wb beads.Bead) []releasedPoolAssign
 	)
 }
 
-// TestReleaseOrphanedPoolAssignments_BdStoreKeepsStoreDeferredRow pins the
-// release loop's non-change for issue #6207. While bd records the routed row
-// deferred, even with an elapsed defer_until, its dead assignee is kept and
-// nothing is written: a release would write status=open, silently un-defer
-// the row and strand its date, which UpdateOpts cannot clear.
-func TestReleaseOrphanedPoolAssignments_BdStoreKeepsStoreDeferredRow(t *testing.T) {
+// TestReleaseOrphanedPoolAssignments_BdStoreReleasesStoreDeferredRowKeepingDeferral
+// pins the release loop's rule for a routed row bd records deferred, even
+// with an elapsed defer_until. It replaces #6207's rule (#8442), which kept
+// the dead assignee until the store woke the row because a release wrote
+// status=open, un-deferring the row and stranding its date. The release now
+// writes no status: one write, guarded on the status bd recorded, clears the
+// dead assignee and leaves the row deferred with its defer_until.
+func TestReleaseOrphanedPoolAssignments_BdStoreReleasesStoreDeferredRowKeepingDeferral(t *testing.T) {
 	elapsed := time.Now().UTC().Add(-6 * time.Hour).Truncate(time.Second)
 	ledger := newBdGuardLedger("deferred", "worker-dead", nil)
 	ledger.bead.DeferUntil = &elapsed
 	store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
 
-	var logs bytes.Buffer
-	restore := captureLogOutput(&logs)
-	defer restore()
-
-	if released := sweepBdGuardLedger(t, store, ledger); len(released) != 0 {
-		t.Fatalf("released = %#v while bd records the row deferred, want none", released)
+	if released := sweepBdGuardLedger(t, store, ledger); len(released) != 1 {
+		t.Fatalf("released = %#v, want the deferred row's dead assignee released; bd updates %v", released, ledger.updates)
 	}
-	if len(ledger.updates) != 0 {
-		t.Fatalf("bd updates = %v, want no write to a row bd records deferred", ledger.updates)
+	if len(ledger.updates) != 1 {
+		t.Fatalf("bd updates = %v, want one guarded write", ledger.updates)
 	}
-	// The keep must come from the live raw-status re-read, not a failed one.
-	if strings.Contains(logs.String(), "validation failed") || !strings.Contains(logs.String(), "moved") {
-		t.Fatalf("log output = %q, want the row kept as moved by a successful live re-read", logs.String())
+	update := ledger.updates[0]
+	if testFlagValue(update, "--if-status") != "deferred" || testFlagValue(update, "--if-assignee") != "worker-dead" {
+		t.Fatalf("bd update = %v, want it guarded on the recorded deferred/worker-dead", update)
+	}
+	if hasBdFlag(update, "--status") {
+		t.Fatalf("bd update = %v, want no status written: the row stays deferred", update)
 	}
 	got := ledger.row()
-	if got.Status != "deferred" || got.Assignee != "worker-dead" || got.DeferUntil == nil || !got.DeferUntil.Equal(elapsed) {
-		t.Fatalf("row = status %q assignee %q defer_until %v, want deferred, worker-dead, %v unchanged", got.Status, got.Assignee, got.DeferUntil, elapsed)
+	if got.Status != "deferred" || got.Assignee != "" || got.DeferUntil == nil || !got.DeferUntil.Equal(elapsed) {
+		t.Fatalf("row = status %q assignee %q defer_until %v, want deferred, unassigned, %v kept", got.Status, got.Assignee, got.DeferUntil, elapsed)
 	}
 }
 
-// TestReleaseOrphanedPoolAssignments_BdStoreReleasesStoreWokenRow is the other
-// half of issue #6207's release contract: once the store wakes the row a
-// release kept (status back to open, defer_until cleared, as bd's sweep or
-// `bd undefer` writes), the next sweep's guarded release clears the dead
-// assignee and the bead reads ready.
-func TestReleaseOrphanedPoolAssignments_BdStoreReleasesStoreWokenRow(t *testing.T) {
+// TestReleaseOrphanedPoolAssignments_BdStoreReleasedDeferredRowReadsReadyOnceWoken
+// is the other half of that rule: the row the release gave back stays out of
+// ready while bd records it deferred, and once the store wakes it (status
+// back to open, defer_until cleared, as bd's sweep or `bd undefer` writes) it
+// reads ready and unassigned, with no further write.
+func TestReleaseOrphanedPoolAssignments_BdStoreReleasedDeferredRowReadsReadyOnceWoken(t *testing.T) {
 	elapsed := time.Now().UTC().Add(-6 * time.Hour).Truncate(time.Second)
 	ledger := newBdGuardLedger("deferred", "worker-dead", nil)
 	ledger.bead.DeferUntil = &elapsed
 	store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
 
-	if released := sweepBdGuardLedger(t, store, ledger); len(released) != 0 {
-		t.Fatalf("released = %#v while bd records the row deferred, want none", released)
+	if released := sweepBdGuardLedger(t, store, ledger); len(released) != 1 {
+		t.Fatalf("released = %#v, want the deferred row's dead assignee released; bd updates %v", released, ledger.updates)
+	}
+	now := time.Now()
+	parked, err := store.Get(ledger.row().ID)
+	if err != nil {
+		t.Fatalf("Get after release: %v", err)
+	}
+	if parked.Assignee != "" || beads.IsReadyCandidate(parked, now) {
+		t.Fatalf("released row %+v: want it unassigned and out of ready while bd records it deferred", parked)
 	}
 
 	ledger.mu.Lock()
@@ -417,20 +553,19 @@ func TestReleaseOrphanedPoolAssignments_BdStoreReleasesStoreWokenRow(t *testing.
 	ledger.bead.DeferUntil = nil
 	ledger.mu.Unlock()
 
-	if released := sweepBdGuardLedger(t, store, ledger); len(released) != 1 {
-		t.Fatalf("released = %#v after the store woke the row, want the dead assignee released; bd updates %v", released, ledger.updates)
+	if released := sweepBdGuardLedger(t, store, ledger); len(released) != 0 {
+		t.Fatalf("released = %#v after the store woke the row, want none: it holds no assignee", released)
 	}
-	if len(ledger.updates) != 1 || testFlagValue(ledger.updates[0], "--if-status") != "open" || testFlagValue(ledger.updates[0], "--if-assignee") != "worker-dead" {
-		t.Fatalf("bd updates = %v, want one write guarded on open/worker-dead", ledger.updates)
+	if len(ledger.updates) != 1 {
+		t.Fatalf("bd updates = %v, want only the release's write", ledger.updates)
 	}
 	woken, err := store.Get(ledger.row().ID)
 	if err != nil {
-		t.Fatalf("Get after release: %v", err)
+		t.Fatalf("Get after wake: %v", err)
 	}
 	if woken.Status != "open" || woken.Assignee != "" {
 		t.Fatalf("row = status %q assignee %q, want open and unassigned", woken.Status, woken.Assignee)
 	}
-	now := time.Now()
 	if beads.IsDeferred(woken, now) || !beads.IsReadyCandidate(woken, now) {
 		t.Fatalf("woken row %+v does not read ready (IsDeferred %v, IsReadyCandidate %v)", woken, beads.IsDeferred(woken, now), beads.IsReadyCandidate(woken, now))
 	}
@@ -477,6 +612,20 @@ func (s *nativeGuardStorage) state() (beadslib.Issue, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.row, len(s.writes)
+}
+
+// wroteStatus reports whether a write the store received set a status.
+func (s *nativeGuardStorage) wroteStatus() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, w := range s.writes {
+		for _, item := range w.Items {
+			if item.Update != nil && item.Update.Patch.Status.Set {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type nativeGuardReader struct {
@@ -538,15 +687,16 @@ func (a nativeGuardApplier) ApplyBatch(_ context.Context, req issueops.ApplyBatc
 	return issueops.ApplyBatchResult{Items: make([]issueops.ItemResult, len(req.Items))}, nil
 }
 
-// TestReleaseOrphanedPoolAssignments_NativeStoreKeepsStoreDeferredRow is
-// issue #6207's release contract on the native door, the sibling of the bd
-// tests above. The census snapshots the folded "open", which keeps a row the
-// store records deferred, and the release loop re-reads it with a Live "open"
-// before it writes, which NativeDoltStore pushes to the reader role as bd's
-// raw open (#7809). The row is absent from that re-read, so its dead assignee
-// is kept and nothing is written; once the store wakes the row, the next sweep
-// releases it.
-func TestReleaseOrphanedPoolAssignments_NativeStoreKeepsStoreDeferredRow(t *testing.T) {
+// TestReleaseOrphanedPoolAssignments_NativeStoreReleasesStoreDeferredRowKeepingDeferral
+// is that rule on the native door, the sibling of the bd tests above. The
+// census snapshots the folded "open", which keeps a row the store records
+// deferred, and the release writes it without the Live "open" re-read, which
+// NativeDoltStore pushes to the reader role as bd's raw open (#7809) and so
+// cannot see the row. The one write clears the dead assignee and sets no
+// status, so the row stays deferred with its defer_until; once the store
+// wakes the row, the census reads it open and unassigned, and no sweep writes
+// it again.
+func TestReleaseOrphanedPoolAssignments_NativeStoreReleasesStoreDeferredRowKeepingDeferral(t *testing.T) {
 	elapsed := time.Now().UTC().Add(-6 * time.Hour).Truncate(time.Second)
 	storage := &nativeGuardStorage{row: beadslib.Issue{
 		ID:         "gc-7",
@@ -568,30 +718,30 @@ func TestReleaseOrphanedPoolAssignments_NativeStoreKeepsStoreDeferredRow(t *test
 		return open[0]
 	}
 
-	var logs bytes.Buffer
-	restore := captureLogOutput(&logs)
-	defer restore()
-
 	parked := census(t)
 	if parked.Status != "open" || !parked.IndefinitelyDeferred {
 		t.Fatalf("census row = status %q IndefinitelyDeferred %v, want the store-deferred row folded to open and marked", parked.Status, parked.IndefinitelyDeferred)
 	}
-	if released := sweepOrphanedPoolRow(store, parked); len(released) != 0 {
-		t.Fatalf("released = %#v while the store records the row deferred, want none", released)
+	if released := sweepOrphanedPoolRow(store, parked); len(released) != 1 {
+		t.Fatalf("released = %#v, want the deferred row's dead assignee released", released)
 	}
-	if row, writes := storage.state(); writes != 0 || row.Status != beadslib.StatusDeferred || row.Assignee != "worker-dead" {
-		t.Fatalf("native writes = %d, row = status %q assignee %q; want no write to a row the store records deferred", writes, row.Status, row.Assignee)
+	row, writes := storage.state()
+	if writes != 1 || storage.wroteStatus() {
+		t.Fatalf("native writes = %d (a status written: %v), want one release write that sets no status", writes, storage.wroteStatus())
 	}
-	// The keep must come from the live raw-status re-read, not a failed one.
-	if strings.Contains(logs.String(), "validation failed") || !strings.Contains(logs.String(), `kept "gc-7" of dead assignee "worker-dead": moved`) {
-		t.Fatalf("log output = %q, want the row kept as moved by a successful live re-read", logs.String())
+	if row.Status != beadslib.StatusDeferred || row.Assignee != "" || row.DeferUntil == nil || !row.DeferUntil.Equal(elapsed) {
+		t.Fatalf("row = status %q assignee %q defer_until %v, want deferred, unassigned, %v kept", row.Status, row.Assignee, row.DeferUntil, elapsed)
 	}
 
 	storage.wake()
-	if released := sweepOrphanedPoolRow(store, census(t)); len(released) != 1 {
-		t.Fatalf("released = %#v after the store woke the row, want the dead assignee released", released)
+	woken := census(t)
+	if woken.Assignee != "" || woken.IndefinitelyDeferred {
+		t.Fatalf("census row after wake = assignee %q IndefinitelyDeferred %v, want it unassigned and awake", woken.Assignee, woken.IndefinitelyDeferred)
 	}
-	if row, writes := storage.state(); writes != 1 || row.Status != beadslib.StatusOpen || row.Assignee != "" {
-		t.Fatalf("native writes = %d, row = status %q assignee %q; want one release write leaving the row open and unassigned", writes, row.Status, row.Assignee)
+	if released := sweepOrphanedPoolRow(store, woken); len(released) != 0 {
+		t.Fatalf("released = %#v after the store woke the row, want none: it holds no assignee", released)
+	}
+	if _, writes := storage.state(); writes != 1 {
+		t.Fatalf("native writes = %d, want only the release's write", writes)
 	}
 }

@@ -289,7 +289,9 @@ func releaseOrphanedPoolAssignments(
 	claimGate := newForeignClaimGate(cfg, sessionStore)
 	defer claimGate.log()
 	for i, wb := range assignedWorkBeads {
-		if wb.Status != "open" && wb.Status != "in_progress" {
+		// A parked claim is classified by releaseListed: the orphan release
+		// gives back a dead assignee's parked claim, keeping its status.
+		if wb.Status != "open" && wb.Status != "in_progress" && !beads.IsParked(wb) {
 			continue
 		}
 		// A bead carrying bd's human label waits on a person. Route-scoped
@@ -410,7 +412,11 @@ func releaseOrphanedPoolAssignments(
 		// The verb's route guard is the one this sweep's pre-filter lacks:
 		// an expanded workflow root's run_target is no lane (NEW-5).
 		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
-			keepLog.log(wb.ID, assignee, out.Why[wb.ID])
+			why := out.Why[wb.ID]
+			if why == keptParked {
+				why += " as " + beads.RecordedStatus(wb)
+			}
+			keepLog.log(wb.ID, assignee, why)
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -736,18 +742,13 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //     the dead probe, and once that probe's socket is gone, hold for good. A
 //     store that cannot fence the write is refused and logged rather than
 //     written blind.
+//
+// Every tier writes poolReleaseUpdate: a parked claim keeps its status.
 func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool) bool {
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
 	}
-	update := beads.UpdateOpts{
-		Assignee: stringPtr(""),
-		Status:   stringPtr("open"),
-		Metadata: clearedSessionAffinityMetadata(),
-	}
-	if clearDetached {
-		update.Metadata[detachedProbeMetadataKey] = ""
-	}
+	update := poolReleaseUpdate(wb, clearDetached)
 	if released, handled, err := releaseWorkAssignmentIfRevisionMatches(store, wb, update); handled {
 		if err != nil {
 			log.Printf("releaseOrphanedPoolAssignments: %v", err)
@@ -770,6 +771,29 @@ func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetach
 		}
 	}
 	return releasePoolAssignmentWithRecheck(store, wb, clearDetached)
+}
+
+// poolReleaseUpdate is the orphan release's one write for wb: the assignee
+// and session affinity cleared, a dead gc.detached too when clearDetached,
+// and the status reopened unless wb is parked (beads.IsParked). A parked
+// claim keeps its status, as releaseWorkBead keeps it: only the dead holder
+// goes, and the hold stays for whoever lifts it. A claim the store records
+// deferred keeps its defer_until too, and reads ready once the store wakes it
+// (releasePolicies: this supersedes #6207's keep-until-woken rule). The
+// update is built before the write tier is chosen, so every tier keeps the
+// status.
+func poolReleaseUpdate(wb beads.Bead, clearDetached bool) beads.UpdateOpts {
+	update := beads.UpdateOpts{
+		Assignee: stringPtr(""),
+		Metadata: clearedSessionAffinityMetadata(),
+	}
+	if !beads.IsParked(wb) {
+		update.Status = stringPtr("open")
+	}
+	if clearDetached {
+		update.Metadata[detachedProbeMetadataKey] = ""
+	}
+	return update
 }
 
 // beadHasActiveContinuationGroup reports whether wb still advertises the active
@@ -846,9 +870,10 @@ func clearReleasedPoolAssignmentMetadata(store beads.Store, id string) {
 // releasePoolAssignmentWithRecheck is the release for snapshots
 // ReleaseIfCurrent cannot take: open-status strands (#2793), assignee-less
 // in_progress recovery, continuation-group beads (beadHasActiveContinuationGroup),
-// releases that clear a dead gc.detached, and stores without the verb. It
-// writes status, assignee and the metadata as ONE write fenced on the
-// snapshot's (status, assignee) (releaseAssignmentFenced): bd's guarded update
+// releases that clear a dead gc.detached, parked claims, and stores without
+// the verb. It writes assignee, the metadata and, unless the claim is parked,
+// status (poolReleaseUpdate) as ONE write fenced on the snapshot's (status,
+// assignee) (releaseAssignmentFenced): bd's guarded update
 // on BdStore, otherwise an UpdateIfMatch on a live re-read's revision. A claim
 // that lands after the snapshot fails the fence and is kept; the next sweep
 // decides again.
@@ -859,15 +884,7 @@ func clearReleasedPoolAssignmentMetadata(store beads.Store, id string) {
 // trace. Such a bead stays assigned until the store can fence or, for a release
 // that need not be one write, its snapshot fits ReleaseIfCurrent.
 func releasePoolAssignmentWithRecheck(store beads.Store, wb beads.Bead, clearDetached bool) bool {
-	opts := beads.UpdateOpts{
-		Assignee: stringPtr(""),
-		Status:   stringPtr("open"),
-		Metadata: clearedSessionAffinityMetadata(),
-	}
-	if clearDetached {
-		opts.Metadata[detachedProbeMetadataKey] = ""
-	}
-	outcome, err := releaseAssignmentFenced(store, wb, opts)
+	outcome, err := releaseAssignmentFenced(store, wb, poolReleaseUpdate(wb, clearDetached))
 	switch {
 	case err != nil:
 		log.Printf("releaseOrphanedPoolAssignments: releasing orphaned pool assignment %s: %v", wb.ID, err)

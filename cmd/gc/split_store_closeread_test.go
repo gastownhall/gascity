@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -229,11 +231,11 @@ func TestCloseRead_BdRigsAreReadFromTheCacheOnly(t *testing.T) {
 	})
 	q := beads.ListQuery{Assignee: "seat", Status: "open", TierMode: beads.TierBoth}
 
-	if list := closeTimeLister(bd, false); list != nil {
+	if list := closeTimeLister(bd, false, closeReRead); list != nil {
 		t.Fatal("an uncached bd rig got a lister; it would be read live")
 	}
 	cached := beads.NewCachingStore(bd, nil)
-	list := closeTimeLister(wrapStoreWithBeadPolicies(cached, &config.City{}), false)
+	list := closeTimeLister(wrapStoreWithBeadPolicies(cached, &config.City{}), false, closeReRead)
 	if list == nil {
 		t.Fatal("a cached bd rig got no lister")
 	}
@@ -245,7 +247,7 @@ func TestCloseRead_BdRigsAreReadFromTheCacheOnly(t *testing.T) {
 		t.Fatalf("the cached bd rig was read live: %d bd calls", bdCalls-before)
 	}
 	local := &workCallCounter{Store: beads.NewMemStore()}
-	if _, err := closeTimeLister(local, false)(q); err != nil || local.n() != 1 {
+	if _, err := closeTimeLister(local, false, closeReRead)(q); err != nil || local.n() != 1 {
 		t.Fatalf("local rig reads = %d, %v; want one live list", local.n(), err)
 	}
 }
@@ -257,23 +259,142 @@ func TestCloseRead_BdRigsAreReadFromTheCacheOnly(t *testing.T) {
 func TestCloseRead_WorkStoreRule(t *testing.T) {
 	q := beads.ListQuery{Assignee: "seat", Status: "open", TierMode: beads.TierBoth}
 	local := &workCallCounter{Store: beads.NewMemStore()}
-	if _, err := closeTimeLister(local, true)(q); err != nil || local.n() != 1 {
+	if _, err := closeTimeLister(local, true, closeReRead)(q); err != nil || local.n() != 1 {
 		t.Fatalf("uncached local work store reads = %d, %v; want one live list", local.n(), err)
 	}
 	cachedBacking := &workCallCounter{Store: beads.NewMemStore()}
 	cached := cachedWorkStore(t, cachedBacking)
 	before := cachedBacking.n()
-	if _, err := closeTimeLister(cached, true)(q); err != nil || cachedBacking.n() != before {
+	if _, err := closeTimeLister(cached, true, closeReRead)(q); err != nil || cachedBacking.n() != before {
 		t.Fatalf("cached work store read its backing %d times (%v); want the cache only", cachedBacking.n()-before, err)
 	}
 	declined := q
 	declined.IncludeClosed = true // a query the cache does not serve
 	before = cachedBacking.n()
-	if _, err := closeTimeLister(cached, true)(declined); err != nil || cachedBacking.n() != before+1 {
+	if _, err := closeTimeLister(cached, true, closeReRead)(declined); err != nil || cachedBacking.n() != before+1 {
 		t.Fatalf("a declined cached read listed the backing %d times (%v); want one live list", cachedBacking.n()-before, err)
 	}
 	bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) { return []byte("[]"), nil })
-	if list := closeTimeLister(bd, true); list != nil {
+	if list := closeTimeLister(bd, true, closeReRead); list != nil {
 		t.Fatal("an uncached bd work store got a lister: mc-3ixn3.19/.20 is a residual, not a live read")
 	}
 }
+
+// The parked read's leg rule (closeTimeLister's parkedRead), at no more cost
+// than the close-time re-read pays: a cached work store answers from its
+// cache alone, every not-closed row when the cache holds them all; primed in
+// part, it answers with its open rows and says the read was in part, since
+// those rows leave out a claim parked outside them; it is read live only when
+// the cache answers neither. A cached bd leg its cache cannot answer
+// not-closed is not read, and says so; it takes no partial prime's open rows,
+// which over bd hold no claim parked before the prime. Any other leg is read
+// live, an uncached bd work store included, with no status filter, since no
+// other read lists a parked claim there.
+func TestParkedRead_LegRule(t *testing.T) {
+	q := beads.ListQuery{Assignee: "seat", TierMode: beads.TierBoth}
+	parked := beads.Bead{ID: "gc-1", Status: "open", SourceStatus: "blocked", Assignee: "seat"}
+
+	t.Run("a cache holding every row", func(t *testing.T) {
+		backing := &workCallCounter{Store: beads.NewMemStore()}
+		cache := &answeringCache{Store: backing, served: map[string][]beads.Bead{"": {parked}}}
+		got, err := closeTimeLister(cache, true, parkedRead)(q)
+		if err != nil || len(got) != 1 || got[0].ID != parked.ID {
+			t.Fatalf("parked read = %v, %v; want the cache's not-closed row", got, err)
+		}
+		if !slices.Equal(cache.asked, []string{""}) || backing.n() != 0 {
+			t.Fatalf("asked the cache for %q and read the backing %d times; want one not-closed query of the cache", cache.asked, backing.n())
+		}
+	})
+	t.Run("a cache primed in part", func(t *testing.T) {
+		backing := &workCallCounter{Store: beads.NewMemStore()}
+		cache := &answeringCache{Store: backing, served: map[string][]beads.Bead{"open": {parked}}}
+		got, err := closeTimeLister(cache, true, parkedRead)(q)
+		if len(got) != 1 || got[0].ID != parked.ID {
+			t.Fatalf("parked read = %v, want the cache's folded open row", got)
+		}
+		if !errors.Is(err, errParkedUnread) {
+			t.Fatalf("parked read err = %v, want errParkedUnread: the open rows are not every parked claim", err)
+		}
+		if !slices.Equal(cache.asked, []string{"", "open"}) || backing.n() != 0 {
+			t.Fatalf("asked the cache for %q and read the backing %d times; want not-closed, then open, of the cache alone", cache.asked, backing.n())
+		}
+	})
+	t.Run("a bd cache primed in part", func(t *testing.T) {
+		bdCalls := 0
+		bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) { bdCalls++; return []byte("[]"), nil })
+		cache := &answeringCache{Store: bd, served: map[string][]beads.Bead{"open": {parked}}}
+		got, err := closeTimeLister(cache, false, parkedRead)(q)
+		if !errors.Is(err, errParkedUnread) || len(got) != 0 || bdCalls != 0 {
+			t.Fatalf("parked read = %v, %v after %d bd calls; want errParkedUnread, no rows and no bd call", got, err, bdCalls)
+		}
+		if !slices.Equal(cache.asked, []string{""}) {
+			t.Fatalf("asked the cache for %q; want not-closed alone, never a partial prime's open", cache.asked)
+		}
+	})
+	t.Run("a work store cache answering neither", func(t *testing.T) {
+		backing := &workCallCounter{Store: beads.NewMemStore()}
+		cache := &answeringCache{Store: backing}
+		if _, err := closeTimeLister(cache, true, parkedRead)(q); err != nil || backing.n() != 1 {
+			t.Fatalf("parked read err %v, backing reads %d; want one live list, as closeTimeLister reads it", err, backing.n())
+		}
+	})
+	t.Run("a bd cache answering neither", func(t *testing.T) {
+		bdCalls := 0
+		bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) { bdCalls++; return []byte("[]"), nil })
+		cache := &answeringCache{Store: bd}
+		if _, err := closeTimeLister(cache, false, parkedRead)(q); !errors.Is(err, errParkedUnread) || bdCalls != 0 {
+			t.Fatalf("parked read err %v after %d bd calls; want errParkedUnread and no bd call", err, bdCalls)
+		}
+	})
+	t.Run("an uncached bd work store", func(t *testing.T) {
+		var mu sync.Mutex
+		var lists [][]string
+		bd := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "list" {
+				mu.Lock()
+				lists = append(lists, args)
+				mu.Unlock()
+			}
+			return []byte("[]"), nil
+		})
+		if _, err := closeTimeLister(bd, true, parkedRead)(q); err != nil {
+			t.Fatal(err)
+		}
+		statusFilter := func(args []string) bool {
+			return slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--status") })
+		}
+		if len(lists) != 1 || statusFilter(lists[0]) || !slices.Contains(lists[0], "--assignee=seat") {
+			t.Fatalf("bd lists = %v, want one live list of the identity with no status filter", lists)
+		}
+	})
+	t.Run("an uncached local leg", func(t *testing.T) {
+		local := &workCallCounter{Store: beads.NewMemStore()}
+		if _, err := closeTimeLister(local, false, parkedRead)(q); err != nil || local.n() != 1 {
+			t.Fatalf("parked read err %v, reads %d; want one live list", err, local.n())
+		}
+	})
+	t.Run("a cached leg closeTimeLister reads live", func(t *testing.T) {
+		backing := &workCallCounter{Store: beads.NewMemStore()}
+		cache := &answeringCache{Store: backing, served: map[string][]beads.Bead{"": {parked}}}
+		if _, err := closeTimeLister(cache, false, parkedRead)(q); err != nil || backing.n() != 1 || len(cache.asked) != 0 {
+			t.Fatalf("parked read err %v, backing reads %d, cache asked %q; want one live list, the cache unasked", err, backing.n(), cache.asked)
+		}
+	})
+}
+
+// answeringCache is a cache layer over Store (a cachedLister, its Backing
+// the Store) that answers a query whose status served lists and declines
+// every other; asked records each query's status.
+type answeringCache struct {
+	beads.Store
+	served map[string][]beads.Bead
+	asked  []string
+}
+
+func (c *answeringCache) CachedList(q beads.ListQuery) ([]beads.Bead, bool) {
+	c.asked = append(c.asked, q.Status)
+	items, ok := c.served[q.Status]
+	return items, ok
+}
+
+func (c *answeringCache) Backing() beads.Store { return c.Store }

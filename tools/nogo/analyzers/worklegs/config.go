@@ -43,6 +43,7 @@ var Analyzer = New(Config{
 		"workAssignment.releaseWorkBead": {
 			"workAssignment.ReleaseWorkBead":         "its body",
 			"workAssignment.ReleaseDetachedWorkBead": "its body, clearing gc.detached in the release write",
+			"releaseServed":                          "the verb's release of one parked claim, keeping one that moved on",
 		},
 		"releasePoolAssignmentWithRecheck": {
 			"releaseOrphanedPoolAssignment": "its fallback tier",

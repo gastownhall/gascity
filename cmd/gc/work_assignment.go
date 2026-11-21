@@ -181,27 +181,38 @@ func excludeMailMessageBeads(items []beads.Bead) []beads.Bead {
 // and assignee fence cannot tell apart. That update returns nil only when the
 // release landed or the bead is gone: any write since the snapshot is a
 // conflict error, because the guard cannot tell a newer claim from an
-// unrelated write. A snapshot at revision 0 is re-read: a legacy row still at
+// unrelated write. The exception is a parked snapshot whose live row shows
+// the move (releaseWorkBead). A snapshot at revision 0 is re-read: a legacy row still at
 // 0 is fenced at 0, and anything else (a store whose lists carry no revision)
 // takes the tiers. Under conditional_writes=require, a store without the
 // capability is refused before either tier.
 func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback string) error {
-	return w.releaseWorkBead(item, runTargetFallback, false)
+	_, err := w.releaseWorkBead(item, runTargetFallback, false)
+	return err
 }
 
 // ReleaseDetachedWorkBead is ReleaseWorkBead for a bead carrying gc.detached:
 // the release write also clears it, so the reopened bead never carries the
 // probe into its next claim.
 func (w workAssignment) ReleaseDetachedWorkBead(item beads.Bead, runTargetFallback string) error {
-	return w.releaseWorkBead(item, runTargetFallback, true)
+	_, err := w.releaseWorkBead(item, runTargetFallback, true)
+	return err
 }
 
 // releaseWorkBead is ReleaseWorkBead, clearing gc.detached in the same write
-// when clearDetached is set.
-func (w workAssignment) releaseWorkBead(item beads.Bead, runTargetFallback string, clearDetached bool) error {
+// when clearDetached is set. released reports that the release landed; a nil
+// error with released false means the bead had moved on and nothing was
+// written.
+//
+// A parked snapshot (beads.IsParked) that loses the revision CAS is re-read
+// live: when its recorded status or assignee changed (it was unblocked, or
+// claimed again), the bead moved on and the conflict is not an error, so the
+// next pass decides again on what it reads then. Otherwise the conflict is
+// returned as for any snapshot.
+func (w workAssignment) releaseWorkBead(item beads.Bead, runTargetFallback string, clearDetached bool) (released bool, err error) {
 	store := w.unwrapped()
 	if store == nil {
-		return nil
+		return false, nil
 	}
 	metadata := clearedSessionAffinityMetadata()
 	if clearDetached {
@@ -220,8 +231,19 @@ func (w workAssignment) releaseWorkBead(item beads.Bead, runTargetFallback strin
 	if item.Status == "in_progress" {
 		update.Status = stringPtr("open")
 	}
-	if _, handled, err := releaseWorkAssignmentIfRevisionMatches(store, item, update); handled {
-		return err
+	if released, handled, err := releaseWorkAssignmentIfRevisionMatches(store, item, update); handled {
+		if beads.IsPreconditionFailed(err) && beads.IsParked(item) {
+			// A failed re-read keeps the conflict error rather than reading
+			// an unverified bead as moved on.
+			current, readErr := beads.HandlesFor(store).Live.Get(item.ID)
+			movedOn := errors.Is(readErr, beads.ErrNotFound) || readErr == nil &&
+				(beads.RecordedStatus(current) != beads.RecordedStatus(item) || strings.TrimSpace(current.Assignee) != strings.TrimSpace(item.Assignee))
+			if movedOn {
+				log.Printf("ReleaseWorkBead: skipping release for %s: assignment changed between snapshot and release write", item.ID)
+				return false, nil
+			}
+		}
+		return released, err
 	}
 	// Tier 1 clears status/assignee atomically but leaves the metadata to a second
 	// write, so it is usable only when that second write is not routing-
@@ -258,11 +280,11 @@ func (w workAssignment) releaseWorkBead(item beads.Bead, runTargetFallback strin
 			// reads as a successful release, and repairStrandedPoolWorkerBead
 			// would then close the session bead while its work is still
 			// assigned to it, with nothing left watching the work.
-			return err
+			return false, err
 		}
 		if handled {
 			if !released {
-				return nil
+				return false, nil
 			}
 			// If this metadata clear fails the error propagates, but no retry
 			// follows: the bead is already unassigned, so the next tick's
@@ -274,9 +296,9 @@ func (w workAssignment) releaseWorkBead(item beads.Bead, runTargetFallback strin
 			// after the caller's List still reaches this second write, and if
 			// this write fails that group outlives the release.
 			if err := store.Update(item.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
-				return fmt.Errorf("clearing session affinity on %q after conditional release: %w", item.ID, err)
+				return true, fmt.Errorf("clearing session affinity on %q after conditional release: %w", item.ID, err)
 			}
-			return nil
+			return true, nil
 		}
 	}
 	// Tier 2: no usable conditional verb (or a route to stamp). The release is
@@ -288,17 +310,18 @@ func (w workAssignment) releaseWorkBead(item beads.Bead, runTargetFallback strin
 	// caller that gates a close on this release does not close over it.
 	outcome, err := releaseAssignmentFenced(store, item, update)
 	if err != nil {
-		return fmt.Errorf("releasing %q: %w", item.ID, err)
+		return false, fmt.Errorf("releasing %q: %w", item.ID, err)
 	}
 	switch outcome {
 	case fencedReleaseChanged:
 		log.Printf("ReleaseWorkBead: skipping release for %s: assignment changed between snapshot and release write", item.ID)
+		return false, nil
 	case fencedReleaseLost:
-		return fmt.Errorf("releasing %q: the bead changed after the re-read; it stays assigned until the next pass", item.ID)
+		return false, fmt.Errorf("releasing %q: the bead changed after the re-read; it stays assigned until the next pass", item.ID)
 	case fencedReleaseRefused:
-		return fmt.Errorf("releasing %q: the store cannot release it conditionally: %w", item.ID, beads.ErrConditionalWriteUnsupported)
+		return false, fmt.Errorf("releasing %q: the store cannot release it conditionally: %w", item.ID, beads.ErrConditionalWriteUnsupported)
 	}
-	return nil
+	return true, nil
 }
 
 // fencedReleaseOutcome is what releaseAssignmentFenced did with a release.
@@ -321,8 +344,11 @@ const (
 
 // releaseAssignmentFenced writes opts, a release (or ReassignWorkBead's
 // reassign) decided from the snapshot wb, as ONE write that lands only while
-// the bead still has wb's status and assignee. Any read may be stale, so the
-// fence is at the write:
+// the bead still has wb's status and assignee. The status is the one the
+// store recorded (beads.RecordedStatus), not the folded one: a claim parked
+// as blocked reads "open" through bd's fold, and fenced on "open" it would
+// never match its own row. Any read may be stale, so the fence is at the
+// write:
 //
 //  1. Where the store has a guarded update (beads.AssignmentGuardedUpdaterFor:
 //     BdStore with `bd update --if-status --if-assignee`), the backend checks
@@ -342,7 +368,7 @@ const (
 // time, after the re-read has already cost a bd call.
 func releaseAssignmentFenced(store beads.Store, wb beads.Bead, opts beads.UpdateOpts) (fencedReleaseOutcome, error) {
 	if updater, ok := beads.AssignmentGuardedUpdaterFor(store); ok {
-		updated, err := updater.UpdateIfAssignment(wb.ID, wb.Status, strings.TrimSpace(wb.Assignee), opts)
+		updated, err := updater.UpdateIfAssignment(wb.ID, beads.RecordedStatus(wb), strings.TrimSpace(wb.Assignee), opts)
 		switch {
 		case err == nil && updated:
 			return fencedReleaseApplied, nil
@@ -363,7 +389,7 @@ func releaseAssignmentFenced(store beads.Store, wb beads.Bead, opts beads.Update
 	if err != nil {
 		return fencedReleaseRefused, fmt.Errorf("re-reading before release: %w", err)
 	}
-	if current.Status != wb.Status || strings.TrimSpace(current.Assignee) != strings.TrimSpace(wb.Assignee) {
+	if beads.RecordedStatus(current) != beads.RecordedStatus(wb) || strings.TrimSpace(current.Assignee) != strings.TrimSpace(wb.Assignee) {
 		return fencedReleaseChanged, nil
 	}
 	err = writer.UpdateIfMatch(wb.ID, current.Revision, opts)

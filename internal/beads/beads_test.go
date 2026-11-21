@@ -574,3 +574,64 @@ func TestBdIssueRejectsInvalidRevision(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordedStatus pins the status a guarded update and a Live status read
+// compare against, in every shape a bead reaches release code in: a folded
+// read with the raw status kept beside it, an event-patched row carrying the
+// raw status itself, and an event's deferral.
+func TestRecordedStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bead Bead
+		want string
+	}{
+		{"folded blocked", Bead{Status: "open", SourceStatus: "blocked"}, "blocked"},
+		{"folded custom", Bead{Status: "open", SourceStatus: "review"}, "review"},
+		{"folded raw open", Bead{Status: "open", SourceStatus: "open"}, "open"},
+		{"padded source status", Bead{Status: "open", SourceStatus: " hooked "}, "hooked"},
+		{"event raw blocked", Bead{Status: "blocked"}, "blocked"},
+		{"event raw custom", Bead{Status: "review"}, "review"},
+		{"event deferral", Bead{Status: "open", IndefinitelyDeferred: true}, "deferred"},
+		{"source status wins over the deferral", Bead{Status: "open", IndefinitelyDeferred: true, SourceStatus: "deferred"}, "deferred"},
+		{"in progress", Bead{Status: "in_progress"}, "in_progress"},
+		{"closed", Bead{Status: "closed", SourceStatus: "closed"}, "closed"},
+		{"no status", Bead{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RecordedStatus(tc.bead); got != tc.want {
+				t.Fatalf("RecordedStatus(%+v) = %q, want %q", tc.bead, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsParked pins which recorded statuses Gas City's three-state model has
+// no place for: bd's blocked, deferred, pinned and hooked, and any custom
+// status, folded or raw. Open, in_progress, closed and no status are not.
+func TestIsParked(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bead Bead
+		want bool
+	}{
+		{"folded blocked", Bead{Status: "open", SourceStatus: "blocked"}, true},
+		{"folded deferred", Bead{Status: "open", SourceStatus: "deferred"}, true},
+		{"folded pinned", Bead{Status: "open", SourceStatus: "pinned"}, true},
+		{"folded hooked", Bead{Status: "open", SourceStatus: "hooked"}, true},
+		{"folded custom", Bead{Status: "open", SourceStatus: "review"}, true},
+		{"event raw blocked", Bead{Status: "blocked"}, true},
+		{"event raw custom", Bead{Status: "testing"}, true},
+		{"event deferral", Bead{Status: "open", IndefinitelyDeferred: true}, true},
+		{"folded raw open", Bead{Status: "open", SourceStatus: "open"}, false},
+		{"open", Bead{Status: "open"}, false},
+		{"in progress", Bead{Status: "in_progress", SourceStatus: "in_progress"}, false},
+		{"closed", Bead{Status: "closed"}, false},
+		{"no status", Bead{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsParked(tc.bead); got != tc.want {
+				t.Fatalf("IsParked(%+v) = %v, want %v", tc.bead, got, tc.want)
+			}
+		})
+	}
+}

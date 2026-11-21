@@ -4576,7 +4576,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if dec.TraceReason != string(TraceReasonAssignedWorkExhausted) {
 					// A claim made since the tick's read (the gather above read the
 					// index) defers the kill, as a claim the gather saw would have.
-					late, err := lateSeatWork(sw.Legs(), releaseScope(infoByID[id], cfg), []string{"in_progress"}, nil)
+					late, err := lateSeatWork(sw.Legs(), releaseScope(infoByID[id], cfg), []string{"in_progress"}, nil, closeReRead)
 					if err != nil || len(late) > 0 {
 						fmt.Fprintf(stderr, "session reconciler: idle timeout for %s deferred: work claimed since this tick's read (%v)\n", name, err) //nolint:errcheck // best-effort stderr
 						continue

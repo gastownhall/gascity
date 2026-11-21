@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -164,4 +167,226 @@ func TestWorkAssignmentHasNonSessionWork_SkipsMail(t *testing.T) {
 	if !wa.HasNonSessionWork([]beads.Bead{mail, task}) {
 		t.Fatal("HasNonSessionWork(mail + task) = false, want true")
 	}
+}
+
+// parkedBdStore stands in for a BdStore over bd's raw statuses. mem holds the
+// raw status; every read folds all but in_progress and closed to "open" and
+// keeps the raw one in SourceStatus (mapBdStatus); a list of a status matches
+// the raw one, as `bd list --status` does, so a Live "open" list omits a
+// blocked row; and the guarded update compares the raw status, as
+// `bd update --if-status --if-assignee` does. Its rows carry no revision (bd's
+// lists publish none) and it has no revision fence: embedding only
+// beads.Store hides MemStore's UpdateIfMatch. guarded records every guarded
+// update; writes counts every write that landed.
+type parkedBdStore struct {
+	beads.Store
+	mem     *beads.MemStore
+	guarded []parkedGuardedCall
+	writes  int
+}
+
+// parkedGuardedCall is one UpdateIfAssignment a parkedBdStore received.
+type parkedGuardedCall struct {
+	status, assignee string
+	opts             beads.UpdateOpts
+}
+
+var _ beads.AssignmentGuardedUpdater = (*parkedBdStore)(nil)
+
+func newParkedBdStore() *parkedBdStore {
+	mem := beads.NewMemStore()
+	return &parkedBdStore{Store: mem, mem: mem}
+}
+
+// foldBdStatus is mapBdStatus' read of b: its raw status kept in
+// SourceStatus, its Status folded to Gas City's three.
+func foldBdStatus(b beads.Bead) beads.Bead {
+	b.SourceStatus = b.Status
+	if b.Status != "in_progress" && b.Status != "closed" {
+		b.Status = "open"
+	}
+	b.Revision = 0
+	return b
+}
+
+func (s *parkedBdStore) Get(id string) (beads.Bead, error) {
+	b, err := s.mem.Get(id)
+	if err != nil {
+		return b, err
+	}
+	return foldBdStatus(b), nil
+}
+
+func (s *parkedBdStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.mem.List(q)
+	for i := range items {
+		items[i] = foldBdStatus(items[i])
+	}
+	return items, err
+}
+
+func (s *parkedBdStore) Update(id string, opts beads.UpdateOpts) error {
+	if err := s.mem.Update(id, opts); err != nil {
+		return err
+	}
+	s.writes++
+	return nil
+}
+
+func (s *parkedBdStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts beads.UpdateOpts) (bool, error) {
+	s.guarded = append(s.guarded, parkedGuardedCall{status: expectedStatus, assignee: expectedAssignee, opts: opts})
+	current, err := s.mem.Get(id)
+	if errors.Is(err, beads.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if current.Status != expectedStatus || strings.TrimSpace(current.Assignee) != expectedAssignee {
+		return false, nil
+	}
+	return true, s.Update(id, opts)
+}
+
+// parkedCASStore is a parkedBdStore's folded reads over a store with a
+// revision fence and no guarded update: releaseAssignmentFenced's tier 2,
+// whose live re-read returns the folded row.
+type parkedCASStore struct {
+	beads.Store
+	bd *parkedBdStore
+}
+
+var _ beads.ConditionalWriter = (*parkedCASStore)(nil)
+
+func (s *parkedCASStore) Get(id string) (beads.Bead, error) {
+	b, err := s.bd.Get(id)
+	if err != nil {
+		return b, err
+	}
+	raw, _ := s.bd.mem.Get(id)
+	b.Revision = raw.Revision
+	return b, nil
+}
+
+func (s *parkedCASStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if err := s.bd.mem.UpdateIfMatch(id, revision, opts); err != nil {
+		return err
+	}
+	s.bd.writes++
+	return nil
+}
+
+func (s *parkedCASStore) CloseIfMatch(id string, revision int64) error {
+	return s.bd.mem.CloseIfMatch(id, revision)
+}
+
+func (s *parkedCASStore) DeleteIfMatch(id string, revision int64) error {
+	return s.bd.mem.DeleteIfMatch(id, revision)
+}
+
+func (s *parkedCASStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	return s.bd.mem.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+// seedParkedClaim creates a work bead in mem held by assignee, then parks it
+// in raw status, as a worker that ran `gc bd update --status=blocked` after
+// its claim does.
+func seedParkedClaim(t *testing.T, mem *beads.MemStore, assignee, status string, metadata map[string]string) beads.Bead {
+	t.Helper()
+	b, err := mem.Create(beads.Bead{Title: "parked claim", Assignee: assignee, Metadata: metadata})
+	if err != nil {
+		t.Fatalf("create claim: %v", err)
+	}
+	if err := mem.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("park claim as %s: %v", status, err)
+	}
+	b, err = mem.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get claim: %v", err)
+	}
+	return b
+}
+
+// assertParkedRelease checks that id is unassigned, still in raw status
+// want, and carries no session affinity.
+func assertParkedRelease(t *testing.T, mem *beads.MemStore, id, want string) {
+	t.Helper()
+	got, err := mem.Get(id)
+	if err != nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	if got.Assignee != "" {
+		t.Errorf("%s assignee = %q, want cleared", id, got.Assignee)
+	}
+	if got.Status != want {
+		t.Errorf("%s status = %q, want %q kept", id, got.Status, want)
+	}
+	for key := range clearedSessionAffinityMetadata() {
+		if v := got.Metadata[key]; v != "" {
+			t.Errorf("%s metadata %s = %q, want cleared", id, key, v)
+		}
+	}
+}
+
+// TestReleaseAssignmentFencedParkedClaimFencesOnRecordedStatus is #7685's
+// fence: a claim its worker parked as blocked reads "open" through bd's fold,
+// and a release fenced on that folded status never matched its own row
+// (`bd update --if-status open` on a blocked bead), so it was skipped as
+// "assignment changed" on every pass. The fence is the status the store
+// recorded, and the release writes no status: the hold stays.
+func TestReleaseAssignmentFencedParkedClaimFencesOnRecordedStatus(t *testing.T) {
+	t.Run("guarded update fences on the raw status", func(t *testing.T) {
+		store := newParkedBdStore()
+		raw := seedParkedClaim(t, store.mem, "dead-session", "blocked", nil)
+		snapshot := foldBdStatus(raw)
+
+		outcome, err := releaseAssignmentFenced(store, snapshot, beads.UpdateOpts{Assignee: stringPtr("")})
+		if err != nil || outcome != fencedReleaseApplied {
+			t.Fatalf("releaseAssignmentFenced = %v, %v; want applied", outcome, err)
+		}
+		if len(store.guarded) != 1 || store.guarded[0].status != "blocked" || store.guarded[0].assignee != "dead-session" {
+			t.Fatalf("guarded updates = %+v, want one expecting (blocked, dead-session)", store.guarded)
+		}
+	})
+
+	t.Run("ReleaseWorkBead writes no status", func(t *testing.T) {
+		store := newParkedBdStore()
+		raw := seedParkedClaim(t, store.mem, "dead-session", "blocked", map[string]string{beadmeta.SessionIDMetadataKey: "dead-session"})
+
+		if err := workAssignmentForStore(beads.WorkStore{Store: store}).ReleaseWorkBead(foldBdStatus(raw), ""); err != nil {
+			t.Fatalf("ReleaseWorkBead: %v", err)
+		}
+		if len(store.guarded) != 1 || store.guarded[0].status != "blocked" || store.guarded[0].opts.Status != nil {
+			t.Fatalf("guarded updates = %+v, want one expecting blocked that writes no status", store.guarded)
+		}
+		assertParkedRelease(t, store.mem, raw.ID, "blocked")
+	})
+
+	t.Run("an event's deferred shape fences on deferred", func(t *testing.T) {
+		store := newParkedBdStore()
+		raw := seedParkedClaim(t, store.mem, "dead-holder", "deferred", nil)
+		snapshot := raw
+		snapshot.Status, snapshot.IndefinitelyDeferred = "open", true
+
+		outcome, err := releaseAssignmentFenced(store, snapshot, beads.UpdateOpts{Assignee: stringPtr("")})
+		if err != nil || outcome != fencedReleaseApplied {
+			t.Fatalf("releaseAssignmentFenced = %v, %v; want applied", outcome, err)
+		}
+		if len(store.guarded) != 1 || store.guarded[0].status != "deferred" || store.guarded[0].assignee != "dead-holder" {
+			t.Fatalf("guarded updates = %+v, want one expecting deferred", store.guarded)
+		}
+		assertParkedRelease(t, store.mem, raw.ID, "deferred")
+	})
+
+	t.Run("conditional writer re-reads the folded row", func(t *testing.T) {
+		bd := newParkedBdStore()
+		store := &parkedCASStore{Store: bd.mem, bd: bd}
+		raw := seedParkedClaim(t, bd.mem, "dead-session", "blocked", nil)
+
+		outcome, err := releaseAssignmentFenced(store, foldBdStatus(raw), beads.UpdateOpts{Assignee: stringPtr("")})
+		if err != nil || outcome != fencedReleaseApplied {
+			t.Fatalf("releaseAssignmentFenced = %v, %v; want applied", outcome, err)
+		}
+		assertParkedRelease(t, bd.mem, raw.ID, "blocked")
+	})
 }
