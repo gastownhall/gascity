@@ -118,6 +118,15 @@ func StoppedWorkflowAncestor(store beads.MoleculeTarget, bead beads.Bead) (Workf
 	return WorkflowStop{}, nil
 }
 
+// WorkflowRootCanceled reports whether root carries cancellation, classified
+// exactly as the stop gate's ancestor walk does: the gc.outcome=canceled a
+// finished cancel stamps, or the gc.cancel_requested intent marker run cancel
+// writes before it winds the run down.
+func WorkflowRootCanceled(root beads.Bead) bool {
+	stop, stopped := workflowRootStop(root)
+	return stopped && stop.Canceled
+}
+
 // workflowRootStop classifies one root on the chain, with the dispatcher's
 // control-gate semantics: cancellation is gc.outcome=canceled or the
 // gc.cancel_requested marker run cancel stamps, and any closure is settlement.

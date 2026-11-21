@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -1367,13 +1368,20 @@ func hookClaimWorkflowLinked(candidate beads.Bead) bool {
 // probe makes: one store hiccup must not idle every seat, and the claim CAS
 // that follows runs against the same store. A failed close still withholds the
 // bead; it stays visible to the next poll, which re-runs this gate.
+//
+// A standalone graph-owned root is gated by hookClaimCanceledGraphRoot.
 func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
-	if !hookClaimWorkflowLinked(candidate) || ops.WorkflowStore == nil {
+	linked := hookClaimWorkflowLinked(candidate)
+	if ops.WorkflowStore == nil || (!linked && !hookClaimGraphOwnedRoot(candidate)) {
 		return false
 	}
 	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
 	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
+	workflow := beads.GraphMolecule(beads.GraphStore{Store: store})
+	if !linked {
+		return hookClaimCanceledGraphRoot(ctx, candidate, workflow, opts, ops, dir, stderr)
+	}
+	stop, err := molecule.WorkflowStopReason(workflow, candidate)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
 		return false
@@ -1393,6 +1401,60 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 		return true
 	}
 	fmt.Fprintf(stderr, "gc hook --claim: closed %s as %s: %s\n", candidate.ID, stop.Outcome(), reason) //nolint:errcheck
+	return true
+}
+
+// hookClaimGraphOwnedRoot reports whether b declares graph-owned input
+// (gc.input_lifecycle=graph), the stamp only a compiled workflow root carries.
+func hookClaimGraphOwnedRoot(b beads.Bead) bool {
+	return strings.TrimSpace(b.Metadata[beadmeta.InputLifecycleMetadataKey]) == beadmeta.InputLifecycleGraph
+}
+
+// hookClaimCanceledGraphRoot gates a standalone workflow root that declares
+// graph-owned input (gc.input_lifecycle=graph) and so is exempt from
+// input-terminal retirement. It reports whether the root, re-read from the
+// workflow store, is still open but canceled — a run cancel that stamped its
+// intent and never wound the run down — and so must not be handed out.
+//
+// Once the run's input is terminal or handed off nothing else will settle it,
+// so the gate finishes the cancel (sourceworkflow.CancelWorkflowTree: deepest first,
+// teardown spared, stopping at the first error). While the input is pending,
+// or the check cannot read it, the root is withheld and nothing is closed. A
+// root that is not canceled, or no longer declares graph ownership, is left
+// to the claim. A canceled root that already closed is withheld and not
+// re-closed: its cancel converged.
+func hookClaimCanceledGraphRoot(ctx context.Context, candidate beads.Bead, store beads.MoleculeTarget, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	root, err := store.Get(candidate.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
+		return false
+	}
+	if hookClaimWorkflowLinked(root) || !hookClaimGraphOwnedRoot(root) || !molecule.WorkflowRootCanceled(root) {
+		return false
+	}
+	if root.Status == "closed" {
+		fmt.Fprintf(stderr, "gc hook --claim: withholding %s: workflow root %s already closed under its cancel; nothing left to finish\n", candidate.ID, root.ID) //nolint:errcheck
+		return true
+	}
+	if ops.InputVerdict == nil {
+		fmt.Fprintf(stderr, "gc hook --claim: withholding %s: workflow root %s was canceled; its input cannot be checked, so the cancel is not finished here\n", candidate.ID, root.ID) //nolint:errcheck
+		return true
+	}
+	verdict, err := ops.InputVerdict(ctx, dir, opts.Env, root, opts.IdentityCandidates, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: withholding %s: workflow root %s was canceled; checking its input failed: %v\n", candidate.ID, root.ID, err) //nolint:errcheck
+		return true
+	}
+	if verdict.State != workflowInputComplete {
+		fmt.Fprintf(stderr, "gc hook --claim: withholding %s: workflow root %s was canceled; its input is not yet settled, so the cancel is not finished here\n", candidate.ID, root.ID) //nolint:errcheck
+		return true
+	}
+	closed, err := sourceworkflow.CancelWorkflowTree(store, root.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: withholding %s: workflow root %s was canceled; finishing the cancel failed after closing %d bead(s): %v\n", candidate.ID, root.ID, closed, err) //nolint:errcheck
+		return true
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: finished the cancel of workflow root %s: closed %d bead(s) of its run as canceled; its input is already terminal or handed off\n", root.ID, closed) //nolint:errcheck
 	return true
 }
 
