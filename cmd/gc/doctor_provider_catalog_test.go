@@ -388,3 +388,39 @@ func TestProviderCatalogReadinessAdvisoryReportsNeedsAuthAndUnlistedTogether(t *
 		t.Fatalf("fix hint = %q, want %q", result.FixHint, wantHint)
 	}
 }
+
+func TestProviderCatalogReadinessAdvisoryUnchangedWithoutNeedsAuth(t *testing.T) {
+	t.Run("not explicit only", func(t *testing.T) {
+		cityDir := writeDoctorCityToml(t, "[workspace]\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
+		stubProviderReadiness(t, map[string]api.ReadinessItem{
+			"claude": {Name: "claude", DisplayName: "Claude Code", Status: api.ProbeStatusConfigured},
+			"codex":  {Name: "codex", DisplayName: "Codex", Status: api.ProbeStatusConfigured},
+		})
+		result := runProviderReadinessAdvisory(cityDir)
+		if result.Status != doctor.StatusWarning || result.Severity != doctor.SeverityAdvisory {
+			t.Fatalf("status/severity = %v/%v, want advisory warning", result.Status, result.Severity)
+		}
+		if want := "1 configured local provider(s) not explicit"; result.Message != want {
+			t.Fatalf("message = %q, want %q", result.Message, want)
+		}
+		if len(result.Details) != 1 || result.Details[0] != "Codex is configured locally but not listed in [providers.codex]" {
+			t.Fatalf("details = %q", result.Details)
+		}
+		if want := "add provider aliases for local CLIs you want this city to use"; result.FixHint != want {
+			t.Fatalf("fix hint = %q, want %q", result.FixHint, want)
+		}
+	})
+	for _, status := range []string{api.ProbeStatusInvalidConfiguration, api.ProbeStatusProbeError, api.ProbeStatusNotInstalled} {
+		t.Run("referenced "+status, func(t *testing.T) {
+			cityDir := writeDoctorCityToml(t, "[workspace]\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
+			stubProviderReadiness(t, map[string]api.ReadinessItem{
+				"claude": {Name: "claude", DisplayName: "Claude Code", Status: status, Detail: "probe detail"},
+			})
+			result := runProviderReadinessAdvisory(cityDir)
+			if result.Status != doctor.StatusOK || result.Message != "configured local providers are explicit" ||
+				len(result.Details) != 0 || result.FixHint != "" {
+				t.Fatalf("result = %+v, want unchanged OK result", result)
+			}
+		})
+	}
+}
