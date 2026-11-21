@@ -584,3 +584,55 @@ func TestCompletionsStartupSweepSkipsConvergedStampedRoots(t *testing.T) {
 		t.Fatalf("cadence sweep = %+v, want the same skip the startup sweep reported", result)
 	}
 }
+
+// TestCompletionsStartupSweepRepairsOnlyTheUnstampedGap (ga-vn0uok): the
+// startup sweep exists to repair the crash-window gap — a closed step whose
+// completion fact never landed. Honoring the stamp also un-queues that
+// repair: the sweep visits exactly the unstamped root, not every converged
+// root in front of it.
+func TestCompletionsStartupSweepRepairsOnlyTheUnstampedGap(t *testing.T) {
+	const roots = 8
+	backing := beads.NewMemStore()
+	rootIDs := make([]string, 0, roots)
+	for i := range roots {
+		id := seedClosedWorkflowRoot(t, backing, fmt.Sprintf("gcg-gap-%d", i))
+		rootIDs = append(rootIDs, id)
+	}
+	cr, lane, _ := newCompletionSweepRuntime(t, backing)
+	convergeCompletions(t, cr, lane, backing, rootIDs)
+
+	// The crash-window gap: a ninth closed root whose step fact never landed.
+	// The controller died between the durable close and the best-effort
+	// journal append, so no event names it and only a sweep converges it.
+	gapRoot := seedClosedWorkflowRoot(t, backing, "gcg-gap-hole")
+
+	boot := &executionevent.CompletionBackstop{ChunkSize: completionsBackstopChunk}
+	var visited, emitted int
+	for range 10 {
+		result := cr.runCompletionsSweepChunk(boot, lane, backstopReasonStartup)
+		visited += result.RootsVisited
+		emitted += result.Emitted
+		if result.SweepComplete {
+			break
+		}
+	}
+	if emitted != 1 || visited != 1 {
+		t.Fatalf("startup sweep emitted %d fact(s) over %d root(s), want exactly the one owed fact over the one unstamped gap root", emitted, visited)
+	}
+	root, err := backing.Get(gapRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] != "" {
+		t.Fatal("the gap root was stamped by the pass that EMITTED its fact; a dropped Record would now be a permanent loss")
+	}
+
+	// A following sweep reads the fact back from the journal and stamps it.
+	if result := cr.runCompletionsSweepChunk(&executionevent.CompletionBackstop{}, lane, backstopReasonCadence); result.Emitted != 0 {
+		t.Fatalf("re-stamp sweep = %+v, want no re-emit", result)
+	}
+	root, err = backing.Get(gapRoot)
+	if err != nil || root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
+		t.Fatalf("the repaired gap root was not stamped by the following sweep: %v", err)
+	}
+}
