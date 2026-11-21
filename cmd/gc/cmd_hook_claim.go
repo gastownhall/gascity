@@ -246,8 +246,12 @@ func continuationPinAssignee(opts hookClaimOptions) string {
 }
 
 type hookClaimOps struct {
-	Runner             WorkQueryRunner
-	Claim              hookClaimFunc
+	Runner WorkQueryRunner
+	Claim  hookClaimFunc
+	// ClaimExact claims a graph-step candidate only while it still matches
+	// the work query's observation of it (cmd_hook_claim_exact.go). A graph
+	// step is never claimed through Claim.
+	ClaimExact         hookClaimExactFunc
 	ListContinuation   hookListContinuationFunc
 	AssignContinuation hookAssignContinuationFunc
 	DrainAck           hookDrainAckFunc
@@ -676,6 +680,9 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 func (ops *hookClaimOps) applyDefaults() {
 	if ops.Claim == nil {
 		ops.Claim = hookClaimWithBdStore
+	}
+	if ops.ClaimExact == nil {
+		ops.ClaimExact = hookClaimExactWithBdStore
 	}
 	if ops.ListContinuation == nil {
 		ops.ListContinuation = hookListContinuationWithBdStore
@@ -1184,7 +1191,8 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		claimed, verdict, err := claimHookCandidate(ctx, candidate, opts.Assignee, true, opts, ops, dir, stderr)
+		ok := verdict == hookClaimVerdictClaimed
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// workflow re-check below spends any more store time.
 		landedAt := ops.nowOrWallClock()

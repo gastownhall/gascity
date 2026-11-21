@@ -69,6 +69,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // hookClaimAnnounceBudget bounds all the store reads one announcement pass
@@ -117,6 +118,17 @@ func withHookClaimBeadEvents(ops hookClaimOps, cityPath string) hookClaimOps {
 			a.note(dir, env, beadID, func(*beads.Bead) *beads.Bead { return row })
 		}
 		return claimed, ok, err
+	}
+	ops.ClaimExact = func(ctx context.Context, dir string, env []string, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+		claimed, verdict, err := base.ClaimExact(ctx, dir, env, actor, req)
+		if verdict == hookClaimVerdictClaimed {
+			var row *beads.Bead
+			if err == nil && strings.TrimSpace(claimed.ID) == req.ID {
+				row = &claimed
+			}
+			a.note(dir, env, req.ID, func(*beads.Bead) *beads.Bead { return row })
+		}
+		return claimed, verdict, err
 	}
 	ops.StampWorkMeta = func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 		err := base.StampWorkMeta(ctx, dir, env, beadID, assignee, patch)
