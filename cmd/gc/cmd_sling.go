@@ -87,6 +87,10 @@ The target is an agent qualified name (e.g. "mayor" or "hello-world/polecat").
 The second argument is a bead ID, a formula name when --formula is set, or
 arbitrary text (which auto-creates a task bead).
 
+Slinging an expanded cooked workflow root (gc formula cook) also routes the
+run's still-unrouted steps to the target, matching what a --formula launch
+routes.
+
 When target is omitted, the bead's rig prefix is used to look up the rig's
 default_sling_targets (or default_sling_target) from config and one is chosen
 at random. Requires --formula to have an explicit target.
@@ -1012,6 +1016,9 @@ func printSlingResult(result sling.SlingResult, stdout, _ io.Writer) {
 		fmt.Fprintf(stdout, "Slung %s (with default formula %q) → %s\n", result.BeadID, result.FormulaName, result.Target) //nolint:errcheck
 	default:
 		fmt.Fprintf(stdout, "Slung %s → %s\n", result.BeadID, result.Target) //nolint:errcheck
+	}
+	if result.RoutedMembers > 0 {
+		fmt.Fprintf(stdout, "Routed %d steps of %s → %s\n", result.RoutedMembers, result.BeadID, result.Target) //nolint:errcheck
 	}
 }
 

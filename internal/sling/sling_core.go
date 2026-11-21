@@ -575,7 +575,7 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if hint := rootOnlyVaporPourHint(opts.BeadOrFormula, recipe); hint != "" {
 		result.BeadWarnings = append(result.BeadWarnings, hint)
 	}
-	return finalizeInStore(opts, deps, rootStore, mResult.RootID, method, result)
+	return finalizeInStore(opts, deps, rootStore, mResult.RootID, method, result, nil)
 }
 
 // rootOnlyVaporPourHint returns a sling-time diagnostic when a formula compiled
@@ -883,22 +883,34 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	return withSourceWorkflowLaunchLock(context.Background(), deps, beadID, opts.Force, runGraph)
 }
 
-// slingPlainBead handles plain bead routing (no formula).
+// slingPlainBead handles plain bead routing (no formula). When the bead is an
+// expanded workflow root it first plans the member routing the run needs
+// (issue #9039): `gc formula cook` leaves the run's executable members
+// unrouted and the expanded root itself is never demand (#7497), so a sling
+// that stamped only the root would leave an on-demand pool with no work to
+// wake for.
 func slingPlainBead(opts SlingOpts, deps SlingDeps, beadID string, result SlingResult) (SlingResult, error) {
-	return finalize(opts, deps, beadID, "bead", result)
+	plan, err := planExpandedRootMemberRoutes(opts, deps, beadID)
+	if err != nil {
+		return result, err
+	}
+	return finalizeInStore(opts, deps, beads.WorkMolecule(deps.Store), beadID, "bead", result, plan)
 }
 
 // finalize executes the sling command, records telemetry, sets merge
 // metadata, creates auto-convoy, pokes the controller, and signals nudge.
 func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
-	return finalizeInStore(opts, deps, beads.WorkMolecule(deps.Store), beadID, method, result)
+	return finalizeInStore(opts, deps, beads.WorkMolecule(deps.Store), beadID, method, result, nil)
 }
 
 // finalizeInStore is finalize for a bead held by beadStore rather than by
 // deps.Store: the routing stamp and the merge-strategy stamp go to the store
 // that holds the bead. Auto-convoy bookkeeping stays in deps.Store, the work
-// store convoys live in.
-func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTarget, beadID, method string, result SlingResult) (SlingResult, error) {
+// store convoys live in. memberRoutes, when non-nil, is the expanded-root
+// member routing plan slingPlainBead computed: its patches are written before
+// the root's own route, so a failed member write leaves the root unrouted and
+// the same sling re-run completes the run.
+func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTarget, beadID, method string, result SlingResult, memberRoutes *memberRoutePlan) (SlingResult, error) {
 	a := opts.Target
 
 	// Execute routing -- prefer typed Router, fall back to shell Runner.
@@ -929,6 +941,13 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 		if warning != "" {
 			result.MetadataErrors = append(result.MetadataErrors, warning)
 		}
+	}
+	// Member routes go down before the root's own route: a failed member
+	// write then leaves the root unrouted, so the same sling re-run is not
+	// short-circuited as idempotent and completes the run.
+	if err := memberRoutes.apply(writer, &result); err != nil {
+		telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+		return result, err
 	}
 	slingEnv := ResolveSlingEnvForBead(a, deps, bead)
 	rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, beadID)
@@ -1093,6 +1112,12 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 	// Signal nudge.
 	if opts.Nudge {
 		result.NudgeAgent = &a
+	}
+
+	// A control member gained an execution route: wake the control dispatcher
+	// so the run's controls run without waiting for its next tick.
+	if !opts.SkipPoke && memberRoutes.hasControlPatches() && deps.Notify != nil {
+		deps.Notify.PokeControlDispatch(deps.CityPath)
 	}
 
 	return result, nil

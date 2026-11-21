@@ -2440,6 +2440,7 @@ go_test(
         "skill_skip_log_test.go",
         "skill_supervisor_test.go",
         "sling_beadid_windows_test.go",
+        "sling_cooked_root_demand_test.go",
         "sling_dashboard_link_test.go",
         "sling_formula_split_route_test.go",
         "sling_inherit_stamp_test.go",
