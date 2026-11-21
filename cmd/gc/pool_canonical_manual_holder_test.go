@@ -315,6 +315,114 @@ func TestCanonicalSingletonPool_SeatBesideManualSessionIsReusedNextTick(t *testi
 	}
 }
 
+// TestCanonicalSingletonPool_ManualSessionClaimingTemplateNameStillHoldsSeat
+// guards the carve-out boundary of issue #8945: a manual session releases the
+// pool's identity lease only for identifiers derived from its template. A
+// name it explicitly claimed — an alias or session_name equal to the pool's
+// canonical name — still holds the seat, in both the store gate (dependency
+// path, snapshot not yet seeing the row) and the planner/create gate (request
+// path over a complete snapshot), and no seat bead is created.
+func TestCanonicalSingletonPool_ManualSessionClaimingTemplateNameStillHoldsSeat(t *testing.T) {
+	cases := []struct {
+		name        string
+		alias       string
+		sessionName string
+	}{
+		{name: "alias_claims_template_name", alias: "worker", sessionName: "s-fixer"},
+		{name: "session_name_claims_template_name", alias: "fixer", sessionName: "worker"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"_store_gate", func(t *testing.T) {
+			store := beads.NewMemStore()
+			if _, err := store.Create(beads.Bead{
+				Title:  tc.alias,
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "agent:" + tc.alias},
+				Metadata: map[string]string{
+					"template":       "worker",
+					"agent_name":     "fixer",
+					"alias":          tc.alias,
+					"session_name":   tc.sessionName,
+					"session_origin": "manual",
+					"state":          "asleep",
+					"sleep_reason":   "drained",
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			worker := canonicalSingletonWorker(t)
+			bp := &agentBuildParams{
+				cityPath:     t.TempDir(),
+				beadStore:    store,
+				sessionBeads: &sessionBeadSnapshot{},
+				agents:       []config.Agent{worker},
+			}
+			_, err := selectOrCreateDependencyPoolSessionBead(bp, &worker, "worker")
+			if !errors.Is(err, errPoolSessionNameUnavailable) {
+				t.Fatalf("manual session explicitly claiming %q must hold the pool seat, got err = %v", "worker", err)
+			}
+			assertNoPoolManagedWorkerSeat(t, store)
+		})
+		t.Run(tc.name+"_planner_gate", func(t *testing.T) {
+			store := beads.NewMemStore()
+			if _, err := store.Create(beads.Bead{
+				Title:  tc.alias,
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "agent:" + tc.alias},
+				Metadata: map[string]string{
+					"template":       "worker",
+					"agent_name":     "fixer",
+					"alias":          tc.alias,
+					"session_name":   tc.sessionName,
+					"session_origin": "manual",
+					"state":          "asleep",
+					"sleep_reason":   "drained",
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			worker := canonicalSingletonWorker(t)
+			snapshot := &sessionBeadSnapshot{}
+			for _, b := range sessionBeadsInStore(t, store) {
+				snapshot.addInfo(sessiontest.SeedBead(t, b))
+			}
+			bp := &agentBuildParams{
+				cityPath:     t.TempDir(),
+				beadStore:    store,
+				sessionBeads: snapshot,
+				agents:       []config.Agent{worker},
+			}
+			bp.sessionOccupancyInfos = snapshot.OpenInfos()
+			bp.sessionSnapshotCompletenessKnown = true
+			bp.sessionSnapshotComplete = true
+
+			if _, _, err := selectOrCreatePoolSessionBead(bp, &worker, "worker", nil, map[string]bool{}, map[int]bool{}); !errors.Is(err, errPoolSessionNameUnavailable) {
+				t.Fatalf("manual session explicitly claiming %q must hold the pool seat, got err = %v", "worker", err)
+			}
+			assertNoPoolManagedWorkerSeat(t, store)
+		})
+	}
+}
+
+// assertNoPoolManagedWorkerSeat fails when the store holds any pool-managed
+// bead of the worker template (the guard tests' no-seat invariant).
+func assertNoPoolManagedWorkerSeat(t testing.TB, store beads.Store) {
+	t.Helper()
+	rows := sessionBeadsInStore(t, store)
+	seats := 0
+	for _, b := range rows {
+		if b.Metadata["template"] == "worker" && b.Metadata[poolManagedMetadataKey] == boolMetadata(true) {
+			seats++
+		}
+	}
+	if seats != 0 {
+		t.Fatalf("store holds %d pool-managed worker bead(s), want none", seats)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("store holds %d session beads, want only the manual one", len(rows))
+	}
+}
+
 // sessionBeadsInStore lists the store's session beads for snapshot seeding.
 func sessionBeadsInStore(t testing.TB, store beads.Store) []beads.Bead {
 	t.Helper()
