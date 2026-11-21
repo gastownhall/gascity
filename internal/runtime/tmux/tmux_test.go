@@ -4321,6 +4321,41 @@ func TestConfigureServerReappliesExitEmptyAfterReplacement(t *testing.T) {
 	}
 }
 
+// TestKillServerClosesListenerBeforeReturning verifies against real tmux that
+// once KillServer returns nil, the killed server's listener no longer answers on
+// its named socket, so the next start's preflight cannot see it as live.
+func TestKillServerClosesListenerBeforeReturning(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("settle")
+	tm := NewTmuxWithConfig(cfg)
+	path := tm.namedServerSocketPath()
+	t.Cleanup(func() {
+		if err := tm.KillServer(); err != nil && !errors.Is(err, ErrNoServer) {
+			t.Errorf("tear down test tmux server: %v", err)
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove test tmux socket: %v", err)
+		}
+	})
+
+	if err := tm.NewSessionWithCommand("settle-running", "", "sleep 600"); err != nil {
+		t.Fatalf("start session on %s: %v", cfg.SocketName, err)
+	}
+	if err := tm.KillServer(); err != nil {
+		t.Fatalf("KillServer() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := observeNamedSocket(ctx, path); err != nil {
+		t.Fatalf("observeNamedSocket(%s) right after KillServer = %v, want the listener closed (absent or stale socket)", path, err)
+	}
+}
+
 func mustTmuxServerPID(t *testing.T, tmux *Tmux) string {
 	t.Helper()
 	out, err := tmux.run("list-sessions", "-F", "#{pid}")

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type namedSocketWitness struct {
@@ -311,6 +312,41 @@ func (t *Tmux) observeServerSocket(ctx context.Context, path string) error {
 		observer = observeNamedSocket
 	}
 	return observer(ctx, path)
+}
+
+// killServerSettleTimeout bounds how long KillServer waits for an acknowledged
+// kill-server's listener to stop answering. It is a variable so tests can
+// shorten it.
+var killServerSettleTimeout = 5 * time.Second
+
+// killServerSettlePoll is the interval between socket observations while
+// KillServer waits for the listener to close.
+const killServerSettlePoll = 10 * time.Millisecond
+
+// awaitServerSocketClosed polls the named server socket until its observation
+// reports it absent or stale, bounded by killServerSettleTimeout. A listener
+// still answering at the bound is ErrServerDegraded carrying the last
+// observation the bound did not cut short. The observer receives the bounded
+// context, so a hung observation still ends at the bound.
+func (t *Tmux) awaitServerSocketClosed() error {
+	ctx, cancel := context.WithTimeout(context.Background(), killServerSettleTimeout)
+	defer cancel()
+	path := t.namedServerSocketPath()
+	var last error
+	for {
+		observationErr := t.observeServerSocket(ctx, path)
+		if observationErr == nil {
+			return nil
+		}
+		if ctx.Err() == nil || last == nil {
+			last = observationErr
+		}
+		if sleepWithContext(ctx, killServerSettlePoll) != nil {
+			// Never wrap ErrNoServer: a listener that still answers is not an
+			// absent server, and the next start on this socket would refuse it.
+			return fmt.Errorf("%w: protocol=kill-server-settle path=%s waited=%s observation=%w", ErrServerDegraded, path, killServerSettleTimeout, last)
+		}
+	}
 }
 
 // serverConfirmedDead reports whether the server's socket is missing, or
