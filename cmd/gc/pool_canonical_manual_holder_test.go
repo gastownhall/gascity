@@ -224,3 +224,33 @@ func TestCanonicalSingletonPool_ActiveManualSessionOfTemplateDoesNotHoldSeat(t *
 		}
 	}
 }
+
+func TestCanonicalSingletonPool_SeatBesideManualSessionLeavesManualBeadUnchanged(t *testing.T) {
+	for _, agentName := range []string{"fixer", "worker"} {
+		t.Run("agent_name_"+agentName, func(t *testing.T) {
+			store := beads.NewMemStore()
+			manual := createManualTemplateHolderBead(t, store, "worker", manualTemplateHolderMetadata(agentName, "asleep"))
+			worker := canonicalSingletonWorker(t)
+			bp := canonicalSingletonBuildParams(t, store, worker, nil)
+			info, err := selectOrCreateDependencyPoolSessionBead(bp, &worker, "worker")
+			if err != nil {
+				t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
+			}
+			seat := assertCanonicalWorkerSeat(t, store, info.ID)
+			if got, want := seat.Metadata["session_name"], PoolSessionName("worker", seat.ID); got != want {
+				t.Fatalf("seat session_name = %q, want bead-scoped %q", got, want)
+			}
+
+			after, err := store.Get(manual.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Status != manual.Status {
+				t.Fatalf("manual status = %q, want unchanged %q", after.Status, manual.Status)
+			}
+			if !maps.Equal(after.Metadata, manual.Metadata) {
+				t.Fatalf("manual metadata changed:\n got %#v\nwant %#v", after.Metadata, manual.Metadata)
+			}
+		})
+	}
+}
