@@ -128,6 +128,88 @@ func TestAgentControlDispatcherHasNoProvider(t *testing.T) {
 	}
 }
 
+// TestAgentStartCommandWithoutProviderHasNoProvider pins gastownhall/gascity#8975:
+// ANY agent whose start_command bypasses normal provider-command resolution,
+// not just the SDK's deterministic control dispatcher, reports no provider
+// when it sets none explicitly — the workspace default would be a guess, not
+// a fact. An ordinary agent with no start_command still inherits the
+// workspace default, which proves the fixture is discoverable.
+func TestAgentStartCommandWithoutProviderHasNoProvider(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Workspace.Provider = "claude"
+	state.cfg.Agents = []config.Agent{
+		{Name: "sandboxed", Dir: "myrig", StartCommand: "openshell run -- claude-sonnet", MaxActiveSessions: intPtr(1)},
+		{Name: "coder", Dir: "myrig", MaxActiveSessions: intPtr(1)},
+	}
+	srv := New(state)
+	srv.LookPathFunc = lookPathNotFound
+	h := newTestCityHandlerWith(t, state, srv)
+
+	list := func(t *testing.T) map[string]agentResponse {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/agents"), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /agents status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var resp struct {
+			Items []agentResponse `json:"items"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode /agents: %v", err)
+		}
+		rows := make(map[string]agentResponse, len(resp.Items))
+		for _, item := range resp.Items {
+			rows[item.Name] = item
+		}
+		return rows
+	}
+	get := func(t *testing.T, name string) agentResponse {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/agent/"+name), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /agent/%s status = %d, want %d: %s", name, rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var resp agentResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode /agent/%s: %v", name, err)
+		}
+		return resp
+	}
+
+	sandboxed := "myrig/sandboxed"
+	rows := list(t)
+	for _, tt := range []struct {
+		endpoint string
+		row      agentResponse
+	}{
+		{endpoint: "GET /agents", row: rows[sandboxed]},
+		{endpoint: "GET /agent/" + sandboxed, row: get(t, sandboxed)},
+	} {
+		if tt.row.Name != sandboxed {
+			t.Fatalf("%s: no row for %s (rows=%+v)", tt.endpoint, sandboxed, rows)
+		}
+		if tt.row.Provider != "" || tt.row.DisplayName != "" {
+			t.Errorf("%s: start_command agent provider = %q, display_name = %q; want both empty, the workspace default would be a guess",
+				tt.endpoint, tt.row.Provider, tt.row.DisplayName)
+		}
+	}
+
+	for _, tt := range []struct {
+		endpoint string
+		row      agentResponse
+	}{
+		{endpoint: "GET /agents", row: rows["myrig/coder"]},
+		{endpoint: "GET /agent/myrig/coder", row: get(t, "myrig/coder")},
+	} {
+		if tt.row.Provider != "claude" || tt.row.DisplayName != "Claude Code" {
+			t.Errorf("%s: coder provider = %q, display_name = %q; want the workspace default claude / Claude Code",
+				tt.endpoint, tt.row.Provider, tt.row.DisplayName)
+		}
+	}
+}
+
 // TestSessionToResponseControlDispatcherHasNoProvider pins the session side:
 // a control-dispatcher session records no provider because it has none, so
 // its response must not fill in the workspace default. A session of an
