@@ -1998,8 +1998,13 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		// Fail-closed: a store read error blocks deletion rather than proceeding
 		// unguarded — a degraded store is exactly when accidental mass deletion
 		// is most dangerous.
+		//
+		// The gate counts the run's own deletion plan, and the prune deletes
+		// exactly that plan: one bounded read of the history, at most
+		// orderTrackingRetentionRunBudget beads, the rest left to the next run.
 		retentionPolicy := orderTrackingRetentionPolicyForConfig(cfg)
-		eligible, countErr := countClosedOrderTrackingRetentionEligible(stores, now, retentionPolicy, onlyOrders)
+		retentionPlan := planClosedOrderTrackingRetentionAcrossStores(stores, now, retentionPolicy, onlyOrders, orderTrackingRetentionRunBudget)
+		eligible, countErr := retentionPlan.eligible(), retentionPlan.readErr()
 		threshold := bulkDeleteConfirmThreshold()
 		switch {
 		case countErr != nil:
@@ -2013,7 +2018,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 				eligible, threshold)
 			confirmGateBlocked = true
 		default:
-			retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, retentionPolicy, onlyOrders)
+			retentionResult, retentionErr = retentionPlan.execute()
 			result.trackingDeleted = retentionResult.deleted
 		}
 	}

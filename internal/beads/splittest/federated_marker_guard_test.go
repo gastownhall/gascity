@@ -82,9 +82,8 @@ var reviewedMarkers = map[string]reviewedMarker{
 	"internal/api/huma_handlers_orders.go orderHistoryBeadsAcrossStoreInfos":            {"relic", 1, "order history list per leg"},
 	"internal/api/huma_handlers_orders.go orderHistoryBeadAcrossStoreInfos":             {"relic", 1, "order history by-id probe per leg"},
 	"cmd/gc/order_dispatch.go sweepStaleOrderTrackingWithOptionsLimitMode":              {"relic", 1, "stale tracking sweep's list probe on a scope leg"},
-	"cmd/gc/order_dispatch.go sweepClosedOrderTrackingRetention":                        {"relic", 1, "retention prune's list probe on a scope leg"},
-	"cmd/gc/order_dispatch.go sweepClosedOrderTrackingRetentionBounded":                 {"relic", 1, "bounded retention prune's list probe on a scope leg"},
-	"cmd/gc/order_dispatch.go countClosedOrderTrackingRetentionEligible":                {"relic", 1, "retention count's list probe on a scope leg"},
+	"cmd/gc/order_dispatch.go selectClosedOrderTrackingRetention":                       {"relic", 1, "retention prune's history page probe on a scope leg"},
+	"cmd/gc/order_dispatch.go (*orderTrackingRetentionFloor).below":                     {"relic", 1, "retention prune's per-order floor probe on a scope leg"},
 }
 
 // markerUse is one reference to a read marker found in production code.
