@@ -1,0 +1,127 @@
+formula  = "mol-swarm-vote"
+version  = 1
+type     = "workflow"
+contract = "graph.v2"
+description = """
+Swarm consensus workflow using fast inference providers.
+
+A coordinator step builds a voter roster, the fanout spawns one
+mol-ask-groq molecule per voter in parallel, the tally step reduces
+their gc.output_json answers to a majority verdict, then a final
+report step summarises the outcome.
+
+Dependency: requires the formula_v2 feature flag and the tally+provider
+PRs (#1193, #1194) to be merged before use.
+
+Usage:
+  gc bd mol mol-swarm-vote --var question="Should we adopt approach X?"
+"""
+
+[vars]
+
+[vars.question]
+description = "The question or proposal to put to the swarm"
+required    = true
+
+[vars.voter_count]
+description = "Number of independent voters to consult (odd numbers recommended: 3, 5, 7)"
+default     = "5"
+
+# ── Step 1: Coordinator builds the voter roster ───────────────────────────────
+#
+# This step closes with gc.output_json containing an array of voter configs.
+# The on_complete fanout reads that array and spawns one mol-ask-groq molecule
+# per entry.  The tally control then waits for all voters to close, reads their
+# gc.output_json answers, and reduces them to a majority verdict.
+#
+# Downstream steps (report) are automatically rewritten to wait for the tally
+# control bead rather than this step directly.
+
+[[steps]]
+id       = "vote"
+title    = "Collect swarm votes on: {{question}}"
+provider = "groq"
+description = """
+Initialize the voting round by emitting a voter roster to gc.output_json.
+
+**1. Prime your environment:**
+```bash
+gc prime
+gc bd prime
+```
+
+**2. Build and write a voter roster:**
+```bash
+COUNT={{voter_count}}
+VOTERS=$(python3 -c "
+import json, sys
+n = int(sys.argv[1])
+print(json.dumps({'voters': [{'index': i + 1} for i in range(n)]}))
+" "$COUNT")
+
+gc bd update $BEAD_ID --metadata "gc.output_json=$VOTERS"
+```
+
+**3. Close the bead — this triggers the fanout:**
+```bash
+gc bd close $BEAD_ID
+```
+
+Do not proceed to other work.  The fanout spawns voter molecules
+automatically once this bead closes, and the tally control closes once
+all voters finish.
+
+**What happens next (automated):**
+- `vote-fanout` control spawns {{voter_count}} `mol-ask-groq` molecules
+- Each voter writes `{"answer": "<value>"}` to its `gc.output_json`
+- `vote-tally` control reduces the answers by majority vote
+- `report` step becomes runnable with the consensus result
+"""
+
+[steps.on_complete]
+for_each = "output.voters"
+bond     = "mol-ask-groq"
+parallel = true
+
+[steps.on_complete.vars]
+question = "{{question}}"
+
+[steps.tally]
+vote_field = "answer"
+mode       = "majority"
+
+# ── Step 2: Report the consensus result ──────────────────────────────────────
+#
+# Runs after vote-tally closes.  Reads gc.tally_result from the tally bead
+# and writes a human-readable summary.
+
+[[steps]]
+id       = "report"
+title    = "Report consensus for: {{question}}"
+needs    = ["vote"]
+provider = "groq"
+description = '''
+Summarise the swarm's consensus verdict.
+
+**1. Find the tally bead and read its result:**
+```bash
+# The tally bead title contains "Tally votes for"
+TALLY=$(gc bd list --json | jq -r \
+  '.[] | select(.title | startswith("Tally votes")) | .id' | head -1)
+
+RESULT=$(gc bd show $TALLY --json | jq -r \
+  '.[0].metadata["gc.tally_result"]')
+OUTCOME=$(gc bd show $TALLY --json | jq -r \
+  '.[0].metadata["gc.outcome"]')
+```
+
+**2. Write a consensus summary to this bead's notes:**
+```bash
+gc bd update $BEAD_ID --notes "Consensus: $RESULT ($OUTCOME)"
+```
+
+**3. Close:**
+```bash
+gc bd close $BEAD_ID
+```
+'''
