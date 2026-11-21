@@ -450,7 +450,7 @@ func TestOrderOutcomeHealthy_FlagsRigScopedOrderFailureStreak(t *testing.T) {
 	if result.Severity != SeverityAdvisory {
 		t.Fatalf("severity = %v, want SeverityAdvisory", result.Severity)
 	}
-	if result.Message != "1 order(s) failing repeatedly" {
+	if result.Message != "1 order(s) have repeated failures or incomplete outcomes" {
 		t.Fatalf("message = %q, want it to name exactly 1 failing order", result.Message)
 	}
 	joined := strings.Join(result.Details, "\n")
@@ -515,4 +515,125 @@ func orderOutcomeTestDetailNames(details []string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	const subject = "export:rig:st"
+	completed := events.Event{Type: events.OrderCompleted, Subject: subject, Ts: now}
+	failed := events.Event{Type: events.OrderFailed, Subject: subject, Ts: now, Message: "exit status 1"}
+	incomplete := func(outcome string) events.Event {
+		return events.Event{
+			Type: events.OrderSkipped, Subject: subject, Ts: now,
+			Message: outcome + ": export unavailable; not run: city (export failed)",
+			Payload: events.OrderSkippedPayloadJSON(events.OrderSkippedPayload{
+				OrderName: subject, Outcome: outcome, Reason: "export unavailable",
+				Scopes: []events.OrderSkippedScope{{Scope: "city", Reason: "export failed"}},
+			}),
+		}
+	}
+	partial := incomplete("partial")
+	skipped := incomplete("skipped")
+	// Recording order, rather than wall-clock time, determines which declaration
+	// remains visible. Concurrent completions have no per-run identity here.
+	olderTimestamp := partial
+	olderTimestamp.Ts = now.Add(-time.Hour)
+
+	for _, tt := range []struct {
+		name       string
+		events     []events.Event
+		warning    bool
+		wantDetail string
+		wantStreak int
+	}{
+		{"partial after completion", []events.Event{completed, partial}, true, "partial: export unavailable", 0},
+		{"repeated skipped declarations", []events.Event{completed, skipped, completed, skipped, completed, skipped}, true, "skipped: export unavailable", 0},
+		{"interleaved completions then older timestamp declaration", []events.Event{completed, completed, olderTimestamp}, true, "partial: export unavailable", 0},
+		{"later completion clears declaration", []events.Event{partial, completed}, false, "last run succeeded", 0},
+		{"failure does not clear declaration", []events.Event{completed, partial, failed}, true, "partial: export unavailable", 1},
+		{"declarations preserve failure streak", []events.Event{failed, skipped, failed, partial, failed}, true, "3 consecutive failures", 3},
+		{"completion still resets failure streak", []events.Event{failed, failed, failed, completed, partial}, true, "partial: export unavailable", 0},
+		{"declaration during startup grace", []events.Event{{Type: events.ControllerStarted, Ts: now}, completed, partial}, true, "partial: export unavailable", 0},
+		{"latest declaration supplies detail", []events.Event{completed, skipped, partial}, true, "partial: export unavailable", 0},
+		{"empty declaration message still warns", []events.Event{{Type: events.OrderSkipped, Subject: subject, Ts: now}}, true, "recorded incomplete outcome", 0},
+		{"scheduler events and other orders do not warn", []events.Event{
+			completed,
+			{Type: events.OrderSuppressed, Subject: subject, Ts: now},
+			{Type: events.OrderInapplicable, Subject: subject, Ts: now},
+			{Type: events.OrderSkipped, Subject: "export:rig:other", Ts: now},
+		}, false, "last run succeeded", 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			rigPath := filepath.Join(cityPath, "rigs", "st")
+			rigOrders := filepath.Join(rigPath, "orders")
+			if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg.Rigs = []config.Rig{{Name: "st", Path: rigPath}}
+			cfg.FormulaLayers.Rigs = map[string][]string{"st": {cfg.FormulaLayers.City[0], filepath.Join(rigPath, "formulas")}}
+			writeOrderFiringTestOrderInDir(t, rigOrders, "export", "cooldown", "15m")
+			writeOrderFiringTestEvents(t, cityPath, tt.events...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+			wantStatus := StatusOK
+			if tt.warning {
+				wantStatus = StatusWarning
+			}
+			if result.Status != wantStatus || result.Severity != SeverityAdvisory {
+				t.Fatalf("status/severity = %v/%v, want %v/advisory; details=%v", result.Status, result.Severity, wantStatus, result.Details)
+			}
+			joined := strings.Join(result.Details, "\n")
+			if !strings.Contains(joined, tt.wantDetail) {
+				t.Fatalf("details = %v, want %q", result.Details, tt.wantDetail)
+			}
+			if tt.warning {
+				if strings.Contains(joined, "last run succeeded") || strings.Contains(result.Message, "all scheduled orders succeeding") {
+					t.Fatalf("incomplete or failed outcomes reported as success: %+v", result)
+				}
+				if result.FixHint != "Inspect with: gc order check && gc order history export --rig st" {
+					t.Fatalf("FixHint = %q, want scoped order inspection", result.FixHint)
+				}
+			}
+			log, err := readOrderOutcomeLog(nil, filepath.Join(cityPath, ".gc", "events.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			streak, _, _, _ := consecutiveOrderFailures(log.bySubject[subject], subject, log.starts, orderOutcomeStartGrace)
+			if streak != tt.wantStreak {
+				t.Fatalf("hard-failure streak = %d, want %d", streak, tt.wantStreak)
+			}
+		})
+	}
+}
+
+func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
+	for _, trigger := range []string{"cron", "cooldown", "manual", "disabled"} {
+		t.Run(trigger, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			ordersDir := filepath.Join(cityPath, "orders")
+			switch trigger {
+			case "cron":
+				writeOrderFiringTestOrderInDir(t, ordersDir, "export", "cron", "*/15 * * * *")
+			case "disabled":
+				if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(ordersDir, "export.toml"), []byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"15m\"\nenabled = false\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				writeOrderFiringTestOrderInDir(t, ordersDir, "export", trigger, "15m")
+			}
+			writeOrderFiringTestEvents(t, cityPath, events.Event{Type: events.OrderSkipped, Subject: "export", Message: "skipped: safety gate held"})
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+			wantStatus := StatusOK
+			if trigger == "cron" || trigger == "cooldown" {
+				wantStatus = StatusWarning
+			}
+			if result.Status != wantStatus {
+				t.Fatalf("status = %v, want %v; details=%v", result.Status, wantStatus, result.Details)
+			}
+		})
+	}
 }
