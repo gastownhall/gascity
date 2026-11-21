@@ -550,3 +550,47 @@ func TestRediscoveredNamedBeadWorkDirUsesAliasNotTemplate(t *testing.T) {
 		t.Fatalf("WorkDir collapsed onto the shared template path %q", sharedWorkDir)
 	}
 }
+
+// A no-trigger seat must not carry demand markers inherited from the
+// controller's process environment: passthroughEnv forwards every non-empty
+// GC_* key, so the resolved env has to pin the markers to explicit empty
+// values (tmux unsets keys present with empty strings) or the seat passes the
+// demand gate and emits an unknown-classified demand_claim_divergence.
+func TestNoTriggerSessionClearsInheritedDemandMarkers(t *testing.T) {
+	t.Setenv("GC_SPAWN_ORIGIN", "demand")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "stale-trigger")
+
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{Name: "worker"}
+	bead := beads.Bead{
+		ID: "ga-worker-1",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"agent_name":   "worker",
+			"session_name": "worker-1",
+		},
+	}
+
+	tp, err := resolveTemplateForSessionBeadInfo(params, agent, "worker", nil, seedSessionInfo(bead))
+	if err != nil {
+		t.Fatalf("resolveTemplateForSessionBeadInfo: %v", err)
+	}
+	for _, key := range []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_WORK_BEAD_ID"} {
+		got, ok := tp.Env[key]
+		if !ok || got != "" {
+			t.Errorf("tp.Env[%q] = %q (present=%v), want explicit empty: inherited demand marker leaked into a no-trigger seat", key, got, ok)
+		}
+	}
+}

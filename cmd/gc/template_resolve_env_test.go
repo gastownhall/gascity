@@ -13,6 +13,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/processenv"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestResolveTemplatePrependsGCBinDirToPATH(t *testing.T) {
@@ -394,6 +396,94 @@ func TestResolveTemplatePopulatesOperatorEnvFromOperatorAuthoredLayers(t *testin
 	if _, ok := tp.OperatorEnv["GC_BIN"]; ok {
 		t.Errorf("OperatorEnv[GC_BIN] present, want excluded (agentEnv-generated, not operator-authored)")
 	}
+}
+
+// demandMarkerCityParams is the agentBuildParams fixture for the demand-marker
+// tests: a workspace env, an agent env, and an upstream env that each name a
+// demand-spawn key, so every config-authored layer that merges after
+// passthroughEnv() tries to plant a marker or trigger id on the resolved env.
+func demandMarkerCityParams(t *testing.T) (*agentBuildParams, *config.Agent) {
+	t.Helper()
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	for _, key := range processenv.DemandSpawnEnvKeys {
+		t.Setenv(key, "stale-"+key)
+	}
+	params := &agentBuildParams{
+		cityName: "city",
+		cityPath: cityPath,
+		city: &config.City{Upstreams: map[string]config.UpstreamSpec{
+			"gateway": {Env: map[string]string{"GC_SPAWN_ORIGIN": "upstream-demand"}},
+		}},
+		workspace: &config.Workspace{
+			Provider: "test",
+			Env: map[string]string{
+				"GC_SPAWN_ORIGIN":         "workspace-demand",
+				"GC_TRIGGER_WORK_BEAD_ID": "workspace-trigger",
+			},
+		},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:     "worker",
+		Upstream: "gateway",
+		Env: map[string]string{
+			"GC_TRIGGER_BEAD_ID":        "agent-trigger",
+			"GC_TRIGGER_WORK_STORE_REF": "agent-store",
+		},
+	}
+	return params, agent
+}
+
+// A seat no trigger started must not carry a demand marker or a trigger id
+// from any layer: passthroughEnv() pins the demand-spawn keys empty against
+// the controller's own stale environment, but the workspace, agent, and
+// upstream layers are config-authored and merge after it, so a literal
+// [workspace.env] GC_SPAWN_ORIGIN=demand would pass the drain-time demand
+// gate (recordDemandClaimDivergence keys on that marker) for a seat whose
+// row carries no trigger stamp, and a config-authored GC_TRIGGER_* id would
+// name a trigger the seat was never spawned by. Withheld — present and
+// empty, never deleted — because the session env is an overlay on an
+// environment the child already inherits.
+func TestResolveTemplatePinsInheritedDemandMarkersEmpty(t *testing.T) {
+	params, agent := demandMarkerCityParams(t)
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	assertEnvWithholds(t, "no-trigger resolution env", tp.Env, processenv.DemandSpawnEnvKeys...)
+}
+
+// The demand stamp lands after resolution (resolveTemplateForSessionBeadInfo
+// writes sessionDemandSpawnEnv onto tp.Env), so withholding the demand-spawn
+// keys in resolveTemplate cannot strip a stamped row's marker. The trigger id
+// itself never reaches the session shell (gastownhall/gascity#5738): a
+// stamped row carries the presence-only marker and every GC_TRIGGER_* key
+// stays withheld, so a fresh trigger can never pair with a stale id or store
+// ref. A row with no stamp keeps every demand-spawn key withheld too.
+func TestResolveTemplateForSessionBeadInfoStampsOverInheritedDemandMarkers(t *testing.T) {
+	params, agent := demandMarkerCityParams(t)
+
+	stamped, err := resolveTemplateForSessionBeadInfo(params, agent, agent.QualifiedName(), nil, sessionpkg.Info{TriggerBeadID: "w-new"})
+	if err != nil {
+		t.Fatalf("resolveTemplateForSessionBeadInfo (stamped): %v", err)
+	}
+	if got := stamped.Env["GC_SPAWN_ORIGIN"]; got != demandSpawnOriginValue {
+		t.Errorf("stamped row: GC_SPAWN_ORIGIN = %q, want %q (the stamp must survive the withhold)", got, demandSpawnOriginValue)
+	}
+	assertEnvWithholdsTriggerIDs(t, "stamped row env", stamped.Env)
+
+	unstamped, err := resolveTemplateForSessionBeadInfo(params, agent, agent.QualifiedName(), nil, sessionpkg.Info{})
+	if err != nil {
+		t.Fatalf("resolveTemplateForSessionBeadInfo (unstamped): %v", err)
+	}
+	assertEnvWithholds(t, "unstamped row env", unstamped.Env, processenv.DemandSpawnEnvKeys...)
 }
 
 // TestResolveTemplatePopulatesOperatorEnvWithExplicitProviderSelection covers
