@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -151,5 +152,115 @@ func TestOrderDispatchFailedInstantiationSweptByWatchdog(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "failed-molecule sweep: closed failed chain") {
 		t.Errorf("stderr = %q, want a closed-chain line", stderr.String())
+	}
+}
+
+// sweepReadCounter counts the failed-molecule sweep's discovery reads.
+type sweepReadCounter struct {
+	beads.Store
+	mu    sync.Mutex
+	reads int
+}
+
+func (s *sweepReadCounter) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" && !q.UpdatedBefore.IsZero() {
+		s.mu.Lock()
+		s.reads++
+		s.mu.Unlock()
+	}
+	return s.Store.List(q)
+}
+
+func (s *sweepReadCounter) sweepReads() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
+// seedFailedChain creates a failed workflow root with one failed step in
+// store and returns their IDs.
+func seedFailedChain(t *testing.T, store beads.Store, title string) []string {
+	t.Helper()
+	root, err := store.Create(beads.Bead{Title: title, Metadata: map[string]string{
+		beadmeta.KindMetadataKey:           "workflow",
+		beadmeta.MoleculeFailedMetadataKey: "true",
+	}})
+	if err != nil {
+		t.Fatalf("Create(%s root): %v", title, err)
+	}
+	step, err := store.Create(beads.Bead{Title: title + " step", ParentID: root.ID, Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey:     root.ID,
+		beadmeta.MoleculeFailedMetadataKey: "true",
+	}})
+	if err != nil {
+		t.Fatalf("Create(%s step): %v", title, err)
+	}
+	return []string{root.ID, step.ID}
+}
+
+func assertBeadStatus(t *testing.T, store beads.Store, want string, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != want {
+			t.Errorf("bead %s (%q) status = %q, want %s", id, b.Title, b.Status, want)
+		}
+	}
+}
+
+// AC-5: in a default-config city (no orders, no wisp GC settings) the
+// watchdog sweeps the graph-class store, which is the city work store, and
+// every rig work store that is not suspended, each once per pass, and a
+// second pass inside the watchdog interval issues no sweep read.
+func TestFailedMoleculeSweepWatchdogSweepsEveryStoreOnce(t *testing.T) {
+	city := &sweepReadCounter{Store: beads.NewMemStore()}
+	rig := &sweepReadCounter{Store: beads.NewMemStore()}
+	parked := &sweepReadCounter{Store: beads.NewMemStore()}
+	cityChain := seedFailedChain(t, city, "city chain")
+	rigChain := seedFailedChain(t, rig, "rig chain")
+	parkedChain := seedFailedChain(t, parked, "suspended rig chain")
+
+	var stderr strings.Builder
+	cr := &CityRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{Name: "r1", Path: t.TempDir()},
+				{Name: "r2", Path: t.TempDir(), Suspended: true},
+			},
+		},
+		standaloneCityStore: city,
+		standaloneRigStores: map[string]beads.Store{"r1": rig, "r2": parked},
+		stdout:              io.Discard,
+		stderr:              &stderr,
+		logPrefix:           "gc test",
+	}
+	now := time.Now().Add(failedMoleculeSweepGrace + time.Minute)
+	cr.runFailedMoleculeSweepWatchdog(cr.cfg, now)
+
+	assertBeadStatus(t, city, "closed", cityChain...)
+	assertBeadStatus(t, rig, "closed", rigChain...)
+	assertBeadStatus(t, parked, "open", parkedChain...)
+	if got := city.sweepReads(); got != 1 {
+		t.Errorf("city store sweep reads = %d, want 1 (graph and work are one store)", got)
+	}
+	if got := rig.sweepReads(); got != 1 {
+		t.Errorf("rig store sweep reads = %d, want 1", got)
+	}
+	if got := parked.sweepReads(); got != 0 {
+		t.Errorf("suspended rig store sweep reads = %d, want 0", got)
+	}
+	if want := fmt.Sprintf(`closed failed chain %s (2 bead(s)) in rig "r1" work store`, rigChain[0]); !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want a closed-chain line %q", stderr.String(), want)
+	}
+
+	cr.runFailedMoleculeSweepWatchdog(cr.cfg, now.Add(time.Minute))
+	if got := city.sweepReads() + rig.sweepReads() + parked.sweepReads(); got != 2 {
+		t.Errorf("sweep reads after a pass inside the interval = %d, want still 2", got)
 	}
 }

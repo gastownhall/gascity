@@ -239,6 +239,13 @@ type CityRuntime struct {
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
 
+	// failedMoleculeSweepWatchdogLast is when the orders lane last ran the
+	// failed-molecule sweep; failedMoleculeSweepLastPass holds that pass's
+	// totals until the lane's trace records them. Both are the orders lane's,
+	// touched only under its pass lock.
+	failedMoleculeSweepWatchdogLast time.Time
+	failedMoleculeSweepLastPass     *failedMoleculeSweepPass
+
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
 	svc *workspacesvc.Manager

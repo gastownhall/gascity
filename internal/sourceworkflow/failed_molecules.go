@@ -16,9 +16,10 @@ const FailedMoleculeSweepCloseReason = "failed-molecule sweep: instantiation fai
 
 // FailedMoleculeSweep reports one SweepFailedMolecules pass over one store.
 type FailedMoleculeSweep struct {
-	Chains []string // owner IDs whose chains this pass closed, oldest first
-	Closed int      // beads newly closed
-	More   bool     // sweepable chains remained beyond maxChains
+	Chains      []string // owner IDs whose chains this pass closed, oldest first
+	ChainClosed []int    // beads newly closed per entry of Chains, parallel to it
+	Closed      int      // beads newly closed
+	More        bool     // sweepable chains remained beyond maxChains
 }
 
 // SweepFailedMolecules closes, oldest first and at most maxChains per call,
@@ -104,6 +105,7 @@ func SweepFailedMolecules(store beads.MoleculeTarget, cutoff time.Time, maxChain
 			continue
 		}
 		out.Chains = append(out.Chains, ownerID)
+		out.ChainClosed = append(out.ChainClosed, n)
 	}
 	return out, errors.Join(errs...)
 }

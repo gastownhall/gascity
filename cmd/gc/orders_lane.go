@@ -204,6 +204,18 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 		trace.RecordControllerOperation(TraceSiteOrderDispatch, TraceReasonRetained, TraceOutcomeComplete,
 			"dispatch_orders", time.Since(phaseStart), nil)
 	}
+	if pass := cr.takeFailedMoleculeSweepPass(); pass != nil && trace != nil {
+		outcome := TraceOutcomeComplete
+		if pass.errors > 0 {
+			outcome = TraceOutcomePartial
+		}
+		trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, outcome,
+			"failed_molecule_sweep", pass.duration, traceRecordPayload{
+				"closed_chains": pass.closedChains,
+				"closed_beads":  pass.closedBeads,
+				"errors":        pass.errors,
+			})
+	}
 	if ctx.Err() != nil {
 		return
 	}
