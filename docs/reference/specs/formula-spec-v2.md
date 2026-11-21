@@ -807,7 +807,7 @@ that run as an infrastructure outcome rather than a verdict:
 |---|---|---|
 | `0` | Pass — the step closes | n/a |
 | `75` | Infrastructure unreachable; the check produced no verdict | **No** — re-run attempt-free |
-| any other nonzero carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
+| any other nonzero except `78` carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
 | `78` | The check cannot run on this machine as configured (for example, a module its interpreter needs is missing); the check produced no verdict | **No**, and no infrastructure budget either. The step stays open and the steps that need it stay blocked; the first non-blank stderr line, clipped, is included in `gc.control_pending_reason`. Re-run every sweep until it exits with any other status |
 | any other nonzero | Fail — the verdict is "not yet" | Yes |
 | none: the script ran past `check.timeout` and was stopped | No verdict | **No** — re-run attempt-free under the same budget |
