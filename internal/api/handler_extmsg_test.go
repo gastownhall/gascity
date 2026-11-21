@@ -718,6 +718,69 @@ func TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce(t *testing.T) {
 	}
 }
 
+// TestExtmsgNotifyMembersUnresolvedExplicitTargetMaterializesNothing guards
+// the resolution half of explicit-target delivery: a target that does not
+// resolve without materializing — an unknown name, or the configured named
+// session myrig/worker that has no session bead — creates no session, nudges
+// nothing for the target, and leaves member notices unchanged. An empty
+// target changes nothing at all.
+func TestExtmsgNotifyMembersUnresolvedExplicitTargetMaterializesNothing(t *testing.T) {
+	for _, target := range []string{"myrig/worker", "nobody", ""} {
+		t.Run(fmt.Sprintf("target %q", target), func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+
+			ref := extmsg.ConversationRef{
+				ScopeID:        "guild-1",
+				Provider:       "slack",
+				AccountID:      "acct-1",
+				ConversationID: "C123",
+				Kind:           extmsg.ConversationRoom,
+			}
+			bound := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+				Caller:         caller,
+				Conversation:   ref,
+				SessionID:      bound.ID,
+				BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+				Owner:          extmsg.MembershipOwnerManual,
+				Now:            time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("EnsureMembership(bound): %v", err)
+			}
+			if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
+				t.Fatal("fixture: named session myrig/worker should not exist before notify")
+			}
+
+			srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hello", "", target)
+
+			if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
+				t.Fatalf("explicit target %q materialized a session", target)
+			}
+			nudges := extmsgNudgesBySessionName(fs)
+			if len(nudges) != 1 {
+				t.Fatalf("nudged sessions = %d, want only the member; nudges=%#v", len(nudges), nudges)
+			}
+			boundNudges := nudges[bound.SessionName]
+			if len(boundNudges) != 1 || !strings.Contains(boundNudges[0], "hello") {
+				t.Fatalf("member nudge missing; nudges=%#v", nudges)
+			}
+			if target == "" {
+				if strings.Contains(boundNudges[0], "Addressed to:") {
+					t.Fatalf("empty target produced a discriminator:\n%s", boundNudges[0])
+				}
+			} else if !strings.Contains(boundNudges[0], "Addressed to: @"+target) {
+				t.Fatalf("member nudge missing discriminator for unresolved target:\n%s", boundNudges[0])
+			}
+		})
+	}
+}
+
 // TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
 // pins the member side of explicit-target delivery: when the target of an
 // inbound names a transcript member, that member is notified exactly once —
