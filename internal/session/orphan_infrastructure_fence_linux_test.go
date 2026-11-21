@@ -616,3 +616,155 @@ func TestSameSessionRestartReapsOrphansInOwnAndSupervisorUnits(t *testing.T) {
 		t.Fatalf("restart events = %v, want every termination before the single start", sp.events)
 	}
 }
+
+// writeBDProxyRoot lays out a bd proxy root at root with record as its
+// proxy.pid, and returns the sql-server config path its backend runs from.
+func writeBDProxyRoot(t *testing.T, root string, record string) string {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("listener:\n  port: 32969\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proxy.pid"), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath
+}
+
+// setFakeProcState rewrites the state field of pid's stat.
+func setFakeProcState(t *testing.T, root string, pid int, state string) {
+	t.Helper()
+	path := filepath.Join(root, strconv.Itoa(pid), "stat")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	closeParen := strings.LastIndexByte(text, ')')
+	fields := strings.Fields(text[closeParen+1:])
+	fields[0] = state
+	if err := os.WriteFile(path, []byte(text[:closeParen+1]+" "+strings.Join(fields, " ")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSameSessionRestartDoesNotReachBDProxiedDoltServer pins AC-2 and AC-4 on
+// the pre-start orphan kill: a bd-configured sql-server reparented to init
+// with this session's identity is bd's backend while a live db-proxy-child for
+// its root fronts it, so a same-session restart terminates only the leftover
+// agent and starts. The proof is the cleanup ownership contract — either bd
+// config file name and flag spelling, a sparse record, or one whose unrelated
+// fields cannot satisfy strict endpoint admission — and anything short of a
+// live proxy naming the backend's root proves nothing: the backend is then the
+// orphan it looks like and is terminated with the agent.
+func TestSameSessionRestartDoesNotReachBDProxiedDoltServer(t *testing.T) {
+	const (
+		proxyPID   = 4200
+		backendPID = 4201
+		agentPID   = 4300
+	)
+	for _, tc := range []struct {
+		name string
+		// record is proxy.pid's content; "" writes the ordinary schema-2 record.
+		record string
+		// backendArgv builds the backend's argv from its proxy root.
+		backendArgv func(root string) []string
+		// proxyArgv builds the proxy's argv from its proxy root.
+		proxyArgv func(root string) []string
+		// proxyState, when set, replaces the proxy's stat state.
+		proxyState string
+		// noProxy leaves the proxy out of the process table.
+		noProxy   bool
+		protected bool
+	}{
+		{name: "config.yaml", protected: true},
+		{name: "runtime config with equals flag", protected: true, backendArgv: func(root string) []string {
+			return []string{"/usr/local/bin/dolt", "sql-server", "--config=" + filepath.Join(root, "proxy-child.runtime-config.yaml")}
+		}},
+		{name: "repeated config flag", protected: true, backendArgv: func(root string) []string {
+			return []string{"dolt", "sql-server", "--config", "/elsewhere/config.yaml", "--config", filepath.Join(root, "config.yaml")}
+		}},
+		{name: "sparse record", protected: true, record: `{"pid":4200,"kind":"db-proxy"}`},
+		{name: "fields strict admission refuses", protected: true, record: `{"pid":4200,"kind":"db-proxy","schema":1,"port":0,"birth":{"v":2},"root_id":"not-this-root"}`},
+		{name: "numeric string pid", protected: true, record: `{"pid":" 4200 ","kind":"db-proxy"}`},
+		{name: "dead proxy", noProxy: true},
+		{name: "zombie proxy", proxyState: "Z"},
+		{name: "dead-state proxy", proxyState: "X"},
+		{name: "proxy for another root", proxyArgv: func(string) []string {
+			return []string{"bd", "db-proxy-child", "--root", "/some/other/root"}
+		}},
+		{name: "unrelated process at the proxy pid", proxyArgv: func(root string) []string {
+			return []string{"bd", "list", "--root", root}
+		}},
+		{name: "relative config path", backendArgv: func(string) []string {
+			return []string{"dolt", "sql-server", "--config", "config.yaml"}
+		}},
+		{name: "gc managed dolt config", backendArgv: func(root string) []string {
+			return []string{"dolt", "sql-server", "--config", filepath.Join(root, "dolt-config.yaml")}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := &procfsOrphanProvider{Fake: runtime.NewFake()}
+			city := t.TempDir()
+			mgr := newTestManager(t, store, sp, WithCityPath(city))
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+				t.Fatalf("Suspend: %v", err)
+			}
+			sp.terminated = nil
+			sp.started = nil
+
+			record := tc.record
+			if record == "" {
+				record = `{"pid":4200,"port":35425,"upstream_id":"u","schema":2,"kind":"db-proxy","control_port":46445}`
+			}
+			proxyRoot := filepath.Join(city, ".beads", "dolt")
+			configPath := writeBDProxyRoot(t, proxyRoot, record)
+			backendArgv := []string{"dolt", "sql-server", "--config", configPath}
+			if tc.backendArgv != nil {
+				backendArgv = tc.backendArgv(proxyRoot)
+			}
+			proxyArgv := []string{"/opt/beads/bd-1.3.0", "db-proxy-child", "--root", proxyRoot, "--port", "0"}
+			if tc.proxyArgv != nil {
+				proxyArgv = tc.proxyArgv(proxyRoot)
+			}
+
+			env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_CITY_PATH=" + city}
+			root := t.TempDir()
+			if !tc.noProxy {
+				// The proxy carries no session identity: it is never a root of
+				// this session itself.
+				writeFakeProcess(t, root, proxyPID, 1, proxyArgv, []string{"PATH=/usr/bin"})
+				if tc.proxyState != "" {
+					setFakeProcState(t, root, proxyPID, tc.proxyState)
+				}
+			}
+			writeFakeProcess(t, root, backendPID, 1, backendArgv, env)
+			writeFakeProcess(t, root, agentPID, 1, []string{"claude", "--resume"}, env)
+			proctable.SetScanRootForTesting(t, root)
+
+			if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			want := []int{backendPID, agentPID}
+			if tc.protected {
+				want = []int{agentPID}
+			}
+			got := slices.Clone(sp.terminated)
+			slices.Sort(got)
+			if !slices.Equal(got, want) {
+				t.Fatalf("pre-start orphan kill terminated %v, want %v", got, want)
+			}
+			if len(sp.started) != 1 || sp.started[0] != info.ID {
+				t.Fatalf("started %v, want the resumed session %s", sp.started, info.ID)
+			}
+		})
+	}
+}

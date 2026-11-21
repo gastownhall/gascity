@@ -26,8 +26,8 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
-// rootIsCityInfrastructure classifies a scanned root before the pre-start
-// orphan kill. It is a variable so tests can supply a classification the host
+// rootIsCityInfrastructure is CityInfrastructureRoot's argv classification of a
+// scanned root. It is a variable so tests can supply a classification the host
 // does not produce under `go test`.
 var rootIsCityInfrastructure = proctable.RootIsCityInfrastructure
 
@@ -776,8 +776,8 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. Roots
-// owned elsewhere are left running: city infrastructure
-// (proctable.IsCityInfrastructureRoot) and detached user services
+// owned elsewhere are left running: city infrastructure and bd-owned Dolt
+// servers (CityInfrastructureRoot) and detached user services
 // (proctable.DetachedUserServiceUnit). It returns
 // a non-nil error when an orphan could not be confirmed dead, or, terminating
 // nothing, when the provider claims one of them as a live runtime it does not
@@ -853,14 +853,15 @@ func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate 
 		}
 		// A root carrying this session's identity may be city infrastructure
 		// that merely inherited it: a managed Dolt scope watchdog or bd's
-		// db-proxy-child started from this session's shell. Terminating it
+		// db-proxy-child started from this session's shell, or the Dolt
+		// server a live bd proxy runs (CityInfrastructureRoot). Terminating it
 		// signals its process group and takes the city's Dolt server down
 		// (#6316), so a same-session restart must never reach it. A root that
 		// cannot be classified is left running rather than terminated on a
 		// command line nobody read; where orphanScanErrorsRefuseStart is set
 		// the start is then refused, since the survivor may be this session's
 		// runtime.
-		infrastructure, err := rootIsCityInfrastructure(live)
+		fence, err := CityInfrastructureRoot(live)
 		if err != nil {
 			log.Printf("session: leaving process-table root for %s pid=%d running: %v", sessionID, live.PID, err)
 			if orphanScanErrorsRefuseStart {
@@ -868,8 +869,8 @@ func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate 
 			}
 			continue
 		}
-		if infrastructure {
-			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
+		if fence != "" {
+			log.Printf("session: leaving process-table root for %s pid=%d alone: %s", sessionID, live.PID, fence)
 			continue
 		}
 		// The provider claims this root as a live runtime of its own that it
