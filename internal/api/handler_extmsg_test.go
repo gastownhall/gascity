@@ -781,6 +781,90 @@ func TestExtmsgNotifyMembersUnresolvedExplicitTargetMaterializesNothing(t *testi
 	}
 }
 
+// TestExtmsgNotifyMembersGroupedNoMatchTargetStaysParticipantOnly guards the
+// grouped-room rule of explicit-target delivery: a group route that does not
+// match the target to a participant keeps the room participant-only, so an
+// explicit target naming a live session outside the group is not notified and
+// never falls back to a city-wide selector resolution. Only transcript
+// members hear the message, with the discriminator.
+func TestExtmsgNotifyMembersGroupedNoMatchTargetStaysParticipantOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		selector func(outsider session.Info) string
+	}{
+		{
+			name:     "outsider by session id",
+			selector: func(outsider session.Info) string { return outsider.ID },
+		},
+		{
+			name:     "outsider by alias",
+			selector: func(session.Info) string { return "myrig/outsider" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+
+			ref := extmsg.ConversationRef{
+				ScopeID:        "guild-1",
+				Provider:       "slack",
+				AccountID:      "acct-1",
+				ConversationID: "C123",
+				Kind:           extmsg.ConversationRoom,
+			}
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			group, err := services.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
+				RootConversation: ref,
+				Mode:             extmsg.GroupModeLauncher,
+				DefaultHandle:    "member",
+			})
+			if err != nil {
+				t.Fatalf("EnsureGroup: %v", err)
+			}
+
+			member := createTestSession(t, fs.cityBeadStore, fs.sp, "Member")
+			outsider := createTestSession(t, fs.cityBeadStore, fs.sp, "Outsider")
+			if tc.name == "outsider by alias" {
+				if err := fs.cityBeadStore.Update(outsider.ID, beads.UpdateOpts{
+					Metadata: map[string]string{"alias": "myrig/outsider"},
+				}); err != nil {
+					t.Fatalf("Update(outsider alias): %v", err)
+				}
+			}
+
+			if _, err := services.Groups.UpsertParticipant(context.Background(), caller, extmsg.UpsertParticipantInput{
+				GroupID:   group.ID,
+				Handle:    "member",
+				SessionID: member.ID,
+				Public:    true,
+			}); err != nil {
+				t.Fatalf("UpsertParticipant(member): %v", err)
+			}
+
+			explicitTarget := tc.selector(outsider)
+			srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "status?", "", explicitTarget)
+
+			nudges := extmsgNudgesBySessionName(fs)
+			if got := nudges[outsider.SessionName]; len(got) != 0 {
+				t.Fatalf("grouped no-match target nudges = %d, want 0; nudges=%#v", len(got), nudges)
+			}
+			memberNudges := nudges[member.SessionName]
+			if len(memberNudges) != 1 || !strings.Contains(memberNudges[0], "status?") {
+				t.Fatalf("member nudges = %v, want exactly one carrying the text; nudges=%#v", memberNudges, nudges)
+			}
+			if !strings.Contains(memberNudges[0], "Addressed to: @"+explicitTarget) {
+				t.Fatalf("member nudge missing discriminator:\n%s", memberNudges[0])
+			}
+			if len(nudges) != 1 {
+				t.Fatalf("nudged sessions = %d, want only the member; nudges=%#v", len(nudges), nudges)
+			}
+		})
+	}
+}
+
 // TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
 // pins the member side of explicit-target delivery: when the target of an
 // inbound names a transcript member, that member is notified exactly once —
