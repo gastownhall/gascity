@@ -198,3 +198,29 @@ func TestCanonicalSingletonPool_GuardedCreateBesideManualSession(t *testing.T) {
 		t.Fatalf("next tick selected %q, want seat %q", selected.ID, seat.ID)
 	}
 }
+
+func TestCanonicalSingletonPool_ActiveManualSessionOfTemplateDoesNotHoldSeat(t *testing.T) {
+	for _, agentName := range []string{"fixer", "worker"} {
+		for _, populated := range []bool{false, true} {
+			name := "agent_name_" + agentName + "/empty_snapshot"
+			if populated {
+				name = "agent_name_" + agentName + "/populated_snapshot"
+			}
+			t.Run(name, func(t *testing.T) {
+				store := beads.NewMemStore()
+				manual := createManualTemplateHolderBead(t, store, "worker", manualTemplateHolderMetadata(agentName, "active"))
+				var snapshot []beads.Bead
+				if populated {
+					snapshot = []beads.Bead{manual}
+				}
+				worker := canonicalSingletonWorker(t)
+				bp := canonicalSingletonBuildParams(t, store, worker, snapshot)
+				info, err := selectOrCreateDependencyPoolSessionBead(bp, &worker, "worker")
+				if err != nil {
+					t.Fatalf("selectOrCreateDependencyPoolSessionBead beside active manual session: %v", err)
+				}
+				assertCanonicalWorkerSeat(t, store, info.ID)
+			})
+		}
+	}
+}
