@@ -29,6 +29,7 @@ go_library(
 go_test(
     name = "proxyendpoint_test",
     srcs = [
+        "backend_test.go",
         "birth_linux_test.go",
         "birth_test.go",
         "idle_test.go",

@@ -450,6 +450,14 @@ func writeBDProxiedBackend(s *procSweep, proxyPID, backendPID int) bdProxiedBack
 	return b
 }
 
+// writeProxyRecord replaces a proxy root's proxy.pid with record verbatim.
+func writeProxyRecord(t *testing.T, root, record string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, proxyendpoint.PIDFileName), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // AC-1: a bd-configured sql-server reparented to init with an ended session's
 // identity is bd's backend, not that session's orphan, while a live bd proxy
 // for its root fronts it. The sweep reaps the genuine agent orphan beside it,
@@ -545,5 +553,78 @@ func writeFakeProcState(t *testing.T, root string, pid int, state string) {
 	fields[0] = state
 	if err := os.WriteFile(path, []byte(text[:closeParen+1]+" "+strings.Join(fields, " ")), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// AC-4: the sweep's protection rests on the cleanup ownership contract, not on
+// strict endpoint admission: either bd config file name and either flag
+// spelling, a sparse record, or one whose unrelated fields a newer bd retyped
+// still proves a live proxy owns the backend. Anything short of a live
+// db-proxy-child naming the backend's root proves nothing, and the backend is
+// reaped as the orphan it then is.
+func TestSweepProcessTableOrphansBDProxiedDoltServerOwnershipShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// edit reshapes the live proxy root and its processes before the sweep.
+		edit      func(s *procSweep, b bdProxiedBackend)
+		protected bool
+	}{
+		{name: "config.yaml", protected: true, edit: func(*procSweep, bdProxiedBackend) {}},
+		{name: "config.yaml with equals flag", protected: true, edit: func(s *procSweep, b bdProxiedBackend) {
+			writeFakeProcCmdline(s.t, s.root, b.backendPID, "dolt", "sql-server", "--config="+b.configPath)
+		}},
+		{name: "port-moved runtime config", protected: true, edit: func(s *procSweep, b bdProxiedBackend) {
+			writeFakeProcCmdline(s.t, s.root, b.backendPID, "/opt/dolt/bin/dolt", "sql-server", "--config="+filepath.Join(b.root, proxyendpoint.RuntimeConfigFileName))
+		}},
+		{name: "sparse record", protected: true, edit: func(s *procSweep, b bdProxiedBackend) {
+			writeProxyRecord(s.t, b.root, `{"pid":4200,"kind":"db-proxy"}`)
+		}},
+		{name: "unfamiliar and retyped fields", protected: true, edit: func(s *procSweep, b bdProxiedBackend) {
+			writeProxyRecord(s.t, b.root, `{"pid":"4200","kind":"db-proxy","schema":"two","port":"x","birth":{"boot":"b"},"root_id":7,"extra":[1]}`)
+		}},
+		{name: "versioned bd binary", protected: true, edit: func(s *procSweep, b bdProxiedBackend) {
+			writeFakeProcCmdline(s.t, s.root, b.proxyPID, "/opt/beads/bd-1.3.0-rc.2", proxyendpoint.ChildVerb, "--root", b.root)
+		}},
+		{name: "dead proxy", edit: func(s *procSweep, b bdProxiedBackend) {
+			if err := os.RemoveAll(filepath.Join(s.root, strconv.Itoa(b.proxyPID))); err != nil {
+				s.t.Fatal(err)
+			}
+		}},
+		{name: "proxy for another root", edit: func(s *procSweep, b bdProxiedBackend) {
+			writeFakeProcCmdline(s.t, s.root, b.proxyPID, "bd", proxyendpoint.ChildVerb, "--root", filepath.Join(s.cityPath, "rigs", "other", ".beads", "dolt"))
+		}},
+		{name: "record of the dolt backend, not the proxy", edit: func(s *procSweep, b bdProxiedBackend) {
+			writeProxyRecord(s.t, b.root, `{"pid":4200,"kind":"dolt-backend"}`)
+		}},
+		{name: "record without a pid", edit: func(s *procSweep, b bdProxiedBackend) {
+			writeProxyRecord(s.t, b.root, `{"kind":"db-proxy"}`)
+		}},
+		{name: "relative config path", edit: func(s *procSweep, b bdProxiedBackend) {
+			writeFakeProcCmdline(s.t, s.root, b.backendPID, "dolt", "sql-server", "--config", ".beads/dolt/config.yaml")
+		}},
+		{name: "gc managed dolt config", edit: func(s *procSweep, b bdProxiedBackend) {
+			cfg := filepath.Join(b.root, "dolt-config.yaml")
+			writeFakeProcCmdline(s.t, s.root, b.backendPID, "dolt", "sql-server", "--config", cfg)
+		}},
+		{name: "not a sql-server", edit: func(s *procSweep, b bdProxiedBackend) {
+			writeFakeProcCmdline(s.t, s.root, b.backendPID, "dolt", "sql-client", "--config", b.configPath)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newProcSweep(t)
+			b := writeBDProxiedBackend(s, 4200, 4201)
+			t.Cleanup(func() { fencedInfrastructureRoots.put(normalizePathForCompare(s.cityPath), nil) })
+			tc.edit(s, b)
+
+			pids, log := s.sweep(nil, sweepClosed, nil)
+			var want []int
+			if !tc.protected {
+				want = []int{b.backendPID}
+			}
+			wantPIDs(t, tc.name, pids, want...)
+			if tc.protected && !strings.Contains(log, "live bd proxy pid=4200") {
+				t.Fatalf("stderr %q does not name the protecting proxy", log)
+			}
+		})
 	}
 }
