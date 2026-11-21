@@ -41,17 +41,26 @@ func hookClaimCandidateIsGraphStep(candidate beads.Bead) bool {
 }
 
 // hookClaimExactPlan builds the exact claim of candidate from the work query's
-// observation of it: the observed status and identity keys are the claim's
-// preconditions, and the claim's effects are the transition to in_progress
-// (plus the assignee when assign is set, i.e. the bead is unassigned). A
-// routing or group key the projection did not carry is left unfenced rather
-// than fenced on an absent value it never saw.
-func hookClaimExactPlan(candidate beads.Bead, actor string, assign bool) molecule.ClaimExactRequest {
+// observation of it: the observed status, assignee and identity keys are the
+// claim's preconditions, and the claim's effects are the transition to
+// in_progress (plus the assignee when assign is set, i.e. the bead is
+// unassigned). A routing or group key the projection did not carry is left
+// unfenced rather than fenced on an absent value it never saw.
+//
+// reclaimed means this invocation just reverted the candidate's stale lease:
+// the observation predates that revert, so the claim is fenced on the open,
+// unassigned row the reclaim left instead of the observed lease.
+func hookClaimExactPlan(candidate beads.Bead, actor string, assign, reclaimed bool) molecule.ClaimExactRequest {
 	status := strings.TrimSpace(candidate.Status)
+	assignee := strings.TrimSpace(candidate.Assignee)
+	if reclaimed {
+		status, assignee = "open", ""
+	}
 	stepID := candidate.Metadata[beadmeta.StepIDMetadataKey]
 	rootID := candidate.Metadata[beadmeta.RootBeadIDMetadataKey]
 	want := molecule.ClaimExactPreconditions{
 		Status:     &status,
+		Assignee:   &assignee,
 		StepID:     &stepID,
 		RootBeadID: &rootID,
 	}
@@ -74,12 +83,12 @@ func hookClaimExactPlan(candidate beads.Bead, actor string, assign bool) molecul
 // graph step goes through ops.ClaimExact and never falls back to ops.Claim;
 // every other candidate keeps the --claim path. assign is whether the claim
 // sets the assignee (the candidate is unassigned) rather than promoting a bead
-// already assigned to actor.
+// already assigned to actor; reclaimed is hookClaimExactPlan's.
 //
 // A rejected exact claim is named on stderr: the caller reports it as a lost
 // race, and bead.claim_rejected names only a rival owner, which a moved step
 // identity does not have.
-func claimHookCandidate(ctx context.Context, candidate beads.Bead, actor string, assign bool, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, hookClaimVerdict, error) {
+func claimHookCandidate(ctx context.Context, candidate beads.Bead, actor string, assign, reclaimed bool, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, hookClaimVerdict, error) {
 	if !hookClaimCandidateIsGraphStep(candidate) {
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, actor)
 		if ok {
@@ -87,7 +96,7 @@ func claimHookCandidate(ctx context.Context, candidate beads.Bead, actor string,
 		}
 		return claimed, hookClaimVerdictNone, err
 	}
-	claimed, verdict, err := ops.ClaimExact(ctx, dir, opts.Env, actor, hookClaimExactPlan(candidate, actor, assign))
+	claimed, verdict, err := ops.ClaimExact(ctx, dir, opts.Env, actor, hookClaimExactPlan(candidate, actor, assign, reclaimed))
 	if err == nil && verdict == hookClaimVerdictRejected {
 		fmt.Fprintf(stderr, "gc hook --claim: exact claim of %s rejected: the bead no longer matches the work query's observation of it\n", candidate.ID) //nolint:errcheck
 	}

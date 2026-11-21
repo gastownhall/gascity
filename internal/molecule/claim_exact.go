@@ -23,6 +23,7 @@ var ErrClaimGenerationReserved = errors.New("claim exact: onSuccess.Metadata mus
 // the bead's current value exactly.
 type ClaimExactPreconditions struct {
 	Status            *string
+	Assignee          *string
 	RoutedTo          *string
 	RootBeadID        *string
 	StepID            *string
@@ -115,7 +116,7 @@ type ClaimExactResult struct {
 }
 
 // ClaimExact claims the single bead id only when want's fields match the
-// bead's current status/routing/root/step/group and the bead's current
+// bead's current status/assignee/routing/root/step/group and the bead's current
 // beadmeta.ClaimGenerationMetadataKey equals fromGeneration. On a match it
 // atomically advances the generation key by one AND applies onSuccess
 // (typically execution identity: Assignee, DirectSessionID/SessionName
@@ -254,6 +255,9 @@ func claimExactPreconditionsMatch(b beads.Bead, want ClaimExactPreconditions) bo
 		return false
 	}
 	if want.RoutedTo != nil && b.Metadata[beadmeta.RoutedToMetadataKey] != *want.RoutedTo {
+		return false
+	}
+	if want.Assignee != nil && b.Assignee != *want.Assignee {
 		return false
 	}
 	if want.RootBeadID != nil && b.Metadata[beadmeta.RootBeadIDMetadataKey] != *want.RootBeadID {

@@ -153,3 +153,68 @@ func TestHookClaimExactFencesObservedStepID(t *testing.T) {
 		t.Fatalf("work-2 = status %q assignee %q, want in_progress owned by this session", got.Status, got.Assignee)
 	}
 }
+
+// TestHookClaimExactFencesObservedAssignee: a graph step observed open and
+// assigned to this session (ready tier), or open and unassigned (eligible
+// tier), went to another worker before the claim ran. Nothing is written and
+// the other worker keeps the bead. A stale lease this invocation reclaimed is
+// claimed from the open, unassigned row the reclaim left.
+func TestHookClaimExactFencesObservedAssignee(t *testing.T) {
+	const self, other = "gc__role-mc-sess1", "other-worker"
+	for _, tc := range []struct {
+		name             string
+		observedAssignee string
+	}{
+		{name: "ready tier", observedAssignee: self},
+		{name: "eligible tier", observedAssignee: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExactClaimFixture(t)
+			f.add(
+				beads.Bead{ID: "work-1", Title: "taken", Status: "open", Assignee: other, Metadata: graphStepMeta("build")},
+				beads.Bead{ID: "work-1", Status: "open", Assignee: tc.observedAssignee, Metadata: graphStepMeta("build")},
+			)
+
+			var stdout, stderr bytes.Buffer
+			doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), f.ops(), &stdout, &stderr)
+
+			if len(f.claims) != 0 {
+				t.Fatalf("--claim ran for graph steps %v, want none", f.claims)
+			}
+			if strings.Contains(stdout.String(), `"action":"work"`) {
+				t.Fatalf("handed out work: %s", stdout.String())
+			}
+			got := f.get("work-1")
+			if got.Status != "open" || got.Assignee != other {
+				t.Fatalf("work-1 = status %q assignee %q, want open and still %s's", got.Status, got.Assignee, other)
+			}
+			if v, ok := got.Metadata[beadmeta.ClaimGenerationMetadataKey]; ok {
+				t.Fatalf("work-1 carries %s=%q, want it unwritten", beadmeta.ClaimGenerationMetadataKey, v)
+			}
+		})
+	}
+
+	t.Run("reclaimed lease", func(t *testing.T) {
+		f := newExactClaimFixture(t)
+		f.add(
+			beads.Bead{ID: "work-1", Title: "stale", Status: "in_progress", Assignee: "stale-worker", Metadata: graphStepMeta("build")},
+			beads.Bead{ID: "work-1", Status: "in_progress", Assignee: "stale-worker", Metadata: graphStepMeta("build")},
+		)
+		ops := f.ops()
+		ops.ReclaimStale = func(_ context.Context, _ string, _ []string, id string) (bool, string, error) {
+			open, none := "open", ""
+			return true, "stale-worker", f.store.Update(id, beads.UpdateOpts{Status: &open, Assignee: &none})
+		}
+		ops.EmitHookClaimReclaimedStale = func(string, string, string) {}
+		opts := poolClaimOpts()
+		opts.AutoReclaimStaleClaims = true
+
+		var stdout, stderr bytes.Buffer
+		if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+			t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if got := f.get("work-1"); got.Status != "in_progress" || got.Assignee != self {
+			t.Fatalf("work-1 = status %q assignee %q, want in_progress owned by this session; stderr=%s", got.Status, got.Assignee, stderr.String())
+		}
+	})
+}
