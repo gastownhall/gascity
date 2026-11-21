@@ -22,6 +22,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -303,33 +304,43 @@ func TestFreshCycleRepro_ClaimAfterTickReadRetainsSession(t *testing.T) {
 
 // ga-pvjbx3 Q2 over a primed CachingStore (deploy gate ga-1rax433). The
 // controller's rig legs are CachingStores, and CachingStore.Get answers a
-// primed, undirtied row without touching the backing store. A close made by
-// another process (`bd close`) reaches the backing store alone, so the cache
-// still reports the anchor in_progress. The Q2 recheck must read through the
-// cache to the backing row, or it reports a closed anchor as live and the
-// session is cycled onto work that no longer exists.
-func TestFreshAnchorBeadTerminal_BypassesPrimedCacheOnExternalClose(t *testing.T) {
+// primed, undirtied row without touching the backing store. A close or a
+// release made by another process (`bd close`, `bd update --assignee`)
+// reaches the backing store alone, so the cache still reports the anchor
+// in_progress and assigned. The Q2 recheck must read through the cache to
+// the backing row, or it judges a closed or released anchor as still this
+// session's and the session is cycled onto work that is no longer its own.
+func TestFreshAnchorLiveRow_BypassesPrimedCacheOnExternalClose(t *testing.T) {
 	backing := reproMemStore()
 	reproCreate(t, backing, beads.Bead{ID: "ga-anchor", Title: "anchor", Type: "task", Status: "in_progress", Assignee: "witness"})
 	cached := beads.NewCachingStore(backing, nil)
 	if err := cached.PrimeActive(); err != nil {
 		t.Fatalf("priming the cache: %v", err)
 	}
-	if before, err := cached.Get("ga-anchor"); err != nil || before.Status != "in_progress" {
-		t.Fatalf("precondition: the primed cache must report the anchor in_progress, got %+v (err %v)", before, err)
+	if before, err := cached.Get("ga-anchor"); err != nil || before.Status != "in_progress" || before.Assignee != "witness" {
+		t.Fatalf("precondition: the primed cache must report the anchor in_progress for witness, got %+v (err %v)", before, err)
 	}
-	reproCloseForReal(t, backing, "ga-anchor") // another process closes it; the cache is not told
+	// Another process hands the anchor off and closes it; the cache is not told.
+	other := "another-session"
+	if err := backing.Update("ga-anchor", beads.UpdateOpts{Assignee: &other}); err != nil {
+		t.Fatalf("reassigning the backing row: %v", err)
+	}
+	reproCloseForReal(t, backing, "ga-anchor")
 
-	control, err := freshAnchorBeadTerminal(residencyTopologyForCity("", nil, backing, nil), "ga-anchor")
-	if err != nil || !control {
-		t.Fatalf("uncached control: terminal = %v, err = %v; want terminal", control, err)
+	cfg := &config.City{Workspace: config.Workspace{Name: "c"}}
+	legsOver := func(store beads.Store) WorkLegs {
+		return workLegsFromCensus(t.TempDir(), cfg, cityWorkLegOf(beads.WorkStore{Store: store}), nil)
 	}
-	terminal, err := freshAnchorBeadTerminal(residencyTopologyForCity("", nil, cached, nil), "ga-anchor")
+	control, err := freshAnchorLiveRow(legsOver(backing), "ga-anchor")
+	if err != nil || control.Status != "closed" || control.Assignee != other {
+		t.Fatalf("uncached control: row = %+v, err = %v; want the closed row assigned to %s", control, err, other)
+	}
+	row, err := freshAnchorLiveRow(legsOver(cached), "ga-anchor")
 	if err != nil {
 		t.Fatalf("primed cache: %v", err)
 	}
-	if !terminal {
-		t.Fatal("the Q2 recheck read the primed cache row and reported a closed anchor non-terminal; the uncached control reports it terminal")
+	if row.Status != "closed" || row.Assignee != other {
+		t.Fatalf("the Q2 recheck read the primed cache row (status %q, assignee %q); the uncached control reads closed for %s", row.Status, row.Assignee, other)
 	}
 }
 
@@ -409,4 +420,30 @@ func TestFreshCycleRepro_ExternalHandoffThroughPrimedCacheDoesNotDefer(t *testin
 			assertCycled(t, env, session, "ga-prev was handed to another agent by a process the cache never saw, so the live assignee is no longer this session and row A must not defer")
 		})
 	}
+}
+
+// ga-js5soe (#9320): the tick snapshot still shows anchor ga-anchor claimed
+// by this session, but the session has since released it
+// (`bd update ga-anchor --assignee "" --status open`) and is about to run its
+// hand-back sling. The live anchor row is open and unassigned: it is no longer
+// this session's work, so the stale snapshot must not kill the session between
+// release and sling.
+func TestFreshCycleRepro_AnchorReleasedAfterSnapshotDoesNotCycle(t *testing.T) {
+	env, session, sessionName := freshCycleReproEnv(t, map[string]string{
+		"awake_started_at": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+	})
+	rig := reproMemStore()
+	reproCreate(t, rig, beads.Bead{ID: "ga-prev", Title: "previous", Type: "task", Status: "in_progress", Assignee: "witness"})
+	reproCloseForReal(t, rig, "ga-prev")
+	reproCreate(t, rig, beads.Bead{ID: "ga-anchor", Title: "handed back", Type: "task", Status: "in_progress", Assignee: "witness"})
+	staleSnapshot, _ := rig.Get("ga-anchor") // what the slow tick still holds
+	empty, open := "", "open"
+	if err := rig.Update("ga-anchor", beads.UpdateOpts{Assignee: &empty, Status: &open}); err != nil {
+		t.Fatalf("releasing ga-anchor: %v", err)
+	}
+	env.setSessionMetadata(&session, map[string]string{sessionpkg.CurrentBeadIDKey: "ga-prev"})
+
+	reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{staleSnapshot}, map[string]beads.Store{"gascity": rig})
+
+	assertNotCycled(t, env, session, sessionName, "the session released ga-anchor after the snapshot; the live anchor is open and unassigned")
 }
