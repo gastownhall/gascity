@@ -1,6 +1,9 @@
 package beadmeta
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // Named subsets of the gc.kind vocabulary. The sets are DATA: which kinds a
 // dispatcher executes, which trigger the graph contract, and what to do per
@@ -156,4 +159,35 @@ var GraphContractMetadataKinds = []string{
 // this composition.
 var EngineMintedOnlyKinds = []string{
 	KindFanout,
+}
+
+// IsBoundWorkflowStep reports whether a bead is a workflow member bound to a
+// root other than itself: gc.root_bead_id is set and names another bead.
+// Materialization stamps every step with its root (molecule.go), the root
+// included but self-referentially, so a foreign root means "member of a
+// workflow molecule, executed by the session that owns the root".
+//
+// Kinds that name their own executable unit are not bound steps, whatever
+// root they carry: KindTask (a dispatch attempt root, whose release routing
+// is the dispatch pool's own contract), KindWorkflow and KindWisp
+// (executable molecule roots). Everything else with a foreign root — a
+// compiler-minted work step (no gc.kind at all), a spec sidecar, a control
+// bead — is bound.
+//
+// city-8ym: no release path may detach a bound step to the shared pool when
+// its owner dies. It stays assigned to its owning session for its whole
+// lifetime; the witness's orphan salvage, acting on a stamped, alerted
+// claim, is the only thing that ever moves one. (The release seam in cmd/gc
+// carves one exception above this predicate: a mol-do-work drain step, the
+// molecule's designed hand-off — see cmd/gc stepBoundToSeat.)
+func IsBoundWorkflowStep(id string, metadata map[string]string) bool {
+	root := strings.TrimSpace(metadata[RootBeadIDMetadataKey])
+	if root == "" || root == strings.TrimSpace(id) {
+		return false
+	}
+	switch strings.TrimSpace(metadata[KindMetadataKey]) {
+	case KindTask, KindWorkflow, KindWisp:
+		return false
+	}
+	return true
 }
