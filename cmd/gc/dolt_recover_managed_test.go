@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -451,7 +452,7 @@ func TestRecoverManagedDoltProcessWithOps(t *testing.T) {
 			}
 
 			gotReport, gotErr := recoverManagedDoltProcessWithOps(
-				cityPath, "127.0.0.1", "3306", "root", "warning", 2*time.Second, ops,
+				cityPath, "127.0.0.1", "3306", "root", "warning", 2*time.Second, withRefusedManagedDoltEndpoint(ops),
 			)
 			if gotReport != tt.wantReport {
 				t.Errorf("report = %+v, want %+v", gotReport, tt.wantReport)
@@ -635,6 +636,21 @@ func setupRecoveryTestCity(t *testing.T) string {
 	return cityPath
 }
 
+// withRefusedManagedDoltEndpoint makes the unresponsiveness gate observe a
+// refused endpoint that no process holds, so a failed probe takes the
+// conclusive stop/start path without dialing or scanning the test host: a
+// Dolt or MySQL server on the default port would otherwise turn the expected
+// restart into a deferral.
+func withRefusedManagedDoltEndpoint(ops managedDoltRecoveryOps) managedDoltRecoveryOps {
+	ops.observeEndpoint = func(string, string) managedDoltEndpointObservation {
+		return managedDoltEndpointObservation{State: managedDoltEndpointRefused, Err: syscall.ECONNREFUSED}
+	}
+	ops.identify = func(string, string) (managedDoltServerIncarnation, error) {
+		return managedDoltServerIncarnation{}, errors.New("no live process identified as the listener")
+	}
+	return ops
+}
+
 func writeRecoveryRuntimeState(t *testing.T, cityPath string, pid, port int) {
 	t.Helper()
 	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), doltRuntimeState{
@@ -743,7 +759,7 @@ func TestRecoverManagedDolt_ProceedsWhenProbeUnreachable(t *testing.T) {
 		return preflightErr
 	}
 
-	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", "3306", "root", "warning", 10*time.Second)
+	report, err := recoverManagedDoltProcessWithOps(cityPath, "127.0.0.1", "3306", "root", "warning", 10*time.Second, withRefusedManagedDoltEndpoint(defaultManagedDoltRecoveryOps()))
 	if !errors.Is(err, preflightErr) {
 		t.Fatalf("recoverManagedDoltProcess error = %v, want preflight cleanup sentinel", err)
 	}
@@ -807,7 +823,7 @@ func TestRecoverManagedDolt_ProceedsWhenHealthCheckErrors(t *testing.T) {
 		return fmt.Errorf("stop: expected — no real dolt process")
 	}
 
-	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", "3306", "root", "warning", 10*time.Second)
+	report, err := recoverManagedDoltProcessWithOps(cityPath, "127.0.0.1", "3306", "root", "warning", 10*time.Second, withRefusedManagedDoltEndpoint(defaultManagedDoltRecoveryOps()))
 	if err == nil {
 		t.Fatal("expected error when health check fails and recovery proceeds to stop/start")
 	}

@@ -2935,8 +2935,11 @@ type DaemonConfig struct {
 	// DoltUnresponsiveRestartAfter is how long a managed dolt server that still
 	// accepts TCP connections must keep failing SQL probes, as the same
 	// verified server incarnation with no healthy observation in between,
-	// before automatic recovery may restart it. A single timed-out probe never
-	// restarts a listening server under a positive window. Duration string
+	// before automatic recovery may restart it. A failure that comes more than
+	// this window after the previous failed probe, or more than two minutes
+	// after it when the window is shorter, starts a fresh window instead of
+	// extending the streak. A single timed-out probe never restarts a
+	// listening server under a positive window. Duration string
 	// (e.g., "180s", "5m"). Defaults to "180s". "0s" removes the delay for a
 	// positively observed listening server; it never authorizes a restart
 	// from an inconclusive observation. Negative or malformed values are

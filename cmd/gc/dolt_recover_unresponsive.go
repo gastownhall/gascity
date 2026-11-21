@@ -352,7 +352,7 @@ func (g managedDoltRecoveryGate) evaluate(failure error) error {
 	if window == 0 {
 		return g.authorizeStop(base, ident, managedDoltRecoveryReasonWindowDisabled, failure)
 	}
-	since := history.openStreak(normalizePathForCompare(g.cityPath), g.endpoint(), ident)
+	since := history.openStreak(normalizePathForCompare(g.cityPath), g.endpoint(), ident, now, managedDoltRecoveryStreakStaleAfter(window))
 	if since.IsZero() {
 		base.Reason = managedDoltRecoveryReasonFirstObservation
 		base.UnresponsiveSince = now
@@ -575,12 +575,31 @@ func (h managedDoltRecoveryHistory) note() string {
 	return fmt.Sprintf("; ignored %d malformed recovery record(s) in dolt.log", h.Malformed)
 }
 
+// managedDoltRecoveryStreakGapCooldowns is how many recovery cooldowns may
+// separate two failed observations of one unresponsiveness streak. Recovery
+// records at most one decision per cooldown, so four cooldowns tolerate three
+// missed observations of a server that stays unresponsive.
+const managedDoltRecoveryStreakGapCooldowns = 4
+
+// managedDoltRecoveryStreakStaleAfter returns how long an unresponsiveness
+// streak stays open after its newest failed observation: the restart window,
+// and never less than managedDoltRecoveryStreakGapCooldowns recovery
+// cooldowns, so a short window still spans observations a cooldown apart.
+func managedDoltRecoveryStreakStaleAfter(window time.Duration) time.Duration {
+	return max(window, managedDoltRecoveryStreakGapCooldowns*providerRecoverCooldown())
+}
+
 // openStreak returns the start of the unresponsiveness streak for ident on
-// endpoint, or zero when none is open. Healthy and stop decisions close a
-// streak, a positive observation of another incarnation replaces it, and
-// inconclusive deferrals neither open nor advance it.
-func (h managedDoltRecoveryHistory) openStreak(scope, endpoint string, ident managedDoltServerIncarnation) time.Time {
-	var since time.Time
+// endpoint at now, or zero when none is open. Healthy and stop decisions close
+// a streak, a positive observation of another incarnation replaces it, and
+// inconclusive deferrals neither open nor advance it. Each record carries the
+// streak start its writer computed, so a later start supersedes an earlier
+// one. A streak whose newest failed observation lies more than staleAfter
+// before now is closed: nothing shows the server stayed unresponsive through
+// that gap, and healthy observations in it may have gone unrecorded, so the
+// next failure starts a fresh window.
+func (h managedDoltRecoveryHistory) openStreak(scope, endpoint string, ident managedDoltServerIncarnation, now time.Time, staleAfter time.Duration) time.Time {
+	var since, newest time.Time
 	for _, rec := range h.Records {
 		if rec.Scope != scope || rec.Endpoint != endpoint {
 			continue
@@ -596,10 +615,14 @@ func (h managedDoltRecoveryHistory) openStreak(scope, endpoint string, ident man
 				since = time.Time{}
 				continue
 			}
-			if since.IsZero() {
+			if rec.UnresponsiveSince.After(since) {
 				since = rec.UnresponsiveSince
 			}
+			newest = rec.At
 		}
+	}
+	if since.IsZero() || now.Sub(newest) > staleAfter {
+		return time.Time{}
 	}
 	return since
 }

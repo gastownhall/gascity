@@ -1451,7 +1451,7 @@
         },
         "dolt_unresponsive_restart_after": {
           "type": "string",
-          "description": "DoltUnresponsiveRestartAfter is how long a managed dolt server that still\naccepts TCP connections must keep failing SQL probes, as the same\nverified server incarnation with no healthy observation in between,\nbefore automatic recovery may restart it. A single timed-out probe never\nrestarts a listening server under a positive window. Duration string\n(e.g., \"180s\", \"5m\"). Defaults to \"180s\". \"0s\" removes the delay for a\npositively observed listening server; it never authorizes a restart\nfrom an inconclusive observation. Negative or malformed values are\nrejected, and recovery then refuses to stop the server.",
+          "description": "DoltUnresponsiveRestartAfter is how long a managed dolt server that still\naccepts TCP connections must keep failing SQL probes, as the same\nverified server incarnation with no healthy observation in between,\nbefore automatic recovery may restart it. A failure that comes more than\nthis window after the previous failed probe, or more than two minutes\nafter it when the window is shorter, starts a fresh window instead of\nextending the streak. A single timed-out probe never restarts a\nlistening server under a positive window. Duration string\n(e.g., \"180s\", \"5m\"). Defaults to \"180s\". \"0s\" removes the delay for a\npositively observed listening server; it never authorizes a restart\nfrom an inconclusive observation. Negative or malformed values are\nrejected, and recovery then refuses to stop the server.",
           "default": "180s"
         },
         "dolt_start_address_in_use_retry_window": {
