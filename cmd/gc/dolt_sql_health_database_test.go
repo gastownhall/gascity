@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // databaseHealthFakeDolt answers the managed-Dolt health probes. HEAD_MODE,
@@ -32,6 +36,8 @@ case "$*" in
       missing) echo "error on line 1 for query USE: Error 1049 (HY000): database not found: hq" >&2; exit 1 ;;
       ghost) echo "Error 1105 (HY000): cannot resolve default branch head for database 'hq': 'ghost'" >&2; exit 1 ;;
       garbage) printf 'head\nNULL\n' ;;
+      short) printf 'head\nabc\n' ;;
+      refused) echo "failed to connect to the dolt sql-server at 127.0.0.1:3311: dial tcp 127.0.0.1:3311: connect: connection refused" >&2; exit 1 ;;
     esac
     exit 0
     ;;
@@ -262,6 +268,7 @@ func TestManagedDoltHealthCheckFieldsReportDatabaseOnOneLine(t *testing.T) {
 		"database\thq",
 		"database_ready\tfalse",
 		"database_error\tdatabase \"hq\" default branch head unresolvable: Error 1105 (HY000)",
+		"database_fault_persistent\tfalse",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("fields =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -330,6 +337,315 @@ func TestDoltStateHealthCheckCmdReportsUnavailableDatabaseInBand(t *testing.T) {
 	}
 	if !strings.Contains(got["database_error"], "database not found: hq") {
 		t.Fatalf("database_error = %q, want the Dolt catalog error", got["database_error"])
+	}
+}
+
+// TestDoltStateHealthCheckCmdDatabaseNotInCatalog covers AC-1: a server
+// that answers queries while the named database is gone from its catalog
+// keeps exit 0 (the server layer is up), reports query_ready true,
+// database_ready false, and a one-line database_error naming the database,
+// and never issues the read-only write probe, whose target may be the
+// broken database.
+func TestDoltStateHealthCheckCmdDatabaseNotInCatalog(t *testing.T) {
+	invocationFile := setupDatabaseHealthFakeDolt(t, "missing", "ok", "ok")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only", "--database", "hq"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s; want exit 0 with the failure in-band", code, stderr.String())
+	}
+	got := parseDoltStateOutput(t, stdout.String())
+	if got["query_ready"] != "true" || got["database_ready"] != "false" {
+		t.Fatalf("output = %q, want query_ready true and database_ready false", stdout.String())
+	}
+	if !strings.Contains(got["database_error"], "hq") {
+		t.Fatalf("database_error = %q, want it to name hq", got["database_error"])
+	}
+	if strings.Contains(got["database_error"], "\n") {
+		t.Fatalf("database_error = %q, want a single line", got["database_error"])
+	}
+	if got["database_fault_persistent"] != "true" {
+		t.Fatalf("output = %q, want database_fault_persistent true for a catalog miss", stdout.String())
+	}
+	if text := readInvocations(t, invocationFile); strings.Contains(text, "CREATE TABLE IF NOT EXISTS") || strings.Contains(text, "REPLACE INTO") {
+		t.Fatalf("health check issued a write probe against a database missing from the catalog:\n%s", text)
+	}
+}
+
+// TestDoltStateHealthCheckCmdDatabaseHeadUnresolvable covers AC-2 on the
+// dolt-CLI path: a database that is in the catalog but whose
+// DOLT_HASHOF('HEAD') fails (errno 1105) or returns a value that is not a
+// commit hash reports database_ready false with a head-resolution error.
+func TestDoltStateHealthCheckCmdDatabaseHeadUnresolvable(t *testing.T) {
+	tests := []struct {
+		name     string
+		head     string
+		wantPart string
+	}{
+		{name: "errno 1105", head: "ghost", wantPart: "cannot resolve default branch head"},
+		{name: "head is not a hash", head: "garbage", wantPart: "unexpected head"},
+		{name: "head is too short", head: "short", wantPart: "unexpected head"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupDatabaseHealthFakeDolt(t, tt.head, "ok", "ok")
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--database", "hq"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, stderr = %s; want exit 0 with the failure in-band", code, stderr.String())
+			}
+			got := parseDoltStateOutput(t, stdout.String())
+			if got["query_ready"] != "true" || got["database_ready"] != "false" {
+				t.Fatalf("output = %q, want query_ready true and database_ready false", stdout.String())
+			}
+			if !strings.Contains(got["database_error"], `database "hq" default branch head unresolvable`) || !strings.Contains(got["database_error"], tt.wantPart) {
+				t.Fatalf("database_error = %q, want a head-resolution error containing %q", got["database_error"], tt.wantPart)
+			}
+			if got["database_fault_persistent"] != "true" {
+				t.Fatalf("output = %q, want database_fault_persistent true for a head the server cannot resolve", stdout.String())
+			}
+		})
+	}
+}
+
+// TestManagedDoltHealthCheckForPasswordPathReportsHeadFailure covers AC-2 on
+// the direct-driver path (GC_DOLT_PASSWORD set): a head that does not
+// resolve is reported in-band, the write probe never runs against the
+// broken database, and no dolt binary is invoked.
+func TestManagedDoltHealthCheckForPasswordPathReportsHeadFailure(t *testing.T) {
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	oldQuery := managedDoltQueryProbeDirectFn
+	oldHead := managedDoltDatabaseHeadDirectFn
+	oldReadOnly := managedDoltReadOnlyStateDirectFn
+	oldReadBack := managedDoltProbeReadBackDirectFn
+	oldConnCount := managedDoltConnectionCountDirectFn
+	defer func() {
+		managedDoltQueryProbeDirectFn = oldQuery
+		managedDoltDatabaseHeadDirectFn = oldHead
+		managedDoltReadOnlyStateDirectFn = oldReadOnly
+		managedDoltProbeReadBackDirectFn = oldReadBack
+		managedDoltConnectionCountDirectFn = oldConnCount
+	}()
+
+	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
+	managedDoltDatabaseHeadDirectFn = func(_, _, _, database string) (string, error) {
+		if database != "hq" {
+			t.Errorf("head probe database = %q, want hq", database)
+		}
+		return "", errors.New("Error 1105 (HY000): no root value found in session")
+	}
+	probeRan := false
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) {
+		probeRan = true
+		return "false", nil
+	}
+	managedDoltProbeReadBackDirectFn = func(_, _, _, _ string) error {
+		probeRan = true
+		return nil
+	}
+	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "2", nil }
+	// No dolt binary anywhere on PATH: taking the dolt-CLI path would fail
+	// the probe and surface as an error instead of the in-band verdict.
+	t.Setenv("PATH", t.TempDir())
+
+	report, err := managedDoltHealthCheckFor("127.0.0.1", "3311", "root", true, managedDoltHealthTarget{Database: "hq"})
+	if err != nil {
+		t.Fatalf("managedDoltHealthCheckFor() error = %v, want the failure in-band", err)
+	}
+	if report.DatabaseReady {
+		t.Fatalf("DatabaseReady = true, want false")
+	}
+	if !strings.Contains(report.DatabaseError, "Error 1105") || !strings.Contains(report.DatabaseError, "no root value found in session") {
+		t.Fatalf("DatabaseError = %q, want the direct head failure", report.DatabaseError)
+	}
+	if probeRan {
+		t.Fatalf("write probe ran against a database whose head does not resolve")
+	}
+	if report.ReadOnly != "unknown" {
+		t.Fatalf("ReadOnly = %q, want unknown when the database check failed", report.ReadOnly)
+	}
+}
+
+// TestDoltStateHealthCheckCmdDatabaseMissingOnDisk covers AC-3: the on-disk
+// check follows a symlink to the repository and counts a missing data dir
+// as missing, even though the SQL checks would succeed. A directory whose
+// name differs from the database by '-' for '_' does not count: Dolt serves a
+// directory under its own name unless DOLT_DBNAME_REPLACE is set, so
+// gas-city/ holds a database named gas-city, not gas_city. Each miss is a
+// fault a restart cannot repair.
+func TestDoltStateHealthCheckCmdDatabaseMissingOnDisk(t *testing.T) {
+	runCheck := func(t *testing.T, database, dataDir string) map[string]string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only", "--database", database, "--data-dir", dataDir}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+		}
+		return parseDoltStateOutput(t, stdout.String())
+	}
+	assertAbsent := func(t *testing.T, got map[string]string) {
+		t.Helper()
+		if got["database_ready"] != "false" || !strings.Contains(got["database_error"], "gas_city") || !strings.Contains(got["database_error"], "data dir") {
+			t.Fatalf("output maps = %v, want database_ready false with an on-disk error naming gas_city", got)
+		}
+		if got["database_fault_persistent"] != "true" {
+			t.Fatalf("output maps = %v, want database_fault_persistent true for a repository missing on disk", got)
+		}
+	}
+	t.Run("only another database on disk", func(t *testing.T) {
+		setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+		dataDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dataDir, "other_db", ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		assertAbsent(t, runCheck(t, "gas_city", dataDir))
+	})
+	t.Run("repository named with a dash does not match", func(t *testing.T) {
+		setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+		dataDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dataDir, "gas-city", ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		assertAbsent(t, runCheck(t, "gas_city", dataDir))
+	})
+	t.Run("data dir absent", func(t *testing.T) {
+		setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+		dataDir := filepath.Join(t.TempDir(), "gone")
+		got := runCheck(t, "gas_city", dataDir)
+		if got["database_ready"] != "false" || !strings.Contains(got["database_error"], "data dir") {
+			t.Fatalf("output maps = %v, want database_ready false for an absent data dir", got)
+		}
+		if got["database_fault_persistent"] != "true" {
+			t.Fatalf("output maps = %v, want database_fault_persistent true for an absent data dir", got)
+		}
+	})
+	t.Run("symlinked repository matches", func(t *testing.T) {
+		setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+		dataDir := t.TempDir()
+		repo := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(repo, ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The link differs from the database name in case only, so the
+		// check finds it by scanning the data dir, not by its exact path.
+		if err := os.Symlink(repo, filepath.Join(dataDir, "Gas_City")); err != nil {
+			t.Fatal(err)
+		}
+		if got := runCheck(t, "gas_city", dataDir); got["database_ready"] != "true" {
+			t.Fatalf("output maps = %v, want database_ready true through a symlinked repository", got)
+		}
+	})
+}
+
+// TestDoltStateHealthCheckCmdReportsUnconfirmedDatabaseFault covers the
+// other side of database_fault_persistent: a head probe the server never
+// answered and a failed sample write keep database_ready false, so health
+// still fails closed, but they do not confirm that the database is at fault.
+func TestDoltStateHealthCheckCmdReportsUnconfirmedDatabaseFault(t *testing.T) {
+	tests := []struct {
+		name     string
+		head     string
+		write    string
+		wantPart string
+	}{
+		{name: "head probe connection refused", head: "refused", write: "ok", wantPart: "connection refused"},
+		{name: "sample write fails", head: "ok", write: "fail", wantPart: `sample write to database "hq" failed`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupDatabaseHealthFakeDolt(t, tt.head, tt.write, "ok")
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only", "--database", "hq"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, stderr = %s; want exit 0 with the failure in-band", code, stderr.String())
+			}
+			got := parseDoltStateOutput(t, stdout.String())
+			if got["database_ready"] != "false" || !strings.Contains(got["database_error"], tt.wantPart) {
+				t.Fatalf("output = %q, want database_ready false with an error containing %q", stdout.String(), tt.wantPart)
+			}
+			if got["database_fault_persistent"] != "false" {
+				t.Fatalf("output = %q, want database_fault_persistent false", stdout.String())
+			}
+		})
+	}
+}
+
+// doltServerError is the error the MySQL driver returns when Dolt answers a
+// statement with errno and message.
+func doltServerError(errno uint16, message string) *mysql.MySQLError {
+	return &mysql.MySQLError{Number: errno, SQLState: [5]byte{'H', 'Y', '0', '0', '0'}, Message: message}
+}
+
+// TestManagedDoltHeadFaultPersistent pins which head-probe failures confirm
+// that the database itself is at fault: Dolt answering that the database is
+// not in its catalog (errno 1049) or that its default branch head does not
+// resolve (errno 1105 with Dolt's head-resolution messages), on the driver and
+// dolt-CLI paths, or answering with a head that is not a commit hash. A
+// timeout, a lost connection and any other answer do not; errno 1105 is
+// Dolt's code for most internal errors.
+func TestManagedDoltHeadFaultPersistent(t *testing.T) {
+	_, unexpectedHead := managedDoltParseHead("head\nNULL\n")
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "driver: not in catalog", err: doltServerError(1049, "database not found: hq"), want: true},
+		{name: "driver: default branch head unresolvable", err: doltServerError(1105, "cannot resolve default branch head for database 'hq': 'ghost'"), want: true},
+		{name: "driver: no root value", err: doltServerError(1105, "no root value found in session"), want: true},
+		{name: "driver: wrapped answer", err: fmt.Errorf("use hq: %w", doltServerError(1049, "database not found: hq")), want: true},
+		{name: "driver: other errno 1105", err: doltServerError(1105, "open /data/hq/.dolt/noms/journal.idx: too many open files"), want: false},
+		{name: "driver: other errno", err: doltServerError(1040, "Too many connections"), want: false},
+		{name: "driver: i/o timeout", err: os.ErrDeadlineExceeded, want: false},
+		{name: "driver: lost connection", err: mysql.ErrInvalidConn, want: false},
+		{name: "cli: not in catalog", err: errors.New("error on line 1 for query USE `hq`: Error 1049 (HY000): database not found: hq"), want: true},
+		{name: "cli: default branch head unresolvable", err: errors.New("error on line 1 for query USE `hq`: Error 1105 (HY000): cannot resolve default branch head for database 'hq': 'ghost'"), want: true},
+		{name: "cli: other errno 1105", err: errors.New("error on line 1 for query USE `hq`: Error 1105 (HY000): too many open files"), want: false},
+		{name: "cli: timed out", err: errors.New("timed out after 5s"), want: false},
+		{name: "cli: connection refused", err: errors.New("failed to connect to the dolt sql-server at 127.0.0.1:3311: dial tcp 127.0.0.1:3311: connect: connection refused"), want: false},
+		{name: "head is not a commit hash", err: unexpectedHead, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := managedDoltHeadFaultPersistent(tt.err); got != tt.want {
+				t.Fatalf("managedDoltHeadFaultPersistent(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDoltStateHealthCheckCmdDatabaseReady covers AC-4: with a healthy
+// database the report keeps today's query_ready, read_only and
+// connection_count lines and adds the database verdict.
+func TestDoltStateHealthCheckCmdDatabaseReady(t *testing.T) {
+	setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only", "--database", "hq"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	want := "query_ready\ttrue\nread_only\tfalse\nconnection_count\t3\ndatabase\thq\ndatabase_ready\ttrue\n"
+	if stdout.String() != want {
+		t.Fatalf("output = %q, want %q", stdout.String(), want)
+	}
+}
+
+// TestDoltStateHealthCheckCmdWithoutDatabaseUnchanged covers AC-4: without
+// --database the output is byte-identical to the server-only report.
+func TestDoltStateHealthCheckCmdWithoutDatabaseUnchanged(t *testing.T) {
+	setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	want := "query_ready\ttrue\nread_only\tfalse\nconnection_count\t3\n"
+	if stdout.String() != want {
+		t.Fatalf("output = %q, want the server-only report %q", stdout.String(), want)
 	}
 }
 
