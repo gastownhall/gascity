@@ -306,30 +306,43 @@ _pog_probe_routed_store() {
 
 # _pog_resolve_branch_token <branch>: prints "<id><TAB><store>" for the bead
 # the branch name encodes (an empty <store> is the caller's own store), or
-# nothing when it encodes none. The first candidate token (see
-# _pog_branch_candidates) decides: a local token is the id with no read; a
-# routed token is the id once a probe of its store finds it, and is skipped
-# when the store answers that it is absent. A routed store that gives no
-# answer blocks: the reason goes to stderr and POG_ROUTE_BLOCK_SENTINEL is
-# printed.
+# nothing when it encodes none. Walks the candidate tokens (see
+# _pog_branch_candidates) in branch order and stops at the first that
+# resolves:
+#   - a local token is the id, with no read (the final verify still blocks
+#     if the bead is absent, as it always has);
+#   - a routed token is the id once its store says the bead exists there,
+#     and is skipped when the store says it does not. The first routed token
+#     of a store probes that store once for every candidate of that store in
+#     this branch, so an ordinary word with a routed prefix (fix/bd-show-json)
+#     costs one read and never a `bd show`.
+# A routed store that gives no answer blocks: the reason goes to stderr and
+# POG_ROUTE_BLOCK_SENTINEL is printed. A store is never read once an earlier
+# token has resolved.
 _pog_resolve_branch_token() {
-    local branch="$1" tab=$'\t' first tok store present
-    first="$(_pog_branch_candidates "$branch" "$(_pog_prefix_table)" | head -1)"
-    [[ -n "$first" ]] || return 0
-    tok="${first%%"$tab"*}"
-    store="${first#*"$tab"}"
-    if [[ -z "$store" ]]; then
-        printf '%s%s' "$tok" "$tab"
-        return 0
-    fi
-    if ! present="$(_pog_probe_routed_store "$store" "$tok")"; then
-        echo "push-ownership-guard: BLOCKED — branch token $tok routes to the bead store $store, which did not answer whether $tok exists after $POG_READ_ATTEMPTS attempts, so ownership of $tok cannot be verified. Last resort: git push --no-verify" >&2
-        printf '%s' "$POG_ROUTE_BLOCK_SENTINEL"
-        return 0
-    fi
-    if grep -qxF -- "$tok" <<<"$present"; then
-        printf '%s%s%s' "$tok" "$tab" "$store"
-    fi
+    local branch="$1" tab=$'\t' nl=$'\n' cands tok store ids present probed="" found=""
+    cands="$(_pog_branch_candidates "$branch" "$(_pog_prefix_table)")"
+    while IFS="$tab" read -r -u 3 tok store; do
+        [[ -n "$tok" ]] || continue
+        if [[ -z "$store" ]]; then
+            printf '%s%s' "$tok" "$tab"
+            return 0
+        fi
+        if [[ "$nl$probed" != *"$nl$store$nl"* ]]; then
+            ids="$(awk -F '\t' -v s="$store" '$2 == s { printf "%s%s", sep, $1; sep = "," }' <<<"$cands")"
+            if ! present="$(_pog_probe_routed_store "$store" "$ids")"; then
+                echo "push-ownership-guard: BLOCKED — branch token $tok routes to the bead store $store, which did not answer whether $tok exists after $POG_READ_ATTEMPTS attempts, so ownership of $tok cannot be verified. Last resort: git push --no-verify" >&2
+                printf '%s' "$POG_ROUTE_BLOCK_SENTINEL"
+                return 0
+            fi
+            probed+="$store$nl"
+            found+="$present$nl"
+        fi
+        if [[ "$nl$found" == *"$nl$tok$nl"* ]]; then
+            printf '%s%s%s' "$tok" "$tab" "$store"
+            return 0
+        fi
+    done 3<<<"$cands"
 }
 
 # _pog_returned_bead_id <json>: prints the id of the bead an already-fetched

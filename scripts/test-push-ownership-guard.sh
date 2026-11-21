@@ -1915,6 +1915,122 @@ test_routed_absent_token_falls_through_to_assignment() {
     rm -rf "$root" "$fbd"
 }
 
+# Walk fixture: new_walk_city <branch> sets WALK_ROOT, WALK_REPO and WALK_FBD
+# to a city on <branch> whose routes.jsonl maps ga to ".", and mc, bd and zoo
+# to the existing (empty) stores ../mc-rig, ../beads-rig and ../zoo-rig.
+new_walk_city() {
+    WALK_ROOT="$(new_city_with_branch "$1")"
+    WALK_REPO="$WALK_ROOT/gascity"
+    mkdir -p "$WALK_ROOT/beads-rig/.beads/fake/show" "$WALK_ROOT/zoo-rig/.beads/fake/show"
+    write_routes "$WALK_REPO" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}' \
+        '{"prefix":"bd","path":"../beads-rig"}' '{"prefix":"zoo","path":"../zoo-rig"}'
+    WALK_FBD="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$WALK_FBD"
+}
+
+# walk_expect_closed_block <label> <id> <store-dir-name> [probe-args] [bash|zsh]:
+# runs the guard (under the given shell) on the walk fixture and passes when it blocks because <id> is closed,
+# every `bd show <id>` reached <store-dir-name> ("default-store" for the
+# caller's), and, when [probe-args] is given, a probe carrying exactly
+# --id=<probe-args> was issued. Cleans the fixture up.
+walk_expect_closed_block() {
+    local label="$1" id="$2" store_name="$3" probe="${4:-}" shell="${5:-bash}" out rc shows
+    if [[ "$shell" == "zsh" ]]; then
+        out="$(run_guard_zsh "$WALK_REPO" "$WALK_FBD" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    else
+        out="$(run_guard "$WALK_REPO" "$WALK_FBD" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    fi
+    shows="$(fake_calls "$WALK_FBD" | grep -F -- "| show $id --json" || true)"
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — $id status is 'closed'" <<<"$out" \
+        && [[ -n "$shows" ]] && ! grep -vqF "/$store_name" <<<"$shows" \
+        && { [[ -z "$probe" ]] || fake_calls "$WALK_FBD" | grep -qF -- "| list --id=$probe --all "; }; then
+        record_pass "walk/$label (rc=$rc, blocked for $id)"
+    else
+        record_fail "walk/$label" "expected a block for closed $id read from $store_name${probe:+ after a probe of --id=$probe}, got rc=$rc, output: $out; calls: $(fake_calls "$WALK_FBD")"
+    fi
+    rm -rf "$WALK_ROOT" "$WALK_FBD"
+}
+
+# AC-5: every candidate token is tried in branch order, so a routed token that
+# probes absent never hides a later bead (local or routed), a routed id after
+# a slug resolves, and a dotted sub-bead or mol/wisp-infixed routed id is
+# probed and verified whole.
+test_routed_walk_finds_later_bead_after_absent_token() {
+    new_walk_city "fix/bd-show-ga-k2p9x"
+    store_put "$WALK_FBD/default-store" "ga-k2p9x" "closed" "agent-x" "tmpl-x"
+    walk_expect_closed_block "absent-routed-then-local-closed" "ga-k2p9x" "default-store" "bd-show"
+
+    new_walk_city "fix/bd-show-mc-k2p9x"
+    store_put "$WALK_ROOT/mc-rig/.beads" "mc-k2p9x" "closed" "agent-x" "tmpl-x"
+    walk_expect_closed_block "absent-routed-then-routed-closed" "mc-k2p9x" "mc-rig/.beads" "mc-k2p9x"
+
+    if command -v zsh >/dev/null 2>&1; then
+        new_walk_city "fix/bd-show-mc-k2p9x"
+        store_put "$WALK_ROOT/mc-rig/.beads" "mc-k2p9x" "closed" "agent-x" "tmpl-x"
+        walk_expect_closed_block "absent-routed-then-routed-closed-under-zsh" "mc-k2p9x" "mc-rig/.beads" "mc-k2p9x" zsh
+    else
+        echo "  skip walk/zsh — zsh not installed"
+    fi
+
+    new_walk_city "fix/registry-update-mc-k2p9x"
+    store_put "$WALK_ROOT/mc-rig/.beads" "mc-k2p9x" "closed" "agent-x" "tmpl-x"
+    walk_expect_closed_block "routed-id-after-slug" "mc-k2p9x" "mc-rig/.beads" "mc-k2p9x"
+
+    new_walk_city "fix/port-mc-k2p9x.4.3"
+    store_put "$WALK_ROOT/mc-rig/.beads" "mc-k2p9x.4.3" "closed" "agent-x" "tmpl-x"
+    walk_expect_closed_block "routed-dotted-subbead-whole" "mc-k2p9x.4.3" "mc-rig/.beads" "mc-k2p9x.4.3"
+
+    new_walk_city "fix/port-mc-mol-k2p9x"
+    store_put "$WALK_ROOT/mc-rig/.beads" "mc-mol-k2p9x" "closed" "agent-x" "tmpl-x"
+    walk_expect_closed_block "routed-mol-infix-whole" "mc-mol-k2p9x" "mc-rig/.beads" "mc-mol-k2p9x"
+
+    new_walk_city "fix/port-mc-wisp-k2p9x"
+    store_put "$WALK_ROOT/mc-rig/.beads" "mc-wisp-k2p9x" "closed" "agent-x" "tmpl-x"
+    walk_expect_closed_block "routed-wisp-infix-whole" "mc-wisp-k2p9x" "mc-rig/.beads" "mc-wisp-k2p9x"
+}
+
+# AC-5 edge cases: overlapping tokens are all found (bd-zoo-k2p9x holds both
+# bd-zoo and zoo-k2p9x); branch order beats local-first; one store costs one
+# probe carrying every candidate it owns in this branch (and a repeated
+# token once), and the first present id in branch order wins.
+test_routed_walk_overlap_order_and_batching() {
+    new_walk_city "builder/bd-zoo-k2p9x"
+    store_put "$WALK_ROOT/zoo-rig/.beads" "zoo-k2p9x" "closed" "agent-x" "tmpl-x"
+    walk_expect_closed_block "overlapping-token-found" "zoo-k2p9x" "zoo-rig/.beads" "zoo-k2p9x"
+
+    new_walk_city "builder/mc-abc12-fix-ga-def34"
+    store_put "$WALK_ROOT/mc-rig/.beads" "mc-abc12" "closed" "agent-x" "tmpl-x"
+    store_put "$WALK_FBD/default-store" "ga-def34" "in_progress" "agent-x" "tmpl-x"
+    walk_expect_closed_block "branch-order-beats-local-first" "mc-abc12" "mc-rig/.beads" "mc-abc12"
+
+    new_walk_city "fix/mc-aaa11-and-mc-bbb22"
+    store_put "$WALK_ROOT/mc-rig/.beads" "mc-bbb22" "closed" "agent-x" "tmpl-x"
+    walk_expect_closed_block "one-probe-per-store-batch" "mc-bbb22" "mc-rig/.beads" "mc-aaa11,mc-bbb22"
+
+    new_walk_city "fix/mc-aaa11-and-mc-bbb22"
+    store_put "$WALK_ROOT/mc-rig/.beads" "mc-aaa11" "closed" "agent-x" "tmpl-x"
+    store_put "$WALK_ROOT/mc-rig/.beads" "mc-bbb22" "in_progress" "agent-x" "tmpl-x"
+    local out rc probes
+    out="$(run_guard "$WALK_REPO" "$WALK_FBD" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    probes="$(store_count "$WALK_ROOT/mc-rig/.beads" list-id-calls)"
+    if [[ $rc -ne 0 && "$probes" -eq 1 ]] && grep -qF "BLOCKED — mc-aaa11 status is 'closed'" <<<"$out"; then
+        record_pass "walk/first-present-in-branch-order-wins (rc=$rc, one probe, mc-aaa11 checked)"
+    else
+        record_fail "walk/first-present-in-branch-order-wins" "expected one mc probe and a block for closed mc-aaa11, got rc=$rc probes=$probes, output: $out; calls: $(fake_calls "$WALK_FBD")"
+    fi
+    rm -rf "$WALK_ROOT" "$WALK_FBD"
+
+    new_walk_city "fix/mc-aaa11-redo-mc-aaa11"
+    out="$(run_guard "$WALK_REPO" "$WALK_FBD" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    probes="$(store_count "$WALK_ROOT/mc-rig/.beads" list-id-calls)"
+    if [[ $rc -eq 0 && "$probes" -eq 1 ]] && fake_calls "$WALK_FBD" | grep -qF -- "| list --id=mc-aaa11 --all "; then
+        record_pass "walk/repeated-token-probed-once (rc=0, one probe of --id=mc-aaa11)"
+    else
+        record_fail "walk/repeated-token-probed-once" "expected one probe carrying mc-aaa11 once and rc=0, got rc=$rc probes=$probes, output: $out; calls: $(fake_calls "$WALK_FBD")"
+    fi
+    rm -rf "$WALK_ROOT" "$WALK_FBD"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1981,6 +2097,8 @@ run_all() {
     test_routed_reads_drop_database_pins
     test_routed_config_issue_prefix_alias
     test_routed_absent_token_falls_through_to_assignment
+    test_routed_walk_finds_later_bead_after_absent_token
+    test_routed_walk_overlap_order_and_batching
 
     echo
     echo "pass=$pass fail=$fail"
