@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "storebinding",
     srcs = [
+        "assignment_guard.go",
         "beads_adapter.go",
         "beads_nudge_queue.go",
         "beads_nudge_queue_batch.go",
@@ -57,6 +58,7 @@ go_library(
 go_test(
     name = "storebinding_test",
     srcs = [
+        "assignment_guard_test.go",
         "beads_adapter_graph_capability_test.go",
         "beads_adapter_test.go",
         "beads_nudge_queue_batch_test.go",

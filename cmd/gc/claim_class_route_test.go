@@ -856,9 +856,10 @@ func TestClaimRouteHoldsKeepsTheAuthorityLegOnACensusCleanBinding(t *testing.T) 
 // read with a not-found and a zero bead: the claim escalates once and lands in
 // the binding through the same fenced tiers, fenced on the same observation,
 // and the binding is memoized so a release of a moved claim follows it there.
-// A work leg that answered — precondition_failed, stale or a write error, all
-// of which return the bead it read — is the answer: the binding is neither
-// read nor written, even when the write error names a not-found.
+// A work leg that answered — precondition_failed, stale, a write error, or a
+// committed claim whose readback failed, all of which return the bead it read
+// — is the answer: the binding is neither read nor written, even when the
+// write error names a not-found.
 func TestClassRoutedClaimExactEscalatesOnlyOnAnAbsentWorkLeg(t *testing.T) {
 	stepMeta := map[string]string{
 		beadmeta.RootBeadIDMetadataKey: "gcg-root",
@@ -918,6 +919,7 @@ func TestClassRoutedClaimExactEscalatesOnlyOnAnAbsentWorkLeg(t *testing.T) {
 		{"precondition_failed or stale", hookClaimVerdictRejected, nil},
 		{"write error", hookClaimVerdictNone, errors.New("claim exact \"gcg-e10\": applying claim effects: database is locked")},
 		{"write error naming a not-found", hookClaimVerdictNone, fmt.Errorf("claim exact %q: applying claim effects: %w", "gcg-e10", beads.ErrNotFound)},
+		{"committed claim whose readback failed", hookClaimVerdictClaimed, fmt.Errorf("claim exact %q: %w", "gcg-e10", molecule.ErrClaimExactReadback)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			class := newClaimRouteClassStore(t)

@@ -563,14 +563,15 @@ func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, 
 }
 
 // claimExact runs a graph step's exact claim against the binding through the
-// same two tiers the work store's exact claim uses: the binding's revision
-// fence when the store offers one, else its status/assignee guard.
+// same two tiers the work store's exact claim uses. The graph front door is
+// always the revision writer: it forwards the binding's revision CAS, and
+// answers unsupported itself when the engine has none. The status/assignee
+// guard comes from storebinding.AssignmentGuardedUpdaterFor, which resolves it
+// only from the canonical Beads projection's backing store, so an engine with
+// neither fence fails closed with the capability named.
 func (r *hookClaimClassRoute) claimExact(actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
-	var writers molecule.ClaimExactWriters
-	if _, ok := beads.As[beads.ConditionalWriter](r.class); ok {
-		writers.Revision = r.graph
-	}
-	if guard, ok := beads.As[beads.AssignmentGuardedUpdater](r.class); ok {
+	writers := molecule.ClaimExactWriters{Revision: r.graph}
+	if guard, ok := storebinding.AssignmentGuardedUpdaterFor(r.graph); ok {
 		writers.Assignment = guard
 	}
 	return hookClaimExactThroughStore(r.graph, writers, actor, req)
