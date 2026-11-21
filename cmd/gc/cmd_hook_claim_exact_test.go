@@ -170,11 +170,16 @@ type exactClaimHarness struct {
 	exactReqs   []molecule.ClaimExactRequest
 	exactResult molecule.ClaimExactResult
 	exactErr    error
-	reclaimed   bool
-	reclaimFrom string
-	rejections  [][3]string
-	reclaimedEv [][3]string
-	stampCalls  int
+	// exactBy, when set, answers each exact claim by bead ID instead of the
+	// single exactResult, so one run can mix outcomes across candidates.
+	exactBy        map[string]molecule.ClaimExactResult
+	releases       [][2]string
+	releasedEvents []hookClaimReleaseRecord
+	reclaimed      bool
+	reclaimFrom    string
+	rejections     [][3]string
+	reclaimedEv    [][3]string
+	stampCalls     int
 }
 
 func (h *exactClaimHarness) run(t *testing.T, opts hookClaimOptions) (string, int) {
@@ -191,7 +196,17 @@ func (h *exactClaimHarness) run(t *testing.T, opts hookClaimOptions) (string, in
 		},
 		ClaimExact: func(_ context.Context, _ string, _ []string, _ string, req molecule.ClaimExactRequest) (molecule.ClaimExactResult, error) {
 			h.exactReqs = append(h.exactReqs, req)
+			if h.exactBy != nil {
+				return h.exactBy[req.ID], h.exactErr
+			}
 			return h.exactResult, h.exactErr
+		},
+		Release: func(_ context.Context, _ string, _ []string, beadID, assignee string) (bool, error) {
+			h.releases = append(h.releases, [2]string{beadID, assignee})
+			return true, nil
+		},
+		EmitClaimReleased: func(rec hookClaimReleaseRecord) {
+			h.releasedEvents = append(h.releasedEvents, rec)
 		},
 		ReclaimStale: func(_ context.Context, _ string, _ []string, _ string) (bool, string, error) {
 			return h.reclaimed, h.reclaimFrom, nil
@@ -281,6 +296,52 @@ func TestDoHookClaimExactRejectedNeverFallsBackToPoolClaim(t *testing.T) {
 	}
 	if len(h.rejections) != 1 || h.rejections[0] != [3]string{"work-1", "rival", "worker-1"} {
 		t.Fatalf("rejection events = %v, want one naming the rival winner", h.rejections)
+	}
+}
+
+// TestDoHookClaimExactMovedReleasesTheLandedClaimAndMovesOn: a guarded claim
+// that committed onto a row whose observed step had already moved (outcome
+// observation_moved) is this session's to unwind: the hook releases the
+// landed claim, fires bead.claim_released with reason observation_moved, and
+// keeps walking the remaining candidates instead of wedging or draining.
+func TestDoHookClaimExactMovedReleasesTheLandedClaimAndMovesOn(t *testing.T) {
+	h := &exactClaimHarness{
+		runner: `[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"build"}},` +
+			`{"id":"work-2","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"test"}}]`,
+		exactBy: map[string]molecule.ClaimExactResult{
+			"work-1": {
+				Bead:    beads.Bead{ID: "work-1", Status: "in_progress", Assignee: "worker-1", Metadata: map[string]string{"gc.root_bead_id": "root-2", "gc.step_id": "other"}},
+				Outcome: molecule.ClaimExactObservationMoved,
+				Fence:   molecule.ClaimExactFenceAssignment,
+			},
+			"work-2": {
+				Bead:    beads.Bead{ID: "work-2", Status: "in_progress", Assignee: "worker-1", Metadata: map[string]string{"gc.routed_to": "worker", "gc.root_bead_id": "root-1", "gc.step_id": "test"}},
+				Outcome: molecule.ClaimExactClaimed,
+				Fence:   molecule.ClaimExactFenceAssignment,
+			},
+		},
+	}
+	stdout, code := h.run(t, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	})
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d; stdout=%s", code, stdout)
+	}
+	if len(h.releases) != 1 || h.releases[0] != [2]string{"work-1", "worker-1"} {
+		t.Fatalf("releases = %v, want exactly the moved claim work-1 given back as worker-1", h.releases)
+	}
+	if len(h.releasedEvents) != 1 || h.releasedEvents[0] != (hookClaimReleaseRecord{BeadID: "work-1", Assignee: "worker-1", Reason: "observation_moved"}) {
+		t.Fatalf("claim_released events = %v, want one work-1 release with reason observation_moved", h.releasedEvents)
+	}
+	if len(h.exactReqs) != 2 || h.exactReqs[0].ID != "work-1" || h.exactReqs[1].ID != "work-2" {
+		t.Fatalf("exact claims = %v, want work-1 then work-2", h.exactReqs)
+	}
+	if !strings.Contains(stdout, `"action":"work"`) || !strings.Contains(stdout, `"bead_id":"work-2"`) {
+		t.Fatalf("hook wedged on the moved claim instead of serving work-2: %s", stdout)
 	}
 }
 
