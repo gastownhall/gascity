@@ -91,8 +91,8 @@ absorbs. For each closed bead it resolves dependents via:
 gc bd dep list <blocker> --direction=up --type=blocks --json
 ```
 
-and nudges every dependent whose status is `open` or `deferred` — at its
-`assignee` when one holds the bead:
+and nudges every dependent whose status is `open`, `in_progress` or
+`deferred` — at its `assignee` when one holds the bead:
 
 ```
 gc session nudge <assignee> "blocker <blocker> closed — your dependent <dep> may be unblocked"
