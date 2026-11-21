@@ -160,8 +160,9 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 2.50,
 		},
 	},
-	// Claude Sonnet 5.5. Same rates as Sonnet 5; it succeeded Sonnet 5 in the
-	// same tier at the same price point (GH#8367).
+	// Claude Sonnet 5.5. Same prompt/completion/cache-write tier as Sonnet 5,
+	// but cache reads are published at 0.05x the prompt rate ($0.10/MTok)
+	// rather than the usual 0.1x, as with Opus 5.5 (GH#8367).
 	{
 		Provider:     "claude",
 		Model:        "claude-sonnet-5-5",
@@ -169,7 +170,7 @@ var claudeDefaults = []ModelPricing{
 		Tier: Tier{
 			PromptUSDPer1M:        2.00,
 			CompletionUSDPer1M:    10.00,
-			CacheReadUSDPer1M:     0.20,
+			CacheReadUSDPer1M:     0.10,
 			CacheCreationUSDPer1M: 2.50,
 		},
 	},

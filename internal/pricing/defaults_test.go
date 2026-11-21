@@ -112,7 +112,7 @@ func TestDefaultPricingsCurrentClaudeRates(t *testing.T) {
 			model:         "claude-sonnet-5-5",
 			prompt:        2.00,
 			completion:    10.00,
-			cacheRead:     0.20,
+			cacheRead:     0.10,
 			cacheCreation: 2.50,
 		},
 		{
