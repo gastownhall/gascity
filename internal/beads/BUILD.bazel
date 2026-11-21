@@ -53,6 +53,7 @@ go_test(
         "absent_blocked_test.go",
         "atomic_close_memstore_test.go",
         "batchfile_windows_test.go",
+        "bazel_tmpdir_test.go",
         "bdsql_relocation_internal_test.go",
         "bdstore_assignee_fanout_test.go",
         "bdstore_batch_test.go",
