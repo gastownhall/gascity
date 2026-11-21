@@ -18,6 +18,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -463,7 +464,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// on a city with configured rigs and asks no storage route. SlingQuery is
 	// not a discovery reader and keeps the raw topology.
 	promptTopo := promptQueryTopology(topo, cfgAgent, p.rigs)
-	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
+	promptRes := renderPromptWithMeta(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
 		TemplateName:            cfgAgent.Name,
@@ -485,6 +486,15 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ConfigDir:               configDir,
 		Env:                     cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
+	// A template that was read but failed to parse or execute comes back as
+	// its raw {{...}} text; shipping that as a live startup prompt is worse
+	// than not starting the agent. A template that cannot be read keeps the
+	// beacon-only fallback (the warning is already on stderr).
+	var readErr *promptTemplateReadError
+	if promptRes.Err != nil && !errors.As(promptRes.Err, &readErr) {
+		return TemplateParams{}, fmt.Errorf("rendering prompt_template %q: %w", cfgAgent.PromptTemplate, promptRes.Err)
+	}
+	prompt = promptRes.Text
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
 	// The prime instruction tells a non-hook agent to go fetch its context.
