@@ -794,6 +794,18 @@ func TestCrashInjectionWorkflowFinalize(t *testing.T) {
 				t.Fatalf("failed workflow's source status = %s, want open for investigation", got)
 			}
 		}),
+		workflowFinalizeCrashScenario("skipped", beadmeta.OutcomeSkipped, func(t *testing.T, ledger []ledgerBead, f sourceChainFinalizeFixture, remainingID string) {
+			requireClosedWithOutcome(t, ledger, 0, f.workflow.ID, beadmeta.OutcomePass)
+			requireClosedWithOutcome(t, ledger, 0, f.finalizer.ID, beadmeta.OutcomePass)
+			requireClosedWithOutcome(t, ledger, 0, remainingID, beadmeta.OutcomeSkipped)
+			requireClosedWithOutcome(t, ledger, 0, f.rigLaunch.ID, beadmeta.OutcomePass)
+			requireClosedWithOutcome(t, ledger, 1, f.citySource.ID, beadmeta.OutcomePass)
+			// Only the finalizer's skipped blocker is listed, not the member
+			// the finalizer's own sweep closed as skipped.
+			if got := ledgerBeadByID(t, ledger, 0, f.workflow.ID).Metadata[beadmeta.SkippedBlockersMetadataKey]; got != f.step.ID {
+				t.Fatalf("root gc.skipped_blockers = %q, want %q (the skipped sink blocker alone)", got, f.step.ID)
+			}
+		}),
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {

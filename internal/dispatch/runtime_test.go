@@ -4528,7 +4528,10 @@ type sourceChainFinalizeFixture struct {
 	citySource beads.Bead
 	rigLaunch  beads.Bead
 	workflow   beads.Bead
-	finalizer  beads.Bead
+	// step is the finalizer's only blocks blocker, closed with the outcome
+	// the fixture was built with.
+	step      beads.Bead
+	finalizer beads.Bead
 }
 
 func newSourceChainFinalizeFixture(t *testing.T) sourceChainFinalizeFixture {
@@ -4588,6 +4591,7 @@ func newSourceChainFinalizeFixtureWithOutcome(t *testing.T, stepOutcome string) 
 		citySource: citySource,
 		rigLaunch:  rigLaunch,
 		workflow:   workflow,
+		step:       cleanup,
 		finalizer:  finalizer,
 	}
 }
