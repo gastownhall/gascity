@@ -45,7 +45,7 @@
 # "no session, nothing to check" semantics every unmatched branch already
 # has.
 #
-# This file ONLY defines functions and one default-value assignment;
+# This file ONLY defines functions and constants;
 # sourcing it must not produce output or otherwise mutate state. It is
 # sourced by zsh as well as bash, so it never binds a local named 'status'
 # or 'path' (zsh ties them to $? and $PATH) and uses grep, sed, awk and jq
@@ -80,6 +80,14 @@ POG_AMBIGUOUS_SENTINEL="__pog_unresolved_ambiguous__"
 # another rig's store cannot be checked against that store (the reason has
 # already gone to stderr). Not a valid bead id by construction.
 POG_ROUTE_BLOCK_SENTINEL="__pog_route_store_unreadable__"
+
+# Environment variables that pin bd to a database independently of
+# BEADS_DIR: bd tries BEADS_DB and its legacy alias BD_DB before BEADS_DIR,
+# and gc sets BEADS_DOLT_SERVER_DATABASE for proxied stores. Every read of a
+# routed store unsets them all, or a leaked pin would silently answer from
+# the caller's store. Host, port and credentials are kept: a wrong server
+# fails loudly, and a failed read blocks.
+POG_STORE_PIN_VARS=(BEADS_DB BD_DB BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_DATABASE BEADS_DOLT_DATA_DIR)
 
 # _pog_timeout <seconds> <cmd...>: run <cmd...> bounded by <seconds>,
 # mirroring the timeout/gtimeout fallback shim in
@@ -127,7 +135,8 @@ _pog_read_with_retry() {
 # _pog_store_read <store> <bd-args...>: _pog_read_with_retry over
 # `bd <bd-args...>` against <store>, a .beads directory. An empty <store>
 # means the caller's own store, read with exactly the caller's environment;
-# any other store is read with BEADS_DIR pointed at it.
+# any other store is read with BEADS_DIR pointed at it and every
+# POG_STORE_PIN_VARS variable unset.
 _pog_store_read() {
     local store="$1"
     shift
@@ -135,7 +144,12 @@ _pog_store_read() {
         _pog_read_with_retry bd "$@"
         return
     fi
-    _pog_read_with_retry env BEADS_DIR="$store" bd "$@"
+    local -a unpin=()
+    local pin
+    for pin in "${POG_STORE_PIN_VARS[@]}"; do
+        unpin+=(-u "$pin")
+    done
+    _pog_read_with_retry env "${unpin[@]}" BEADS_DIR="$store" bd "$@"
 }
 
 # _pog_beads_dir: prints the caller's .beads directory: $BEADS_DIR when set
