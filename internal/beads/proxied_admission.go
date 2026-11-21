@@ -715,12 +715,15 @@ const (
 //  3. inspect: decode, validate, and ask the process table. A record that fails
 //     validation (a foreign root_id, a pre-schema-2 document) is refused HERE,
 //     with no dial ever spent on it;
-//  4. resolve the idle policy, because a finite-idle proxy cannot host a
+//  4. read the record's data-port protocol: a live proxy whose data port
+//     accepts only bd's BDPROXY1 handshake (beads v1.4.0) is refused here
+//     too, because the probe and the library open both speak plain MySQL;
+//  5. resolve the idle policy, because a finite-idle proxy cannot host a
 //     long-lived handle whatever its health;
-//  5. probe, once, for a live endpoint;
-//  6. gate the probe's raw on-disk cursors against this binary's pinned pair.
+//  6. probe, once, for a live endpoint;
+//  7. gate the probe's raw on-disk cursors against this binary's pinned pair.
 //
-// Step 6 runs BEFORE the library open and not after, and that is the whole
+// Step 7 runs BEFORE the library open and not after, and that is the whole
 // reason the cursors come from the probe rather than from a library read: the
 // library's own open-time checks see only the MAIN lane (see "What does NOT
 // bound it" on proxiedPinMemo), so an ignored-lane mismatch discovered after
@@ -818,7 +821,7 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 	key := proxyendpoint.NewPoolKey(ep.Record, in.Database)
 	switch ep.Verdict {
 	case proxyendpoint.VerdictLive:
-		// Fall through to the idle rule and the probe.
+		// Fall through to the data-port protocol, the idle rule and the probe.
 	case proxyendpoint.VerdictLegacySchema:
 		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictLegacySchema,
 			"the proxy record predates the schema that carries a birth token, so no generation can be established", ep.Err)
@@ -839,6 +842,26 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 		// package refuses to do. Non-terminal, so the next open re-inspects.
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone,
 			"proxy liveness undetermined: "+ep.Verdict.String(), ep.Err)
+	}
+
+	if ep.Record.RequiresDataAuth() {
+		// A live proxy of bd's that serves its data port to bd alone (beads
+		// v1.4.0, beads#7885): every connection must open with a BDPROXY1
+		// hello keyed by proxy.secret, which gc never reads and has no client
+		// for. The probe below speaks plain MySQL, so on this port it could
+		// only sit out its whole session budget waiting for a greeting the
+		// proxy withholds and come back indeterminate (budget_exhausted): a
+		// one-shot open paid that budget before taking the bd front door
+		// anyway, and a long-lived one paid it once per outer pass. The
+		// record answers the question before any dial does, so the lane
+		// declines here — no probe session, no bd verb — and terminally,
+		// because no retry can teach this binary the handshake. The bd front
+		// door is the designed store for a proxied scope, so the scope loses
+		// nothing it has with the flag off.
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictDataAuthRequired,
+			fmt.Sprintf("the proxy record carries control_proto=%d: bd's proxy on data port %d accepts only bd's "+
+				"BDPROXY1 handshake, which this build cannot perform, so reads take the bd front door",
+				ep.Record.ControlProto, ep.Record.Port), nil)
 	}
 
 	idle := proxyendpoint.ResolveIdlePolicy(sidecar, ep.Liveness.IdlePolicy)

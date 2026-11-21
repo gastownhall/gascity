@@ -128,16 +128,23 @@ func TestNativeDoltStoreApplyGraphPlanMidPlanFailureLeavesZeroRows(t *testing.T)
 // the reviewer's G3 HIGH-2 probe: a plan whose batch representation exceeds
 // issueops.MaxApplyBatchItems (41 nodes, 40 of them carrying both a
 // ParentKey and AssignAfterCreate, expanding to 41 creates + 40 parent-child
-// dep_adds + 40 deferred assignee updates = 121 items) used to hard-fail with
+// dep_adds + 40 deferred assignee updates = 121 items, padded with standalone
+// nodes to one item past the cap) used to hard-fail with
 // *GraphApplyTooLargeError on EVERY backend, including this real embedded
 // one that has a working beadslib.RunInTransaction and therefore never
 // needed BatchApplier's cap at all. It must now succeed, atomically, through
 // applyGraphPlanOverCapInTransaction.
+//
+// beads 1.4.0 raised MaxApplyBatchItems from 100 to 1000 (beads#7051), so the
+// 121-item core alone now fits one BatchApplier request and never reaches the
+// fallback. Each standalone node adds one create item, the cheapest kind;
+// under a cap of 120 or less there are none and the plan is the core alone.
 func TestNativeDoltStoreApplyGraphPlanOverCapSucceedsAtomicallyOnEmbeddedDolt(t *testing.T) {
 	store := openRealNativeDoltStoreForFacade(t, "graph-apply-over-cap")
 
 	const childCount = 40
-	nodes := make([]GraphApplyNode, 0, childCount+1)
+	fillerCount := max(0, issueops.MaxApplyBatchItems-3*childCount)
+	nodes := make([]GraphApplyNode, 0, childCount+1+fillerCount)
 	nodes = append(nodes, GraphApplyNode{Key: "root", Title: "Root"})
 	for i := 0; i < childCount; i++ {
 		nodes = append(nodes, GraphApplyNode{
@@ -148,11 +155,18 @@ func TestNativeDoltStoreApplyGraphPlanOverCapSucceedsAtomicallyOnEmbeddedDolt(t 
 			AssignAfterCreate: true,
 		})
 	}
+	for i := 0; i < fillerCount; i++ {
+		nodes = append(nodes, GraphApplyNode{Key: fmt.Sprintf("f%d", i), Title: fmt.Sprintf("Filler %d", i)})
+	}
 	plan := &GraphApplyPlan{CommitMessage: "gc: over-cap graph apply", Nodes: nodes}
 
-	wantItems := (childCount + 1) + childCount + childCount // creates + parent links + assigns
-	if wantItems != 121 {
-		t.Fatalf("test construction error: wantItems = %d, want 121", wantItems)
+	wantItems := (childCount + 1 + fillerCount) + childCount + childCount // creates + parent links + assigns
+	req, err := nativeGraphApplyBatchRequest(plan, "graph-apply-over-cap", false, false)
+	if err != nil {
+		t.Fatalf("test construction error: compose the batch request: %v", err)
+	}
+	if len(req.Items) != wantItems {
+		t.Fatalf("test construction error: the plan composes %d batch items, want %d", len(req.Items), wantItems)
 	}
 	if wantItems <= issueops.MaxApplyBatchItems {
 		t.Fatalf("test construction error: %d items does not exceed the %d-item cap", wantItems, issueops.MaxApplyBatchItems)
