@@ -569,3 +569,39 @@ func TestCompletionFactIndexWiringAbsorbsAndInvalidates(t *testing.T) {
 	standalone.absorbCompletionFact(fact)
 	standalone.invalidateCompletionFacts()
 }
+
+// TestDetachedOrphanDeltaLeavesALoneParkedCandidateUnrouted: an orphan bd parks
+// keeps its recoverable route unstamped when it is the only candidate an event
+// named. The raw-open control is the same orphan, restored.
+func TestDetachedOrphanDeltaLeavesALoneParkedCandidateUnrouted(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		source       string
+		indefinitely bool
+		want         string
+	}{
+		{name: "deferred", source: "deferred", indefinitely: true},
+		{name: "review", source: "review"},
+		{name: "raw open control", source: "open", want: detachedOrphanTestPool},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := detachedOrphanWorkBead("D-1")
+			bead.SourceStatus = tc.source
+			bead.IndefinitelyDeferred = tc.indefinitely
+			cr, store := detachedOrphanRuntime(t, detachedOrphanSessionBead(), bead)
+			cr.detachedOrphanLaneOf().observe(beadCreatedEvent(t, bead))
+
+			report := cr.sweepDetachedHandoffOrphansDelta()
+			wantRestored := 0
+			if tc.want != "" {
+				wantRestored = 1
+			}
+			if report.restored != wantRestored {
+				t.Fatalf("delta restored %d (err=%v), want %d for a %s bead", report.restored, report.err, wantRestored, tc.source)
+			}
+			if got := mustRoutedTo(t, store, "D-1"); got != tc.want {
+				t.Fatalf("D-1 gc.routed_to = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
