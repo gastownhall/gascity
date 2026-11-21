@@ -36,17 +36,20 @@ func warmBindPoolSession() *beads.Bead {
 func alwaysUnclaimed(beads.Bead) bool { return true }
 func neverUnclaimed(beads.Bead) bool  { return false }
 
-// TestWarmBindClaimText: a warm reuse reminds a slot with its template's
-// claim nudge, else the pool default the claim backstop sends later; a slot
-// whose template is unknown, or suppresses its startup prompt, gets none.
+// TestWarmBindClaimText: a warm reuse reminds a slot with the pool claim line
+// the claim backstop sends later, whatever its template configures as its
+// nudge (a claim line, a work procedure, or none: issue #9196); a slot whose
+// template is unknown, or suppresses its startup prompt, gets none.
 func TestWarmBindClaimText(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{
 		{Name: "worker", Nudge: "  " + warmClaimText + "\n"},
+		{Name: "procedure", Nudge: idleClaimProcedureNudge},
 		{Name: "quiet"},
-		{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve"},
+		{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve", Nudge: idleClaimProcedureNudge},
 	}}
 	for template, want := range map[string]string{
-		"worker":                          warmClaimText,
+		"worker":                          defaultPoolClaimNudge,
+		"procedure":                       defaultPoolClaimNudge,
 		"quiet":                           defaultPoolClaimNudge,
 		"ghost":                           "",
 		config.ControlDispatcherAgentName: "",
