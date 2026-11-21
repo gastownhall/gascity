@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +64,38 @@ func findCityWithOptions(dir string, opts cityDiscoveryOptions) (string, error) 
 		return legacy, nil
 	}
 	return "", fmt.Errorf("not in a city directory (no city.toml or .gc/ found)")
+}
+
+// cwdGoneError reports that city discovery started from a working directory
+// that no longer exists. Its message keeps the "not in a city directory"
+// prefix so callers that treat a discovery miss as "no city" still do.
+type cwdGoneError struct {
+	// Dir is the removed directory, or empty when the platform could not
+	// report its path.
+	Dir string
+}
+
+func (e *cwdGoneError) Error() string {
+	subject := "the current working directory"
+	if e.Dir != "" {
+		subject = "the current directory " + e.Dir
+	}
+	return "not in a city directory: " + subject +
+		" no longer exists (run gc from an existing directory, or set GC_CITY to the city path)"
+}
+
+// cityDiscoveryCwd returns the process working directory for city discovery.
+// A removed working directory becomes a *cwdGoneError; any other os.Getwd
+// failure is returned unchanged.
+func cityDiscoveryCwd() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", &cwdGoneError{}
+		}
+		return "", err
+	}
+	return cwd, nil
 }
 
 func implicitCityDiscoveryOptions() cityDiscoveryOptions {

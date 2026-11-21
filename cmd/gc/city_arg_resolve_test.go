@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -915,5 +916,59 @@ func TestIsCityDiscoveryNotFoundRecognizesTestBinaryGuardRefusal(t *testing.T) {
 	}
 	if !isCityDiscoveryNotFound(err) {
 		t.Errorf("isCityDiscoveryNotFound(%v) = false, want true — the guard's refusal must read as city-not-found so callers that special-case it don't hard-fail", err)
+	}
+}
+
+// clearCityDiscoveryEnv isolates a discovery test from the ambient city
+// environment so only the process working directory can resolve a city.
+func clearCityDiscoveryEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
+	for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG"} {
+		t.Setenv(key, "")
+	}
+}
+
+// chdirIntoRemovedDir makes the test process's working directory a directory
+// that has since been removed, the state a check is left in when the close of
+// its bead deletes the work dir while the check runs.
+func chdirIntoRemovedDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "work")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Regression (#6295): on Linux os.Getwd of a removed directory fails with a
+// raw ENOENT. Discovery must say the working directory is gone, keep the
+// classifiable "not in a city directory" prefix, and point at GC_CITY.
+func TestResolveContextFromDirRemovedCwdSaysDirectoryIsGone(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux getcwd reports ENOENT for a removed directory; Darwin returns its stale path")
+	}
+	clearCityDiscoveryEnv(t)
+	chdirIntoRemovedDir(t)
+
+	ctx, err := resolveContextFromDir(contextResolutionMode{})
+	if err == nil {
+		t.Fatalf("resolveContextFromDir() = %+v, nil; want a removed-cwd error", ctx)
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "not in a city directory") {
+		t.Errorf("error = %q, want prefix %q", msg, "not in a city directory")
+	}
+	for _, want := range []string{"current working directory no longer exists", "GC_CITY"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want it to contain %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "getwd") {
+		t.Errorf("error = %q, want no raw getwd error", msg)
 	}
 }

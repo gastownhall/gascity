@@ -860,7 +860,7 @@ func resolveContextFromDir(mode contextResolutionMode) (resolvedContext, error) 
 	}
 
 	// Step 9: Registered rig binding lookup (cwd prefix match).
-	cwd, err := os.Getwd()
+	cwd, err := cityDiscoveryCwd()
 	if err != nil {
 		return resolvedContext{}, err
 	}
