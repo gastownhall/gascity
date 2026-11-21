@@ -178,11 +178,12 @@ var bdBeadExists = func(cityPath string, cfg *config.City, target execStoreTarge
 func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]string, error) {
 	var overrides map[string]string
 	var err error
-	if target.ScopeKind == "rig" {
+	switch {
+	case target.ScopeKind == "rig":
 		overrides, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
-	} else if target.ScopeKind == "city" && samePath(cityPath, target.ScopeRoot) {
+	case target.ScopeKind == "city" && samePath(cityPath, target.ScopeRoot):
 		overrides, err = bdRuntimeEnvForCityCommand(cityPath)
-	} else {
+	default:
 		overrides, err = bdRuntimeEnvWithError(cityPath)
 	}
 	if err != nil {
