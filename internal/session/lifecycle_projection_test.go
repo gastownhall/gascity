@@ -332,6 +332,8 @@ func TestProjectLifecycleConflictIsBlockerOverlay(t *testing.T) {
 
 func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	future := now.Add(30 * time.Minute).Format(time.RFC3339)
+	past := now.Add(-30 * time.Minute).Format(time.RFC3339)
 
 	tests := []struct {
 		name                string
@@ -347,6 +349,57 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 				StoredState: "asleep",
 				Runtime:     RuntimeFacts{Observed: true, Alive: true},
 				Now:         now,
+			},
+			wantRuntime:         RuntimeProjectionAlive,
+			wantReconciledState: StateAwake,
+		},
+		{
+			// Regression: a session just suspended (gc session suspend) still has
+			// a live runtime for a tick or two. The advisory heal must not force
+			// it back to awake while an explicit hold is active — doing so clobbers
+			// held_until and spins the session back into the user-hold drain arm
+			// every reconciler tick. Mirror the dead-runtime path: keep it
+			// suspended so the heal is a no-op and the drain can finalize once.
+			name: "alive suspended runtime with active hold stays suspended",
+			input: LifecycleInput{
+				Status:      "open",
+				StoredState: "suspended",
+				HeldUntil:   future,
+				Runtime:     RuntimeFacts{Observed: true, Alive: true},
+				Now:         now,
+			},
+			wantRuntime:         RuntimeProjectionAlive,
+			wantReconciledState: StateSuspended,
+		},
+		{
+			// Counterpart: once the hold has expired, an alive suspended runtime is
+			// genuinely awake again, so the advisory heal still applies. This keeps
+			// the guard scoped to exactly the BlockerHeld window (now < held_until).
+			name: "alive suspended runtime with expired hold heals to awake",
+			input: LifecycleInput{
+				Status:      "open",
+				StoredState: "suspended",
+				HeldUntil:   past,
+				Runtime:     RuntimeFacts{Observed: true, Alive: true},
+				Now:         now,
+			},
+			wantRuntime:         RuntimeProjectionAlive,
+			wantReconciledState: StateAwake,
+		},
+		{
+			// A suspend that landed mid-start (pending_create_claim still set) is
+			// NOT covered by the suspended-hold guard: that half-committed start
+			// must roll back — drain the runtime and clear the lease — rather than
+			// park suspended-but-alive, so it keeps the awake projection that drives
+			// the rollback (TestRecoverRunningPendingCreateRefusesASuspend).
+			name: "alive suspended runtime mid-start still heals to awake",
+			input: LifecycleInput{
+				Status:             "open",
+				StoredState:        "suspended",
+				HeldUntil:          future,
+				PendingCreateClaim: true,
+				Runtime:            RuntimeFacts{Observed: true, Alive: true},
+				Now:                now,
 			},
 			wantRuntime:         RuntimeProjectionAlive,
 			wantReconciledState: StateAwake,
