@@ -855,14 +855,32 @@ ensure_project_identity() {
     if [ -z "$dolt_database" ]; then
         return 0
     fi
-    host=$(connect_host)
-    "$gc_bin" dolt-state ensure-project-id \
-        --city "$GC_CITY_PATH" \
-        --metadata "$meta_file" \
-        --host "$host" \
-        --port "$DOLT_PORT" \
-        --user "$DOLT_USER" \
-        --database "$dolt_database" >/dev/null \
+    set -- --city "$GC_CITY_PATH" --metadata "$meta_file"
+    if [ "${GC_BEADS_PROVIDER_OWNED:-}" != "1" ] || {
+        [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] &&
+            [ "${GC_BEADS_TARGET:-}" = "external" ] &&
+            [ -z "${BEADS_DOLT_SERVER_SOCKET:-}" ] && [ -n "$DOLT_PORT" ];
+    }; then
+        # Managed init already resolved DOLT_PORT from gc's runtime layout,
+        # and direct/external TCP init has the endpoint bd just used. Keep
+        # forwarding those explicit endpoints. Provider-owned local init and
+        # socket-backed init (BEADS_DOLT_SERVER_SOCKET takes precedence over
+        # any inherited TCP port) reconcile from the binding bd persisted.
+        if [ "${GC_BEADS_PROVIDER_OWNED:-}" = "1" ] &&
+            [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] &&
+            [ "${GC_BEADS_TARGET:-}" = "external" ] &&
+            [ -z "${BEADS_DOLT_SERVER_SOCKET:-}" ]; then
+            # Reuse the exact host bd received at init. connect_host folds
+            # loopback IPv6 into IPv4 for gc-managed local servers, but an
+            # external binding may be IPv6-only.
+            host="${GC_DOLT_HOST:-$DOLT_HOST}"
+        else
+            host=$(connect_host)
+        fi
+        set -- "$@" --host "$host" --port "$DOLT_PORT"
+    fi
+    set -- "$@" --user "$DOLT_USER" --database "$dolt_database"
+    "$gc_bin" dolt-state ensure-project-id "$@" >/dev/null \
         || die "failed to ensure project identity for $dir"
 }
 
@@ -2426,6 +2444,8 @@ load_health_check_from_gc() {
     GC_HEALTH_QUERY_READY="false"
     GC_HEALTH_READ_ONLY=""
     GC_HEALTH_CONNECTION_COUNT=""
+    GC_HEALTH_DATA_READ_ERROR=""
+    GC_HEALTH_DATA_READ_WARNING=""
     GC_HEALTH_DATABASE_READY=""
     GC_HEALTH_DATABASE_ERROR=""
     while IFS="$(printf '	')" read -r key value; do
@@ -2438,6 +2458,12 @@ load_health_check_from_gc() {
                 ;;
             connection_count)
                 GC_HEALTH_CONNECTION_COUNT="$value"
+                ;;
+            data_read_error)
+                GC_HEALTH_DATA_READ_ERROR="$value"
+                ;;
+            data_read_warning)
+                GC_HEALTH_DATA_READ_WARNING="$value"
                 ;;
             database_ready)
                 GC_HEALTH_DATABASE_READY="$value"
@@ -4891,6 +4917,31 @@ op_store_bridge() {
     GC_DOLT_PASSWORD="$DOLT_PASSWORD"     BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"     "$gc_bin" bd-store-bridge         --dir "$scope_dir"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         "$@"
     return $?
 }
+# health_data_read_gate fails the health check when the gc helper's data-read
+# probe could not read a pre-existing dolt-ignored table (a lost chunk: catalog
+# queries and the probe's own table stay green while bd's tables are unreadable).
+# An inconclusive read only warns. Only the gc helper path reports this; the
+# shell-native fallback has no data-read probe.
+health_data_read_gate() {
+    if [ -n "${GC_HEALTH_DATA_READ_ERROR:-}" ]; then
+        die "dolt data read probe failed: $GC_HEALTH_DATA_READ_ERROR"
+    fi
+    if [ -n "${GC_HEALTH_DATA_READ_WARNING:-}" ]; then
+        echo "warning: dolt data read probe inconclusive: $GC_HEALTH_DATA_READ_WARNING" >&2
+    fi
+}
+
+# health_store_open_gate exercises bd's own store-open path (bd ping opens the
+# store and runs a trivial query): a server that answers SQL can still hand bd a
+# store it cannot open.
+health_store_open_gate() {
+    local out
+    [ -d "$GC_CITY_PATH/.beads" ] || return 0
+    if ! out=$(run_bd_pinned "$GC_CITY_PATH" ping 2>&1); then
+        die "bd store-open probe failed (bd ping): $out"
+    fi
+}
+
 op_health() {
     local conn_count="" read_only_status health_db health_data_dir db_failure
 
@@ -4918,6 +4969,7 @@ op_health() {
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "unknown" ]; then
             echo "warning: dolt read-only probe inconclusive" >&2
         fi
+        health_data_read_gate
         conn_count="$GC_HEALTH_CONNECTION_COUNT"
     else
         # Query probe.
@@ -4950,6 +5002,8 @@ op_health() {
         # Connection capacity warning (non-fatal, single query).
         conn_count=$(get_connection_count 2>/dev/null) || conn_count=""
     fi
+
+    health_store_open_gate
 
     if [ -n "$conn_count" ] && [ "$conn_count" -ge 800 ] 2>/dev/null; then
         echo "warning: connection count ($conn_count) near capacity (80% of 1000)" >&2
@@ -5446,10 +5500,28 @@ op_provider_owned_init() {
         anchored=true
     fi
     GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@" || status=$?
-    if [ "$status" -ne 0 ] && [ "$anchored" = true ]; then
-        release_fresh_beads_dir_anchor "$dir"
+    if [ "$status" -ne 0 ]; then
+        if [ "$anchored" = true ]; then
+            release_fresh_beads_dir_anchor "$dir"
+        fi
+        return "$status"
     fi
-    return "$status"
+    # The normal managed path allocates DOLT_PORT after provider-owned dispatch.
+    # Preserve only a direct external TCP endpoint here; local init and a
+    # socket init (bd was handed --server-socket, which wins over any
+    # inherited GC_DOLT_PORT) reconcile from the binding bd persisted.
+    if [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] && [ "${GC_BEADS_TARGET:-}" = "external" ] &&
+        [ -z "${BEADS_DOLT_SERVER_SOCKET:-}" ]; then
+        DOLT_PORT="${GC_DOLT_PORT:-$DOLT_PORT}"
+    fi
+    # gc's ProviderRoot must resolve the proxy root under the same
+    # shared-server opt-out bd ran under in run_provider_owned_bd, or an
+    # inherited BEADS_DOLT_SHARED_SERVER=1 sends it to a different root.
+    # This is the op's last step, so exporting in this process is safe.
+    if [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
+        pin_proxied_shared_server_off
+    fi
+    ensure_project_identity "$dir"
 }
 
 # anchor_fresh_beads_dir makes BEADS_DIR authoritative for a scope bd has not

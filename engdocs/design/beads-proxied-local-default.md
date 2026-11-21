@@ -198,6 +198,10 @@ periodic read would keep a suspended scope warm for good.
   - Every cache pauses its reconcile (`beads.WithReconcileGate`).
   - A config change made while it is quiescent is applied on the first tick
     after resume.
+  - The per-session `gc nudge poll` sidecars (the legacy nudge_dispatcher)
+    exit before their next store read once the suspension has stopped their
+    session, because each read would restart the pair the controller retired.
+    Their queued nudges wait for the resume.
 - **Retire on suspend, converging on live state.** Once a suspended scope's
   sessions have been drained, and none of the controller's off-tick store work
   (autoclose runs, completion facts, the async session starts and drain-ack

@@ -130,7 +130,7 @@ func TestInputOutcomeProjectionMatchesLaneAndQueue(t *testing.T) {
 		{runtime.InputOutcomeNotSent, laneTransientMiss, queueCharged},
 		{runtime.InputOutcomeRejected, laneRejected, queueCharged},
 		{runtime.InputOutcomeBusy, laneTransientMiss, queueReleasedAfterWait},
-		{runtime.InputOutcomePendingInteraction, laneTransientMiss, queueReleased},
+		{runtime.InputOutcomePendingInteraction, laneTransientMiss, queueReleasedAfterWait},
 		{runtime.InputOutcomeUnavailable, laneTransientMiss, queueReleasedAfterWait},
 		{runtime.InputOutcomeGone, laneUnknown, queueReleased},
 	}

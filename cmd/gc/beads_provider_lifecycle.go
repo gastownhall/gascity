@@ -95,6 +95,26 @@ func isBreakerOpenError(err error) bool {
 		strings.Contains(s, "server appears down, failing fast")
 }
 
+// isDataReadFailureError reports whether a provider health error is the data-read
+// probe's verdict (gc-beads-bd.sh health_data_read_gate) that a pre-existing
+// table cannot be read. Restarting the server cannot restore a lost chunk.
+func isDataReadFailureError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "dolt data read probe failed:")
+}
+
+// healthErrorSkipsRecover reports whether a provider health error must be
+// returned as-is instead of triggering recover:
+//   - an open bd circuit breaker means a recovery is already in flight (#2533
+//     clears the breaker on kill); recovering again would re-trip the breaker
+//     and re-desync the PID.
+//   - a data-read failure is not something recover can fix, and the helper's
+//     recovery path reports success without re-running the probe: recovering
+//     would replace the failure with a green health check on data that is
+//     still unreadable.
+func healthErrorSkipsRecover(err error) bool {
+	return isBreakerOpenError(err) || isDataReadFailureError(err)
+}
+
 func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
 	return cfg.Host != "" ||
 		cfg.Port != 0 ||
@@ -1805,6 +1825,8 @@ func providerScriptTraceDir(environ []string) string {
 // runProviderOwnedOpStrict differs from the legacy generic provider runner:
 // an exit status of 2 is a provider failure for a scope GC has explicitly
 // handed to the provider, never an invitation to fall back to GC lifecycle.
+// Where the platform cannot exec the bundled gc-beads-bd script, gc's native
+// form of it runs in its place (builtinProviderOwnedOp).
 func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, script string, environ []string, args ...string) error {
 	op := "provider operation"
 	if len(args) > 0 {
@@ -1812,14 +1834,21 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 	}
 	ctx, cancel := providerLifecycleContext(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, script, args...)
-	cmd.WaitDelay = 2 * time.Second
-	prepareProviderOpCommand(cmd)
-	cmd.Env = environ
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	start := time.Now()
-	err := cmd.Run()
+	var start time.Time
+	var err error
+	if native := builtinProviderOwnedOp(script, environ); native != nil {
+		start = time.Now()
+		err = native(ctx, environ, &stderr, args)
+	} else {
+		cmd := exec.CommandContext(ctx, script, args...)
+		cmd.WaitDelay = 2 * time.Second
+		prepareProviderOpCommand(cmd)
+		cmd.Env = environ
+		cmd.Stderr = &stderr
+		start = time.Now()
+		err = cmd.Run()
+	}
 	traceProviderScriptCall(script, providerScriptTraceDir(environ), args, start, err)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -2483,11 +2512,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				if !owned {
 					return err
 				}
-				// Breaker-aware preflight: if the bd circuit breaker is
-				// open, a recovery is already in flight (#2533 clears the
-				// breaker on kill). Skip recover here so the next restart
-				// doesn't re-trip the breaker and re-desync the PID.
-				if isBreakerOpenError(err) {
+				if healthErrorSkipsRecover(err) {
 					return err
 				}
 				// Recover backoff: refuse a 2nd recover within

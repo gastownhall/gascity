@@ -3860,6 +3860,11 @@ type fencedInfrastructureRootSet struct {
 
 var fencedInfrastructureRoots = &fencedInfrastructureRootSet{}
 
+// sweepRootIsCityInfrastructure classifies a scanned root before the orphan
+// sweep reaps it. It is a variable so tests can supply a classification the
+// host does not produce under `go test`.
+var sweepRootIsCityInfrastructure = proctable.RootIsCityInfrastructure
+
 func (s *fencedInfrastructureRootSet) take(cityPath string) map[string]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3967,16 +3972,23 @@ func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bo
 // the root is city infrastructure by argv, or a detached foreign systemd
 // user service, reported with its unit, ppid and command name so a root
 // the fence spares can be identified from the log. "" means the root may
-// be reaped. The caller re-checks the fence every sweep and reports each
+// be reaped. A root the classifier cannot read (the scan's start identity
+// is missing, or its command line is unreadable) returns the error, and the
+// caller leaves it running: a root that cannot be classified is not
+// reaped. The caller re-checks the fence every sweep and reports each
 // fenced root once per process through the sweep's existing suppression.
-func processRootFence(live runtime.LiveRuntime) string {
-	if proctable.IsCityInfrastructureRoot(live.PID) {
-		return "city infrastructure (managed Dolt watchdog, bd proxy or nudge poller)"
+func processRootFence(live runtime.LiveRuntime) (string, error) {
+	infrastructure, err := sweepRootIsCityInfrastructure(live)
+	if err != nil {
+		return "", err
+	}
+	if infrastructure {
+		return "city infrastructure (managed Dolt watchdog, bd proxy or nudge poller)", nil
 	}
 	if unit := proctable.DetachedUserServiceUnit(live.PID); unit != "" {
-		return fmt.Sprintf("detached user service %s (ppid=%d name=%q)", unit, live.PPID, live.Name)
+		return fmt.Sprintf("detached user service %s (ppid=%d name=%q)", unit, live.PPID, live.Name), nil
 	}
-	return ""
+	return "", nil
 }
 
 // processScanErrorLogRepeat is how often the orphan sweep repeats a scan
@@ -4122,8 +4134,14 @@ func sweepProcessTableOrphans(
 		// environment carries the session's identity (inherited from the user
 		// manager's environment, or set with `systemd-run --user --setenv`).
 		// It is not this session's runtime, and a later incarnation's cleanup
-		// must not end it.
-		if reason := processRootFence(live); reason != "" {
+		// must not end it. A root that cannot be classified is left running
+		// and reported.
+		reason, err := processRootFence(live)
+		if err != nil {
+			fmt.Fprintf(stderr, "session reconciler: leaving process-table orphan pid=%d session=%s running: %v\n", live.PID, live.SessionID, err) //nolint:errcheck
+			continue
+		}
+		if reason != "" {
 			key := strconv.Itoa(live.PID) + ":" + proctable.RootStartIdentity(live.PID)
 			fenced[key] = struct{}{}
 			if _, reported := previouslyFenced[key]; !reported {

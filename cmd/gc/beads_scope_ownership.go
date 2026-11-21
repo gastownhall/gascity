@@ -1041,7 +1041,7 @@ func providerOwnershipIntentFromPersistedCity(cityPath string) (providerScopeInt
 		// Embedded Beads metadata has no server transport a fresh rig can
 		// inherit. Preserve the city exactly as it is and initialize the new
 		// provider-owned rig with the normal fresh-scope default.
-		return providerScopeIntent{Transport: "proxied", Target: "local"}, nil
+		return providerScopeIntent{Transport: freshScopeTransportDefault, Target: "local"}, nil
 	}
 	state, configured, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"))
 	if err != nil {
