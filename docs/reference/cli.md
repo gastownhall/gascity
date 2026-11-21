@@ -5251,6 +5251,10 @@ The target is an agent qualified name (e.g. "mayor" or "hello-world/polecat").
 The second argument is a bead ID, a formula name when --formula is set, or
 arbitrary text (which auto-creates a task bead).
 
+Slinging an expanded cooked workflow root (gc formula cook) also routes the
+run's still-unrouted steps to the target, matching what a --formula launch
+routes.
+
 When target is omitted, the bead's rig prefix is used to look up the rig's
 default_sling_targets (or default_sling_target) from config and one is chosen
 at random. Requires --formula to have an explicit target.
