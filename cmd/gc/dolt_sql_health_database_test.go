@@ -22,6 +22,10 @@ case "$*" in
     printf 'cnt\n3\n'
     exit 0
     ;;
+  *"information_schema.tables"*)
+    printf 'table_schema,table_name\n'
+    exit 0
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\naaa_first\nhq\ninformation_schema\nmysql\n'
     exit 0

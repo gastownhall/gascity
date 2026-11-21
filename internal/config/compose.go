@@ -1209,7 +1209,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		// itself set: a fragment defining any [beads] key would otherwise
 		// reset the whole struct and silently downgrade an explicit
 		// conditional_writes / guarded_release / allow_schema_behind_migrate
-		// opt-in, or turn an explicit native_transport = "off" back into the
+		// opt-in or migrate_command, or turn an explicit native_transport = "off" back into the
 		// "auto" default (mirror of the daemon.formula_v2 preservation below).
 		// Capture before the overwrite; a fragment that DOES set the field
 		// still wins.
@@ -1219,6 +1219,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
 		nativeTransport := base.Beads.NativeTransport
 		ledgerFeed := base.Beads.LedgerFeed
+		migrateCommand := base.Beads.MigrateCommand
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
@@ -1237,6 +1238,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 		if !fragMeta.IsDefined("beads", "ledger_feed") {
 			base.Beads.LedgerFeed = ledgerFeed
+		}
+		if !fragMeta.IsDefined("beads", "migrate_command") {
+			base.Beads.MigrateCommand = migrateCommand
 		}
 	}
 	// [ops] merges per key: each field is a rollout gate, so a fragment
