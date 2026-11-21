@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // deadPaneProvider is a fake tmux backend over runtime.Fake that can hold a
@@ -420,6 +421,91 @@ func TestReconcileNamedCorpseCrashUnderSuspension(t *testing.T) {
 			}
 			if got := len(e.crashes()); got > 1 {
 				t.Fatalf("session.crashed events = %d, want at most 1 for one dead object", got)
+			}
+		})
+	}
+}
+
+// setMeta stamps the bead's metadata for a gate case.
+func (e *deadPaneEnv) setMeta(t *testing.T, kv map[string]string) {
+	t.Helper()
+	b, err := e.store.Get(e.beadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", e.beadID, err)
+	}
+	e.setSessionMetadata(&b, kv)
+}
+
+// TestReconcileNamedCorpseCrashGates: a corpse whose row or runtime is owned
+// by another handler, or whose pane shows a provider rate-limit screen,
+// records no dead-pane crash; the rate-limited dead object stays unrecorded
+// once the screen scrolls away.
+func TestReconcileNamedCorpseCrashGates(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		pane  string
+		setup func(t *testing.T, e *deadPaneEnv)
+		later string
+	}{
+		{name: "pool seat", setup: func(t *testing.T, e *deadPaneEnv) {
+			e.setMeta(t, map[string]string{namedSessionMetadataKey: "", "pool_managed": "true", "pool_slot": "1"})
+		}},
+		{name: "rate-limit screen", pane: "Usage limit reached for this account", later: "agent exited"},
+		{name: "runtime drain ack", setup: func(t *testing.T, e *deadPaneEnv) {
+			if err := e.sp.SetMeta(e.name, "GC_DRAIN_ACK", "1"); err != nil {
+				t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+			}
+		}},
+		{name: "runtime restart requested", setup: func(t *testing.T, e *deadPaneEnv) {
+			if err := e.sp.SetMeta(e.name, "GC_RESTART_REQUESTED", "1700000000"); err != nil {
+				t.Fatalf("SetMeta(GC_RESTART_REQUESTED): %v", err)
+			}
+		}},
+		{name: "foreign runtime token", setup: func(t *testing.T, e *deadPaneEnv) {
+			if err := e.sp.SetMeta(e.name, "GC_INSTANCE_TOKEN", "tok-other-incarnation"); err != nil {
+				t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+			}
+		}},
+		{name: "row restart requested", setup: func(t *testing.T, e *deadPaneEnv) {
+			e.setMeta(t, map[string]string{"restart_requested": "true"})
+		}},
+		{name: "pending create claim", setup: func(t *testing.T, e *deadPaneEnv) {
+			e.setMeta(t, map[string]string{"pending_create_claim": "true"})
+		}},
+		{name: "tracked drain", setup: func(_ *testing.T, e *deadPaneEnv) {
+			e.dt.set(e.beadID, &drainState{reason: "idle", generation: 1})
+		}},
+		{name: "kill pending", setup: func(t *testing.T, e *deadPaneEnv) {
+			e.setMeta(t, map[string]string{
+				"state":        "asleep",
+				"state_reason": session.KillPendingReason,
+				"sleep_reason": string(session.SleepReasonKilled),
+				"slept_at":     e.clk.Now().UTC().Format(time.RFC3339),
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newDeadPaneEnv(t)
+			pane := tc.pane
+			if pane == "" {
+				pane = "agent exited"
+			}
+			e.sp.SetPeekOutput(e.name, pane)
+			e.sp.startErr = errors.New("start refused")
+			e.sp.kill(e.name, "$7")
+			if tc.setup != nil {
+				tc.setup(t, e)
+			}
+
+			e.tick(t)
+			if tc.later != "" {
+				e.sp.SetPeekOutput(e.name, tc.later)
+				e.claimLive(t)
+				e.tick(t)
+			}
+
+			if got := len(e.crashes()); got != 0 {
+				t.Fatalf("session.crashed events = %d, want 0; events=%#v", got, e.rec.Events)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/events"
@@ -18,33 +19,73 @@ import (
 const deadPaneCrashReason = "dead pane"
 
 // deadPaneCrashCandidate reports whether obs, a completed liveness
-// observation of name, is the dead pane of info's committed named
-// incarnation.
-func deadPaneCrashCandidate(info session.Info, obs runtime.Liveness) bool {
+// observation, is the dead pane of info's committed named incarnation with no
+// other handler owning the row: no pending create claim, requested restart,
+// tracked drain or kill fence.
+func deadPaneCrashCandidate(info session.Info, obs runtime.Liveness, dt *drainTracker, now time.Time) bool {
 	if !obs.Corpse || !isNamedSessionInfo(info) {
 		return false
 	}
+	if info.PendingCreateClaim || strings.TrimSpace(info.RestartRequested) == "true" ||
+		(dt != nil && dt.get(info.ID) != nil) || session.IsKillPendingInfo(info, now) {
+		return false
+	}
 	return session.ProjectLifecycle(session.LifecycleInputFromInfo(info)).BaseState == session.BaseStateActive
+}
+
+// deadPaneOwnedElsewhere reports whether runtime name says its exit is
+// another handler's: a drain ack, a requested restart, or the token of
+// another incarnation. A read error is returned, and the caller records
+// nothing.
+func deadPaneOwnedElsewhere(info session.Info, name string, sp runtime.Provider) (bool, error) {
+	for _, key := range []string{"GC_DRAIN_ACK", "GC_RESTART_REQUESTED"} {
+		v, err := sp.GetMeta(name, key)
+		if err != nil {
+			return false, fmt.Errorf("reading %s: %w", key, err)
+		}
+		if strings.TrimSpace(v) != "" {
+			return true, nil
+		}
+	}
+	foreign, err := runtimeOfAnotherIncarnation(info, name, sp)
+	if err != nil {
+		return false, fmt.Errorf("reading GC_INSTANCE_TOKEN: %w", err)
+	}
+	return foreign, nil
 }
 
 // recordDeadPaneCrash records session.crashed for a configured named row
 // whose runtime name is observed as a remain-on-exit corpse: the pane is
 // gone, so without this record the restart that follows reads the same as
 // an operator's wake (#6298). The pane tail rides on the event; a failed
-// peek is logged and leaves it empty, and the crash is still recorded. One
-// record is made per dead object (markCorpseCrash).
-func recordDeadPaneCrash(info session.Info, name string, obs runtime.Liveness, tp TemplateParams, peek func(int) (string, error), dt *drainTracker, rec events.Recorder, stderr io.Writer) {
+// peek is logged and leaves it empty, and the crash is still recorded. A
+// pane showing a provider rate-limit screen is not a crash. One
+// classification is made per dead object (markCorpseCrash); a failed
+// runtime metadata read records nothing and leaves the object for the next
+// tick.
+func recordDeadPaneCrash(info session.Info, name string, obs runtime.Liveness, tp TemplateParams, sp runtime.Provider, peek func(int) (string, error), dt *drainTracker, now time.Time, rec events.Recorder, stderr io.Writer) {
 	if obs.Alive {
 		dt.clearCorpseCrash(info.ID)
 		return
 	}
-	if !deadPaneCrashCandidate(info, obs) || !dt.markCorpseCrash(info.ID, deadObjectKey(info, obs)) {
+	if !deadPaneCrashCandidate(info, obs, dt, now) {
+		return
+	}
+	owned, err := deadPaneOwnedElsewhere(info, name, sp)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: classifying dead pane of %s: %v\n", name, err) //nolint:errcheck
+		return
+	}
+	if owned || !dt.markCorpseCrash(info.ID, deadObjectKey(info, obs)) {
 		return
 	}
 	output, err := peek(rateLimitPeekLines)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reading dead pane of %s for its crash record: %v\n", name, err) //nolint:errcheck
 		output = ""
+	}
+	if runtime.ContainsProviderRateLimitScreen(output) {
+		return
 	}
 	rec.Record(sessionCrashedEvent(info.ID, tp, output, deadPaneCrashReason))
 	telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
