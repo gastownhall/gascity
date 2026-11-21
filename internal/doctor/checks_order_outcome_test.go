@@ -1003,3 +1003,91 @@ func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
 		})
 	}
 }
+
+// TestOrderOutcomeHealthyMixedOutcomeSummary pins the aggregate: each unhealthy
+// order counts once, an aggregate covering incomplete work replaces "failing
+// repeatedly" whenever a declaration is outstanding, and a failure-only log
+// keeps its exact existing output.
+func TestOrderOutcomeHealthyMixedOutcomeSummary(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	failures := func(subject string) []events.Event {
+		out := make([]events.Event, 0, 3)
+		for i := 3; i >= 1; i-- {
+			out = append(out, events.Event{
+				Type: events.OrderFailed, Ts: now.Add(-time.Duration(i) * time.Hour), Subject: subject,
+				Actor: "controller", Message: "exit status 1",
+			})
+		}
+		return out
+	}
+	declared := func(subject string) events.Event {
+		return skippedOrderEvent(subject, now.Add(-30*time.Minute), "skipped", "nothing to export")
+	}
+
+	cases := []struct {
+		name        string
+		evts        []events.Event
+		wantMessage string
+		wantDetails []string
+		wantHint    string
+	}{
+		{
+			name:        "failure-only log keeps existing output",
+			evts:        failures("alpha-sweep"),
+			wantMessage: "1 order(s) failing repeatedly",
+			wantDetails: []string{`alpha-sweep: 3 consecutive failures, last "exit status 1"`, "beta-sweep: no completed runs yet"},
+			wantHint:    "Inspect with: gc order check && gc order history alpha-sweep",
+		},
+		{
+			name:        "declaration only",
+			evts:        []events.Event{declared("beta-sweep")},
+			wantMessage: "1 order(s) have unhealthy outcomes",
+			wantDetails: []string{"alpha-sweep: no completed runs yet", "beta-sweep: recorded incomplete work: skipped: nothing to export"},
+			wantHint:    "Inspect with: gc order check && gc order history beta-sweep",
+		},
+		{
+			name:        "failing order and declaring order count separately",
+			evts:        append(failures("alpha-sweep"), declared("beta-sweep")),
+			wantMessage: "2 order(s) have unhealthy outcomes",
+			wantDetails: []string{
+				`alpha-sweep: 3 consecutive failures, last "exit status 1"`,
+				"beta-sweep: recorded incomplete work: skipped: nothing to export",
+			},
+			wantHint: "Inspect with: gc order check && gc order history alpha-sweep",
+		},
+		{
+			name:        "both signals on one order count it once",
+			evts:        append([]events.Event{declared("alpha-sweep")}, failures("alpha-sweep")...),
+			wantMessage: "1 order(s) have unhealthy outcomes",
+			wantDetails: []string{
+				`alpha-sweep: 3 consecutive failures, last "exit status 1"`,
+				"alpha-sweep: recorded incomplete work: skipped: nothing to export",
+				"beta-sweep: no completed runs yet",
+			},
+			wantHint: "Inspect with: gc order check && gc order history alpha-sweep",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "alpha-sweep", "cooldown", "1h")
+			writeOrderFiringTestOrder(t, cityPath, "beta-sweep", "cron", "0 * * * *")
+			writeOrderFiringTestEvents(t, cityPath, tc.evts...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != StatusWarning || result.Severity != SeverityAdvisory {
+				t.Fatalf("status/severity = %v/%v, want StatusWarning/SeverityAdvisory; details=%v", result.Status, result.Severity, result.Details)
+			}
+			if result.Message != tc.wantMessage {
+				t.Fatalf("message = %q, want %q", result.Message, tc.wantMessage)
+			}
+			if strings.Join(result.Details, "\n") != strings.Join(tc.wantDetails, "\n") {
+				t.Fatalf("details = %q, want %q", result.Details, tc.wantDetails)
+			}
+			if result.FixHint != tc.wantHint {
+				t.Fatalf("FixHint = %q, want %q", result.FixHint, tc.wantHint)
+			}
+		})
+	}
+}

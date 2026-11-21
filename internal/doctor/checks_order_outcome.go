@@ -203,7 +203,9 @@ func (c *OrderOutcomeHealthyCheck) CanFix() bool { return false }
 // Fix is a no-op for the reason given on CanFix.
 func (c *OrderOutcomeHealthyCheck) Fix(_ *CheckContext) error { return nil }
 
-// Run counts each scheduled order's trailing consecutive failures.
+// Run counts each scheduled order's trailing consecutive failures and reports
+// any order.skipped declaration of incomplete work recorded since its latest
+// completion.
 //
 // Unlike order-firing-current this needs no goroutine-plus-timeout guard: that
 // check wraps its work because the order-history resolver opens the beads/Dolt
@@ -250,7 +252,8 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 
 	worst := StatusOK
 	monitored := 0
-	failing := 0
+	unhealthy := 0
+	incomplete := false
 	var firstFailingHint string
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
@@ -276,6 +279,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 			// failures keep their own detail alongside it; otherwise the
 			// classifier's success or no-outcome detail would be false.
 			status = worseStatus(status, StatusWarning)
+			incomplete = true
 			declarationDetail := incompleteOrderOutcomeDetail(order, declaration)
 			if streak > 0 || skipped > 0 {
 				details = append(details, declarationDetail)
@@ -286,7 +290,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, details...)
 		if status != StatusOK {
-			failing++
+			unhealthy++
 			if firstFailingHint == "" {
 				// gc order history takes a bare name positionally and filters
 				// on a.Name; the scoped form matches zero orders on the
@@ -308,7 +312,13 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	if worst == StatusOK {
 		result.Message = "all scheduled orders succeeding"
 	} else {
-		result.Message = fmt.Sprintf("%d order(s) failing repeatedly", failing)
+		// "failing repeatedly" would misdescribe an order whose only signal is
+		// a declaration of incomplete work, so any outstanding declaration
+		// switches to an aggregate covering both signals.
+		result.Message = fmt.Sprintf("%d order(s) failing repeatedly", unhealthy)
+		if incomplete {
+			result.Message = fmt.Sprintf("%d order(s) have unhealthy outcomes", unhealthy)
+		}
 		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, firstFailingHint)
 	}
 	return result
