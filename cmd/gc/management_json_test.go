@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -42,6 +43,14 @@ func decodeOneJSONLine(t *testing.T, stdout *bytes.Buffer) map[string]any {
 func validateManagementJSONPayload(t *testing.T, command []string, stdout *bytes.Buffer) map[string]any {
 	t.Helper()
 	payload := decodeOneJSONLine(t, stdout)
+	validateJSONAgainstBuiltinSchema(t, command, stdout.Bytes())
+	return payload
+}
+
+// validateJSONAgainstBuiltinSchema validates raw, one JSON document in any
+// whitespace layout, against command's built-in result schema.
+func validateJSONAgainstBuiltinSchema(t *testing.T, command []string, raw []byte) {
+	t.Helper()
 	schemaRaw, err := readBuiltinSchema(command, jsonSchemaResultRole)
 	if err != nil {
 		t.Fatalf("read schema for %v: %v", command, err)
@@ -50,9 +59,9 @@ func validateManagementJSONPayload(t *testing.T, command []string, stdout *bytes
 	if err != nil {
 		t.Fatalf("parse schema for %v: %v", command, err)
 	}
-	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(stdout.Bytes()))
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 	if err != nil {
-		t.Fatalf("parse payload for %v: %v\n%s", command, err, stdout.String())
+		t.Fatalf("parse payload for %v: %v\n%s", command, err, raw)
 	}
 	compiler := jsonschema.NewCompiler()
 	schemaURL := strings.Join(command, "/") + "/result.schema.json"
@@ -64,9 +73,8 @@ func validateManagementJSONPayload(t *testing.T, command []string, stdout *bytes
 		t.Fatalf("compile schema for %v: %v", command, err)
 	}
 	if err := compiled.Validate(instance); err != nil {
-		t.Fatalf("payload for %v does not validate: %v\n%s", command, err, stdout.String())
+		t.Fatalf("payload for %v does not validate: %v\n%s", command, err, raw)
 	}
-	return payload
 }
 
 func runManagementJSONPayload(t *testing.T, cityPath string, args ...string) map[string]any {
@@ -139,6 +147,11 @@ func TestManagementJSONSuccessPayloadsValidateDeclaredSchemas(t *testing.T) {
 				cityPath := t.TempDir()
 				writeManagementJSONTestCity(t, cityPath, "[workspace]\nname = \"test-city\"\n")
 				return cityPath, []string{"rig", "add", filepath.Join(t.TempDir(), "frontend"), "--prefix", "fe", "--json"}
+			},
+			check: func(t *testing.T, payload map[string]any) {
+				if got, ok := payload["suspended"].(bool); !ok || got {
+					t.Fatalf("suspended = %#v, want false without --start-suspended", payload["suspended"])
+				}
 			},
 		},
 		{
@@ -497,7 +510,7 @@ contract = "gc.healthz.v1"
 	return cityPath
 }
 
-func TestRigAddJSONEmitsOnlySummary(t *testing.T) {
+func TestRigAddJSONReportsEffectiveSuspendedOnStart(t *testing.T) {
 	clearGCEnv(t)
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "bd")
@@ -506,16 +519,24 @@ func TestRigAddJSONEmitsOnlySummary(t *testing.T) {
 	rigPath := filepath.Join(t.TempDir(), "frontend")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--city", cityPath, "rig", "add", rigPath, "--prefix", "fe", "--json"}, &stdout, &stderr)
+	code := run([]string{"--city", cityPath, "rig", "add", rigPath, "--prefix", "fe", "--start-suspended", "--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run rig add --json = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
 	payload := decodeOneJSONLine(t, &stdout)
-	if payload["schema_version"] != "1" || payload["ok"] != true || payload["command"] != "rig add" || payload["rig"] != "frontend" || payload["prefix"] != "fe" {
+	if payload["schema_version"] != "1" || payload["ok"] != true || payload["command"] != "rig add" || payload["rig"] != "frontend" || payload["prefix"] != "fe" || payload["suspended"] != true {
 		t.Fatalf("payload = %+v", payload)
 	}
 	if strings.Contains(stdout.String(), "Adding rig") || strings.Contains(stdout.String(), "Rig added") {
 		t.Fatalf("stdout contains human text: %q", stdout.String())
+	}
+
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].EffectiveSuspendedOnStart() {
+		t.Fatalf("stored rigs = %+v, want one effectively suspended rig", cfg.Rigs)
 	}
 }
 

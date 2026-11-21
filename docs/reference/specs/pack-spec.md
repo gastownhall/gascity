@@ -242,7 +242,7 @@ Rig-scoped requirements are validated while loading the pack for a rig.
 Pack imports are named dependencies.
 
 ```toml
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^1"
 ```
@@ -266,6 +266,7 @@ selector are part of the same source string.
 |---|---|---|---|
 | `source` | string | yes | Durable source for the pack root. Must not be empty. GitHub-hosted packs below a repository root should use dereferenceable `/tree/<ref>/<path>` URLs. |
 | `version` | string | no | Compatibility constraint for versioned sources. |
+| `agents_exclude` | array of strings | no | Local agent names to remove on this import edge. Invalid names fail loading; valid unmatched names warn and do nothing. Backing named sessions are removed with their excluded agents. |
 
 Public import TOML must not use fields named `path`, `ref`, `commit`, or
 `hash`. Registry handles such as `main:gascity` are command-time lookup handles
@@ -493,10 +494,13 @@ time or via the `pack-runtimes` doctor check below. Pack authors can
 self-verify ahead of production: `gc runtime check <name>` resolves the
 declaration and smoke-tests it by invoking the runtime's `nudge` operation
 against a throwaway conformance session, failing the run (`required: nudge`)
-when nudge is absent or broken. That smoke-tests the operation, not that an
-oversized prompt reroutes end to end — a pack that never runs it and
-declares `nudge-fallback` falsely still will not fail until an oversized
-prompt actually reaches that runtime at session start.
+when nudge is absent or broken. A runtime whose handshake declares
+`carrier.ops` reports the same probe as `capability carrier.ops: nudge`,
+alongside that carrier's other required driving operations. That
+smoke-tests the operation, not that an oversized prompt reroutes end to
+end — a pack that never runs it and declares `nudge-fallback` falsely still
+will not fail until an oversized prompt actually reaches that runtime at
+session start.
 
 City composition registers declared runtimes into a city-wide selection
 registry (`City.Runtimes`), including runtimes declared by rig-imported packs.
@@ -618,6 +622,28 @@ An optional `command.toml` may override the default command words or script:
 | `command` | array of string | no | Command words. Defaults to the directory path under `commands/`. |
 | `description` | string | no | Short help text. |
 | `run` | string | no | Entrypoint path relative to the command directory. Defaults to `run.sh`. |
+
+A command runs with the invoking environment plus these variables:
+
+| Variable | Value |
+|---|---|
+| `GC_BIN` | The `gc` executable that invoked the command. Use it for recursive `gc` calls. |
+| `GC_CITY`, `GC_CITY_PATH` | The city root. |
+| `GC_CITY_NAME` | The city name. |
+| `GC_CITY_RUNTIME_DIR` | The city's runtime state directory. |
+| `GC_PACK_DIR` | The root of the pack that defines the command. |
+| `GC_PACK_NAME` | That pack's name. |
+| `GC_PACK_STATE_DIR` | The pack's state directory for this city. |
+| `GC_SUPERVISOR_URL` | Base URL of the supervisor API serving the city, such as `http://127.0.0.1:8372`. City routes are under `$GC_SUPERVISOR_URL/v0/city/<name>/`, where `<name>` is the name the city is registered under (normally `GC_CITY_NAME`). Set only when the city is registered with a supervisor whose API address is plain `http` on loopback, the address `gc` itself uses; otherwise unset. An inherited value is never passed through. |
+
+**Scope flags.** `--city` and `--rig` are reserved for `gc`. A `--city` or `--rig`
+after the command words must name the command's own city, or a rig of it, and
+then reaches the script unchanged. Any other value, including an empty one, makes
+`gc` print an error and exit 1 without running the script, because the command
+is already bound to its city. To target another city, put the flag before the
+pack binding (`gc --city <dir> <binding> ...`) or `cd` to that city. Everything
+after a literal `--` belongs to the script, and `--help` is never refused. A
+command that needs a flag of its own picks another name.
 
 > **Compatibility:** Legacy `pack.toml` `[[commands]]` entries remain loader
 > compatibility for existing packs. New packs should use `commands/<path>/`.
@@ -833,6 +859,11 @@ top-level `[imports.<binding>]` in `pack.toml`.
 If a pack import has an empty binding name or empty `source`, loading must
 fail.
 
+An import may set `agents_exclude` to a list of local agent names. Selectors
+are validated with the agent-name grammar; an invalid selector fails loading,
+while a valid selector that matches no agent is a warning and otherwise has no
+effect.
+
 ### 2.2. Versioning
 
 `PackImport.version` is a compatibility constraint for versioned sources.
@@ -904,6 +935,16 @@ When loading a pack for a rig-level surface:
 2. The loader drops agents and named sessions whose `scope` is `city`.
 3. For kept agents and named sessions whose `dir` is empty, the loader sets
    `dir` to the consuming rig's `name`.
+
+After cached results are retrieved and `transitive = false` filtering is
+applied, each import edge applies its `agents_exclude` selectors before
+binding stamping or dependency qualification. Matching uses the agent's local
+`name`, not its eventual qualified name. Named sessions whose backing
+`template` has a matching local name are removed with the agent. The filter is
+edge-local: importing the same source twice may exclude different agents on
+each edge. Providers, commands, doctors, runtimes, skills, formulas, orders,
+globals, requirements, and other non-agent content are unaffected. A cached
+pack result is never mutated by this filtering.
 
 Agents contributed by an `[imports.<binding>]` table are stamped with that
 binding at both the city level and the rig level. The consuming surface's own

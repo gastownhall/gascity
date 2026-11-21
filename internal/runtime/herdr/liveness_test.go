@@ -3,6 +3,8 @@ package herdr
 import (
 	"errors"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestAgentAliveFromStatus pins the core of the claude-2.1.x singleton
@@ -51,5 +53,19 @@ func TestLivenessFromAgentPresent(t *testing.T) {
 	terminal := livenessFromAgent(agentInfo{Name: "mayor", AgentStatus: "exited"}, true, nil)
 	if !terminal.Running || terminal.Alive {
 		t.Errorf("present exited agent: got %+v; want Running=true Alive=false", terminal)
+	}
+}
+
+// ListRunning is not complete here: a bound session whose pane binding does
+// not resolve is omitted with no error. An error-free listing is therefore no
+// proof of absence, and the provider must stay unattested until its listing
+// reports that gap.
+// Kills: a listing attestation declared while ListRunning still omits live
+// sessions.
+func TestListRunningIsNotAttested(t *testing.T) {
+	for _, sp := range []any{(*Provider)(nil)} {
+		if _, ok := sp.(runtime.ListingAttestation); ok {
+			t.Errorf("%T declares runtime.ListingAttestation", sp)
+		}
 	}
 }

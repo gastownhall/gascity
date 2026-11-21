@@ -5,10 +5,101 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestParsePingCheckNormalizesHealthyAndFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		res  execResult
+		want string
+	}{
+		{name: "healthy", res: execResult{stdout: `{"status":"ok"}`}, want: "ok"},
+		{name: "provider failure", res: execResult{exitCode: 1, stdout: `{"status":"error","error":"proxy unavailable"}`}, want: "error"},
+		{name: "error envelope without status", res: execResult{exitCode: 1, stdout: `{"error":"proxy unavailable","schema_version":1}`}, want: "error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checks, ok := parsePingCheck(&tt.res)
+			if !ok || len(checks) != 1 || checks[0].Status != tt.want {
+				t.Fatalf("parsePingCheck() = (%v, %v), want one %s check", checks, ok, tt.want)
+			}
+			if checks[0].Category != "Beads" || checks[0].Name != pingConnectivityCheck {
+				t.Fatalf("check identity = %+v", checks[0])
+			}
+		})
+	}
+}
+
+func TestParsePingCheckRejectsMalformedOutput(t *testing.T) {
+	t.Parallel()
+	for _, stdout := range []string{"", "not json", `{"status":""}`, `[]`} {
+		if checks, ok := parsePingCheck(&execResult{stdout: stdout}); ok || checks != nil {
+			t.Errorf("parsePingCheck(%q) = (%v, %v), want nil,false", stdout, checks, ok)
+		}
+	}
+}
+
+type probeFileSnapshot struct {
+	Mode os.FileMode
+	Data []byte
+}
+
+func snapshotProbeDir(root string) (map[string]probeFileSnapshot, error) {
+	out := make(map[string]probeFileSnapshot)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			rel = ""
+		}
+		snapshot := probeFileSnapshot{Mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			snapshot.Data, err = os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+		}
+		out[rel] = snapshot
+		return nil
+	})
+	return out, err
+}
+
+func TestExecBdPingHonorsCancellation(t *testing.T) {
+	root := t.TempDir()
+	beadsPath := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := newExecRunner().execBdPing(ctx, beadsPath); err == nil {
+		t.Fatal("execBdPing() with canceled context returned nil error")
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // recordingRoundTripper is a fake in-process transport standing in for the
 // supervisor's LoopbackTransport: it records the request path and returns a

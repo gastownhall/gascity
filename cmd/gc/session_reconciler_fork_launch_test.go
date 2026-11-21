@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 
@@ -23,6 +24,7 @@ import (
 // (#127-class drift). This FAILS against pendingCreateResidueFold(info) and PASSES
 // against pendingCreateResidueFold(partialInfo).
 func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) {
+	testCity := t.TempDir()
 	const parentSID = "brain-xyz"
 	candidate, cfg, store := newForkSessionCandidate(t, forkClaude(), parentSID, "fresh")
 	if candidate.info.StartedConfigHash != "deadbeef" {
@@ -33,10 +35,10 @@ func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) 
 	// pre-flight guard fires clearStaleResumeKeyMetadata (persisting started_config_hash="")
 	// before validateForkLaunch aborts on fork + wake_mode=fresh.
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
-	ok, residue := recoverRunningPendingCreate(candidate.info, candidate.tp, cfg, store, clock.Real{}, nil)
+	ok, residue := recoverRunningPendingCreate(testCity, candidate.info, candidate.tp, cfg, store, nil, clock.Real{}, io.Discard, nil)
 	if ok {
 		t.Fatal("recoverRunningPendingCreate ok=true; want false (buildPreparedStart errors on fork + wake_mode=fresh)")
 	}
@@ -416,7 +418,7 @@ func TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery(t *testi
 			prevProbe := staleResumeKeyProbe
 			// The own session_key is stale (transcript gone) so recovery fires; the
 			// parent's presence is controlled per case.
-			staleResumeKeyProbe = func(_, _, key string) (present, probeable bool) {
+			staleResumeKeyProbe = func(_ []string, _, _, key string) (present, probeable bool) {
 				if key == parentSID {
 					return tc.parentPresent, true
 				}

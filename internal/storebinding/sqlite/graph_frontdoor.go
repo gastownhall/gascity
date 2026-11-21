@@ -119,6 +119,16 @@ func OpenGraph(spec storebinding.BindingSpec) (*GraphComponent, error) {
 	if err != nil {
 		return nil, err
 	}
+	// This open is NOT fenced, and it opens the same database the serving seam
+	// fences: it passes no WithSQLiteStoreReservedIDPrefixes, while OpenEngine
+	// (beads_engine.go) opens filepath.Dir of the same locator this door
+	// computes, GraphPath(BindingRoot(spec)), with the reserved prefixes
+	// storebinding.EngineReservedPrefixes(classes). A pinned id from any
+	// namespace is therefore admitted through this door. That is tolerable only
+	// because this door has no production caller today; the first one has to
+	// thread the fence in too, or invariant 16
+	// (engdocs/architecture/beads.md) holds for the engine and not for the
+	// database underneath it.
 	opened, err := beads.OpenSQLiteStore(filepath.Dir(path), beads.WithSQLiteStoreIDPrefix(graphIDPrefix))
 	if err != nil {
 		return nil, fmt.Errorf("opening SQLite Graph component: %w", err)
@@ -283,9 +293,10 @@ func (f *graphFrontDoor) Delete(id string) error { return f.engine.Delete(id) }
 
 // Claim is the acquire half of the ownership pair. The deployed semantics are
 // preserved exactly: same-owner reclaim is a no-op that consumes neither a
-// revision nor a claim fence, a foreign holder or a terminal status is a
-// conflict reported as ok=false rather than an error, and the engine's single
-// write connection makes concurrent claims single-winner.
+// revision nor a claim fence, a foreign holder, a terminal status or an open
+// bead deferred into the future (outside the engine's raw open) is a conflict
+// reported as ok=false rather than an error, and the engine's single write
+// connection makes concurrent claims single-winner.
 func (f *graphFrontDoor) Claim(id, assignee string) (beads.Bead, bool, error) {
 	return f.engine.Claim(id, assignee)
 }

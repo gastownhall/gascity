@@ -32,11 +32,16 @@
         "claimed",
         "existing_assignment",
         "ready_assignment",
+        "started_claim_held",
         "no_work",
         "claims_errored",
         "stale_session",
         "non_turn_context",
-        "drain_pending"
+        "drain_pending",
+        "missing_session_registration",
+        "city_suspended",
+        "agent_suspended",
+        "rig_suspended"
       ]
     },
     "bead_id": {
@@ -59,6 +64,12 @@
       "items": {
         "type": "string"
       }
+    },
+    "work_dir": {
+      "type": "string"
+    },
+    "work_branch": {
+      "type": "string"
     },
     "drain_acknowledged": {
       "type": "boolean"
@@ -102,7 +113,11 @@
               "claims_errored",
               "stale_session",
               "non_turn_context",
-              "drain_pending"
+              "drain_pending",
+              "missing_session_registration",
+              "city_suspended",
+              "agent_suspended",
+              "rig_suspended"
             ]
           }
         }

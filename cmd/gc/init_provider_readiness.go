@@ -31,6 +31,7 @@ type initFinalizeOptions struct {
 	showProgress          bool
 	commandName           string
 	noStart               bool
+	hostedDolt            hostedDoltInitOptions
 }
 
 type initProviderTarget struct {
@@ -41,6 +42,23 @@ type initProviderTarget struct {
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
 	EnsureBuiltinRuntimeAssets(cityPath, os.Stderr) //nolint:errcheck // best-effort; needed before dependency and provider checks
+	// Record the selected provider owner before any dependency or readiness
+	// work. Either path can fail after the scaffold exists; a later gc start
+	// must therefore see the same pending topology rather than seed a legacy
+	// managed store.
+	if err := persistFreshProviderOwnership(cityPath, opts.hostedDolt); err != nil {
+		fmt.Fprintf(stderr, "%s: recording provider-owned beads scope: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// Check the running supervisor before the slow dependency and readiness
+	// work: a supervisor from a different gc installation would run this
+	// city with the wrong binary.
+	if !opts.noStart {
+		if proceed, _ := checkSupervisorBinaryBeforeRegister(opts.commandName, stderr, true); !proceed {
+			fmt.Fprintf(stderr, "%s: city created at %s but not registered; after fixing the supervisor, run 'gc start' there\n", opts.commandName, cityPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
@@ -97,6 +115,10 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := opts.hostedDolt.registerSelectorEndpointForInit(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: configuring selector endpoint: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !opts.skipProviderReadiness && hasRemoteImports {
@@ -344,7 +366,9 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 	if !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 		return nil
 	}
-	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+	if owned, err := scopeProviderOwned(cityPath, cityPath); err != nil {
+		return err
+	} else if !owned && scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 		if err := seedDeferredManagedBeadsErr(cityPath, cityPath, config.EffectiveHQPrefix(cfg), ""); err != nil {
 			return err
 		}
@@ -353,8 +377,14 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 		if strings.TrimSpace(rig.Path) == "" || !rigUsesManagedBdStoreContract(cityPath, rig) {
 			continue
 		}
-		if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
-			return fmt.Errorf("rig %q: %w", rig.Name, err)
+		owned, err := scopeProviderOwned(cityPath, rig.Path)
+		if err != nil {
+			return fmt.Errorf("rig %q ownership: %w", rig.Name, err)
+		}
+		if !owned {
+			if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
+				return fmt.Errorf("rig %q: %w", rig.Name, err)
+			}
 		}
 	}
 	return nil
@@ -508,6 +538,12 @@ func shellQuoteWindowsPath(path string) string {
 	return `"` + strings.ReplaceAll(path, `"`, `""`) + `"`
 }
 
+// managedDoltLifecycleDep names the capability of running Gas City's own Dolt
+// server, as opposed to the `dolt` binary being installed. They are separate
+// requirements: a platform can have the binary and still be unable to own a
+// server's lifecycle, and a city pointed at an external endpoint needs neither.
+const managedDoltLifecycleDep = "managed Dolt lifecycle"
+
 // missingDep describes a hard dependency that is missing or too old.
 type missingDep struct {
 	name        string
@@ -520,23 +556,84 @@ var initLookPath = exec.LookPath
 
 var initRunVersionCommandContext = exec.CommandContext
 
-var initRunVersionTimeout = 2 * time.Second
+// initProbeAttemptTimeouts bounds each attempt of a local CLI probe
+// ("dolt config --get", "<binary> version"). These commands normally finish
+// in milliseconds, but on a heavily loaded host process startup alone can
+// exceed a few seconds. A probe whose attempt hits its deadline is retried
+// with the next, longer budget; a probe that exits on its own (success or
+// failure) is never retried, so real errors surface immediately.
+var initProbeAttemptTimeouts = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
 
-var initRunDoltConfigGet = func(key string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
-	defer cancel()
+// initProbeRetryBackoff is the pause between timed-out probe attempts.
+var initProbeRetryBackoff = 500 * time.Millisecond
 
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("dolt config probe timed out after %s", initRunVersionTimeout)
+// initDoltIdentityProbeTotal caps the time all Dolt identity probes of one
+// preflight (user.name and user.email) may take together, so a hung dolt
+// stops startup with an error instead of stalling it for minutes.
+var initDoltIdentityProbeTotal = 60 * time.Second
+
+// initProbeWaitDelay bounds how long a probe waits for its output pipes
+// after the process is killed, in case a grandchild still holds them.
+const initProbeWaitDelay = time.Second
+
+// initProbeNotice receives the one-line notice printed before each retry
+// of a slow probe. Overridable for tests.
+var initProbeNotice io.Writer = os.Stderr
+
+// errInitProbeTimedOut marks a probe that exhausted its attempt budgets or
+// the caller's overall deadline.
+var errInitProbeTimedOut = errors.New("probe timed out")
+
+// runInitProbeWithRetry runs attempt with each budget in
+// initProbeAttemptTimeouts, bounded by parent's deadline, until an attempt
+// completes before its own deadline. Each retry prints a one-line notice to
+// initProbeNotice. It returns the first attempt's result that did not time
+// out, or an error wrapping errInitProbeTimedOut naming the probe and the
+// time spent.
+func runInitProbeWithRetry(parent context.Context, name string, attempt func(ctx context.Context) error) error {
+	start := time.Now()
+	budgets := initProbeAttemptTimeouts
+	for i, budget := range budgets {
+		if parent.Err() != nil {
+			break
+		}
+		if i > 0 {
+			fmt.Fprintf(initProbeNotice, "%s probe slow, retrying (attempt %d, %s)\n", name, i+1, budget) //nolint:errcheck // best-effort notice
+		}
+		ctx, cancel := context.WithTimeout(parent, budget)
+		err := attempt(ctx)
+		timedOut := ctx.Err() != nil
+		cancel()
+		if !timedOut {
+			return err
+		}
+		if i < len(budgets)-1 && initProbeRetryBackoff > 0 {
+			select {
+			case <-parent.Done():
+			case <-time.After(initProbeRetryBackoff):
+			}
+		}
 	}
-	value := strings.TrimSpace(stdout.String())
+	return fmt.Errorf("%s %w after %s", name, errInitProbeTimedOut, time.Since(start).Round(time.Millisecond))
+}
+
+var initRunDoltConfigGet = func(ctx context.Context, key string) (string, error) {
+	var value, stderrText string
+	err := runInitProbeWithRetry(ctx, "dolt identity", func(ctx context.Context) error {
+		var stdout, stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		cmd.WaitDelay = initProbeWaitDelay
+		runErr := cmd.Run()
+		value = strings.TrimSpace(stdout.String())
+		stderrText = strings.TrimSpace(stderr.String())
+		return runErr
+	})
+	if errors.Is(err, errInitProbeTimedOut) {
+		return "", err
+	}
 	if err != nil {
-		stderrText := strings.TrimSpace(stderr.String())
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && value == "" && stderrText == "" {
 			return "", errDoltConfigKeyMissing
@@ -552,13 +649,14 @@ var initRunDoltConfigGet = func(key string) (string, error) {
 // initRunVersion runs "<binary> version" and returns the first line.
 // Tests can override this.
 var initRunVersion = func(binary string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
-	defer cancel()
-
-	out, err := initRunVersionCommandContext(ctx, binary, "version").Output()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("%s version probe timed out after %s", binary, initRunVersionTimeout)
-	}
+	var out []byte
+	err := runInitProbeWithRetry(context.Background(), binary+" version", func(ctx context.Context) error {
+		cmd := initRunVersionCommandContext(ctx, binary, "version")
+		cmd.WaitDelay = initProbeWaitDelay
+		var runErr error
+		out, runErr = cmd.Output()
+		return runErr
+	})
 	if err != nil {
 		return "", err
 	}
@@ -569,7 +667,16 @@ var initRunVersion = func(binary string) (string, error) {
 // Minimum versions for beads-provider binaries.
 const (
 	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
-	bdMinVersion   = "1.0.4"                // BdStore shell-out interface, including bd create --id
+	// bdMinVersion is the minimum supported bd (deps.env BD_PREV_VERSION). It
+	// is 1.3.0 because BdStore.ReleaseIfCurrent needs bd's --if-assignee /
+	// --if-status preconditions and has no path without them; 1.3.0 is the
+	// first tested release carrying them (bd 1.2.2 re-released 1.1.2).
+	// It may not drop below beads.BdConditionalReleaseMinVersion.
+	bdMinVersion = "1.3.0"
+	// Fresh provider-owned scopes use bd's persisted ownership and transport
+	// contract, introduced with the 1.3 release candidate. It equals the init
+	// floor today; it stays a separate anchor so it can move independently.
+	bdFreshProviderMinVersion = "1.3.0"
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -577,6 +684,18 @@ const (
 // Returns a list of missing or outdated deps. Without this check, missing
 // binaries cause the supervisor to fail-loop silently and the user never
 // sees the actual error.
+//
+// Every entry carries the condition that makes it a requirement rather than a
+// habit. An unconditional list is only correct for a city that uses every
+// backend at once: it makes a herdr city install tmux, and on a platform where
+// the POSIX automation that consumes jq, pgrep, lsof, flock and GNU timeout is
+// not enabled at all, it demands tools nothing will ever run. Both failures
+// read as "Gas City needs this", which is the opposite of what this check is
+// for.
+//
+// Conditioning is not bypassing. A dependency the selected configuration
+// actually uses is still required and still fails the same way; what changes
+// is that the requirement follows the selection.
 func checkHardDependencies(cityPath string) []missingDep {
 	type dep struct {
 		name        string
@@ -587,15 +706,31 @@ func checkHardDependencies(cityPath string) []missingDep {
 	}
 
 	needsBd := initNeedsBdTooling(cityPath)
+	bdRequiredVersion := bdMinVersion
+	if pending, err := providerScopeOwnershipHasInitializingEntry(cityPath); err != nil || pending {
+		// A corrupt journal must not silently lower the dependency floor to
+		// legacy compatibility. Normal ownership admission will surface the
+		// journal error before lifecycle work begins.
+		bdRequiredVersion = bdFreshProviderMinVersion
+	}
+	selectionCfg, selectionCfgOK := initSessionSelectionConfig(cityPath)
+	runtimes := sessionRuntimeNamesFromConfig(selectionCfg, selectionCfgOK)
 
 	deps := []dep{
 		{
 			name:        "tmux",
 			installHint: "https://github.com/tmux/tmux/wiki/Installing",
+			condition:   func() bool { return selectionResolvesToTmux(runtimes, selectionCfg) },
+		},
+		{
+			name:        "herdr",
+			installHint: "https://herdr.dev",
+			condition:   func() bool { return runtimes["herdr"] },
 		},
 		{
 			name:        "jq",
 			installHint: "brew install jq (macOS) or apt install jq (Linux)",
+			condition:   posixShellAutomationEnabled,
 		},
 		{
 			name:        "git",
@@ -610,18 +745,30 @@ func checkHardDependencies(cityPath string) []missingDep {
 		{
 			name:        "bd",
 			installHint: "https://github.com/gastownhall/beads/releases",
-			minVersion:  bdMinVersion,
+			minVersion:  bdRequiredVersion,
 			condition:   func() bool { return needsBd },
+		},
+		{
+			// Having the binary is not the same as being able to run a server
+			// with it. Every destructive step of the managed lifecycle is
+			// fenced by an ownership proof, and where the platform cannot
+			// supply one the start path refuses outright — so reporting this
+			// city ready would promise a server that will not come up.
+			name: managedDoltLifecycleDep,
+			condition: func() bool {
+				return needsBd && initNeedsLocalDoltIdentity(cityPath) && managedDoltLifecycleDepApplies(cityPath)
+			},
+			available: func() bool { return managedDoltNativeIdentitySupported() == nil },
 		},
 		{
 			name:        "flock",
 			installHint: "brew install flock (macOS) or apt install util-linux (Linux)",
-			condition:   func() bool { return needsBd },
+			condition:   func() bool { return needsBd && posixShellAutomationEnabled() },
 		},
 		{
 			name:        "timeout/gtimeout/python3",
 			installHint: "install GNU coreutils timeout/gtimeout or python3",
-			condition:   func() bool { return needsBd },
+			condition:   func() bool { return needsBd && posixShellAutomationEnabled() },
 			available: func() bool {
 				return initAnyToolAvailable("timeout", "gtimeout", "python3")
 			},
@@ -629,10 +776,12 @@ func checkHardDependencies(cityPath string) []missingDep {
 		{
 			name:        "pgrep",
 			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
+			condition:   posixShellAutomationEnabled,
 		},
 		{
 			name:        "lsof",
 			installHint: "brew install lsof (macOS) or apt install lsof (Linux)",
+			condition:   posixShellAutomationEnabled,
 		},
 	}
 
@@ -645,7 +794,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 			if !d.available() {
 				missing = append(missing, missingDep{
 					name:        d.name,
-					installHint: d.installHint,
+					installHint: unavailableBackendHint(d.name, d.installHint),
 				})
 			}
 			continue
@@ -653,7 +802,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		if _, err := initLookPath(d.name); err != nil {
 			missing = append(missing, missingDep{
 				name:        d.name,
-				installHint: d.installHint,
+				installHint: unavailableBackendHint(d.name, d.installHint),
 			})
 			continue
 		}
@@ -667,6 +816,115 @@ func checkHardDependencies(cityPath string) []missingDep {
 		}
 	}
 	return missing
+}
+
+// initSessionSelectionConfig loads the config that decides this city's
+// session runtime selection. It prefers the composed config, so agents and
+// pack-declared runtimes that arrive through includes and imports are seen as
+// startup sees them. When composition fails (for example before a fresh
+// init has installed its imports) it falls back to the raw city.toml, so a
+// selection written there directly is still honored. The bool reports whether
+// any config was readable.
+func initSessionSelectionConfig(cityPath string) (*config.City, bool) {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err == nil && cfg != nil {
+		return cfg, true
+	}
+	return initConfigForBdTooling(cityPath)
+}
+
+// citySessionRuntimeNames returns the runtime selection names this city would
+// resolve: the city-level session provider, the GC_SESSION override that wins
+// over it, and every per-agent session override, including agents composed in
+// from includes and packs.
+//
+// The empty selection is reported as the platform runtime default. Unix keeps
+// that default empty, which resolves through the runtime registry's tmux
+// fallback. Windows resolves it to herdr before the registry.
+func citySessionRuntimeNames(cityPath string) map[string]bool {
+	return sessionRuntimeNamesFromConfig(initSessionSelectionConfig(cityPath))
+}
+
+// sessionRuntimeNamesFromConfig is citySessionRuntimeNames over an already
+// loaded config; ok reports whether cfg was readable.
+func sessionRuntimeNamesFromConfig(cfg *config.City, ok bool) map[string]bool {
+	names := map[string]bool{}
+	add := func(raw string) {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			name = "tmux"
+		}
+		names[name] = true
+	}
+
+	if !ok || cfg == nil {
+		// Without a readable config the selection is unknown. Report the same
+		// platform default that runtime provider construction would use.
+		add(effectiveProviderName(""))
+		return names
+	}
+
+	add(effectiveProviderName(cfg.Session.Provider))
+	for i := range cfg.Agents {
+		// An empty per-agent session means "use the city-level provider",
+		// which is already in the set; only an explicit override adds a name.
+		if override := strings.TrimSpace(cfg.Agents[i].Session); override != "" {
+			add(override)
+		}
+	}
+	return names
+}
+
+// selectionResolvesToTmux reports whether any selected runtime name resolves to
+// a provider that runs sessions on tmux.
+//
+// Naming a provider is not the same as resolving one, so a literal "tmux" is
+// not the only selection that needs tmux installed:
+//
+//   - "hybrid" composes a local tmux provider and routes every session to it
+//     unless a remote match pattern is configured, and even then only the
+//     matching sessions go remote.
+//   - A name the registry does not resolve is not rejected. It falls through
+//     to the tmux fallback, so such a city still runs on tmux.
+//
+// Resolution is asked of the same per-city registry startup uses
+// (runtimeRegistryForCity: the builtins plus the city's pack-declared
+// [runtimes.<name>] entries) rather than a second copy of the name list, so
+// registering a provider, builtin or pack-declared, cannot leave this check
+// behind. A nil cfg resolves against the builtins. If the city's registry
+// cannot be built, the builtin registry is used instead, which can only
+// over-require tmux, never under-require it. It has to be Resolves rather
+// than Has: "exec:" and "ssh:" are registered as prefixes, and testing exact
+// membership would misread those real providers as unresolved and demand tmux
+// for them.
+func selectionResolvesToTmux(names map[string]bool, cfg *config.City) bool {
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil || reg == nil {
+		reg = buildRuntimeRegistry()
+	}
+	for name := range names {
+		if name == "tmux" || name == "hybrid" {
+			return true
+		}
+		if !reg.Resolves(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// unavailableBackendHint replaces an install hint with the reason a backend
+// cannot be installed at all on this platform.
+//
+// Telling a Windows operator to run `brew install tmux` sends them after
+// something that does not exist for their OS; the actionable answer is that
+// this city selected a backend this platform does not have, so the city has to
+// select a different one.
+func unavailableBackendHint(name, installHint string) string {
+	if reason, unavailable := backendUnavailableOnThisPlatform(name); unavailable {
+		return reason
+	}
+	return installHint
 }
 
 type doltAuthorIdentityProbeError struct {
@@ -691,8 +949,10 @@ func checkDoltAuthorIdentity(cityPath string) doltAuthorIdentityStatus {
 		return doltAuthorIdentityStatus{}
 	}
 	var status doltAuthorIdentityStatus
+	ctx, cancel := context.WithTimeout(context.Background(), initDoltIdentityProbeTotal)
+	defer cancel()
 	for _, key := range []string{"user.name", "user.email"} {
-		value, err := initRunDoltConfigGet(key)
+		value, err := initRunDoltConfigGet(ctx, key)
 		value = strings.TrimSpace(value)
 		if errors.Is(err, errDoltConfigKeyMissing) && value == "" {
 			status.missingKeys = append(status.missingKeys, key)

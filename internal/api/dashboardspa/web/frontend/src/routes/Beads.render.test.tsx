@@ -1,5 +1,5 @@
 import { cleanup, render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setActiveCity } from '../api/cityBase';
 import { invalidate, setCached } from '../api/cache';
@@ -41,7 +41,9 @@ describe('BeadsPage supervisor reads', () => {
 
     expect(screen.queryByText('supervisor noise bead')).toBeNull();
     expect(fetchCalls.some((call) => call.path === '/api/city/test-city/beads')).toBe(false);
-    expect(beadFetches()).toHaveLength(1);
+    // The windowed read plus the dedicated in-progress leg (gp-6xd F1) —
+    // neither is the slow closed-history (all=true) path.
+    expect(beadFetches()).toHaveLength(2);
     expect(beadFetches().every((call) => call.query.has('all'))).toBe(false);
     expect(beadFetches().every((call) => call.query.has('type'))).toBe(false);
   });
@@ -151,10 +153,7 @@ function renderPage(
   options: { readOnly?: boolean } = {},
 ) {
   return render(
-    <MemoryRouter
-      initialEntries={[path]}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={[path]}>
       <NowProvider intervalMs={1_000_000}>
         <ReadOnlyProvider readOnly={options.readOnly ?? false}>
           <AttentionProvider contributors={contributors}>

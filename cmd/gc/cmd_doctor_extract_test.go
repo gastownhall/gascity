@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -36,6 +37,10 @@ func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
 		t.Fatalf("read golden: %v", err)
 	}
 	want := strings.TrimSpace(string(data))
+	if goruntime.GOOS == "windows" {
+		// bd can be a batch file only on Windows, so only there is its check registered.
+		want = strings.Replace(want, "beads-role\n", "beads-role\nbd-batch-file\n", 1)
+	}
 	got := strings.Join(names, "\n")
 	if got != want {
 		t.Fatalf("doctor check names changed\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -90,6 +95,40 @@ func TestBuildDoctorChecksSkipsNamedAlwaysMinConflictCheckWithoutConfig(t *testi
 			}))
 			if got := doctorCheckIndex(names, "named-always-min-conflict"); got >= 0 {
 				t.Fatalf("named-always-min-conflict registered at %d, want absent; names=%v", got, names)
+			}
+		})
+	}
+}
+
+// TestBuildDoctorChecksRegistersNudgeUnconfirmedCheckWithoutConfig: the
+// nudge-unconfirmed check reads only the city path, so it must stay outside
+// the config gate. Behind it, a broken city.toml — precisely when session
+// diagnostics matter most — both hid existing findings and made
+// `gc doctor --check nudge-unconfirmed` fail as an unregistered check.
+func TestBuildDoctorChecksRegistersNudgeUnconfirmedCheckWithoutConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+
+	tests := []struct {
+		name   string
+		cfg    *config.City
+		cfgErr error
+	}{
+		{name: "nil config", cfg: nil, cfgErr: nil},
+		{name: "config load error", cfg: &config.City{Workspace: config.Workspace{Name: "demo"}}, cfgErr: os.ErrInvalid},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			names := doctorCheckNames(buildDoctorChecks(cityDir, tt.cfg, tt.cfgErr, buildDoctorChecksOpts{
+				ControllerRunning:    false,
+				SkipCityDoltCheck:    true,
+				SkipManagedDoltCheck: true,
+			}))
+			if got := doctorCheckIndex(names, "nudge-unconfirmed"); got < 0 {
+				t.Fatalf("nudge-unconfirmed absent, want registered regardless of config; names=%v", names)
 			}
 		})
 	}

@@ -100,14 +100,20 @@ func doltSQLServerProcessOwnsDataDir(pid int, argv []string, args, dataDir strin
 }
 
 func argvDataDirMatches(argv []string, dataDir string) (bool, bool) {
-	value, ok := argvFlagValue(argv, "--data-dir")
+	value, ok := argvFlagValue(argv)
 	if !ok {
 		return false, false
 	}
 	return samePath(value, dataDir), true
 }
 
-func argvFlagValue(argv []string, flag string) (string, bool) {
+// argvFlagValue extracts the --data-dir value from a dolt sql-server argv,
+// handling both "--data-dir value" and "--data-dir=value" forms. The only
+// flag ever looked up here is --data-dir (dolt_cleanup_reaper.go's
+// extractDataDirPath is the other caller); it is not a parameter because no
+// second flag is in use.
+func argvFlagValue(argv []string) (string, bool) {
+	const flag = "--data-dir"
 	for i, arg := range argv {
 		if arg == flag {
 			if i+1 >= len(argv) {

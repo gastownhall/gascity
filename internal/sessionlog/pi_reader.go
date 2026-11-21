@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -137,19 +138,92 @@ type piSessionCandidate struct {
 	modTime   time.Time
 }
 
+// piSessionDirName mirrors pi's own session-directory encoding
+// (getSessionDir in pi-coding-agent): "--" + cwd with one leading path
+// separator stripped and every "/", "\\" and ":" replaced by "-" + "--". Pi
+// writes every transcript for a cwd under exactly this directory of the
+// sessions root, so a lookup can read that one directory instead of walking
+// the whole root.
+func piSessionDirName(workDir string) string {
+	trimmed := workDir
+	if trimmed != "" && (trimmed[0] == '/' || trimmed[0] == '\\') {
+		trimmed = trimmed[1:]
+	}
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-")
+	return "--" + replacer.Replace(trimmed) + "--"
+}
+
+// piLegacyWalkExcludedRoots lists roots the legacy full-tree walk must never
+// descend into. The generic transcript search paths (the Claude projects tree
+// by default) are merged into the pi roots by mergePiSearchPaths, and that tree
+// can hold tens of thousands of .jsonl files that can never be pi transcripts:
+// walking it cost one readdir+lstat per file, per pi session row, per
+// /sessions request (gascity sys-by2243.75). Overridable for tests.
+var piLegacyWalkExcludedRoots = DefaultSearchPaths
+
 func findPiSessionCandidates(searchPaths []string, workDir string) []piSessionCandidate {
 	workDir = cleanPiWorkDir(workDir)
 	if workDir == "" {
 		return nil
 	}
 
+	roots := mergePiSearchPaths(searchPaths)
+	dirName := piSessionDirName(workDir)
+	// The encoded name is a single path component by construction (every
+	// separator is replaced); the IsLocal guard keeps the join provably
+	// containment-safe for CodeQL's path-injection query.
+	if !filepath.IsLocal(dirName) {
+		return nil
+	}
+	// The fallback is decided per root: a root holding the cwd-encoded
+	// directory is read from that directory alone, and any other root uses the
+	// legacy layout (transcripts not under the encoded directory, such as the
+	// flat PI_CODING_AGENT_SESSION_DIR) and is walked, unless it is one of the
+	// excluded generic roots.
+	excluded := make(map[string]bool)
+	for _, p := range piLegacyWalkExcludedRoots() {
+		excluded[filepath.Clean(p)] = true
+	}
 	var candidates []piSessionCandidate
-	for _, root := range mergePiSearchPaths(searchPaths) {
+	for _, root := range roots {
+		dir := filepath.Join(root, dirName)
+		if entries, err := os.ReadDir(dir); err == nil {
+			candidates = append(candidates, piSessionCandidatesFromDir(dir, entries, workDir)...)
+			continue
+		}
+		if excluded[filepath.Clean(root)] {
+			continue
+		}
 		candidates = append(candidates, findPiSessionCandidatesIn(root, workDir)...)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
+	return candidates
+}
+
+// piSessionCandidatesFromDir applies the same header check as the walk to the
+// .jsonl files of one directory, without descending.
+func piSessionCandidatesFromDir(dir string, entries []os.DirEntry, workDir string) []piSessionCandidate {
+	var candidates []piSessionCandidate
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		sessionID, cwd := cachedPiSessionHeader(path, info)
+		if cleanPiWorkDir(cwd) != workDir {
+			continue
+		}
+		if sessionID == "" {
+			sessionID = piSessionID(path)
+		}
+		candidates = append(candidates, piSessionCandidate{path: path, sessionID: sessionID, modTime: info.ModTime()})
+	}
 	return candidates
 }
 
@@ -167,12 +241,12 @@ func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
 		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
 			return nil
 		}
-		sessionID, cwd := piSessionHeader(path)
-		if cleanPiWorkDir(cwd) != workDir {
-			return nil
-		}
 		info, err := entry.Info()
 		if err != nil {
+			return nil
+		}
+		sessionID, cwd := cachedPiSessionHeader(path, info)
+		if cleanPiWorkDir(cwd) != workDir {
 			return nil
 		}
 		if sessionID == "" {
@@ -185,6 +259,71 @@ func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
 		return nil
 	}
 	return candidates
+}
+
+// piHeaderCacheEntry memoizes the parsed first-line header of a pi session
+// file. size+modTime form the stat signature: a rewritten transcript gets a new
+// signature and re-parses, while list/enrichment sweeps that revisit an
+// unchanged tree skip the per-file open+parse entirely.
+type piHeaderCacheEntry struct {
+	size      int64
+	modTimeNS int64
+	sessionID string
+	cwd       string
+}
+
+var (
+	piHeaderCacheMu sync.Mutex
+	piHeaderCache   = make(map[string]piHeaderCacheEntry)
+)
+
+// piHeaderCacheMaxEntries bounds the cache; deleted transcripts leave stale
+// keys behind, so past this size the map resets rather than growing forever.
+// The reset is an anti-leak cap, not a working-set-preserving eviction policy:
+// a tree with more live transcripts than this bound wipes mid-sweep and stops
+// caching. Real eviction is out of scope here and tracked in ga-gn1gf.
+const piHeaderCacheMaxEntries = 16384
+
+func cachedPiSessionHeader(path string, info os.FileInfo) (string, string) {
+	size := info.Size()
+	modTimeNS := info.ModTime().UnixNano()
+
+	piHeaderCacheMu.Lock()
+	entry, hit := piHeaderCache[path]
+	piHeaderCacheMu.Unlock()
+	if hit && entry.size == size && entry.modTimeNS == modTimeNS {
+		return entry.sessionID, entry.cwd
+	}
+
+	sessionID, cwd, read := piSessionHeader(path)
+	if !read {
+		// The read failed rather than finding no header. Storing that would
+		// freeze a transient fault into an authoritative "no transcript" answer
+		// until the file's size or mtime changes, which an idle transcript
+		// awaiting resume never does.
+		return sessionID, cwd
+	}
+	storePiHeaderCacheEntry(path, piHeaderCacheEntry{
+		size:      size,
+		modTimeNS: modTimeNS,
+		sessionID: sessionID,
+		cwd:       cwd,
+	}, piHeaderCacheMaxEntries)
+	return sessionID, cwd
+}
+
+// storePiHeaderCacheEntry records entry under path, resetting the cache first
+// when a new key would push it past maxEntries. A signature refresh of a key
+// already present cannot grow the map, so it never triggers the reset.
+// maxEntries is a parameter so tests can exercise the reset without creating
+// piHeaderCacheMaxEntries files.
+func storePiHeaderCacheEntry(path string, entry piHeaderCacheEntry, maxEntries int) {
+	piHeaderCacheMu.Lock()
+	defer piHeaderCacheMu.Unlock()
+	if _, exists := piHeaderCache[path]; !exists && len(piHeaderCache) >= maxEntries {
+		piHeaderCache = make(map[string]piHeaderCacheEntry)
+	}
+	piHeaderCache[path] = entry
 }
 
 func parsePiFileDetailed(path string) ([]piEntry, string, SessionDiagnostics, error) {
@@ -703,17 +842,30 @@ func parsePiTimestamp(raw string) time.Time {
 	return ts
 }
 
-func piSessionHeader(path string) (string, string) {
+// piSessionHeader parses the session ID and cwd from a pi transcript's first
+// line. read reports whether the file was actually read: false means the read
+// failed (the open errored, or the scan errored, which includes a first line
+// past the buffer limit), so the header is simply unknown. true means the file
+// was read, so empty return values are content-derived (an empty file, an
+// unparsable or non-session first record, or a session record carrying no id
+// or cwd) rather than a read failure. Callers that memoize the result must
+// store only read results, so a transient failure is retried instead of frozen
+// as an authoritative absence.
+func piSessionHeader(path string) (sessionID, cwd string, read bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", ""
+		return "", "", false
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	if !scanner.Scan() {
-		return "", ""
+		// Scan reports an empty file and a failed read the same way, so
+		// scanner.Err() is the only thing that separates them. A first line
+		// longer than the buffer above lands here as bufio.ErrTooLong and is
+		// re-parsed every sweep, exactly as it was before the cache existed.
+		return "", "", scanner.Err() == nil
 	}
 	var header struct {
 		Type string `json:"type"`
@@ -721,12 +873,12 @@ func piSessionHeader(path string) (string, string) {
 		CWD  string `json:"cwd"`
 	}
 	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
-		return "", ""
+		return "", "", true
 	}
 	if header.Type != "session" {
-		return "", ""
+		return "", "", true
 	}
-	return strings.TrimSpace(header.ID), header.CWD
+	return strings.TrimSpace(header.ID), header.CWD, true
 }
 
 func cleanPiWorkDir(path string) string {

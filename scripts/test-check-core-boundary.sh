@@ -40,13 +40,43 @@ new_repo() {
     printf '%s' "$d"
 }
 
-# run_check <repo>: runs the real script inside <repo>, capturing exit code
-# and combined output.
+# run_check <repo> [script args...]: runs the real script inside <repo>,
+# capturing exit code and combined output.
 run_check() {
     local repo="$1" out ec
-    out=$(cd "$repo" && bash "$SCRIPT" 2>&1)
+    shift
+    out=$(cd "$repo" && bash "$SCRIPT" "$@" 2>&1)
     ec=$?
     printf '%s\x1e%s' "$ec" "$out"
+}
+
+# output_contains <haystack> <needle>: 0 if <haystack> contains the literal
+# <needle>. A pure-bash match: no pipe, so no SIGPIPE under pipefail.
+output_contains() {
+    [[ "$1" == *"$2"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Harness self-test: output_contains must report a match even when the
+# needle is followed by many more lines than a pipe buffer holds. A
+# `printf | grep -q` matcher under `set -o pipefail` fails here: grep -q
+# exits on the first match, printf takes SIGPIPE writing the remainder, and
+# the pipeline reports failure despite the match (ga-ef27jq).
+# ---------------------------------------------------------------------------
+test_output_contains_survives_early_match() {
+    local big
+    big="BLOCKED (b): early match
+$(seq 1 200000)"
+    if output_contains "$big" 'BLOCKED (b)'; then
+        record_pass "output_contains matches before a large trailing output"
+    else
+        record_fail "output_contains matches before a large trailing output" "match reported as miss"
+    fi
+    if ! output_contains "$big" 'BLOCKED (c)'; then
+        record_pass "output_contains reports a genuine miss"
+    else
+        record_fail "output_contains reports a genuine miss" "miss reported as match"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -93,7 +123,7 @@ EOF
     git -C "$repo" commit -qm "add tracked violation"
     result="$(run_check "$repo")"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED (b)'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED (b)'; then
         record_pass "tracked org_ token in core .go still blocks (b)"
     else
         record_fail "tracked org_ token in core .go still blocks (b)" "exit=$ec, expected nonzero with BLOCKED (b)
@@ -178,7 +208,7 @@ func resolveOrgID() string { return "" }
 EOF
     result="$(run_check "$dir")"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED'; then
         record_pass "non-git directory fails closed"
     else
         record_fail "non-git directory fails closed" "exit=$ec, expected nonzero with BLOCKED
@@ -207,7 +237,7 @@ EOF
     git -C "$repo" commit -qm "add tracked violation under a path with a space"
     result="$(run_check "$repo")"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED (b)'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED (b)'; then
         record_pass "tracked path containing whitespace still blocks (b)"
     else
         record_fail "tracked path containing whitespace still blocks (b)" "exit=$ec, expected nonzero with BLOCKED (b)
@@ -247,6 +277,96 @@ $out"
     rm -rf "$repo"
 }
 
+# ---------------------------------------------------------------------------
+# --declared-tree mode (the Bazel sh_test, //scripts:check_core_boundary_test):
+# the scanned surface is every .go file under the working directory, which
+# Bazel populates with exactly the declared source tree as runfiles symlinks.
+# There is no git work tree there, and none is needed.
+# ---------------------------------------------------------------------------
+
+# new_tree: a plain (non-git) directory with a minimal go.mod, prints its path.
+new_tree() {
+    local d
+    d="$(mktemp -d "${TMPDIR:-/tmp}/gc-ccb-test.XXXXXX")"
+    printf 'module example.com/testmod\n\ngo 1.22\n' > "$d/go.mod"
+    printf '%s' "$d"
+}
+
+test_declared_tree_clean_passes() {
+    local dir result ec out
+    dir="$(new_tree)"
+    printf 'package core\n\nfunc Tenant() string { return "" }\n' > "$dir/core.go"
+    result="$(run_check "$dir" --declared-tree)"
+    ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
+    if [ "$ec" -eq 0 ]; then
+        record_pass "declared tree without violations passes"
+    else
+        record_fail "declared tree without violations passes" "exit=$ec, expected 0
+$out"
+    fi
+    rm -rf "$dir"
+}
+
+# Runfiles are symlinks into the source tree; the scan must follow them.
+test_declared_tree_symlinked_violation_blocked() {
+    local dir src result ec out
+    dir="$(new_tree)"
+    src="$(mktemp -d "${TMPDIR:-/tmp}/gc-ccb-src.XXXXXX")"
+    mkdir -p "$dir/internal/tenant"
+    cat > "$src/tenant.go" <<'EOF'
+package tenant
+
+// resolveOrgID resolves the commercial org_id tenant key.
+func resolveOrgID() string { return "" }
+EOF
+    ln -s "$src/tenant.go" "$dir/internal/tenant/tenant.go"
+    result="$(run_check "$dir" --declared-tree)"
+    ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED (b)'; then
+        record_pass "declared tree follows symlinked sources and blocks (b)"
+    else
+        record_fail "declared tree follows symlinked sources and blocks (b)" "exit=$ec, expected nonzero with BLOCKED (b)
+$out"
+    fi
+    rm -rf "$dir" "$src"
+}
+
+test_declared_tree_excludes_vendor_testdata_and_tests() {
+    local dir result ec out
+    dir="$(new_tree)"
+    mkdir -p "$dir/vendor/x" "$dir/internal/foo/testdata"
+    printf 'package x\n\nfunc F() { _ = "org_id" }\n' > "$dir/vendor/x/x.go"
+    printf 'package testdata\n\nfunc F() { _ = "org_id" }\n' > "$dir/internal/foo/testdata/golden.go"
+    printf 'package foo\n\nfunc F() {}\n' > "$dir/internal/foo/foo.go"
+    printf 'package foo\n\nfunc G() { _ = "org_id" }\n' > "$dir/internal/foo/foo_test.go"
+    result="$(run_check "$dir" --declared-tree)"
+    ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
+    if [ "$ec" -eq 0 ]; then
+        record_pass "declared tree excludes vendor/, testdata/ and _test.go"
+    else
+        record_fail "declared tree excludes vendor/, testdata/ and _test.go" "exit=$ec, expected 0
+$out"
+    fi
+    rm -rf "$dir"
+}
+
+# A declared tree with no .go files means the inputs were not wired: fail
+# closed rather than report a clean scan of nothing.
+test_declared_tree_without_go_files_fails_closed() {
+    local dir result ec out
+    dir="$(new_tree)"
+    result="$(run_check "$dir" --declared-tree)"
+    ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED'; then
+        record_pass "declared tree without .go files fails closed"
+    else
+        record_fail "declared tree without .go files fails closed" "exit=$ec, expected nonzero with BLOCKED
+$out"
+    fi
+    rm -rf "$dir"
+}
+
+test_output_contains_survives_early_match
 test_untracked_cache_dir_ignored
 test_tracked_org_token_still_blocked
 test_tracked_vendor_and_testdata_still_excluded
@@ -254,6 +374,10 @@ test_boundary_allow_annotation_still_suppresses
 test_non_git_dir_fails_closed
 test_tracked_path_with_space_still_blocked
 test_lone_tracked_test_file_not_blocked
+test_declared_tree_clean_passes
+test_declared_tree_symlinked_violation_blocked
+test_declared_tree_excludes_vendor_testdata_and_tests
+test_declared_tree_without_go_files_fails_closed
 
 echo "----"
 echo "test-check-core-boundary.sh: $pass passed, $fail failed"

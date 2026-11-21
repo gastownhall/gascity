@@ -101,16 +101,29 @@ func popClaimedAt(t *testing.T, patch map[string]string) map[string]string {
 	return rest
 }
 
+// poolClaimWorkerDir is the checkout a pool slot's bead records as its own. It
+// is deliberately NOT the store dir these tests pass to doHookClaim ("/tmp/work"):
+// gc.work_branch is resolved from the checkouts the bead records, never from the
+// directory the work query was answered from (gc-j4sr), so a bead with no
+// recorded checkout is stamped with no branch at all.
+const poolClaimWorkerDir = "/worktrees/pool-worker"
+
 // poolClaimOps builds the seam for a pool slot claiming an unassigned,
 // route-matched candidate: the runner yields it, Claim returns it owned by us,
 // the branch resolver returns branch, and StampWorkMeta is captured by spy.
+//
+// The claimed bead is given poolClaimWorkerDir as its gc.work_dir unless the
+// caller set one, so the branch resolver has a worker checkout to answer for.
 func poolClaimOps(runner string, claimedMeta map[string]string, branch string, spy *stampMetaSpy) hookClaimOps {
+	if _, ok := claimedMeta[beadmeta.WorkDirMetadataKey]; !ok {
+		claimedMeta[beadmeta.WorkDirMetadataKey] = poolClaimWorkerDir
+	}
 	return hookClaimOps{
 		Runner: func(string, string) (string, error) { return runner, nil },
 		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: claimedMeta}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return branch },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return branch },
 		StampWorkMeta:     spy.fn,
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, error) {
 			meta := map[string]string{}
@@ -187,7 +200,7 @@ func TestDoHookClaimStampsSessionIdentityOnAdoption(t *testing.T) {
 			t.Error("Claim must not be called on the existing-assignment path")
 			return beads.Bead{}, false, nil
 		},
-		ResolveWorkBranch: func(string) string { return "" }, // no worktree
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" }, // no worktree
 		StampWorkMeta:     spy.fn,
 		PublishRunMap:     noopPublishRunMap,
 		StampSessionClaim: noopStampSessionClaim,
@@ -410,7 +423,7 @@ func TestHookClaimIdentityPatchWorkBranchPartialEvidenceGuard(t *testing.T) {
 		beadmeta.WorktreeLifecycleMetadataKey,
 	}
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1", "GC_SESSION_NAME=gc__role-mc-sess1"}}
-	ops := hookClaimOps{ResolveWorkBranch: func(string) string { return "bd-new-branch" }}
+	ops := hookClaimOps{ResolveWorkBranch: func(hookClaimWorkTree) string { return "bd-new-branch" }}
 
 	for _, tc := range []struct {
 		name         string
@@ -423,7 +436,10 @@ func TestHookClaimIdentityPatchWorkBranchPartialEvidenceGuard(t *testing.T) {
 		{name: "all_eight_present", presentCount: 8, wantStamped: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			meta := map[string]string{beadmeta.KindMetadataKey: "worker"}
+			meta := map[string]string{
+				beadmeta.KindMetadataKey:    "worker",
+				beadmeta.WorkDirMetadataKey: poolClaimWorkerDir,
+			}
 			for i := 0; i < tc.presentCount; i++ {
 				meta[otherEightKeys[i]] = "present"
 			}
@@ -483,7 +499,7 @@ func TestDoHookClaimAdoptionReconcilesDurableStartedFact(t *testing.T) {
 		Runner: func(string, string) (string, error) {
 			return `[{"id":"gcg-attempt","status":"in_progress","assignee":"gc__role-mc-sess1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"gcg-run","gc.step_id":"build","gc.session_id":"mc-sess1","gc.session_name":"gc__role-mc-sess1","gc.claimed_at":"2026-01-01T00:00:00Z"}}]`, nil
 		},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		StampWorkMeta:     spy.fn,
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, error) {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: meta}, nil
@@ -559,7 +575,7 @@ func TestDoHookClaimStampsCurrentClaimOnAdoption(t *testing.T) {
 						Metadata: map[string]string{"gc.routed_to": "worker"},
 					}, true, nil
 				},
-				ResolveWorkBranch: func(string) string { return "" },
+				ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 				StampWorkMeta:     noopStampWorkMeta,
 				PublishRunMap:     noopPublishRunMap,
 				StampSessionClaim: sessSpy.fn,

@@ -23,7 +23,7 @@ import (
 func expectedDecision(in mergeRowInput) mergeDecision {
 	switch {
 	case in.freshExists:
-		if in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq {
+		if in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq || in.writeAtSeq > in.startSeq {
 			return mergeDecision{action: mergeSkipFenced, degradeDepsComplete: in.cachedExists && !in.hasCachedDeps}
 		}
 		if in.cachedExists && recentLocalMutation(in.localAt, in.now) && beadChanged(in.cached, in.fresh, in.skipLabels) {
@@ -40,7 +40,7 @@ func expectedDecision(in mergeRowInput) mergeDecision {
 		}
 		return mergeDecision{action: mergeAbsorb, notification: n}
 	case in.cachedExists:
-		if in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq {
+		if in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq || in.writeAtSeq > in.startSeq {
 			return mergeDecision{action: mergeSkipFenced}
 		}
 		if in.cached.Status != "closed" && recentLocalMutation(in.localAt, in.now) {
@@ -52,7 +52,7 @@ func expectedDecision(in mergeRowInput) mergeDecision {
 		}
 		return mergeDecision{action: mergeEvict, notification: n}
 	default:
-		if in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq {
+		if in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq || in.writeAtSeq > in.startSeq {
 			return mergeDecision{action: mergeSkipFenced}
 		}
 		if recentLocalMutation(in.localAt, in.now) {
@@ -85,30 +85,33 @@ func TestReconcileMergeDecision_Exhaustive(t *testing.T) {
 							for _, hcd := range []bool{true, false} {
 								for _, del := range seqVals {
 									for _, bs := range seqVals {
-										for _, rec := range recVals {
-											for _, skip := range []bool{true, false} {
-												in := mergeRowInput{
-													freshExists:   fe,
-													fresh:         fresh,
-													freshDeps:     fdeps,
-													cachedExists:  ce,
-													cached:        cached,
-													cachedDeps:    cdeps,
-													hasCachedDeps: hcd,
-													deletedAtSeq:  del,
-													beadAtSeq:     bs,
-													startSeq:      startSeq,
-													localAt:       rec,
-													now:           now,
-													skipLabels:    skip,
+										for _, ws := range seqVals {
+											for _, rec := range recVals {
+												for _, skip := range []bool{true, false} {
+													in := mergeRowInput{
+														freshExists:   fe,
+														fresh:         fresh,
+														freshDeps:     fdeps,
+														cachedExists:  ce,
+														cached:        cached,
+														cachedDeps:    cdeps,
+														hasCachedDeps: hcd,
+														deletedAtSeq:  del,
+														beadAtSeq:     bs,
+														writeAtSeq:    ws,
+														startSeq:      startSeq,
+														localAt:       rec,
+														now:           now,
+														skipLabels:    skip,
+													}
+													got := reconcileMergeDecision(in)
+													want := expectedDecision(in)
+													if got != want {
+														t.Fatalf("decision mismatch\n in=%+v\n got=%+v\n want=%+v", in, got, want)
+													}
+													assertDecisionInvariants(t, in, got)
+													count++
 												}
-												got := reconcileMergeDecision(in)
-												want := expectedDecision(in)
-												if got != want {
-													t.Fatalf("decision mismatch\n in=%+v\n got=%+v\n want=%+v", in, got, want)
-												}
-												assertDecisionInvariants(t, in, got)
-												count++
 											}
 										}
 									}

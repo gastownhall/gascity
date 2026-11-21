@@ -63,7 +63,7 @@ func (s *Store) GetWait(id string) (WaitInfo, error) {
 // reachable waits instead of dropping them. A hard (non-partial) store error still
 // short-circuits with nil rows.
 func (s *Store) WaitsForSession(sessionID string) ([]WaitInfo, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
@@ -136,7 +136,7 @@ func (s *Store) ListWaits(state, sessionID string) ([]WaitInfo, error) {
 // read folds its beads.PartialResultError through alongside the surviving rows
 // (same fold-through as WaitsForSession); a hard error returns nil rows.
 func (s *Store) listWaitsByLabel() ([]WaitInfo, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	all, err := s.store.List(beads.ListQuery{
@@ -305,10 +305,23 @@ type WaitSpec struct {
 	Now time.Time
 }
 
+// waitRegisteredResetPendingKey marks a wait registered while its session had a
+// fresh restart pending: registered_epoch is the epoch that restart retires, and
+// the wait belongs to the conversation the restart starts. It is written only
+// together with registered_epoch; the two keys form one continuation fence.
+const waitRegisteredResetPendingKey = "registered_reset_pending"
+
+// sessionResetPending reports whether the session markers record a fresh
+// restart that no start has consumed yet.
+func sessionResetPending(markers PersistedMarkers) bool {
+	return strings.TrimSpace(markers.ContinuationResetPending) != ""
+}
+
 // CreateWait registers a durable wait bead for a session. It reads the session's
-// persisted markers to build the wait title / session_name / registered_epoch,
-// creates the bead with the canonical type, labels and pending metadata, and
-// returns the WaitInfo projection of the created bead.
+// persisted markers to build the wait title / session_name / registered_epoch
+// (plus registered_reset_pending while a fresh restart is pending), creates the
+// bead with the canonical type, labels and pending metadata, and returns the
+// WaitInfo projection of the created bead.
 func (s *Store) CreateWait(spec WaitSpec) (WaitInfo, error) {
 	markers, err := s.PersistedMarkers(spec.SessionID)
 	if err != nil {
@@ -325,6 +338,9 @@ func (s *Store) CreateWait(spec WaitSpec) (WaitInfo, error) {
 		"delivery_attempt":   "1",
 		"created_by_session": spec.CreatedBySession,
 		"created_at":         spec.Now.Format(time.RFC3339),
+	}
+	if sessionResetPending(markers) {
+		meta[waitRegisteredResetPendingKey] = "true"
 	}
 	created, err := s.store.Create(beads.Bead{
 		Title:       "wait:" + markers.Title,
@@ -360,6 +376,7 @@ func retryableWaitMetadata(src map[string]string) map[string]string {
 		"dep_ids",
 		"dep_mode",
 		"registered_epoch",
+		waitRegisteredResetPendingKey,
 		"created_by_session",
 		"expires_at",
 	}
@@ -374,8 +391,8 @@ func retryableWaitMetadata(src map[string]string) map[string]string {
 
 // RetryClosedWait re-registers a closed wait as a fresh ready wait. It gets the
 // raw closed wait, clones its carry-forward metadata, applies the ready+clears
-// block, refreshes registered_epoch / session_name from the session's persisted
-// markers, and creates the replacement. nextAttempt is supplied by the caller
+// block, refreshes registered_epoch / registered_reset_pending / session_name
+// from the session's persisted markers, and creates the replacement. nextAttempt is supplied by the caller
 // (the nudges-class delivery-attempt read stays caller-side); an empty
 // nextAttempt falls back to the wait's own delivery_attempt (default "1").
 func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo, error) {
@@ -408,6 +425,11 @@ func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo
 		if markers, err := s.PersistedMarkers(sessionID); err == nil {
 			if epoch := markers.ContinuationEpoch; epoch != "" {
 				meta["registered_epoch"] = epoch
+			}
+			if sessionResetPending(markers) {
+				meta[waitRegisteredResetPendingKey] = "true"
+			} else {
+				delete(meta, waitRegisteredResetPendingKey)
 			}
 			if meta["session_name"] == "" {
 				meta["session_name"] = markers.SessionName
@@ -485,7 +507,7 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) (
 // ReassignWaits moves open non-terminal waits from one session bead ID to another
 // during canonical session repair, closing terminal waits it encounters.
 func (s *Store) ReassignWaits(oldSessionID, newSessionID string) error {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil
 	}
 	oldSessionID = strings.TrimSpace(oldSessionID)
@@ -566,7 +588,7 @@ func (s *Store) WakeSession(id string, now time.Time, opts WakeOpts) (WakeResult
 	if !IsSessionBeadOrRepairable(b) {
 		return WakeResult{}, fmt.Errorf("%w: %s", ErrNotSessionBead, id)
 	}
-	RepairEmptyType(s.store.Store, &b)
+	RepairEmptyType(s.store, &b)
 	info := infoFromPersistedBead(b)
 	if opts.RejectClosed && b.Status == "closed" {
 		return WakeResult{}, &WakeConflictError{SessionID: id, State: "closed"}
@@ -596,9 +618,16 @@ func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]st
 		return nil, err
 	}
 	state := State(strings.TrimSpace(sessionBead.Metadata["state"]))
-	batch := ClearWakeBlockersPatch(state, sessionBead.Metadata["sleep_reason"])
+	// An operator's wake is the disposition's Wake cell: every blocker goes,
+	// an operator's suspend included (D-J 1); the lifecycle is
+	// ClearWakeBlockersPatch's, with the explicit wake request.
+	life := LifecycleOnly(ClearWakeBlockersPatch(state, sessionBead.Metadata["sleep_reason"], now))
 	for k, v := range RequestExplicitWakePatch(string(WakeCauseExplicit), now) {
-		batch[k] = v
+		life[k] = v
+	}
+	batch, _, err := MoveDisposition(sessionBead.Metadata, infoFromPersistedBead(sessionBead), ActorOperator, DispEvent{Kind: EvWake}, func(Disposition, Disposition, Info) MetadataPatch { return life }, now)
+	if err != nil {
+		return nil, err
 	}
 	if view.BaseState == BaseStateArchived && view.ContinuityEligible {
 		batch["archived_at"] = ""

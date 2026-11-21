@@ -101,6 +101,15 @@ func userManagedDirs(homeDir string) []string {
 		filepath.Join(homeDir, ".npm-global", "bin"),
 		filepath.Join(homeDir, ".yarn", "bin"),
 		filepath.Join(homeDir, ".config", "yarn", "global", "node_modules", ".bin"),
+		// Nix single-user profile bins. `.nix-profile` is the classic
+		// nix-env symlink; `.local/state/nix/profiles/profile` is where
+		// the newer `nix profile install` (flake-based) command links by
+		// default. gc init's provider-readiness probes use this search
+		// path (NOT the ambient PATH), so a CLI installed via Nix was
+		// previously reported as "not installed" even though it was on
+		// the shell's PATH (gastownhall/gascity#3962).
+		filepath.Join(homeDir, ".nix-profile", "bin"),
+		filepath.Join(homeDir, ".local", "state", "nix", "profiles", "profile", "bin"),
 	)
 	dirs = append(dirs, globExistingDirs(
 		filepath.Join(homeDir, ".nvm", "versions", "node", "*", "bin"),

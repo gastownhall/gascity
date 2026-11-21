@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -55,6 +55,12 @@ type StepDefinition struct {
 	ExecutionRunID   string
 	StepID           string
 	DependsOnStepIDs *[]string
+	// DefinedEmitted reports that this step's step_defined fact has already
+	// been recorded durably (its bead carries StepDefinedEmittedMetadataKey).
+	// EmitCurrent skips re-emitting a marked step so a steady tick restates
+	// nothing; the full-restate Events form ignores it. It is projection state,
+	// not part of the emitted fact.
+	DefinedEmitted bool
 }
 
 // Projection is the deterministic current-store execution projection for one
@@ -67,6 +73,29 @@ type Projection struct {
 
 // EmitCurrent projects and records the current execution snapshot for rootID.
 // A nil recorder disables emission without reading either store.
+//
+// The projection is level-triggered — the whole graph is re-read every call —
+// so a definition missed on a crashed or failed pass self-heals on the next
+// one. Work associations and source anchors are bounded by convoy membership,
+// not by the step graph, and are restated in full each call. step_defined is
+// idempotent instead (ga-rd8le): a step already carrying
+// StepDefinedEmittedMetadataKey is skipped, and an unmarked step is emitted and
+// then marked, so a steady tick restates nothing while every creator and
+// recovery path still self-heals without threading created IDs.
+//
+// The step is marked ONLY once its step_defined is acknowledged durable — the
+// same discipline applyConvergenceStamp uses for completion facts, where a
+// dropped append must never stamp a permanent fact loss. events.Recorder.Record
+// is best-effort and can silently drop the event (a FileRecorder lock timeout or
+// write error, or events.Discard returned on a recorder-open failure), so
+// marking after a dropped emit would skip the step FOREVER — the exact
+// permanent-miss the level-triggered restatement exists to prevent. An emit that
+// is not acknowledged (a drop, or a recorder that cannot promise durability at
+// all, such as events.Discard) leaves the step unmarked and re-emitted next tick
+// — a duplicate step_defined is a tolerated repeatable snapshot fact; a
+// permanent miss is not. The offline full restate ('gc events reemit-execution')
+// calls Events instead, which ignores the marker and re-states every step
+// deliberately.
 func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoyStore beads.WorkStore, rootID, actor string) error {
 	if recorder == nil {
 		return nil
@@ -75,18 +104,76 @@ func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoySt
 	if err != nil {
 		return err
 	}
-	for _, event := range projection.Events(actor) {
+	for _, event := range projection.workAndAnchorEvents(actor) {
 		recorder.Record(event)
+	}
+	for _, step := range projection.Steps {
+		if step.DefinedEmitted {
+			continue
+		}
+		if !recordStepDefinedConfirmed(recorder, step.definedEvent(actor)) {
+			// The emit was dropped or the recorder cannot acknowledge durability
+			// (events.Discard). Leave the step unmarked so the next healthy tick
+			// re-emits it: a best-effort append that may have been lost must never
+			// durably mark the step, or a dropped emit becomes a permanent miss.
+			continue
+		}
+		if graphStore != (beads.GraphStore{}) {
+			// The fact is durable; record that the step was emitted. A failed mark
+			// leaves the step unmarked, so the next tick re-emits it — the same
+			// at-least-once tolerance the snapshot facts already carry.
+			_ = graphStore.SetMetadata(step.BeadID, beadmeta.StepDefinedEmittedMetadataKey, time.Now().UTC().Format(time.RFC3339))
+		}
 	}
 	return nil
 }
 
-// Events converts the projection to repeatable snapshot facts. Work
-// associations precede source anchors and step definitions, preserving each
-// slice's deterministic order. Topology is copied so later graph reads cannot
-// mutate emitted facts.
+// recordStepDefinedConfirmed records a step's step_defined fact and reports
+// whether the append is durable enough to mark the step as emitted. It records
+// through events.AckRecorder when the recorder offers it — a nil ack means the
+// fact reached the log and is readable back by any consumer, the synchronous
+// equivalent of the journal read-back applyConvergenceStamp relies on, without
+// paying a per-tick journal read on this hot control-dispatch path (the ga-ftgyl
+// burn). A recorder that cannot acknowledge durability — events.Discard returned
+// on a recorder-open failure, or any bare Recorder — is recorded best-effort but
+// is NEVER treated as confirmed, so the step stays unmarked and re-emits next
+// tick rather than being marked on the strength of an emit that may have been
+// dropped.
+func recordStepDefinedConfirmed(recorder events.Recorder, event events.Event) bool {
+	if ack, ok := recorder.(events.AckRecorder); ok {
+		return ack.RecordAck(event) == nil
+	}
+	recorder.Record(event)
+	return false
+}
+
+// Events converts the projection to repeatable snapshot facts — the FULL
+// restatement, emitting every work association, source anchor, and step
+// definition regardless of any per-step emitted marker. Work associations
+// precede source anchors and step definitions, preserving each slice's
+// deterministic order. Topology is copied so later graph reads cannot mutate
+// emitted facts. This is the offline reemit form; the online tick uses
+// EmitCurrent, which emits each step_defined once against its durable marker.
 func (p Projection) Events(actor string) []events.Event {
 	result := make([]events.Event, 0, len(p.WorkAssociations)+len(p.RunAnchors)+len(p.Steps))
+	result = p.appendWorkAndAnchorEvents(result, actor)
+	for _, step := range p.Steps {
+		result = append(result, step.definedEvent(actor))
+	}
+	return result
+}
+
+// workAndAnchorEvents renders the work-association and source-anchor facts, in
+// that order. These are bounded by convoy membership rather than the step
+// graph, so both the online tick and the offline full restate emit them whole.
+func (p Projection) workAndAnchorEvents(actor string) []events.Event {
+	return p.appendWorkAndAnchorEvents(make([]events.Event, 0, len(p.WorkAssociations)+len(p.RunAnchors)), actor)
+}
+
+// appendWorkAndAnchorEvents appends the work-association then source-anchor
+// facts to result, letting Events pre-size one slice for the whole restatement
+// while the online tick allocates only for the bounded work/anchor facts.
+func (p Projection) appendWorkAndAnchorEvents(result []events.Event, actor string) []events.Event {
 	for _, association := range p.WorkAssociations {
 		result = append(result, events.Event{
 			Type:    events.ExecutionWorkAssociated,
@@ -103,17 +190,20 @@ func (p Projection) Events(actor string) []events.Event {
 			RunID:   anchor.ExecutionRunID,
 		})
 	}
-	for _, step := range p.Steps {
-		result = append(result, events.Event{
-			Type:             events.ExecutionStepDefined,
-			Actor:            actor,
-			Subject:          step.BeadID,
-			RunID:            step.ExecutionRunID,
-			StepID:           step.StepID,
-			DependsOnStepIDs: cloneTopology(step.DependsOnStepIDs),
-		})
-	}
 	return result
+}
+
+// definedEvent renders this step's execution.step_defined snapshot fact.
+// Topology is copied so a later graph read cannot mutate an emitted fact.
+func (s StepDefinition) definedEvent(actor string) events.Event {
+	return events.Event{
+		Type:             events.ExecutionStepDefined,
+		Actor:            actor,
+		Subject:          s.BeadID,
+		RunID:            s.ExecutionRunID,
+		StepID:           s.StepID,
+		DependsOnStepIDs: cloneTopology(s.DependsOnStepIDs),
+	}
 }
 
 // ProjectCurrent projects current execution facts for rootID. The graph store
@@ -121,7 +211,7 @@ func (p Projection) Events(actor string) []events.Event {
 // input convoy, the supplied work store exclusively owns that convoy's tracks
 // edges. A graph run without an input convoy is valid and projects only steps.
 func ProjectCurrent(graphStore beads.GraphStore, convoyStore beads.WorkStore, rootID string) (Projection, error) {
-	if graphStore.Store == nil {
+	if graphStore == (beads.GraphStore{}) {
 		return Projection{}, fmt.Errorf("%w: nil graph store", ErrNotGraphV2Root)
 	}
 	if !eventexport.IsOpaqueRef(rootID) {
@@ -163,7 +253,7 @@ func ProjectCurrent(graphStore beads.GraphStore, convoyStore beads.WorkStore, ro
 // unreadable, non-exact, or ambiguous links produce no anchor while preserving
 // the rest of the execution snapshot.
 func currentRunAnchors(store beads.WorkStore, root beads.Bead, work []WorkAssociation) []RunAnchor {
-	if len(work) == 0 || store.Store == nil {
+	if len(work) == 0 || store == (beads.WorkStore{}) {
 		return nil
 	}
 	declaredLaunchID := root.Metadata[beadmeta.SourceBeadIDMetadataKey]
@@ -206,7 +296,7 @@ func currentWorkAssociations(store beads.WorkStore, rootID, convoyID string) ([]
 	if !eventexport.IsOpaqueRef(convoyID) {
 		return nil, fmt.Errorf("%w: %q", ErrInvalidConvoyReference, convoyID)
 	}
-	if store.Store == nil {
+	if store == (beads.WorkStore{}) {
 		return nil, fmt.Errorf("listing tracks membership for convoy %q: nil work store", convoyID)
 	}
 	dependencies, err := store.DepList(convoyID, "down")
@@ -290,6 +380,7 @@ func currentStepRows(store beads.GraphStore, rootID string) ([]stepRow, error) {
 				ExecutionRunID:   rootID,
 				StepID:           stepID,
 				DependsOnStepIDs: canonicalTopology(row.Metadata[beadmeta.NativeStepDependenciesMetadataKey], stepID),
+				DefinedEmitted:   strings.TrimSpace(row.Metadata[beadmeta.StepDefinedEmittedMetadataKey]) != "",
 			},
 			bead: row,
 		})
@@ -361,19 +452,11 @@ func LifecycleEvent(eventType string, root, step beads.Bead, actor string) (even
 // EmitLifecycle records a validated lifecycle fact for a graph.v2 step. The
 // root is loaded from graphStore so a v1 or unrelated parent can never produce
 // a lifecycle event by metadata resemblance alone.
-func EmitLifecycle(recorder events.Recorder, graphStore beads.Store, eventType string, step beads.Bead, actor string) bool {
-	if recorder == nil || graphStore == nil {
+func EmitLifecycle(recorder events.Recorder, graphStore beads.GraphStore, eventType string, step beads.Bead, actor string) bool {
+	if recorder == nil {
 		return false
 	}
-	rootID := step.Metadata[beadmeta.RootBeadIDMetadataKey]
-	if !eventexport.IsOpaqueRef(rootID) {
-		return false
-	}
-	root, err := graphStore.Get(rootID)
-	if err != nil {
-		return false
-	}
-	event, ok := LifecycleEvent(eventType, root, step, actor)
+	event, ok := lifecycleEventFromStore(graphStore, eventType, step, actor)
 	if !ok {
 		return false
 	}
@@ -381,16 +464,53 @@ func EmitLifecycle(recorder events.Recorder, graphStore beads.Store, eventType s
 	return true
 }
 
-// EmitCompletedFromClosedNotification is the sole close-side lifecycle entry
-// point. It consumes the physical bead snapshot carried by the authoritative
-// bead.closed notification rather than inferring completion from dependencies
-// or re-projecting current graph state.
-func EmitCompletedFromClosedNotification(recorder events.Recorder, graphStore beads.Store, payload json.RawMessage, actor string) bool {
-	step, ok := beads.DecodeBeadEventPayload(payload)
-	if !ok || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+func lifecycleEventFromStore(graphStore beads.GraphStore, eventType string, step beads.Bead, actor string) (events.Event, bool) {
+	if graphStore == (beads.GraphStore{}) {
+		return events.Event{}, false
+	}
+	rootID := step.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if !eventexport.IsOpaqueRef(rootID) {
+		return events.Event{}, false
+	}
+	root, err := graphStore.Get(rootID)
+	if err != nil {
+		return events.Event{}, false
+	}
+	return LifecycleEvent(eventType, root, step, actor)
+}
+
+// EmitCompleted is the sole close-side lifecycle entry point. step is a
+// committed close: the snapshot the controller's own cache write carried, or a
+// live read that returned the row closed. Any other writer's bead.closed is a
+// claim and reaches here only through such a read. Inferences (a row
+// absent from a scan) must be confirmed by such a read first.
+//
+// It records at most one fact per key: a fact this index already holds, from
+// the journal or from an earlier call, is not repeated, so a replayed or
+// re-inferred close is idempotent. The key is recorded unconfirmed, exactly as
+// the delta pass records its own facts, and an unloaded index stays unloaded,
+// so its first warm still reads the journal.
+func (idx *CompletedFactIndex) EmitCompleted(recorder events.Recorder, graphStore beads.GraphStore, step beads.Bead, actor string) bool {
+	if recorder == nil || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
 		return false
 	}
-	return EmitLifecycle(recorder, graphStore, events.ExecutionStepCompleted, step, actor)
+	event, ok := lifecycleEventFromStore(graphStore, events.ExecutionStepCompleted, step, actor)
+	if !ok {
+		return false
+	}
+	key := completedFactKeyFor(event)
+	idx.mu.Lock()
+	if _, present := idx.facts[key]; present {
+		idx.mu.Unlock()
+		return false
+	}
+	if idx.facts == nil {
+		idx.facts = map[completedFactKey]bool{}
+	}
+	idx.facts[key] = false
+	idx.mu.Unlock()
+	recorder.Record(event)
+	return true
 }
 
 // ReconcileCompleted repairs completed facts that were stranded between a
@@ -412,7 +532,7 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 	}
 	hasStore := false
 	for _, graphStore := range graphStores {
-		if graphStore.Store != nil {
+		if graphStore != (beads.GraphStore{}) {
 			hasStore = true
 			break
 		}
@@ -565,8 +685,9 @@ func (idx *CompletedFactIndex) Invalidate() {
 //
 // It is the delta half of a two-lane doctrine, never a replacement. A close can
 // exist with no event naming it — a controller can crash between the durable step
-// close and the best-effort append, and graph stores emit no bead.closed by
-// design — so the full pass remains the convergence backstop.
+// close and the best-effort append, and a write that emits nothing (a Tx-shaped
+// one) leaves no bead.closed — so the full pass remains the convergence
+// backstop.
 func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphStores []beads.GraphStore, rootIDs []string, actor string) int {
 	if recorder == nil || len(rootIDs) == 0 {
 		return 0
@@ -576,7 +697,7 @@ func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphSto
 	}
 	emitted := 0
 	for _, graphStore := range graphStores {
-		if graphStore.Store == nil {
+		if graphStore == (beads.GraphStore{}) {
 			continue
 		}
 		// One batched read for every named root this store might hold, rather
@@ -770,16 +891,17 @@ type CompletionBackstop struct {
 	VisitStamped bool
 	// sweepVisitsStamped latches VisitStamped for the life of one sweep.
 	sweepVisitsStamped bool
-	// sweepStoreSignature latches an ORDER-SENSITIVE identity of the store fan at
-	// sweep start. The caller re-resolves its store set every chunk, and the
-	// cursor is an INDEX into it: if any position's store changes mid-sweep — a
-	// store added, removed, replaced, or reordered, even when the total COUNT is
-	// unchanged (completionReconcileInputs sorts the rig tail, so a rig add+remove
+	// sweepStores latches a copy of the store fan, in order, at sweep start; a
+	// copy, because the caller may reuse its slice. The caller re-resolves its
+	// store set every chunk, and the cursor is an INDEX into it: if any
+	// position's store changes mid-sweep — a store added, removed, replaced, or
+	// reordered, even when the total COUNT is unchanged
+	// (completionReconcileInputs sorts the rig tail, so a rig add+remove
 	// reorders it at equal length) — the held roots no longer correspond to the
 	// store at the cursor, so the sweep restarts rather than reconciling one
 	// store's roots against another store. A length-only latch missed the
-	// equal-length reorder; see storeFanSignature.
-	sweepStoreSignature string
+	// equal-length reorder; sameStoreFan compares the fans.
+	sweepStores []beads.GraphStore
 	// index is this sweep's idempotency record, loaded once per SWEEP rather
 	// than once per chunk. Re-reading the whole journal per chunk would make the
 	// chunking that keeps the sweep bounded cost more than the sweep it bounds.
@@ -818,7 +940,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		result.SweepComplete = true
 		return result
 	}
-	b.prepareSweep(storeFanSignature(graphStores))
+	b.prepareSweep(graphStores)
 	if !b.index.warm(recorder) {
 		result.WarmFailed = true
 		return result
@@ -828,7 +950,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 			return result
 		}
 		graphStore := graphStores[b.storeIndex]
-		if graphStore.Store == nil {
+		if graphStore == (beads.GraphStore{}) {
 			b.advanceStore()
 			continue
 		}
@@ -876,18 +998,18 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 // re-derives the completion record — nothing feeds this index between sweeps, so
 // a warm one would only know the facts it emitted itself and would re-emit
 // everything the delta lane or the close path recorded — and latches the sweep's
-// VisitStamped choice and store-fan signature. Mid-sweep, a changed store fan (a
+// VisitStamped choice and a copy of its store fan. Mid-sweep, a changed store fan (a
 // store added, removed, replaced, or reordered, even at unchanged length) means
 // the cursor's store index no longer names the store its held roots came from, so
 // the sweep restarts against the current fan.
-func (b *CompletionBackstop) prepareSweep(storeSignature string) {
+func (b *CompletionBackstop) prepareSweep(graphStores []beads.GraphStore) {
 	if b.storeIndex == 0 && b.afterRootID == "" && !b.storeRootsLoaded {
 		b.index.Invalidate()
 		b.sweepVisitsStamped = b.VisitStamped
-		b.sweepStoreSignature = storeSignature
+		b.sweepStores = slices.Clone(graphStores)
 		return
 	}
-	if b.sweepStoreSignature == storeSignature {
+	if sameStoreFan(b.sweepStores, graphStores) {
 		return
 	}
 	b.storeIndex = 0
@@ -896,7 +1018,7 @@ func (b *CompletionBackstop) prepareSweep(storeSignature string) {
 	b.storeRootsLoaded = false
 	b.skippedConverged = 0
 	b.sweepVisitsStamped = b.VisitStamped
-	b.sweepStoreSignature = storeSignature
+	b.sweepStores = slices.Clone(graphStores)
 }
 
 // ensureStoreRoots lists graphStore's graph.v2 workflow roots and holds the ones
@@ -961,37 +1083,32 @@ func (b *CompletionBackstop) advanceStore() {
 	b.skippedConverged = 0
 }
 
-// storeFanSignature builds an order-sensitive identity for a resolved store fan.
-// The sweep cursor is an INDEX into this slice, so a mid-sweep change to which
-// store sits at any position — one added, removed, or replaced, even when the
-// total count is unchanged — must restart the sweep. Pointer identity of each
-// embedded store, taken in slice order, captures exactly that: two fans with the
-// same stores in the same order share a signature, and any reorder or
-// replacement diverges. This identity guarantee holds for pointer-backed stores,
-// which every production Store is (*BdStore, *CachingStore, *MemStore). A nil
-// store and a store whose concrete value is not a pointer (no stable address to
-// compare) get fixed markers ("nil"/"np"), so such entries are compared by shape
-// and position only: two DISTINCT non-pointer stores at the same index share the
-// "np" marker and would NOT diverge — acceptable only because no production fan
-// holds one.
-func storeFanSignature(graphStores []beads.GraphStore) string {
-	var b strings.Builder
-	for i, graphStore := range graphStores {
-		if i > 0 {
-			b.WriteByte('|')
-		}
-		if graphStore.Store == nil {
-			b.WriteString("nil")
-			continue
-		}
-		v := reflect.ValueOf(graphStore.Store)
-		if v.Kind() == reflect.Pointer && !v.IsNil() {
-			fmt.Fprintf(&b, "%d", v.Pointer())
-			continue
-		}
-		b.WriteString("np")
+// sameStoreFan reports whether a and b are one store fan: the same physical
+// stores (beads.SameStore) at the same positions, a zero handle matching only a
+// zero handle. The sweep cursor is an INDEX into the fan, so a mid-sweep change
+// to which store sits at any position — one added, removed, or replaced, even
+// when the total count is unchanged — must restart the sweep, while a fan the
+// caller re-resolved to the same stores must not. Every production store is a
+// comparable pointer (*BdStore, *CachingStore, *MemStore); a store whose
+// dynamic type is not comparable is the same as nothing, so a fan holding one
+// restarts the sweep on every Pass, and no production fan holds one.
+func sameStoreFan(a, b []beads.GraphStore) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	return b.String()
+	for i := range a {
+		zeroA, zeroB := a[i] == (beads.GraphStore{}), b[i] == (beads.GraphStore{})
+		if zeroA || zeroB {
+			if zeroA != zeroB {
+				return false
+			}
+			continue
+		}
+		if !beads.SameStore(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // reconcileRoots projects the closed steps of the supplied roots and records the

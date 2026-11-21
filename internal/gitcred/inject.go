@@ -60,9 +60,13 @@ func CredentialedNetworkArgs(gcExe, cityRoot, cloneURL string) (Injection, error
 
 	if strings.TrimSpace(rule.SSHKeyFile) != "" {
 		keyPath := expandUser(rule.SSHKeyFile)
+		// Keepalive flags must stay aligned with git.SSHKeepaliveCommand
+		// (internal/git). gitcred cannot import that package (clone.go
+		// import cycle). Without them a long pre-push hook idles GitHub
+		// SSH until the push SIGPIPEs (ga-2i5).
 		return Injection{
 			Env: []string{
-				fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o IdentitiesOnly=yes -o BatchMode=yes", shellQuote(keyPath)),
+				fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=90", shellQuote(keyPath)),
 			},
 			Matched:    true,
 			RuleOrigin: rule.Origin,

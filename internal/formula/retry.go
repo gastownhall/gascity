@@ -87,8 +87,12 @@ func expandRetry(step *Step) ([]*Step, error) {
 	run.OnComplete = nil
 	run.Children = nil
 	run.Metadata = withMetadata(run.Metadata, map[string]string{
-		beadmeta.AttemptMetadataKey: strconv.Itoa(attempt),
-		beadmeta.StepIDMetadataKey:  step.ID,
+		// gc.retry_attempt is this step's own retry counter. gc.attempt starts
+		// equal to it and is rewritten to the loop iteration if this attempt is
+		// later namespaced into a ralph body (namespaceRalphBodySteps).
+		beadmeta.RetryAttemptMetadataKey: strconv.Itoa(attempt),
+		beadmeta.AttemptMetadataKey:      strconv.Itoa(attempt),
+		beadmeta.StepIDMetadataKey:       step.ID,
 		// gc.control_for records the durable lineage pointer back to the retry
 		// control. At compile time no store bead ID exists yet, so the value is
 		// the control's identity as known now (step.ID, which the control also

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -30,9 +31,10 @@ const droppedDatabasesDir = ".beads/dolt/.dolt_dropped_databases"
 // into report.Errors but never abort the run.
 //
 // Purge.OK is true only when --force was set and every purge call
-// succeeded; in dry-run mode OK stays false because no work was done.
+// succeeded; in dry-run mode OK stays false because no work was done. A
+// legacy-fallback port is never purged; runDoltCleanup records that refusal.
 func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
-	if opts.FS == nil {
+	if opts.FS == nil || opts.PortResolution.Fallback {
 		return
 	}
 	if opts.Force && hasRigProtectionError(report) {
@@ -119,51 +121,39 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 	report.Purge.OK = allOK
 }
 
+// rigSharesResolvedDoltServer reports whether a rig's beads scope resolves
+// to the same dolt server the cleanup run is connected to. The decision
+// comes from the canonical scope config plus live managed runtime state
+// (contract.ResolveDoltConnectionTarget) — never from the rig's
+// .beads/dolt-server.port mirror, which is a bd compatibility status file
+// with a history of lying (city-scale plan P1.7).
+//
+// Failure semantics: an invalid canonical config fails closed (the rig is
+// excluded from purge accounting). A scope that merely cannot be resolved
+// right now (legacy scope without canonical config, stopped managed dolt —
+// contract.IsManagedRuntimeUnavailable) is treated as sharing only when the
+// cleanup port itself came from the city config. The legacy fallback never
+// vouches for a scope: nothing proves this city's server listens there.
 func rigSharesResolvedDoltServer(rig resolverRig, opts cleanupOptions) bool {
 	if opts.PortResolution.Port <= 0 || opts.FS == nil {
 		return true
 	}
-	port, state := rigPortFileValue(rig, opts.FS)
-	switch state {
-	case rigPortFileValid:
-		return port == opts.PortResolution.Port
-	case rigPortFileMissing:
-		return opts.PortResolution.Fallback || cityConfigPortSelectsRig(rig, opts)
-	default:
-		return false
+	if strings.TrimSpace(opts.CityPath) != "" {
+		target, err := contract.ResolveDoltConnectionTarget(opts.FS, opts.CityPath, rig.Path)
+		switch {
+		case err == nil:
+			port, perr := strconv.Atoi(strings.TrimSpace(target.Port))
+			return perr == nil && port == opts.PortResolution.Port
+		case !contract.IsManagedRuntimeUnavailable(err):
+			return false
+		}
 	}
+	return cityConfigPortSelectsRig(rig, opts)
 }
 
 func cityConfigPortSelectsRig(_ resolverRig, opts cleanupOptions) bool {
 	return opts.PortResolution.Source == cityConfigDoltPortSource &&
 		opts.CityPort == opts.PortResolution.Port
-}
-
-type rigPortFileState int
-
-const (
-	rigPortFileMissing rigPortFileState = iota
-	rigPortFileInvalid
-	rigPortFileValid
-)
-
-func rigPortFileValue(rig resolverRig, fs fsys.FS) (int, rigPortFileState) {
-	data, err := fs.ReadFile(filepath.Join(rig.Path, ".beads", "dolt-server.port"))
-	if err != nil {
-		if errors.Is(err, iofs.ErrNotExist) {
-			return 0, rigPortFileMissing
-		}
-		return 0, rigPortFileInvalid
-	}
-	text := strings.TrimSpace(string(data))
-	if text == "" {
-		return 0, rigPortFileInvalid
-	}
-	port, err := strconv.Atoi(text)
-	if err != nil || !validDoltPort(port) {
-		return 0, rigPortFileInvalid
-	}
-	return port, rigPortFileValid
 }
 
 // sumBytesUnder walks the given root recursively and returns the total

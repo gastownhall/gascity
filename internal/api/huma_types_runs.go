@@ -127,7 +127,7 @@ type RunStatusCounts struct {
 type RunStep struct {
 	ID       string        `json:"id" doc:"Step (child bead) identifier."`
 	Title    string        `json:"title" doc:"Step title."`
-	Status   RunStepStatus `json:"status" doc:"Closed step lifecycle status."`
+	Status   RunStepStatus `json:"status" doc:"Closed step lifecycle status. Under a terminal run an unfinished step reads the status the run's wind-down closes it with (canceled for a canceled run, skipped otherwise), so it never changes from one terminal status to another; a step that executes after the run settles (the workflow finalizer, the teardown tail) reads its own status until it closes."`
 	Kind     string        `json:"kind,omitempty" doc:"Step kind (bead type)."`
 	Assignee string        `json:"assignee,omitempty" doc:"Current assignee, when set."`
 }
@@ -215,6 +215,17 @@ type RunCancelOutput struct {
 	Body struct {
 		RunID  string    `json:"run_id" doc:"The canceled run."`
 		Status RunStatus `json:"status" doc:"Run status after the cancel wind-down."`
-		Closed int       `json:"closed" doc:"Count of the run's beads closed by the cancel."`
+		Closed int       `json:"closed" doc:"Count of the run's beads closed by the cancel. Closing is the durable part of a cancel: no closed bead is claimed again."`
+		// Interrupted and InterruptFailures report the best-effort stop of work
+		// already executing; neither affects the durable cancel above.
+		Interrupted       []string                    `json:"interrupted,omitempty" doc:"IDs of the sessions whose current turn was interrupted because they held an in-progress step the cancel closed. Interrupting ends the agent's turn, the same as POST /session/{id}/stop; for Codex it also closes the session's background terminals. It does not verify that every process the step started has exited, and it cannot undo effects the step already made, such as a push or a call to a remote service. The sessions are not killed; they stay up to serve other work."`
+		InterruptFailures []RunCancelInterruptFailure `json:"interrupt_failures,omitempty" doc:"Holders of an in-progress step the cancel closed whose current turn could not be interrupted. The cancel is durable regardless; stop or suspend these sessions directly."`
 	}
+}
+
+// RunCancelInterruptFailure is one holder of a canceled in-progress step whose
+// current turn a run cancel could not interrupt.
+type RunCancelInterruptFailure struct {
+	Session string `json:"session" doc:"Session ID, or the step assignee when it could not be resolved to a session."`
+	Error   string `json:"error" doc:"Why the interrupt failed."`
 }

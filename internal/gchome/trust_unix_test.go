@@ -39,6 +39,12 @@ func TestInspectTrustedProductUsagePathPredicate(t *testing.T) {
 		{name: "root-owned ancestors accepted", mutate: func(tree map[string]componentInfo) {
 			tree["/safe/users/alice"] = directoryInfo(0, 0o755)
 		}},
+		{name: "namespace overflow owner accepted only at filesystem root", mutate: func(tree map[string]componentInfo) {
+			tree["/"] = directoryInfo(overflowUID, 0o755)
+		}},
+		{name: "namespace overflow owner below root rejected", mutate: func(tree map[string]componentInfo) {
+			tree["/safe"] = directoryInfo(overflowUID, 0o755)
+		}, wantErr: true},
 		{name: "effective-UID ancestor accepted", mutate: func(tree map[string]componentInfo) {
 			tree["/safe"] = directoryInfo(testEUID, 0o755)
 		}},

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import {
   GC_EVENT_PREFIX,
   effectiveContextPct,
@@ -26,7 +26,7 @@ import { Table, type TableColumn } from '../components/Table';
 import { useNow } from '../contexts/NowContext';
 import { READ_ONLY_CONTROL_TITLE, ReadOnlyBadge, useReadOnly } from '../contexts/ReadOnlyContext';
 import { useCachedData } from '../hooks/useCachedData';
-import { useGcEventRefresh } from '../hooks/useGcEvents';
+import { isSessionObservation, useGcEventRefresh } from '../hooks/useGcEvents';
 import { formatRelative } from '../hooks/time';
 import {
   attachCommand,
@@ -99,7 +99,7 @@ export function AgentsPage() {
   const { data, loading, error, refresh } = useCachedData('agents', listSupervisorAgents);
   // The supervisor's AgentResponse.session (SessionInfo) carries only
   // `name`/`attached`/`last_activity` — NOT the session id. Peek needs
-  // the session id (gc-XXX format) per SESSION_ID_RE on the backend.
+  // the session id (gc-XXX format) per the supervisor's session-id gate.
   // Fetch the sessions list in parallel so we can map agent.session.name
   // -> session.id at peek time.
   const sessionsCache = useCachedData('sessions', listSupervisorSessions);
@@ -188,6 +188,7 @@ export function AgentsPage() {
       void beadsCache.refresh();
       void sessionsCache.refresh();
     },
+    { matches: (event) => !isSessionObservation(event) },
   );
 
   const synopsis = useMemo(() => buildAgentSynopsis(rows), [rows]);

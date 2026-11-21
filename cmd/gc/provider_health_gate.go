@@ -72,15 +72,31 @@ func loadProviderHealthSnapshot(cityPath string) *providerHealthSnapshot {
 	if err != nil {
 		return &providerHealthSnapshot{present: false}
 	}
-	var f providerHealthFileFormat
-	if err := json.Unmarshal(data, &f); err != nil {
+	f, ok := parseProviderHealthFile(data)
+	if !ok {
 		return &providerHealthSnapshot{present: false}
 	}
+	return f.snapshotAt(time.Now())
+}
+
+// parseProviderHealthFile decodes provider-health.json; false when it does
+// not parse.
+func parseProviderHealthFile(data []byte) (providerHealthFileFormat, bool) {
+	var f providerHealthFileFormat
+	if err := json.Unmarshal(data, &f); err != nil {
+		return providerHealthFileFormat{}, false
+	}
+	return f, true
+}
+
+// snapshotAt is the file's snapshot at now: entries older than
+// providerHealthTTL are omitted.
+func (f providerHealthFileFormat) snapshotAt(now time.Time) *providerHealthSnapshot {
 	snap := &providerHealthSnapshot{
 		present: len(f.Providers) > 0,
 		entries: make(map[string]bool, len(f.Providers)),
 	}
-	nowSecs := float64(time.Now().UnixNano()) / 1e9
+	nowSecs := float64(now.UnixNano()) / 1e9
 	for _, rec := range f.Providers {
 		ageSecs := nowSecs - rec.ProbedAt
 		if ageSecs > providerHealthTTL.Seconds() {

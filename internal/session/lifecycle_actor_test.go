@@ -26,12 +26,20 @@ func TestRuntimeEnvWithSessionContextAlignsAgentAndBeadsActor(t *testing.T) {
 		configuredIdentity   string
 		sessionName          string
 		persistedSessionName string
+		origin               string
 		want                 string
 	}{
-		{name: "canonical alias", alias: "rig/worker", sessionName: "rig--worker", persistedSessionName: "rig--worker", want: "rig/worker"},
-		{name: "configured named identity fallback", configuredIdentity: "rig/worker", sessionName: "rig--worker", persistedSessionName: "rig--worker", want: "rig/worker"},
-		{name: "session name fallback", sessionName: "rig--worker", persistedSessionName: "rig--worker", want: "rig--worker"},
-		{name: "bead id fallback", sessionName: "s-session-id", want: "session-id"},
+		{name: "canonical alias", alias: "rig/worker", sessionName: "rig--worker", persistedSessionName: "rig--worker", origin: "ephemeral", want: "rig/worker"},
+		{name: "configured named identity fallback", configuredIdentity: "rig/worker", sessionName: "rig--worker", persistedSessionName: "rig--worker", origin: "ephemeral", want: "rig/worker"},
+		{name: "unaliased pool-managed session claims under its bead id, not the reusable session name", sessionName: "rig--worker", persistedSessionName: "rig--worker", origin: "ephemeral", want: "session-id"},
+		{name: "bead id fallback", sessionName: "s-session-id", origin: "ephemeral", want: "session-id"},
+		// The origin is a table field because it SELECTS the branch: only an
+		// ephemeral/pool-managed session claims under its bead ID. An unaliased
+		// manual session still owns work under its persisted session_name, and
+		// with every row pinned to "ephemeral" no row could say so — leaving
+		// AssigneeIdentifier's session_name arm assertion-free.
+		{name: "unaliased manual session keeps its persisted session name", sessionName: "rig--worker", persistedSessionName: "rig--worker", origin: "manual", want: "rig--worker"},
+		{name: "aliased manual session still leads with the alias", alias: "rig/worker", sessionName: "rig--worker", persistedSessionName: "rig--worker", origin: "manual", want: "rig/worker"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info := Info{
@@ -41,7 +49,7 @@ func TestRuntimeEnvWithSessionContextAlignsAgentAndBeadsActor(t *testing.T) {
 				Alias:                   tc.alias,
 				ConfiguredNamedIdentity: tc.configuredIdentity,
 				Template:                "rig/template",
-				SessionOrigin:           "ephemeral",
+				SessionOrigin:           tc.origin,
 			}
 			env := RuntimeEnvWithSessionContext(
 				info,

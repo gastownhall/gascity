@@ -5,6 +5,31 @@
 > *contract*; this defines how we *test and gate* it across versions).
 > **Decision owner:** integration-branch maintainers.
 
+> **Pin state superseded — 2026-09-10.** Every concrete version below (`BD_VERSION=v1.0.4`,
+> the v1.0.5-is-a-Draft question, `BD_CURRENT_VERSION=v1.1.0-rc.1`) describes 2026-06-24
+> and is kept as the design record, not as an operative anchor. The live values are
+> always `deps.env`, enforced by `scripts/bd_version_pin_test.go`. As of the
+> v1.3.0-rc.2 bump: `BD_PREV_VERSION=v1.0.4` (unchanged floor),
+> `BD_VERSION=v1.3.0-rc.2`, `BD_CURRENT_VERSION=v1.3.0-rc.2`.
+>
+> The axis this design gates is `BD_PREV_VERSION` against `BD_CURRENT_VERSION` —
+> v1.0.4 against v1.3.0-rc.2 — and it is as wide as it has ever been.
+> `BD_VERSION` is the installable default, not a matrix cell, so it neither
+> widens nor narrows that axis; it only has to sit at or above the floor.
+> Here it sits on the current cell's own tag: `BD_CURRENT_REF` is the commit
+> `v1.3.0-rc.2` is tagged at, so the installed tarball and the source-built cell
+> reach the same upstream commit by two routes, and gc links the same beads it
+> shells out to.
+>
+> **Floor raised — 2026-10-17.** `BD_PREV_VERSION` moved from v1.0.4 to v1.3.0,
+> the first tested bd release with the `--if-assignee`/`--if-status`
+> conditional-release flags (beads#5008; bd v1.2.2 re-released v1.1.2 without
+> them). The matrix floor cell is now `@bd_bin_v1_3_0`, `bdMinVersion` is 1.3.0,
+> and BdStore's raw-SQL `ReleaseIfCurrent` fallback was deleted with it.
+>
+> The **mechanism** this doc specifies is unchanged and was followed by both
+> bumps: the corpus re-vendor rides in the same PR as the pin move.
+
 ## Summary
 
 `bd` (beads) and `gc` (Gas City) drift out of sync because gascity drives the
@@ -180,7 +205,9 @@ and the diff anchor only moves on a *real* wire change.
   anchor instead — `BD_CURRENT_VERSION` (`v1.1.0-rc.1`, a release-candidate with
   **no** release tarball) built from beads source at the SHA-pinned
   `BD_CURRENT_REF` by the `contract-acceptance-current` job, with
-  `contract-radar-bd-head` as the non-required radar. So the three `deps.env`
+  `contract-radar-bd-head` as the non-required radar (since ga-ylpbsy.55 in
+  its own workflow, `advisory-probes.yml`, so a red radar never shares a run
+  with the required checks). So the three `deps.env`
   bd anchors map onto the matrix as: `BD_PREV_VERSION` = the min-supported floor
   cell (tarball), `BD_VERSION` = the installable default the floor tracks
   (tarball), and `BD_CURRENT_VERSION`/`BD_CURRENT_REF` = the source-built `current`

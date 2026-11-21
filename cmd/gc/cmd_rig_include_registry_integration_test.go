@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/packregistry"
 )
 
@@ -61,6 +62,11 @@ func TestRigAddIncludeResolvesScopedRegistryPackName(t *testing.T) {
 
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "bd")
+	// The include resolves its version the way gc import add does: the
+	// catalog's newest release defaults the constraint. Keep that lookup real
+	// (it reads the cached catalog) and fake only the network lock sync.
+	stubRigIncludeImportSeams(t, "1.0.0")
+	resolveImportRegistryRelease = packman.ResolveRegistryRelease
 
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"wespd/cacc-twin-team"}, "", "", "", false, false, &stdout, &stderr)
@@ -83,6 +89,9 @@ func TestRigAddIncludeResolvesScopedRegistryPackName(t *testing.T) {
 	var got []string
 	for _, imp := range cfg.Rigs[0].Imports {
 		got = append(got, imp.Source)
+		if imp.Source == wantSource && imp.Version != "^1.0" {
+			t.Errorf("registry include version = %q, want the catalog release constraint ^1.0; city.toml:\n%s", imp.Version, data)
+		}
 	}
 	if !slices.Contains(got, wantSource) {
 		t.Fatalf("rig import sources = %q, want the registry source %q; city.toml:\n%s", got, wantSource, data)

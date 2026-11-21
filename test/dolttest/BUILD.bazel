@@ -1,0 +1,75 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "dolttest",
+    srcs = [
+        "dolttest.go",
+        "dolttest_unix.go",
+        "dolttest_windows.go",
+        "sqlserver.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/test/dolttest",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/doltorphan",
+        "//internal/pidutil",
+    ],
+)
+
+go_test(
+    name = "dolttest_test",
+    srcs = [
+        "dolttest_test.go",
+        "sqlserver_integration_test.go",
+        "sqlserver_test.go",
+        "testenv_import_test.go",
+    ],
+    data = select({
+        "//:gotags_integration": ["@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt"],
+        "//conditions:default": [],
+    }),
+    embed = [":dolttest"],
+    # The integration build's tests run dolt by name: GC_TEST_TOOL_PATHS puts
+    # the pinned binary first on PATH (internal/testenv).
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_TOOL_PATHS": "$(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+        },
+        "//conditions:default": {},
+    }),
+    deps = [
+        "//internal/pidutil",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

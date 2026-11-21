@@ -8,9 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
-	"syscall"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,38 +30,49 @@ func newTestProvider(t *testing.T) *Provider {
 	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
 }
 
-func requirePrivateSocketDirectory(t *testing.T, path string) {
-	t.Helper()
-	info, err := os.Lstat(path)
-	if err != nil {
-		t.Fatalf("Lstat(%q): %v", path, err)
+func TestSeamScanScopeForwarding(t *testing.T) {
+	raw := newTestProvider(t)
+	var got []string
+	raw.ops.scan = func(id string, executables []string) ([]runtime.LiveRuntime, error) {
+		if id != "S" {
+			t.Fatalf("scan session = %q", id)
+		}
+		got = executables
+		return nil, nil
 	}
-	if !info.IsDir() {
-		t.Fatalf("%q mode = %v, want directory", path, info.Mode())
+	p := seamBack(raw)
+	names := []string{"custom-agent"}
+	p.SetScanExecutables(names)
+	names[0] = "mutated"
+	if _, err := p.FindRuntimesBySessionID("S"); err != nil {
+		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o700 {
-		t.Fatalf("%q permissions = %04o, want 0700", path, got)
+	if !slices.Equal(got, []string{"custom-agent"}) {
+		t.Fatalf("scanner did not receive the configured immutable scope: %v", got)
 	}
-	if special := info.Mode() & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky); special != 0 {
-		t.Fatalf("%q special mode bits = %v, want none", path, special)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("%q ownership metadata = %T, want *syscall.Stat_t", path, info.Sys())
-	}
-	if got, want := stat.Uid, uint32(os.Geteuid()); got != want {
-		t.Fatalf("%q uid = %d, want %d", path, got, want)
+	p.SetScanExecutables(nil)
+	if _, err := p.FindRuntimesBySessionID("S"); err != nil || len(got) != 0 {
+		t.Fatalf("strict-scope refresh was lost: %v, %v", got, err)
 	}
 }
 
-func ensurePrivateFallbackRootForTest(t *testing.T) string {
+// waitExited blocks until the named session stops reporting as running.
+//
+// It polls rather than sleeping a fixed interval because "how long does a
+// command that exits immediately take" is a property of the interpreter, not of
+// the provider: PowerShell needs a few hundred milliseconds to start before it
+// can exit, where `true` is gone almost at once. A constant long enough for
+// both is a constant the fast platform pays on every run.
+func waitExited(t *testing.T, p *Provider, name string) {
 	t.Helper()
-	root := privateFallbackRoot(os.Geteuid())
-	if err := os.Mkdir(root, 0o700); err != nil && !os.IsExist(err) {
-		t.Fatalf("Mkdir private fallback root: %v", err)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if !p.IsRunning(name) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	requirePrivateSocketDirectory(t, root)
-	return root
+	t.Fatalf("session %q still reports running after its command should have exited", name)
 }
 
 func requirePrivateFallbackRejected(t *testing.T, p *Provider, name string) {
@@ -86,11 +97,15 @@ func requirePrivateFallbackRejected(t *testing.T, p *Provider, name string) {
 			t.Errorf("%s error = %v, want private socket directory validation", check.name, err)
 		}
 	}
+	// A directory that fails validation cannot tell, so liveness is unknown.
+	if _, err := p.ObserveLivenessWithError(name, nil); !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, errPrivateSocketDirValidation) {
+		t.Errorf("ObserveLivenessWithError error = %v, want ErrRuntimeUnavailable wrapping private socket directory validation", err)
+	}
 }
 
 func TestStartCreatesProcess(t *testing.T) {
 	p := newTestProvider(t)
-	err := p.Start(context.Background(), "test", runtime.Config{Command: "sleep 3600"})
+	err := p.Start(context.Background(), "test", runtime.Config{Command: cmdSleepLong})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -104,7 +119,7 @@ func TestStartCreatesProcess(t *testing.T) {
 func TestStartPersistsRuntimeMetadataForGetMeta(t *testing.T) {
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "meta-start", runtime.Config{
-		Command: "sleep 3600",
+		Command: cmdSleepLong,
 		Env: map[string]string{
 			"GC_SESSION_ID":     "bead-123",
 			"GC_INSTANCE_TOKEN": "token-456",
@@ -161,7 +176,7 @@ func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
 	}
 
 	p := NewProviderWithDir(longDir)
-	if err := p.Start(context.Background(), name, runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), name, runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer p.Stop(name) //nolint:errcheck
@@ -203,7 +218,7 @@ func TestStartVeryLongSocketDirFallsBackToTempDir(t *testing.T) {
 		t.Fatalf("sockPath(%q) = %q exceeds limit %d", name, p.sockPath(name), socketPathLimit)
 	}
 
-	if err := p.Start(context.Background(), name, runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), name, runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer p.Stop(name) //nolint:errcheck
@@ -219,293 +234,6 @@ func TestStartVeryLongSocketDirFallsBackToTempDir(t *testing.T) {
 	if len(got) != 1 || got[0] != name {
 		t.Fatalf("ListRunning = %#v, want [%q]", got, name)
 	}
-}
-
-func TestFallbackKeepsBindableLegacyTempPathPastConservativeLimit(t *testing.T) {
-	root := shortTempDir(t)
-	longDir := filepath.Join(root, strings.Repeat("p", socketPathLimit+32))
-	owner := NewProviderWithDir(longDir)
-	observer := NewProviderWithDir(longDir)
-	const name = "bindable-legacy-fallback"
-
-	var bindableTemp string
-	for length := 1; length <= socketPathLimit; length++ {
-		candidate := filepath.Join(root, strings.Repeat("t", length))
-		probe := filepath.Join(candidate, fallbackSocketDirName, owner.fallbackLeaf(), owner.sockKey(name)+".sock")
-		if len(probe) > socketPathLimit && len(probe) <= nativeSocketPathLimit {
-			bindableTemp = candidate
-			break
-		}
-	}
-	if bindableTemp == "" {
-		t.Fatalf("could not construct fallback path in (%d, %d]", socketPathLimit, nativeSocketPathLimit)
-	}
-	if err := os.MkdirAll(bindableTemp, 0o700); err != nil {
-		t.Fatalf("MkdirAll bindable TMPDIR: %v", err)
-	}
-	t.Setenv("TMPDIR", bindableTemp)
-
-	fallback := owner.fallbackDir()
-	wantFallback := filepath.Join(bindableTemp, fallbackSocketDirName, owner.fallbackLeaf())
-	if fallback != wantFallback {
-		t.Fatalf("fallback = %q, want legacy path %q", fallback, wantFallback)
-	}
-	if got := len(owner.sockPath(name)); got <= socketPathLimit || got > nativeSocketPathLimit {
-		t.Fatalf("legacy fallback socket length = %d, want (%d, %d]", got, socketPathLimit, nativeSocketPathLimit)
-	}
-	t.Cleanup(func() {
-		_ = owner.Stop(name)
-		_ = observer.Stop(name)
-		_ = syscall.Rmdir(fallback)
-	})
-
-	if err := owner.Start(context.Background(), name, runtime.Config{Command: "sleep 300"}); err != nil {
-		t.Fatalf("Start on native-addressable legacy fallback: %v", err)
-	}
-	if _, err := os.Lstat(owner.sockPath(name)); err != nil {
-		t.Fatalf("Lstat legacy fallback socket: %v", err)
-	}
-	if !observer.IsRunning(name) {
-		t.Fatal("native-addressable legacy fallback is not visible through another provider")
-	}
-	if err := observer.Stop(name); err != nil {
-		t.Fatalf("cross-provider Stop on native-addressable legacy fallback: %v", err)
-	}
-}
-
-func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
-	root := shortTempDir(t)
-	longTemp := filepath.Join(root, strings.Repeat("t", nativeSocketPathLimit+32))
-	if err := os.MkdirAll(longTemp, 0o700); err != nil {
-		t.Fatalf("MkdirAll long TMPDIR: %v", err)
-	}
-	t.Setenv("TMPDIR", longTemp)
-	const name = "x"
-
-	var legacyDir string
-	for length := 1; length <= socketPathLimit; length++ {
-		candidate := filepath.Join(root, strings.Repeat("p", length))
-		canonicalProbe := filepath.Join(candidate, "s00000000.sock")
-		legacyPath := filepath.Join(candidate, name+".sock")
-		if len(canonicalProbe) > socketPathLimit && len(legacyPath) <= nativeSocketPathLimit {
-			legacyDir = candidate
-			break
-		}
-	}
-	if legacyDir == "" {
-		t.Fatal("could not construct addressable legacy path with fallback canonical path")
-	}
-	p := NewProviderWithDir(legacyDir)
-	privateLeaf := p.fallbackDir()
-	if filepath.Dir(privateLeaf) != privateFallbackRoot(os.Geteuid()) {
-		t.Fatalf("fallback = %q, want private root", privateLeaf)
-	}
-	if _, err := os.Lstat(privateLeaf); !os.IsNotExist(err) {
-		t.Fatalf("private fallback before discovery: %v, want not exist", err)
-	}
-
-	gotCommand := startRecordingControlSocket(t, p.legacySockPath(name), "ok\n", 5)
-	t.Cleanup(func() { _ = syscall.Rmdir(privateLeaf) })
-
-	startCalls := 0
-	p.ops.start = func(*exec.Cmd) error {
-		startCalls++
-		return errors.New("process start must not be reached")
-	}
-	if !p.IsRunning(name) {
-		t.Fatal("IsRunning missed addressable legacy socket")
-	}
-	names, err := p.ListRunning("")
-	if err != nil {
-		t.Fatalf("ListRunning legacy socket: %v", err)
-	}
-	if len(names) != 1 || names[0] != name {
-		t.Fatalf("ListRunning = %#v, want [%q]", names, name)
-	}
-	if err := p.Interrupt(name); err != nil {
-		t.Fatalf("Interrupt legacy socket: %v", err)
-	}
-	if err := p.Stop(name); err != nil {
-		t.Fatalf("Stop legacy socket: %v", err)
-	}
-	err = p.Start(context.Background(), name, runtime.Config{Command: "sleep 300"})
-	if !errors.Is(err, runtime.ErrSessionExists) {
-		t.Fatalf("Start error = %v, want ErrSessionExists from legacy socket", err)
-	}
-	if startCalls != 0 {
-		t.Fatalf("process start calls = %d, want 0", startCalls)
-	}
-	for _, want := range []string{"ping", "ping", "interrupt", "stop", "ping"} {
-		select {
-		case got := <-gotCommand:
-			if got != want {
-				t.Fatalf("legacy socket command = %q, want %q", got, want)
-			}
-		case <-time.After(testutil.ExecRaceTimeout):
-			t.Fatalf("timed out waiting for legacy socket command %q", want)
-		}
-	}
-}
-
-func TestOverlongTempDirUsesPrivateFallbackAcrossProviders(t *testing.T) {
-	root := shortTempDir(t)
-	longTemp := filepath.Join(root, strings.Repeat("t", nativeSocketPathLimit+32))
-	if err := os.MkdirAll(longTemp, 0o700); err != nil {
-		t.Fatalf("MkdirAll long TMPDIR: %v", err)
-	}
-	t.Setenv("TMPDIR", longTemp)
-
-	longDir := filepath.Join(root, strings.Repeat("p", socketPathLimit+32))
-	owner := NewProviderWithDir(longDir)
-	observer := NewProviderWithDir(longDir)
-	const name = "private-fallback-lifecycle"
-	fallback := owner.fallbackDir()
-	privateRoot := privateFallbackRoot(os.Geteuid())
-	sentinel := filepath.Join(privateRoot, owner.fallbackLeaf()+".sentinel")
-	t.Cleanup(func() {
-		_ = owner.Stop(name)
-		_ = observer.Stop(name)
-		_ = os.Remove(sentinel)
-		if err := syscall.Rmdir(fallback); err != nil && !os.IsNotExist(err) {
-			t.Errorf("Rmdir private fallback leaf: %v", err)
-		}
-	})
-
-	legacySocket := filepath.Join(longTemp, fallbackSocketDirName, owner.fallbackLeaf(), owner.sockKey(name)+".sock")
-	if len(legacySocket) <= nativeSocketPathLimit {
-		t.Fatalf("legacy fallback socket length = %d, want greater than %d", len(legacySocket), nativeSocketPathLimit)
-	}
-	if got, want := fallback, filepath.Join(privateRoot, owner.fallbackLeaf()); got != want {
-		t.Fatalf("fallback = %q, want private path %q", got, want)
-	}
-	if err := owner.Start(context.Background(), name, runtime.Config{Command: "sleep 300"}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	requirePrivateSocketDirectory(t, privateRoot)
-	requirePrivateSocketDirectory(t, fallback)
-	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
-		t.Fatalf("WriteFile private-root sentinel: %v", err)
-	}
-
-	if !observer.IsRunning(name) {
-		t.Fatal("private fallback session is not visible through another provider")
-	}
-	names, err := observer.ListRunning("")
-	if err != nil {
-		t.Fatalf("cross-provider ListRunning: %v", err)
-	}
-	if len(names) != 1 || names[0] != name {
-		t.Fatalf("cross-provider ListRunning = %#v, want [%q]", names, name)
-	}
-	if err := observer.Stop(name); err != nil {
-		t.Fatalf("cross-provider Stop: %v", err)
-	}
-
-	requirePrivateSocketDirectory(t, fallback)
-	if contents, err := os.ReadFile(sentinel); err != nil || string(contents) != "keep" {
-		t.Fatalf("private-root sentinel after Stop: contents=%q err=%v", contents, err)
-	}
-	if info, err := os.Stat(longDir); err != nil || !info.IsDir() {
-		t.Fatalf("caller-owned directory after Stop: info=%v err=%v", info, err)
-	}
-}
-
-func TestPrivateFallbackRejectsHostilePrecreation(t *testing.T) {
-	root := shortTempDir(t)
-	longTemp := filepath.Join(root, strings.Repeat("t", nativeSocketPathLimit+32))
-	if err := os.MkdirAll(longTemp, 0o700); err != nil {
-		t.Fatalf("MkdirAll long TMPDIR: %v", err)
-	}
-	t.Setenv("TMPDIR", longTemp)
-	privateRoot := ensurePrivateFallbackRootForTest(t)
-
-	t.Run("symlink leaf", func(t *testing.T) {
-		longDir := filepath.Join(root, "symlink-state", strings.Repeat("p", socketPathLimit+32))
-		p := NewProviderWithDir(longDir)
-		const name = "hostile-symlink-fallback"
-		fallback := p.fallbackDir()
-		if filepath.Dir(fallback) != privateRoot {
-			t.Fatalf("fallback parent = %q, want %q", filepath.Dir(fallback), privateRoot)
-		}
-
-		target := shortTempDir(t)
-		socketTarget := filepath.Join(target, p.sockKey(name)+".sock")
-		nameTarget := filepath.Join(target, p.sockKey(name)+".name")
-		for path, contents := range map[string]string{socketTarget: "keep-socket", nameTarget: "keep-name"} {
-			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-				t.Fatalf("WriteFile hostile target %q: %v", path, err)
-			}
-		}
-		if err := os.Symlink(target, fallback); err != nil {
-			t.Fatalf("Symlink fallback leaf: %v", err)
-		}
-		t.Cleanup(func() { _ = os.Remove(fallback) })
-
-		startCalls := 0
-		p.ops.start = func(*exec.Cmd) error {
-			startCalls++
-			return errors.New("process start must not be reached")
-		}
-		err := p.Start(context.Background(), name, runtime.Config{Command: "sleep 300"})
-		if err == nil || !strings.Contains(err.Error(), "private socket directory") {
-			t.Fatalf("Start error = %v, want private socket directory validation", err)
-		}
-		if startCalls != 0 {
-			t.Fatalf("process start calls = %d, want 0", startCalls)
-		}
-		requirePrivateFallbackRejected(t, p, name)
-		for path, want := range map[string]string{socketTarget: "keep-socket", nameTarget: "keep-name"} {
-			contents, err := os.ReadFile(path)
-			if err != nil || string(contents) != want {
-				t.Errorf("hostile target %q: contents=%q err=%v, want %q", path, contents, err, want)
-			}
-		}
-	})
-
-	t.Run("permissive leaf", func(t *testing.T) {
-		longDir := filepath.Join(root, "permissive-state", strings.Repeat("p", socketPathLimit+32))
-		p := NewProviderWithDir(longDir)
-		const name = "hostile-permissive-fallback"
-		fallback := p.fallbackDir()
-		if err := os.Mkdir(fallback, 0o755); err != nil {
-			t.Fatalf("Mkdir permissive fallback leaf: %v", err)
-		}
-		if err := os.Chmod(fallback, 0o755); err != nil {
-			t.Fatalf("Chmod permissive fallback leaf: %v", err)
-		}
-		socketTarget := filepath.Join(fallback, p.sockKey(name)+".sock")
-		nameTarget := filepath.Join(fallback, p.sockKey(name)+".name")
-		for path, contents := range map[string]string{socketTarget: "keep-socket", nameTarget: "keep-name"} {
-			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-				t.Fatalf("WriteFile hostile target %q: %v", path, err)
-			}
-		}
-		t.Cleanup(func() {
-			_ = os.Remove(socketTarget)
-			_ = os.Remove(nameTarget)
-			_ = syscall.Rmdir(fallback)
-		})
-
-		startCalls := 0
-		p.ops.start = func(*exec.Cmd) error {
-			startCalls++
-			return errors.New("process start must not be reached")
-		}
-		err := p.Start(context.Background(), name, runtime.Config{Command: "sleep 300"})
-		if err == nil || !strings.Contains(err.Error(), "private socket directory") {
-			t.Fatalf("Start error = %v, want private socket directory validation", err)
-		}
-		if startCalls != 0 {
-			t.Fatalf("process start calls = %d, want 0", startCalls)
-		}
-		requirePrivateFallbackRejected(t, p, name)
-		for path, want := range map[string]string{socketTarget: "keep-socket", nameTarget: "keep-name"} {
-			contents, err := os.ReadFile(path)
-			if err != nil || string(contents) != want {
-				t.Errorf("hostile target %q: contents=%q err=%v, want %q", path, contents, err, want)
-			}
-		}
-	})
 }
 
 func TestStopUnknownSessionWithVeryLongSocketDirIsIdempotent(t *testing.T) {
@@ -526,12 +254,12 @@ func TestStopUnknownSessionWithVeryLongSocketDirIsIdempotent(t *testing.T) {
 
 func TestStartDuplicateNameFails(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start(context.Background(), "dup", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "dup", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	defer p.Stop("dup") //nolint:errcheck
 
-	err := p.Start(context.Background(), "dup", runtime.Config{Command: "sleep 3600"})
+	err := p.Start(context.Background(), "dup", runtime.Config{Command: cmdSleepLong})
 	if err == nil {
 		t.Fatal("expected error for duplicate name")
 	}
@@ -539,15 +267,15 @@ func TestStartDuplicateNameFails(t *testing.T) {
 
 func TestStartReusesDeadName(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start(context.Background(), "reuse", runtime.Config{Command: "true"}); err != nil {
+	if err := p.Start(context.Background(), "reuse", runtime.Config{Command: cmdExitsImmediately}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	waitExited(t, p, "reuse")
 	if p.IsRunning("reuse") {
 		t.Fatal("expected process to have exited")
 	}
 
-	if err := p.Start(context.Background(), "reuse", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "reuse", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("second Start: %v", err)
 	}
 	defer p.Stop("reuse") //nolint:errcheck
@@ -559,7 +287,7 @@ func TestStartReusesDeadName(t *testing.T) {
 
 func TestStopKillsProcess(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start(context.Background(), "kill", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "kill", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := p.Stop("kill"); err != nil {
@@ -568,49 +296,6 @@ func TestStopKillsProcess(t *testing.T) {
 	if p.IsRunning("kill") {
 		t.Error("expected IsRunning=false after Stop")
 	}
-}
-
-func TestStopKillsProcessGroupDescendants(t *testing.T) {
-	dir := t.TempDir()
-	childPIDPath := filepath.Join(dir, "child.pid")
-
-	p := newTestProvider(t)
-	if err := p.Start(context.Background(), "group-kill", runtime.Config{
-		Command: "sleep 3600 & echo $! > " + childPIDPath + "; wait",
-		WorkDir: dir,
-	}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	var childPID int
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(childPIDPath)
-		if err == nil {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-			if err == nil && pid > 0 {
-				childPID = pid
-				break
-			}
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if childPID == 0 {
-		t.Fatal("timed out waiting for child PID marker")
-	}
-
-	if err := p.Stop("group-kill"); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(childPID, syscall.Signal(0)); err != nil {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("child process %d still alive after Stop killed the parent session", childPID)
 }
 
 func TestStopIdempotent(t *testing.T) {
@@ -622,10 +307,10 @@ func TestStopIdempotent(t *testing.T) {
 
 func TestStopDeadProcess(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start(context.Background(), "dead", runtime.Config{Command: "true"}); err != nil {
+	if err := p.Start(context.Background(), "dead", runtime.Config{Command: cmdExitsImmediately}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	waitExited(t, p, "dead")
 
 	if err := p.Stop("dead"); err != nil {
 		t.Errorf("Stop(dead) = %v, want nil", err)
@@ -634,10 +319,10 @@ func TestStopDeadProcess(t *testing.T) {
 
 func TestIsRunningFalseAfterExit(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start(context.Background(), "short", runtime.Config{Command: "true"}); err != nil {
+	if err := p.Start(context.Background(), "short", runtime.Config{Command: cmdExitsImmediately}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	waitExited(t, p, "short")
 
 	if p.IsRunning("short") {
 		t.Error("expected IsRunning=false after process exits")
@@ -664,7 +349,7 @@ func TestEnvPassedToProcess(t *testing.T) {
 
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "env-test", runtime.Config{
-		Command: "echo $GC_TEST_VAR > " + marker,
+		Command: cmdWriteEnvVarToFile("GC_TEST_VAR", marker),
 		Env:     map[string]string{"GC_TEST_VAR": "hello-from-subprocess"},
 	})
 	if err != nil {
@@ -695,7 +380,7 @@ func TestEmptyEnvOverrideIsAbsentFromProcess(t *testing.T) {
 
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "env-withhold", runtime.Config{
-		Command: "env | sort > " + marker,
+		Command: cmdWriteEnvDumpToFile(marker),
 		Env: map[string]string{
 			"BEADS_DB":               "",
 			"BEADS_DOLT_SERVER_HOST": "",
@@ -736,7 +421,7 @@ func TestWorkDirSet(t *testing.T) {
 
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "workdir-test", runtime.Config{
-		Command: "pwd > " + marker,
+		Command: cmdWriteCwdToFile(marker),
 		WorkDir: dir,
 	})
 	if err != nil {
@@ -744,14 +429,20 @@ func TestWorkDirSet(t *testing.T) {
 	}
 	defer p.Stop("workdir-test") //nolint:errcheck
 
+	// Canonicalize both sides: macOS hands back /var for /private/var, and
+	// Windows differs from t.TempDir() in path case.
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(marker)
 		if err == nil && len(data) > 0 {
-			got := string(data)
-			// Canonicalize to handle macOS /var → /private/var symlink.
-			canonical, _ := filepath.EvalSymlinks(dir)
-			want := canonical + "\n"
+			got, err := filepath.EvalSymlinks(strings.TrimSpace(string(data)))
+			if err != nil {
+				t.Fatalf("EvalSymlinks(%q): %v", strings.TrimSpace(string(data)), err)
+			}
 			if got != want {
 				t.Errorf("workdir = %q, want %q", got, want)
 			}
@@ -772,7 +463,7 @@ func TestStartStagesSingleFileCopyIntoWorkDirRoot(t *testing.T) {
 
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "copy-root", runtime.Config{
-		Command:   "sleep 3600",
+		Command:   cmdSleepLong,
 		WorkDir:   workDir,
 		CopyFiles: []runtime.CopyEntry{{Src: src}},
 	})
@@ -811,7 +502,7 @@ func TestStartStagesKiroPackOverlayBeforeLaunch(t *testing.T) {
 
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "kiro-overlay", runtime.Config{
-		Command:         "sleep 3600",
+		Command:         cmdSleepLong,
 		WorkDir:         workDir,
 		ProviderName:    "kiro",
 		PackOverlayDirs: []string{packOverlay},
@@ -847,7 +538,7 @@ func TestStartFailsWhenCopyFileCannotBeStaged(t *testing.T) {
 
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "copy-error", runtime.Config{
-		Command: "sleep 3600",
+		Command: cmdSleepLong,
 		WorkDir: workDir,
 		CopyFiles: []runtime.CopyEntry{{
 			Src:    src,
@@ -877,7 +568,7 @@ func TestStartFailsWhenOverlayCannotBeStaged(t *testing.T) {
 
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "overlay-error", runtime.Config{
-		Command:    "sleep 3600",
+		Command:    cmdSleepLong,
 		WorkDir:    workDir,
 		OverlayDir: overlayDir,
 	})
@@ -900,7 +591,7 @@ func TestStartFailedStagingDoesNotRetainWorkDirForCopyTo(t *testing.T) {
 
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "copy-error", runtime.Config{
-		Command: "sleep 3600",
+		Command: cmdSleepLong,
 		WorkDir: workDir,
 		CopyFiles: []runtime.CopyEntry{{
 			Src:    src,
@@ -925,7 +616,7 @@ func TestStartFailedStagingDoesNotRetainWorkDirForCopyTo(t *testing.T) {
 
 func TestSocketCreated(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start(context.Background(), "sock-check", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "sock-check", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer p.Stop("sock-check") //nolint:errcheck
@@ -937,7 +628,7 @@ func TestSocketCreated(t *testing.T) {
 
 func TestSocketRemovedAfterStop(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start(context.Background(), "cleanup", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "cleanup", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := p.Stop("cleanup"); err != nil {
@@ -979,26 +670,6 @@ func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
 	}
 	if _, statErr := os.Stat(p.sockNamePath(name)); statErr != nil {
 		t.Fatalf("socket name path err = %v, want socket name preserved after failed stop", statErr)
-	}
-}
-
-func TestStopBySocket_PreservesCanonicalErrorWhenLegacyPathIsTooLong(t *testing.T) {
-	longDir := filepath.Join(t.TempDir(), strings.Repeat("p", 120))
-	p := NewProviderWithDir(longDir)
-	const name = "reject-stop"
-
-	if got := len(p.legacySockPath(name)); got <= socketPathLimit {
-		t.Fatalf("legacy socket path length = %d, want greater than %d", got, socketPathLimit)
-	}
-	euid := os.Geteuid()
-	if err := p.ensureSocketDir(p.socketDirForEUID(euid), euid); err != nil {
-		t.Fatalf("ensure canonical socket directory: %v", err)
-	}
-	_ = startRejectingControlSocket(t, p.sockPath(name))
-
-	err := p.stopBySocket(name)
-	if err == nil || !strings.Contains(err.Error(), "unexpected response") {
-		t.Fatalf("stopBySocket error = %v, want canonical unexpected-response error", err)
 	}
 }
 
@@ -1088,7 +759,7 @@ func TestStopBySocket_FallsBackToLegacySocketWhenCanonicalRejectsStop(t *testing
 
 func TestSocketGoneAfterProcessDeath(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start(context.Background(), "short-lived", runtime.Config{Command: "true"}); err != nil {
+	if err := p.Start(context.Background(), "short-lived", runtime.Config{Command: cmdExitsImmediately}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1109,7 +780,7 @@ func TestCrossProcessStopBySocket(t *testing.T) {
 	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p1 := NewProviderWithDir(dir)
-	if err := p1.Start(context.Background(), "cross", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p1.Start(context.Background(), "cross", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("p1.Start: %v", err)
 	}
 
@@ -1166,7 +837,7 @@ func TestCrossProcessInterruptBySocket(t *testing.T) {
 
 	p1 := NewProviderWithDir(dir)
 	// Use a command that traps SIGINT.
-	if err := p1.Start(context.Background(), "intr", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p1.Start(context.Background(), "intr", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("p1.Start: %v", err)
 	}
 	defer p1.Stop("intr") //nolint:errcheck
@@ -1203,7 +874,7 @@ func TestIsRunningViaSocket(t *testing.T) {
 	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p1 := NewProviderWithDir(dir)
-	if err := p1.Start(context.Background(), "live", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p1.Start(context.Background(), "live", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("p1.Start: %v", err)
 	}
 	defer p1.Stop("live") //nolint:errcheck
@@ -1224,15 +895,15 @@ func TestListRunningViaSocket(t *testing.T) {
 	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p := NewProviderWithDir(dir)
-	if err := p.Start(context.Background(), "gc-test-a", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "gc-test-a", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("Start a: %v", err)
 	}
 	defer p.Stop("gc-test-a") //nolint:errcheck
-	if err := p.Start(context.Background(), "gc-test-b", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "gc-test-b", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("Start b: %v", err)
 	}
 	defer p.Stop("gc-test-b") //nolint:errcheck
-	if err := p.Start(context.Background(), "other-x", runtime.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "other-x", runtime.Config{Command: cmdSleepLong}); err != nil {
 		t.Fatalf("Start x: %v", err)
 	}
 	defer p.Stop("other-x") //nolint:errcheck
@@ -1251,5 +922,292 @@ func TestListRunningViaSocket(t *testing.T) {
 	}
 	if len(all) != 3 {
 		t.Errorf("ListRunning('') = %v, want 3 results", all)
+	}
+}
+
+// noProcessStart stands in for (*exec.Cmd).Start without spawning: it binds a
+// pid above every OS pid_max (Linux 2^22, macOS 99999), so the failure paths'
+// Kill and Wait reach no process.
+func noProcessStart(cmd *exec.Cmd) (int, error) {
+	proc, err := os.FindProcess(1 << 30)
+	if err != nil {
+		return 0, err
+	}
+	cmd.Process = proc
+	return 0, nil
+}
+
+// fakeListener is a control socket that accepts nothing until closed.
+type fakeListener struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newFakeListener() *fakeListener { return &fakeListener{closed: make(chan struct{})} }
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *fakeListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *fakeListener) Addr() net.Addr { return &net.UnixAddr{Net: "unix"} }
+
+var identityEnv = map[string]string{
+	"GC_SESSION_ID":     "bead-123",
+	"GC_INSTANCE_TOKEN": "token-456",
+}
+
+// v5 O2 (X3): Ownerless on subprocess requires the identity write to precede
+// liveness. A reader in another process looks at the sidecar the instant the
+// socket is bound; it must already carry both identity keys.
+func TestSubprocessSidecarSeededBeforeSocket(t *testing.T) {
+	p := newTestProvider(t)
+	reader := NewProviderWithDir(p.dir)
+	seen := map[string]string{}
+	p.ops.start = noProcessStart
+	p.ops.listen = func(_, _ string) (net.Listener, error) {
+		for key := range identityEnv {
+			seen[key], _ = reader.GetMeta("seeded", key)
+		}
+		return newFakeListener(), nil
+	}
+
+	if err := p.Start(context.Background(), "seeded", runtime.Config{Command: "sleep 300", Env: identityEnv}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for key, want := range identityEnv {
+		if seen[key] != want {
+			t.Errorf("sidecar %s at socket bind = %q, want %q", key, seen[key], want)
+		}
+	}
+}
+
+func TestSubprocessStartFailureCleansSidecar(t *testing.T) {
+	p := newTestProvider(t)
+	workDir := t.TempDir()
+	p.ops.start = noProcessStart
+	p.ops.listen = func(_, _ string) (net.Listener, error) {
+		return nil, errors.New("bind refused")
+	}
+
+	err := p.Start(context.Background(), "unbound", runtime.Config{Command: "sleep 300", WorkDir: workDir, Env: identityEnv})
+	if err == nil || !strings.Contains(err.Error(), "creating control socket") {
+		t.Fatalf("Start error = %v, want control socket failure", err)
+	}
+	for key := range identityEnv {
+		if got, _ := p.GetMeta("unbound", key); got != "" {
+			t.Errorf("sidecar %s after failed Start = %q, want removed", key, got)
+		}
+	}
+	if _, ok := p.workDirs["unbound"]; ok {
+		t.Error("workDir still tracked after failed Start")
+	}
+	if _, ok := p.procs["unbound"]; ok {
+		t.Error("session still tracked after failed Start")
+	}
+	namePath := filepath.Join(p.socketDir(), p.sockKey("unbound")+".name")
+	if _, err := os.Lstat(namePath); !os.IsNotExist(err) {
+		t.Errorf("socket name artifact after failed Start: %v, want not exist", err)
+	}
+}
+
+// LL6, I24: subprocess is already fresh-only. A held name returns
+// ErrSessionExists with FreshOnly set, and the holder is neither replaced nor
+// stopped. Kills a recycle of a held name inside Start.
+func TestAcpSubprocessAlreadyFreshOnly(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t))
+	p.ops.start = func(*exec.Cmd) (int, error) {
+		t.Fatal("Start spawned a process for a held name")
+		return 0, nil
+	}
+	holder := &sessionConn{done: make(chan struct{})}
+	p.procs["held"] = holder
+
+	err := p.Start(context.Background(), "held", runtime.Config{Command: "true", FreshOnly: true})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start = %v, want runtime.ErrSessionExists", err)
+	}
+	if p.procs["held"] != holder || !holder.alive() {
+		t.Fatal("Start replaced or stopped the runtime holding the name")
+	}
+}
+
+// exitingConn is a tracked session whose process has already exited: its cmd
+// was never started, so reap's Wait returns at once and no process is spawned.
+func exitingConn(token string) *sessionConn {
+	return &sessionConn{cmd: &exec.Cmd{}, done: make(chan struct{}), reaped: make(chan struct{}), token: token, listener: newFakeListener()}
+}
+
+// v5 O2 (X3): Ownerless needs identity to be atomic with liveness on the way
+// out as well as in. Held off p.mu, reap can close done but cannot clear the
+// sidecar, so the runtime reads not alive with its identity still there. This
+// is the only clear of a started session's sidecar, whether the process exits
+// on its own or because Stop signaled it.
+// Kills: the sidecar cleared before done closes (the old exit order).
+func TestSubprocessExitReadsNotAliveBeforeIdentityClears(t *testing.T) {
+	p := newTestProvider(t)
+	if err := p.persistStartMetadata("exiting", identityEnv); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	sc := exitingConn(identityEnv["GC_INSTANCE_TOKEN"])
+	p.procs["exiting"] = sc
+
+	p.mu.Lock()
+	go p.reap("exiting", sc, p.socketDir(), os.Geteuid())
+	<-sc.done
+	for key, want := range identityEnv {
+		if got, _ := p.GetMeta("exiting", key); got != want {
+			t.Errorf("sidecar %s when done closed = %q, want %q", key, got, want)
+		}
+	}
+	p.mu.Unlock()
+	<-sc.reaped
+
+	if obs, err := p.ObserveLivenessWithError("exiting", nil); err != nil || obs.Alive {
+		t.Errorf("ObserveLivenessWithError after reap = %+v, %v; want not alive", obs, err)
+	}
+	for key := range identityEnv {
+		if got, _ := p.GetMeta("exiting", key); got != "" {
+			t.Errorf("sidecar %s after reap = %q, want cleared", key, got)
+		}
+	}
+}
+
+// A late reap clears the sidecar only while it is still its incarnation's.
+// Kills: an unconditional clear (rows 3 and 4), the tracked-incarnation check
+// dropped (row 3: a tokenless newer Start in this provider), the token check
+// dropped (row 4: a newer Start in another provider), and a reap that never
+// clears (rows 1 and 2).
+func TestSubprocessReapClearsOnlyItsOwnIncarnation(t *testing.T) {
+	newer := map[string]string{"GC_SESSION_ID": "bead-123"}
+	tests := []struct {
+		name      string
+		ownToken  string
+		tracked   func(own *sessionConn) *sessionConn
+		sidecar   map[string]string
+		wantClear bool
+	}{
+		{"tracked own incarnation", "token-456", func(own *sessionConn) *sessionConn { return own }, identityEnv, true},
+		{"own incarnation evicted by Stop", "token-456", func(*sessionConn) *sessionConn { return nil }, identityEnv, true},
+		{"newer tokenless Start in this provider", "", func(*sessionConn) *sessionConn { return exitingConn("") }, newer, false},
+		{"newer Start in another provider", "token-456", func(*sessionConn) *sessionConn { return nil }, map[string]string{"GC_SESSION_ID": "bead-123", "GC_INSTANCE_TOKEN": "token-789"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newTestProvider(t)
+			if err := p.persistStartMetadata("reused", tt.sidecar); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			sc := exitingConn(tt.ownToken)
+			if cur := tt.tracked(sc); cur != nil {
+				p.procs["reused"] = cur
+			}
+
+			p.reap("reused", sc, p.socketDir(), os.Geteuid())
+
+			for key, want := range tt.sidecar {
+				if tt.wantClear {
+					want = ""
+				}
+				if got, _ := p.GetMeta("reused", key); got != want {
+					t.Errorf("sidecar %s after reap = %q, want %q", key, got, want)
+				}
+			}
+		})
+	}
+}
+
+// Stop returns only once reap has cleared the sidecar, as it did when reap
+// cleared it before closing done: from a live conn (reap held in Close until
+// Stop is under way) and from one whose done closes while Stop and reap both
+// wait on p.mu. Each setup races Stop against reap, so it runs repeatedly; a pass
+// is never spurious.
+// Kills: Stop not waiting for reap on the live path (terminateSessionConn) or
+// the exited path.
+func TestSubprocessStopReturnsAfterReap(t *testing.T) {
+	setups := map[string]func(p *Provider, sc *sessionConn, stop func()){
+		"live": func(p *Provider, sc *sessionConn, stop func()) {
+			gate := &gatedListener{fakeListener: newFakeListener(), release: make(chan struct{})}
+			sc.listener = gate
+			go p.reap("stopping", sc, p.socketDir(), os.Geteuid())
+			stop()
+			close(gate.release)
+		},
+		"exited": func(p *Provider, sc *sessionConn, stop func()) {
+			p.mu.Lock()
+			stop()
+			go p.reap("stopping", sc, p.socketDir(), os.Geteuid())
+			<-sc.done
+			p.mu.Unlock()
+		},
+	}
+	for name, setup := range setups {
+		t.Run(name, func(t *testing.T) {
+			for range 32 {
+				p := newTestProvider(t)
+				if err := p.persistStartMetadata("stopping", identityEnv); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+				sc := exitingConn(identityEnv["GC_INSTANCE_TOKEN"])
+				p.procs["stopping"] = sc
+				stopped := make(chan error, 1)
+				setup(p, sc, func() { go func() { stopped <- p.Stop("stopping") }() })
+				if err := <-stopped; err != nil {
+					t.Fatalf("Stop: %v", err)
+				}
+				select {
+				case <-sc.reaped:
+				default:
+					t.Fatal("Stop returned before reap finished")
+				}
+				for key := range identityEnv {
+					if got, _ := p.GetMeta("stopping", key); got != "" {
+						t.Fatalf("sidecar %s after Stop = %q, want cleared", key, got)
+					}
+				}
+			}
+		})
+	}
+}
+
+// gatedListener holds reap in Close, so the runtime stays alive, until release.
+type gatedListener struct {
+	*fakeListener
+	release chan struct{}
+}
+
+func (l *gatedListener) Close() error {
+	<-l.release
+	return l.fakeListener.Close()
+}
+
+// The seed writes the token, then the epoch, then the session ID, so a read
+// that straddles it never sees an ID without its token. Squatting a key's
+// path makes its write the one that fails; the first squatted key attempted
+// names the order.
+// Kills: the seed written in map order.
+func TestSubprocessSeedsIdentityTokenEpochID(t *testing.T) {
+	env := map[string]string{"GC_SESSION_ID": "bead-123", "GC_RUNTIME_EPOCH": "4", "GC_INSTANCE_TOKEN": "token-456"}
+	for _, squat := range [][]string{
+		{"GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH", "GC_SESSION_ID"},
+		{"GC_RUNTIME_EPOCH", "GC_SESSION_ID"},
+	} {
+		for range 16 {
+			p := newTestProvider(t)
+			for _, key := range squat {
+				if err := os.MkdirAll(filepath.Join(p.metaPath("seeded", key), "squat"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := p.persistStartMetadata("seeded", env)
+			if err == nil || !strings.Contains(err.Error(), p.metaPath("seeded", squat[0])) {
+				t.Fatalf("squatting %v: seed error = %v, want the %s write to fail first", squat, err, squat[0])
+			}
+		}
 	}
 }

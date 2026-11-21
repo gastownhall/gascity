@@ -165,6 +165,19 @@ func TestValidateDurationsBadMailRetentionTTL(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsBadMailUnreadRetentionTTL(t *testing.T) {
+	cfg := &City{
+		Mail: MailConfig{UnreadRetentionTTL: "7d"},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "unread_retention_ttl") || !strings.Contains(warnings[0], "7d") {
+		t.Errorf("warning should mention field and bad value: %s", warnings[0])
+	}
+}
+
 func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	cfg := &City{
 		Daemon: DaemonConfig{
@@ -178,6 +191,33 @@ func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	warnings := ValidateDurations(cfg, "city.toml")
 	if len(warnings) != 5 {
 		t.Fatalf("expected 5 warnings, got %d: %v", len(warnings), warnings)
+	}
+}
+
+func TestValidateDurationsDriftDeferralEscalateAfter(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{"", ""},
+		{"2h", ""},
+		{"an hour", "[daemon] drift_deferral_escalate_after = \"an hour\" is not a valid duration"},
+		{"0s", "[daemon] drift_deferral_escalate_after = \"0s\" must be a positive duration"},
+		{"-1m", "[daemon] drift_deferral_escalate_after = \"-1m\" must be a positive duration"},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg := &City{Daemon: DaemonConfig{DriftDeferralEscalateAfter: tc.raw}}
+			warnings := ValidateDurations(cfg, "city.toml")
+			if tc.want == "" {
+				if len(warnings) != 0 {
+					t.Fatalf("expected no warnings, got %v", warnings)
+				}
+				return
+			}
+			if len(warnings) != 1 || !strings.Contains(warnings[0], tc.want) {
+				t.Fatalf("warnings = %v, want one containing %q", warnings, tc.want)
+			}
+		})
 	}
 }
 

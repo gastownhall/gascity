@@ -12,9 +12,11 @@ const RedactedValue = "<redacted>"
 // substitutionFloor is the shortest value [RedactSecrets] will substitute.
 // Substitution is blind to word boundaries, so hiding a short value mangles
 // unrelated text: with "no" a secret, herdr's "agent not found" becomes
-// "agent <redacted>t found", and both the herdr client's isAgentNotFound and
-// [IsSessionGone] decide by matching that phrase — a redactor silently taking
-// over branches that turn a tolerated missing session into a hard failure.
+// "agent <redacted>t found", and [IsSessionGone] decides by matching that phrase
+// — a redactor silently taking over branches that turn a tolerated missing
+// session into a hard failure. (The herdr client used to decide the same way and
+// now gates on herdr's reported error code instead, for a related reason: the
+// rendered text it was matching also carried the argv it had passed in.)
 //
 // The floor buys that back because the two populations barely overlap: the
 // credentials that reach a session are long (the instance token is 32 hex
@@ -44,6 +46,9 @@ const substitutionFloor = 8
 // widen argv routing, so a pack that set PATH or HOME as session env would
 // start passing it as a process argument — a silent behavior change on a
 // question this file exists to answer conservatively.
+//
+// Windows adds its own standard environment to the set and matches names
+// without regard to case; see redactionInertEnvKey.
 var envRedactionInert = map[string]bool{
 	"HOME":    true,
 	"LOGNAME": true,
@@ -53,17 +58,27 @@ var envRedactionInert = map[string]bool{
 	"SHELL":   true,
 	"SHLVL":   true,
 	"TMPDIR":  true,
-	"USER":    true,
+	// Go toolchain temp root (CI gates set it beside TMPDIR); same class as
+	// TMPDIR — a path failing commands echo constantly, an authenticator of
+	// nothing.
+	"GOTMPDIR": true,
+	"USER":     true,
+	// Bazel's test runner exports TEST_TMPDIR and (in remote actions) points
+	// HOME at it. Redacting that value through this key scrubs every path in
+	// the diagnostic for bazel-executed controllers - the exact diagnostics
+	// outage this list exists to prevent; it authenticates nothing.
+	"TEST_TMPDIR": true,
 }
 
 // redactableEnvValue reports whether this key/value pair should be scrubbed out
 // of rendered text. Argv-safe values stay legible because they are already
 // readable in /proc/<pid>/cmdline, so hiding them costs diagnostics and buys
-// nothing; [envRedactionInert] names stay legible because hiding them costs the
-// whole message. Everything else is assumed to carry credential material — the
-// underlying predicate is an allow list, so an unrecognized name is a secret.
+// nothing; redaction-inert names ([envRedactionInert]) stay legible because
+// hiding them costs the whole message. Everything else is assumed to carry
+// credential material — the underlying predicate is an allow list, so an
+// unrecognized name is a secret.
 func redactableEnvValue(key, value string) bool {
-	return ArgvSecretEnvValue(key, value) && !envRedactionInert[key]
+	return ArgvSecretEnvValue(key, value) && !redactionInertEnvKey(key)
 }
 
 // SecretEnvValues returns the values of env that must not appear in rendered
@@ -101,8 +116,8 @@ func processSecretEnvValues() []string {
 // command's captured output when the command runs HOST-SIDE. Those runners
 // build the child environment the same way — os.Environ() overlaid with the
 // session env the caller assembled — so both halves are in scope for anything
-// the command echoes, and both belong here. Shared so the three host-side
-// runners (this package's [RunSetupCommand], the tmux adapter's and herdr's)
+// the command echoes, and both belong here. Shared so the host-side runners
+// (internal/runtime/setupcmd, which herdr delegates to, and the tmux adapter's)
 // cannot drift apart on which half they cover.
 //
 // Not for a runner that executes the command somewhere else. The ssh provider
@@ -129,12 +144,7 @@ func SetupCommandSecrets(env map[string]string) []string {
 //
 // Values below [substitutionFloor] are skipped.
 func RedactSecrets(text string, secrets []string) string {
-	ordered := make([]string, 0, len(secrets))
-	for _, secret := range secrets {
-		if len(secret) >= substitutionFloor {
-			ordered = append(ordered, secret)
-		}
-	}
+	ordered := substitutable(secrets)
 	sort.SliceStable(ordered, func(i, j int) bool { return len(ordered[i]) > len(ordered[j]) })
 
 	for _, secret := range ordered {
@@ -143,11 +153,25 @@ func RedactSecrets(text string, secrets []string) string {
 	return text
 }
 
+// substitutable returns the secrets at or above [substitutionFloor], the ones
+// [RedactSecrets] replaces, in a new slice.
+func substitutable(secrets []string) []string {
+	kept := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
+		if len(secret) >= substitutionFloor {
+			kept = append(kept, secret)
+		}
+	}
+	return kept
+}
+
 // tailRedactionSlack is how much beyond its reported limit a bounded output
-// tail must retain, and therefore the longest credential this file can promise
-// to scrub out of one: a value whose head falls outside the retained window is
-// gone before [RedactSecretsTail] ever sees it, and its tail then survives into
-// the reported text unmatched.
+// tail must retain, and therefore the longest credential that can straddle the
+// last limit bytes written and still be whole when [RedactSecretsTail] runs. A
+// value whose head falls outside the retained window is gone before redaction
+// ever sees it, and its surviving tail matches nothing. The slack does not keep
+// that tail out of the report, because redaction shortens the text and can pull
+// the window back to the buffer's first byte; [TrimDecapitatedSecret] does.
 //
 // So the number is a claim about the population, not a comfort margin. API keys
 // and bearer tokens run well under 100 bytes, but this package's whole posture
@@ -167,7 +191,9 @@ const tailRedactionSlack = 8192
 
 // OutputTailRetention returns how many bytes a bounded output writer must keep
 // in order to report limit bytes safely. Retaining exactly limit is not enough:
-// see [RedactSecretsTail] for why the extra is load-bearing.
+// see [RedactSecretsTail] for why the extra is load-bearing, and
+// [TrimDecapitatedSecret] for what the writer still owes once it has discarded
+// output.
 func OutputTailRetention(limit int) int {
 	if limit <= 0 {
 		return limit
@@ -187,12 +213,66 @@ func OutputTailRetention(limit int) int {
 //
 // It is why a caller retaining a tail must keep [OutputTailRetention] bytes
 // rather than limit: a value can only be redacted here if the buffer still
-// holds all of it, and the slack is what guarantees that for every value whose
-// end lands inside the window actually reported.
+// holds all of it, and the slack guarantees that for every value no longer than
+// the slack whose end lands in the last limit bytes written. That is not every
+// byte this can report, though. Each value redacted shortens the text, so the
+// reported window can reach back as far as the buffer's first byte, where a
+// value whose head the caller discarded survives as a suffix matching nothing.
+// A caller that discarded output strips that with [TrimDecapitatedSecret] first.
 func RedactSecretsTail(text string, limit int, secrets []string) (string, bool) {
 	text = RedactSecrets(text, secrets)
 	if limit > 0 && len(text) > limit {
 		return text[len(text)-limit:], true
 	}
 	return text, false
+}
+
+// TrimDecapitatedSecret strips what may be the tail of a credential from the
+// start of text, the bytes a bounded writer kept after it discarded earlier
+// output. Such a writer calls it before [RedactSecretsTail].
+//
+// The writer drops bytes as they stream, long before anyone knows what the
+// secrets are, so what it kept can begin partway through a value, and that
+// suffix no longer matches its own secret. The [OutputTailRetention] slack
+// keeps it outside the reported window only while redaction shortens the text
+// by less than the slack, and a command that echoes a credential over and over
+// shortens it by more: each whole occurrence shrinks to [RedactedValue] until
+// the window reaches the first byte and reports the suffix verbatim.
+//
+// Which suffix sits there is unknowable once the head is gone, so the cut takes
+// the longest suffix of any secret that text begins with. The cut then moves
+// past every whole value it would split; otherwise a value whose last bytes
+// repeat its first (a PEM block's dashes) would lose its head to the trim and
+// survive redaction instead. Everything cut is credential material or matches
+// it. Values below [substitutionFloor] are skipped, as [RedactSecrets] skips
+// them.
+func TrimDecapitatedSecret(text string, secrets []string) string {
+	secrets = substitutable(secrets)
+	// The longest proper suffix of any secret that text begins with.
+	cut := 0
+	for _, secret := range secrets {
+		for k := min(len(secret)-1, len(text)); k > cut; k-- {
+			if strings.HasPrefix(text, secret[len(secret)-k:]) {
+				cut = k
+				break
+			}
+		}
+	}
+	// Then past each whole value the cut would split, until none is left.
+	for cut > 0 {
+		next := cut
+		for _, secret := range secrets {
+			// The window holds exactly the occurrences that start before cut
+			// and end after it; the last of them reaches furthest.
+			lo, hi := max(0, cut-len(secret)+1), min(len(text), cut+len(secret)-1)
+			if i := strings.LastIndex(text[lo:hi], secret); i >= 0 {
+				next = max(next, lo+i+len(secret))
+			}
+		}
+		if next == cut {
+			break
+		}
+		cut = next
+	}
+	return text[cut:]
 }

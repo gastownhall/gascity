@@ -49,8 +49,10 @@ func (s counterMemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return nil, err
 	}
 	statusByID := make(map[string]string, len(all))
+	workOutcomeByID := make(map[string]string, len(all))
 	for _, b := range all {
 		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 	}
 	now := time.Now().UTC()
 	var result []Bead
@@ -65,7 +67,7 @@ func (s counterMemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if derr != nil {
 			return nil, derr
 		}
-		if !cachedBeadReady(b, statusByID, deps) {
+		if !cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
 			continue
 		}
 		result = append(result, cloneBead(b))
@@ -816,8 +818,10 @@ func (s depStrippingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return nil, err
 	}
 	statusByID := make(map[string]string, len(all))
+	workOutcomeByID := make(map[string]string, len(all))
 	for _, b := range all {
 		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 	}
 	now := time.Now().UTC()
 	var result []Bead
@@ -832,7 +836,7 @@ func (s depStrippingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if derr != nil {
 			return nil, derr
 		}
-		if !cachedBeadReady(b, statusByID, deps) {
+		if !cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
 			continue
 		}
 		result = append(result, stripDepFields(cloneBead(b)))

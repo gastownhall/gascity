@@ -8,6 +8,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -143,22 +144,74 @@ func runWarmupTest(t *testing.T, checks []doctor.Check, opts WarmupOpts) (*Warmu
 	return report, mailer, stderr.String()
 }
 
+// warmupBarrier releases its checks only once all n of them are running at
+// the same time, so it proves concurrency without a wall-clock bound.
+type warmupBarrier struct {
+	n       int
+	mu      sync.Mutex
+	running int
+	all     chan struct{}
+}
+
+func newWarmupBarrier(n int) *warmupBarrier {
+	return &warmupBarrier{n: n, all: make(chan struct{})}
+}
+
+// barrierWarmupCheck blocks in Run until every check sharing its barrier has
+// entered Run. Checks run one at a time would leave the first one waiting
+// alone; it then reports an error once deadlockGuard elapses, a deadlock
+// guard only, never a timing assertion: concurrent checks release at once.
+type barrierWarmupCheck struct {
+	name    string
+	barrier *warmupBarrier
+}
+
+const barrierDeadlockGuard = 4 * time.Second
+
+func (c barrierWarmupCheck) Name() string { return c.name }
+
+func (c barrierWarmupCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	b := c.barrier
+	b.mu.Lock()
+	b.running++
+	if b.running == b.n {
+		close(b.all)
+	}
+	running := b.running
+	b.mu.Unlock()
+	select {
+	case <-b.all:
+		return &doctor.CheckResult{Name: c.name, Status: doctor.StatusOK, Message: "ok"}
+	case <-time.After(barrierDeadlockGuard):
+		return &doctor.CheckResult{
+			Name: c.name, Status: doctor.StatusError,
+			Message: fmt.Sprintf("only %d of %d checks were running at once", running, b.n),
+		}
+	}
+}
+
+func (c barrierWarmupCheck) CanFix() bool { return false }
+
+func (c barrierWarmupCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+func (c barrierWarmupCheck) WarmupEligible() bool { return true }
+
+// TestRunWarmupChecks_ParallelExecution proves the checks run concurrently:
+// each blocks until all are running at once. It used to time three 200ms
+// sleeps against a 400ms bound, which failed on loaded hosts (535ms at load
+// ~250) without any loss of parallelism.
 func TestRunWarmupChecks_ParallelExecution(t *testing.T) {
+	barrier := newWarmupBarrier(3)
 	checks := []doctor.Check{
-		stubWarmupCheck{name: "a", warmup: true, runDelay: 200 * time.Millisecond},
-		stubWarmupCheck{name: "b", warmup: true, runDelay: 200 * time.Millisecond},
-		stubWarmupCheck{name: "c", warmup: true, runDelay: 200 * time.Millisecond},
+		barrierWarmupCheck{name: "a", barrier: barrier},
+		barrierWarmupCheck{name: "b", barrier: barrier},
+		barrierWarmupCheck{name: "c", barrier: barrier},
 	}
 
-	start := time.Now()
 	report, mailer, stderr := runWarmupTest(t, checks, WarmupOpts{})
-	elapsed := time.Since(start)
 
-	if elapsed >= 400*time.Millisecond {
-		t.Fatalf("RunWarmupChecks elapsed %s, want <400ms", elapsed)
-	}
 	if report.HighestSeverity != doctor.StatusOK {
-		t.Fatalf("HighestSeverity = %v, want StatusOK", report.HighestSeverity)
+		t.Fatalf("HighestSeverity = %v, want StatusOK (checks did not all run at once): %+v", report.HighestSeverity, report.Failures)
 	}
 	if len(mailer.sent) != 0 {
 		t.Fatalf("sent mail count = %d, want 0", len(mailer.sent))

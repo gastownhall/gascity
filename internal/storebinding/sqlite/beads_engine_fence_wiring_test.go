@@ -1,10 +1,10 @@
 package sqlite
 
-// That the fence engineReservedPrefixes computes is the fence the opened store
-// actually enforces.
+// That the fence storebinding.EngineReservedPrefixes computes is the fence the
+// opened store actually enforces.
 //
-// The tests next door pin what the function returns. They cannot see whether
-// the return value ever reaches the store: deleting the
+// The rows over in storebinding pin what that function returns. They cannot see
+// whether the return value ever reaches the store: deleting the
 // WithSQLiteStoreReservedIDPrefixes option from OpenEngine leaves every one of
 // them green and ships a binding that accepts any pinned id at all — the exact
 // state the fence was added to end. The rows here go through OpenEngine and ask
@@ -16,7 +16,17 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
+
+func classSet(t *testing.T, classes ...coordclass.Class) storebinding.ClassSet {
+	t.Helper()
+	set, err := storebinding.NewClassSet(classes...)
+	if err != nil {
+		t.Fatalf("NewClassSet(%v): %v", classes, err)
+	}
+	return set
+}
 
 // openBeadsEngine drives OpenEngine for the given classes and returns the store
 // it hands back, closed on cleanup.

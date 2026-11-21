@@ -30,7 +30,15 @@ version = "sha:<pinned commit>"
 offline from the binary's embedded copy; pinning a bundled source at any
 other commit makes it an ordinary remote import; `gc import install`
 fetches that exact commit from git, so editing the pin always does what it
-says.
+says. One exception: when a gc release moves the canonical `core`/`bd`/`dolt`
+pin, the pins earlier releases wrote keep being served from the embedded
+copy (they always meant "the built-in pack", not that commit's tree), so an
+upgraded city keeps loading offline, and `gc doctor` lists them as a
+warning. `gc doctor --fix` rewrites them to the current pin. Restart the
+supervisor on the new binary (`gc supervisor stop`, then
+`gc supervisor start`) before running `gc doctor --fix`: an older gc still
+running does not know the new pin and fails with "locked but not cached"
+until `gc import install` fetches it.
 
 The `bd` entry is written only for cities using the `bd` beads provider (the
 default); cities on other providers get only `core`. The `bd` pack pulls in
@@ -38,6 +46,14 @@ the `dolt` pack transitively via its own `[imports.dolt]`, so dolt never
 needs its own import. The `gastown` and `gascity` packs are also bundled but
 never required -- they arrive via the templates that use them (`gc init`
 gastown/gascity options) or an explicit import.
+
+The gascity template also writes a default rig import of the gascity pack's
+role agents (`gc-roles`, source `.../gascity-packs/tree/main/gascity/roles`),
+pinned to the same commit as `[imports.gc]`. That subpack ships inside the
+bundled gascity pack, so at that pin it resolves offline from the same
+embedded copy; `gc init` and `gc rig add` never clone gascity-packs for it.
+`gc doctor --fix` re-pins it together with `[imports.gc]` when a newer `gc`
+moves the gascity pin.
 
 ## Core Pack
 
@@ -57,6 +73,24 @@ The `core` pack deliberately ships no agents. Packs that need long-lived
 utility workers define their own -- for example, the `gastown` pack owns the
 `dog` utility pool and the `mol-shutdown-dance` formula, and the `dolt` pack
 ships its own separate `dog` agent for Dolt maintenance formulas.
+
+## bd Pack
+
+The bundled `bd` pack drives the default Dolt-backed bead store. Its
+`gc-beads-bd` provider script runs the city's Dolt server, through the `dolt`
+pack it imports, and initializes each scope's database whenever the city
+starts, reloads or gains a rig.
+
+Running `bd migrate schema` changes a database's schema for every client of
+it at once, and a `bd` built for the older schema then refuses it. So the
+provider runs it only on a database it is creating, which includes repairing
+a creation an earlier start cut off in the middle of a migration step. Any
+other database keeps its schema until an operator migrates it. `gc start`,
+`gc reload` and the `bd-schema` check of `gc doctor` name each database whose
+schema differs from the Beads library built into `gc`, with the command to
+run. A rig whose database the city's `bd` cannot open because of that
+difference is left unserved instead of stopping the city. See
+[Databases Gas City leaves to you](/getting-started/upgrading#databases-gas-city-leaves-to-you).
 
 ## Doctor Repair And Migration
 

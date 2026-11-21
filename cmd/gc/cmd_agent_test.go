@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestDoAgentListJSON(t *testing.T) {
@@ -77,6 +78,45 @@ sling_query = "bd update {} --set-metadata gc.routed_to=frontend/worker"
 	if worker.WorkQuery != "bd ready --label=frontend" || worker.SlingQuery == "" {
 		t.Fatalf("worker routing fields = %+v", worker)
 	}
+}
+
+func TestDoAgentListJSONUsesRuntimeRigSuspension(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "frontend"
+path = "/rig/frontend"
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "frontend", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doAgentList(fsys.OSFS{}, cityPath, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doAgentList --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result AgentListJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	for _, item := range result.Agents {
+		if item.QualifiedName == "frontend/worker" {
+			if !item.Suspended {
+				t.Fatalf("frontend/worker = %+v, want runtime rig suspension", item)
+			}
+			return
+		}
+	}
+	t.Fatalf("frontend/worker missing from %+v", result.Agents)
 }
 
 // ---------------------------------------------------------------------------

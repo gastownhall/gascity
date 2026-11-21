@@ -6,8 +6,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 const (
@@ -37,16 +38,33 @@ const (
 // dir but not yet acquired the alive sentinel.
 const testOrphanSweepMinAge = time.Hour
 
+// testOrphanSweepFreeSentinelMinAge is the minimum age before a dir whose
+// alive sentinel is present but unlocked becomes a sweep candidate. A free
+// sentinel already proves the creator is gone, so only a short grace window
+// is needed -- not the full legacy fence, which exists to cover dirs with no
+// sentinel evidence at all.
+const testOrphanSweepFreeSentinelMinAge = 2 * time.Minute
+
 // holdAliveSentinel creates <dir>/.gc-test-alive.lock and takes an exclusive
-// flock on it. The caller must keep the returned file referenced for as long
-// as the dir must stay protected: the runtime finalizes unreachable os.Files,
-// which closes the descriptor and releases the lock.
+// kernel lock on it. The caller must keep the returned file referenced for as
+// long as the dir must stay protected: the runtime finalizes unreachable
+// os.Files, which closes the descriptor and releases the lock.
+//
+// Closing the file is the release path on both platforms, so the lock handle
+// is deliberately not returned: flock is released when the last descriptor for
+// the open file closes, and a Windows byte-range lock is released with its
+// handle.
 func holdAliveSentinel(dir string) (*os.File, error) {
-	f, err := os.OpenFile(filepath.Join(dir, testAliveSentinelName), os.O_CREATE|os.O_RDWR, 0o644)
+	path := filepath.Join(dir, testAliveSentinelName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening alive sentinel in %q: %w", dir, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	}); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("locking alive sentinel in %q: %w", dir, err)
 	}
@@ -55,9 +73,10 @@ func holdAliveSentinel(dir string) (*os.File, error) {
 
 // aliveSentinelHeld probes <dir>'s alive sentinel. exists reports whether the
 // sentinel file is present; held reports whether some process still holds its
-// flock. Probe failures are reported as held so the sweep stays conservative.
+// lock. Probe failures are reported as held so the sweep stays conservative.
 func aliveSentinelHeld(dir string) (exists, held bool) {
-	f, err := os.OpenFile(filepath.Join(dir, testAliveSentinelName), os.O_RDWR, 0)
+	path := filepath.Join(dir, testAliveSentinelName)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, false
@@ -65,10 +84,15 @@ func aliveSentinelHeld(dir string) (exists, held bool) {
 		return true, true
 	}
 	defer f.Close() //nolint:errcheck
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		return true, true
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = lock.Release()
 	return true, false
 }
 
@@ -158,24 +182,33 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 			continue
 		}
 		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) < testOrphanSweepMinAge {
+		if err != nil {
 			continue
 		}
+		age := now.Sub(info.ModTime())
 		path := filepath.Join(root, e.Name())
 		exists, held := aliveSentinelHeld(path)
 		var reason string
 		switch {
 		case held:
-			// Creator (possibly in another PID namespace) is still alive.
+			// Creator (possibly in another PID namespace) is still alive,
+			// regardless of age.
 			continue
 		case exists:
-			// Sentinel present but unlocked: the creator is gone. Remove
-			// even though the active-root marker is still there — crashed
-			// runs never clear their marker.
+			// Sentinel present but unlocked: the creator is gone. Only a
+			// short grace window is needed, not the full legacy fence --
+			// and it's removed even though the active-root marker may
+			// still be there, since crashed runs never clear their marker.
+			if age < testOrphanSweepFreeSentinelMinAge {
+				continue
+			}
 			reason = "free sentinel"
 		default:
-			// Legacy dir without a sentinel: fall back to PID liveness and
-			// the active-root marker.
+			// Legacy dir without a sentinel: keep the full fence, then fall
+			// back to PID liveness and the active-root marker.
+			if age < testOrphanSweepMinAge {
+				continue
+			}
 			if pidAlive(pid) {
 				continue
 			}
@@ -189,4 +222,29 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 		fmt.Fprintf(os.Stderr, "cmd/gc test sweep: removing %s (%s)\n", path, reason)
 		_ = os.RemoveAll(path)
 	}
+}
+
+// adoptPerRunTMPDIR sets TMPDIR to newTMPDIR for the rest of the test
+// binary's life and returns the host temp root that was in effect
+// beforehand, so callers can sweep legacy fixture dirs left there by prior
+// runs. os.TempDir() re-reads TMPDIR on every call, so the host root must be
+// captured before this override — capturing it afterward would instead
+// return newTMPDIR's own fresh, empty directory (ga-lygcyb).
+func adoptPerRunTMPDIR(newTMPDIR string) (hostTmpRoot string, err error) {
+	hostTmpRoot = os.TempDir()
+	if err := os.Setenv("TMPDIR", newTMPDIR); err != nil {
+		return "", err
+	}
+	return hostTmpRoot, nil
+}
+
+// sweepLegacyCmdGCFixtureDirs removes stale legacy fixture dirs for the five
+// prefixes cmd/gc test fixtures used before per-run temp roots existed, all
+// created directly under the host temp root rather than inside it.
+func sweepLegacyCmdGCFixtureDirs(hostTmpRoot string) {
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testGCHomeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testRuntimeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testProviderStubDirPrefix)
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testSlingFormulaDirPrefix)
+	sweepOrphanPIDPrefixedDirs(hostTmpRoot, testSlingCityDirPrefix)
 }

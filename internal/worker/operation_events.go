@@ -205,7 +205,10 @@ func (h *SessionHandle) currentOperationSessionInfo() (sessionpkg.Info, sessionp
 	if id == "" {
 		return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, false
 	}
-	info, pr, err := sessionRecordViaManager(h.manager, id)
+	// Persisted read only: the live overlay makes unbounded provider calls, and
+	// this runs on the kill and start paths (before and after the operation), so
+	// a wedged provider would hold them. The event names stored identity only.
+	info, pr, err := sessionRecordPersisted(h.manager, id)
 	if err != nil {
 		return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, false
 	}

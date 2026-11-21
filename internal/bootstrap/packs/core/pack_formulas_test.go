@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -17,6 +18,9 @@ type formulaFile struct {
 		ID          string `toml:"id"`
 		Title       string `toml:"title"`
 		Description string `toml:"description"`
+		Retry       *struct {
+			MaxAttempts int `toml:"max_attempts"`
+		} `toml:"retry"`
 	} `toml:"steps"`
 }
 
@@ -52,6 +56,76 @@ func formulaStep(t *testing.T, f formulaFile, id string) string {
 	}
 	t.Fatalf("formula %s has no step %q", f.Formula, id)
 	return ""
+}
+
+// TestMolDoWorkDrainClaimsCurrentContinuation pins the distinction between a
+// process's immutable startup bead and the continuation that became ready
+// while that process was running.
+func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "drain")
+
+	if !strings.Contains(step, "gc ready --json --limit=2") {
+		t.Fatal("drain must resolve the current continuation from ready work")
+	}
+	if !strings.Contains(step, "--include-ephemeral") {
+		t.Fatal("drain must include ephemeral rows; a wisp-tier continuation is invisible to bd ready without it")
+	}
+	if !strings.Contains(step, `--metadata-field "gc.root_bead_id=$ROOT_BEAD_ID"`) || !strings.Contains(step, `--metadata-field "gc.step_ref=mol-do-work.drain"`) {
+		t.Fatal("drain must select the ready drain step from the current workflow root")
+	}
+	if strings.Contains(step, `DRAIN_BEAD_ID="${GC_BEAD_ID`) {
+		t.Fatal("drain must not treat the immutable startup bead as the continuation bead")
+	}
+	if !strings.Contains(step, "if [ -z \"$ROOT_BEAD_ID\" ]") {
+		t.Fatal("drain must fail closed when the startup bead has no workflow root")
+	}
+	if !strings.Contains(step, "if length == 1") || !strings.Contains(step, "could not resolve one ready continuation bead") {
+		t.Fatal("drain must fail closed unless exactly one matching continuation is ready")
+	}
+	// The current-claim branch must stay gated on gc.step_ref. An unguarded
+	// `gc hook current` re-introduces gh-5141 on the deferred path, where the
+	// claim stamp still names the do-work step rather than the drain step.
+	currentAt := strings.Index(step, "gc hook current --id-only")
+	if currentAt < 0 {
+		t.Fatal("drain must consult the current claim before falling back to a ready query")
+	}
+	readyAt := strings.Index(step, "gc ready --json --limit=2")
+	if readyAt < currentAt {
+		t.Fatal("drain must consult the current claim before the ready query, not after it")
+	}
+	if !strings.Contains(step[currentAt:readyAt], `.metadata["gc.step_ref"] == "mol-do-work.drain"`) {
+		t.Fatal("drain must gate the current-claim branch on gc.step_ref; an unguarded claim restores the stale-identity bug")
+	}
+	// The startup-bead id is only needed by the ready-query fallback. Requiring
+	// it up front aborts drain on every session seat: GC_BEAD_ID exists only in
+	// the dispatch condition environment, never in a session shell, and no
+	// session shell carries a trigger id (cmd/gc/cmd_hook_current.go). Same
+	// shape as ga-2q2r0.
+	startupAt := strings.Index(step, `STARTUP_BEAD_ID="${GC_BEAD_ID`)
+	if startupAt < 0 || startupAt < currentAt {
+		t.Fatal("drain must not require a startup bead id before consulting the current claim")
+	}
+	// The current claim carries gc.root_bead_id, and in a session shell it is
+	// the ONLY source of it: GC_BEAD_ID never reaches a session shell and no
+	// session shell carries a trigger id (cmd/gc/cmd_hook_current.go).
+	// Reading the root off the startup bead first strands every warm seat on
+	// the deferred path — the ga-2q2r0 failure, one layer in.
+	rootFromCurrent := strings.Index(step, `ROOT_BEAD_ID=$(printf '%s' "$CURRENT"`)
+	if rootFromCurrent < 0 {
+		t.Fatal("drain must derive the workflow root from the current claim it already fetched")
+	}
+	if rootFromCurrent > startupAt {
+		t.Fatal("drain must try the current claim's root before falling back to startup env vars")
+	}
+
+	updateAt := strings.Index(step, "gc bd update")
+	drainAckAt := strings.Index(step, "gc runtime drain-ack")
+	if drainAckAt < 0 {
+		t.Fatal("drain must still acknowledge runtime drain after closing its continuation bead")
+	}
+	if updateAt < 0 || !strings.Contains(step[updateAt:drainAckAt], "|| exit 1") {
+		t.Fatal("drain must not acknowledge runtime drain after a failed bead close")
+	}
 }
 
 // TestPolecatPreflightSearchesLedgerBeforeFiling pins the search-before-file
@@ -252,6 +326,40 @@ func TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 	}
 }
 
+// TestCoreRetryManagedStepsStateOutcomeContract requires every core-pack step
+// that declares [steps.retry] to tell the worker how to close it: the retry
+// evaluator classifies an attempt closed without gc.outcome as missing_outcome
+// and, once attempts run out, fails the workflow even though the work succeeded.
+func TestCoreRetryManagedStepsStateOutcomeContract(t *testing.T) {
+	entries, err := fs.ReadDir(PackFS, "formulas")
+	if err != nil {
+		t.Fatalf("reading formulas: %v", err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".toml") {
+			continue
+		}
+		f := readFormula(t, entry.Name())
+		for _, step := range f.Steps {
+			if step.Retry == nil {
+				continue
+			}
+			checked++
+			t.Run(entry.Name()+"/"+step.ID, func(t *testing.T) {
+				for _, want := range []string{"gc.outcome=pass", "gc.outcome=fail", "gc.failure_class", "gc.failure_reason"} {
+					if !strings.Contains(step.Description, want) {
+						t.Errorf("retry-managed step %s/%s never mentions %q; a close without gc.outcome fails the step as missing_outcome", entry.Name(), step.ID, want)
+					}
+				}
+			})
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no [steps.retry] step in the core formulas; the scan is not looking where the retry tables are")
+	}
+}
+
 // TestMolScopedWorkResolvesRepoBeforeRemovingWorktree pins the same fix for
 // mol-scoped-work's cleanup step, which is worse than mol-polecat-commit's:
 // its `|| rm -rf` fallback makes the stranded git registration the designed
@@ -287,4 +395,256 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 	if guardAt > removeAt {
 		t.Error("cleanup-worktree runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
 	}
+}
+
+// TestMolDoWorkWorkBeadCloseFailsClosed pins that a refused work-bead close
+// (for example, the typed work-record close gate) stops the step instead of
+// falling through to close the formula step over still-open work.
+func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	closes := 0
+	for _, line := range strings.Split(step, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, `gc bd close "$WORK_BEAD_ID"`) {
+			continue
+		}
+		closes++
+		if !strings.HasSuffix(line, "|| exit 1") {
+			t.Errorf("work-bead close must fail closed with `|| exit 1`: %s", line)
+		}
+	}
+	if closes == 0 {
+		t.Fatal("expected mol-do-work to close $WORK_BEAD_ID in the do-work step")
+	}
+}
+
+// TestCorePackClaimTextTreatsFailedClaimAsHeld pins the agent-facing claim
+// wording. `bd update <id> --claim` is idempotent only for the holder: it wins
+// an open bead that is unassigned or already the actor's and refuses a bead
+// another actor holds. Pack text must not promise a takeover, must tell the
+// agent a failed claim means "held by someone else; do not work it", and the
+// routed-pickup texts must name `gc hook --claim` as the one-step pickup.
+func TestCorePackClaimTextTreatsFailedClaimAsHeld(t *testing.T) {
+	const doWorkName = "formulas/mol-do-work.toml do-work step"
+	doWork := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	texts := map[string]string{doWorkName: doWork}
+	for _, path := range []string{
+		"skills/gc-work/SKILL.md",
+		"overlay/per-provider/copilot/.github/copilot-instructions.md",
+		"overlay/per-provider/kiro/AGENTS.md",
+	} {
+		data, err := fs.ReadFile(PackFS, path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		texts[path] = string(data)
+	}
+	// flatten joins wrapped lines and folds case, so a phrase is found
+	// wherever the prose breaks it or a sentence starts with it.
+	flatten := func(text string) string { return strings.ToLower(strings.Join(strings.Fields(text), " ")) }
+	for name, text := range texts {
+		flat := flatten(text)
+		for _, banned := range []string{"self-assigns", "regardless of current state", "already claimed some other way"} {
+			if strings.Contains(flat, banned) {
+				t.Errorf("%s still says --claim %q; a claim never takes over another holder's bead", name, banned)
+			}
+		}
+		if !strings.Contains(flat, "gc bd update") || !strings.Contains(flat, "--claim") {
+			t.Errorf("%s no longer teaches gc bd update --claim; update this test if the verb moved", name)
+		}
+		if !strings.Contains(flat, "another agent holds") && !strings.Contains(flat, "another agent already holds") {
+			t.Errorf("%s must say a claim fails when another agent holds the bead", name)
+		}
+		if !strings.Contains(flat, "do not work") {
+			t.Errorf("%s must tell the agent not to work a bead whose claim failed", name)
+		}
+		// mol-do-work claims the specific convoy child it derived, so only
+		// the routed-pickup texts must point at the one-step claim.
+		if name != doWorkName && !strings.Contains(flat, "gc hook --claim") {
+			t.Errorf("%s must name gc hook --claim (find and claim one routed item in a single step)", name)
+		}
+		// Plain gc hook only lists routed work. Saying it claims sends the
+		// agent to work a bead it never claimed, with no assignee or lease.
+		for _, banned := range []string{"run `gc hook` to check for and claim", "`gc hook` — check for and claim"} {
+			if strings.Contains(flat, banned) {
+				t.Errorf("%s says plain gc hook claims work (%q); only gc hook --claim claims", name, banned)
+			}
+		}
+	}
+	// Step 3 of mol-do-work records gc.work_outcome on the work bead and closes
+	// it, including for blocked or abandoned work. A failed claim leaves the
+	// bead with its holder, so the failure path must rule both writes out
+	// instead of sending the agent down the blocked close onto someone else's
+	// bead.
+	if !strings.Contains(flatten(doWork), "do not record an outcome on it or close it") {
+		t.Errorf("%s must tell the agent not to record an outcome on, or close, a bead whose claim failed", doWorkName)
+	}
+}
+
+// molDoWorkCloseStepBlock returns the bash block under the do-work step's
+// "Close this formula step" heading, with the convoy variable rendered as cv-1.
+func molDoWorkCloseStepBlock(t *testing.T) string {
+	t.Helper()
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	const marker = "**4. Close this formula step:**"
+	at := strings.Index(step, marker)
+	if at < 0 {
+		t.Fatalf("do-work step has no %q section", marker)
+	}
+	section := step[at:]
+	open := strings.Index(section, "```bash\n")
+	if open < 0 {
+		t.Fatal("close-step section has no bash block")
+	}
+	body := section[open+len("```bash\n"):]
+	end := strings.Index(body, "```")
+	if end < 0 {
+		t.Fatal("close-step bash block is unterminated")
+	}
+	return strings.ReplaceAll(body[:end], "{{convoy_id}}", "cv-1")
+}
+
+// closeStepCase is one session shell the do-work close block runs in. The fake
+// gc answers `hook current --id-only` with hookOut/hookRC, `convoy status` with
+// convoy and `bd show` with show (an empty convoy or show fails the read), and
+// exits updateRC for `bd update`; like gc, each failure reports on stderr. A refused case's diagnostic must name
+// wantNamed.
+type closeStepCase struct {
+	name      string
+	env       []string
+	hookOut   string
+	hookRC    int
+	convoy    string
+	show      string
+	updateRC  int
+	wantClose bool
+	wantNamed string
+}
+
+const (
+	closeStepConvoy  = `{"children":[{"id":"ga-work"}]}`
+	closeStepClaimed = `[{"id":"ga-step","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}}]`
+)
+
+// closeStepEnvKeys are the settings each case supplies itself. A live session
+// exports the identity variables, and a stale GC_BEAD_ID or a leaked block
+// variable would otherwise decide the case.
+var closeStepEnvKeys = map[string]struct{}{
+	"GC_BEAD_ID":         {},
+	"GC_TRIGGER_BEAD_ID": {},
+	"GC_SESSION_ID":      {},
+	"GC_SESSION_NAME":    {},
+	"GC_ALIAS":           {},
+	"WORK_BEAD_ID":       {},
+	"STEP_BEAD_ID":       {},
+	"CONVOY_STATUS":      {},
+	"STEP_BEAD":          {},
+}
+
+func (c closeStepCase) fakeGC() string {
+	convoy := "echo 'gc: convoy status failed' >&2; exit 1"
+	if c.convoy != "" {
+		convoy = fmt.Sprintf("printf '%%s\\n' '%s'", c.convoy)
+	}
+	show := "echo 'gc: bd show failed' >&2; exit 1"
+	if c.show != "" {
+		show = fmt.Sprintf("printf '%%s\\n' '%s'", c.show)
+	}
+	return fmt.Sprintf(`case "$*" in
+"hook current --id-only") printf '%%s\n' '%s'; exit %d ;;
+"convoy status cv-1 --json") %s ;;
+"bd show "*" --json") %s ;;
+"bd update "*) [ %[5]d -eq 0 ] || echo 'gc: bd update failed' >&2; exit %[5]d ;;
+*) echo "unexpected gc command: $*" >&2; exit 64 ;;
+esac
+`, c.hookOut, c.hookRC, convoy, show, c.updateRC)
+}
+
+// TestMolDoWorkCloseStepNeverReadsGCBeadID pins that the do-work step names
+// its own bead through the hook claim: GC_BEAD_ID never reaches a session
+// shell, so step text that waits on it presents a skipped close as success.
+// The close block must also carry no backslash, which the TOML basic string
+// would decode before the agent sees it.
+func TestMolDoWorkCloseStepNeverReadsGCBeadID(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	if strings.Contains(step, "GC_BEAD_ID") {
+		t.Error("do-work step references GC_BEAD_ID, which a session shell never has")
+	}
+	if !strings.Contains(step, "gc hook current --id-only") {
+		t.Error("do-work step must resolve its own bead with `gc hook current --id-only`")
+	}
+	if strings.Contains(step, "closed when `GC_BEAD_ID` is available") {
+		t.Error("do-work exit criteria still make the step close conditional on GC_BEAD_ID")
+	}
+	if block := molDoWorkCloseStepBlock(t); strings.Contains(block, `\`) {
+		t.Errorf("close-step block contains a backslash:\n%s", block)
+	}
+}
+
+// graphBeadVars are the shell variables core formulas use for workflow
+// infrastructure beads: the claimed formula step, the drain continuation and
+// the workflow root. Every one carries gc.root_bead_id, so on a city that
+// keeps its coordination classes in a separate store each is held by that
+// store and `gc bd` serves writes to it in process.
+var graphBeadVars = []string{"GC_BEAD_ID", "DRAIN_BEAD_ID", "ROOT_BEAD_ID", "STEP_BEAD_ID"}
+
+// graphBeadRefusedShapes are the spellings the in-process door refuses on such
+// a bead, because the class store has nothing to write them into (notes, a
+// heartbeat lease, an audit actor). A close reason is not among them: the door
+// records `close --reason` as the bead's close reason. A core formula that uses
+// one of these breaks on gc's own split store.
+var graphBeadRefusedShapes = []string{"--notes", "--append-notes", "--actor", "heartbeat"}
+
+// TestCoreFormulasUseNoRefusedShapeOnGraphBeads scans every core formula for a
+// `bd` write naming a graph-bead variable and fails on a refused shape, or on a
+// bare `bd` (which cannot see a relocated bead at all). Continuation lines are
+// joined first so a flag on the next line of a `\`-continued command counts.
+func TestCoreFormulasUseNoRefusedShapeOnGraphBeads(t *testing.T) {
+	entries, err := fs.ReadDir(PackFS, "formulas")
+	if err != nil {
+		t.Fatalf("reading formulas: %v", err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".toml") {
+			continue
+		}
+		data, err := fs.ReadFile(PackFS, "formulas/"+entry.Name())
+		if err != nil {
+			t.Fatalf("reading %s: %v", entry.Name(), err)
+		}
+		joined := strings.ReplaceAll(string(data), "\\\n", " ")
+		for _, line := range strings.Split(joined, "\n") {
+			bd := strings.Index(line, "bd ")
+			if bd < 0 || !namesGraphBeadVar(line[bd:]) {
+				continue
+			}
+			command := line[bd:]
+			verb := strings.Fields(command)
+			if len(verb) < 2 || (verb[1] != "update" && verb[1] != "close" && verb[1] != "heartbeat") {
+				continue
+			}
+			checked++
+			if !strings.HasSuffix(strings.TrimRight(line[:bd], " `"), "gc") {
+				t.Errorf("%s: bare `bd` on a graph bead cannot reach a relocated class store; use `gc bd`: %s", entry.Name(), strings.TrimSpace(line))
+			}
+			for _, refused := range graphBeadRefusedShapes {
+				if strings.Contains(command, refused) {
+					t.Errorf("%s: %s is refused on a relocated graph bead: %s", entry.Name(), refused, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no graph-bead write in the core formulas; the scan is not looking where the writes are")
+	}
+}
+
+func namesGraphBeadVar(command string) bool {
+	for _, name := range graphBeadVars {
+		if strings.Contains(command, "$"+name) || strings.Contains(command, "${"+name) {
+			return true
+		}
+	}
+	return false
 }

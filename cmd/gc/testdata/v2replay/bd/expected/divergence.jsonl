@@ -1,0 +1,4 @@
+{"family":"harness gap","item":"no exported demand","tick":"tk-a","at":"2026-10-05T00:01:09Z","template":"worker","class":"start","legacy":1,"v2":0,"legacy_records":["reconciler.session.wake_decision/start_candidate/wake"]}
+{"family":"replay approximation","item":"close's L5 runs in the effect","tick":"tk-b","at":"2026-10-05T00:02:09Z","template":"worker","class":"close","legacy":0,"v2":1,"v2_intents":["close/close-orphan"]}
+{"family":"unexplained","tick":"tk-a","at":"2026-10-05T00:01:09Z","template":"worker","class":"drain","legacy":0,"v2":1,"v2_intents":["drain-begin/drain-begin:orphaned"]}
+{"family":"unexplained","tick":"tk-a","at":"2026-10-05T00:01:09Z","template":"worker","class":"heal","legacy":0,"v2":1,"v2_intents":["row-heal/timer-heal"]}

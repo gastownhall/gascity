@@ -32,7 +32,7 @@ import (
 // and the reset rotated it to 3445a81d… while clearing started_config_hash —
 // forcing the wake exec to use --session-id instead of --resume.
 func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinuationReset(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 
 	const (
@@ -46,7 +46,8 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 		"resume_style":        "flag",
 	})
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	tp := driftResumeSessionIDCapableTemplateParams()
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), tp, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -60,33 +61,23 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 			got.Metadata["started_config_hash"], priorStartedConfigHash)
 	}
 
-	tp := TemplateParams{
-		Command:      "claude --dangerously-skip-permissions",
-		SessionName:  "mayor",
-		TemplateName: "mayor",
-		ResolvedProvider: &config.ResolvedProvider{
-			Name:          "claude",
-			Command:       "claude",
-			ResumeFlag:    "--resume",
-			ResumeStyle:   "flag",
-			SessionIDFlag: "--session-id",
-		},
-	}
 	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
 	clk := &clock.Fake{Time: time.Date(2026, 5, 13, 16, 23, 30, 0, time.UTC)}
 
 	prepared, err := prepareStartCandidateForCity(
 		startCandidate{info: env.sessionInfo(got.ID), tp: tp, order: 0},
-		"", "", cfg, env.sp, env.store, clk, io.Discard, nil,
+		"", "", cfg, env.sp, env.store, clk, io.Discard, nil, dispatchOptionSources{},
 	)
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
 
+	leased, release := leasedStart(t, env.city, *prepared)
+	defer release()
 	if _, err := startPreparedStartCandidate(
 		context.Background(),
-		*prepared,
-		"",
+		leased,
+		env.city,
 		env.store,
 		env.sp,
 		cfg,
@@ -128,7 +119,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 }
 
 func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Providers: map[string]config.ProviderSpec{
@@ -248,7 +239,7 @@ func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *te
 // Deterministic inner and outer lifecycle signals keep the fake-runtime path
 // in the fast suite without weakening either liveness probe.
 func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 
 	const (
@@ -262,29 +253,18 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 		"resume_style":        "flag",
 	})
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	tp := driftResumeSessionIDCapableTemplateParams()
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), tp, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
 		t.Fatalf("get after reset: %v", err)
 	}
 
-	tp := TemplateParams{
-		Command:      "claude --dangerously-skip-permissions",
-		SessionName:  "mayor",
-		TemplateName: "mayor",
-		ResolvedProvider: &config.ResolvedProvider{
-			Name:          "claude",
-			Command:       "claude",
-			ResumeFlag:    "--resume",
-			ResumeStyle:   "flag",
-			SessionIDFlag: "--session-id",
-		},
-	}
 	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
 	clk := &clock.Fake{Time: time.Date(2026, 5, 13, 16, 23, 30, 0, time.UTC)}
 
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(),
 		[]startCandidate{{info: env.sessionInfo(got.ID), tp: tp, order: 0}},
 		cfg,
@@ -292,11 +272,13 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 		env.sp,
 		env.store,
 		"test-city",
+		env.city,
 		clk,
 		events.Discard,
 		10*time.Second,
 		&env.stdout,
 		&env.stderr,
+		nil,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
@@ -330,8 +312,14 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 // and mint a fresh session_key. Preservation is gated on StateCreating so the
 // asleep-repair contract — drift cleared, next wake uses fresh config — is
 // untouched by the resume-continuity change.
+//
+// The provider is `--session-id`-capable because minting is only meaningful for
+// that shape: a caller-supplied key reaches the next start as
+// `--session-id <uuid>`, which creates the conversation. Resume-only providers
+// are covered by
+// TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderClearsKey.
 func TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 	const (
 		priorSessionKey        = "old-provider-conversation"
@@ -342,7 +330,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey(t
 		"started_config_hash": priorStartedConfigHash,
 	})
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), driftResumeSessionIDCapableTemplateParams(), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -365,11 +353,11 @@ func TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey(t
 // next wake has a valid --session-id argument. Preserving resume metadata is
 // conditional on having a prior conversation to resume.
 func TestResetConfiguredNamedSessionForConfigDrift_GeneratesKeyWhenNoneToPreserve(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 	// No session_key, no started_config_hash — the session never started.
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), driftResumeSessionIDCapableTemplateParams(), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -384,8 +372,183 @@ func TestResetConfiguredNamedSessionForConfigDrift_GeneratesKeyWhenNoneToPreserv
 	}
 }
 
+// driftResumeSessionIDCapableTemplateParams is the `--session-id`-capable
+// provider shape (claude) used by the config-drift reset tests that assert a
+// fresh session_key is minted. Minting is only correct for this shape: the
+// caller-supplied key reaches the next start as `--session-id <uuid>`, which
+// creates the conversation rather than resuming one.
+func driftResumeSessionIDCapableTemplateParams() TemplateParams {
+	return TemplateParams{
+		Command:      "claude --dangerously-skip-permissions",
+		SessionName:  "mayor",
+		TemplateName: "mayor",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:          "claude",
+			Command:       "claude",
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+	}
+}
+
+// driftResumeResumeOnlyTemplateParams is the resume-only provider shape
+// (opencode: `--session <key>` to resume, no flag for creating a conversation
+// with a caller-supplied ID). codex and gemini have the same shape.
+func driftResumeResumeOnlyTemplateParams() TemplateParams {
+	return TemplateParams{
+		Command:      "opencode",
+		SessionName:  "mayor",
+		TemplateName: "mayor",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:        "opencode",
+			Command:     "opencode",
+			ResumeFlag:  "--session",
+			ResumeStyle: "flag",
+		},
+	}
+}
+
+// TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderClearsKey is
+// the regression guard for the config-drift reset minting a session ID that the
+// provider cannot possibly honor.
+//
+// A provider with no session_id_flag has no way to be told "create a
+// conversation with this ID". resolveSessionCommand therefore routes ANY
+// non-empty session_key — including one this reset just minted — onto the
+// resume path, producing `opencode --session <uuid>` for a conversation that
+// was never created. OpenCode rejects it with "Invalid session ID", the pane
+// dies on startup, and the session is rebuilt from scratch with its history
+// lost.
+//
+// The correct rotation for a resume-only provider is to CLEAR session_key so
+// the next start launches bare and the real provider-minted key is captured
+// after startup. This mirrors freshRestartSessionKeyInfo's contract, which the
+// restart-request and fresh-cycle handoffs already honor.
+//
+// Forensic source: stacked-chips-v2 gascity mayor (bead ga-r2l). Five
+// consecutive city restarts each minted a UUID over a healthy `ses_…` key —
+// 4b0c5b88, b995ac9e, 355012d9, de9b6c4b, 40f28aed — and every one produced
+// `reconciler.start.failed` / `deadline_exceeded` on the following wake.
+func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderClearsKey(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	session := env.createSessionBead("mayor", "mayor")
+	// A healthy provider-minted OpenCode key, as captured by `gc prime --hook`.
+	const priorSessionKey = "ses_fcde424edffeE5J9OJuN9YG869"
+	env.setSessionMetadata(&session, map[string]string{
+		"session_key":  priorSessionKey,
+		"resume_flag":  "--session",
+		"resume_style": "flag",
+	})
+
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), driftResumeResumeOnlyTemplateParams(), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get after reset: %v", err)
+	}
+	if key := got.Metadata["session_key"]; key != "" {
+		t.Fatalf("session_key = %q, want cleared: a provider without session_id_flag cannot be handed a caller-minted ID, so the next start must launch bare", key)
+	}
+}
+
+// TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderStartsBare
+// closes the loop from the cleared key to the command actually launched. It
+// runs the real prep + Start path so the assertion is on the command the
+// runtime received, not on an intermediate value: the launch must be the bare
+// provider command, never a `--session <uuid>` resume of a conversation that
+// was never created.
+func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderStartsBare(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	session := env.createSessionBead("mayor", "mayor")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_key":  "ses_fcde424edffeE5J9OJuN9YG869",
+		"resume_flag":  "--session",
+		"resume_style": "flag",
+	})
+
+	tp := driftResumeResumeOnlyTemplateParams()
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), tp, env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+	clk := &clock.Fake{Time: time.Date(2026, 8, 24, 12, 46, 13, 0, time.UTC)}
+	prepared, err := prepareStartCandidateForCity(
+		startCandidate{info: env.sessionInfo(session.ID), tp: tp, order: 0},
+		"", "", cfg, env.sp, env.store, clk, io.Discard, nil, dispatchOptionSources{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	leased, release := leasedStart(t, env.city, *prepared)
+	defer release()
+	if _, err := startPreparedStartCandidate(
+		context.Background(), leased, env.city, env.store, env.sp, cfg, nil,
+		immediateSessionStaleKeyDetectionWaiter, nil,
+	); err != nil {
+		t.Fatalf("startPreparedStartCandidate: %v", err)
+	}
+
+	var startCfg *runtime.Config
+	for _, call := range env.sp.Calls {
+		if call.Method == "Start" && call.Name == "mayor" {
+			cfgCopy := call.Config
+			startCfg = &cfgCopy
+			break
+		}
+	}
+	if startCfg == nil {
+		t.Fatalf("expected Start call for mayor, calls=%#v", env.sp.Calls)
+	}
+	if strings.Contains(startCfg.Command, "--session") {
+		t.Fatalf("Start command = %q, must not carry a --session argument: the provider never created that conversation", startCfg.Command)
+	}
+}
+
+// driftResumeResumeCommandOnlyTemplateParams is the resume-capable shape that
+// carries a resume_command instead of a resume flag and no session_id_flag.
+// freshRestartSessionKeyInfo treats it as resume-capable, so the rotation must
+// clear rather than mint here too.
+func driftResumeResumeCommandOnlyTemplateParams() TemplateParams {
+	return TemplateParams{
+		Command:      "somecli",
+		SessionName:  "mayor",
+		TemplateName: "mayor",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:          "somecli",
+			Command:       "somecli",
+			ResumeCommand: "somecli resume {{.SessionKey}}",
+		},
+	}
+}
+
+// TestResetConfiguredNamedSessionForConfigDrift_ResumeCommandOnlyProviderClearsKey
+// covers the resume_command arm of freshRestartSessionKeyInfo, which the
+// resume_flag cases above leave unexercised. The provider advertises resume
+// capability through resume_command alone and has no session_id_flag, so the
+// rotation must clear the stored key exactly as it does for the resume_flag
+// shape.
+func TestResetConfiguredNamedSessionForConfigDrift_ResumeCommandOnlyProviderClearsKey(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	session := env.createSessionBead("mayor", "mayor")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_key": "prior-provider-conversation",
+	})
+
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city,
+		env.sessionInfo(session.ID), driftResumeResumeCommandOnlyTemplateParams(),
+		env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get after reset: %v", err)
+	}
+	if key := got.Metadata["session_key"]; key != "" {
+		t.Fatalf("session_key = %q, want cleared: a resume_command-only provider cannot be handed a caller-minted ID", key)
+	}
+}
+
 func TestReconcileSessionBeads_ConfigDriftDefersPinnedNamedSession(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{{Name: "worker", StartCommand: "new-cmd", MaxActiveSessions: restartRequestTestIntPtr(1)}},

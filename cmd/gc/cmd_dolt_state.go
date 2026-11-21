@@ -7,8 +7,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/fsyncprobe"
 	"github.com/spf13/cobra"
 )
+
+// fsyncProbeFunc is the probe behind `gc dolt-state fsync-probe`; tests
+// replace it so they need no detached worker.
+var fsyncProbeFunc = fsyncprobe.Probe
 
 func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -32,6 +37,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		cityPath      string
 		hostText      string
 		userText      string
+		databaseName  string
 		checkReadOnly bool
 		checkDeleted  bool
 		forceReset    bool
@@ -50,6 +56,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc dolt-state write-provider: %v\n", err) //nolint:errcheck
 				return errExit
 			}
+			state = keepRecordedInfraScope(stateFile, state)
 			if err := writeDoltRuntimeStateFile(stateFile, state); err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state write-provider: %v\n", err) //nolint:errcheck
 				return errExit
@@ -155,6 +162,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state inspect-managed: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			info, err := inspectManagedDoltProcess(cityPath, portText)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state inspect-managed: %v\n", err) //nolint:errcheck
@@ -180,6 +191,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state probe-managed: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			report, err := probeManagedDolt(cityPath, hostText, portText)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state probe-managed: %v\n", err) //nolint:errcheck
@@ -207,6 +222,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state existing-managed: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			report, err := assessExistingManagedDolt(cityPath, hostText, portText, userText, time.Duration(timeoutMS)*time.Millisecond)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state existing-managed: %v\n", err) //nolint:errcheck
@@ -317,7 +336,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			report, err := managedDoltHealthCheck(hostText, portText, userText, checkReadOnly)
+			report, err := managedDoltHealthCheckFor(hostText, portText, userText, checkReadOnly, managedDoltHealthTarget{
+				Database: databaseName,
+				DataDir:  dataDir,
+			})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state health-check: %v\n", err) //nolint:errcheck
 				return errExit
@@ -335,8 +357,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	healthCheck.Flags().StringVar(&portText, "port", "", "Dolt port")
 	healthCheck.Flags().StringVar(&userText, "user", "", "Dolt user")
 	healthCheck.Flags().BoolVar(&checkReadOnly, "check-read-only", false, "include read-only status")
+	healthCheck.Flags().StringVar(&databaseName, "database", "", "scope database that must exist, resolve its default branch head, and accept a sample write and read")
+	healthCheck.Flags().StringVar(&dataDir, "data-dir", "", "managed Dolt data dir that must hold the --database repository")
 	_ = healthCheck.MarkFlagRequired("port")
 	cmd.AddCommand(healthCheck)
+
+	cmd.AddCommand(newFsyncProbeCmd(stdout, stderr), newFsyncProbeWorkerCmd(stderr))
 
 	waitReady := &cobra.Command{
 		Use:    "wait-ready",
@@ -344,6 +370,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state wait-ready: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			pid, err := strconv.Atoi(pidText)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state wait-ready: invalid --pid %q: %v\n", pidText, err) //nolint:errcheck
@@ -382,6 +412,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state stop-managed: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			report, err := stopManagedDoltProcess(cityPath, portText)
 			for _, line := range managedDoltStopFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {
@@ -407,6 +441,29 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if guardErr := admitLegacyManagedDoltLifecycle(cityPath); guardErr != nil {
+				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", guardErr) //nolint:errcheck
+				return errExit
+			}
+			lock, _, lockErr := openManagedDoltLifecycleLock(cityPath)
+			if lockErr != nil {
+				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", lockErr) //nolint:errcheck
+				return errExit
+			}
+			locked, lockErr := tryManagedDoltLifecycleLock(lock)
+			if lockErr != nil || !locked {
+				releaseManagedDoltLifecycleLock(lock)
+				if lockErr == nil {
+					lockErr = fmt.Errorf("managed dolt lifecycle is busy")
+				}
+				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", lockErr) //nolint:errcheck
+				return errExit
+			}
+			defer releaseManagedDoltLifecycleLock(lock)
+			if guardErr := admitLegacyManagedDoltLifecycle(cityPath); guardErr != nil {
+				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", guardErr) //nolint:errcheck
+				return errExit
+			}
 			report, err := startManagedDoltProcess(cityPath, hostText, portText, userText, logLevel, time.Duration(timeoutMS)*time.Millisecond)
 			for _, line := range managedDoltStartFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {
@@ -467,6 +524,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state preflight-clean: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			if err := preflightManagedDoltCleanup(cityPath); err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state preflight-clean: %v\n", err) //nolint:errcheck
 				return errExit
@@ -478,6 +539,78 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	_ = preflightClean.MarkFlagRequired("city")
 	cmd.AddCommand(preflightClean)
 
+	return cmd
+}
+
+// maxFsyncProbeTimeoutMS caps --timeout-ms so the bound cannot overflow a
+// time.Duration or turn the "bounded" probe into an unbounded wait.
+const maxFsyncProbeTimeoutMS = 3600000
+
+// newFsyncProbeCmd builds `gc dolt-state fsync-probe`: it times one fsync in
+// the data directory and prints tab-separated status lines.
+func newFsyncProbeCmd(stdout, stderr io.Writer) *cobra.Command {
+	var (
+		dir       string
+		timeoutMS int
+	)
+	cmd := &cobra.Command{
+		Use:    "fsync-probe",
+		Short:  "Time one fsync in a Dolt data directory",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			var res fsyncprobe.Result
+			if timeoutMS < 1 || timeoutMS > maxFsyncProbeTimeoutMS {
+				res = fsyncprobe.Result{
+					Status: fsyncprobe.StatusError,
+					Error:  fmt.Sprintf("--timeout-ms %d out of range 1..%d", timeoutMS, maxFsyncProbeTimeoutMS),
+				}
+			} else {
+				res = fsyncProbeFunc(dir, time.Duration(timeoutMS)*time.Millisecond)
+			}
+			fields := []string{"status\t" + res.Status, fmt.Sprintf("fsync_ms\t%d", res.FsyncMS)}
+			if res.Status == fsyncprobe.StatusError {
+				fields = []string{"status\t" + res.Status, "error\t" + res.Error}
+			}
+			for _, line := range fields {
+				if _, err := fmt.Fprintln(stdout, line); err != nil {
+					fmt.Fprintf(stderr, "gc dolt-state fsync-probe: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+			}
+			if res.Status == fsyncprobe.StatusError {
+				fmt.Fprintf(stderr, "gc dolt-state fsync-probe: %s\n", res.Error) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dir, "dir", "", "Dolt data directory")
+	cmd.Flags().IntVar(&timeoutMS, "timeout-ms", 0, "bound in milliseconds; the probe returns by then even if the fsync has not")
+	_ = cmd.MarkFlagRequired("dir")
+	_ = cmd.MarkFlagRequired("timeout-ms")
+	return cmd
+}
+
+// newFsyncProbeWorkerCmd builds the detached re-exec target of fsync-probe;
+// it reports over the descriptor the probe passes as fsyncprobe.ResultFD.
+func newFsyncProbeWorkerCmd(stderr io.Writer) *cobra.Command {
+	var dir string
+	cmd := &cobra.Command{
+		Use:    "fsync-probe-worker",
+		Short:  "Detached fsync-probe worker (re-exec target of fsync-probe)",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := fsyncprobe.RunWorker(dir, os.NewFile(fsyncprobe.ResultFD, "fsync-probe-result")); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state fsync-probe-worker: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dir, "dir", "", "Dolt data directory")
+	_ = cmd.MarkFlagRequired("dir")
 	return cmd
 }
 
@@ -509,6 +642,23 @@ func parseDoltRuntimeStateFlags(pidText, runText, portText, dataDir, startedAt s
 		DataDir:   dataDir,
 		StartedAt: startedAt,
 	}, nil
+}
+
+// keepRecordedInfraScope carries the infra scope recorded in the existing
+// state file into state when both name the same server PID. The provider
+// script rewrites its state from flags alone on every start or ensure-ready
+// against a live server; without this the scope gc recorded when it started
+// that server would be lost before the server ever exits.
+func keepRecordedInfraScope(stateFile string, state doltRuntimeState) doltRuntimeState {
+	if state.InfraScope != "" {
+		return state
+	}
+	existing, err := readDoltRuntimeStateFile(stateFile)
+	if err != nil || existing.PID != state.PID {
+		return state
+	}
+	state.InfraScope = existing.InfraScope
+	return state
 }
 
 func doltRuntimeStateField(state doltRuntimeState, field string) (string, error) {

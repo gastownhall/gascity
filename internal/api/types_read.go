@@ -1,6 +1,7 @@
 package api
 
 import (
+	"math"
 	"net/http"
 	"strconv"
 
@@ -23,27 +24,36 @@ import (
 //   - cmd/gc/cmd_<domain>.go           — routes via apiClient(cityPath);
 //                                        logs route=... on every exit path.
 //
-// The CacheAge float64 returned from each wrapper is the supervisor's
-// CachingStore age in seconds at the time of the read, sourced from the
-// X-GC-Cache-Age-S response header (populated by handlers via the
+// The CacheAge float64 returned from each wrapper is the seconds since the
+// server's bead cache last took in fresh data from its store (the cache's
+// age, not each row's; 0 when the endpoint reports no age), sourced from
+// the X-GC-Cache-Age-S response header (populated by handlers via the
 // cacheAgeSeconds helper). CLI callers surface this as _cache_age_s on
-// the --json envelope and as a stale-read banner on human output when
-// the age crosses 30 s.
+// the --json envelope, and print a cache-age footer on stderr when the age
+// passes twice the cache's reported re-scan interval (CachedRead.Refresh).
 
 // CachedRead is a convenience wrapper returned by read wrappers so the
 // two cache-age-bearing return values stay co-located with the payload.
 // Per-domain wrappers may return CachedRead[[]SessionSummary],
 // CachedRead[MailHeader], and so on. A zero AgeSeconds means the server
-// did not surface a cache age (non-caching store or fallback path).
+// did not surface a cache age (non-caching store or fallback path). Refresh
+// carries the cache's re-scan interval and refresh state, the zero value when
+// the server reported neither (an uncached body, or an older server).
 type CachedRead[T any] struct {
 	Body       T
 	AgeSeconds float64
+	Refresh    CacheRefresh
 }
 
-// cacheAgeHeader is the wire name of the X-GC-Cache-Age-S response header,
+// Wire names of the bead-cache freshness response headers (X-GC-Cache-Age-S
+// and CacheRefresh),
 // set by read handlers via the cacheAgeSeconds helper and consumed by CLI
-// wrappers through cacheAgeFromResponse.
-const cacheAgeHeader = "X-GC-Cache-Age-S"
+// wrappers through cacheAgeFromResponse and cacheRefreshFromResponse.
+const (
+	cacheAgeHeader             = "X-GC-Cache-Age-S"
+	cacheRefreshIntervalHeader = "X-GC-Cache-Refresh-Interval-S"
+	cacheRefreshHeader         = "X-GC-Cache-Refresh"
+)
 
 // StatusView is the CLI-facing shape for `gc status` and `gc rig status`.
 // It mirrors the subset of StatusBody fields the CLI formatter reads so
@@ -80,9 +90,12 @@ type StatusAgentView struct {
 	Running       bool
 	Suspended     bool
 	SessionName   string
-	GroupName     string
-	ScaleLabel    string
-	Expanded      bool
+	// SessionID is the bead ID of the row's session; empty when the server
+	// sent none.
+	SessionID  string
+	GroupName  string
+	ScaleLabel string
+	Expanded   bool
 }
 
 // StatusRigView is the CLI-facing per-rig row.
@@ -109,10 +122,18 @@ type StatusSessionCountsView struct {
 // StatusStoreHealthView mirrors the CLI's StoreHealth struct. Values
 // render into the store health block appended to text output; fallback
 // callers read the same shape from the local event log.
+//
+// RowsMeasured must be checked before LiveRows, RatioMB or Warning are
+// read: when it is false the count never happened and all three are
+// zero-valued rather than measured. It is spelled for the measured state
+// so that a decoder which never sets it — a response from a supervisor
+// predating the wire field — leaves it false and the renderer withholds
+// the number, instead of the omission quietly claiming a measurement.
 type StatusStoreHealthView struct {
 	Path         string
 	SizeBytes    int64
 	LiveRows     int
+	RowsMeasured bool
 	RatioMB      float64
 	Warning      bool
 	ThresholdMB  float64
@@ -165,6 +186,32 @@ type MaintenanceTriggerView struct {
 	Accepted  bool                `json:"accepted"`
 	StartedAt string              `json:"started_at,omitempty"`
 	Run       *MaintenanceRunView `json:"run,omitempty"`
+}
+
+// cachedReadOf pairs body with the bead-cache freshness r's headers report.
+func cachedReadOf[T any](body T, r *http.Response) CachedRead[T] {
+	return CachedRead[T]{Body: body, AgeSeconds: cacheAgeFromResponse(r), Refresh: cacheRefreshFromResponse(r)}
+}
+
+// cacheRefreshFromResponse extracts the bead cache's re-scan interval and
+// refresh state from r's X-GC-Cache-Refresh-Interval-S and X-GC-Cache-Refresh
+// headers. A state this client does not know reads as unreported (""), and an
+// interval that is absent, unparseable, non-positive or not finite reads as 0.
+func cacheRefreshFromResponse(r *http.Response) CacheRefresh {
+	if r == nil {
+		return CacheRefresh{}
+	}
+	var out CacheRefresh
+	switch st := CacheRefreshState(r.Header.Get(cacheRefreshHeader)); st {
+	case CacheRefreshScheduled, CacheRefreshPaused, CacheRefreshFailing, CacheRefreshRebuilding:
+		out.State = st
+	}
+	if v := r.Header.Get(cacheRefreshIntervalHeader); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && !math.IsInf(f, 0) {
+			out.IntervalS = f
+		}
+	}
+	return out
 }
 
 // cacheAgeFromResponse extracts the CachingStore age from the response's

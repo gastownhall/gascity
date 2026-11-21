@@ -65,6 +65,16 @@ func TestEnsureClaudeProjectStateMergesExistingState(t *testing.T) {
 	}, nil)
 }
 
+// With no CLAUDE_CONFIG_DIR, HOME is the only place Claude reads its state from,
+// so an unwritable one is an error to report, not something to route around.
+func TestEnsureClaudeProjectStateFailsWhenHomeIsTheOnlyStateLocation(t *testing.T) {
+	env := &Env{vars: map[string]string{"HOME": unwritableHomeForTest(t)}}
+
+	if err := EnsureClaudeProjectState(env, filepath.Join(t.TempDir(), "city")); err == nil {
+		t.Fatal("EnsureClaudeProjectState with an unwritable HOME and no CLAUDE_CONFIG_DIR = nil, want the write error")
+	}
+}
+
 func assertClaudeProjectTrustedForTest(t *testing.T, statePath, projectPath string, preservedState, preservedProject map[string]any) {
 	t.Helper()
 

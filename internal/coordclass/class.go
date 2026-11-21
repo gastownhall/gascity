@@ -47,6 +47,8 @@
 // against the exported constants where those are importable.
 package coordclass
 
+import "github.com/gastownhall/gascity/internal/beadmeta"
+
 // Class is the owning subsystem a bead belongs to — the unit of routing for the
 // coordination-store split. Each non-Work class is destined for its own typed
 // provider module, with bd as the first (identity) implementation. It is
@@ -95,17 +97,17 @@ const (
 func (c Class) String() string {
 	switch c {
 	case ClassWork:
-		return "work"
+		return beadmeta.ClassNameWork
 	case ClassGraph:
-		return "graph"
+		return beadmeta.ClassNameGraph
 	case ClassMessaging:
-		return "messaging"
+		return beadmeta.ClassNameMessaging
 	case ClassSessions:
-		return "sessions"
+		return beadmeta.ClassNameSessions
 	case ClassOrders:
-		return "orders"
+		return beadmeta.ClassNameOrders
 	case ClassNudges:
-		return "nudges"
+		return beadmeta.ClassNameNudges
 	default:
 		return "unknown"
 	}

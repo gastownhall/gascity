@@ -1,0 +1,7 @@
+{"id":{},"started":{"uuid":"a12d7c08-33a8-4489-8880-73b7a2c082d6","command":"test","buildToolVersion":"9.2.0","startTime":"2026-10-08T02:43:15.026Z"}}
+{"id":{"targetCompleted":{"label":"//internal/doltversion:doltversion","aspect":"ValidateTarget"}},"completed":{}}
+{"id":{"targetCompleted":{"label":"//internal/doltversion:doltversion_test","aspect":"ValidateTarget"}},"completed":{}}
+{"id":{"testResult":{"label":"//internal/doltversion:doltversion_test","run":1,"shard":1,"attempt":1,"configuration":{"id":"e7931d852f62e8da993f0d4c024d2ea7efcd44f27ccb9aba8b012121f2f9152c"}}},"testResult":{"status":"PASSED","testAttemptDurationMillis":"63","executionInfo":{"strategy":"remote"}}}
+{"id":{"testSummary":{"label":"//internal/doltversion:doltversion_test","configuration":{"id":"e7931d852f62e8da993f0d4c024d2ea7efcd44f27ccb9aba8b012121f2f9152c"}}},"testSummary":{"overallStatus":"PASSED","totalRunCount":1,"attemptCount":1}}
+{"id":{},"finished":{"exitCode":{"name":"BUILD_FAILURE","code":1}}}
+{"id":{},"buildMetrics":{"actionSummary":{"actionsCreated":"485","actionsExecuted":"418","runnerCount":[{"name":"total","count":418},{"name":"disk cache hit","count":352,"execKind":"Remote"},{"name":"internal","count":56},{"name":"remote","count":10,"execKind":"Remote"}],"actionCacheStatistics":{"misses":418}}}}

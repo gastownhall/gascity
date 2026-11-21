@@ -291,3 +291,61 @@ func TestDoltBackupCheck_ExternalEndpoint_NoWarn(t *testing.T) {
 		t.Errorf("external endpoint must not emit a localhost fix hint: %s", r.FixHint)
 	}
 }
+
+// TestDoltBackupCheck_BdDefaultDestinationAtArtifactDir_OK covers the
+// registration mol-dog-backup makes today: `bd backup init` records the
+// destination as bd's "default" backup, pointing at <city>/.dolt-backup/<db>.
+func TestDoltBackupCheck_BdDefaultDestinationAtArtifactDir_OK(t *testing.T) {
+	cityPath := t.TempDir()
+	doltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	rigPath := filepath.Join(cityPath, "rig")
+	if err := os.MkdirAll(rigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRigMetadata(t, rigPath, "testdb")
+	writeRepoStateBackups(t, doltDataDir, "testdb", map[string]string{
+		"default": "file://" + filepath.Join(cityPath, ".dolt-backup", "testdb"),
+	})
+
+	r := NewDoltBackupCheck(cityPath, config.Rig{Name: "testrig", Path: rigPath}, doltDataDir).Run(&CheckContext{CityPath: cityPath})
+	if r.Status != StatusOK || !strings.Contains(r.Message, `"default" registered (sync pending)`) {
+		t.Fatalf("status = %d message = %q, want OK for bd's default destination at the artifact dir", r.Status, r.Message)
+	}
+}
+
+// A "default" destination elsewhere is the operator's own policy and is not
+// evidence that the gc artifact dir is being populated.
+func TestDoltBackupCheck_BdDefaultDestinationElsewhere_Warns(t *testing.T) {
+	cityPath := t.TempDir()
+	doltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	rigPath := filepath.Join(cityPath, "rig")
+	if err := os.MkdirAll(rigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRigMetadata(t, rigPath, "testdb")
+	writeRepoStateBackups(t, doltDataDir, "testdb", map[string]string{"default": "file:///mnt/elsewhere/testdb"})
+
+	r := NewDoltBackupCheck(cityPath, config.Rig{Name: "testrig", Path: rigPath}, doltDataDir).Run(&CheckContext{CityPath: cityPath})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want StatusWarning for a default destination outside the artifact dir", r.Status)
+	}
+}
+
+func writeRepoStateBackups(t *testing.T, doltDataDir, dbName string, backups map[string]string) {
+	t.Helper()
+	doltDir := filepath.Join(doltDataDir, dbName, ".dolt")
+	if err := os.MkdirAll(doltDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries := map[string]any{}
+	for name, url := range backups {
+		entries[name] = map[string]any{"name": name, "url": url}
+	}
+	data, err := json.Marshal(map[string]any{"head": "refs/heads/main", "backups": entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDir, "repo_state.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

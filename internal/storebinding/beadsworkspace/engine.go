@@ -70,7 +70,7 @@ func (p *workspaceProvider) OpenEngine(spec storebinding.BindingSpec, classes st
 		return nil, nil, err
 	}
 
-	store, err := p.openWorkspace(spec)
+	store, err := p.openWorkspace(spec, classes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the workspace of binding %q at %s through the linked beads library: %w", p.spec.Name, p.root, err)
 	}
@@ -81,9 +81,19 @@ func (p *workspaceProvider) OpenEngine(spec storebinding.BindingSpec, classes st
 // exact remote credential-provider selector adds only a command that calls
 // back into this running gc binary; local workspaces and other auth forms stay
 // fully hermetic.
-func (p *workspaceProvider) openWorkspace(spec storebinding.BindingSpec) (workspaceEngine, error) {
+//
+// Every path out of here is fenced to the namespaces the assigned classes
+// hold, from the same derivation the SQLite provider uses — the pinned-id
+// contract in engdocs/architecture/beads.md, invariant 16. The prefix check in
+// admit only proves what this workspace MINTS; without the fence a
+// caller-pinned id from any namespace still lands here, and one foreign bead
+// makes the binding's claim false while leaving that bead unreachable by every
+// id-shaped lookup of the namespace it actually sits in. The fence rides on
+// the store rather than the open, so the credential path's reopen keeps it.
+func (p *workspaceProvider) openWorkspace(spec storebinding.BindingSpec, classes storebinding.ClassSet) (workspaceEngine, error) {
+	fence := beads.WithNativeDoltStoreReservedIDPrefixes(storebinding.EngineReservedPrefixes(classes)...)
 	if spec.Provider != ProviderID || strings.TrimSpace(spec.URL) == "" || spec.Auth != storebinding.AuthCredentialProvider {
-		return beads.OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), p.root)
+		return beads.OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), p.root, fence)
 	}
 	executable, err := workspaceExecutable()
 	if err != nil {
@@ -103,7 +113,7 @@ func (p *workspaceProvider) openWorkspace(spec storebinding.BindingSpec) (worksp
 		return beads.OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx, p.root, command)
 	}
 	return beads.OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(
-		context.Background(), p.root, command, beads.WithNativeReopen(reopen))
+		context.Background(), p.root, command, beads.WithNativeReopen(reopen), fence)
 }
 
 // admit hands back an opened workspace this binding may serve from, and closes

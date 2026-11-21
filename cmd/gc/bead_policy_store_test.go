@@ -8,10 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 type captureCreateStore struct {
@@ -152,6 +155,45 @@ func TestBeadPolicyStoreAppliesDefaultStorageForAllowlistedCreates(t *testing.T)
 				t.Fatalf("captured creates = %d, want 1", len(backing.created))
 			}
 			assertStorageClass(t, backing.storages[0], tt.want)
+		})
+	}
+}
+
+func TestBeadPolicyStorePreservesNoHistoryThroughCachingStoreWithPlainBacking(t *testing.T) {
+	cases := []struct {
+		name string
+		bead beads.Bead
+	}{
+		{
+			name: "session",
+			bead: beads.Bead{Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession}},
+		},
+		{
+			name: "order tracking",
+			bead: beads.Bead{Title: "order:daily", Labels: []string{"order-run:daily", labelOrderTracking}},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			store := wrapStoreWithBeadPolicies(cache, &config.City{})
+
+			created, err := store.Create(tt.bead)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if !created.NoHistory || created.Ephemeral {
+				t.Fatalf("created storage = ephemeral:%v no_history:%v, want no-history", created.Ephemeral, created.NoHistory)
+			}
+			persisted, err := backing.Get(created.ID)
+			if err != nil {
+				t.Fatalf("backing Get: %v", err)
+			}
+			if !persisted.NoHistory || persisted.Ephemeral {
+				t.Fatalf("persisted storage = ephemeral:%v no_history:%v, want no-history", persisted.Ephemeral, persisted.NoHistory)
+			}
 		})
 	}
 }
@@ -678,4 +720,117 @@ func TestBeadPolicyStoreCountUnsupportedWithoutInnerCounter(t *testing.T) {
 	if _, err := counter.Count(context.Background(), beads.ListQuery{AllowScan: true}); !errors.Is(err, beads.ErrCountUnsupported) {
 		t.Fatalf("Count error = %v, want ErrCountUnsupported", err)
 	}
+}
+
+// witnessCaptureStore is a store that has already handed this process a row,
+// which is the state the store-health count checks a later zero against.
+type witnessCaptureStore struct {
+	beads.Store
+	sawRows bool
+}
+
+func (s *witnessCaptureStore) SawRows() bool { return s.sawRows }
+
+// TestBeadPolicyStorePreservesRowWitness pins the capability the store-health
+// row count depends on across this wrapper.
+//
+// The controller reads its city store through a policy wrapper on every city:
+// the opener policy-wraps its result, and wrapWithCachingStore re-wraps the
+// cache it builds. So a witness that stopped at the wrapper would leave
+// countBeadStoreRows unable to disprove a zero on exactly the stores the guard
+// was written for, and the failure is silent — a missing optional capability
+// reads as "this store cannot witness itself", which is a supported state.
+func TestBeadPolicyStorePreservesRowWitness(t *testing.T) {
+	store := wrapStoreWithBeadPolicies(&witnessCaptureStore{Store: beads.NewMemStore(), sawRows: true}, &config.City{})
+
+	witness, ok := store.(beads.RowWitness)
+	if !ok {
+		t.Fatal("policy store does not implement beads.RowWitness; the store-health count loses its only disproof of a zero on every controller-opened city")
+	}
+	if !witness.SawRows() {
+		t.Fatal("SawRows() = false while the wrapped store had already been handed a row")
+	}
+
+	cold := wrapStoreWithBeadPolicies(&witnessCaptureStore{Store: beads.NewMemStore()}, &config.City{})
+	if cold.(beads.RowWitness).SawRows() {
+		t.Fatal("SawRows() = true over a store holding no evidence; the wrapper must forward the verdict, not manufacture one")
+	}
+}
+
+// TestBeadPolicyStoreReportsNoEvidenceWithoutInnerWitness covers the inner
+// stores that cannot witness themselves. Reporting no evidence is what keeps a
+// caller on its prior behavior, the same way an absent inner Counter reports
+// ErrCountUnsupported rather than failing the read.
+func TestBeadPolicyStoreReportsNoEvidenceWithoutInnerWitness(t *testing.T) {
+	store := wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})
+
+	witness, ok := store.(beads.RowWitness)
+	if !ok {
+		t.Fatal("policy store does not implement beads.RowWitness")
+	}
+	if witness.SawRows() {
+		t.Fatal("SawRows() = true over a store that cannot witness itself")
+	}
+}
+
+// A beads nudge queue record stays in the history plane (DES-NQ D7, D-NQ): the
+// native store refuses Claim on wisp-plane rows, so the bead policy must never
+// route a gc:nudge-queue record to a storage tier the way it routes gc:nudge
+// shadows.
+func TestPolicyNameForBeadLeavesNudgeQueueRecordsInHistory(t *testing.T) {
+	memory := beads.NewMemStore()
+	memory.HonorExplicitIDs = true
+	store := policyClaimingMemStore{MemStore: memory}
+	queue, err := storebinding.NewBeadsNudgeQueue(beads.NudgesStore{Store: store})
+	if err != nil {
+		t.Fatalf("NewBeadsNudgeQueue: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := queue.Enqueue(nudgequeue.Item{ID: "n-plane", Agent: "alpha/worker", Source: "test", Message: "hi", CreatedAt: now, DeliverAfter: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	all, err := memory.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 1 || !storebinding.IsNudgeQueueRecord(all[0]) {
+		t.Fatalf("store holds %+v, want exactly the one queue record", all)
+	}
+	if got := policyNameForBead(all[0]); got != "" {
+		t.Fatalf("policyNameForBead(queue record) = %q, want \"\" so the record stays in the history plane", got)
+	}
+
+	// The same record written through the bead policy front door takes the
+	// default (history) storage path, not a no-history tier.
+	backing := &captureCreateStore{Store: beads.NewMemStore()}
+	policy := wrapStoreWithBeadPolicies(backing, &config.City{})
+	record := all[0]
+	if _, err := policy.Create(beads.Bead{Title: record.Title, Type: record.Type, Labels: record.Labels, Metadata: record.Metadata}); err != nil {
+		t.Fatalf("Create through the bead policy: %v", err)
+	}
+	if len(backing.storages) != 1 || backing.storages[0] != beads.StorageDefault {
+		t.Fatalf("queue record storage = %v, want the default history path", backing.storages)
+	}
+}
+
+// policyClaimingMemStore is beads.MemStore with the two-argument assignment
+// claim the beads nudge queue requires.
+type policyClaimingMemStore struct {
+	*beads.MemStore
+}
+
+func (s policyClaimingMemStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	current, err := s.Get(id)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	if current.Assignee != "" && current.Assignee != assignee {
+		return beads.Bead{}, false, nil
+	}
+	inProgress := "in_progress"
+	if err := s.UpdateIfMatch(id, current.Revision, beads.UpdateOpts{Assignee: &assignee, Status: &inProgress}); err != nil {
+		return beads.Bead{}, false, err
+	}
+	held, err := s.Get(id)
+	return held, err == nil, err
 }

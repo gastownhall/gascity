@@ -6,14 +6,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func noopBdRunner() beads.CommandRunner {
@@ -415,5 +418,257 @@ func waitForNonEmptyFileContent(t *testing.T, path string, timeout time.Duration
 			t.Fatalf("timed out waiting for %s to be written", path)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// fakeProxiedStore stands in for *beads.ProxiedStore, which cannot be built
+// outside internal/beads: its constructor demands an admitted beads.Pin, and
+// Pin's fields are unexported precisely so the proxied opener cannot be reached
+// without a gate pass. That fence is why the unwrap seam is an INTERFACE — a
+// caller that type-asserted the concrete store would have no way to test its own
+// branch without a live proxy, a real Dolt server and a passing admission.
+type fakeProxiedStore struct {
+	beads.MemStore
+	demoted bool
+	bdLeaf  beads.Store
+	verdict *beads.ProxiedVerdictError
+	report  beads.ProxiedOpenReport
+}
+
+func (s *fakeProxiedStore) Demoted() bool                       { return s.demoted }
+func (s *fakeProxiedStore) Verdict() *beads.ProxiedVerdictError { return s.verdict }
+func (s *fakeProxiedStore) BdLeaf() beads.Store                 { return s.bdLeaf }
+func (s *fakeProxiedStore) Report() beads.ProxiedOpenReport     { return s.report }
+
+// TestScopedStoreLikeReturnsNilForNativeProxiedStore is the zero-fork half of
+// P2-13, and it is the half that makes `gc status` cost nothing on a proxied
+// city.
+//
+// While the split store's native leaf serves, its reads are library calls over
+// bd's proxy: there is no subprocess to bind a deadline to, and handing back a bd
+// clone here would make loadStatusSessionSnapshot rebuild a store that forks once
+// per read — silently turning the lane's headline property (0 forks, down from 2)
+// back into two forks, with every test still green.
+func TestScopedStoreLikeReturnsNilForNativeProxiedStore(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	native := &fakeProxiedStore{demoted: false, bdLeaf: beads.NewBdStore(cityDir, noopBdRunner())}
+
+	scoped, err := scopedStoreLike(context.Background(), cityDir, &config.City{}, native)
+	if err != nil {
+		t.Fatalf("scopedStoreLike: %v", err)
+	}
+	if scoped != nil {
+		t.Fatalf("scopedStoreLike() = %T, want nil while the native leaf serves: the session reads must stay on the wrapper", scoped)
+	}
+	if got, ok := bdStoreBacking(native); ok {
+		t.Fatalf("bdStoreBacking() = (%p, true), want ok=false for a store that is not forking", got)
+	}
+	// And the same answer through the wrappers a real caller holds.
+	wrapped := wrapStoreWithBeadPolicies(beads.NewCachingStoreForTest(native, nil), &config.City{})
+	if got, ok := bdStoreBacking(wrapped); ok {
+		t.Fatalf("bdStoreBacking(policy(cache(native proxied))) = (%p, true), want ok=false", got)
+	}
+}
+
+// TestScopedStoreLikeClonesCtxBoundBdStoreForDemotedProxiedStore is the other
+// half: after a stand-down the wrapper's reads ARE bd forks, and gc status runs
+// them under a 3s deadline (statusSessionSnapshotTimeout). A clone that is not
+// bound to that deadline abandons a live bd child instead of killing it, which is
+// the leak ga-cdmx6x exists to prevent — so a demoted wrapper must unwrap to its
+// bd leaf.
+func TestScopedStoreLikeClonesCtxBoundBdStoreForDemotedProxiedStore(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	leaf := beads.NewBdStore(cityDir, noopBdRunner())
+	demoted := &fakeProxiedStore{
+		demoted: true,
+		bdLeaf:  leaf,
+		verdict: beads.NewProxiedVerdictError(beads.ProxiedVerdictDatabaseGone, "the database went away", nil),
+	}
+
+	backing, ok := bdStoreBacking(demoted)
+	if !ok || backing != leaf {
+		t.Fatalf("bdStoreBacking(demoted) = (%p, %v), want the bd leaf %p", backing, ok, leaf)
+	}
+
+	scoped, err := scopedStoreLike(context.Background(), cityDir, &config.City{}, demoted)
+	if err != nil {
+		t.Fatalf("scopedStoreLike: %v", err)
+	}
+	clone, isBd := scoped.(*beads.BdStore)
+	if !isBd {
+		t.Fatalf("scopedStoreLike() = %T, want a *beads.BdStore clone", scoped)
+	}
+	if clone == leaf {
+		t.Fatal("scopedStoreLike handed back the wrapper's own leaf; that store's runner is fixed to context.Background()")
+	}
+	if got := clone.Dir(); got != cityDir {
+		t.Fatalf("clone Dir() = %q, want the city scope %q", got, cityDir)
+	}
+
+	// The clone carries the REQUEST's context: a canceled one refuses instead of
+	// building a store whose child outlives the command.
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := scopedStoreLike(canceled, cityDir, &config.City{}, demoted); !errors.Is(err, context.Canceled) {
+		t.Fatalf("scopedStoreLike(canceled ctx) error = %v, want context.Canceled", err)
+	}
+
+	// And through the wrappers a real caller holds.
+	wrapped := wrapStoreWithBeadPolicies(beads.NewCachingStoreForTest(demoted, nil), &config.City{})
+	if backing, ok := bdStoreBacking(wrapped); !ok || backing != leaf {
+		t.Fatalf("bdStoreBacking(policy(cache(demoted))) = (%p, %v), want the bd leaf %p", backing, ok, leaf)
+	}
+}
+
+// TestBeadPolicyStoreCarriesTheProxiedStoreView pins the seam itself. The policy
+// layer is the outermost store every caller holds and it embeds the beads.Store
+// interface, so without this forward internal/doctor cannot ask a handle whether
+// it has stood down — which is how `gc doctor` came to report a demoted city as
+// native.
+func TestBeadPolicyStoreCarriesTheProxiedStoreView(t *testing.T) {
+	view := &fakeProxiedStore{demoted: true, bdLeaf: beads.NewMemStore()}
+	wrapped := wrapStoreWithBeadPolicies(view, &config.City{})
+
+	carried, ok := beads.ProxiedStoreFrom(wrapped)
+	if !ok {
+		t.Fatal("the policy wrapper hides the proxied store; doctor would report the account at open forever")
+	}
+	if !carried.Demoted() {
+		t.Fatal("the carried view disagrees with the store underneath it")
+	}
+	if _, ok := beads.ProxiedStoreFrom(wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})); ok {
+		t.Fatal("a policy-wrapped MemStore answered as a proxied store")
+	}
+}
+
+// TestBdStoreBackingGuardsATypedNilProxiedView is council A-F10.
+//
+// The interface arm read `if v == nil || !v.Demoted()`. `v == nil` is false for
+// an interface holding a nil *beads.ProxiedStore — the interface has a type —
+// and (*ProxiedStore).Demoted takes s.mu.RLock() on the nil receiver and
+// panics. The two neighboring arms (*beads.BdStore, *beads.CachingStore) both
+// guard their typed nils explicitly, so this was an inconsistency rather than a
+// deliberate choice, and bdStoreBacking is reached from gc status's snapshot
+// path where a panic is the whole command.
+func TestBdStoreBackingGuardsATypedNilProxiedView(t *testing.T) {
+	var typedNil *beads.ProxiedStore
+	// Through beads.Store, which is what bdStoreBacking takes; the type switch
+	// inside it is what reaches the ProxiedStoreView arm.
+	var store beads.Store = typedNil
+	// Asserted through reflect rather than `store == nil`: the comparison is
+	// the very thing this test is about, and staticcheck rejects it (SA4023)
+	// precisely because it can see that an interface with a type is never nil.
+	// That is the bug, stated by the linter.
+	if value := reflect.ValueOf(store); value.Kind() != reflect.Pointer || !value.IsNil() {
+		t.Fatal("the fixture did not build a typed nil; this test would prove nothing")
+	}
+	if _, ok := store.(beads.ProxiedStoreView); !ok {
+		t.Fatal("a *beads.ProxiedStore no longer satisfies ProxiedStoreView, so this test does not " +
+			"reach the arm it is about")
+	}
+
+	got, ok := bdStoreBacking(store)
+	if ok || got != nil {
+		t.Fatalf("bdStoreBacking(typed nil) = (%v, %v), want (nil, false)", got, ok)
+	}
+}
+
+// TestScopedStoreLikeRebuildsBehindTheGatesView is the unit-lane half of
+// ga-ylpbsy.94.1: handed one of the split-strict gate's views of a bd-backed
+// store (raw or policy-wrapped), scopedStoreLike builds its ctx-bound clone
+// from the store under the view and returns it behind the same side of the
+// same projection, keeping the policy layer, so the clone's reads stay policed
+// against the original's pins.
+func TestScopedStoreLikeRebuildsBehindTheGatesView(t *testing.T) {
+	saved := splitStrictSeam
+	splitStrictSeam = splitStrictGate{}
+	t.Cleanup(func() { splitStrictSeam = saved })
+
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	cfg := &config.City{}
+	for _, policy := range []bool{false, true} {
+		var raw beads.Store = bdStoreForCity(cityDir, cityDir)
+		if policy {
+			raw = wrapStoreWithBeadPolicies(raw, cfg)
+		}
+		for name, view := range map[string]func(beads.Store) beads.Store{
+			"class": splitStrictClassView, "work": splitStrictWorkView,
+		} {
+			viewed := view(raw)
+			scoped, err := scopedStoreLike(context.Background(), cityDir, cfg, viewed)
+			if err != nil || scoped == nil {
+				t.Fatalf("policy=%v %s: scopedStoreLike = %v, %v; want a clone", policy, name, scoped, err)
+			}
+			front, _, isView := splittest.ViewFront(scoped)
+			if !isView {
+				t.Fatalf("policy=%v %s: clone %T is not behind the gate", policy, name, scoped)
+			}
+			if splittest.ProjectionOf(scoped) != splittest.ProjectionOf(viewed) {
+				t.Fatalf("policy=%v %s: clone is behind a different projection than the store it cloned", policy, name)
+			}
+			if _, ok := bdStoreBacking(front); !ok {
+				t.Fatalf("policy=%v %s: clone front %T is not bd-backed", policy, name, front)
+			}
+			if _, wrapped := beadPolicyConfig(front); wrapped != policy {
+				t.Fatalf("policy=%v %s: clone policy-wrapped = %v", policy, name, wrapped)
+			}
+		}
+	}
+}
+
+// controllerStateWorkLeg is store as the one work leg of a city that holds
+// nothing else, as the API's status readers receive a plan's leg.
+func controllerStateWorkLeg(t *testing.T, store beads.Store) storeref.TypedLeg {
+	t.Helper()
+	st := storeref.NewStores(storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: store}}, storeref.StoresOptions{})
+	plan, err := st.Plan(storeref.WorkFederation{Kind: storeref.WorkScope, Scope: storeref.WorkRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leg storeref.TypedLeg
+	storeref.EachTypedLeg(plan, func(l storeref.TypedLeg) { leg = l })
+	return leg
+}
+
+// TestControllerStateScopedStoreLikeClonesABdBackedLegThroughItsHandle pins
+// the typed api.State.ScopedStoreLike (typed-stores T7e.2, R12): handed a plan
+// leg over a bd-backed store, it binds the leg to the ctx-bound clone and
+// reports it cloned. The bind reaches scopedStoreLike with the raw store the
+// plan leg holds, not the class handle the epoch hands out, which
+// bdStoreBacking answers "not bd" for, so the clone would silently turn off.
+// The bound leg keeps the leg's ref, role and gate role.
+func TestControllerStateScopedStoreLikeClonesABdBackedLegThroughItsHandle(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	cs := &controllerState{cityPath: cityDir, cfg: &config.City{}}
+	existing := beads.NewBdStore(cityDir, noopBdRunner())
+	leg := controllerStateWorkLeg(t, existing)
+
+	if scoped, err := scopedStoreLike(context.Background(), cityDir, cs.cfg, beads.WorkStore{Store: existing}); err != nil || scoped != nil {
+		t.Fatalf("scopedStoreLike over the class handle = %v, %v; want (nil, nil), the R12 trap this method avoids", scoped, err)
+	}
+	bound, cloned, err := cs.ScopedStoreLike(context.Background(), leg)
+	if err != nil || !cloned {
+		t.Fatalf("ScopedStoreLike = cloned %v, %v; want the ctx-bound clone", cloned, err)
+	}
+	if beads.SameStore(bound.Strict, existing) || !strings.HasPrefix(beads.PhysicalStoreKey(bound.Strict), "*beads.BdStore:") {
+		t.Fatalf("bound leg reads %s, want a new bd store, not %s", beads.PhysicalStoreKey(bound.Strict), beads.PhysicalStoreKey(existing))
+	}
+	if bound.Ref != leg.Ref || bound.Role != leg.Role || bound.OnError != leg.OnError || bound.Reader.Role() != leg.Reader.Role() {
+		t.Fatalf("bound leg = %v/%v/%v/%v, want the leg's %v/%v/%v/%v", bound.Ref, bound.Role, bound.OnError, bound.Reader.Role(), leg.Ref, leg.Role, leg.OnError, leg.Reader.Role())
+	}
+
+	mem := controllerStateWorkLeg(t, beads.NewMemStore())
+	if got, cloned, err := cs.ScopedStoreLike(context.Background(), mem); err != nil || cloned || !beads.SameStore(got.Strict, mem.Strict) {
+		t.Fatalf("ScopedStoreLike over a MemStore = cloned %v, %v; want the leg unchanged", cloned, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got, cloned, err := cs.ScopedStoreLike(ctx, leg); !errors.Is(err, context.Canceled) || err.Error() != context.Canceled.Error() || cloned || !beads.IsNilStore(got.Strict) {
+		t.Fatalf("ScopedStoreLike under a canceled ctx = cloned %v, %v; want context.Canceled, unwrapped, and a zero leg", cloned, err)
 	}
 }

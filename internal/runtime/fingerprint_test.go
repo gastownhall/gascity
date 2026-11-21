@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -190,6 +192,43 @@ func TestConfigFingerprintIncludesMouseOn(t *testing.T) {
 	}
 }
 
+// An operator env change moves the core hash, so the breakdown must name it,
+// added, changed or removed, and the drift detail lists its keys but never
+// its values.
+func TestCoreFingerprintBreakdownNamesOperatorEnv(t *testing.T) {
+	stored := Config{Command: "claude", OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/old"}}
+	current := Config{Command: "claude", OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/new-secret"}}
+
+	if CoreFingerprint(stored) == CoreFingerprint(current) {
+		t.Fatal("OperatorEnv should affect core fingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(stored), current); len(got) != 1 || got[0] != "OperatorEnv" {
+		t.Fatalf("CoreFingerprintDriftFields = %v, want [OperatorEnv]", got)
+	}
+	raw, err := json.Marshal(CoreFingerprintBreakdown(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	LogCoreFingerprintDrift(&out, "worker", string(raw), current)
+	if !strings.Contains(out.String(), "OperatorEnv keys: [CLAUDE_CONFIG_DIR]") {
+		t.Fatalf("drift detail = %q, want the operator env keys", out.String())
+	}
+	if strings.Contains(out.String(), "/new-secret") || strings.Contains(out.String(), "/old") {
+		t.Fatalf("drift detail = %q, must not print operator env values", out.String())
+	}
+	unset := Config{Command: "claude"}
+	if _, ok := CoreFingerprintBreakdown(unset).Fields["OperatorEnv"]; ok {
+		t.Fatal("an empty OperatorEnv must leave the breakdown without the field, as it leaves the core hash unchanged")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(stored), unset); len(got) != 1 || got[0] != "OperatorEnv" {
+		t.Fatalf("CoreFingerprintDriftFields after removing the operator env = %v, want [OperatorEnv]", got)
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(unset), stored); len(got) != 1 || got[0] != "OperatorEnv" {
+		t.Fatalf("CoreFingerprintDriftFields after adding an operator env = %v, want [OperatorEnv]", got)
+	}
+}
+
 func TestConfigFingerprintIncludesLifecycle(t *testing.T) {
 	persistent := Config{Command: "custom-once"}
 	oneShot := Config{Command: "custom-once", Lifecycle: LifecycleOneShot}
@@ -276,9 +315,9 @@ func TestConfigFingerprintEmptyConfig(t *testing.T) {
 
 func TestConfigFingerprintExtraChangesHash(t *testing.T) {
 	a := Config{Command: "claude"}
-	b := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "5"}}
+	b := Config{Command: "claude", FingerprintExtra: map[string]string{"depends_on": "db"}}
 	if ConfigFingerprint(a) == ConfigFingerprint(b) {
-		t.Error("FingerprintExtra should change the hash")
+		t.Error("a Restart-policy FingerprintExtra key should change the hash")
 	}
 }
 
@@ -295,10 +334,10 @@ func TestConfigFingerprintExtraDeterministic(t *testing.T) {
 }
 
 func TestConfigFingerprintExtraDifferentValues(t *testing.T) {
-	a := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "3"}}
-	b := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "10"}}
+	a := Config{Command: "claude", FingerprintExtra: map[string]string{"depends_on": "db"}}
+	b := Config{Command: "claude", FingerprintExtra: map[string]string{"depends_on": "cache"}}
 	if ConfigFingerprint(a) == ConfigFingerprint(b) {
-		t.Error("different FingerprintExtra values should produce different hashes")
+		t.Error("different Restart-policy FingerprintExtra values should produce different hashes")
 	}
 }
 
@@ -495,6 +534,142 @@ func TestProbedEntryWithFailedHashUsesStableSentinel(t *testing.T) {
 	}
 }
 
+// TestCoreFingerprintDriftNamesTheMovedField moves one core field per case and
+// requires the drift diagnostics to name a field whenever the core fingerprint
+// moved. A field hashed into the core but missing from the breakdown would log
+// "no per-field diff" and hide the cause of a real restart.
+func TestCoreFingerprintDriftNamesTheMovedField(t *testing.T) {
+	base := Config{
+		Command:     "claude",
+		Upstream:    "anthropic",
+		OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/a"},
+	}
+	cases := []struct {
+		name   string
+		want   string
+		mutate func(c *Config)
+	}{
+		{"operator_env_add_empty_value", "OperatorEnv", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "NEW_KEY", "") }},
+		{"operator_env_add_value", "OperatorEnv", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "NEW_KEY", "v") }},
+		{"operator_env_change_value", "OperatorEnv", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "CLAUDE_CONFIG_DIR", "/b") }},
+		{"operator_env_value_to_empty", "OperatorEnv", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "CLAUDE_CONFIG_DIR", "") }},
+		{"upstream_switch", "Upstream", func(c *Config) { c.Upstream = "bedrock" }},
+		{"upstream_removed", "Upstream", func(c *Config) { c.Upstream = "" }},
+		{"command_change_control", "Command", func(c *Config) { c.Command = "codex" }},
+	}
+	raw, err := json.Marshal(CoreFingerprintBreakdown(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current := base
+			tc.mutate(&current)
+			if CoreFingerprint(base) == CoreFingerprint(current) {
+				t.Fatal("the mutation did not move the core fingerprint")
+			}
+			if got := CoreFingerprintDriftFieldsFromJSON(string(raw), current); !slices.Equal(got, []string{tc.want}) {
+				t.Fatalf("CoreFingerprintDriftFieldsFromJSON = %v, want [%s]", got, tc.want)
+			}
+			var out strings.Builder
+			LogCoreFingerprintDrift(&out, "worker", string(raw), current)
+			if !strings.Contains(out.String(), "drifted fields: "+tc.want+"\n") {
+				t.Fatalf("LogCoreFingerprintDrift = %q, want it to name %s", out.String(), tc.want)
+			}
+		})
+	}
+
+	switched := base
+	switched.Upstream = "bedrock"
+	var out strings.Builder
+	LogCoreFingerprintDrift(&out, "worker", string(raw), switched)
+	if !strings.Contains(out.String(), `Upstream: "bedrock"`) {
+		t.Fatalf("drift detail = %q, want the current upstream", out.String())
+	}
+
+	// Upstream unset leaves the core hash unchanged, so it must leave the
+	// breakdown without the field too: stored breakdowns stay byte-identical.
+	if _, ok := CoreFingerprintBreakdown(Config{Command: "claude"}).Fields["Upstream"]; ok {
+		t.Fatal("an empty Upstream must leave the breakdown without the field")
+	}
+}
+
+// coreFieldBreakdownKey maps every field of coreFieldHalf to the
+// CoreFingerprintBreakdown key that names it when it drifts. Most fields keep
+// their own name; FingerprintExtra is FPExtra, and the three fields folded into
+// the overlay-providers hash share OverlayProviders.
+var coreFieldBreakdownKey = map[string]string{
+	"Command":              "Command",
+	"Lifecycle":            "Lifecycle",
+	"Upstream":             "Upstream",
+	"OperatorEnv":          "OperatorEnv",
+	"MCPServers":           "MCPServers",
+	"AcceptStartupDialogs": "AcceptStartupDialogs",
+	"MouseOn":              "MouseOn",
+	"SessionSetup":         "SessionSetup",
+	"SessionSetupScript":   "SessionSetupScript",
+	"Env":                  "Env",
+	"FingerprintExtra":     "FPExtra",
+	"PreStart":             "PreStart",
+	"OverlayDir":           "OverlayDir",
+	"CopyFiles":            "CopyFiles",
+	"ProviderName":         "OverlayProviders",
+	"ProviderOverlayName":  "OverlayProviders",
+	"InstallAgentHooks":    "OverlayProviders",
+}
+
+// TestCoreFingerprintDriftNamesEveryCoreField requires every field hashed into
+// the core (every coreFieldHalf entry, whether or not partitionHalfCases has a
+// row for it) to have a key in CoreFingerprintBreakdown, so a core drift never
+// logs without a drifted field. Each field the partition table mutates must
+// then drift exactly that key.
+func TestCoreFingerprintDriftNamesEveryCoreField(t *testing.T) {
+	base := goldenFixtures()["comprehensive"]
+	// Optional fields enter the breakdown only when set; set each one the
+	// fixture leaves empty so every key is present.
+	full := base
+	full.Upstream = "bedrock"
+	fields := CoreFingerprintBreakdown(full).Fields
+
+	claimed := map[string]bool{}
+	for field := range coreFieldHalf {
+		key, ok := coreFieldBreakdownKey[field]
+		if !ok {
+			t.Errorf("core field %s has no entry in coreFieldBreakdownKey: give it a key in CoreFingerprintBreakdown and map it here", field)
+			continue
+		}
+		claimed[key] = true
+		if _, ok := fields[key]; !ok {
+			t.Errorf("core field %s maps to breakdown key %q, which CoreFingerprintBreakdown does not emit (an optional field must also be set in this test's config)", field, key)
+		}
+	}
+	for field := range coreFieldBreakdownKey {
+		if _, ok := coreFieldHalf[field]; !ok {
+			t.Errorf("coreFieldBreakdownKey maps %s, which coreFieldHalf does not classify as a core field", field)
+		}
+	}
+	for key := range fields {
+		if !claimed[key] {
+			t.Errorf("breakdown key %q is not mapped from any core field", key)
+		}
+	}
+
+	stored := CoreFingerprintBreakdown(base)
+	for _, tc := range partitionHalfCases {
+		t.Run(tc.field, func(t *testing.T) {
+			current := base
+			tc.mutate(&current)
+			if CoreFingerprint(base) == CoreFingerprint(current) {
+				t.Fatal("the mutation did not move the core fingerprint")
+			}
+			want := coreFieldBreakdownKey[tc.field]
+			if got := CoreFingerprintDriftFields(stored, current); !slices.Equal(got, []string{want}) {
+				t.Fatalf("CoreFingerprintDriftFields = %v, want [%s]", got, want)
+			}
+		})
+	}
+}
+
 func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 	cfgs := []Config{
 		{Command: "claude"},
@@ -504,6 +679,8 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 		{Command: "claude", PreStart: []string{"echo hi"}},
 		{Command: "claude", SessionSetup: []string{"set -x"}},
 		{Command: "claude", OverlayDir: "/overlay"},
+		{Command: "claude", OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/x"}},
+		{Command: "claude", Upstream: "bedrock"},
 	}
 	for i, a := range cfgs {
 		for j, b := range cfgs {
@@ -518,15 +695,9 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 			if coreA == coreB {
 				continue // same core hash, nothing to check
 			}
-			// Core hashes differ — at least one breakdown field must differ.
-			anyDiff := false
-			for field, va := range bdA.Fields {
-				if va != bdB.Fields[field] {
-					anyDiff = true
-					break
-				}
-			}
-			if !anyDiff {
+			// Core hashes differ — at least one breakdown field must differ,
+			// a field only one side carries included.
+			if len(diffBreakdownFields(bdA.Fields, bdB.Fields)) == 0 {
 				t.Errorf("configs %d vs %d: CoreFingerprint differs but no CoreFingerprintBreakdown field differs", i, j)
 			}
 		}
@@ -938,7 +1109,7 @@ func TestIsLegacyOrMismatchedVersion(t *testing.T) {
 		{"empty stored (handled by separate gate, not legacy/mismatch)", "", false},
 		{"current version prefix", current, false},
 		{"v0 prefix (older mismatched version)", "v0:" + bareHex, true},
-		{"v6 prefix (future mismatched version)", "v6:" + bareHex, true},
+		{"v8 prefix (future mismatched version)", "v8:" + bareHex, true},
 		{"vX prefix (non-numeric, treated as legacy)", "vX:" + bareHex, true},
 		{"v01 prefix (different literal version, mismatch)", "v01:" + bareHex, true},
 		{"non-v prefix (e.g. xyz, treated as legacy)", "xyz:" + bareHex, true},

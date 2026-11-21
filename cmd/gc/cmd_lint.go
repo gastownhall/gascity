@@ -14,10 +14,12 @@ import (
 	"text/template"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/overlay"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/promptmeta"
 	"github.com/spf13/cobra"
 )
@@ -104,8 +106,10 @@ func lintTarget(target string) lintReport {
 		})
 		return report
 	}
+	walkRoot, _ := filepath.Abs(target)
+	cities := newLintCityResolver(walkRoot)
 	for _, dir := range packDirs {
-		packReport := lintPack(dir)
+		packReport := lintPack(dir, cities)
 		report.Packs = append(report.Packs, packReport)
 		report.ErrorCount += lintErrorCount(packReport.Diagnostics)
 	}
@@ -174,7 +178,7 @@ func lintSkipDir(name string) bool {
 	}
 }
 
-func lintPack(packDir string) lintPackReport {
+func lintPack(packDir string, cities *lintCityResolver) lintPackReport {
 	out := lintPackReport{Path: packDir, OK: true}
 	loaded, err := config.LoadPackForLint(fsys.OSFS{}, packDir)
 	if err != nil {
@@ -191,12 +195,220 @@ func lintPack(packDir string) lintPackReport {
 	out.Diagnostics = append(out.Diagnostics, lintFormulaFiles(packDir)...)
 	targets, diagnostics := collectLintPromptTargets(packDir, loaded)
 	out.Diagnostics = append(out.Diagnostics, diagnostics...)
+	packDirs, cityPackDirs, cityDiagnostics := cities.searchDirs(packDir, loaded.Name, loaded.PackDirs)
+	out.Diagnostics = append(out.Diagnostics, cityDiagnostics...)
 	for _, target := range targets {
-		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, loaded.PackDirs, loaded.Providers, target)...)
+		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, packDirs, cityPackDirs, loaded.Providers, target)...)
 	}
 	out.Diagnostics = append(out.Diagnostics, lintClaudeOverlayHookShape(packDir)...)
 	out.OK = lintErrorCount(out.Diagnostics) == 0
 	return out
+}
+
+// lintLoadCityConfig is the loader gc lint uses for candidate cities. It is a
+// variable so tests can count loads.
+var lintLoadCityConfig = loadCityConfigAdvisory
+
+// lintCityResolver finds the city whose composition decides a pack's fragment
+// namespace, and loads each candidate city at most once per gc lint invocation.
+type lintCityResolver struct {
+	// walkRoot is the directory gc lint was pointed at. A city.toml there is
+	// the first candidate for every pack under it.
+	walkRoot string
+	loads    map[string]*lintCityLoad
+}
+
+// lintCityLoad is the memoized outcome of loading one candidate city, failures
+// included, so a city that cannot load is neither retried nor reported twice.
+type lintCityLoad struct {
+	cfg    *config.City
+	err    error
+	warned bool
+}
+
+func newLintCityResolver(walkRoot string) *lintCityResolver {
+	return &lintCityResolver{walkRoot: walkRoot, loads: make(map[string]*lintCityLoad)}
+}
+
+// candidates returns the cities that may compose packDir, in precedence order:
+// the walk-root city, then each city.toml on packDir's ancestor chain, nearest
+// first. Directories are deduplicated by normalized path. The ancestor walk
+// stops at the implicit discovery ceilings, as findCity does.
+func (r *lintCityResolver) candidates(packDir string) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	add := func(dir string) {
+		dir = pathutil.NormalizePathForCompare(dir)
+		if _, dup := seen[dir]; dup || !citylayout.HasCityConfig(dir) {
+			return
+		}
+		seen[dir] = struct{}{}
+		out = append(out, dir)
+	}
+	if r.walkRoot != "" {
+		add(r.walkRoot)
+	}
+	dir, err := filepath.Abs(packDir)
+	if err != nil {
+		return out
+	}
+	ceilings := implicitCityDiscoveryCeilings()
+	for {
+		add(dir)
+		parent := filepath.Dir(dir)
+		if isCityDiscoveryCeiling(dir, ceilings) || parent == dir {
+			return out
+		}
+		dir = parent
+	}
+}
+
+func (r *lintCityResolver) load(cityDir string) *lintCityLoad {
+	if l, ok := r.loads[cityDir]; ok {
+		return l
+	}
+	l := &lintCityLoad{}
+	l.cfg, l.err = lintLoadCityConfig(cityDir)
+	if l.err == nil && l.cfg == nil {
+		l.err = fmt.Errorf("city config is empty")
+	}
+	r.loads[cityDir] = l
+	return l
+}
+
+// searchDirs splits the directories a pack's prompts may resolve
+// fragments from into the pack's own recursively-included PackDirs and the
+// extra dirs its hosting city composes in (city.toml's per-rig "includes" and
+// the city's own packs). A pack can depend on fragments from a sibling pack
+// purely through that city-level composition without declaring the sibling in
+// its own pack.toml — the runtime resolves such fragments fine (resolveTemplate
+// in template_resolve.go calls city.PackDirsForRig(rigName)), but a standalone
+// pack load (config.LoadPackForLint) never reads city.toml, so lint reported
+// those fragments "not found" even though they render correctly.
+//
+// The hosting city is the first candidate (see candidates) that loads and
+// composes the pack. A city.toml between a pack and the city that composes it
+// — a nested city that composes nothing — therefore cannot decide the
+// namespace. A pack is composed when its normalized dir is in
+// cfg.AllPackDirs() or is the city's own root dir; imported packs count.
+//
+//   - A candidate that fails to load is reported once per invocation as a
+//     warning naming the city and the error, and the next candidate is tried.
+//   - When no candidate composes the pack, lint keeps the fallback below and
+//     warns, naming the pack and the first city that loaded. When no candidate
+//     loads, only the pack's own dirs are searched. When no city.toml exists
+//     on the chain, lint stays standalone and says nothing.
+//
+// Two rules keep the widening from making lint lie or leak:
+//
+//   - City dirs are scoped to the rigs that actually contain this pack. A
+//     fragment that exists only in an unrelated rig's pack is NOT reachable at
+//     runtime for this pack's agents, so unioning every rig (PackDirsForRig(""))
+//     would turn a real missing-fragment error into a false pass. Only rigs
+//     whose composed dirs include packDir contribute. A pack that belongs to no
+//     rig — city-level or city-root — has no rig to scope to and keeps the
+//     rig-less fallback the runtime uses for scope=city agents:
+//     PackDirsForRig("").
+//   - City dirs contribute fragments, not diagnostics. gc lint <pack> must
+//     report on <pack>; a malformed fragment in a neighboring pack is already
+//     that neighbour's lint failure, so parse failures under these dirs are
+//     recorded at warning severity and do not fail this pack.
+//
+// City loads are advisory: on config.ErrRepoCacheBusy (another gc process holds
+// the machine-wide repo-cache lock through a network clone) the load fails and
+// lint moves on rather than blocking on that lock.
+func (r *lintCityResolver) searchDirs(packDir, packName string, ownPackDirs []string) (own []string, cityOnly []string, diagnostics []lintDiagnostic) {
+	var fallbackCity string
+	var fallback *config.City
+	var composing *config.City
+	for _, cityDir := range r.candidates(packDir) {
+		l := r.load(cityDir)
+		if l.err != nil {
+			if !l.warned {
+				l.warned = true
+				diagnostics = append(diagnostics, newLintWarning(filepath.Join(cityDir, "city.toml"), 0,
+					fmt.Sprintf("city config failed to load, trying the next enclosing city: %s", strings.Join(strings.Fields(l.err.Error()), " "))))
+			}
+			continue
+		}
+		if fallback == nil {
+			fallback, fallbackCity = l.cfg, cityDir
+		}
+		if lintCityComposes(l.cfg, cityDir, packDir) {
+			composing = l.cfg
+			break
+		}
+	}
+	switch {
+	case composing != nil:
+	case fallback != nil:
+		composing = fallback
+		diagnostics = append(diagnostics, newLintWarning(filepath.Join(packDir, "pack.toml"), 0,
+			fmt.Sprintf("pack %q is not composed by city %s; fragments resolve against that city's whole pack set", packName, fallbackCity)))
+	default:
+		return ownPackDirs, nil, diagnostics
+	}
+	known := make(map[string]struct{}, len(ownPackDirs))
+	for _, dir := range ownPackDirs {
+		known[pathutil.NormalizePathForCompare(dir)] = struct{}{}
+	}
+	for _, dir := range lintCityComposedPackDirs(composing, packDir) {
+		key := pathutil.NormalizePathForCompare(dir)
+		if _, seen := known[key]; seen {
+			continue
+		}
+		known[key] = struct{}{}
+		cityOnly = append(cityOnly, dir)
+	}
+	return ownPackDirs, cityOnly, diagnostics
+}
+
+// lintCityComposes reports whether the city at cityDir composes packDir: the
+// pack is in cfg.AllPackDirs() (city-level, rig-included, or imported) or is
+// the city's own root pack.
+func lintCityComposes(cfg *config.City, cityDir, packDir string) bool {
+	target := pathutil.NormalizePathForCompare(packDir)
+	if target == pathutil.NormalizePathForCompare(cityDir) {
+		return true
+	}
+	for _, dir := range cfg.AllPackDirs() {
+		if pathutil.NormalizePathForCompare(dir) == target {
+			return true
+		}
+	}
+	return false
+}
+
+// lintCityComposedPackDirs returns the pack dirs cfg composes in for every rig
+// that contains packDir, unioned in sorted rig-name order for determinism.
+// Paths are compared through pathutil.NormalizePathForCompare because findCity
+// canonicalizes the city root the same way, so a symlinked or /private-aliased
+// ancestor cannot cause a rig to miss its own pack. When no rig contains
+// packDir this falls back to cfg.PackDirsForRig(""), the rig-less union.
+func lintCityComposedPackDirs(cfg *config.City, packDir string) []string {
+	target := pathutil.NormalizePathForCompare(packDir)
+	rigNames := make([]string, 0, len(cfg.RigPackDirs))
+	for name := range cfg.RigPackDirs {
+		rigNames = append(rigNames, name)
+	}
+	sort.Strings(rigNames)
+
+	var dirs []string
+	var matched bool
+	for _, rigName := range rigNames {
+		for _, dir := range cfg.RigPackDirs[rigName] {
+			if pathutil.NormalizePathForCompare(dir) != target {
+				continue
+			}
+			matched = true
+			dirs = appendUniqueStrings(dirs, cfg.PackDirsForRig(rigName)...)
+			break
+		}
+	}
+	if !matched {
+		return cfg.PackDirsForRig("")
+	}
+	return dirs
 }
 
 func lintNamedSessionPoolConflicts(packPath string, loaded *config.LintPackLoad) []lintDiagnostic {
@@ -347,7 +559,13 @@ func lintAgentNameFromTemplate(path string) string {
 	return name
 }
 
-func lintPrompt(packDir string, packDirs []string, providers map[string]config.ProviderSpec, target lintPromptTarget) []lintDiagnostic {
+// lintPrompt renders one prompt target and reports what breaks. packDirs are
+// the pack's own fragment sources and report at error severity; cityPackDirs
+// are composed in by the hosting city (see lintCityResolver.searchDirs) and supply
+// fragments at warning severity, so a neighboring pack's malformed fragment
+// cannot fail this pack's lint. City dirs are parsed first so the pack's own
+// definitions win on a name collision.
+func lintPrompt(packDir string, packDirs, cityPackDirs []string, providers map[string]config.ProviderSpec, target lintPromptTarget) []lintDiagnostic {
 	sourcePath := target.sourcePath
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -370,6 +588,10 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 		Funcs(promptFuncMap("lint-city", "", nil, func() *template.Template { return tmpl })).
 		Option("missingkey=zero")
 
+	for _, dir := range cityPackDirs {
+		diagnostics = append(diagnostics, lintLoadAdvisorySharedTemplates(tmpl, filepath.Join(dir, "prompts", "shared"))...)
+		diagnostics = append(diagnostics, lintLoadAdvisorySharedTemplates(tmpl, filepath.Join(dir, "template-fragments"))...)
+	}
 	for _, dir := range packDirs {
 		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(dir, "prompts", "shared"))...)
 		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(dir, "template-fragments"))...)
@@ -406,21 +628,46 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 	return diagnostics
 }
 
+// lintLoadSharedTemplates parses every shared template under dir into tmpl and
+// reports failures at error severity. Use it for directories the linted pack
+// owns.
 func lintLoadSharedTemplates(tmpl *template.Template, dir string) []lintDiagnostic {
+	return loadLintSharedTemplates(tmpl, dir, false)
+}
+
+// lintLoadAdvisorySharedTemplates parses every shared template under dir into
+// tmpl but reports failures at warning severity, so the fragments are available
+// to the linted pack without a directory it does not own deciding its exit
+// code.
+func lintLoadAdvisorySharedTemplates(tmpl *template.Template, dir string) []lintDiagnostic {
+	return loadLintSharedTemplates(tmpl, dir, true)
+}
+
+func loadLintSharedTemplates(tmpl *template.Template, dir string, advisory bool) []lintDiagnostic {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
+	}
+	report := diagnosticFromError
+	if advisory {
+		report = func(path string, err error) lintDiagnostic {
+			message := "unknown error"
+			if err != nil {
+				message = err.Error()
+			}
+			return diagnosticFromWarning(path, message)
+		}
 	}
 	var diagnostics []lintDiagnostic
 	for _, name := range sharedTemplateFileNames(entries) {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			diagnostics = append(diagnostics, report(path, err))
 			continue
 		}
 		if _, err := tmpl.Parse(string(data)); err != nil {
-			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			diagnostics = append(diagnostics, report(path, err))
 		}
 	}
 	return diagnostics
@@ -534,6 +781,15 @@ func newLintDiagnostic(path string, line int, message string) lintDiagnostic {
 	}
 }
 
+func newLintWarning(path string, line int, message string) lintDiagnostic {
+	return lintDiagnostic{
+		Severity: "warning",
+		Path:     path,
+		Line:     line,
+		Message:  strings.TrimSpace(message),
+	}
+}
+
 func lintErrorCount(diagnostics []lintDiagnostic) int {
 	var count int
 	for _, diagnostic := range diagnostics {
@@ -600,10 +856,14 @@ func formatLintDiagnostic(diagnostic lintDiagnostic) string {
 }
 
 // lintClaudeOverlayHookShape walks a pack for .claude/settings.json overlay
-// files and flags any top-level hook entry using the invalid bare shape.
+// files and flags hook entries Claude Code cannot use as written: a top-level
+// entry in the invalid bare shape, and a wrapped entry whose matcher is not a
+// usable regex over tool names.
 // Claude Code requires the wrapped {"matcher": ..., "hooks": [...]} form; a bare
 // {"type": "command", "command": ...} entry projects to a settings file that
-// fails Claude's schema (and `claude doctor`).
+// fails Claude's schema (and `claude doctor`). A matcher in permission-rule
+// syntax such as Bash(*bd mol pour*) matches no tool name, so the guard it was
+// meant to add never fires.
 func lintClaudeOverlayHookShape(packDir string) []lintDiagnostic {
 	var diagnostics []lintDiagnostic
 	_ = filepath.WalkDir(packDir, func(path string, entry iofs.DirEntry, walkErr error) error {
@@ -633,6 +893,18 @@ func lintClaudeOverlayHookShape(packDir string) []lintDiagnostic {
 			diagnostics = append(diagnostics, newLintDiagnostic(path, 0, fmt.Sprintf(
 				"hooks.%s[%d] is a bare hook entry; Claude settings require the wrapped form {\"matcher\": ..., \"hooks\": [...]}",
 				b.Category, b.Index)))
+		}
+		matchers, err := overlay.FindInvalidHookMatchers(data)
+		if err != nil {
+			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			return nil
+		}
+		for _, m := range matchers {
+			if m.Severity == overlay.SeverityWarning {
+				diagnostics = append(diagnostics, newLintWarning(path, 0, m.Message))
+			} else {
+				diagnostics = append(diagnostics, newLintDiagnostic(path, 0, m.Message))
+			}
 		}
 		return nil
 	})

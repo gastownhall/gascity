@@ -36,7 +36,7 @@ func claimOpsForRunMap(beadID string, claimedMeta map[string]string, spy *publis
 		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: claimedMeta}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		StampWorkMeta:     noopStampWorkMeta,
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, error) {
 			meta := map[string]string{}
@@ -73,6 +73,11 @@ func TestDoHookClaimPublishesRunMapWithoutSessionBeadMutation(t *testing.T) {
 	collisionMetadata := map[string]string{"sentinel": "unchanged"}
 	hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
 		return func(_ string, _ string, args ...string) ([]byte, error) {
+			// The workflow stop gate reads the claimed step's root; a read is
+			// not the mutation this boundary forbids.
+			if len(args) > 0 && (args[0] == "show" || args[0] == "query" || args[0] == "list") {
+				return nil, nil
+			}
 			bdCalls++
 			if len(args) >= 3 && args[0] == "update" && args[2] == "session-1" {
 				collisionMetadata["gc.current_run_id"] = "root-safe"

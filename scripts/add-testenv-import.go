@@ -53,7 +53,7 @@ func main() {
 			return err
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			if path != root && (skipDirs[d.Name()] || isNestedWorktreeRoot(path)) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -235,6 +235,18 @@ func formatNode(fset *token.FileSet, file *ast.File) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// isNestedWorktreeRoot reports whether path is the root of a linked git
+// worktree checked out inside this tree. Linked worktrees have a .git FILE
+// (a "gitdir: ..." pointer) rather than a .git directory, so this catches
+// worktrees regardless of naming convention. Ported from
+// internal/testenv/lint_test.go's isNestedWorktreeRoot: without it, walking
+// into a sibling worktree here writes generated files into whatever branch
+// that worktree has checked out.
+func isNestedWorktreeRoot(path string) bool {
+	info, err := os.Lstat(filepath.Join(path, ".git"))
+	return err == nil && !info.IsDir()
 }
 
 func repoRoot() (string, error) {

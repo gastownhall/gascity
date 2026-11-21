@@ -90,8 +90,8 @@ func TestFileRecorderAppendBatchSurfacesClosedAndLockErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = recorder.Close() })
-		sibling := mustOpenSiblingLock(t, path)
-		t.Cleanup(func() { _ = sibling.Close() })
+		_, releaseSibling := mustOpenSiblingLock(t, path)
+		t.Cleanup(releaseSibling)
 
 		err = recorder.AppendBatch([]Event{{Type: ExecutionStepDefined}})
 		if err == nil || !strings.Contains(err.Error(), "lock") {
@@ -108,6 +108,35 @@ func TestWriteBatchDetectsShortWriteInOneCall(t *testing.T) {
 	}
 	if writer.calls != 1 {
 		t.Fatalf("write calls = %d, want one", writer.calls)
+	}
+}
+
+func TestEncodeAndWriteRecordDetectsShortWrite(t *testing.T) {
+	writer := &shortBatchWriter{}
+	err := encodeAndWriteRecord(writer, &Event{Type: ExecutionStepDefined})
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("encodeAndWriteRecord error = %v, want io.ErrShortWrite", err)
+	}
+	if writer.calls != 1 {
+		t.Fatalf("write calls = %d, want one", writer.calls)
+	}
+}
+
+func TestEncodeAndWriteRecordWritesOneCompleteLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := encodeAndWriteRecord(&buf, &Event{Type: ExecutionStepDefined, Seq: 7}); err != nil {
+		t.Fatalf("encodeAndWriteRecord: %v", err)
+	}
+	line := buf.String()
+	if !strings.HasSuffix(line, "\n") {
+		t.Fatalf("line = %q, want a trailing newline", line)
+	}
+	var got Event
+	if err := json.Unmarshal([]byte(strings.TrimSuffix(line, "\n")), &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", line, err)
+	}
+	if got.Seq != 7 {
+		t.Fatalf("Seq = %d, want 7", got.Seq)
 	}
 }
 

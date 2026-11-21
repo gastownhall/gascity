@@ -12,7 +12,10 @@
     "path": { "type": "string" },
     "prefix": { "type": "string" },
     "default_branch": { "type": "string" },
-    "suspended": { "type": "boolean" }
+    "suspended": {
+      "type": "boolean",
+      "description": "The rig's authored startup suspension default (city.toml suspended_on_start, honoring the deprecated suspended alias) — not live effective state. On a re-add of an existing rig this can differ from `gc rig list --json`, which layers the runtime suspension-state override on top."
+    }
   },
   "additionalProperties": true
 }

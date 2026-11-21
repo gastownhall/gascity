@@ -187,6 +187,23 @@ func TestFindAgentMappings(t *testing.T) {
 	}
 }
 
+func TestFindAgentMappings_MetaMappingIsAuthoritativeAndDeduplicated(t *testing.T) {
+	dir := t.TempDir()
+	parentPath, subDir := makeSessionDir(t, dir, "session-abc")
+	writeTestFile(t, filepath.Join(subDir, "agent-helper.jsonl"), `{"uuid":"a1","type":"system","parentToolUseId":""}`+"\n")
+	writeTestFile(t, filepath.Join(subDir, "agent-helper.meta.json"), `{"toolUseId":"toolu_real"}`)
+	mappings, err := FindAgentMappings(parentPath)
+	if err != nil {
+		t.Fatalf("FindAgentMappings: %v", err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("len(mappings) = %d, want exactly one", len(mappings))
+	}
+	if got := mappings[0]; got.AgentID != "helper" || got.ParentToolUseID != "toolu_real" {
+		t.Fatalf("mapping = %#v", got)
+	}
+}
+
 func TestFindAgentMappings_PropagatesReadErrors(t *testing.T) {
 	dir := t.TempDir()
 	parentPath, subDir := makeSessionDir(t, dir, "session-abc")
@@ -390,5 +407,25 @@ func TestInferAgentStatus(t *testing.T) {
 				t.Errorf("inferAgentStatus = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A metadata file without a toolUseId must not erase a join key recovered from
+// the transcript. Losing it unlinks the subagent from its spawn, which reads as
+// "no background work" to callers that guard a destructive action.
+func TestFindAgentMappings_EmptyMetaToolUseIDDoesNotOverrideTranscript(t *testing.T) {
+	dir := t.TempDir()
+	parentPath, subDir := makeSessionDir(t, dir, "session-abc")
+	writeTestFile(t, filepath.Join(subDir, "agent-helper.jsonl"), `{"uuid":"a1","type":"system","parentToolUseId":"toolu_from_transcript"}`+"\n")
+	writeTestFile(t, filepath.Join(subDir, "agent-helper.meta.json"), `{}`)
+	mappings, err := FindAgentMappings(parentPath)
+	if err != nil {
+		t.Fatalf("FindAgentMappings: %v", err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("len(mappings) = %d, want exactly one", len(mappings))
+	}
+	if got := mappings[0]; got.AgentID != "helper" || got.ParentToolUseID != "toolu_from_transcript" {
+		t.Fatalf("mapping = %#v, want transcript join key preserved", got)
 	}
 }

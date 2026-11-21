@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -568,7 +569,7 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -580,15 +581,7 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
-	for reconcileCount.Load() < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for initial reconcile")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return reconcileCount.Load() >= 1 }, "initial reconcile")
 
 	reply, err := sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "1s"})
 	if err != nil {
@@ -631,12 +624,18 @@ func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T
 	}
 	cfg := result.Cfg
 	applyFeatureFlags(cfg)
+	// Boot the bead lifecycle as the supervisor does before a runtime exists:
+	// reload refuses a city whose store was never initialized.
+	if err := startBeadsLifecycle(dir, "test", cfg, io.Discard); err != nil {
+		t.Fatalf("boot bead lifecycle: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	initialOrders, err := scanOrderSetSnapshotFS(fsys.OSFS{}, dir, cfg, &stderr, "test")
 	if err != nil {
 		t.Fatalf("initial order scan: %v", err)
 	}
 	cr := &CityRuntime{
+		bootCityStore:      recordCityStore(dir),
 		cityPath:           dir,
 		cityName:           "test",
 		configName:         "test",
@@ -778,7 +777,7 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, 30*time.Second, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -790,28 +789,15 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
-	for reconcileCount.Load() < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for initial reconcile")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return reconcileCount.Load() >= 1 }, "initial reconcile")
 
-	oldDebounce := debounceDelay
-	debounceDelay = 30 * time.Second
-	t.Cleanup(func() {
-		debounceDelay = oldDebounce
-	})
 	if err := os.WriteFile(tomlPath, []byte("[[[ bad toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	stdoutBeforeInvalid := stdout.String()
 	var reply reloadControlReply
-	deadline = time.After(45 * time.Second)
+	deadline := time.After(45 * time.Second)
 	for {
 		reply, err = sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "30s"})
 		if err != nil {
@@ -964,21 +950,29 @@ func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *test
 	}
 	cfg := result.Cfg
 	applyFeatureFlags(cfg)
+	// Boot the bead lifecycle as the supervisor does before a runtime exists:
+	// reload refuses a city whose store was never initialized.
+	if err := startBeadsLifecycle(dir, "test", cfg, io.Discard); err != nil {
+		t.Fatalf("boot bead lifecycle: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
-		cityPath:   dir,
-		cityName:   "test",
-		configName: "test",
-		tomlPath:   tomlPath,
-		configRev:  result.Revision,
-		cfg:        cfg,
-		sp:         runtime.NewFake(),
-		dops:       newDrainOps(runtime.NewFake()),
-		rec:        events.Discard,
-		stdout:     &stdout,
-		stderr:     &stderr,
-		logPrefix:  "gc test",
+		bootCityStore: recordCityStore(dir),
+		cityPath:      dir,
+		cityName:      "test",
+		configName:    "test",
+		tomlPath:      tomlPath,
+		configRev:     result.Revision,
+		cfg:           cfg,
+		sp:            runtime.NewFake(),
+		dops:          newDrainOps(runtime.NewFake()),
+		rec:           events.Discard,
+		stdout:        &stdout,
+		stderr:        &stderr,
+		logPrefix:     "gc test",
 	}
+	// The reload restarts the config watcher; stop it with the test.
+	t.Cleanup(cr.stopConfigWatcher)
 	lastProviderName := cfg.Session.Provider
 
 	// Same selection name, different declared command. The exec proxy

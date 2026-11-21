@@ -24,11 +24,13 @@
 #   RUN_ID       workflow run id that produced the patch (for comment text)
 #   RUN_URL      html url of that run (for commit/comment provenance)
 #   GH_TOKEN     token for gh api calls (PR lookup, comments) - needs the
-#                workflow's pull-requests:write; never the PAT
+#                workflow's pull-requests:write; never the App token
 #   PUSH_TOKEN   token for the git push only (optional; defaults to GH_TOKEN),
-#                so a dedicated DOCS_AUTOFIX_TOKEN needs contents:write only
-#   AUTOFIX_TOKEN_KIND  "pat" when a dedicated push token is in use, "default"
-#                       for the workflow's GITHUB_TOKEN (retrigger caveat)
+#                so the minted gastownhall-autofix App token needs
+#                contents:write only
+#   AUTOFIX_TOKEN_KIND  "app" when the minted App push token is in use,
+#                       "default" for the workflow's GITHUB_TOKEN (retrigger
+#                       caveat)
 #
 # Exit 0 on every non-actionable outcome (PR closed, head moved, no patch);
 # exit 1 only on genuine errors so the workflow surfaces them.
@@ -48,8 +50,9 @@ PATCH_FILE="$(readlink -f "$PATCH_FILE")"
 COMMENT_MARKER="<!-- generated-docs-autofix -->"
 AUTOFIX_SUBJECT="docs: auto-regenerate reference docs"
 
-# Exactly the files cmd/genschema writes - keep in sync with GEN_PATHS in
-# scripts/check-generated-docs-drift.sh. Exact matches only: no traversal,
+# Exactly the files cmd/genschema writes - keep in sync with the paths
+# //cmd/genschema:genschema_in_sync_test compares (cmd/genschema/BUILD.bazel)
+# and GEN_PATHS in scripts/check-generated-docs-drift.sh. Exact matches only: no traversal,
 # no nesting, no metacharacters can slip through.
 path_allowed() {
     case "$1" in *..*) return 1 ;; esac
@@ -184,7 +187,7 @@ fi
 # --- Same-repo PRs: push the regen commit -------------------------------------
 
 # Keep the token out of on-disk .git/config: pass the auth header per command.
-# Uses PUSH_TOKEN (the optional contents:write PAT), not the API token.
+# Uses PUSH_TOKEN (the minted App token, contents:write only), not the API token.
 AUTH_CONFIG="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
 
 WORK="$(mktemp -d)"
@@ -210,7 +213,7 @@ git -c user.name="github-actions[bot]" \
     commit --quiet -m "$AUTOFIX_SUBJECT
 
 Applied from the generated-docs-freshness-patch artifact of $RUN_URL.
-See scripts/check-generated-docs-drift.sh for how drift is detected."
+See //cmd/genschema:genschema_in_sync_test for how drift is detected."
 
 if ! git -c "$AUTH_CONFIG" push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"; then
     cd - >/dev/null
@@ -230,7 +233,7 @@ EOF
 if [ "$AUTOFIX_TOKEN_KIND" = "default" ]; then
     cat >> "$BODY" <<'EOF'
 
-Note: this commit was pushed with the default workflow token, which does **not** retrigger PR checks - re-run them (or push any commit) to refresh the gate. Configuring a `DOCS_AUTOFIX_TOKEN` repo secret removes this step.
+Note: this commit was pushed with the default workflow token, which does **not** retrigger PR checks - re-run them (or push any commit) to refresh the gate. This only happens if the gastownhall-autofix App token could not be minted for this push.
 EOF
 fi
 post_or_update_comment "$BODY"

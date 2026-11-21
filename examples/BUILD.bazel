@@ -1,0 +1,77 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "examples_test",
+    srcs = [
+        "routing_namespace_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//examples:all_examples",
+        "//examples/bd/dolt:pack_files",
+        "//examples/gastown:pack_files",
+        "//examples/hyperscale:pack_files",
+        "//examples/lifecycle:pack_files",
+        "//examples/t3bridge-gastown:pack_files",
+        "//internal/bootstrap/packs/core:pack_files",
+    ],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+        "@com_github_burntsushi_toml//:toml",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+# Every example city and pack, for tests that enumerate or walk examples/
+# (gc init --from, config validation, pack lint). Each example is its own
+# package, so a glob here cannot reach them.
+filegroup(
+    name = "all_examples",
+    srcs = [
+        "//examples/bd:pack_files",
+        "//examples/bd/dolt:pack_files",
+        "//examples/gastown:pack_files",
+        "//examples/hyperscale:pack_files",
+        "//examples/lifecycle:pack_files",
+        "//examples/storage:pack_files",
+        "//examples/swarm:pack_files",
+        "//examples/t3bridge-gastown:pack_files",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

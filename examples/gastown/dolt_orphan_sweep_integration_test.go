@@ -1,10 +1,9 @@
-//go:build integration || dolt_integration
+//go:build (integration || dolt_integration) && unix
 
 package gastown_test
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/doltorphan"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // TestSweep_ReapsRealDoltDataDirAfterSIGKILL exercises acceptance criterion 3
@@ -80,11 +80,32 @@ func TestSweep_ReapsRealDoltDataDirAfterSIGKILL(t *testing.T) {
 	if len(after.Errors) != 0 {
 		t.Fatalf("sweep errored after the dolt sql-server was SIGKILLed: %v", after.Errors)
 	}
-	if len(after.Removed) != 1 || after.Removed[0] != dataDir {
-		t.Fatalf("sweep.Removed = %v, want [%s] after the dolt sql-server was SIGKILLed", after.Removed, dataDir)
+	if len(after.Removed) != 1 || after.Removed[0] != dbDir {
+		t.Fatalf("sweep.Removed = %v, want [%s] after the dolt sql-server was SIGKILLed", after.Removed, dbDir)
 	}
-	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
-		t.Fatalf("data dir %s still exists after sweep reported removing it (stat err = %v)", dataDir, err)
+	if _, err := os.Stat(dbDir); !os.IsNotExist(err) {
+		t.Fatalf("dolt store dir %s still exists after sweep reported removing it (stat err = %v)", dbDir, err)
+	}
+	if _, err := os.Stat(dataDir); err != nil {
+		t.Fatalf("top-level data dir %s should survive; only its nested dolt store dir is removed: %v", dataDir, err)
+	}
+
+	// The server's own bookkeeping .dolt in dataDir holds no noms/, so it is
+	// not a store: a later pass, with the removal's fresh mtime on dataDir aged
+	// past MinAge again, must leave dataDir alone.
+	if _, err := os.Stat(filepath.Join(dataDir, ".dolt", "noms")); !os.IsNotExist(err) {
+		t.Fatalf("dataDir/.dolt/noms exists (stat err = %v); the server's bookkeeping .dolt was expected to hold no store", err)
+	}
+	sweepCfg.Clock = &clock.Fake{Time: time.Now().Add(doltorphan.DefaultMinAge + 5*time.Minute)}
+	again := doltorphan.Sweep(sweepCfg)
+	if len(again.Errors) != 0 {
+		t.Fatalf("second sweep errored: %v", again.Errors)
+	}
+	if len(again.Removed) != 0 {
+		t.Fatalf("second sweep.Removed = %v, want none: dataDir's .dolt holds server bookkeeping, not a store", again.Removed)
+	}
+	if _, err := os.Stat(dataDir); err != nil {
+		t.Fatalf("data dir %s was removed by the second sweep: %v", dataDir, err)
 	}
 }
 
@@ -96,52 +117,34 @@ func TestSweep_ReapsRealDoltDataDirAfterSIGKILL(t *testing.T) {
 // for free if the test never reaches its own call (e.g. an earlier Fatalf).
 func startSweepDoltServer(t *testing.T, doltPath, dataDir string) (pid, port int, killAndWait func() bool) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	port = listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("Close listener: %v", err)
-	}
-
-	logPath := filepath.Join(dataDir, "sql-server.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("Create(%s): %v", logPath, err)
-	}
-
-	cmd := exec.Command(doltPath, "sql-server",
-		"-H", "127.0.0.1",
-		"-P", fmt.Sprintf("%d", port),
-		"--data-dir", dataDir,
-		"--loglevel", "warning",
-	)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		t.Fatalf("Start dolt sql-server: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltPath,
+		Args: func(listenPort int) []string {
+			return []string{
+				"sql-server",
+				"-H", "127.0.0.1",
+				"-P", fmt.Sprintf("%d", listenPort),
+				"--data-dir", dataDir,
+				"--loglevel", "warning",
+			}
+		},
+		LogPath: filepath.Join(dataDir, "sql-server.log"),
+	})
 
 	var once sync.Once
 	var exited bool
 	killAndWait = func() bool {
 		once.Do(func() {
-			_ = cmd.Process.Kill()
+			_ = srv.Process.Kill()
 			select {
-			case <-done:
+			case <-srv.Exited:
 				exited = true
 			case <-time.After(10 * time.Second):
 				exited = false
 			}
-			_ = logFile.Close()
 		})
 		return exited
 	}
 	t.Cleanup(func() { killAndWait() })
-	return cmd.Process.Pid, port, killAndWait
+	return srv.PID, srv.Port, killAndWait
 }

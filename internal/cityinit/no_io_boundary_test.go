@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 func TestPackageDoesNotExposeInputOutputWriters(t *testing.T) {
@@ -85,6 +87,9 @@ func packageGoFiles(t *testing.T) []string {
 		t.Fatal("runtime.Caller failed")
 	}
 	dir := filepath.Dir(caller)
+	if root := bazeltest.OverrideRoot(); root != "" {
+		dir = filepath.Join(root, "internal", "cityinit")
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("ReadDir(%q): %v", dir, err)

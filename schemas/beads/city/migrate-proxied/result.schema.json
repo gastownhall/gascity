@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gc://schemas/beads/city/migrate-proxied/result.schema.json",
+  "title": "gc beads city migrate-proxied result",
+  "description": "Per-scope outcome of migrating a legacy GC-managed city to bd's proxied-server topology. ok:true means the report is complete; failed counts the scopes that did not migrate, and the process exit code carries the overall verdict.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "city", "dry_run", "scopes", "failed"],
+  "properties": {
+    "ok": {
+      "description": "True when the command produced a complete report.",
+      "const": true
+    },
+    "city": {
+      "description": "Absolute path of the city whose scopes were considered.",
+      "type": "string",
+      "minLength": 1
+    },
+    "dry_run": {
+      "description": "True when no files were written.",
+      "type": "boolean"
+    },
+    "failed": {
+      "description": "Number of scopes whose status is \"failed\".",
+      "type": "integer",
+      "minimum": 0
+    },
+    "scopes": {
+      "description": "One entry per scope considered, city first.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope", "path", "status"],
+        "properties": {
+          "scope": {
+            "description": "\"city\", or \"rig:<name>\".",
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "description": "Absolute path of the scope root.",
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "description": "What happened to this scope.",
+            "type": "string",
+            "enum": ["migrated", "already-migrated", "would-migrate", "failed"]
+          },
+          "dolt_mode": {
+            "description": "The scope's dolt_mode in metadata.json after this run.",
+            "type": "string"
+          },
+          "dolt_data_dir": {
+            "description": "Relative dolt_data_dir written so a rig shares the city's proxy root.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Human-readable note about what was done or would be done.",
+            "type": "string"
+          },
+          "error": {
+            "description": "Why this scope failed. Present only with status \"failed\".",
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

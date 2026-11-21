@@ -17,25 +17,27 @@ import (
 
 // resolveSessionID delegates to session.ResolveSessionID.
 func resolveSessionID(store beads.Store, identifier string) (string, error) {
-	return session.ResolveSessionID(store, identifier)
-}
-
-func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, error) {
-	return session.ResolveSessionIDAllowClosed(store, identifier)
+	return session.ResolveSessionID(beads.SessionStore{Store: store}, identifier)
 }
 
 type namedSessionResolveOptions struct {
 	allowClosed         bool
 	materialize         bool
 	materializeMetadata map[string]string
+	// skipExactID skips the bead-id lookup for a caller that has just made it
+	// (resolveExactSessionInfo), so a miss is not asked twice.
+	skipExactID bool
+	// beforeReopen, when materializing, is called with the id of a closed
+	// configured named row before it is reopened; an error leaves the row
+	// closed and is the resolution's.
+	beforeReopen func(id string) error
+	// stderr, when materializing, receives the materializer's report of a
+	// session start it left to the reconciler (noteDeferredSessionStart); nil
+	// discards it, for a caller that reports the start itself.
+	stderr io.Writer
 }
 
 const templateTargetPrefix = "template:"
-
-type templateTarget struct {
-	template   string
-	forceFresh bool
-}
 
 var errNamedSessionConflict = errors.New("configured named session conflict")
 
@@ -57,7 +59,7 @@ func resolveConfiguredNamedSessionID(
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	lookup, err := session.LookupConfiguredNamedSession(store, spec)
+	lookup, err := session.LookupConfiguredNamedSession(beads.SessionStore{Store: store}, spec)
 	if err != nil {
 		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
@@ -67,6 +69,9 @@ func resolveConfiguredNamedSessionID(
 	// When materializing, check for a closed bead with this identity and
 	// reopen it (preserves bead ID for reference continuity).
 	if opts.materialize {
+		if err := beforeConfiguredNamedSessionReopen(store, cfg, cityName, spec, opts.beforeReopen); err != nil {
+			return "", true, err
+		}
 		if bead, _, ok := reopenClosedConfiguredNamedSessionBead(
 			cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, io.Discard,
 		); ok {
@@ -79,7 +84,7 @@ func resolveConfiguredNamedSessionID(
 	if !opts.materialize {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, io.Discard, ensureSessionForTemplateOptions{
+	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, opts.stderr, ensureSessionForTemplateOptions{
 		materializeMetadata: opts.materializeMetadata,
 	})
 	return id, true, err
@@ -93,8 +98,19 @@ func resolveSessionIDAllowClosedWithConfig(cityPath string, cfg *config.City, st
 	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{allowClosed: true})
 }
 
-func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
-	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true})
+// resolveSessionIDMaterializingNamed resolves identifier, materializing a
+// configured named session that has no row yet. stderr receives the
+// materializer's report of a start it left to the reconciler; nil discards it.
+func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store beads.Store, identifier string, stderr io.Writer) (string, error) {
+	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true, stderr: stderr})
+}
+
+// resolveSessionIDMaterializingNamedBeforeReopen is
+// resolveSessionIDMaterializingNamed calling beforeReopen with a closed
+// configured named row's id before it reopens it; an error from beforeReopen
+// leaves the row closed and is returned.
+func resolveSessionIDMaterializingNamedBeforeReopen(cityPath string, cfg *config.City, store beads.Store, identifier string, beforeReopen func(id string) error) (string, error) {
+	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true, beforeReopen: beforeReopen})
 }
 
 func resolveSessionIDMaterializingNamedWithMetadata(cityPath string, cfg *config.City, store beads.Store, identifier string, metadata map[string]string) (string, error) {
@@ -104,19 +120,14 @@ func resolveSessionIDMaterializingNamedWithMetadata(cityPath string, cfg *config
 	})
 }
 
-func parseTemplateTarget(identifier string) (templateTarget, bool) {
+// isTemplateTarget reports whether identifier is a "template:<name>" target,
+// which names a template to start fresh rather than a session to resolve.
+func isTemplateTarget(identifier string) bool {
 	identifier = strings.TrimSpace(identifier)
 	if !strings.HasPrefix(identifier, templateTargetPrefix) {
-		return templateTarget{}, false
+		return false
 	}
-	name := normalizeNamedSessionTarget(strings.TrimSpace(strings.TrimPrefix(identifier, templateTargetPrefix)))
-	if name == "" {
-		return templateTarget{}, false
-	}
-	return templateTarget{
-		template:   name,
-		forceFresh: true,
-	}, true
+	return normalizeNamedSessionTarget(strings.TrimSpace(strings.TrimPrefix(identifier, templateTargetPrefix))) != ""
 }
 
 func resolveSessionIDWithOptions(
@@ -129,20 +140,23 @@ func resolveSessionIDWithOptions(
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
-	if _, ok := parseTemplateTarget(identifier); ok {
+	sessions := beads.SessionStore{Store: store}
+	if isTemplateTarget(identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
-		return id, nil
-	} else if !errors.Is(err, session.ErrSessionNotFound) {
-		return "", err
+	if !opts.skipExactID {
+		if id, err := session.ResolveSessionIDByExactID(sessions, identifier); err == nil {
+			return id, nil
+		} else if !errors.Is(err, session.ErrSessionNotFound) {
+			return "", err
+		}
 	}
 	if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
 		return id, nil
 	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
 		return "", fmt.Errorf("resolving configured named session %q: %w", identifier, err)
 	}
-	if id, err := session.ResolveSessionID(store, identifier); err == nil {
+	if id, err := session.ResolveSessionID(sessions, identifier); err == nil {
 		if cfg != nil {
 			if info, getErr := sessionFrontDoor(store).Get(id); getErr == nil {
 				if isNamedSessionInfo(info) {
@@ -171,7 +185,7 @@ func resolveSessionIDWithOptions(
 				return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 			}
 		}
-		if id, err := session.ResolveSessionIDAllowClosed(store, identifier); err == nil {
+		if id, err := session.ResolveSessionIDAllowClosed(sessions, identifier); err == nil {
 			return id, nil
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err

@@ -17,6 +17,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 const agentScriptActionTimeout = 5 * time.Minute
@@ -110,16 +113,23 @@ type agentScriptExecutor struct {
 	runCommandInStore func(dir string, env []string, name string, args ...string) error
 	// resolveBeadStore returns the dir + env a bd write against beadID must use
 	// (ok=true) when the current runner must claim/update across stores; ok=false
-	// runs the write in the default (inherited) environment.
-	resolveBeadStore func(beadID string) (dir string, env []string, ok bool)
+	// runs the write in the default (inherited) environment. An error means the
+	// store could not be decided: the write is refused and no bd process runs.
+	resolveBeadStore func(beadID string) (dir string, env []string, ok bool, err error)
 }
 
 // runBDForBead runs a bd subprocess against beadID, redirecting it to the bead's
 // owning store when the runner is cross-store-eligible (vp-kvp stage iii write
-// half). Falls back to the default environment otherwise.
+// half). Falls back to the default environment otherwise. An error from
+// resolveBeadStore is returned without running bd and without a fallback: a
+// write whose store cannot be decided must not land in the default store.
 func (e agentScriptExecutor) runBDForBead(beadID string, args ...string) error {
-	if e.resolveBeadStore != nil && e.runCommandInStore != nil {
-		if dir, env, ok := e.resolveBeadStore(strings.TrimSpace(beadID)); ok {
+	if e.resolveBeadStore != nil {
+		dir, env, ok, err := e.resolveBeadStore(strings.TrimSpace(beadID))
+		if err != nil {
+			return err
+		}
+		if ok && e.runCommandInStore != nil {
 			return e.runCommandInStore(dir, env, "bd", args...)
 		}
 	}
@@ -389,7 +399,9 @@ func agentScriptBDUpdateArgs(arg any, ctx agentScriptContext) ([]string, error) 
 		return nil, err
 	}
 	if notes != "" {
-		args = append(args, "--notes", notes)
+		// Append rather than replace: scripted agents update work beads,
+		// and --notes would discard notes the bead already carries.
+		args = append(args, "--append-notes", notes)
 	}
 	if rawMetadata, ok := m["metadata"]; ok {
 		metadata, err := agentScriptMapArg("bd_update metadata", rawMetadata)
@@ -710,16 +722,25 @@ func envKeySegment(value string) string {
 	return strings.Trim(b.String(), "_")
 }
 
+// runShellCommand runs a shell action through the platform's command
+// interpreter (runtime.ShellCommandContext: `sh -c` on Unix, PowerShell on
+// Windows). A command the platform refuses (runtime.ShellCommandUnavailable)
+// starts nothing.
 func (e agentScriptExecutor) runShellCommand(command string, env []string) error {
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return fmt.Errorf("shell action refused: %s", reason)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), agentScriptActionTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return fmt.Errorf("shell action failed: %w", err)
+	}
 	cmd.WaitDelay = 2 * time.Second
-	prepareProviderOpCommand(cmd)
 	cmd.Env = workQueryEnvForDir(env, "")
 	cmd.Stdout = e.stdout
 	cmd.Stderr = e.stderr
-	if err := cmd.Run(); err != nil {
+	if err := runProviderOpCommand(cmd); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("shell action timed out after %s", agentScriptActionTimeout)
 		}
@@ -744,6 +765,9 @@ func runAgentScriptCommandInStore(stdout, stderr io.Writer, dir string, env []st
 	prepareProviderOpCommand(cmd)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
 	}
 	if env != nil {
 		cmd.Env = workQueryEnvForDir(env, dir)
@@ -801,6 +825,11 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 
 func agentScriptHookExitIsNoWork(output, stderr string) bool {
 	if workQueryHasReadyWork(output) {
+		return false
+	}
+	// The store could not be read, which is not the same as no work, even
+	// when bd's own message is warning-shaped.
+	if strings.Contains(stderr, hookStoreUnavailableToken) {
 		return false
 	}
 	for _, line := range strings.Split(stderr, "\n") {

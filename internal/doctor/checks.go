@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -29,7 +28,10 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -114,7 +116,7 @@ func NewConfigValidCheck(cfg *config.City) *ConfigValidCheck {
 func (c *ConfigValidCheck) Name() string { return "config-valid" }
 
 // Run validates agents and rigs in the config.
-func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
+func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if err := config.ValidateAgents(c.cfg.Agents); err != nil {
 		r.Status = StatusError
@@ -122,6 +124,15 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if err := config.ValidateRigs(c.cfg.Rigs, config.EffectiveHQPrefix(c.cfg)); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("rig validation: %v", err)
+		return r
+	}
+	cityPath := ""
+	if ctx != nil {
+		cityPath = ctx.CityPath
+	}
+	if err := config.ValidateRigFederationLayout(cityPath, c.cfg); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
@@ -139,6 +150,11 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 	if err := workspacesvc.ValidateRuntimeSupport(c.cfg.Services); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("service validation: %v", err)
+		return r
+	}
+	if warnings := config.RigFederationWarnings(c.cfg.Rigs); len(warnings) > 0 {
+		r.Status = StatusWarning
+		r.Message = "agents, rigs, and services valid; " + strings.Join(warnings, "; ")
 		return r
 	}
 	r.Status = StatusOK
@@ -456,17 +472,37 @@ func (c *BinaryCheck) Fix(_ *CheckContext) error { return nil }
 
 // --- Session checks (skipped when controller is running) ---
 
+// SessionRegistry reads the open session rows from the store the city keeps
+// its sessions in and returns each row's runtime session name mapped to the
+// qualified name of the agent it runs. It leaves out a row whose agent or
+// named session is no longer configured, so that row's runtime stays an
+// orphan. The runtime names a pool instance or a bead-named session after its
+// session row, not after agent.SessionNameFor, so the session checks read the
+// registry to know which running sessions the city accounts for. A nil
+// SessionRegistry knows only the agent.SessionNameFor names.
+type SessionRegistry func() (map[string]string, error)
+
+func (r SessionRegistry) read() (map[string]string, error) {
+	if r == nil {
+		return nil, nil
+	}
+	return r()
+}
+
 // AgentSessionsCheck verifies non-suspended agents have running sessions.
 type AgentSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	registry        SessionRegistry
 }
 
-// NewAgentSessionsCheck creates a check for agent session liveness.
-func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider) *AgentSessionsCheck {
-	return &AgentSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp}
+// NewAgentSessionsCheck creates a check for agent session liveness. An agent
+// has a session when a registry session mapped to it is running, or when its
+// agent.SessionNameFor name is.
+func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider, registry SessionRegistry) *AgentSessionsCheck {
+	return &AgentSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp, registry: registry}
 }
 
 // Name returns the check identifier.
@@ -475,13 +511,26 @@ func (c *AgentSessionsCheck) Name() string { return "agent-sessions" }
 // Run checks that each non-suspended agent has a running session.
 func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	registered, err := c.registry.read()
+	if err != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("cannot tell which agents have sessions: reading the session registry: %v", err)
+		return r
+	}
+	byAgent := make(map[string][]string)
+	for sn, qn := range registered {
+		byAgent[qn] = append(byAgent[qn], sn)
+	}
+	for _, names := range byAgent {
+		sort.Strings(names)
+	}
+	listed := c.attestedRunning()
 	var missing []string
 	for _, a := range c.cfg.Agents {
 		if a.Suspended {
 			continue
 		}
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		if !c.sp.IsRunning(sn) {
+		if !c.hasRunningSession(listed, byAgent[a.QualifiedName()], a.QualifiedName()) {
 			missing = append(missing, a.QualifiedName())
 		}
 	}
@@ -495,6 +544,38 @@ func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r.Details = missing
 	r.FixHint = "run gc start to reconcile sessions"
 	return r
+}
+
+// attestedRunning lists the running sessions once, when the provider attests
+// that an error-free listing is complete. It returns nil when the listing
+// proves no absence: the provider does not attest it, or it failed.
+func (c *AgentSessionsCheck) attestedRunning() map[string]bool {
+	running, attested, err := runtime.ListRunningWithAttestation(c.sp, "") // per-city socket isolation: all sessions belong to this city
+	if !attested || err != nil {
+		return nil
+	}
+	listed := make(map[string]bool, len(running))
+	for _, s := range running {
+		listed[s] = true
+	}
+	return listed
+}
+
+// hasRunningSession reports whether one of the agent's registry sessions, or
+// its agent.SessionNameFor name, is running. A name absent from an attested
+// listing is not running and is not probed; any other name is confirmed through
+// IsRunning, stopping at the first running session.
+func (c *AgentSessionsCheck) hasRunningSession(listed map[string]bool, registered []string, qualifiedName string) bool {
+	names := append(append([]string(nil), registered...), agent.SessionNameFor(c.cityName, qualifiedName, c.sessionTemplate))
+	for _, sn := range names {
+		if listed != nil && !listed[sn] {
+			continue
+		}
+		if c.sp.IsRunning(sn) {
+			return true
+		}
+	}
+	return false
 }
 
 // CanFix returns false.
@@ -548,7 +629,10 @@ func (c *ZombieSessionsCheck) CanFix() bool { return true }
 
 // Fix kills all zombie sessions. It refuses while a controller is running
 // (GH#5742): the controller's own health patrol already reconciles zombie
-// sessions, and an uncoordinated Stop here would race it.
+// sessions, and an uncoordinated Stop here would race it. A zombie that is
+// already gone when Fix stops it — its tmux server died after the observation —
+// is fixed, so Fix stops through runtime.StopForCleanup and reports only a
+// stop that failed to remove a session.
 func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -559,7 +643,7 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 		}
 		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
 		if c.sp.IsRunning(sn) && !c.sp.ProcessAlive(sn, a.ProcessNames) {
-			if err := c.sp.Stop(sn); err != nil {
+			if err := runtime.StopForCleanup(c.sp, sn); err != nil {
 				return fmt.Errorf("killing zombie session %q: %w", sn, err)
 			}
 		}
@@ -567,23 +651,49 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// OrphanSessionsCheck finds sessions with the city prefix not in config.
+// OrphanSessionsCheck finds running sessions that neither a configured agent
+// nor an open session registry row accounts for.
 type OrphanSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	registry        SessionRegistry
 }
 
-// NewOrphanSessionsCheck creates a check for orphaned sessions.
-func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider) *OrphanSessionsCheck {
-	return &OrphanSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp}
+// NewOrphanSessionsCheck creates a check for orphaned sessions. A running
+// session is accounted for when it carries a configured agent's
+// agent.SessionNameFor name or an open registry row's session name.
+func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider, registry SessionRegistry) *OrphanSessionsCheck {
+	return &OrphanSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp, registry: registry}
+}
+
+// expectedSessions returns every session name the city accounts for: each
+// configured agent's agent.SessionNameFor name and each open registry row's
+// session name. It reads the registry afresh, so a caller that lists the
+// running sessions first never takes a session whose row was written meanwhile
+// for an orphan.
+func (c *OrphanSessionsCheck) expectedSessions() (map[string]bool, error) {
+	registered, err := c.registry.read()
+	if err != nil {
+		return nil, fmt.Errorf("reading the session registry: %w", err)
+	}
+	expected := make(map[string]bool, len(c.cfg.Agents)+len(registered))
+	for _, a := range c.cfg.Agents {
+		expected[agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)] = true
+	}
+	for sn := range registered {
+		expected[sn] = true
+	}
+	return expected, nil
 }
 
 // Name returns the check identifier.
 func (c *OrphanSessionsCheck) Name() string { return "orphan-sessions" }
 
-// Run finds sessions with the city prefix that don't match any configured agent.
+// Run finds running sessions that neither a configured agent's
+// agent.SessionNameFor name nor an open registry row of a configured agent
+// accounts for.
 func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	prefix := "" // per-city socket isolation: all sessions belong to this city
@@ -595,11 +705,11 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	// Build set of expected session names.
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
+	expected, registryErr := c.expectedSessions()
+	if registryErr != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("cannot tell which sessions are orphaned: %v", registryErr)
+		return r
 	}
 
 	var orphans []string
@@ -634,7 +744,11 @@ func (c *OrphanSessionsCheck) CanFix() bool { return true }
 
 // Fix kills all orphaned sessions. It refuses while a controller is running
 // (GH#5742): the controller's own health patrol already reconciles orphan
-// sessions, and an uncoordinated Stop here would race it.
+// sessions, and an uncoordinated Stop here would race it. Like
+// ZombieSessionsCheck.Fix, it stops through runtime.StopForCleanup, so an
+// orphan whose tmux server died after the listing counts as removed. It stops
+// nothing when the session registry cannot be read: every bead-named session
+// would otherwise look orphaned.
 func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -647,14 +761,13 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if err != nil {
 		return err
 	}
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
+	expected, err := c.expectedSessions()
+	if err != nil {
+		return fmt.Errorf("stopping no session: %w", err)
 	}
 	for _, s := range running {
 		if !expected[s] {
-			if err := c.sp.Stop(s); err != nil {
+			if err := runtime.StopForCleanup(c.sp, s); err != nil {
 				return fmt.Errorf("killing orphan session %q: %w", s, err)
 			}
 		}
@@ -689,6 +802,9 @@ func (c *BeadsStoreCheck) Name() string { return "beads-store" }
 // native-store city.
 func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, c.cityPath); pending != nil {
+		return pending
+	}
 	target, fixHint, active, err := validateBDStoreTarget(c.cityPath, c.cityPath)
 	if err != nil {
 		r.Status = StatusError
@@ -699,15 +815,16 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if active {
-		addr := net.JoinHostPort(target.Host, target.Port)
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err != nil {
-			r.Status = StatusError
-			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
-			r.FixHint = doltServerFixHint(target)
-			return r
+		if !strings.EqualFold(target.DoltMode, "proxied-server") || target.External {
+			addr, conn, err := dialDoltTarget(target)
+			if err != nil {
+				r.Status = StatusError
+				r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+				r.FixHint = doltServerFixHint(target)
+				return r
+			}
+			conn.Close() //nolint:errcheck // best-effort close
 		}
-		conn.Close() //nolint:errcheck // best-effort close
 	}
 	result, err := c.newStore(c.cityPath)
 	if err != nil {
@@ -715,9 +832,78 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("store open failed: %v", err)
 		return r
 	}
-	if err := result.Store.Ping(); err != nil {
+	pingErr := result.Store.Ping()
+	// The structured half of the answer, for the consumers that must not parse
+	// the message below. On a proxied scope it carries gc's read-only account
+	// of bd's proxy — the record, the liveness verdict and its evidence, the
+	// idle policy and both schema cursors — which is what the native-over-proxy
+	// work has to be able to observe before it may use any of it.
+	//
+	// On the proxied-native lane it ALSO carries the store open's own account of
+	// bd's proxy — the generation it pinned, the verdict if it refused, whether
+	// the handle has since dropped to bd — projected from the same diagnostic the
+	// message below is built from, and sitting beside the independent endpoint
+	// account so a disagreement between the two is visible rather than averaged.
+	//
+	// It is the account the handle gives NOW, not only the one the open gave.
+	// The store doctor holds has been through wrapStoreWithBeadPolicies, which
+	// embeds the Store interface and therefore strips the wrapper's own methods;
+	// beads.LiveProxiedDiagnostic asks through the unwrap seam that wrapper
+	// participates in, and falls back to the open-time account for every store
+	// that carries no split store — which is every store on every other lane, so
+	// their payload is byte-identical to today's.
+	//
+	// The difference is the whole point: a handle that stood down after the open
+	// (a migration under a controller store, a proxy that went away) reports
+	// itself native forever if the payload is only ever the open's account, and
+	// a demoted city reading as healthy is the one thing `gc doctor` must not
+	// say.
+	proxied := beads.LiveProxiedDiagnostic(result.Store, result.Diagnostic.Proxied)
+	r.Payload = newBeadsStorePayload(c.cityPath, target, beadsStoreDiagnostic{
+		Store:           result.Diagnostic.Store,
+		PreflightGate:   result.Diagnostic.PreflightGate,
+		PreflightReason: result.Diagnostic.PreflightReason,
+		Proxied:         proxied,
+	})
+	// The ping is reported AFTER the payload is built, not instead of it
+	// (council B-F2). Returning on the ping error dropped the whole proxied
+	// diagnostic block — the generation, the verdict, whether the handle has
+	// stood down — on precisely the failure it exists to explain, and left an
+	// operator with one line of driver text. The failure is still an error; it
+	// now arrives with the evidence attached.
+	//
+	// It is read after LiveProxiedDiagnostic as well as after newStore, because
+	// on the proxied lane a failing Ping is itself a demotion trigger: it runs
+	// through withReadRetry, so its verdict stands the native leaf down, and the
+	// diagnostic must be the account the handle gives once that has happened.
+	if pingErr != nil {
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("store ping failed: %v", err)
+		r.Message = fmt.Sprintf("store ping failed: %v", pingErr)
+		return r
+	}
+	if result.Diagnostic.Store == beads.BeadsStoreNameNativeDoltStore && proxied != nil {
+		// The proxied-native lane. The store name is NativeDoltStore because that
+		// is what serves the reads (design 5.3); the message is what tells an
+		// operator that this native store is reading through somebody else's
+		// proxy and writing through somebody else's CLI.
+		//
+		// A handle that has since stood down gets its own line: the open took the
+		// lane and the handle lost it, which is a different fact from a scope that
+		// never took it, and "native reads over bd proxy" would be a false
+		// statement about a store that is forking for every read.
+		r.Status = StatusOK
+		if proxied.Demoted {
+			r.Message = proxiedDemotedStoreMessage(proxied)
+			return r
+		}
+		r.Message = proxiedNativeStoreMessage(proxied)
+		return r
+	}
+	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore && result.Diagnostic.PreflightGate == beads.BeadsGateProxiedProvider {
+		// Not a degraded fallback: bd owns the Dolt topology for proxied
+		// scopes and the CLI front door is the only supported store.
+		r.Status = StatusOK
+		r.Message = proxiedFallbackStoreMessage(proxied)
 		return r
 	}
 	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore {
@@ -738,6 +924,18 @@ func (c *BeadsStoreCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *BeadsStoreCheck) Fix(_ *CheckContext) error { return nil }
+
+// dialDoltTarget probes the transport selected by the canonical connection
+// contract. A Unix socket is authoritative when present; otherwise host/port
+// identifies the TCP endpoint. Callers own the returned connection.
+func dialDoltTarget(target contract.DoltConnectionTarget) (string, net.Conn, error) {
+	network, addr := "tcp", net.JoinHostPort(target.Host, target.Port)
+	if target.Socket != "" {
+		network, addr = "unix", target.Socket
+	}
+	conn, err := net.DialTimeout(network, addr, 2*time.Second)
+	return addr, conn, err
+}
 
 // BDSplitStoreCheck warns when legacy bd embedded/server store directories
 // coexist and the inactive store still contains Dolt data.
@@ -1204,6 +1402,33 @@ func doctorScopeHasFileStoreMarker(scopePath string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// scopeNonDoltBackend reports the backend a scope's .beads/metadata.json names
+// when that backend is not Dolt, so a Dolt-only check can answer "not
+// applicable" instead of dialing a server that does not exist. It decides from
+// metadata alone and names no backend: "is Dolt" is contract.IsDoltBackend, the
+// predicate the store factory and the provider lifecycle route on, so every
+// spelling they serve as Dolt ("dolt", "bd", in any case) keeps its dial and
+// any other name is not Dolt. Metadata that names nothing, or cannot be read,
+// stays with the Dolt checks: an unnamed backend is the Dolt default, and an
+// unreadable file must not silence a check that would report it.
+func scopeNonDoltBackend(scopeRoot string) (string, bool) {
+	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !named || contract.IsDoltBackend(backend) {
+		return "", false
+	}
+	return backend, true
+}
+
+// nonDoltScopeResult is the not-applicable answer for a Dolt-server check on a
+// scope bound to a non-Dolt backend.
+func nonDoltScopeResult(name, backend string) *CheckResult {
+	return &CheckResult{
+		Name:    name,
+		Status:  StatusOK,
+		Message: fmt.Sprintf("not applicable (beads backend %q is not Dolt)", backend),
+	}
+}
+
 // DoltServerCheck verifies the dolt server is running and reachable.
 type DoltServerCheck struct {
 	cityPath string
@@ -1232,22 +1457,33 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "not required (bd backend=doltlite)"
 		return r
 	}
+	if backend, ok := scopeNonDoltBackend(c.cityPath); ok {
+		return nonDoltScopeResult(c.Name(), backend)
+	}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, c.cityPath); pending != nil {
+		return pending
+	}
 
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, c.cityPath)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
-		r.FixHint = resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath)
+		r.FixHint = withManagedDoltInfraScopeHint(c.cityPath, resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath))
 		return r
 	}
-	addr := net.JoinHostPort(target.Host, target.Port)
-
-	// Check TCP reachability.
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if target.DoltMode == "proxied-server" && target.Host == "" && target.Port == "" && target.Socket == "" {
+		r.Status = StatusOK
+		r.Message = "managed by beads proxied-server provider"
+		return r
+	}
+	addr, conn, err := dialDoltTarget(target)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
 		r.FixHint = doltServerFixHint(target)
+		if target.EndpointOrigin == contract.EndpointOriginManagedCity {
+			r.FixHint = withManagedDoltInfraScopeHint(c.cityPath, r.FixHint)
+		}
 		return r
 	}
 	conn.Close() //nolint:errcheck // best-effort close
@@ -1296,6 +1532,12 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "not required (bd backend=doltlite)"
 		return r
 	}
+	if backend, ok := scopeNonDoltBackend(rigPath); ok {
+		return nonDoltScopeResult(c.Name(), backend)
+	}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
+		return pending
+	}
 	if err := contract.ValidateInheritedCityEndpointMirror(fsys.OSFS{}, c.cityPath, rigPath); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("inherited city endpoint drift: %v", err)
@@ -1309,20 +1551,42 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = "reconcile the canonical external Dolt endpoint"
 		return r
 	}
-	if !explicit {
-		r.Status = StatusOK
-		r.Message = "inherits city dolt endpoint"
-		return r
-	}
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
 	if err != nil {
+		if !explicit && contract.IsManagedRuntimeUnavailable(err) {
+			r.Status = StatusOK
+			r.Message = "inherits city dolt endpoint"
+			return r
+		}
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
 		r.FixHint = "reconcile the canonical external Dolt endpoint"
 		return r
 	}
-	addr := net.JoinHostPort(target.Host, target.Port)
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if strings.EqualFold(target.DoltMode, "proxied-server") && target.External {
+		addr, conn, dialErr := dialDoltTarget(target)
+		if dialErr != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+			r.FixHint = doltServerFixHint(target)
+			return r
+		}
+		conn.Close() //nolint:errcheck // best-effort close
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("reachable on %s (proxied-server external)", addr)
+		return r
+	}
+	if strings.EqualFold(target.DoltMode, "proxied-server") && !target.External {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=dolt proxied-server)"
+		return r
+	}
+	if !explicit {
+		r.Status = StatusOK
+		r.Message = "inherits city dolt endpoint"
+		return r
+	}
+	addr, conn, err := dialDoltTarget(target)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
@@ -1377,8 +1641,9 @@ func (c *EventsLogCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = "events.jsonl not found (events will not be logged)"
 		return r
 	}
-	// Check writable by opening for append.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, fi.Mode())
+	// Check writable by opening for append, without blocking a concurrent
+	// rotation of the log.
+	f, err := livefile.OpenFile(path, os.O_WRONLY|os.O_APPEND, fi.Mode())
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("events.jsonl not writable: %v", err)
@@ -1524,6 +1789,9 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	if !filepath.IsAbs(rigPath) {
 		rigPath = filepath.Join(c.cityPath, rigPath)
 	}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
+		return pending
+	}
 	target, fixHint, active, err := validateBDStoreTarget(c.cityPath, rigPath)
 	if err != nil {
 		r.Status = StatusError
@@ -1533,9 +1801,9 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 		}
 		return r
 	}
-	if active {
-		addr := net.JoinHostPort(target.Host, target.Port)
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	proxied := active && targetIsProviderOwnedProxied(target)
+	if active && !proxied {
+		addr, conn, err := dialDoltTarget(target)
 		if err != nil {
 			r.Status = StatusError
 			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
@@ -1557,6 +1825,14 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	}
 	r.Status = StatusOK
 	r.Message = "store accessible"
+	if proxied {
+		// The rig lane has no store-open diagnostic to project: NewRigBeadsCheck
+		// takes a factory that returns a bare beads.Store, and rig diagnostics are
+		// not retained anywhere today (the city's are, via CityBeadsDiagnostic).
+		// So the lane is read off the store itself, which is the one piece of
+		// evidence this check does hold.
+		r.Message = rigProxiedStoreMessage(store)
+	}
 	return r
 }
 
@@ -1623,17 +1899,24 @@ type WorktreeCheck struct {
 // Name returns the check identifier.
 func (c *WorktreeCheck) Name() string { return "worktrees" }
 
-// Run walks .gc/worktrees/ and verifies each .git pointer.
+// Run walks the configured worktrees root (workdir.WorktreesRoot) and
+// verifies each .git pointer. Per-bead
+// worktrees at <rig>/worktrees/ are a separate population and are
+// covered by RigWorktreesCheck.
 func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.broken = nil
 
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
 			r.Status = StatusOK
-			r.Message = "no worktrees directory"
+			// Name the directory. The bare "no worktrees directory"
+			// read as a claim about every worktree on the box, and was
+			// reported green against a rig whose own worktrees/ held
+			// tens of gigabytes.
+			r.Message = fmt.Sprintf("no worktrees directory at %s", wtRoot)
 			return r
 		}
 		r.Status = StatusError
@@ -1665,7 +1948,7 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(c.broken) == 0 {
 		r.Status = StatusOK
 		if total == 0 {
-			r.Message = "no worktrees"
+			r.Message = fmt.Sprintf("no agent worktrees under %s", wtRoot)
 		} else {
 			r.Message = fmt.Sprintf("all %d worktree(s) valid", total)
 		}
@@ -1759,6 +2042,47 @@ type managedDoltDoctorRuntimeState struct {
 	PID     int    `json:"pid"`
 	Port    int    `json:"port"`
 	DataDir string `json:"data_dir"`
+	// InfraScope names the transient systemd user scope unit gc started the
+	// server in; empty when it was started unscoped.
+	InfraScope string `json:"infra_scope"`
+}
+
+// managedDoltInfraScopeHint tells the operator where to look when a managed
+// Dolt server gc started in a transient systemd user scope is not running:
+// the scope is collected once its processes exit, but the user manager's
+// journal records for it remain. It reads the published runtime state, then
+// the provider state, and returns "" when neither records a scope.
+func managedDoltInfraScopeHint(cityPath string) string {
+	for _, name := range []string{"dolt-state.json", "dolt-provider-state.json"} {
+		data, err := os.ReadFile(filepath.Join(doctorDoltPackStateDir(cityPath), name)) //nolint:gosec // path is derived from managed city layout
+		if err != nil {
+			continue
+		}
+		var state managedDoltDoctorRuntimeState
+		if json.Unmarshal(data, &state) != nil {
+			continue
+		}
+		unit := strings.TrimSpace(state.InfraScope)
+		if unit == "" {
+			continue
+		}
+		return fmt.Sprintf("the managed Dolt server (pid %d) was started in systemd user scope %s, which is removed once it exits; "+
+			"its journal records remain: journalctl --user-unit=%s (all such scopes: journalctl -g 'gascity infra:'; without per-user journals this needs adm or systemd-journal group access), and its own output is in the managed dolt.log",
+			state.PID, unit, unit)
+	}
+	return ""
+}
+
+// withManagedDoltInfraScopeHint appends managedDoltInfraScopeHint to hint.
+func withManagedDoltInfraScopeHint(cityPath, hint string) string {
+	scopeHint := managedDoltInfraScopeHint(cityPath)
+	if scopeHint == "" {
+		return hint
+	}
+	if hint == "" {
+		return scopeHint
+	}
+	return hint + "; " + scopeHint
 }
 
 func publishedManagedDoltDataDir(cityPath string) string {
@@ -1815,7 +2139,7 @@ func validPublishedManagedDoltDoctorState(cityPath string, state managedDoltDoct
 		return false
 	}
 	_ = conn.Close()
-	holderPID := managedDoltDoctorPortHolderPID(state.Port)
+	holderPID := managedDoltDoctorPortHolderPID(state.Port, state.PID)
 	if holderPID > 0 {
 		return holderPID == state.PID
 	}
@@ -1850,76 +2174,17 @@ func managedDoltDoctorProcCmdline(pid int) string {
 	return strings.TrimSpace(string(out))
 }
 
-func managedDoltDoctorPortHolderPID(port int) int {
+// managedDoltDoctorPortHolderPID returns the PID listening on port, checking
+// candidate first. Linux reads /proc (see pidutil.ListenerPID); hosts without
+// /proc/net fall back to lsof.
+func managedDoltDoctorPortHolderPID(port, candidate int) int {
 	if port <= 0 {
 		return 0
 	}
-	if pid, checked := managedDoltDoctorPortHolderFromProc(uint16(port)); checked {
+	if pid, checked := pidutil.ListenerPID(port, candidate); checked {
 		return pid
 	}
 	return managedDoltDoctorPortHolderFromLsof(port)
-}
-
-func managedDoltDoctorPortHolderFromProc(port uint16) (int, bool) {
-	inodes := map[string]struct{}{}
-	checked := false
-	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		checked = true
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 10 || fields[3] != "0A" {
-				continue
-			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			gotPort, err := strconv.ParseUint(portHex, 16, 16)
-			if err != nil || uint16(gotPort) != port {
-				continue
-			}
-			inodes[fields[9]] = struct{}{}
-		}
-	}
-	if !checked {
-		return 0, false
-	}
-	if len(inodes) == 0 {
-		return 0, true
-	}
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0, true
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || !pidutil.Alive(pid) {
-			continue
-		}
-		fdDir := filepath.Join("/proc", entry.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
-				continue
-			}
-			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-			if _, ok := inodes[inode]; ok {
-				return pid, true
-			}
-		}
-	}
-	return 0, true
 }
 
 func managedDoltDoctorPortHolderFromLsof(port int) int {
@@ -2217,6 +2482,20 @@ func managedLocalDoltChecksApplicableForScopeRoots(cityPath string, scopeRoots [
 		if !scopeUsesBDDoltStore(cityPath, scopeRoot) {
 			continue
 		}
+		// Three arms, not two: managed-local, bd-owned proxied, external. A city
+		// migrated with `gc beads city migrate-proxied` keeps
+		// gc.endpoint_origin: managed_city in its canonical config — the managed
+		// city is still where its rigs inherit from — but its Dolt is bd's
+		// proxied server now and migrate-proxied retired gc's dolt-config.yaml on
+		// purpose. Classifying it as managed-local produced a permanent
+		// 'dolt-config — managed dolt-config.yaml not found' warning whose fix
+		// hint (gc start / gc dolt restart) is a typed no-op on a proxied scope:
+		// a doctor line no operator can ever clear, on the documented migration
+		// path. Ask bd's own binding, which is the authority for who runs the
+		// process.
+		if doctorScopeIsBdOwnedProxied(cityPath, scopeRoot) {
+			continue
+		}
 
 		resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 		if err != nil {
@@ -2240,6 +2519,25 @@ func managedLocalDoltChecksApplicableForScopeRoots(cityPath string, scopeRoots [
 		}
 	}
 	return false
+}
+
+// doctorScopeIsBdOwnedProxied reports whether the scope's Dolt is bd's proxied
+// server rather than a server gc would start.
+//
+// bd's committed metadata.json answers first: it is the durable binding, and a
+// scope carries it whether gc journaled the initialization or `bd migrate` wrote
+// it in place. The resolved authoritative state is the fallback for a scope
+// whose metadata is unreadable but whose canonical config still records the
+// mode.
+func doctorScopeIsBdOwnedProxied(cityPath, scopeRoot string) bool {
+	if scopeBindingIsProviderOwnedProxied(scopeRoot) {
+		return true
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(resolved.State.DoltMode), "proxied-server")
 }
 
 func inheritedDoctorScopeUsesManagedCity(cityPath string) bool {
@@ -2917,12 +3215,17 @@ func IsControllerRunning(cityPath string) bool {
 	}
 	defer f.Close() //nolint:errcheck // probe only
 
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
 	if err != nil {
-		// EWOULDBLOCK means the lock is held — controller is running.
+		// A busy lock means the controller holds it; an unknown lock error is
+		// treated as running so fixers do not race a controller they cannot rule out.
 		return true
 	}
 	// We got the lock, release immediately — no controller running.
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	lock.Release() //nolint:errcheck // best-effort unlock
 	return false
 }

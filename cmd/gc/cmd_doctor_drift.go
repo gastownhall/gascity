@@ -11,19 +11,23 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // doltDriftCheck detects bd-vs-gc Dolt drift in managed-city topology: rigs
 // configured inherited_city but running their own Dolt, port-file mismatches
 // between rig mirrors and the canonical managed city port, and stale
 // .dolt/sql-server.info files left over from abandoned rig-local servers.
+// Embedded rigs serve their own store and are skipped, as the port-file sync
+// skips them.
 type doltDriftCheck struct {
 	cityPath string
 	cfg      *config.City
 
 	// repinnablePortDrift is set by Run when at least one rig's
-	// .beads/dolt-server.port disagrees with the managed city port (Case B) —
-	// drift that re-pinning the configured port files repairs.
+	// .beads/dolt-server.port disagrees with the managed city port (Case B) or
+	// is missing or empty where the sync writes one (Case D) — drift that
+	// re-pinning the configured port files repairs.
 	repinnablePortDrift bool
 	// liveRigLocalBlocking is set by Run when a rig configured inherited_city
 	// still has a live rig-local Dolt (Case A). Re-pinning a port file while a
@@ -75,6 +79,24 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		if !rigUsesManagedBdStoreContract(c.cityPath, rig) {
 			continue
 		}
+		embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, rig.Path)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("rig %q classify storage mode: %v", rig.Name, err))
+			continue
+		}
+		if embedded {
+			// An embedded rig serves its own store (ga-p9iuv): its port file is
+			// not gc's to re-pin, so there is no drift to report or fix.
+			continue
+		}
+		if bdOwnedDirect, err := scopeIsBdOwnedDirectExternal(c.cityPath, rig.Path); err != nil {
+			errors = append(errors, fmt.Sprintf("rig %q classify store binding: %v", rig.Name, err))
+			continue
+		} else if bdOwnedDirect {
+			// bd bound this rig to a server gc does not run: its port file is
+			// bd's, and the port-file sync Fix runs leaves it alone.
+			continue
+		}
 		rigState, err := resolveDesiredRigEndpointState(c.cityPath, rig, cityState)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("rig %q resolve endpoint state: %v", rig.Name, err))
@@ -104,18 +126,40 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			))
 		}
 
-		// Case B: rig port file disagrees with managed city port.
+		// Cases B and D: the rig port file disagrees with, or lacks, the
+		// managed city port.
 		if managedPort != "" {
 			rigPortFile := filepath.Join(rig.Path, ".beads", "dolt-server.port")
-			if data, err := os.ReadFile(rigPortFile); err == nil {
-				got := strings.TrimSpace(string(data))
-				if got != "" && got != managedPort {
-					c.repinnablePortDrift = true
-					errors = append(errors, fmt.Sprintf(
-						"rig %q .beads/dolt-server.port=%s disagrees with managed city port %s; `gc doctor --fix` re-pins it (or next `gc start` overwrites it)",
-						rig.Name, got, managedPort,
-					))
+			data, err := os.ReadFile(rigPortFile)
+			got := strings.TrimSpace(string(data))
+			switch {
+			case err == nil && got != "" && got != managedPort:
+				c.repinnablePortDrift = true
+				errors = append(errors, fmt.Sprintf(
+					"rig %q .beads/dolt-server.port=%s disagrees with managed city port %s; `gc doctor --fix` re-pins it (or next `gc start` overwrites it)",
+					rig.Name, got, managedPort,
+				))
+			case (os.IsNotExist(err) || (err == nil && got == "")) && !liveRigLocal:
+				// Case D: the mirror is missing or empty. Raw bd in an
+				// inherited rig has no other way to find the city server, so
+				// every bd call there resolves port 0 until the mirror is back.
+				expected, expErr := rigExpectsManagedPortMirror(c.cityPath, rig, cityState)
+				if expErr != nil {
+					errors = append(errors, fmt.Sprintf("rig %q classify port mirror: %v", rig.Name, expErr))
+					break
 				}
+				if !expected {
+					break
+				}
+				state := "missing"
+				if err == nil {
+					state = "empty"
+				}
+				c.repinnablePortDrift = true
+				errors = append(errors, fmt.Sprintf(
+					"inherited rig %q has its .beads/dolt-server.port %s (managed city port %s), so raw bd there cannot reach the city server; `gc doctor --fix --check dolt-drift` re-pins it (or next `gc start` rewrites it)",
+					rig.Name, state, managedPort,
+				))
 			}
 		}
 	}
@@ -148,7 +192,8 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 }
 
 // CanFix reports whether the detected drift is the re-pinnable kind: at least
-// one rig port file disagrees with the managed city port (Case B), and no rig
+// one rig port file disagrees with the managed city port (Case B) or is
+// missing or empty where the sync writes one (Case D), and no rig
 // has a conflicting live rig-local Dolt (Case A). Re-pinning while a rig-local
 // server is listening would point the file at the wrong server, so that case is
 // left for the operator (the FixHint covers it). Run populates these flags and
@@ -158,10 +203,11 @@ func (c *doltDriftCheck) CanFix() bool {
 }
 
 // Fix re-pins the configured .beads/dolt-server.port files to the managed city
-// port, repairing Case-B drift. It reuses the same syncConfiguredDoltPortFiles
-// path that `gc start` runs at startup, so a stale rig port file no longer
-// requires a full restart to correct. The doctor framework re-runs Run
-// afterward to verify (and to surface any remaining non-re-pinnable drift).
+// port, repairing Case-B and Case-D drift. It reuses the same
+// syncConfiguredDoltPortFiles path that `gc start` runs at startup, so a stale
+// or missing rig port file no longer requires a full restart to correct. The
+// doctor framework re-runs Run afterward to verify (and to surface any
+// remaining non-re-pinnable drift).
 func (c *doltDriftCheck) Fix(ctx *doctor.CheckContext) error {
 	if c.cfg == nil {
 		return fmt.Errorf("dolt-drift: no city config available to re-pin port files")
@@ -174,6 +220,54 @@ func (c *doltDriftCheck) Fix(ctx *doctor.CheckContext) error {
 		warn = ctx.Output
 	}
 	return syncConfiguredDoltPortFiles(c.cityPath, c.cfg.Dolt, config.EffectiveHQPrefix(c.cfg), c.cfg.Rigs, warn)
+}
+
+// rigExpectsManagedPortMirror reports whether syncConfiguredDoltPortFiles
+// writes the managed city port into this inherited rig's
+// .beads/dolt-server.port. It mirrors the sync's skip arms beyond the ones Run
+// already applies (embedded and non-inherited rigs), so Case D only reports a
+// missing mirror that `gc doctor --fix` actually restores.
+func rigExpectsManagedPortMirror(cityPath string, rig config.Rig, cityState contract.ConfigState) (bool, error) {
+	if strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
+		return false, nil
+	}
+	cityProviderOwned, err := scopeProviderOwned(cityPath, cityPath)
+	if err != nil {
+		return false, err
+	}
+	if cityProviderOwned {
+		return false, nil
+	}
+	if cityUsesBdStoreContract(cityPath) {
+		cityBound, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+		if err != nil {
+			return false, err
+		}
+		if cityBound {
+			return false, nil
+		}
+	}
+	// The sync leaves the managed port unresolved for a city bd binds
+	// directly to a server gc does not run, so it writes no rig mirror.
+	cityBdOwnedDirect, err := scopeIsBdOwnedDirectExternal(cityPath, cityPath)
+	if err != nil {
+		return false, err
+	}
+	if cityBdOwnedDirect {
+		return false, nil
+	}
+	rigProviderOwned, err := scopeProviderOwned(cityPath, rig.Path)
+	if err != nil {
+		return false, err
+	}
+	if rigProviderOwned {
+		return false, nil
+	}
+	rigBound, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(rig.Path))
+	if err != nil {
+		return false, err
+	}
+	return !rigBound, nil
 }
 
 // rigLocalDoltPIDFromSQLServerInfo reads the colon-separated PID:PORT:UUID
@@ -206,5 +300,5 @@ func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, port int, infoEx
 	if !pidAlive(parsed) {
 		return parsed, parsedPort, true, false
 	}
-	return parsed, parsedPort, true, findPortHolderPID(strconv.Itoa(parsedPort)) == parsed
+	return parsed, parsedPort, true, findPortHolderPID(strconv.Itoa(parsedPort), parsed) == parsed
 }

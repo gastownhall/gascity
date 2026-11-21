@@ -21,6 +21,22 @@ type ProviderOption struct {
 	// Choices are the allowed values; selecting one injects its FlagArgs into the
 	// agent command line (how the Model axis renders to a harness CLI flag).
 	Choices []OptionChoice `toml:"choices" json:"choices"`
+	// FlagTemplate makes this option OPEN: a value that is not one of Choices
+	// is still honored by substituting it for OptionValuePlaceholder in this
+	// template. Options with no template are CLOSED — an undeclared value
+	// cannot be turned into flags at all.
+	//
+	// Model ids are an open, fast-moving set: every provider ships new ones
+	// between gc releases. Modeling them as a closed enum meant a pin the
+	// catalog had not caught up to produced no FlagArgs and the launch path
+	// silently omitted the flag, unpinning the agent onto whatever the CLI
+	// defaulted to (ra-jbbv0 for claude-opus-5, ga-fyh for grok-4.6).
+	// Choices stay as the curated suggestion list for pickers; the template
+	// is what guarantees an explicit pin is never discarded.
+	//
+	// json:"-" for the same reason as OptionChoice.FlagArgs: CLI flag shapes
+	// are server-side only and must not reach the public API DTO.
+	FlagTemplate []string `toml:"flag_template,omitempty" json:"-"`
 	// Omit is the removal sentinel for options_schema_merge = "by_key".
 	// When set on a child layer's entry, the matching Key inherited from
 	// a parent layer is pruned from the resolved schema.
@@ -78,6 +94,12 @@ type ProviderSpec struct {
 	ReadyDelayMs int `toml:"ready_delay_ms,omitempty" jsonschema:"minimum=0"`
 	// ReadyPromptPrefix is the string prefix that indicates the provider is ready for input.
 	ReadyPromptPrefix string `toml:"ready_prompt_prefix,omitempty"`
+	// NotReadyMarkers lists text the provider prints when it discards a
+	// submitted prompt because it is not ready for input yet, although its
+	// input prompt is already showing (Copilot prints "Managed account policy
+	// is still loading" until its policy loads). A runtime that sees one
+	// appear after delivering the startup prompt delivers the prompt again.
+	NotReadyMarkers []string `toml:"not_ready_markers,omitempty"`
 	// ProcessNames lists process names to look for when checking if the provider is running.
 	ProcessNames []string `toml:"process_names,omitempty"`
 	// EmitsPermissionWarning is tri-state: nil = inherit, &true = enable,
@@ -157,6 +179,10 @@ type ProviderSpec struct {
 	// the right names for this harness, so an upstream preset is portable across
 	// harnesses (claude → ANTHROPIC_*, codex → OPENAI_*).
 	UpstreamEnv UpstreamEnvBinding `toml:"upstream_env,omitempty"`
+	// ProgramStatus declares whether this harness's program reports its own
+	// state over the OSC 7501 Program Status Protocol and how gc captures the
+	// reports. Inert unless [session] program_status is "shadow" or "on".
+	ProgramStatus ProgramStatusBinding `toml:"program_status,omitempty"`
 	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
 	// The provider prints its response to stdout and exits. When empty, the
 	// provider does not support one-shot invocation.
@@ -171,7 +197,13 @@ type ProviderSpec struct {
 	// When empty, Command is used for both tmux and ACP transports.
 	ACPCommand string `toml:"acp_command,omitempty"`
 	// ACPArgs overrides Args when the session transport is ACP.
-	// When nil, Args is used for both tmux and ACP transports.
+	// When nil, Args is used for both tmux and ACP transports. When any layer
+	// sets acp_args, args and args_append reach only the CLI launch, except
+	// schema-managed flags such as a curated model, which become option
+	// defaults that both launches carry: when a layer more specific than the
+	// acp_args layer declares args that reach the CLI launch, the CLI
+	// transport is the default, and an explicit ACP session that still drops
+	// args prints a warning.
 	ACPArgs []string `toml:"acp_args,omitempty"`
 }
 
@@ -220,6 +252,7 @@ type ResolvedProvider struct {
 	PromptFlag             string
 	ReadyDelayMs           int
 	ReadyPromptPrefix      string
+	NotReadyMarkers        []string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
 	AcceptStartupDialogs   *bool
@@ -235,10 +268,21 @@ type ResolvedProvider struct {
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
 	UpstreamEnv            UpstreamEnvBinding
+	ProgramStatus          ProgramStatusBinding
 	PrintArgs              []string
 	TitleModel             string
 	ACPCommand             string
 	ACPArgs                []string
+	// ACPOmittedArgs holds the args that provider layers more specific than
+	// the most specific layer that sets acp_args contribute to Args, as the
+	// merge applies them: args replaces, args_append extends. The ACP launch
+	// takes its args from ACPArgs alone, so these tokens reach only the CLI
+	// launch; a non-empty value makes the CLI transport the provider default
+	// (ProviderSessionCreateTransport). Schema-managed flags are not among
+	// them: normalization lifts them into option defaults, which both
+	// launches carry. Nil when ACPArgs is nil, because the ACP launch then
+	// uses Args.
+	ACPOmittedArgs []string
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
@@ -315,6 +359,11 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 	if rp == nil || !rp.SupportsACP {
 		return ""
 	}
+	if len(rp.ACPOmittedArgs) > 0 {
+		// The ACP launch would drop args a more specific layer declared;
+		// the CLI launch keeps them.
+		return ""
+	}
 	if transport := rp.DefaultSessionTransport(); transport != "" {
 		return transport
 	}
@@ -385,8 +434,11 @@ func (rp *ResolvedProvider) TitleModelFlagArgs() []string {
 
 // ResolveDefaultArgs produces CLI flag args from EffectiveDefaults.
 // For each schema option with an effective default, the corresponding
-// FlagArgs are emitted. Options with no effective default (or whose
-// default is "") are skipped.
+// flags are emitted. Options with no effective default (or whose default is
+// "") are skipped. A value that is not a declared choice still resolves when
+// the option is open (ProviderOption.FlagTemplate); on a closed option it is
+// skipped — call UnhonoredOptionPins and warn, and do not treat a missing
+// flag as success (ga-fyh).
 // Args are emitted in schema declaration order for deterministic output.
 func (rp *ResolvedProvider) ResolveDefaultArgs() []string {
 	var args []string
@@ -395,9 +447,8 @@ func (rp *ResolvedProvider) ResolveDefaultArgs() []string {
 		if value == "" {
 			continue
 		}
-		choice := findChoice(opt.Choices, value)
-		if choice != nil {
-			args = append(args, choice.FlagArgs...)
+		if flagArgs, ok := OptionFlagArgs(opt, value); ok {
+			args = append(args, flagArgs...)
 		}
 	}
 	return args
@@ -468,6 +519,7 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		PromptFlag:             spec.PromptFlag,
 		ReadyDelayMs:           spec.ReadyDelayMs,
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
+		NotReadyMarkers:        cloneStrings(spec.NotReadyMarkers),
 		ProcessNames:           cloneStrings(spec.ProcessNames),
 		EmitsPermissionWarning: boolPtr(spec.EmitsPermissionWarning),
 		AcceptStartupDialogs:   cloneBoolPtr(spec.AcceptStartupDialogs),
@@ -489,11 +541,37 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 			APIKey:    spec.UpstreamAPIKeyEnv,
 			AuthToken: spec.UpstreamAuthTokenEnv,
 		},
-		PrintArgs:  cloneStrings(spec.PrintArgs),
-		TitleModel: spec.TitleModel,
-		ACPCommand: spec.ACPCommand,
-		ACPArgs:    cloneStrings(spec.ACPArgs),
+		ProgramStatus: programStatusBindingFromWorker(spec),
+		PrintArgs:     cloneStrings(spec.PrintArgs),
+		TitleModel:    spec.TitleModel,
+		ACPCommand:    spec.ACPCommand,
+		ACPArgs:       cloneStrings(spec.ACPArgs),
 	}
+}
+
+// programStatusBindingFromWorker lifts a built-in profile's flat
+// program-status fields into the config binding. An unset relay,
+// hold_mid_turn, decide_startup or decide_settle stays nil so a city layer
+// can still inherit or override it.
+func programStatusBindingFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProgramStatusBinding {
+	b := ProgramStatusBinding{
+		Protocol: spec.ProgramStatusProtocol,
+		App:      spec.ProgramStatusApp,
+		Env:      cloneStringMap(spec.ProgramStatusEnv),
+	}
+	if spec.ProgramStatusRelay {
+		b.Relay = boolPtr(true)
+	}
+	if spec.ProgramStatusHoldMidTurn {
+		b.HoldMidTurn = boolPtr(true)
+	}
+	if spec.ProgramStatusDecideStartup {
+		b.DecideStartup = boolPtr(true)
+	}
+	if spec.ProgramStatusDecideSettle {
+		b.DecideSettle = boolPtr(true)
+	}
+	return b
 }
 
 func providerOptionsFromWorker(options []workerbuiltin.BuiltinProviderOption) []ProviderOption {
@@ -503,11 +581,12 @@ func providerOptionsFromWorker(options []workerbuiltin.BuiltinProviderOption) []
 	out := make([]ProviderOption, len(options))
 	for i, option := range options {
 		out[i] = ProviderOption{
-			Key:     option.Key,
-			Label:   option.Label,
-			Type:    option.Type,
-			Default: option.Default,
-			Choices: providerChoicesFromWorker(option.Choices),
+			Key:          option.Key,
+			Label:        option.Label,
+			Type:         option.Type,
+			Default:      option.Default,
+			Choices:      providerChoicesFromWorker(option.Choices),
+			FlagTemplate: cloneStrings(option.FlagTemplate),
 		}
 	}
 	return out

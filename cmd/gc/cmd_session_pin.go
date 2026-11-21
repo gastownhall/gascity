@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -112,23 +114,33 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		fmt.Fprintf(stderr, "gc session %s: %s is not a session\n", action, id) //nolint:errcheck
 		return 1
 	}
-	session.RepairEmptyType(sessStore, &b)
+	session.RepairEmptyType(beads.SessionStore{Store: sessStore}, &b)
 	if b.Status == "closed" {
 		fmt.Fprintf(stderr, "gc session %s: session %s is closed\n", action, id) //nolint:errcheck
 		return 1
 	}
-
-	value := ""
-	if pinned {
-		value = "true"
+	if pinned && !materializedForPin && cfg != nil {
+		// Pool demand alone starts and keeps a demand-only singleton's session;
+		// the reconciler never reads pin_awake for it, so refuse instead of
+		// reporting a pin that does nothing (#6858).
+		info, err := sessionFrontDoor(sessStore).Get(id)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session %s: %v\n", action, err) //nolint:errcheck
+			return 1
+		}
+		if agent := sessionWakeResolveAgentInfo(info, cfg); demandOnlySingletonSessionInfo(info, agent, cfg) {
+			fmt.Fprintf(stderr, "gc session %s: cannot pin session %s: %s\n", action, id, session.DemandOnlySingletonExplanation(agent.QualifiedName())) //nolint:errcheck
+			return 1
+		}
 	}
+
 	if !materializedForPin {
-		if err := sessionFrontDoor(sessStore).SetMarker(id, "pin_awake", value); err != nil {
+		if err := sessionFrontDoor(sessStore).SetPinAwake(id, pinned); err != nil {
 			fmt.Fprintf(stderr, "gc session %s: updating metadata: %v\n", action, err) //nolint:errcheck
 			return 1
 		}
 	}
-	pokeSessionPinController(cityErr, cityPath)
+	pokeSessionPinController(cityErr, cityPath, sessionInfoFromBead(b), "gc session "+action, materializedForPin, stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -150,9 +162,29 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 	return 0
 }
 
-func pokeSessionPinController(cityErr error, cityPath string) {
-	if cityErr != nil || !cityUsesManagedReconciler(cityPath) {
+// pokeSessionPinController asks the controller that owns cityPath's session
+// starts (sessionStartOwnedByReconciler) to reconcile row after its pin
+// changed. A failed poke is silent for a row that already existed, since the
+// pin is recorded and the next reconcile reads it; on a worker site, where no
+// poke finds a controller, it prints the noteWorkerSitePoke notice. A row the
+// pin created gets noteDeferredSessionStart's report instead: only a
+// controller starts it.
+func pokeSessionPinController(cityErr error, cityPath string, row session.Info, command string, created bool, stderr io.Writer) {
+	if cityErr != nil {
 		return
 	}
-	_ = pokeController(cityPath)
+	owned, err := sessionStartOwnedByReconciler(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: warning: %v\n", command, err) //nolint:errcheck
+		return
+	}
+	if !owned {
+		return
+	}
+	pokeErr := enqueueController(cityPath, reconcilekey.Session(row.ID))
+	if created {
+		noteDeferredSessionStart(stderr, command, row, pokeErr)
+		return
+	}
+	noteWorkerSitePoke(stderr, command, pokeErr)
 }

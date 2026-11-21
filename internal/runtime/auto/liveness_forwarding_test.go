@@ -1,6 +1,8 @@
 package auto
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -16,6 +18,16 @@ type livenessObserverStub struct {
 }
 
 func (s *livenessObserverStub) ObserveLiveness(string, []string) runtime.Liveness { return s.obs }
+
+type errorBearingLivenessObserverStub struct {
+	*runtime.Fake
+	obs runtime.Liveness
+	err error
+}
+
+func (s *errorBearingLivenessObserverStub) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	return s.obs, s.err
+}
 
 // TestProvider_ForwardsObserveLivenessToRoutedBackend guards the herdr
 // singleton-liveness fix against the auto wrapper. When a LivenessObserver
@@ -51,5 +63,52 @@ func TestProvider_ObserveLivenessFallsThroughOnStaleRoute(t *testing.T) {
 
 	if got := p.ObserveLiveness("acpsess", []string{"claude"}); got != acp.obs {
 		t.Errorf("stale-route ObserveLiveness = %+v; want %+v (fallthrough to ACP backend lost)", got, acp.obs)
+	}
+}
+
+func TestProvider_ForwardsLivenessObservationErrorFromRoutedBackend(t *testing.T) {
+	wantErr := errors.New("snapshot unavailable")
+	def := &errorBearingLivenessObserverStub{Fake: runtime.NewFake(), err: wantErr}
+	acp := &errorBearingLivenessObserverStub{Fake: runtime.NewFake(), err: wantErr}
+	p := New(def, acp)
+	p.RouteACP("acpsess")
+
+	for _, name := range []string{"plain", "acpsess"} {
+		got, err := p.ObserveLivenessWithError(name, nil)
+		if !errors.Is(err, wantErr) {
+			t.Errorf("ObserveLivenessWithError(%q) error = %v, want %v", name, err, wantErr)
+		}
+		if got != (runtime.Liveness{}) {
+			t.Errorf("ObserveLivenessWithError(%q) = %+v, want zero while routed result is unknown", name, got)
+		}
+	}
+}
+
+// TestAutoForwardsIsAttachedWithError proves auto forwards the error-bearing
+// attachment probe to the routed backend. Without the forward, the error is
+// lost behind the bool IsAttached and a probe failure reads "not attached".
+func TestAutoForwardsIsAttachedWithError(t *testing.T) {
+	def, acp := runtime.NewFake(), runtime.NewFake()
+	defErr := fmt.Errorf("default probe: %w", runtime.ErrRuntimeUnavailable)
+	acpErr := fmt.Errorf("acp probe: %w", runtime.ErrRuntimeUnavailable)
+	def.AttachedErrors["plain"] = defErr
+	acp.AttachedErrors["acpsess"] = acpErr
+	def.SetAttached("attached", true)
+	p := New(def, acp)
+	p.RouteACP("acpsess")
+
+	for _, tc := range []struct {
+		name    string
+		want    bool
+		wantErr error
+	}{
+		{"plain", false, defErr},
+		{"acpsess", false, acpErr},
+		{"attached", true, nil},
+	} {
+		got, err := runtime.IsAttachedWithError(p, tc.name)
+		if got != tc.want || !errors.Is(err, tc.wantErr) {
+			t.Errorf("IsAttachedWithError(%q) = (%v, %v), want (%v, %v)", tc.name, got, err, tc.want, tc.wantErr)
+		}
 	}
 }

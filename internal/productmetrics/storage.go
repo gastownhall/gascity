@@ -25,6 +25,12 @@ var (
 	errStorageClosed              = errors.New("productmetrics: storage handle is closed")
 	errStorageReadLimit           = errors.New("productmetrics: storage read limit exceeded")
 	errStorageUnsafeRecordShape   = errors.New("productmetrics: storage record has an unsafe filesystem shape")
+	// errStorageRecordReplaced marks a read whose record was replaced or
+	// unlinked between name lookup and descriptor validation, so no stable
+	// incarnation was observed. It is joined to the validation error, never
+	// returned alone; only a caller whose writers all hold the record's lock
+	// may read it as a concurrent state change.
+	errStorageRecordReplaced = errors.New("productmetrics: storage record was replaced during the read")
 )
 
 const (

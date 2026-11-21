@@ -52,7 +52,7 @@ func hookFanoutBaseOps(claim hookClaimFunc) hookClaimOps {
 	return hookClaimOps{
 		Claim:             claim,
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
 			return nil
@@ -178,10 +178,9 @@ func TestClassEscalationStillReachesABindingOnlyBead(t *testing.T) {
 	}
 }
 
-// noCASBindingLeaf is the production binding leaf that cannot CAS-claim:
-// beadsworkspace's OpenEngine returns a *beads.NativeDoltStore, which carries
-// ReleaseIfCurrent and no two-argument Claim. beads.MemStore HAS the capability,
-// so it is hidden behind an embedding that does not re-export it.
+// noCASBindingLeaf is a binding leaf that cannot CAS-claim. The
+// beads.SQLiteStore it wraps HAS the capability, so it is hidden behind an
+// embedding that does not re-export it.
 type noCASBindingLeaf struct{ beads.Store }
 
 // newCapabilityRefusingRoute builds a route whose binding answers reads but
@@ -199,6 +198,20 @@ func newCapabilityRefusingRoute(t *testing.T, ids ...string) *hookClaimClassRout
 		t.Fatalf("projecting the graph front door over a claim-incapable leaf: %v", err)
 	}
 	return newClaimClassRouteOver(hidden, graph)
+}
+
+// newWrapperRefusingRoute builds a route through the real constructor over a
+// forwarding wrapper (the bead-policy layer) whose leaf cannot CAS-claim. The
+// wrapper's own two-argument Claim passes newHookClaimClassRoute's door check,
+// so the leaf's missing capability surfaces only per bead, as the wrapper's
+// beads.ErrClaimUnsupported.
+func newWrapperRefusingRoute(t *testing.T, ids ...string) *hookClaimClassRoute {
+	t.Helper()
+	leaf := newClaimRouteClassStore(t)
+	for _, id := range ids {
+		mintClaimRouteBead(t, leaf, id, nil)
+	}
+	return newClaimRouteFor(t, wrapStoreWithBeadPolicies(noCASBindingLeaf{Store: leaf}, nil))
 }
 
 // TestBindingClaimRefusalIsPerBeadNotPerTick is the control-vs-refusal pair.
@@ -237,6 +250,12 @@ func TestBindingClaimRefusalIsPerBeadNotPerTick(t *testing.T) {
 			name: "class route whose binding refuses the claim CAS",
 			ops: func(t *testing.T) hookClaimOps {
 				return classRoutedHookClaimOps(newBase(), newCapabilityRefusingRoute(t, "gcg-6"))
+			},
+		},
+		{
+			name: "class route whose binding wrapper refuses the claim CAS beneath it",
+			ops: func(t *testing.T) hookClaimOps {
+				return classRoutedHookClaimOps(newBase(), newWrapperRefusingRoute(t, "gcg-6"))
 			},
 		},
 	} {

@@ -1,0 +1,15 @@
+# Integration tests that each run for minutes (seconds measured 2026-10-04,
+# local bazel on a loaded 192-core host; CI workers run them in roughly half
+# that). rules_go shards a go_test round-robin over its tests in source order,
+# so two of these in one shard push it toward --test_timeout. The guard
+# scripts/integration_shards_test.go fails when shard_count in BUILD.bazel
+# would put two of them in the same shard, and prints the counts that do not.
+# Add a test here when it takes more than about 250 s.
+TestReviewLoopApprovesInIterationTwoWithBodyRetry 620
+TestPersonalWorkFormulaCompileAndRun 520
+TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries 482
+TestAdoptPRFormulaCompileAndRun 455
+TestAdoptPRFormulaRetriesTransientReviewerStep 454
+TestGraphWorkflowSuccessPath 345
+TestGraphWorkflowFailureRunsCleanup 345
+TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash 300

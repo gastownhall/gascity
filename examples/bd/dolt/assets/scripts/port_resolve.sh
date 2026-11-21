@@ -3,16 +3,14 @@
 #
 # Sourced by:
 #   .gc/system/packs/dolt/assets/scripts/runtime.sh
-#   .gc/system/packs/core/assets/scripts/dolt-target.sh
 #   .gc/system/packs/bd/dolt/assets/scripts/runtime.sh
 #
 # Defines:
 #   resolve_dolt_port_or_die  state_file  [provider_state_file]  data_dir  city_path
 #
 # Preconditions (caller responsibilities):
-#   - managed_runtime_port is in scope (either from a sourced runtime.sh
-#     above this file in the source chain, or inlined in the caller, as
-#     dolt-target.sh currently inlines it).
+#   - managed_runtime_port is in scope (from a sourced runtime.sh above this
+#     file in the source chain).
 #   - GC_CITY_PATH is set; the caller enforces this at file head.
 #
 # POSIX /bin/sh only. No bash-isms.
@@ -42,8 +40,7 @@
 #   4. Otherwise, it writes the §3 error template to stderr and exits 78.
 #
 # Preconditions (caller must arrange):
-#   - managed_runtime_port is in scope (sourced from runtime.sh, or inlined
-#     in dolt-target.sh per its existing layout).
+#   - managed_runtime_port is in scope (sourced from runtime.sh).
 #   - GC_CITY_PATH is set (the helper does NOT default it; callers already
 #     enforce ': "${GC_CITY_PATH:?...}"' at file head).
 #

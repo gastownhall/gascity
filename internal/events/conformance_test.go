@@ -22,6 +22,7 @@ func TestFileRecorderConformance(t *testing.T) {
 		return rec, func() { rec.Close() } //nolint:errcheck // test cleanup
 	}
 	eventstest.RunProviderTests(t, factory)
+	eventstest.RunSinceOrderingTests(t, factory)
 	eventstest.RunConcurrencyTests(t, factory)
 	eventstest.RunRotationTests(t, factory)
 }
@@ -32,6 +33,7 @@ func TestFakeConformance(t *testing.T) {
 		return events.NewFake(), func() {}
 	}
 	eventstest.RunProviderTests(t, factory)
+	eventstest.RunSinceOrderingTests(t, factory)
 	eventstest.RunConcurrencyTests(t, factory)
 	eventstest.RunInMemoryWakeTests(t, factory)
 }

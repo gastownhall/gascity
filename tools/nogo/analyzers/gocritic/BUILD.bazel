@@ -1,0 +1,54 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gocritic",
+    srcs = ["gocritic.go"],
+    importpath = "github.com/gastownhall/gascity/tools/nogo/analyzers/gocritic",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_go_critic_go_critic//checkers",
+        "@com_github_go_critic_go_critic//linter",
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+go_test(
+    name = "gocritic_test",
+    srcs = ["gocritic_test.go"],
+    deps = [
+        ":gocritic",
+        "//tools/nogo/analyzers/internal/analyzertest",
+        "@com_github_go_critic_go_critic//linter",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

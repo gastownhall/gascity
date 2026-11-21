@@ -44,19 +44,43 @@ func ResolveVersion(cityRoot, source, constraint string) (ResolvedVersion, error
 	for version := range tags {
 		versions = append(versions, version)
 	}
-	sort.Slice(versions, func(i, j int) bool {
-		return compareSemver(mustParseSemver(versions[i]), mustParseSemver(versions[j])) > 0
-	})
-
-	for _, version := range versions {
-		if constraint == "" || matchesConstraint(version, constraint) {
-			return ResolvedVersion{
-				Version: version,
-				Commit:  tags[version],
-			}, nil
-		}
+	if version, ok := SelectVersion(versions, constraint); ok {
+		return ResolvedVersion{
+			Version: version,
+			Commit:  tags[version],
+		}, nil
 	}
 	return ResolvedVersion{}, fmt.Errorf("no tags for %q match constraint %q", source, constraint)
+}
+
+// SelectVersion returns the highest semver in versions that satisfies
+// constraint. An empty constraint selects the highest version. Entries that
+// are not major.minor[.patch] semver are ignored. It is the one selection rule
+// shared by git-tag resolution and registry-release resolution, so a
+// constraint means the same thing whichever source answers it.
+func SelectVersion(versions []string, constraint string) (string, bool) {
+	sorted := SortVersions(versions)
+	for i := len(sorted) - 1; i >= 0; i-- {
+		if constraint == "" || matchesConstraint(sorted[i], constraint) {
+			return sorted[i], true
+		}
+	}
+	return "", false
+}
+
+// SortVersions returns the semver entries of versions in ascending order,
+// dropping anything that is not major.minor[.patch].
+func SortVersions(versions []string) []string {
+	valid := make([]string, 0, len(versions))
+	for _, version := range versions {
+		if _, err := parseSemver(version); err == nil {
+			valid = append(valid, version)
+		}
+	}
+	sort.Slice(valid, func(i, j int) bool {
+		return compareSemver(mustParseSemver(valid[i]), mustParseSemver(valid[j])) < 0
+	})
+	return valid
 }
 
 // DefaultConstraint returns the default caret constraint for a selected version.

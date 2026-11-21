@@ -249,9 +249,9 @@ func TestReadyProjectionLatchesAnUnimplementedBackendWhoseBlockedDoorAlsoFails(t
 //
 // Nothing in gc holds one BdStore per scope for the life of the process:
 // cmd/gc's scoped stores are built per request, and the control-dispatcher
-// readiness scan rebuilds a store per scope every controlReadyCacheTTL (3s) and
-// primes it immediately, so a verdict memoized on the store object is
-// re-derived — and re-announced — a few times a minute, forever. That is the
+// readiness scan rebuilds a store per scope on every scan and primes it
+// immediately, so a verdict memoized on the store object is re-derived — and
+// re-announced — many times a minute, forever. That is the
 // same defect the sibling unread-store notice already had to fix, so this
 // reuses its registry pattern.
 //
@@ -325,9 +325,9 @@ func TestReadyProjectionVerdictIsPerScopeAcrossStoreRebuilds(t *testing.T) {
 // runtime refusal ("not yet supported in embedded mode") reveals the backend was
 // opened embedded, and `bd blocked` answers in its place. A choice recorded only
 // on the store object is re-derived on every rebuild: cmd/gc builds a store per
-// request and the control-ready scan rebuilds one per scope every
-// controlReadyCacheTTL (3s), so the SQL door would be re-picked and the failing
-// 6-16s `bd sql` re-spent a few times a minute, forever — the exact pathology
+// request and the control-ready scan rebuilds one per scope on every scan, so
+// the SQL door would be re-picked and the failing 6-16s `bd sql` re-spent many
+// times a minute, forever — the exact pathology
 // this door was added to remove. Latching the choice in the scope guard lets a
 // fresh store start on the blocked door with no `bd sql` spent, while still
 // serving the column on every rebuild.
@@ -480,5 +480,94 @@ func TestReadyProjectionUnreadableMetadataFallsThroughToTheLatch(t *testing.T) {
 	}
 	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %v, want the version probe, one refused sql and the refused blocked door behind it", runner.calls)
+	}
+}
+
+// The capability-absent refusals a newer bd returns for `bd blocked` against an
+// older `bd serve` that lacks the operation, verbatim as bd renders them.
+const (
+	// A client that classifies commands against the server's advertised
+	// capabilities and refuses before dialing.
+	bdBlockedRequiresCapabilityRefusal = "exit status 1: {\"error\":\"bd blocked requires server capability \\\"blocked.list\\\"; " +
+		"bd serve at http://beads.internal:8080 (bd_version 1.4.0) does not advertise it — upgrade the server or run in a local workspace\"}"
+	// A client whose HTTP transport refuses the operation at the handshake
+	// (wire.CapabilityError).
+	bdBlockedNotAdvertisedRefusal = "exit status 1: Error: bd serve at http://beads.internal:8080 (bd_version 1.4.0) " +
+		"does not advertise capability \"blocked.list\", which ListBlocked requires"
+)
+
+// TestIsBdBlockedUnsupportedRecognizesEveryRefusalShape pins the classifier on
+// each text bd uses to refuse the blocked verb, and on the failures it must NOT
+// latch: a blip misread as a refusal costs a long-lived dispatcher its
+// projection for the life of the process.
+func TestIsBdBlockedUnsupportedRecognizesEveryRefusalShape(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"unknown verb", errors.New(bdBlockedRefusal), true},
+		{"not supported over http", errors.New(`exit status 1: {"error":"bd blocked is not supported against HTTP workspace http://beads.internal:8080; this build serves: list, show"}`), true},
+		{"legacy http backend stub", errors.New(`exit status 1: {"error":"operation \"GetBlockedIssues\" not supported by the http backend"}`), true},
+		{"requires server capability", errors.New(bdBlockedRequiresCapabilityRefusal), true},
+		{"does not advertise capability", errors.New(bdBlockedNotAdvertisedRefusal), true},
+		{"nil", nil, false},
+		{"timeout", errors.New("bd blocked --json: signal: killed (timeout after 30s)"), false},
+		{"connection reset", errors.New("exit status 1: Error: bd blocked: read tcp 10.0.0.1:443: connection reset by peer"), false},
+		{"server busy", errors.New(`exit status 1: {"error":"bd blocked: 503 busy: retry later"}`), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isBdBlockedUnsupported(tc.err); got != tc.want {
+				t.Fatalf("isBdBlockedUnsupported(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReadyProjectionLatchesWhenTheServerLacksTheBlockedOperation is the
+// version-skew case: a newer bd in front of an older `bd serve` refuses
+// `bd blocked` naming the capability the server does not advertise. That is a
+// property of the server for the life of the process, so the scope latches
+// after one attempt instead of spending a failing subprocess every reconcile.
+func TestReadyProjectionLatchesWhenTheServerLacksTheBlockedOperation(t *testing.T) {
+	for name, refusal := range map[string]string{
+		"requires server capability":    bdBlockedRequiresCapabilityRefusal,
+		"does not advertise capability": bdBlockedNotAdvertisedRefusal,
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := &recordingRunner{}
+			runner.reply = func(args []string) ([]byte, error) {
+				joined := strings.Join(args, " ")
+				switch {
+				case joined == "version":
+					return []byte("bd version 1.1.0\n"), nil
+				case len(args) > 0 && args[0] == "sql":
+					return nil, errors.New(bdEmbeddedSQLRefusal)
+				case len(args) > 0 && args[0] == "blocked":
+					return nil, errors.New(refusal)
+				}
+				return nil, fmt.Errorf("unexpected command: %s", joined)
+			}
+			notices := &bytes.Buffer{}
+			s := NewBdStore(t.TempDir(), runner.run, WithBdStoreNoticeSink(notices))
+
+			for i := 1; i <= 3; i++ {
+				if _, err := s.enrichReadyProjectionForCache(activeWorkBeads()); !errors.Is(err, ErrReadyProjectionUnsupported) {
+					t.Fatalf("enrich #%d error = %v, want ErrReadyProjectionUnsupported", i, err)
+				}
+			}
+			blockedCalls := 0
+			for _, call := range runner.calls {
+				if len(call) > 1 && call[1] == "blocked" {
+					blockedCalls++
+				}
+			}
+			if blockedCalls != 1 {
+				t.Fatalf("bd blocked ran %d times across 3 enrichments (calls=%v); the latch must spend exactly one", blockedCalls, runner.calls)
+			}
+			if got := strings.Count(notices.String(), "ready-projection enrichment disabled"); got != 1 {
+				t.Fatalf("operator notice printed %d times, want exactly 1:\n%s", got, notices.String())
+			}
+		})
 	}
 }

@@ -10,6 +10,7 @@ import (
 const productMetricsTestRecordHelpCommandFixture = "__testhook-record-help"
 
 func TestProductMetricsBuildTagSurfacesKeepTesthooksOutOfNormalCommandTree(t *testing.T) {
+	chdirToRealPackageDir(t)
 	normal := build.Default
 	normal.BuildTags = nil
 	tagged := normal

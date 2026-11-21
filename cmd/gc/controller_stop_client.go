@@ -55,16 +55,25 @@ func (r controllerStopResult) failClosedError() error {
 
 type controllerStopClient struct {
 	stat         func(string) (os.FileInfo, error)
-	dial         func(network, address string, timeout time.Duration) (net.Conn, error)
+	dial         func(address string, timeout time.Duration) (net.Conn, error)
 	dialTimeout  time.Duration
 	writeTimeout time.Duration
 	readTimeout  time.Duration
 }
 
+// sendControllerStop asks cityPath's controller to stop. On a worker site it
+// fails closed before touching the socket path: the box has no socket file, and
+// reading that absence as "no controller runs" would let direct cleanup act
+// behind the remote controller.
 func sendControllerStop(cityPath string, force bool) controllerStopResult {
+	if onWorkerSite(cityPath) {
+		return classifiedControllerStopResult(controllerStopOutcomeInvalid, "reaching the controller", errWorkerSiteNoController)
+	}
 	return controllerStopClient{
-		stat:         os.Stat,
-		dial:         net.DialTimeout,
+		stat: os.Stat,
+		dial: func(address string, timeout time.Duration) (net.Conn, error) {
+			return dialCitySocket(cityPath, address, timeout)
+		},
 		dialTimeout:  controllerStopDialTimeout,
 		writeTimeout: controllerStopWriteTimeout,
 		readTimeout:  controllerStopReadTimeout,
@@ -81,7 +90,12 @@ func (c controllerStopClient) stop(cityPath string, force bool) controllerStopRe
 		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "stating socket before dial", errors.New("socket stat returned no identity"))
 	}
 
-	conn, err := c.dial("unix", socketPath, c.dialTimeout)
+	conn, err := c.dial(socketPath, c.dialTimeout)
+	if errors.Is(err, errWorkerSiteNoController) {
+		// The seam refused a worker site's dial: its controller is the remote
+		// one, so the refusal is no proof that none runs.
+		return classifiedControllerStopResult(controllerStopOutcomeInvalid, "dialing socket", err)
+	}
 	if err != nil {
 		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "dialing socket", err)
 	}

@@ -17,7 +17,7 @@
 #
 #   # Route work to the polecat pool:
 #   gc sling demo-repo/polecat "Write hello world"
-#   bd show <bead-id> --watch
+#   gc bd show <bead-id> --watch
 
 [workspace]
 name = "lifecycle-demo"
@@ -26,6 +26,24 @@ start_command = "true"
 
 [defaults.rig.imports.lifecycle]
 source = "packs/lifecycle"
+
+# Storage classes (docs/runbooks/split-storage-classes.md): work stays in the
+# work ledger, and the five infrastructure classes live in one local SQLite
+# store under .gc/store, created on first start. This is the split gc init
+# writes for a new city. `gc init --from` copies it, except where gc init
+# would start a new city single-store (a bd a split city's gc bd refuses):
+# there the copy leaves it out and says why.
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
 
 [daemon]
 patrol_interval = "10s"
@@ -39,8 +57,8 @@ shutdown_timeout = "5s"
 # The builtin-pack-imports doctor check repairs missing entries.
 [imports.core]
 source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
-version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
 
 [imports.bd]
 source = "https://github.com/gastownhall/gascity.git//examples/bd"
-version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"

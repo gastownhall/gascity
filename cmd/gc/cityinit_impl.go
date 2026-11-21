@@ -7,12 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/cityinit"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -66,7 +64,7 @@ type cityInitLifecycleEvents struct {
 }
 
 func (e cityInitLifecycleEvents) EnsureCityLog(cityPath string) error {
-	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), e.stderrOrDiscard())
+	fr, err := openCityEventsLog(cityPath, e.stderrOrDiscard())
 	if err != nil {
 		return err
 	}
@@ -85,7 +83,7 @@ func (e cityInitLifecycleEvents) CityUnregisterRequested(city cityinit.Registere
 }
 
 func (e cityInitLifecycleEvents) record(cityPath, eventType, subject string, payload api.CityLifecyclePayload) error {
-	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), e.stderrOrDiscard())
+	fr, err := openCityEventsLog(cityPath, e.stderrOrDiscard())
 	if err != nil {
 		return err
 	}
@@ -122,9 +120,15 @@ func cityInitDoInit(_ context.Context, req cityinit.InitRequest) error {
 		startCommand:     req.StartCommand,
 		bootstrapProfile: req.BootstrapProfile,
 	}
-	if code := doInit(fsys.OSFS{}, req.Dir, wiz, req.NameOverride, io.Discard, io.Discard, false); code != 0 {
+	var stderr bytes.Buffer
+	if code := doInit(fsys.OSFS{}, req.Dir, wiz, req.NameOverride, io.Discard, &stderr, false); code != 0 {
 		if code == initExitAlreadyInitialized {
 			return cityinit.ErrAlreadyInitialized
+		}
+		// The refusal doInit printed is the reason (an existing .gc/store,
+		// say); a bare exit code tells an API caller nothing.
+		if reason := strings.TrimSpace(stderr.String()); reason != "" {
+			return fmt.Errorf("scaffold failed: %s", reason)
 		}
 		return fmt.Errorf("scaffold failed (exit %d)", code)
 	}

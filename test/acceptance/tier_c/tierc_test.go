@@ -96,16 +96,6 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: staging provider binaries: " + err.Error())
 	}
 
-	// Configure dolt identity in the isolated home (dolt requires user.name).
-	doltCfgDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltCfgDir, 0o755); err != nil {
-		panic("acceptance-c: " + err.Error())
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(doltCfgDir, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
-		panic("acceptance-c: " + err.Error())
-	}
-
 	// Force a token refresh before staging OAuth credentials. Claude Code
 	// refreshes tokens in-memory but may not persist to .credentials.json,
 	// leaving the on-disk token expired. A quick --print call forces the
@@ -130,7 +120,10 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: ensuring Claude state: " + err.Error())
 	}
 
+	// NewEnv seeds the dolt identity (metrics off) under gcHome/.dolt; the
+	// real providers authenticate through the operator's home.
 	testEnvC = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
+		WithHostHome().
 		Without("GC_SESSION"). // use real tmux, not subprocess
 		Without("GC_BEADS").   // use real bd (dolt-backed) provider
 		Without("GC_DOLT").    // let gc manage dolt (don't skip it)
@@ -276,17 +269,24 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	t.Logf("Slung work to polecat: %s", strings.TrimSpace(out))
 	attachedWorkflowID := parseAttachedWorkflowID(out)
 
+	// These reads go through gc, which sees the same beads on either
+	// topology. Tier C runs gc on the tool-home bd wrapper (WithHostHome),
+	// which a split city's gc bd refuses, so gc init --from starts this copy
+	// of the split example single-store. A split copy would keep the
+	// attached workflow root in the infrastructure store, which raw bd does
+	// not read: gc ready federates every store, and gc bd show answers an
+	// infrastructure id from the binding.
 	routeKey := gastownRigAgent(rigName, "polecat")
-	readyOut, err := bdCmd(testEnvC, rigDir, "ready", "--metadata-field", "gc.routed_to="+routeKey, "--unassigned", "--json", "--limit=20")
-	require.NoError(t, err, "bd ready")
+	readyOut, err := gcJSON(c, "ready", "--metadata-field", "gc.routed_to="+routeKey, "--unassigned", "--json", "--limit=20")
+	require.NoError(t, err, "gc ready: %s", readyOut)
 	var ready []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(readyOut), &ready), "unmarshal ready queue")
 	require.Len(t, ready, 1, "expected only the routed source/workflow root in the ready queue")
 	require.NotContains(t, ready[0].ID, ".", "expected source/workflow root id, not a step id")
 
 	outerID := ready[0].ID
-	outerOut, err := bdCmd(testEnvC, rigDir, "show", outerID, "--json")
-	require.NoError(t, err, "bd show outer")
+	outerOut, err := gcJSON(c, "bd", "show", outerID, "--json")
+	require.NoError(t, err, "gc bd show outer: %s", outerOut)
 	var outer []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(outerOut), &outer), "unmarshal outer bead")
 	require.Len(t, outer, 1, "expected one outer bead")
@@ -296,8 +296,8 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	}
 	require.NotEmpty(t, moleculeID, "routed bead should carry or be the attached workflow/molecule root")
 
-	rootOut, err := bdCmd(testEnvC, rigDir, "show", moleculeID, "--json")
-	require.NoError(t, err, "bd show molecule root")
+	rootOut, err := gcJSON(c, "bd", "show", moleculeID, "--json")
+	require.NoError(t, err, "gc bd show molecule root: %s", rootOut)
 	var root []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(rootOut), &root), "unmarshal molecule root")
 	require.Len(t, root, 1, "expected one molecule root")
@@ -636,6 +636,18 @@ func parseAttachedWorkflowID(output string) string {
 	return strings.TrimSpace(match[1])
 }
 
+// gcJSON runs a gc read in the city directory and returns its stdout, the JSON
+// the caller parses. Stderr carries advisories, such as config-load notices,
+// that would corrupt the parse, so it joins the output only when the command
+// fails.
+func gcJSON(c *helpers.City, args ...string) (string, error) {
+	stdout, stderr, err := helpers.RunGCStreams(c.Env, c.Dir, args...)
+	if err != nil {
+		return stdout + stderr, err
+	}
+	return stdout, nil
+}
+
 func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 	bdPath := "bd"
 	if path, err := exec.LookPath("bd"); err == nil {
@@ -643,7 +655,7 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 	}
 	cmd := exec.Command(bdPath, args...)
 	cmd.Dir = dir
-	cmd.Env = env.List()
+	cmd.Env = env.ToolList()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

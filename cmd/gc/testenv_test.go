@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // gcEnvVars lists the GC_* identity and session-routing variables that
@@ -94,6 +96,20 @@ func clearGCEnv(t *testing.T) {
 	// a .gc/ directory left by a running city or a prior test run in /tmp
 	// (e.g. a developer box hosting a live city contaminates no-city tests).
 	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(td))
+	// The ceiling above only bounds a walk that starts under td. City/rig
+	// discovery (resolveContextFromDir) walks up from the real process cwd,
+	// which for a test invoked from inside a gc rig worktree is already
+	// nested inside a live city — the ceiling never comes into play because
+	// that walk never enters td's ancestry at all. Chdir into td so the walk
+	// starts somewhere with no city.toml in its ancestry.
+	//
+	// Repo-root resolution under bazel also walks up from the cwd (the
+	// runfiles tree), so pin the root before leaving it; otherwise helpers
+	// such as gcRepoRootFromEnv lose the checkout's formulas and packs.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		t.Setenv("GC_TEST_REPO_ROOT", root)
+	}
+	t.Chdir(td)
 }
 
 func clearProcessLiveEnvForTests() {
@@ -102,7 +118,44 @@ func clearProcessLiveEnvForTests() {
 	}
 }
 
+// TestClearProcessLiveEnvForTestsUnsetsInheritedState runs the process-wide
+// scrub TestMain runs, so it must hand the process back every key the scrub
+// unset. It restored only the keys it had set: the scrub's os.Unsetenv of
+// GC_HOME outlived it, and a later test that resolves the supervisor home
+// panicked on a repeat run (-count>1) or a later shard order (ga-3sdi50).
 func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
+	before := make(map[string]*string)
+	for _, key := range liveEnvKeysForTests() {
+		if value, ok := os.LookupEnv(key); ok {
+			before[key] = &value
+		} else {
+			before[key] = nil
+		}
+	}
+
+	t.Run("scrub", func(t *testing.T) {
+		testClearProcessLiveEnvForTestsScrub(t)
+	})
+
+	for key, want := range before {
+		got, ok := os.LookupEnv(key)
+		switch {
+		case want == nil && ok:
+			t.Errorf("%s = %q after the scrub test, want unset as before", key, got)
+		case want != nil && (!ok || got != *want):
+			t.Errorf("%s = %q (set=%v) after the scrub test, want %q as before", key, got, ok, *want)
+		}
+	}
+}
+
+func testClearProcessLiveEnvForTestsScrub(t *testing.T) {
+	t.Helper()
+	// The scrub is process-wide: register every key it touches with
+	// t.Setenv, which restores each one, set or unset, when the test ends.
+	// The scrub below unsets them all anyway.
+	for _, key := range liveEnvKeysForTests() {
+		t.Setenv(key, os.Getenv(key))
+	}
 	cleared := []string{
 		"BEADS_ACTOR",
 		"BEADS_DIR",
@@ -118,7 +171,9 @@ func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
 		"GC_SUPERVISOR_SYSTEMD_UNIT",
 	}
 	preserved := []string{
+		"DOLT_DISABLE_EVENT_FLUSH",
 		"GC_FAST_UNIT",
+		"GC_HERDR_LIVE_TESTS",
 		"GC_REAL_PROCESS_SIGNAL_TESTS",
 		"GC_TEST_KEEP",
 		"GC_WORKER_REPORT_DIR",
@@ -195,8 +250,18 @@ func preserveTestControlEnv(key string) bool {
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
+		// internal/testenv sets this once per test binary so no dolt a test runs
+		// forks a detached `dolt send-metrics`. The DOLT_ prefix scrub below would
+		// otherwise strip it before sanitizedBaseEnv could hand it to a child.
+		key == "DOLT_DISABLE_EVENT_FLUSH" ||
+		// The live herdr tier's opt-in. Without it here the scrub below would
+		// strip the variable before any cmd/gc live journey could read it, so
+		// `make test-herdr-live` could never reach the journeys in this package.
+		key == "GC_HERDR_LIVE_TESTS" ||
 		strings.HasPrefix(key, "GC_LIVE_") ||
 		strings.HasPrefix(key, "GC_SESSION_CHAOS_") ||
+		// The v2 simulator's seed knobs (GC_V2_SIM_SEED, GC_V2_SIM_SEEDS).
+		strings.HasPrefix(key, "GC_V2_SIM_") ||
 		strings.HasPrefix(key, "GC_TEST_")
 }
 
@@ -336,12 +401,7 @@ func gcBeadsBdTestHomeEnv(t *testing.T) []string {
 }
 
 func writeTestDoltIdentity(homeDir string) error {
-	doltDir := filepath.Join(homeDir, ".dolt")
-	if err := os.MkdirAll(doltDir, 0o755); err != nil {
-		return err
-	}
-	data := []byte(`{"user.name":"gc-test","user.email":"gc-test@test.local"}`)
-	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), data, 0o644)
+	return testutil.SeedDoltGlobalConfig(homeDir)
 }
 
 // doltIdentityHomeDir returns a fresh directory for dolt/git identity files,

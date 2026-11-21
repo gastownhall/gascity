@@ -90,7 +90,9 @@ func TestCreatePoolSessionBead_UsesExplicitIDThroughCachingStore(t *testing.T) {
 	if !strings.HasPrefix(bead.ID, "mc-session-") {
 		t.Fatalf("bead.ID = %q, want explicit mc-session-* ID", bead.ID)
 	}
-	wantSessionName := poolIdentitySessionName("gascity/claude", "gascity/claude")
+	// The explicit ID is pre-minted, so the bead-scoped runtime name lands in
+	// the create itself (no placeholder + second write).
+	wantSessionName := PoolSessionName("gascity/claude", bead.ID)
 	if got := bead.SessionNameMetadata; got != wantSessionName {
 		t.Fatalf("session_name = %q, want %q", got, wantSessionName)
 	}
@@ -308,9 +310,9 @@ func TestCreatePoolSessionBeadWithAlias_FallsBackToPoolIdentityNameWhenAliasEmpt
 	if err != nil {
 		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
 	}
-	want := poolIdentitySessionName("", "claude")
+	want := PoolSessionName("claude", bead.ID)
 	if got := bead.SessionNameMetadata; got != want {
-		t.Fatalf("session_name = %q, want %q (pool identity fallback)", got, want)
+		t.Fatalf("session_name = %q, want %q (bead-scoped <template>-<beadID>)", got, want)
 	}
 }
 

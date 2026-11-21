@@ -498,7 +498,7 @@ func TestAgentScriptRunActionBuildsBDUpdateArgs(t *testing.T) {
 		"bd", "update", "ga-123",
 		"--assignee", "demo/lifecycle.refinery",
 		"--status", "closed",
-		"--notes", "merged polecat/ga-123",
+		"--append-notes", "merged polecat/ga-123",
 		"--set-metadata", "alpha=first",
 		"--set-metadata", "zeta=last",
 	}
@@ -843,7 +843,7 @@ func TestAgentScriptRunsShippedLifecyclePolecatScript(t *testing.T) {
 	wantCommands := [][]string{
 		{"bd", "update", "ga-123", "--claim", "--actor", "demo/lifecycle.polecat"},
 		{"gc", "mail", "send", "--to", "demo/lifecycle.refinery", "-s", "CLAIMED: Demo work (ga-123)", "-m", "scripted polecat demo/lifecycle.polecat claimed ga-123; branch polecat/ga-123."},
-		{"bd", "update", "ga-123", "--assignee", "demo/lifecycle.refinery", "--notes", "scripted polecat: implemented ga-123, handed off to refinery"},
+		{"bd", "update", "ga-123", "--assignee", "demo/lifecycle.refinery", "--append-notes", "scripted polecat: implemented ga-123, handed off to refinery"},
 		{"gc", "mail", "send", "--to", "demo/lifecycle.refinery", "-s", "READY FOR MERGE: polecat/ga-123 (ga-123)", "-m", "scripted polecat demo/lifecycle.polecat pushed polecat/ga-123 for demo/lifecycle.refinery."},
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
@@ -941,7 +941,7 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 
 	wantCommands := [][]string{
 		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGING: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery is merging polecat/ga-123."},
-		{"bd", "update", "ga-123", "--status", "closed", "--notes", "scripted refinery: merged polecat/ga-123 into the rig mainline", "--set-metadata", "merge_result=merged"},
+		{"bd", "update", "ga-123", "--status", "closed", "--append-notes", "scripted refinery: merged polecat/ga-123 into the rig mainline", "--set-metadata", "merge_result=merged"},
 		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGED: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery merged polecat/ga-123 into the rig mainline."},
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
@@ -1029,6 +1029,30 @@ func TestAgentScriptHookBeadReportsHookFailureWithEmptyOutput(t *testing.T) {
 	}
 	if got := stderr.String(); got != "gc hook: config failed\n" {
 		t.Fatalf("stderr = %q, want forwarded hook error", got)
+	}
+}
+
+// TestAgentScriptHookBeadReportsStoreUnavailableAsFailure pins that the no-work
+// heuristic does not swallow a store-unavailable hook. bd can fail with nothing
+// but a warning-shaped line; gc hook still classifies it, prints the token and
+// exits 2, and that is a failed read, not an empty queue.
+func TestAgentScriptHookBeadReportsStoreUnavailableAsFailure(t *testing.T) {
+	var stderr bytes.Buffer
+	_, hasWork, err := agentScriptHookBeadWithRunner(&stderr,
+		func(_ []string, _ bool, _ string, _ io.Writer, hookStderr io.Writer) int {
+			return reportWorkQueryFailure("gc hook", errors.New("running work query \"bd ready --json\": exit status 1: warning: auto-import from issues.jsonl failed: dial tcp 127.0.0.1:3307: connect: connection refused"), hookStderr)
+		})
+	if err == nil {
+		t.Fatal("agentScriptHookBeadWithRunner succeeded, want hook failure for an unavailable store")
+	}
+	if hasWork {
+		t.Fatal("agentScriptHookBeadWithRunner reported work on hook failure")
+	}
+	if !strings.Contains(err.Error(), "gc hook failed") {
+		t.Fatalf("error = %q, want hook failure", err.Error())
+	}
+	if got := stderr.String(); !strings.Contains(got, hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want forwarded %s line", got, hookStoreUnavailableToken)
 	}
 }
 

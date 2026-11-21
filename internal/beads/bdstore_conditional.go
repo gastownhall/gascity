@@ -387,16 +387,42 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 // from the stores that can. If this store cannot fence, it returns
 // ErrConditionalWriteUnsupported rather than falling through to an
 // unconditional write.
+//
+// An assignee edit carries --force, as the native store's waives its
+// assignee-transfer guard (ForceAssigneeTransfer): the revision fence already
+// proves the caller decided on the row as it stands, so bd's anti-steal
+// refusal of another actor's live in_progress claim would only turn a fenced
+// release of a dead claim into a hard error. A stale revision still refuses
+// (bd exits 13 under --force). An edit that also closes the bead does not
+// carry it: bd's --force also waives the close policy (open children, a live
+// blocker), which no assignee edit asked to override.
+//
+// The native store waives more, deliberately: each guard has a request member
+// of its own there, and its UpdateIfMatch waives the transfer guard on every
+// assignee edit and the close policy on every status edit, closing edits
+// included, as its unconditional Update does; bd's one flag cannot waive the
+// transfer guard without the close policy. The exclusion keys on "closed",
+// the done status Gas City writes: bd's close policy covers every status that
+// crosses into the workspace's done category, which this store does not read,
+// so a fenced assignee edit to another done status still carries --force, and
+// with it the close-policy waiver.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if err := validateConditionalUpdateOpts(opts); err != nil {
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
+	if err := validateConditionalUpdateOpts(opts, false); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
 	}
+	if err := bdSplitSafeUpdate(opts); err != nil {
+		return err
+	}
 	args := bdUpdateArgs(id, opts)
 	if len(args) == 3 {
 		return nil
+	}
+	if opts.Assignee != nil && (opts.Status == nil || *opts.Status != "closed") {
+		args = append(args, "--force")
 	}
 	args = append(args, conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10))
 	return s.runConditionalWrite(id, expectedRevision, args...)
@@ -527,6 +553,10 @@ func (s *BdStore) finalizeConditionalWrite(id, verb string, expectedRevision int
 // genuine value loss ((false,nil)) or a precondition — so consumers re-enter
 // level-triggered instead of stranding a reservation (DESIGN §8.4).
 func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := bdSplitSafeKeys(map[string]string{key: next}); err != nil {
+		return false, err
+	}
+	noteSessionKeysByID(s.Get, id, map[string]string{key: next})
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return false, ErrConditionalWriteUnsupported
 	}

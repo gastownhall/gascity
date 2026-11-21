@@ -38,10 +38,16 @@ const (
 // internal/api's by-id surface has, where the plane's own router — not this
 // package's shadow rule — decides which work stores can hold the id.
 //
-// Its legs are fixed, so a row shows exactly what the intent contributed: the
+// Its refs are fixed, so a row shows exactly what the intent contributed: the
 // binding legs come from the topology, the work tail comes from the router, and
-// no row can quietly mix the two.
-func corpusRouter() WorkAxisRouter { return newCountingRouter(routedLegs()...) }
+// no row can quietly mix the two. It routes the alpha rig AHEAD of the work
+// leg, an order the package's own rule never produces, so a routed row of a
+// work-shaped id differs from its unrouted twin: on a topology with that rig
+// the rig is the residual and the work leg a shadow behind it, and on one
+// without it the row is the plan error a route to a store the topology lacks
+// is. A routed row of a namespaced id equals its twin: inside a namespace the
+// router is not consulted.
+func corpusRouter() WorkAxisRouter { return newCountingRouter(RigRef("alpha"), WorkRef) }
 
 // corpusIntents is the intent axis, in a stable printed order.
 func corpusIntents() []struct {
@@ -78,8 +84,8 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T0":                  `FirstOwner: ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T0":                   `FirstOwner: ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T0":                     `FirstOwner: ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T0":            `FirstOwner: ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
-	"ByID(gcg-abc,routed) x T0":           `FirstOwner: ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T0":            `error: storeref: the by-id work axis routed "ga-xyz" to "rig:alpha", which this topology holds no store for`,
+	"ByID(gcg-abc,routed) x T0":           `error: storeref: the by-id work axis routed "gcg-abc" to "rig:alpha", which this topology holds no store for`,
 	"RoutedWork x T0":                     `Union(first-leg-wins): ""[Authority,Fatal]`,
 	"AssignedWork(sweep) x T0":            `Union(first-leg-wins): ""[Authority,Fatal]`,
 	"AssignedWork(claim-escalation) x T0": `FirstOwner: ""[Authority,Fatal]`,
@@ -98,7 +104,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T1":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T1":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T1":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T1":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T1":            `error: storeref: the by-id work axis routed "ga-xyz" to "rig:alpha", which this topology holds no store for`,
 	"ByID(gcg-abc,routed) x T1":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T1":                     `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T1":            `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
@@ -118,7 +124,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T2":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T2":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T2":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:alpha[Shadow,Fatal]`,
-	"ByID(ga-xyz,routed) x T2":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T2":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > rig:alpha[WorkFallback,Fatal] > ""[Shadow,Fatal]`,
 	"ByID(gcg-abc,routed) x T2":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T2":                     `Union(first-leg-wins): ""[Authority,Fatal] > rig:alpha[FederationTail,PartialDegrade] > rig:bravo[FederationTail,PartialDegrade] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T2":            `Union(first-leg-wins): ""[Authority,Fatal] > rig:alpha[FederationTail,PartialDegrade] > rig:bravo[FederationTail,PartialDegrade] > class:gmnos[FederationTail,Fatal]`,
@@ -139,7 +145,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T3":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T3":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T3":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T3":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T3":            `error: storeref: the by-id work axis routed "ga-xyz" to "rig:alpha", which this topology holds no store for`,
 	"ByID(gcg-abc,routed) x T3":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T3":                     "error: storage refused: run `gc storage migrate`",
 	"AssignedWork(sweep) x T3":            "error: storage refused: run `gc storage migrate`",
@@ -152,12 +158,35 @@ var residencyCorpus = map[string]string{
 	"Class(graph) x T3":                   "error: storage refused: run `gc storage migrate`",
 	"Class(sessions) x T3":                "error: storage refused: run `gc storage migrate`",
 
+	// ---- T3k: T3 whose binding a durable census PROVED holds ids outside its
+	// reserved namespaces. Every row is character-for-character T3's except the
+	// three residence probes, which become Fatal. The carve-out above rests on
+	// "this leg was only ever a probe for an id no relocated class could own",
+	// and that sentence is known to be false here: the migration preserved ids,
+	// so a work-shaped id CAN be resident in this binding, and the retained
+	// pre-migration copy is sitting in the work store ready to answer for it.
+	"ByID(gcg-abc) x T3k":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(ga-xyz) x T3k":                   `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(ra-7) x T3k":                     `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(ga-xyz,routed) x T3k":            `error: storeref: the by-id work axis routed "ga-xyz" to "rig:alpha", which this topology holds no store for`,
+	"ByID(gcg-abc,routed) x T3k":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"RoutedWork x T3k":                     "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(sweep) x T3k":            "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(claim-escalation) x T3k": "error: storage refused: run `gc storage migrate`",
+	"Session x T3k":                        "error: storage refused: run `gc storage migrate`",
+	"Census(all) x T3k":                    "error: storage refused: run `gc storage migrate`",
+	"Census(work) x T3k":                   `Union(first-leg-wins): ""[Authority,Fatal]`,
+	"Census(graph) x T3k":                  "error: storage refused: run `gc storage migrate`",
+	"Class(work) x T3k":                    `SingleOwner: ""[Authority,Fatal]`,
+	"Class(graph) x T3k":                   "error: storage refused: run `gc storage migrate`",
+	"Class(sessions) x T3k":                "error: storage refused: run `gc storage migrate`",
+
 	// ---- T4: T2 with the bravo rig suspended. The constructor is TOLD which
 	// rigs to include; the resolver never re-invents an excluded leg.
 	"ByID(gcg-abc) x T4":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T4":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T4":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:alpha[Shadow,Fatal]`,
-	"ByID(ga-xyz,routed) x T4":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T4":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > rig:alpha[WorkFallback,Fatal] > ""[Shadow,Fatal]`,
 	"ByID(gcg-abc,routed) x T4":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T4":                     `Union(first-leg-wins): ""[Authority,Fatal] > rig:alpha[FederationTail,PartialDegrade] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T4":            `Union(first-leg-wins): ""[Authority,Fatal] > rig:alpha[FederationTail,PartialDegrade] > class:gmnos[FederationTail,Fatal]`,
@@ -180,7 +209,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T5":                  `FirstOwner: class:g[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T5":                   `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T5":                     `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T5":            `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T5":            `error: storeref: the by-id work axis routed "ga-xyz" to "rig:alpha", which this topology holds no store for`,
 	"ByID(gcg-abc,routed) x T5":           `FirstOwner: class:g[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T5":                     `Union(first-leg-wins): ""[Authority,Fatal] > class:g[FederationTail,Fatal] > class:s[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T5":            `Union(first-leg-wins): ""[Authority,Fatal] > class:g[FederationTail,Fatal] > class:s[FederationTail,Fatal]`,
@@ -200,7 +229,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T6":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T6":                   `FirstOwner: ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T6":                     `FirstOwner: ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T6":            `FirstOwner: ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T6":            `error: storeref: the by-id work axis routed "ga-xyz" to "rig:alpha", which this topology holds no store for`,
 	"ByID(gcg-abc,routed) x T6":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T6":                     `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T6":            `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
@@ -213,13 +242,13 @@ var residencyCorpus = map[string]string{
 	"Class(graph) x T6":                   `SingleOwner: class:gmnos[Authority,Fatal]`,
 	"Class(sessions) x T6":                `SingleOwner: class:gmnos[Authority,Fatal]`,
 
-	// ---- T6r: mint-truthful but relics still open. The OTHER half of the
+	// ---- T6r: mint-truthful but holding relics. The OTHER half of the
 	// retirement pair — the probe stays, because a point-in-time "zero open
 	// relics" is the only thing that may retire it.
 	"ByID(gcg-abc) x T6r":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T6r":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T6r":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T6r":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T6r":            `error: storeref: the by-id work axis routed "ga-xyz" to "rig:alpha", which this topology holds no store for`,
 	"ByID(gcg-abc,routed) x T6r":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T6r":                     `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T6r":            `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
@@ -244,6 +273,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcnq-abc-q) x T1":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T2":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T3":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T3k": `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T4":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T5":  `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(gcnq-abc-q) x T6":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
@@ -320,6 +350,15 @@ var residencyRuntimeCorpus = map[string]string{
 	"Session@runtime x T3":                        "error: storage refused: run `gc storage migrate`",
 	"Census(all)@runtime x T3":                    "error: storage refused: run `gc storage migrate`",
 	"ByID(ga-xyz)@runtime x T3":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated]`,
+
+	// T3k narrows identically — narrowing keeps a leg's role and policy, so the
+	// Fatal probe stays Fatal here too.
+	"RoutedWork@runtime x T3k":                     "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(sweep)@runtime x T3k":            "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(claim-escalation)@runtime x T3k": "error: storage refused: run `gc storage migrate`",
+	"Session@runtime x T3k":                        "error: storage refused: run `gc storage migrate`",
+	"Census(all)@runtime x T3k":                    "error: storage refused: run `gc storage migrate`",
+	"ByID(ga-xyz)@runtime x T3k":                   `FirstOwner: class:gmnos[ResidenceProbe,Fatal]`,
 
 	"RoutedWork@runtime x T4":                     `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep)@runtime x T4":            `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,

@@ -1,0 +1,54 @@
+diff -ruN a/lint/package.go b/lint/package.go
+--- a/lint/package.go	2026-10-06 20:40:32.738690165 +0000
++++ b/lint/package.go	2026-10-06 23:13:13.249103069 +0000
+@@ -6,6 +6,10 @@
+ 	"go/importer"
+ 	"go/token"
+ 	"go/types"
++	"io"
++	"os"
++	"path/filepath"
++	"runtime"
+ 	"sync"
+ 
+ 	goversion "github.com/hashicorp/go-version"
+@@ -112,7 +116,7 @@
+ 	config := &types.Config{
+ 		// By setting a no-op error reporter, the type checker does as much work as possible.
+ 		Error:    func(error) {},
+-		Importer: importer.Default(),
++		Importer: defaultGcImporter(p.fset),
+ 	}
+ 	info := &types.Info{
+ 		Types:  map[ast.Expr]types.TypeAndValue{},
+@@ -235,3 +239,30 @@
+ 		return 0
+ 	}
+ }
++
++// Added by gascity third_party/patches (Bazel nogo support).
++// defaultGcImporter returns importer.Default(), except under an export-data
++// GOROOT -- one with compiled packages in $GOROOT/pkg/$GOOS_$GOARCH but no
++// sources or go command, as rules_go's stdlib provides to nogo actions --
++// where it reads standard-library export data from that directory instead of
++// running `go list -export`, which cannot work there.
++func defaultGcImporter(fset *token.FileSet) types.Importer {
++	goroot := os.Getenv("GOROOT")
++	if goroot == "" {
++		return importer.Default()
++	}
++	goos, goarch := os.Getenv("GOOS"), os.Getenv("GOARCH")
++	if goos == "" {
++		goos = runtime.GOOS
++	}
++	if goarch == "" {
++		goarch = runtime.GOARCH
++	}
++	dir := filepath.Join(goroot, "pkg", goos+"_"+goarch)
++	if _, err := os.Stat(filepath.Join(dir, "runtime.a")); err != nil {
++		return importer.Default()
++	}
++	return importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
++		return os.Open(filepath.Join(dir, filepath.FromSlash(path)+".a"))
++	})
++}

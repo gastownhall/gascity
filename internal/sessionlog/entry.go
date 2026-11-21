@@ -33,6 +33,10 @@ type Entry struct {
 	Type    string `json:"type"`    // user, assistant, system, tool_use, tool_result, progress, result, file-history-snapshot
 	Subtype string `json:"subtype"` // compact_boundary, init, status, etc. (system entries only)
 
+	// IsAPIErrorMessage marks Claude-generated provider failures, not model replies.
+	IsAPIErrorMessage bool            `json:"isApiErrorMessage,omitempty"`
+	APIError          json.RawMessage `json:"error,omitempty"`
+
 	// Content
 	Message     json.RawMessage `json:"message"` // {role, content} for user/assistant
 	SystemEvent *SystemEvent    `json:"systemEvent,omitempty"`
@@ -52,6 +56,11 @@ type Entry struct {
 	// Raw preserves the full JSON line for pass-through to API consumers.
 	Raw         json.RawMessage `json:"-"`
 	RawRecordID string          `json:"-"`
+
+	// Partial marks an entry the provider is still writing: a later read
+	// of the growing file may return it with more content under the same
+	// UUID.
+	Partial bool `json:"-"`
 }
 
 // SystemEvent carries provider-neutral system event metadata extracted from a
