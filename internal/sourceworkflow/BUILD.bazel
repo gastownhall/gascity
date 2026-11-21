@@ -23,6 +23,7 @@ go_test(
     name = "sourceworkflow_test",
     srcs = [
         "atomic_root_close_test.go",
+        "failed_molecules_test.go",
         "live_read_through_target_test.go",
         "owned_test.go",
         "sourceworkflow_test.go",
@@ -30,6 +31,7 @@ go_test(
     ],
     embed = [":sourceworkflow"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/session",
