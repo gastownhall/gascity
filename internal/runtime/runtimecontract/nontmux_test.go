@@ -109,11 +109,21 @@ func TestNonTmuxIdleBoundaryKeepsTheLastRealRead(t *testing.T) {
 	}
 }
 
+// A hung peek is cut at the read window, min(3s, OpTimeout), and reported as
+// a timeout. It calls opsPeekShows directly, so only the peek runs under the
+// 100ms bound: through run the bound also covered the handshake, and on a
+// CPU-starved host a handshake past 100ms read as an undeclared idle-boundary
+// SKIP (ga-8xk44z8s).
+// Kills: a window not capped by the op timeout (3s), and a peek neither the
+// window nor the op timeout bounds (the 30s sleep runs out).
 func TestNonTmuxIdleBoundaryPeekBound(t *testing.T) {
+	b := reference.NonTmuxBodies()
+	b["peek"] = "exec sleep 30"
+	r := &runner{path: writeScript(t, t.TempDir(), b), opts: Options{OpTimeout: 100 * time.Millisecond}}
 	start := time.Now()
-	r := runNonTmuxIdleOptions(t, map[string]string{"peek": "exec sleep 30"}, Options{OpTimeout: 100 * time.Millisecond})
-	if r.Status != StatusFail || !strings.Contains(r.Detail, "timed out") {
-		t.Errorf("hung peek = %s, %s", r.Status, r.Detail)
+	status, detail := opsPeekShows(context.Background(), r, "peek-bound", "GC_RPP_IDLE_READ_peek-bound")
+	if status != StatusFail || !strings.Contains(detail, "carrier.ops idle read timed out after 100ms") {
+		t.Errorf("hung peek = %s, %s", status, detail)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("peek exceeded short bound: %s", elapsed)
