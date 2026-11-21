@@ -400,8 +400,6 @@ cmd/gc/class_store_emit_oprows.go	deferJournalRings	raw-param	1
 cmd/gc/cli_class_stores.go	cliGraphStore	raw-param	1
 cmd/gc/cli_class_stores.go	cliMailStore	raw-param	1
 cmd/gc/cli_class_stores.go	cliNudgesStore	raw-param	1
-cmd/gc/cli_session_store.go	cliRelocatedSessionStore	raw-param	1
-cmd/gc/cli_session_store.go	cliRelocatedSessionStore	raw-result	1
 cmd/gc/cli_session_store.go	cliSessionFrontDoor	raw-param	1
 cmd/gc/cli_session_store.go	cliSessionStore	raw-param	1
 cmd/gc/cli_session_store.go	cliSessionStore	raw-result	1
@@ -510,7 +508,6 @@ cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStores	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStoresWith	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStoresWithProvider	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	recordRootSettleFailure	raw-param	1
-cmd/gc/cmd_convoy_dispatch.go	recycleDispatchSubjectSession	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	reopenTrackingConvoysForReopenedSource	mint	1
 cmd/gc/cmd_convoy_dispatch.go	reopenTrackingConvoysForReopenedSource	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	restoreWorkflowDeleteDeps	raw-param	1
@@ -532,8 +529,6 @@ cmd/gc/cmd_events_reemit_execution.go	openExistingExecutionReemitStore	raw-resul
 cmd/gc/cmd_events_reemit_execution.go	projectExecutionReemitRun	raw-param	1
 cmd/gc/cmd_formula.go	closeFormulaCookFailedGraphV2Roots	mint	1
 cmd/gc/cmd_formula.go	closeFormulaCookFailedGraphV2Roots	raw-param	1
-cmd/gc/cmd_formula.go	decorateFormulaCookGraphV2Recipe	mint	1
-cmd/gc/cmd_formula.go	decorateFormulaCookGraphV2Recipe	raw-param	1
 cmd/gc/cmd_formula.go	emitAttachedFormulaCookExecutionFacts	raw-param	1
 cmd/gc/cmd_formula.go	emitFormulaCookExecutionFacts	mint	1
 cmd/gc/cmd_formula.go	emitFormulaCookExecutionFacts	raw-param	1

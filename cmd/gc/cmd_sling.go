@@ -20,7 +20,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -581,21 +580,18 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	// The sling's scope stores: store as the work store, and the graph class
 	// at that scope, the binding on a city that relocates it.
 	cs := cliStores(cityPath, store)
-	// Session beads live in the city's sessions store, never in a rig store.
-	// That is the scope's sessions handle at city scope and on a city that
-	// relocates the sessions class (the binding); a rig-scope sling on a city
-	// that does not opens the city store to read them. A city store that does
-	// not open leaves the sling reading sessions in its rig store, as it did
-	// before, with a warning: the sling's own work is in the rig ledger.
-	sessions := cs.Sessions()
-	if _, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassSessions); !relocated && !samePath(storeDir, cityPath) { // residency:allow — asks only whether the sessions class is relocated, to decide whether the scope's handle already is the city's
-		if cityStore, err := openCityStoreAtWithConfig(cityPath, cfg); err != nil {
-			fmt.Fprintf(stderr, "warning: gc sling: opening the city store for session lookups: %v; reading sessions in the rig store\n", err) //nolint:errcheck // best-effort stderr
-		} else if cityStore != nil {
-			defer closeBeadStoreHandle(cityStore) //nolint:errcheck // best-effort
-			sessions = cliStores(cityPath, cityStore).Sessions()
-		}
+	// Session beads live in the city's sessions store, never in a rig store
+	// (#8436). A city store that does not open refuses the sling rather than
+	// reading or minting sessions in the rig store.
+	sessions, releaseSessions, err := acquireRoutingSessionStore(cityPath, storeDir, cs)
+	if err != nil {
+		return fail("session_store_unavailable", fmt.Sprintf("gc sling: %v", err))
 	}
+	defer func() {
+		if err := releaseSessions(); err != nil {
+			fmt.Fprintf(stderr, "warning: gc sling: closing the city session store: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}()
 	deps := slingDeps{
 		CityName:           cityName,
 		CityPath:           cityPath,
@@ -856,15 +852,11 @@ func cliDirectSessionResolver(stderr io.Writer) graphroute.DirectSessionResolver
 		if !ok {
 			return "", false, nil
 		}
-		// A named session bead is session class. The caller's store is whatever
-		// scope the sling or drain runs in (a rig work store, for a rig scope), so
-		// on a split city resolve and materialize through the sessions binding
-		// instead: through the scope store the canonical bead is invisible and a
-		// duplicate is minted where nothing reads it (write-audit B6).
-		// store.Store: the caller's raw scope store, as this resolver has always
-		// taken it; graphroute hands it over as a sessions handle (typed-store
-		// T5a), and the resolution below still takes the raw store (T9e).
-		id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store.Store, cfg, cityPath), spec.Identity, stderr)
+		// store is the city's sessions store every graph-routing root supplies,
+		// so the named session is resolved and materialized where every session
+		// reader reads it (#8436); the resolution below still takes the raw
+		// store (typed-store T9e).
+		id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store.Store, spec.Identity, stderr)
 		if err != nil {
 			return "", false, err
 		}

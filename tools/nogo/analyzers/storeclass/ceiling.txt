@@ -5,10 +5,10 @@
 # coordinator decision, made by hand, and visible in review.
 cmd/gc	cache-peel	20
 cmd/gc	cap-assert	98
-cmd/gc	mint	157
+cmd/gc	mint	156
 cmd/gc	raw-field	177
-cmd/gc	raw-param	1072
-cmd/gc	raw-result	268
+cmd/gc	raw-param	1069
+cmd/gc	raw-result	267
 cmd/gc	raw-type	4
 cmd/gc	raw-var	38
 cmd/gc	read-marker	15

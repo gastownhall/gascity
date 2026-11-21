@@ -270,9 +270,10 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 
 	var sessions beads.SessionStore
 	switch bead.Metadata[beadmeta.KindMetadataKey] {
-	case "check", "fanout", "drain", "retry", "ralph":
-		// The steps and attempts these kinds spawn bind sessions, whose rows
-		// live in the city's sessions store, never in the graph store (#8436).
+	case "check", "fanout", "drain", "retry-eval", "retry", "ralph":
+		// The steps and attempts these kinds spawn bind sessions, and the retry
+		// lane recycles them; their rows live in the city's sessions store,
+		// never in the graph store (#8436).
 		acquired, release, err := acquireRoutingSessionStore(cityPath, storePath, cliStores(cityPath, store))
 		if err != nil {
 			return fmt.Errorf("control dispatch %s: %w", beadID, err)
@@ -355,12 +356,12 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			// supply the work leg as the member tail so that read crosses the
 			// class boundary. Route-gated exactly like the drain: on every
 			// other city graphStore IS store and the tail stays empty.
-			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, sessions, cfg)
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			// Same cross-store required-artifact source resolution as
 			// retry-eval above.
-			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, sessions, cfg)
 		}
 	}
 
@@ -461,12 +462,18 @@ func validateDispatchSessionProviderConfig(cfg *config.City, cityPath string) er
 // so the session provider (two bd reads for its session snapshot) is built on
 // the first recycle rather than for every retry, ralph and retry-eval control
 // the dispatcher processes. A provider that cannot be built fails the recycle
-// that needs it, through ProcessControl's error return.
-func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *config.City) func(beads.Bead) error {
+// that needs it, through ProcessControl's error return. sessions is the city's
+// sessions store, where the subject's session row lives: never a rig or scope
+// work store (#8436). A zero handle fails the recycle rather than killing
+// through some other store.
+func recycleDispatchSubjectSession(cityPath string, sessions beads.SessionStore, cfg *config.City) func(beads.Bead) error {
 	var sp runtime.Provider
 	return func(subject beads.Bead) error {
 		if strings.TrimSpace(subject.Assignee) == "" {
 			return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
+		}
+		if sessions == (beads.SessionStore{}) {
+			return fmt.Errorf("recycling the session of subject %s: %w", subject.ID, graphroute.ErrNoSessionStore)
 		}
 		if sp == nil {
 			provider, err := dispatchControlSessionProvider()
@@ -475,10 +482,7 @@ func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *conf
 			}
 			sp = provider
 		}
-		// The subject's session row is session class: on a split city it lives
-		// only in the binding, never in the scope work store this hook is
-		// built over (write-audit B5).
-		return workerKillSessionTargetWithConfig(cityPath, cliRelocatedSessionStore(store, cfg, cityPath), sp, cfg, subject.Assignee)
+		return workerKillSessionTargetWithConfig(cityPath, sessions, sp, cfg, subject.Assignee)
 	}
 }
 
