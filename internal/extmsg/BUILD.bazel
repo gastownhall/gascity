@@ -37,6 +37,7 @@ go_library(
 go_test(
     name = "extmsg_test",
     srcs = [
+        "addressed_session_test.go",
         "agent_binding_test.go",
         "binding_lock_pool_test.go",
         "binding_survival_test.go",
