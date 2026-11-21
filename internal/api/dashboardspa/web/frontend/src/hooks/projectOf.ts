@@ -110,14 +110,23 @@ const WORKER_ROLE_RX = /(?:worker|polecat)(?:-\d+)?$/;
 // chief-of-staff directs that rig's work; it is not a worker.
 const RIG_ORCHESTRATION_RX = /(?:\.project-lead|chief-of-staff)$/;
 
+// `agent_kind` value the supervisor stamps on a session backed by a
+// multi-instance (pool) agent. It is a structural classification of the
+// configured agent, never derived from a role name, so it identifies a pool
+// worker whatever the pool is called (`cursor`, `claude-reviewer`, ...). Newer
+// supervisors send it on every agent-backed session; older payloads omit it.
+const POOL_AGENT_KIND = 'pool';
+
 /**
  * True when a session is a live worker actively performing work — the signal
  * the Work-in-flight section counts. Requires a live state (`active` or
  * `running` — the same running signal isRunningAgent / isSessionStreamable /
  * stateTone honour, so a worker reported as `running` is not silently dropped),
- * a worker/pool role in the template or runtime name, and that the session is
- * NOT any flavour of orchestration (cross-rig, per-rig dispatcher,
- * project-lead, chief-of-staff).
+ * that the session is NOT any flavour of orchestration (cross-rig, per-rig
+ * dispatcher, project-lead, chief-of-staff), and that it is either backed by a
+ * pool agent (`agent_kind === 'pool'`, whatever the pool is named) or carries a
+ * worker/pool role in the template, alias or runtime name (the fallback for
+ * payloads that predate `agent_kind`).
  */
 export function isWorkerSession(s: DashboardSession): boolean {
   if (s.state !== 'active' && s.state !== 'running') return false;
@@ -127,6 +136,7 @@ export function isWorkerSession(s: DashboardSession): boolean {
   if (RIG_ORCHESTRATION_RX.test(template) || RIG_ORCHESTRATION_RX.test(alias)) {
     return false;
   }
+  if (s.agent_kind === POOL_AGENT_KIND) return true;
   // The worker role can surface in the template (`polecat`, `scix-worker`) or,
   // for a dynamically-spawned slot, in the runtime session_name
   // (`polecat-gc-335825`). Strip any `-gc-XXXXX` handle first so the role
