@@ -768,3 +768,44 @@ func TestSameSessionRestartDoesNotReachBDProxiedDoltServer(t *testing.T) {
 		})
 	}
 }
+
+// TestCityInfrastructureRootReadsOnlyTheInjectedProcfs pins AC-5: the fence
+// decides a backend's ownership from the procfs the scanner enumerated, never
+// from the host's. A proxy pid alive only on the injected procfs protects the
+// backend; a pid alive on the host (this test process) but absent from the
+// injected procfs does not.
+func TestCityInfrastructureRootReadsOnlyTheInjectedProcfs(t *testing.T) {
+	const backendPID = 4201
+	hostPID := os.Getpid()
+	for _, tc := range []struct {
+		name      string
+		proxyPID  int
+		inProcfs  bool
+		protected bool
+	}{
+		{name: "proxy only in the injected procfs", proxyPID: 4200, inProcfs: true, protected: true},
+		{name: "proxy only on the host", proxyPID: hostPID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxyRoot := filepath.Join(t.TempDir(), "proxy")
+			configPath := writeBDProxyRoot(t, proxyRoot, `{"pid":`+strconv.Itoa(tc.proxyPID)+`,"kind":"db-proxy"}`)
+			root := t.TempDir()
+			if tc.inProcfs {
+				writeFakeProcess(t, root, tc.proxyPID, 1, []string{"bd", "db-proxy-child", "--root", proxyRoot}, []string{"PATH=/usr/bin"})
+			}
+			writeFakeProcess(t, root, backendPID, 1, []string{"dolt", "sql-server", "--config", configPath}, []string{"PATH=/usr/bin"})
+			proctable.SetScanRootForTesting(t, root)
+
+			reason, err := CityInfrastructureRoot(runtime.LiveRuntime{PID: backendPID, StartIdentity: "0"})
+			if err != nil {
+				t.Fatalf("CityInfrastructureRoot: %v", err)
+			}
+			if got := reason != ""; got != tc.protected {
+				t.Fatalf("CityInfrastructureRoot reason = %q, want protected=%v", reason, tc.protected)
+			}
+			if tc.protected && !strings.Contains(reason, "live bd proxy pid="+strconv.Itoa(tc.proxyPID)) {
+				t.Fatalf("reason %q does not name proxy pid %d", reason, tc.proxyPID)
+			}
+		})
+	}
+}
