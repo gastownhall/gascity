@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -854,7 +855,7 @@ func IsReadyBlockingDependencyType(t string) bool {
 // open rather than newly stalling dependents it doesn't understand.
 //
 // Callers pass ReadinessWorkOutcome(dep.Metadata), not the raw gc.work_outcome,
-// so a dependency whose control-plane step passed is never vetoed.
+// so a formula step whose close dispatch reads as a verdict is never vetoed.
 func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	if depStatus != "closed" {
 		return false
@@ -862,25 +863,59 @@ func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	return depWorkOutcome != beadmeta.WorkOutcomeBlocked
 }
 
+// terminalStepOutcomes are the gc.outcome verdicts, compared after
+// strings.TrimSpace as dispatch compares them, with which a closed formula step
+// releases its dependents whatever its gc.work_outcome. The SQLite ready
+// statement renders its IN list from this collection.
+var terminalStepOutcomes = []string{
+	beadmeta.OutcomePass,
+	beadmeta.OutcomeFail,
+	beadmeta.OutcomeSkipped,
+	beadmeta.OutcomeCanceled,
+}
+
 // ReadinessWorkOutcome is the gc.work_outcome value readiness should judge a
 // closed dependency by. gc.outcome is the control-plane step result that
 // internal/dispatch sequences a workflow on, and gc.work_outcome the worker's
 // work-record disposition (ADR-0009); the two vocabularies are disjoint and can
-// disagree. A step that closed with gc.outcome=pass has already been advanced
-// past by dispatch, so letting gc.work_outcome=blocked veto its dependents
-// strands them: the graph waits on work that readiness never offers to any
-// worker. When the step passed, its work outcome does not gate readiness.
+// disagree. The controls that consume a formula step's close (retry,
+// scope-check, workflow-finalize) depend on the step and are only ever served
+// from Ready(), so letting gc.work_outcome=blocked veto them strands the
+// workflow: the graph waits on work that readiness never offers. So when
+// dispatch reads the step's close as a verdict (dispatchReadsStepClose), its
+// work outcome does not gate readiness, and dispatch decides what the close
+// means. The stored work record is left unchanged.
 //
-// The override applies only to formula step beads (those carrying
-// gc.step_ref). A plain work bead can also carry gc.outcome=pass — the core
-// mol-do-work formula stamps it on the work bead it closes, blocked or not —
-// and there gc.outcome is not a dispatch verdict, so its blocked work outcome
-// keeps withholding dependents.
+// A formula step whose close dispatch reads as no verdict keeps its blocked
+// work outcome: one with a missing or unrecognized gc.outcome that is neither
+// an attempt root nor an abort_scope member. Its consumers count such a close
+// as a pass (workflow-finalize, the scope-check of a member that did not opt
+// into abort_scope), so releasing it would finalize a blocked step as passed.
+// A plain work bead (no gc.step_ref) keeps its blocked work outcome whatever
+// gc.outcome it carries: the core mol-do-work formula stamps gc.outcome=pass on
+// the work bead it closes, blocked or not, and there gc.outcome is not a
+// dispatch verdict.
 func ReadinessWorkOutcome(metadata map[string]string) string {
-	if metadata[beadmeta.StepRefMetadataKey] != "" && metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass {
+	if dispatchReadsStepClose(metadata) {
 		return ""
 	}
 	return metadata[beadmeta.WorkOutcomeMetadataKey]
+}
+
+// dispatchReadsStepClose reports whether metadata marks a formula step
+// (gc.step_ref) whose close internal/dispatch reads as a verdict: a terminal
+// gc.outcome; the attempt root of a retry or ralph control
+// (beadmeta.IsAttemptRoot), whose control judges every close (a retry control
+// retries a missing or unrecognized gc.outcome); or a gc.on_fail=abort_scope
+// member, whose scope-check counts any close but pass, skipped or canceled as a
+// failure. gc.outcome and gc.on_fail are trimmed as dispatch trims them.
+func dispatchReadsStepClose(metadata map[string]string) bool {
+	if metadata[beadmeta.StepRefMetadataKey] == "" {
+		return false
+	}
+	return slices.Contains(terminalStepOutcomes, strings.TrimSpace(metadata[beadmeta.OutcomeMetadataKey])) ||
+		beadmeta.IsAttemptRoot(metadata) ||
+		strings.TrimSpace(metadata[beadmeta.OnFailMetadataKey]) == beadmeta.OnFailAbortScope
 }
 
 // IsReadyExcludedType reports whether the bead type is excluded from

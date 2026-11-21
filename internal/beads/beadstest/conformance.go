@@ -999,6 +999,10 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// Which closed blockers that recorded gc.work_outcome=blocked still withhold
+	// their dependent (beads.ReadinessWorkOutcome).
+	runStepCloseReadinessTests(t, newStore)
+
 	t.Run("ReadyIncludesDependentWhenBlockerClosedWithNoWorkOutcome", func(t *testing.T) {
 		s := newStore()
 		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
