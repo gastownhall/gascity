@@ -306,6 +306,13 @@ var bdSplitRefusals = map[string]bdSplitRefusal{
 	"migrate-issues":    {"a hidden spelling of migrate issues, which is not vetted", bdSplitAltBulk},
 	"__gw-credential":   {"a hidden enterprise credential helper", bdSplitAltRequest},
 	"observer":          {"enterprise observer administration is not vetted", bdSplitAltRequest},
+
+	// bd 1.4.0's versioned-history read, `versions <id>`. The by-id door does
+	// not route it (bdByIDSubjectTable takes a verb only when every pinned
+	// inventory resolves it alike, and bd 1.3.x has no versions), so for a
+	// bead the binding holds bd would answer from the work store. It fails
+	// closed until it is vetted.
+	"versions": {"not vetted on split cities yet", bdSplitAltRequest},
 }
 
 // bdSplitRedirectFlags are the flags, on any command, that point bd at a

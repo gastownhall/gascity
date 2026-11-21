@@ -48,6 +48,22 @@ func NativeLaneExpectation() *BeadsStoreExpectation {
 	}
 }
 
+// BdOnlyNativeLaneExpectation is the beads-store payload with
+// GC_BEADS_PROXIED_NATIVE on for a proxied scope whose proxy serves its data
+// port to bd alone. beads v1.4.0 opens every data connection with its BDPROXY1
+// handshake (beads#7885) and marks proxy.pid with control_proto, and the lane
+// declines such a proxy from the record, before any dial, with
+// data_auth_required: the bd front door under the unchanged proxied_provider
+// gate, with the verdict on the account. Admission refused before it pinned a
+// generation, so the account carries no endpoint, evidence or idle policy to
+// assert.
+func BdOnlyNativeLaneExpectation() *BeadsStoreExpectation {
+	return &BeadsStoreExpectation{
+		Store: "BdStore", PreflightGate: "proxied_provider", RequireProxiedAccount: true,
+		Verdict: "data_auth_required",
+	}
+}
+
 // The init topology matrix.
 //
 // Gas City supports more than one way to bring a beads scope up, and the
@@ -220,6 +236,12 @@ type BeadsTopology struct {
 	// one non-proxied shape opts in anyway, as the fence that says the flag
 	// changes nothing off its own lane.
 	CityStoreNativeLane *BeadsStoreExpectation
+	// CityStoreNativeLaneBdOnly replaces CityStoreNativeLane when the city's
+	// proxy serves its data port to bd alone (a bd from beads v1.4.0 on,
+	// whose proxy.pid carries control_proto; see BdOnlyNativeLaneExpectation).
+	// Nil for a shape with no bd proxy, whose flag-on expectation does not
+	// depend on one.
+	CityStoreNativeLaneBdOnly *BeadsStoreExpectation
 
 	// DoctorGaps names checks this shape fails for a reason that predates this
 	// work and is not this feature's to fix. Every entry needs a comment saying
@@ -395,8 +417,11 @@ func BeadsTopologies() []BeadsTopology {
 		Store: "BdStore", PreflightGate: "proxied_provider", RefuseProxiedAccount: true,
 	}
 	// And with the flag on: what the native lane does with a scope gc
-	// initialized at the default idle timeout (NativeLaneExpectation).
+	// initialized at the default idle timeout (NativeLaneExpectation), and
+	// what it does instead when the scope's proxy serves its data port to bd
+	// alone (BdOnlyNativeLaneExpectation).
 	proxiedNativeStore := NativeLaneExpectation()
+	proxiedBdOnlyStore := BdOnlyNativeLaneExpectation()
 	proxiedLocalScope := ScopeShape{
 		DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 		Journaled: true, Proxies: 1, Servers: 1, Owner: OwnerProvider,
@@ -439,13 +464,14 @@ func BeadsTopologies() []BeadsTopology {
 	directExternalDoctorGaps := []string{"order-firing-current"}
 	return []BeadsTopology{
 		{
-			Name:                "M1-proxied-local",
-			Doc:                 "the default: no selector at all, bd owns a proxy and its Dolt child",
-			City:                proxiedLocalScope,
-			Rig:                 proxiedLocalScope,
-			CityStore:           proxiedProviderStore,
-			CityStoreNativeLane: proxiedNativeStore,
-			InitArgs:            func(*ExternalDolt) []string { return nil },
+			Name:                      "M1-proxied-local",
+			Doc:                       "the default: no selector at all, bd owns a proxy and its Dolt child",
+			City:                      proxiedLocalScope,
+			Rig:                       proxiedLocalScope,
+			CityStore:                 proxiedProviderStore,
+			CityStoreNativeLane:       proxiedNativeStore,
+			CityStoreNativeLaneBdOnly: proxiedBdOnlyStore,
+			InitArgs:                  func(*ExternalDolt) []string { return nil },
 		},
 		{
 			Name:                     "M2-direct-local",
@@ -521,8 +547,9 @@ func BeadsTopologies() []BeadsTopology {
 			//
 			// City-scoped, and only the city: the rig of this shape used to
 			// declare the same pair and nothing read it (council C-F6).
-			CityStore:           proxiedProviderStore,
-			CityStoreNativeLane: proxiedNativeStore,
+			CityStore:                 proxiedProviderStore,
+			CityStoreNativeLane:       proxiedNativeStore,
+			CityStoreNativeLaneBdOnly: proxiedBdOnlyStore,
 			InitArgs: func(up *ExternalDolt) []string {
 				return []string{
 					"--beads-transport", "proxied", "--beads-target", "external",
@@ -593,15 +620,16 @@ func BeadsTopologies() []BeadsTopology {
 			InitArgs: func(*ExternalDolt) []string { return nil },
 		},
 		{
-			Name:                "M7-deferred-init",
-			Doc:                 "GC_DOLT=skip: init records the intent and creates nothing; start finishes the store",
-			Env:                 map[string]string{"GC_DOLT": "skip"},
-			Deferred:            true,
-			City:                proxiedLocalScope,
-			Rig:                 proxiedLocalScope,
-			CityStore:           proxiedProviderStore,
-			CityStoreNativeLane: proxiedNativeStore,
-			InitArgs:            func(*ExternalDolt) []string { return nil },
+			Name:                      "M7-deferred-init",
+			Doc:                       "GC_DOLT=skip: init records the intent and creates nothing; start finishes the store",
+			Env:                       map[string]string{"GC_DOLT": "skip"},
+			Deferred:                  true,
+			City:                      proxiedLocalScope,
+			Rig:                       proxiedLocalScope,
+			CityStore:                 proxiedProviderStore,
+			CityStoreNativeLane:       proxiedNativeStore,
+			CityStoreNativeLaneBdOnly: proxiedBdOnlyStore,
+			InitArgs:                  func(*ExternalDolt) []string { return nil },
 		},
 	}
 }

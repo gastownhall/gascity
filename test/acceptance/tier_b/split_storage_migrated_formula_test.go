@@ -24,9 +24,12 @@
 //     its edge is dropped and recorded, and the rollback puts it back.
 //   - MigratedByV150RC1: the same, but everything up to and including the
 //     migration is run by a v1.5.0-rc1 gc (GC_ACCEPTANCE_SPLIT_RC1_GC_BIN, or
-//     built here from the tag when the clone has it). Booting that city with
-//     this binary must refuse and name the repair command; running it repairs
-//     the city.
+//     built here from the tag when the clone has it) on the bd that release
+//     shipped with (GC_ACCEPTANCE_SPLIT_RC1_BD_BIN, a bd 1.3.x; see
+//     splitRC1BD). The city is then handed to this binary and the pinned bd
+//     the way beads documents an upgrade, `bd migrate schema` before anything
+//     else touches the store. Booting that city with this binary must refuse
+//     and name the repair command; running it repairs the city.
 //   - BornSplit: a city with [storage] from its first boot. The control.
 //   - RawBdStrandAfterCutover / RawBdStrandAfterFreshMigration: a born-split
 //     city, and a freshly migrated one, stranded mid-formula by a plain
@@ -48,7 +51,12 @@
 // Run:
 //
 //	git fetch --no-tags --depth=1 origin +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1
-//	make test-acceptance-split-storage GC_ACCEPTANCE_BD_BIN=/path/to/bd-1.3.1
+//	BD_INSTALL_BIN_DIR=/path/to/bd-1.3.1 .github/scripts/install-bd-archive.sh v1.3.1
+//	make test-acceptance-split-storage GC_ACCEPTANCE_BD_BIN=/path/to/bd \
+//	    GC_ACCEPTANCE_SPLIT_RC1_BD_BIN=/path/to/bd-1.3.1/bd
+//
+// GC_ACCEPTANCE_SPLIT_RC1_BD_BIN may be left unset when GC_ACCEPTANCE_BD_BIN
+// is itself a bd 1.3.x.
 package tierb_test
 
 import (
@@ -73,7 +81,14 @@ const (
 	// splitRC1GCBinEnv names a gc built from tag v1.5.0-rc1, the release whose
 	// migration retains the work-store copies this test catches re-dispatching.
 	splitRC1GCBinEnv = "GC_ACCEPTANCE_SPLIT_RC1_GC_BIN"
-	// splitRequireRC1Env makes a missing rc1 binary fatal instead of a skip.
+	// splitRC1BDBinEnv names the bd the v1.5.0-rc1 gc runs on: a bd 1.3.x,
+	// ideally splitRC1BDRelease.
+	splitRC1BDBinEnv = "GC_ACCEPTANCE_SPLIT_RC1_BD_BIN"
+	// splitRC1BDRelease is the bd v1.5.0-rc1 shipped with: that tag's deps.env
+	// BD_VERSION, and the beads module its go.mod requires.
+	splitRC1BDRelease = "v1.3.1"
+	// splitRequireRC1Env makes a missing rc1 gc or rc1 bd fatal instead of a
+	// skip.
 	splitRequireRC1Env = "GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC"
 
 	// splitRepairCommand is the command a boot refusal of an unrepaired
@@ -181,7 +196,7 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 	}
 
 	t.Run("FreshMigration", func(t *testing.T) {
-		c := newSplitE2ECity(t, bdPath, doltPath, false, "")
+		c := newSplitE2ECity(t, bdPath, doltPath, false, "", "")
 		root := c.runFirstHalf()
 		edge := c.addWorkEdgeInto(root)
 		c.authorSplit()
@@ -196,11 +211,13 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 
 	t.Run("MigratedByV150RC1", func(t *testing.T) {
 		// The whole pre-cutover life of this city is v1.5.0-rc1's: it is
-		// initialized, run, stopped and migrated by that binary, under its
-		// own supervisor, exactly as an operator who adopted 1.5.0 did. Only
-		// then is the binary under test handed the city.
+		// initialized, run, stopped and migrated by that binary and the bd it
+		// shipped with, under its own supervisor, exactly as an operator who
+		// adopted 1.5.0 did. Only then are the binary under test and the
+		// pinned bd handed the city.
+		rc1BD := splitRC1BD(t, bdPath)
 		rc1 := splitRC1Binary(t)
-		c := newSplitE2ECity(t, bdPath, doltPath, false, rc1)
+		c := newSplitE2ECity(t, bdPath, doltPath, false, rc1, rc1BD)
 		root := c.runFirstHalf()
 		c.authorSplit()
 		c.migrate()
@@ -211,7 +228,7 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 	})
 
 	t.Run("BornSplit", func(t *testing.T) {
-		c := newSplitE2ECity(t, bdPath, doltPath, true, "")
+		c := newSplitE2ECity(t, bdPath, doltPath, true, "", "")
 		root := c.runFirstHalf()
 		c.finishAndAssert(root)
 	})
@@ -222,7 +239,7 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 	// keep serving (degraded) — boot included — and the in-place repair must
 	// clear it on the running city.
 	t.Run("RawBdStrandAfterCutover", func(t *testing.T) {
-		c := newSplitE2ECity(t, bdPath, doltPath, true, "")
+		c := newSplitE2ECity(t, bdPath, doltPath, true, "", "")
 		root := c.runFirstHalf()
 		c.strandServeDegradedAndRepair(bdPath, root)
 	})
@@ -230,7 +247,7 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 	// The same on a city that ran its first half unsplit and was migrated
 	// with this binary (the FreshMigration shape).
 	t.Run("RawBdStrandAfterFreshMigration", func(t *testing.T) {
-		c := newSplitE2ECity(t, bdPath, doltPath, false, "")
+		c := newSplitE2ECity(t, bdPath, doltPath, false, "", "")
 		root := c.runFirstHalf()
 		c.authorSplit()
 		c.migrate()
@@ -366,6 +383,65 @@ func splitRC1Binary(t *testing.T) string {
 	return bin
 }
 
+// splitRC1BD returns the bd the v1.5.0-rc1 gc runs on.
+//
+// That gc links beads v1.3.1, which opens a database at schema v66 at most,
+// and beads 1.4.0's schema upgrade is one-way: a database a bd >= 1.4.0
+// created or migrated is at v74. The v1.5.0-rc1 native store refuses it
+// ("database is at v74, binary knows up to v66"), and the migration then runs
+// over the BdStore fallback, which cannot read edge payloads. So the rc1 half
+// runs on a bd 1.3.x, as it did when that release shipped:
+// GC_ACCEPTANCE_SPLIT_RC1_BD_BIN, or the pinned bd when it is one. With
+// neither, it skips, or fails under splitRequireRC1Env. A set path that names
+// no file, or a bd that is not 1.3.x, is always a failure.
+func splitRC1BD(t *testing.T, bdPath string) string {
+	t.Helper()
+	if raw := strings.TrimSpace(os.Getenv(splitRC1BDBinEnv)); raw != "" {
+		bin, err := filepath.Abs(raw)
+		if err != nil {
+			t.Fatalf("resolving %s %q: %v", splitRC1BDBinEnv, raw, err)
+		}
+		if info, err := os.Stat(bin); err != nil || info.IsDir() {
+			t.Fatalf("%s %s is not an executable file: %v", splitRC1BDBinEnv, bin, err)
+		}
+		if version := splitBDVersion(t, bin); !strings.HasPrefix(version, "1.3.") {
+			t.Fatalf("%s %s is bd %s; the %s half needs a bd 1.3.x (that release shipped with bd %s)",
+				splitRC1BDBinEnv, bin, version, splitRC1Tag, splitRC1BDRelease)
+		}
+		return bin
+	}
+	version := splitBDVersion(t, bdPath)
+	if strings.HasPrefix(version, "1.3.") {
+		return bdPath
+	}
+	reason := fmt.Sprintf("%s is unset and the pinned bd %s is bd %s, not a bd 1.3.x, so there is no bd for the %s half of the upgraded-city scenario: "+
+		"that gc links beads v1.3.1 and refuses a database a bd >= 1.4.0 created (beads 1.4.0's one-way schema upgrade). "+
+		"Install the bd it shipped with (BD_INSTALL_BIN_DIR=<dir> .github/scripts/install-bd-archive.sh %s) and set %s=<dir>/bd",
+		splitRC1BDBinEnv, bdPath, version, splitRC1Tag, splitRC1BDRelease, splitRC1BDBinEnv)
+	if v := strings.TrimSpace(os.Getenv(splitRequireRC1Env)); v != "" && v != "0" {
+		t.Fatalf("%s is set, so this scenario must run, but %s", splitRequireRC1Env, reason)
+	}
+	t.Skip(reason)
+	return ""
+}
+
+// splitBDVersionRE reads the release out of `bd version`.
+var splitBDVersionRE = regexp.MustCompile(`bd version (\d+\.\d+\.\d+[0-9A-Za-z.+-]*)`)
+
+// splitBDVersion is the release bin's `bd version` reports, without a v.
+func splitBDVersion(t *testing.T, bin string) string {
+	t.Helper()
+	out, err := helpers.ToolCommand(t, bin, "version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s version: %v\n%s", bin, err, out)
+	}
+	m := splitBDVersionRE.FindStringSubmatch(string(out))
+	if m == nil {
+		t.Fatalf("%s version printed no bd version:\n%s", bin, out)
+	}
+	return m[1]
+}
+
 // buildSplitRC1FromTag extracts the tagged tree with git archive (no worktree
 // is registered, nothing in the clone changes) and builds its gc into a
 // test-owned temp dir. The only network it can need is the Go module proxy
@@ -469,8 +545,13 @@ type splitE2ECity struct {
 	dir  string
 	// preEnv runs everything before the hand-over: the binary under test, or
 	// for the upgrade scenario the v1.5.0-rc1 gc, first on PATH as `gc` so
-	// the worker's own gc calls and the supervisor resolve the same binary.
+	// the worker's own gc calls and the supervisor resolve the same binary,
+	// and the bd it shipped with as the bd every gc of that phase runs.
 	preEnv *helpers.Env
+	// bd is the pinned bd, the one the binary under test runs.
+	bd string
+	// preBD is the bd preEnv runs when that is not bd, else "".
+	preBD string
 	// standalone runs the city's controller as `gc start --foreground`
 	// instead of under a supervisor: the v1.5.0-rc1 phase does, because that
 	// binary's supervisor refuses any HOME but the passwd one, and this test
@@ -484,7 +565,10 @@ type splitE2ECity struct {
 	controllerDone chan struct{}
 }
 
-func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preBin string) *splitE2ECity {
+// newSplitE2ECity builds one city on the pinned bd. preBin and preBD, when
+// set, are the gc and bd that run it until handOver; "" is the binary under
+// test, or the pinned bd.
+func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preBin, preBD string) *splitE2ECity {
 	t.Helper()
 	gcBin, err := helpers.ResolveGCPath(testEnvB)
 	if err != nil {
@@ -518,6 +602,17 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 		// a standalone controller instead (see splitE2ECity.standalone).
 		preEnv = splitBinaryEnv(t, env, preBin, filepath.Join(root, "pre-bin"))
 	}
+	if preBD == bdPath {
+		preBD = ""
+	}
+	provisionBD := bdPath
+	if preBD != "" {
+		// Its own bd, run as itself (BD_BIN, and first on PATH ahead of the
+		// pinned bd and its tool-home wrapper), creates the store too: the
+		// database is that bd's schema from its first row.
+		preEnv = preEnv.Clone().WithRealBD(preBD)
+		provisionBD = preBD
+	}
 
 	// Registered before the upstream and the city so it runs after both have
 	// stopped: no Dolt server or bd proxy under this root may outlive the test.
@@ -530,7 +625,7 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 	if upstream.Port == strconv.Itoa(splitLegacyDoltPort) {
 		t.Fatalf("the test's Dolt server landed on %d, the host's shared default; acceptance must never touch it", splitLegacyDoltPort)
 	}
-	upstream.ProvisionBeadsDatabase(t, env, bdPath, filepath.Join(root, "provision"), "hosted")
+	upstream.ProvisionBeadsDatabase(t, preEnv, provisionBD, filepath.Join(root, "provision"), "hosted")
 
 	scriptPath := filepath.Join(root, "split-e2e-worker.sh")
 	if err := os.WriteFile(scriptPath, []byte(splitWorkerScript), 0o755); err != nil {
@@ -560,7 +655,7 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 		}
 		t.Logf("gc init hit the dolt identity probe timeout; gc start completes it:\n%s", out)
 	}
-	c := &splitE2ECity{t: t, env: env, city: city, root: root, dir: dir, preEnv: preEnv, standalone: preBin != ""}
+	c := &splitE2ECity{t: t, env: env, city: city, root: root, dir: dir, preEnv: preEnv, bd: bdPath, preBD: preBD, standalone: preBin != ""}
 	t.Cleanup(c.stopStandaloneController)
 	c.reduceToScriptedWorker(scriptPath, bornSplit)
 	if err := os.WriteFile(c.path("formulas", splitFormulaName+".toml"), []byte(splitFormulaTOML), 0o644); err != nil {
@@ -632,9 +727,10 @@ func copySplitBinary(src, dst string) error {
 }
 
 // handOver retires the pre-cutover binary's supervisor with that binary and
-// gives the city to the binary under test. The order matters: a supervisor is
-// stopped by the build that started it, before the next build starts its own
-// against the same GC_HOME.
+// gives the city to the binary under test and the pinned bd. The order
+// matters: a supervisor is stopped by the build that started it, before the
+// next build starts its own against the same GC_HOME, and the store is
+// upgraded for the pinned bd before any gc of the new build opens it.
 func (c *splitE2ECity) handOver() {
 	c.t.Helper()
 	if c.controller != nil {
@@ -648,6 +744,37 @@ func (c *splitE2ECity) handOver() {
 	c.city.Env = c.env
 	c.preEnv = c.env
 	c.standalone = false
+	c.upgradeStoreForPinnedBD()
+}
+
+// upgradeStoreForPinnedBD is the beads half of the hand-over when the
+// pre-cutover phase ran another bd: the upgrade beads documents for a
+// database on a shared or external server, `bd migrate schema` with the new
+// bd once every client is upgraded (the beads 1.4.0 upgrade notes). Every
+// gc and bd of the old phase has stopped by now. From beads 1.4.0 on, bd
+// and the library gc links migrate an existing database only with that
+// explicit consent, and the migration is one-way: after it, the v1.5.0-rc1
+// gc and its bd 1.3.x refuse this store. Between two bd releases of one
+// schema it is a no-op.
+//
+// Left out, the store is still migrated, by the first gc start below: gc's
+// bd pack runs `bd migrate schema` itself when it readies a scope whose
+// schema exists (finish_bd_schema_migrations in gc-beads-bd.sh). This step
+// keeps the documented upgrade, and its place before any gc of this build
+// runs, in the test instead of leaving it to that side effect.
+func (c *splitE2ECity) upgradeStoreForPinnedBD() {
+	c.t.Helper()
+	if c.preBD == "" {
+		return
+	}
+	cmd := exec.Command(c.bd, "migrate", "schema")
+	cmd.Dir = c.dir
+	cmd.Env = c.city.Env.List()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		c.t.Fatalf("%s migrate schema, upgrading the store bd %s left for the pinned bd: %v\n%s", c.bd, c.preBD, err, out)
+	}
+	c.t.Logf("%s migrate schema (the store bd %s left, upgraded for the pinned bd):\n%s", c.bd, c.preBD, out)
 }
 
 // splitLegacyDoltPort is the host's shared Dolt default, which no acceptance
