@@ -785,3 +785,79 @@ func TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
 		})
 	}
 }
+
+// extmsgBindTestConversation binds an ungrouped Slack room to a new live
+// session and returns the room and that session, its one transcript member.
+func extmsgBindTestConversation(t *testing.T, fs *fakeState, services extmsg.Services) (extmsg.ConversationRef, session.Info) {
+	t.Helper()
+	ref := extmsg.ConversationRef{
+		ScopeID:        "scope-1",
+		Provider:       "slack",
+		AccountID:      "acct-1",
+		ConversationID: "C123",
+		Kind:           extmsg.ConversationRoom,
+	}
+	member := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    member.ID,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	return ref, member
+}
+
+// TestExtmsgNotifyMembersUnresolvedExplicitTargetMaterializesNothing covers an
+// explicit target that names no session without materializing one (an unknown
+// name, a configured named session with no bead) or names a closed session:
+// nothing is created or nudged for it, and the member still gets its notice
+// with the self-silence line.
+func TestExtmsgNotifyMembersUnresolvedExplicitTargetMaterializesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target func(t *testing.T, fs *fakeState) string
+	}{
+		{name: "configured named session without bead", target: func(*testing.T, *fakeState) string { return "myrig/worker" }},
+		{name: "unknown name", target: func(*testing.T, *fakeState) string { return "nobody" }},
+		{name: "closed session id", target: func(t *testing.T, fs *fakeState) string {
+			closed := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed")
+			if err := fs.cityBeadStore.Close(closed.ID); err != nil {
+				t.Fatalf("Close(%s): %v", closed.ID, err)
+			}
+			return closed.ID
+		}},
+		{name: "empty target", target: func(*testing.T, *fakeState) string { return "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+			ref, member := extmsgBindTestConversation(t, fs, services)
+			target := tc.target(t, fs)
+
+			srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hi", "", target)
+
+			if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
+				t.Fatal("explicit target materialized the configured named session")
+			}
+			nudges := extmsgNudgesBySessionName(fs)
+			if len(nudges) != 1 || len(nudges[member.SessionName]) != 1 {
+				t.Fatalf("nudges = %#v, want exactly one, to member %s", nudges, member.SessionName)
+			}
+			got := nudges[member.SessionName][0]
+			if target == "" {
+				if strings.Contains(got, "Addressed to:") {
+					t.Fatalf("unaddressed notice carries discriminator:\n%s", got)
+				}
+				return
+			}
+			if !strings.Contains(got, "Addressed to: @"+target) {
+				t.Fatalf("member notice missing discriminator for %q:\n%s", target, got)
+			}
+		})
+	}
+}
