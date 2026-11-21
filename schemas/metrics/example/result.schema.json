@@ -227,7 +227,8 @@
               "storage-remote-stage-unmark",
               "storage-snapshot",
               "storage-snapshot-restore",
-              "storage-split"
+              "storage-split",
+              "config-agent-patch"
             ]
           },
           "event_id": {

@@ -2219,6 +2219,39 @@ type AgentPatch struct {
 	WorkDir                 *string            `json:"WorkDir"`
 }
 
+// AgentPatchMerge defines model for AgentPatchMerge.
+type AgentPatchMerge struct {
+	// ClearProvider Remove this patch's provider field, exposing the underlying configuration.
+	ClearProvider *bool `json:"clear_provider,omitempty"`
+
+	// Delete Remove the entire patch under the expected revision, restoring prior absence.
+	Delete *bool   `json:"delete,omitempty"`
+	Dir    *string `json:"dir,omitempty"`
+
+	// Name Exact singleton agent template name; qualify its rig with dir or rig.
+	Name string `json:"name"`
+
+	// OptionDefaults Merge these option defaults, including model, preserving other keys.
+	OptionDefaults *map[string]string `json:"option_defaults,omitempty"`
+
+	// Provider Provider override for the next start.
+	Provider *string `json:"provider,omitempty"`
+
+	// RemoveOptions Remove these option keys from this patch, exposing underlying defaults.
+	RemoveOptions *[]string `json:"remove_options,omitempty"`
+
+	// Revision Expected X-GC-Patch-Revision from GET, or absent for a missing patch.
+	Revision string  `json:"revision"`
+	Rig      *string `json:"rig,omitempty"`
+}
+
+// AgentPatchMergeResult defines model for AgentPatchMergeResult.
+type AgentPatchMergeResult struct {
+	After    *AgentPatch `json:"after,omitempty"`
+	Before   *AgentPatch `json:"before,omitempty"`
+	Revision string      `json:"revision"`
+}
+
 // AgentPatchSetInputBody defines model for AgentPatchSetInputBody.
 type AgentPatchSetInputBody struct {
 	// Dir Agent directory scope (legacy targeting key; prefer rig).
@@ -2229,6 +2262,9 @@ type AgentPatchSetInputBody struct {
 
 	// Name Agent name.
 	Name *string `json:"name,omitempty"`
+
+	// OptionDefaults Override provider option defaults, including model.
+	OptionDefaults *map[string]string `json:"option_defaults,omitempty"`
 
 	// Provider Override the agent's provider.
 	Provider *string `json:"provider,omitempty"`
@@ -7067,6 +7103,18 @@ type SessionWakeRefusedPayload struct {
 	WakeRequest string `json:"wake_request"`
 }
 
+// SessionWokePayload defines model for SessionWokePayload.
+type SessionWokePayload struct {
+	// Model Effective configured model, when the provider declares one.
+	Model *string `json:"model,omitempty"`
+
+	// Provider Resolved provider name used for this start.
+	Provider *string `json:"provider,omitempty"`
+
+	// ProviderKind Resolved provider family used for delivery.
+	ProviderKind *string `json:"provider_kind,omitempty"`
+}
+
 // SlingBatchSummary defines model for SlingBatchSummary.
 type SlingBatchSummary struct {
 	// ContainerType Container bead type, e.g. convoy.
@@ -9478,7 +9526,7 @@ type TypedEventStreamEnvelopeSessionWoke struct {
 	Actor            string                   `json:"actor"`
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
-	Payload          NoPayload                `json:"payload"`
+	Payload          SessionWokePayload       `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -11703,7 +11751,7 @@ type TypedTaggedEventStreamEnvelopeSessionWoke struct {
 	City             string                   `json:"city"`
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
-	Payload          NoPayload                `json:"payload"`
+	Payload          SessionWokePayload       `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -13241,6 +13289,12 @@ type DeleteV0CityByCityNamePatchesAgentByDirByBaseParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// PatchV0CityByCityNamePatchesAgentsParams defines parameters for PatchV0CityByCityNamePatchesAgents.
+type PatchV0CityByCityNamePatchesAgentsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PutV0CityByCityNamePatchesAgentsParams defines parameters for PutV0CityByCityNamePatchesAgents.
 type PutV0CityByCityNamePatchesAgentsParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -13834,6 +13888,9 @@ type PostV0CityByCityNameOrderByNameRunJSONRequestBody = OrderRunInputBody
 
 // AddPackJSONRequestBody defines body for AddPack for application/json ContentType.
 type AddPackJSONRequestBody = PackAddInputBody
+
+// PatchV0CityByCityNamePatchesAgentsJSONRequestBody defines body for PatchV0CityByCityNamePatchesAgents for application/json ContentType.
+type PatchV0CityByCityNamePatchesAgentsJSONRequestBody = AgentPatchMerge
 
 // PutV0CityByCityNamePatchesAgentsJSONRequestBody defines body for PutV0CityByCityNamePatchesAgents for application/json ContentType.
 type PutV0CityByCityNamePatchesAgentsJSONRequestBody = AgentPatchSetInputBody
@@ -15559,6 +15616,32 @@ func (t *EventPayload) FromSessionWakeRefusedPayload(v SessionWakeRefusedPayload
 
 // MergeSessionWakeRefusedPayload performs a merge with any union data inside the EventPayload, using the provided SessionWakeRefusedPayload
 func (t *EventPayload) MergeSessionWakeRefusedPayload(v SessionWakeRefusedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionWokePayload returns the union data inside the EventPayload as a SessionWokePayload
+func (t EventPayload) AsSessionWokePayload() (SessionWokePayload, error) {
+	var body SessionWokePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionWokePayload overwrites any union data inside the EventPayload as the provided SessionWokePayload
+func (t *EventPayload) FromSessionWokePayload(v SessionWokePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionWokePayload performs a merge with any union data inside the EventPayload, using the provided SessionWokePayload
+func (t *EventPayload) MergeSessionWokePayload(v SessionWokePayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -26098,6 +26181,11 @@ type ClientInterface interface {
 	// GetV0CityByCityNamePatchesAgents request
 	GetV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PatchV0CityByCityNamePatchesAgentsWithBody request with any body
+	PatchV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PatchV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, body PatchV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PutV0CityByCityNamePatchesAgentsWithBody request with any body
 	PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -27907,6 +27995,30 @@ func (c *Client) GetV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context,
 
 func (c *Client) GetV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNamePatchesAgentsRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PatchV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNamePatchesAgentsRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PatchV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, body PatchV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNamePatchesAgentsRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -35624,6 +35736,66 @@ func NewGetV0CityByCityNamePatchesAgentsRequest(server string, cityName string) 
 	return req, nil
 }
 
+// NewPatchV0CityByCityNamePatchesAgentsRequest calls the generic PatchV0CityByCityNamePatchesAgents builder with application/json body
+func NewPatchV0CityByCityNamePatchesAgentsRequest(server string, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, body PatchV0CityByCityNamePatchesAgentsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPatchV0CityByCityNamePatchesAgentsRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewPatchV0CityByCityNamePatchesAgentsRequestWithBody generates requests for PatchV0CityByCityNamePatchesAgents with any type of body
+func NewPatchV0CityByCityNamePatchesAgentsRequestWithBody(server string, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/patches/agents", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewPutV0CityByCityNamePatchesAgentsRequest calls the generic PutV0CityByCityNamePatchesAgents builder with application/json body
 func NewPutV0CityByCityNamePatchesAgentsRequest(server string, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -40818,6 +40990,11 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNamePatchesAgentsWithResponse request
 	GetV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesAgentsResponse, error)
 
+	// PatchV0CityByCityNamePatchesAgentsWithBodyWithResponse request with any body
+	PatchV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNamePatchesAgentsResponse, error)
+
+	PatchV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, body PatchV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNamePatchesAgentsResponse, error)
+
 	// PutV0CityByCityNamePatchesAgentsWithBodyWithResponse request with any body
 	PutV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error)
 
@@ -43817,6 +43994,36 @@ func (r GetV0CityByCityNamePatchesAgentsResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNamePatchesAgentsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PatchV0CityByCityNamePatchesAgentsResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *AgentPatchMergeResult
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON501 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PatchV0CityByCityNamePatchesAgentsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PatchV0CityByCityNamePatchesAgentsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -46969,6 +47176,23 @@ func (c *ClientWithResponses) GetV0CityByCityNamePatchesAgentsWithResponse(ctx c
 		return nil, err
 	}
 	return ParseGetV0CityByCityNamePatchesAgentsResponse(rsp)
+}
+
+// PatchV0CityByCityNamePatchesAgentsWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNamePatchesAgentsResponse
+func (c *ClientWithResponses) PatchV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNamePatchesAgentsResponse, error) {
+	rsp, err := c.PatchV0CityByCityNamePatchesAgentsWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePatchV0CityByCityNamePatchesAgentsResponse(rsp)
+}
+
+func (c *ClientWithResponses) PatchV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNamePatchesAgentsParams, body PatchV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNamePatchesAgentsResponse, error) {
+	rsp, err := c.PatchV0CityByCityNamePatchesAgents(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePatchV0CityByCityNamePatchesAgentsResponse(rsp)
 }
 
 // PutV0CityByCityNamePatchesAgentsWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNamePatchesAgentsResponse
@@ -54069,6 +54293,88 @@ func ParseGetV0CityByCityNamePatchesAgentsResponse(rsp *http.Response) (*GetV0Ci
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePatchV0CityByCityNamePatchesAgentsResponse parses an HTTP response from a PatchV0CityByCityNamePatchesAgentsWithResponse call
+func ParsePatchV0CityByCityNamePatchesAgentsResponse(rsp *http.Response) (*PatchV0CityByCityNamePatchesAgentsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PatchV0CityByCityNamePatchesAgentsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentPatchMergeResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
 
 	}
 

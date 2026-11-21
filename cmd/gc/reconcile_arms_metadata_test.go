@@ -536,7 +536,7 @@ func TestDesiredRowIdentityProviderProjectionBoundary(t *testing.T) {
 	codex := rowRefreshKeys{
 		"command": "codex-wrapped", "provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex",
 		"resume_flag": "--codex-resume", "resume_style": "subcommand", "resume_command": "codex resume {{.SessionKey}}",
-		"session_id_flag": "--codex-session", "session_key": "k-1", "continuation_epoch": "1",
+		"session_id_flag": "--codex-session", "continuation_epoch": "1",
 	}
 	// The codex row after the switch to claude has been applied.
 	projection := maps.Clone(map[string]string(codex))

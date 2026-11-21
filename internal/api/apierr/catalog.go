@@ -32,10 +32,12 @@ var (
 	// ScopeNotFound is a city-or-rig scope reference that does not resolve (the
 	// detail names which kind); it is distinct from the resource the scope was
 	// being resolved for (e.g. a formula).
-	ScopeNotFound   = Register(ProblemType{Code: "scope-not-found", Status: http.StatusNotFound, Title: "Scope Not Found"})
-	ServiceNotFound = Register(ProblemType{Code: "service-not-found", Status: http.StatusNotFound, Title: "Service Not Found"})
-	PatchNotFound   = Register(ProblemType{Code: "patch-not-found", Status: http.StatusNotFound, Title: "Patch Not Found"})
-	PackNotFound    = Register(ProblemType{Code: "pack-not-found", Status: http.StatusNotFound, Title: "Pack Not Found"})
+	ScopeNotFound         = Register(ProblemType{Code: "scope-not-found", Status: http.StatusNotFound, Title: "Scope Not Found"})
+	ServiceNotFound       = Register(ProblemType{Code: "service-not-found", Status: http.StatusNotFound, Title: "Service Not Found"})
+	PatchNotFound         = Register(ProblemType{Code: "patch-not-found", Status: http.StatusNotFound, Title: "Patch Not Found"})
+	PatchScopeConflict    = Register(ProblemType{Code: "patch-scope-conflict", Status: http.StatusConflict, Title: "Patch Targets Multiple Sessions"})
+	PatchRevisionConflict = Register(ProblemType{Code: "patch-revision-conflict", Status: http.StatusConflict, Title: "Patch Revision Conflict"})
+	PackNotFound          = Register(ProblemType{Code: "pack-not-found", Status: http.StatusNotFound, Title: "Pack Not Found"})
 
 	// Request validation.
 	InvalidRequest   = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})

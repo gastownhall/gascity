@@ -31,6 +31,23 @@ import (
 // central events registry to decode the bytes back into the typed Go
 // variant before emitting on the typed /v0/events/stream wire schema.
 
+// SessionWokePayload identifies the provider configuration of a committed start.
+// Fields are optional for historical events that carried only the envelope.
+type SessionWokePayload struct {
+	Provider     string `json:"provider,omitempty" doc:"Resolved provider name used for this start."`
+	ProviderKind string `json:"provider_kind,omitempty" doc:"Resolved provider family used for delivery."`
+	Model        string `json:"model,omitempty" doc:"Effective configured model, when the provider declares one."`
+}
+
+// IsEventPayload marks SessionWokePayload as a typed event payload.
+func (SessionWokePayload) IsEventPayload() {}
+
+// SessionWokePayloadJSON encodes the resolved launch configuration.
+func SessionWokePayloadJSON(provider, family, model string) json.RawMessage {
+	data, _ := json.Marshal(SessionWokePayload{Provider: provider, ProviderKind: family, Model: model})
+	return data
+}
+
 // MailEventPayload is the shape of every mail.* event payload
 // (MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 // MailReplied, MailDeleted). Message is nil for mark/archive/delete
@@ -898,7 +915,7 @@ func init() {
 	// Subject, and Message fields. NoPayload registers an empty typed
 	// shape so the spec still emits a discriminated-union variant
 	// for the event type and the registry-coverage test passes.
-	events.RegisterPayload(events.SessionWoke, events.NoPayload{})
+	events.RegisterPayload(events.SessionWoke, SessionWokePayload{})
 	events.RegisterPayload(events.SessionStopped, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionCrashed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionDraining, events.NoPayload{})

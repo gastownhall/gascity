@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -60,6 +61,8 @@ type rowRefreshKeys map[string]string
 
 // refreshKeyNames are rowRefreshKeys' keys.
 var refreshKeyNames = []string{
+	"state", "started_config_hash",
+	beadmeta.BrainParentSIDMetadataKey,
 	"work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind",
 	"builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag", "close_reason", "closed_at",
 }
@@ -218,7 +221,7 @@ func refreshLaunchKeys(m session.MetadataPatch, tp TemplateParams, raw rowRefres
 	if raw["continuation_epoch"] == "" {
 		m["continuation_epoch"] = strconv.Itoa(session.DefaultContinuationEpoch)
 	}
-	if tp.Command != "" && raw["command"] != tp.Command {
+	if sessionLaunchRefreshAllowed(raw) && tp.Command != "" && raw["command"] != tp.Command {
 		m["command"] = tp.Command
 	}
 	queueChangedResolvedProviderSessionMetadata(raw, func(k, v string) { m[k] = v }, tp.ResolvedProvider)

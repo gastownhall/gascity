@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -27,6 +28,12 @@ import (
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
+
+// AgentPatchMerger publishes revision-guarded provider-default edits through the
+// same transaction as other config mutations. Older states may lack this surface.
+type AgentPatchMerger interface {
+	MergeAgentPatch(configedit.AgentPatchMerge) (configedit.AgentPatchMergeResult, error)
+}
 
 // MaintenanceProvider is the subset of supervisor.StoreMaintenanceLoop that
 // the API layer consumes. Defining it here keeps handlers from importing
