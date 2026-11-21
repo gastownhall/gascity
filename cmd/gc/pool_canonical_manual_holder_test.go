@@ -246,6 +246,75 @@ func TestCanonicalSingletonPool_ManualSessionOfTemplateDoesNotHoldSeat(t *testin
 	}
 }
 
+// TestCanonicalSingletonPool_SeatBesideManualSessionIsReusedNextTick covers
+// the convergence half of issue #8945: the seat minted beside a manual
+// session of the template is REUSED by the next tick's pool demand (the
+// request path), not duplicated — and never by adopting the manual bead.
+func TestCanonicalSingletonPool_SeatBesideManualSessionIsReusedNextTick(t *testing.T) {
+	store := beads.NewMemStore()
+	seedManualSessionOfPoolTemplate(t, store, "worker", "asleep", "drained")
+	worker := canonicalSingletonWorker(t)
+
+	// Tick 1: dependency demand mints the seat before the tick's snapshot
+	// sees the manual row.
+	bp1 := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		beadStore:    store,
+		sessionBeads: &sessionBeadSnapshot{},
+		agents:       []config.Agent{worker},
+	}
+	seat, err := selectOrCreateDependencyPoolSessionBead(bp1, &worker, "worker")
+	if err != nil {
+		t.Fatalf("tick 1 cannot mint the pool seat beside the manual session: %v", err)
+	}
+	if seat.ID == "" || !seat.PoolManaged {
+		t.Fatalf("tick 1 minted no pool-managed seat: %+v", seat)
+	}
+
+	// Tick 2: the snapshot now sees both the manual row and the seat. A pool
+	// request must reuse the seat (canonical reuse tier), not plan a second
+	// one and not adopt the manual bead.
+	snapshot := &sessionBeadSnapshot{}
+	for _, b := range sessionBeadsInStore(t, store) {
+		snapshot.addInfo(sessiontest.SeedBead(t, b))
+	}
+	bp2 := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       []config.Agent{worker},
+	}
+	bp2.sessionOccupancyInfos = snapshot.OpenInfos()
+	bp2.sessionSnapshotCompletenessKnown = true
+	bp2.sessionSnapshotComplete = true
+
+	got, slot, plan, err := selectOrPlanPoolSessionBead(bp2, &worker, "worker", nil, SessionRequest{}, time.Now(), map[string]bool{}, map[int]bool{})
+	if err != nil {
+		t.Fatalf("tick 2 cannot satisfy pool demand beside the manual session: %v", err)
+	}
+	if plan != nil {
+		t.Fatalf("tick 2 planned a second seat (%q, slot %d) instead of reusing %s", plan.qualifiedInstance, plan.slot, seat.ID)
+	}
+	if got.ID != seat.ID {
+		t.Fatalf("tick 2 reused %q, want the minted seat %s", got.ID, seat.ID)
+	}
+	if !got.PoolManaged {
+		t.Fatalf("tick 2 returned a non-pool-managed row: %+v", got)
+	}
+	if slot != 0 {
+		t.Fatalf("tick 2 slot = %d, want canonical slot 0", slot)
+	}
+	pooled := 0
+	for _, b := range sessionBeadsInStore(t, store) {
+		if b.Metadata["template"] == "worker" && b.Metadata[poolManagedMetadataKey] == boolMetadata(true) {
+			pooled++
+		}
+	}
+	if pooled != 1 {
+		t.Fatalf("store holds %d pool-managed worker beads, want exactly the one seat", pooled)
+	}
+}
+
 // sessionBeadsInStore lists the store's session beads for snapshot seeding.
 func sessionBeadsInStore(t testing.TB, store beads.Store) []beads.Bead {
 	t.Helper()
