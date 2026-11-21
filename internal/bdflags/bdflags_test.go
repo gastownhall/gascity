@@ -157,13 +157,13 @@ func TestCreateStatusFlagsConsumeValues(t *testing.T) {
 
 func TestUpdateFlagSets(t *testing.T) {
 	value := ValueFlags("update")
-	for _, f := range []string{"--assignee", "-a", "--status", "-s", "--priority", "-p", "--set-metadata", "--unset-metadata", "--parent", "--type", "-t"} {
+	for _, f := range []string{"--if-assignee", "--if-status", "--assignee", "-a", "--status", "-s", "--priority", "-p", "--set-metadata", "--unset-metadata", "--parent", "--type", "-t"} {
 		if !value[f] {
 			t.Errorf("ValueFlags(update)[%q] = false, want true", f)
 		}
 	}
 	boolFlags := BoolFlags("update")
-	for _, f := range []string{"--claim", "--ephemeral", "--persistent", "--stdin"} {
+	for _, f := range []string{"--claim", "--force", "--ephemeral", "--persistent", "--stdin"} {
 		if !boolFlags[f] {
 			t.Errorf("BoolFlags(update)[%q] = false, want true", f)
 		}

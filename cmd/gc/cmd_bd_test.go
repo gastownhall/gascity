@@ -2680,6 +2680,38 @@ func TestBdMutationWriteIDs(t *testing.T) {
 			want: result{ids: []string{"gcy-dv7"}, ok: true},
 		},
 
+		// --- Release/claim flags (gcf-c5w12): bd update --force / --if-assignee / --if-status / -a "" ---
+		{
+			name: "update release with --force and empty assignee",
+			args: []string{"update", "gcy-dv7", "--status", "open", "--assignee", "", "--force"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "update with short -a empty value then --force",
+			args: []string{"update", "gcy-dv7", "-a", "", "--force"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "update --if-assignee consumes its value (not read as an id)",
+			args: []string{"update", "--if-assignee", "gascity/worker-1", "gcy-dv7", "--status", "open"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "update --if-status consumes its value",
+			args: []string{"update", "gcy-dv7", "--if-status", "in_progress", "-a", ""},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "global --no-color and --database value do not break the scan",
+			args: []string{"update", "--no-color", "--database", "beads_x", "gcy-dv7", "--status", "open"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "a genuinely unknown flag still fails closed",
+			args: []string{"update", "gcy-dv7", "--not-a-bd-flag", "gcy-wisp-dv78"},
+			want: result{ok: true, ambiguous: true},
+		},
+
 		// --- --flag=value form ---
 		{
 			name: "--flag=value does not consume next token",
