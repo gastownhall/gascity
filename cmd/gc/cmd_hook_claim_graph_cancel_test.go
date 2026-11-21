@@ -405,3 +405,77 @@ func TestHookClaimNeverReleasesCanceledGraphRootItDidNotClaim(t *testing.T) {
 		})
 	}
 }
+
+// TestHookClaimLinkedGraphWorkKeepsStepScopedStop: graph work linked to a
+// canceled graph-owned run — a step naming the root, or a drain item root
+// naming a drain control of the run — is closed alone by the existing stop
+// gate, even with the run's input settled. A linked candidate never carries
+// authority to sweep the run: the root, its other steps and its teardown stay
+// open for the run's own cancel or a claim of the root to finish.
+func TestHookClaimLinkedGraphWorkKeepsStepScopedStop(t *testing.T) {
+	cases := map[string]func(f *hookWorkflowStopFixture, run graphCancelRun) (served beads.Bead, untouched []string){
+		"step": func(f *hookWorkflowStopFixture, run graphCancelRun) (beads.Bead, []string) {
+			sibling := f.step("notify", run.root.ID, map[string]string{beadmeta.StepIDMetadataKey: "notify"})
+			return run.step, []string{run.root.ID, sibling.ID, run.teardown.ID}
+		},
+		"drain_item_root": func(f *hookWorkflowStopFixture, run graphCancelRun) (beads.Bead, []string) {
+			drain := f.step("drain", run.root.ID, map[string]string{beadmeta.KindMetadataKey: beadmeta.KindDrain})
+			item := f.root("item", drain.ID)
+			if err := f.store.SetMetadataBatch(item.ID, map[string]string{
+				beadmeta.RoutedToMetadataKey:       "worker",
+				beadmeta.InputLifecycleMetadataKey: beadmeta.InputLifecycleGraph,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			itemStep := f.step("item work", item.ID, map[string]string{beadmeta.StepIDMetadataKey: "work"})
+			return f.get(item.ID), []string{run.root.ID, run.step.ID, run.teardown.ID, drain.ID, itemStep.ID}
+		},
+	}
+	for name, seed := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			run := seedGraphCancelRun(f, beadmeta.InputLifecycleGraph, map[string]string{beadmeta.CancelRequestedMetadataKey: "true"})
+			served, untouched := seed(f, run)
+			f.served = []string{served.ID}
+
+			code, got, stderr := runHookClaimWith(f, graphCancelOps(f, workflowInputComplete, nil))
+			if code != 0 || got != "" {
+				t.Fatalf("doHookClaim = %d handing out %q, want 0 handing out nothing; stderr=%s", code, got, stderr)
+			}
+			f.wantNeverClaimed(served.ID)
+			f.wantClosed(served.ID, beadmeta.OutcomeCanceled)
+			f.wantOpen(untouched...)
+		})
+	}
+}
+
+// TestHookClaimServesTeardownUnderStoppedGraphRoot: the teardown tail of a
+// graph-owned run is served once its root has settled or been canceled — the
+// condition teardown waits for — with the run's input already settled, and
+// serving it sweeps nothing else of the run.
+func TestHookClaimServesTeardownUnderStoppedGraphRoot(t *testing.T) {
+	cases := map[string]func(f *hookWorkflowStopFixture, run graphCancelRun){
+		"settled_root": func(f *hookWorkflowStopFixture, run graphCancelRun) {
+			f.closeAs(run.root.ID, "pass", nil)
+		},
+		"canceled_root": func(f *hookWorkflowStopFixture, run graphCancelRun) {
+			if err := f.store.SetMetadata(run.root.ID, beadmeta.CancelRequestedMetadataKey, "true"); err != nil {
+				f.t.Fatal(err)
+			}
+		},
+	}
+	for name, stop := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			run := seedGraphCancelRun(f, beadmeta.InputLifecycleGraph, nil)
+			stop(f, run)
+			f.served = []string{run.teardown.ID}
+
+			code, got, stderr := runHookClaimWith(f, graphCancelOps(f, workflowInputComplete, nil))
+			if code != 0 || got != run.teardown.ID {
+				t.Fatalf("doHookClaim = %d handing out %q, want 0 handing out teardown %s; stderr=%s", code, got, run.teardown.ID, stderr)
+			}
+			f.wantOpen(run.step.ID)
+		})
+	}
+}
