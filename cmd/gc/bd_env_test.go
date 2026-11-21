@@ -1280,12 +1280,8 @@ func TestRuntimeCityDoltTargetUsesReadyProviderRemoteBinding(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "local-sidecar":
-				ln, err := net.Listen("tcp", "127.0.0.1:0")
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = ln.Close() })
-				for file, n := range map[string]int{"dolt-server.pid": os.Getpid(), "dolt-server.port": ln.Addr().(*net.TCPAddr).Port} {
+				port := reachableDoltTestPort(t)
+				for file, n := range map[string]int{"dolt-server.pid": os.Getpid(), "dolt-server.port": port} {
 					if err := os.WriteFile(filepath.Join(city, ".beads", file), []byte(strconv.Itoa(n)+"\n"), 0o600); err != nil {
 						t.Fatal(err)
 					}
