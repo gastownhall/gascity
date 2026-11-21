@@ -362,3 +362,29 @@ func TestProviderCatalogReadinessAdvisoryNeedsAuthFollowsInitProbeMapping(t *tes
 		})
 	}
 }
+
+func TestProviderCatalogReadinessAdvisoryReportsNeedsAuthAndUnlistedTogether(t *testing.T) {
+	cityDir := writeDoctorCityToml(t, "[workspace]\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
+	stubProviderReadiness(t, map[string]api.ReadinessItem{
+		"claude": claudeNeedsAuthItem,
+		"codex":  {Name: "codex", DisplayName: "Codex", Status: api.ProbeStatusConfigured},
+	})
+
+	result := runProviderReadinessAdvisory(cityDir)
+	if result.Status != doctor.StatusWarning || result.Severity != doctor.SeverityAdvisory {
+		t.Fatalf("status/severity = %v/%v (message %q), want advisory warning", result.Status, result.Severity, result.Message)
+	}
+	if want := "1 referenced provider(s) need authentication: Claude Code; 1 configured local provider(s) not explicit"; result.Message != want {
+		t.Fatalf("message = %q, want %q", result.Message, want)
+	}
+	if len(result.Details) != 2 ||
+		!strings.HasPrefix(result.Details[0], "Claude Code needs authentication") ||
+		result.Details[1] != "Codex is configured locally but not listed in [providers.codex]" {
+		t.Fatalf("details = %q, want the auth finding then the codex not-explicit finding", result.Details)
+	}
+	wantHint := "Claude Code: " + providerStatusFixHint("claude", api.ProbeStatusNeedsAuth) + "\n" +
+		"add provider aliases for local CLIs you want this city to use"
+	if result.FixHint != wantHint {
+		t.Fatalf("fix hint = %q, want %q", result.FixHint, wantHint)
+	}
+}
