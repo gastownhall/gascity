@@ -424,7 +424,18 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			if rigName != "" {
 				perRigAgentTotals[rigName]++
 			}
-			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, statusListsTemplateBeads(a), sessionSnapshot)
+			// The pool's own name is none of its seats (mirrors
+			// agentSessionResolver.resolve's identical guard for GET
+			// /agents): for a genuine multi-seat pool, a bare-name row's
+			// canonical session is the whole answer, so a miss there must
+			// not fall through to the ambiguous byTemplate(groupName)
+			// candidates below, which belong to its numbered seats.
+			var sessName string
+			if ea.qualifiedName == groupName && hasSeveralSeats(a) {
+				sessName = agentSessionName(cityName, ea.qualifiedName, sessTmpl)
+			} else {
+				sessName = statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, statusListsTemplateBeads(a), sessionSnapshot)
+			}
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
 			// An agent whose work runs under a relocated-graph wisp session is
