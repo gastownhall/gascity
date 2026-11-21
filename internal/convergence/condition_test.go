@@ -820,6 +820,54 @@ func TestRunConditionNotesWorkDirRemovedDuringRun(t *testing.T) {
 	}
 }
 
+// The work-dir note is added only to a failed check whose work dir changed:
+// an intact work dir, a passing check, and a timed-out check keep the
+// script's stderr exactly.
+func TestRunConditionNoNoteWhenWorkDirIntact(t *testing.T) {
+	cases := []struct {
+		name        string
+		script      string
+		timeout     time.Duration
+		wantOutcome string
+		wantStderr  string
+	}{
+		{
+			name:        "intact",
+			script:      "echo x >&2\nexit 1\n",
+			timeout:     5 * time.Second,
+			wantOutcome: GateFail,
+			wantStderr:  "x\n",
+		},
+		{
+			name:        "removed then pass",
+			script:      "rm -rf \"$GC_WORK_DIR\"\necho x >&2\nexit 0\n",
+			timeout:     5 * time.Second,
+			wantOutcome: GatePass,
+			wantStderr:  "x\n",
+		},
+		{
+			name:        "timeout after removal",
+			script:      "rm -rf \"$GC_WORK_DIR\"\necho x >&2\nexec sleep 30\n",
+			timeout:     500 * time.Millisecond,
+			wantOutcome: GateTimeout,
+			wantStderr:  "x\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script, env := workDirGateFixture(t, tc.script)
+
+			result := RunCondition(context.Background(), script, env, tc.timeout, 0)
+			if result.Outcome != tc.wantOutcome {
+				t.Fatalf("Outcome = %q, want %q (stderr=%q)", result.Outcome, tc.wantOutcome, result.Stderr)
+			}
+			if result.Stderr != tc.wantStderr {
+				t.Errorf("Stderr = %q, want exactly %q", result.Stderr, tc.wantStderr)
+			}
+		})
+	}
+}
+
 // truncateForLog keeps a failure message readable when stderr is large.
 func truncateForLog(s string) string {
 	const keep = 200
