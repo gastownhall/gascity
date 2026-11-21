@@ -96,7 +96,15 @@ func hookClaimExactPlan(candidate beads.Bead, actor string, opts hookClaimOption
 	if len(metadata) > 0 {
 		onSuccess.Metadata = metadata
 	}
-	return molecule.ClaimExactRequest{ID: candidate.ID, Want: want, OnSuccess: onSuccess}
+	req := molecule.ClaimExactRequest{ID: candidate.ID, Want: want, OnSuccess: onSuccess}
+	// A projection that carried the row's claim generation fences on it: a
+	// row re-claimed underneath the observation is stale, not a claim. No
+	// observed generation means no fence — the claim advances whatever the
+	// row holds rather than guessing a value it never saw.
+	if gen := strings.TrimSpace(candidate.Metadata[beadmeta.ClaimGenerationMetadataKey]); gen != "" {
+		req.FromGeneration = &gen
+	}
+	return req
 }
 
 // hookClaimExactThroughStore classifies a molecule.ClaimExactWithWriters

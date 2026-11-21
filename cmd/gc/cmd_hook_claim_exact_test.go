@@ -503,3 +503,66 @@ func TestHookClaimExactPlanCarriesSessionIdentityByRule(t *testing.T) {
 		t.Fatal("no-session effects carry no claimed_at")
 	}
 }
+
+// TestDoHookClaimExactClaimFencesOnObservedGeneration: when the observed
+// candidate carries gc.claim_generation, the exact claim fences on that
+// generation — a row re-claimed underneath the observation is stale, not a
+// claim — and a row with no generation claims with the fence open (advance
+// whatever is there).
+func TestDoHookClaimExactClaimFencesOnObservedGeneration(t *testing.T) {
+	h := &exactClaimHarness{
+		runner: `[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"build","gc.claim_generation":"5"}}]`,
+		exactResult: molecule.ClaimExactResult{
+			Bead:    beads.Bead{ID: "work-1", Status: "in_progress", Assignee: "worker-1", Metadata: map[string]string{"gc.routed_to": "worker", "gc.root_bead_id": "root-1", "gc.step_id": "build", "gc.claim_generation": "6"}},
+			Outcome: molecule.ClaimExactClaimed,
+			Fence:   molecule.ClaimExactFenceRevision,
+		},
+	}
+	stdout, code := h.run(t, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	})
+
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d; stdout=%s", code, stdout)
+	}
+	if len(h.exactReqs) != 1 {
+		t.Fatalf("exact claims = %d, want 1", len(h.exactReqs))
+	}
+	from := h.exactReqs[0].FromGeneration
+	if from == nil || *from != "5" {
+		t.Fatalf("exact claim FromGeneration = %v, want the observed generation 5", from)
+	}
+}
+
+// TestDoHookClaimExactClaimLeavesGenerationFenceOpenWhenUnobserved: a
+// projection that did not carry gc.claim_generation claims without the
+// generation fence (nil FromGeneration advances whatever the row holds)
+// rather than guessing one.
+func TestDoHookClaimExactClaimLeavesGenerationFenceOpenWhenUnobserved(t *testing.T) {
+	h := &exactClaimHarness{
+		runner: `[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"build"}}]`,
+		exactResult: molecule.ClaimExactResult{
+			Bead:    beads.Bead{ID: "work-1", Status: "in_progress", Assignee: "worker-1"},
+			Outcome: molecule.ClaimExactClaimed,
+			Fence:   molecule.ClaimExactFenceRevision,
+		},
+	}
+	stdout, code := h.run(t, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	})
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d; stdout=%s", code, stdout)
+	}
+	if len(h.exactReqs) != 1 {
+		t.Fatalf("exact claims = %d, want 1", len(h.exactReqs))
+	}
+	if from := h.exactReqs[0].FromGeneration; from != nil {
+		t.Fatalf("exact claim FromGeneration = %v, want nil (generation unobserved)", from)
+	}
+}
