@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -19,7 +21,7 @@ import (
 func TestSessionRunningReflectsTheRuntimeInEveryState(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandlerWith(t, fs, New(fs))
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "default", Title: "running-state", Command: "codex", WorkDir: "/tmp", Provider: "codex",
 		ExtraMeta: map[string]string{"session_origin": "manual"},
@@ -99,7 +101,7 @@ func TestSessionRunningReflectsTheRuntimeInEveryState(t *testing.T) {
 func TestSessionRunningIsTheRuntimeProbeNotTheLifecycleState(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandlerWith(t, fs, New(fs))
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "default", Title: "no-runtime-yet", Command: "codex", WorkDir: "/tmp", Provider: "codex",
 		ExtraMeta: map[string]string{"session_origin": "manual"},

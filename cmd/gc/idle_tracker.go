@@ -37,6 +37,14 @@ type idleTracker interface {
 	// scan, either of which can report the session idle.
 	checkIdle(sessionName, template, provider, transport string, sp runtime.Provider, now time.Time) bool
 
+	// checkIdleUnder is checkIdle for a session whose idle settings are
+	// registered under settingName instead of its own runtime name: a
+	// configured named session a requalification renamed in place keeps the
+	// bare form's runtime name (lifecycleSessionNameInfo). The timeout and the
+	// template-fallback exemption are settingName's; the runtime is observed,
+	// and its content-idle anchor kept, under sessionName.
+	checkIdleUnder(sessionName, settingName, template, provider, transport string, sp runtime.Provider, now time.Time) bool
+
 	// setTimeout configures the idle timeout for a single session name.
 	// Used for sessions whose runtime names are deterministic at startup
 	// (configured named sessions). Duration of 0 clears the entry.
@@ -121,9 +129,13 @@ func (m *memoryIdleTracker) exemptTemplateFallbackForSession(sessionName string)
 }
 
 func (m *memoryIdleTracker) checkIdle(sessionName, template, provider, transport string, sp runtime.Provider, now time.Time) bool {
+	return m.checkIdleUnder(sessionName, sessionName, template, provider, transport, sp, now)
+}
+
+func (m *memoryIdleTracker) checkIdleUnder(sessionName, settingName, template, provider, transport string, sp runtime.Provider, now time.Time) bool {
 	m.mu.Lock()
-	timeout, ok := m.timeouts[sessionName]
-	exempt := m.templateFallbackExemptions[sessionName]
+	timeout, ok := m.timeouts[settingName]
+	exempt := m.templateFallbackExemptions[settingName]
 	if !ok && !exempt && template != "" {
 		timeout, ok = m.templateTimeouts[template]
 	}

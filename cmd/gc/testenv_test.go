@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -95,6 +96,20 @@ func clearGCEnv(t *testing.T) {
 	// a .gc/ directory left by a running city or a prior test run in /tmp
 	// (e.g. a developer box hosting a live city contaminates no-city tests).
 	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(td))
+	// The ceiling above only bounds a walk that starts under td. City/rig
+	// discovery (resolveContextFromDir) walks up from the real process cwd,
+	// which for a test invoked from inside a gc rig worktree is already
+	// nested inside a live city — the ceiling never comes into play because
+	// that walk never enters td's ancestry at all. Chdir into td so the walk
+	// starts somewhere with no city.toml in its ancestry.
+	//
+	// Repo-root resolution under bazel also walks up from the cwd (the
+	// runfiles tree), so pin the root before leaving it; otherwise helpers
+	// such as gcRepoRootFromEnv lose the checkout's formulas and packs.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		t.Setenv("GC_TEST_REPO_ROOT", root)
+	}
+	t.Chdir(td)
 }
 
 func clearProcessLiveEnvForTests() {
@@ -156,6 +171,7 @@ func testClearProcessLiveEnvForTestsScrub(t *testing.T) {
 		"GC_SUPERVISOR_SYSTEMD_UNIT",
 	}
 	preserved := []string{
+		"DOLT_DISABLE_EVENT_FLUSH",
 		"GC_FAST_UNIT",
 		"GC_HERDR_LIVE_TESTS",
 		"GC_REAL_PROCESS_SIGNAL_TESTS",
@@ -234,6 +250,10 @@ func preserveTestControlEnv(key string) bool {
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
+		// internal/testenv sets this once per test binary so no dolt a test runs
+		// forks a detached `dolt send-metrics`. The DOLT_ prefix scrub below would
+		// otherwise strip it before sanitizedBaseEnv could hand it to a child.
+		key == "DOLT_DISABLE_EVENT_FLUSH" ||
 		// The live herdr tier's opt-in. Without it here the scrub below would
 		// strip the variable before any cmd/gc live journey could read it, so
 		// `make test-herdr-live` could never reach the journeys in this package.

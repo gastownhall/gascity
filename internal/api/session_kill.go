@@ -24,7 +24,7 @@ import (
 // runtime lease (a closed row's included, recordedKillLease), taken first and
 // lent to the fence, and before the fence does anything, so a refused kill
 // leaves the row as it found it.
-func (s *Server) operatorKill(ctx context.Context, store beads.Store, id string, force bool, adm *legacyop.Admission) (worker.OperatorKillResult, error) {
+func (s *Server) operatorKill(ctx context.Context, store beads.SessionStore, id string, force bool, adm *legacyop.Admission) (worker.OperatorKillResult, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return worker.OperatorKillResult{}, err
@@ -39,7 +39,7 @@ func (s *Server) operatorKill(ctx context.Context, store beads.Store, id string,
 		defer lease.Release()
 		by.Lease = lease
 	}
-	front := session.NewStore(beads.SessionStore{Store: store})
+	front := session.NewStore(store)
 	info, infoErr := front.Get(id)
 	warn := func(msg string) { log.Printf("gc api: session kill: %s", msg) }
 	req := worker.OperatorKillRequest{
