@@ -467,8 +467,17 @@ func TestHandleReloadSocketCmdBusyOnAcceptTimeout(t *testing.T) {
 }
 
 func TestHandleReloadSocketCmdWaitsForAcceptedAfterHandoff(t *testing.T) {
+	// Take the handoff late in the accept window, then ack after the original
+	// window has expired but inside a fresh one: handoffDelay+ackDelay exceeds
+	// the window, and each delay leaves half-window-scale slack for a loaded
+	// host to wake late.
+	const (
+		acceptWindow = time.Second
+		handoffDelay = 500 * time.Millisecond
+		ackDelay     = 750 * time.Millisecond
+	)
 	oldAccept := controllerReloadAcceptTimeout
-	controllerReloadAcceptTimeout = 200 * time.Millisecond
+	controllerReloadAcceptTimeout = acceptWindow
 	t.Cleanup(func() { controllerReloadAcceptTimeout = oldAccept })
 
 	server, client := net.Pipe()
@@ -481,9 +490,14 @@ func TestHandleReloadSocketCmdWaitsForAcceptedAfterHandoff(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(180 * time.Millisecond)
-	req := <-reloadReqCh
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(handoffDelay)
+	var req reloadRequest
+	select {
+	case req = <-reloadReqCh:
+	case <-time.After(acceptWindow):
+		t.Fatal("reload socket handler never handed off the request; it gave up on the accept window")
+	}
+	time.Sleep(ackDelay)
 	req.acceptedCh <- reloadControlReply{
 		Outcome: reloadOutcomeAccepted,
 		Message: "Reload requested.",
@@ -834,6 +848,12 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 
 func readReloadSocketReply(t *testing.T, conn net.Conn) reloadControlReply {
 	t.Helper()
+	// The handler's pipe write gives up at its own conn deadline and returns
+	// without closing its end, so an unbounded read would hang to the package
+	// timeout when the test goroutine wakes that late.
+	if err := conn.SetReadDeadline(time.Now().Add(hangBudget)); err != nil {
+		t.Fatalf("set reply read deadline: %v", err)
+	}
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	if !scanner.Scan() {
