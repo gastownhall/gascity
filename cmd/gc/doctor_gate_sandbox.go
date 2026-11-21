@@ -31,16 +31,37 @@ const doctorGateSandboxReadTimeout = 5 * time.Second
 // and uses a 2s WaitDelay, neither of which a real gate gets. Both are harmless
 // for a read-only probe, but the contract this function reproduces is the
 // environment, not the runner.
+//
+// A second deliberate addition: the canonical Dolt target for cityPath is
+// resolved and projected over whatever BEADS_DOLT_SERVER_*/GC_DOLT_* the
+// doctor process's own env carries. convergence.ConditionEnv.Environ()
+// copies those ambient keys verbatim, which is correct for a REAL gate (the
+// controller's own environment is the one a gate command should reach), but
+// doctor's own process env is the operator's shell, not necessarily the
+// controller's. A shell that still carries a different city's connection env
+// (two cities on one host, a sourced env left over from another directory)
+// would otherwise make the probe connect to the wrong server and report a
+// misleading PROJECT IDENTITY MISMATCH as a sandbox failure
+// (gastownhall/gascity#8418). applyOrderExecCanonicalDoltEnv is the same
+// resolve-and-project helper order-exec environments already use; a scope
+// with no resolvable canonical config (externally bound, or none at all) is
+// left untouched by it, matching every other caller's no-op behavior there.
 func gateSandboxEnv(cityPath string) []string {
 	gateEnv := convergence.ConditionEnv{CityPath: cityPath, StorePath: cityPath}.Environ()
-	env := make([]string, 0, len(gateEnv)+1)
+	env := make(map[string]string, len(gateEnv)+1)
 	for _, entry := range gateEnv {
-		if name, _, ok := strings.Cut(entry, "="); ok && name == "BEADS_DOLT_AUTO_START" {
-			continue
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			env[name] = value
 		}
-		env = append(env, entry)
 	}
-	return append(env, "BEADS_DOLT_AUTO_START=0")
+	applyOrderExecCanonicalDoltEnv(cityPath, cityPath, env)
+	env["BEADS_DOLT_AUTO_START"] = "0"
+
+	result := make([]string, 0, len(env))
+	for name, value := range env {
+		result = append(result, name+"="+value)
+	}
+	return result
 }
 
 // gateSandboxReadCheck verifies that a bead read succeeds inside the gate

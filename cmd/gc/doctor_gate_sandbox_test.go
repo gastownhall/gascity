@@ -54,6 +54,71 @@ func TestGateSandboxEnvMatchesTheGateContract(t *testing.T) {
 	}
 }
 
+// TestGateSandboxEnvResolvesCanonicalDoltTargetOverAmbientEnv is the
+// regression for gastownhall/gascity#8418: the gate-sandbox probe must pin the
+// CURRENT city's Dolt endpoint the way the controller's own preflight does,
+// not inherit whatever BEADS_DOLT_SERVER_*/GC_DOLT_* the doctor process's own
+// shell happens to carry (e.g. left over from a different city's env). A city
+// with a resolvable canonical endpoint (city-db.example.com:4406) is set up;
+// the ambient env is set to a DIFFERENT host/port, simulating a shell that
+// sourced another city's connection env. The probe env must reflect the
+// current city's own endpoint, not the ambient one.
+func TestGateSandboxEnvResolvesCanonicalDoltTargetOverAmbientEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityPath, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: verified",
+		"dolt.host: city-db.example.com",
+		"dolt.port: 4406",
+		"dolt.user: city-user",
+		"",
+	}, "\n"))
+
+	// Simulate a shell that still carries a DIFFERENT city's connection env.
+	t.Setenv("GC_DOLT_HOST", "other-city-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "other-city-db.example.com")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+
+	lookup := gateSandboxEnvLookup(t, cityPath)
+
+	if got := lookup["GC_DOLT_HOST"]; got != "city-db.example.com" {
+		t.Errorf("GC_DOLT_HOST = %q, want the current city's resolved host %q, not the ambient one", got, "city-db.example.com")
+	}
+	if got := lookup["GC_DOLT_PORT"]; got != "4406" {
+		t.Errorf("GC_DOLT_PORT = %q, want the current city's resolved port %q, not the ambient one", got, "4406")
+	}
+	if got := lookup["BEADS_DOLT_SERVER_HOST"]; got != "city-db.example.com" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want the current city's resolved host %q, not the ambient one", got, "city-db.example.com")
+	}
+	if got := lookup["BEADS_DOLT_SERVER_PORT"]; got != "4406" {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want the current city's resolved port %q, not the ambient one", got, "4406")
+	}
+}
+
+// TestGateSandboxEnvWithNoResolvableScopeLeavesAmbientEnvUntouched pins the
+// no-op case: a city with no resolvable canonical scope config (the common
+// case in the existing tests above, a bare t.TempDir()) must not have its
+// ambient Dolt env disturbed by the #8418 fix, since there is nothing to
+// resolve it against.
+func TestGateSandboxEnvWithNoResolvableScopeLeavesAmbientEnvUntouched(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "ambient-host.example.com")
+	t.Setenv("GC_DOLT_PORT", "1234")
+
+	lookup := gateSandboxEnvLookup(t, t.TempDir())
+
+	if got := lookup["GC_DOLT_HOST"]; got != "ambient-host.example.com" {
+		t.Errorf("GC_DOLT_HOST = %q, want the ambient value %q preserved when the scope has no resolvable canonical config", got, "ambient-host.example.com")
+	}
+	if got := lookup["GC_DOLT_PORT"]; got != "1234" {
+		t.Errorf("GC_DOLT_PORT = %q, want the ambient value %q preserved when the scope has no resolvable canonical config", got, "1234")
+	}
+}
+
 // TestGateSandboxEnvOverridesAmbientDoltAutoStart pins the one deliberate
 // divergence from the gate contract: a gate inherits the controller's
 // auto-start setting, but a diagnostic must never start a Dolt server, and the
