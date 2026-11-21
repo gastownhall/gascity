@@ -56,9 +56,9 @@ func assertArchivedWithReason(t *testing.T, store beads.Store, id string) {
 	}
 }
 
-// TestArchiveStampsCloseReasonForOnCloseValidation covers AC-1: Archive
-// closes read and unread messages through a store that enforces bd's on-close
-// validation, stamping ArchiveCloseReason first.
+// TestArchiveStampsCloseReasonForOnCloseValidation covers AC-1 and AC-2:
+// Archive and ArchiveMatching close read and unread messages through a store
+// that enforces bd's on-close validation, stamping ArchiveCloseReason first.
 func TestArchiveStampsCloseReasonForOnCloseValidation(t *testing.T) {
 	t.Run("Archive unread", func(t *testing.T) {
 		store := onCloseValidatingStore{MemStore: beads.NewMemStore()}
@@ -87,5 +87,40 @@ func TestArchiveStampsCloseReasonForOnCloseValidation(t *testing.T) {
 			t.Fatalf("Archive(%s) = %v; want nil (close must carry a close_reason)", m.ID, err)
 		}
 		assertArchivedWithReason(t, store, m.ID)
+	})
+
+	t.Run("ArchiveMatching read and unread", func(t *testing.T) {
+		store := onCloseValidatingStore{MemStore: beads.NewMemStore()}
+		p := newTestProvider(store)
+		unread, err := p.Send("sender", "recipient", "bulk: unread", "body")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		read, err := p.Send("sender", "recipient", "bulk: read", "body")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if err := p.MarkRead(read.ID); err != nil {
+			t.Fatalf("MarkRead: %v", err)
+		}
+		_, results, err := p.ArchiveMatching(ArchiveFilter{
+			Recipients:    []string{"recipient"},
+			SubjectPrefix: "bulk:",
+			IncludeRead:   true,
+		})
+		if err != nil {
+			t.Fatalf("ArchiveMatching: %v", err)
+		}
+		if len(results) != 2 {
+			t.Fatalf("ArchiveMatching results = %d; want 2", len(results))
+		}
+		for _, r := range results {
+			if r.Err != nil {
+				t.Errorf("ArchiveMatching(%s) err = %v; want nil (close must carry a close_reason)", r.ID, r.Err)
+			}
+		}
+		for _, id := range []string{unread.ID, read.ID} {
+			assertArchivedWithReason(t, store, id)
+		}
 	})
 }
