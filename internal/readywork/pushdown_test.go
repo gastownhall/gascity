@@ -215,6 +215,26 @@ func TestReadyStatusLegsFilterMetadataInTheStore(t *testing.T) {
 			// (beads.LiveFor).
 			want: beads.ListQuery{Status: StatusClosed, TierMode: beads.FederatedReadTier, Live: true},
 		},
+		{
+			name:  "blocked",
+			query: Query{Status: StatusBlocked, MetadataFields: []string{"gc.root_bead_id=root-1"}},
+			want:  beads.ListQuery{Status: StatusBlocked, TierMode: beads.FederatedReadTier, Live: true},
+		},
+		{
+			name:  "in_progress",
+			query: Query{Status: StatusInProgress, MetadataFields: []string{"gc.root_bead_id=root-1"}},
+			want:  beads.ListQuery{Status: StatusInProgress, TierMode: beads.FederatedReadTier, Live: true},
+		},
+		{
+			name:  "in_progress with assignee",
+			query: Query{Status: StatusInProgress, Assignee: "w1", MetadataFields: []string{"gc.root_bead_id=root-1"}},
+			want:  beads.ListQuery{Status: StatusInProgress, Assignee: "w1", TierMode: beads.FederatedReadTier, Live: true},
+		},
+		{
+			name:  "open",
+			query: Query{Status: StatusOpen, MetadataFields: []string{"gc.root_bead_id=root-1"}},
+			want:  beads.ListQuery{AllowScan: true, TierMode: beads.FederatedReadTier, Live: true},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status := tc.query.Status

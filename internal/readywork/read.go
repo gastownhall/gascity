@@ -226,7 +226,7 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore)
 	case "":
 		return readReadyCandidates(ctx, legs, c, cs)
 	case StatusOpen:
-		return readOpenStatusCandidates(ctx, legs)
+		return readOpenStatusCandidates(ctx, legs, c)
 	case StatusInProgress:
 		// The crash-recovery tier, and the one whose rows carry blocked_by. The
 		// assignee is pushed into each leg's list; it is matched exactly on every
@@ -277,11 +277,24 @@ func narrowOrFederateList(ctx context.Context, legs []Leg, c compiled, plain, na
 // non-closed row and keeping the mapped "open" ones gives the bd-backed store the
 // same answer without widening ListQuery{Status: "open"} for the controller
 // callers whose readiness gates rely on bd's narrower status (ga-3mv5d3).
-func readOpenStatusCandidates(ctx context.Context, legs []Leg) ([]beads.Bead, map[string]int, error) {
-	items, owners, err := federate(ctx, legs, listRead(beads.ListQuery{
-		AllowScan: true,
-		TierMode:  beads.FederatedReadTier,
-	}))
+//
+// A pushable --metadata-field narrows the leg reads themselves
+// (ListQuery.Metadata, pushdown.go's listMetadata): each leg lists its
+// non-closed rows carrying the pairs and keeps only its mapped-open ones
+// (openStatusLegRead), through the exactness guard; the answer is cut again
+// after the merge, which is the plain read's cut.
+func readOpenStatusCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
+	plain := beads.ListQuery{AllowScan: true, TierMode: beads.FederatedReadTier}
+	var items []beads.Bead
+	var owners map[string]int
+	var err error
+	if md := listMetadata(c); len(md) > 0 {
+		narrowed := plain
+		narrowed.Metadata = md
+		items, owners, err = readNarrowed(ctx, legs, c, openStatusLegRead(listRead(narrowed)), listRead(plain))
+	} else {
+		items, owners, err = federate(ctx, legs, listRead(plain))
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -294,6 +307,31 @@ func readOpenStatusCandidates(ctx context.Context, legs []Leg) ([]beads.Bead, ma
 		delete(owners, item.ID)
 	}
 	return out, owners, nil
+}
+
+// openStatusLegRead wraps a leg's narrowed open-arm read with the open cut:
+// the leg keeps only the rows whose mapped status is open. The cut has to
+// happen inside the leg, before the merge, because the exactness guard
+// (narrowedAnswerIsExact) sizes its probe window with the compiled
+// predicates, and those do not judge status: an in_progress or blocked row
+// left in the window can push a binding relic out of the probed prefix, and
+// the post-merge cut would then serve that relic unprobed. For the plain
+// read the post-merge cut alone is today's behavior, and it still runs after
+// the merge for the narrowed answer's no-op and the fallback's cut alike.
+func openStatusLegRead(read legRead) legRead {
+	return func(ctx context.Context, leg Leg) legResult {
+		res := read(ctx, leg)
+		if res.err != nil {
+			return res
+		}
+		out := res.rows[:0]
+		for _, item := range res.rows {
+			if item.Status == StatusOpen {
+				out = append(out, item)
+			}
+		}
+		return legResult{rows: out}
+	}
 }
 
 // legRead reads one leg. Every read goes through the store's LIVE handle: a
