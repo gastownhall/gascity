@@ -178,6 +178,14 @@ _pog_route_store() {
     esac
 }
 
+# _pog_config_issue_prefix <config.yaml>: prints the top-level issue_prefix
+# (or issue-prefix) value of a beads config file, unquoted, or nothing when
+# the file or key is absent.
+_pog_config_issue_prefix() {
+    [[ -f "$1" ]] || return 0
+    sed -nE "s/^issue[-_]prefix:[[:space:]]*['\"]?([^'\"#[:space:]]*)['\"]?.*\$/\1/p" "$1" 2>/dev/null | head -1
+}
+
 # _pog_prefix_table: prints one "<prefix><TAB><store>" line per bead prefix a
 # branch name may carry, read from files gc already maintains. An empty
 # <store> marks a local prefix (the caller's own store); any other <store> is
@@ -187,7 +195,12 @@ _pog_route_store() {
 #      (gc writes "mc", bd-style routes write "mc-"). A prefix must match
 #      ^[a-z0-9]+(-[a-z0-9]+)*$; any other entry is skipped with one stderr
 #      WARNING, and the first entry for a prefix wins. Path "." is local.
-#   2. A built-in local "ga" when no entry names "ga", so a city with no
+#   2. Each routed scope's own .beads/config.yaml issue_prefix (or
+#      issue-prefix), the prefix that scope actually mints, as an alias for
+#      the same store when no routes entry names it: a route's prefix and its
+#      scope's issue prefix can differ (snk routing to a scope that mints dg-
+#      beads). An invalid value is skipped with one stderr WARNING.
+#   3. A built-in local "ga" when no entry names "ga", so a city with no
 #      routes file keeps the guard's original contract.
 _pog_prefix_table() {
     local beads_dir routes table="" tab=$'\t' nl=$'\n'
@@ -218,6 +231,20 @@ _pog_prefix_table() {
             [[ "$nl$table" == *"$nl$prefix$tab"* ]] && continue
             table+="$prefix$tab$(_pog_route_store "$base" "$route_path")$nl"
         done 3<<<"$parsed"
+        local routed_table="$table" store config alias
+        while IFS="$tab" read -r -u 3 prefix store; do
+            [[ -n "$prefix" ]] || continue
+            config="${store:-$beads_dir}/config.yaml"
+            alias="$(_pog_config_issue_prefix "$config")"
+            alias="${alias%-}"
+            [[ -n "$alias" ]] || continue
+            if ! grep -Eqx '[a-z0-9]+(-[a-z0-9]+)*' <<<"$alias"; then
+                echo "push-ownership-guard: WARNING ignoring issue prefix '$alias' in $config: a prefix is lowercase letters and digits (inner dashes allowed)" >&2
+                continue
+            fi
+            [[ "$nl$table" == *"$nl$alias$tab"* ]] && continue
+            table+="$alias$tab$store$nl"
+        done 3<<<"$routed_table"
     fi
     if [[ "$nl$table" != *"${nl}ga$tab"* ]]; then
         table+="ga$tab$nl"
