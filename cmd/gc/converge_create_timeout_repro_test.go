@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,40 +13,55 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 )
 
-// TestReproConvergeCreateTimeoutStillCreates: while the event loop is busy (a
+// TestConvergeCreateTimedOutRequestIsSkipped: while the event loop is busy (a
 // long controller tick), a `converge:` create gets "controller did not respond
-// in time" after 60 s, but the request stays queued and the loop creates it
-// later. A caller that retries after the error gets a second loop.
-func TestReproConvergeCreateTimeoutStillCreates(t *testing.T) {
+// in time" once the reply wait expires. The request stays queued, so when the
+// loop drains it later it must skip it rather than create a loop behind the
+// caller's back; a caller that retries after the error then gets exactly one
+// loop (gastownhall/gascity#8387).
+func TestConvergeCreateTimedOutRequestIsSkipped(t *testing.T) {
+	old := convergeReplyTimeout
+	convergeReplyTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { convergeReplyTimeout = old })
+
 	cr, store := setupConvergenceRuntime(t)
 	payload := `{"command":"create","params":{"formula":"test-formula","target":"test-agent","max_iterations":"3"}}`
 
 	// Attempt 1: the event loop is inside a tick and does not read the channel.
 	server, client := net.Pipe()
 	go func() { handleConvergeSocketCmd(server, payload, cr.convergenceReqCh); server.Close() }() //nolint:errcheck // test cleanup
-	start := time.Now()
 	line, err := bufio.NewReader(client).ReadString('\n')
 	if err != nil {
 		t.Fatal(err)
 	}
 	client.Close() //nolint:errcheck // test cleanup
 	var first convergenceReply
-	_ = json.Unmarshal([]byte(line), &first)
-	t.Logf("attempt 1 reply after %s: error=%q", time.Since(start).Round(time.Second), first.Error)
-	t.Logf("requests still queued for the event loop: %d", len(cr.convergenceReqCh))
+	if err := json.Unmarshal([]byte(line), &first); err != nil {
+		t.Fatalf("decoding attempt 1 reply %q: %v", line, err)
+	}
+	if first.Error != "controller did not respond in time" {
+		t.Fatalf("attempt 1 error = %q, want %q", first.Error, "controller did not respond in time")
+	}
 
-	// The tick ends; the event loop drains the queue it was given.
+	// The tick ends; the event loop drains the queue it was given and must
+	// skip the request whose caller already gave up.
 	for len(cr.convergenceReqCh) > 0 {
 		req := <-cr.convergenceReqCh
 		r := cr.handleConvergenceRequest(context.Background(), req)
-		t.Logf("event loop processed the queued %q after the client was told it failed: error=%q result=%s", req.Command, r.Error, r.Result)
+		if !strings.Contains(r.Error, "request abandoned") {
+			t.Errorf("queued %q processed after caller timed out: error=%q result=%s, want a \"request abandoned\" error", req.Command, r.Error, r.Result)
+		}
 	}
 
 	// Attempt 2: the caller retries the create it was told had failed.
 	var req convergenceRequest
-	_ = json.Unmarshal([]byte(payload), &req)
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		t.Fatalf("decoding retry payload: %v", err)
+	}
 	r := cr.handleConvergenceRequest(context.Background(), req)
-	t.Logf("attempt 2 (retry) reply: error=%q result=%s", r.Error, r.Result)
+	if r.Error != "" {
+		t.Fatalf("retry create failed: %q", r.Error)
+	}
 
 	loops, err := store.List(beads.ListQuery{Type: "convergence"})
 	if err != nil {
@@ -59,7 +75,7 @@ func TestReproConvergeCreateTimeoutStillCreates(t *testing.T) {
 			active++
 		}
 	}
-	if first.Error != "" && active != 1 {
+	if active != 1 {
 		t.Errorf("one create was reported failed and one retried, but %d loops are live for the same formula and target", active)
 	}
 }

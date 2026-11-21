@@ -433,8 +433,6 @@ func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req converg
 	// behind that caller's back and, on a retry, create a second loop for
 	// the same work (gastownhall/gascity#8387). Skip it instead.
 	if req.canceled != nil && req.canceled.Load() {
-		fmt.Fprintf(cr.stderr, "%s: convergence: skipping %s %s: caller already timed out waiting for the reply\n", //nolint:errcheck
-			cr.logPrefix, req.Command, req.BeadID)
 		return convergenceReply{Error: "request abandoned: caller's reply wait already expired"}
 	}
 
