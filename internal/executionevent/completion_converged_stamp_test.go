@@ -153,54 +153,90 @@ func TestCompletionBackstopDoesNotStampAnEmptyStepListing(t *testing.T) {
 	}
 }
 
-// TestCompletionBackstopStartupSweepRevisitsAndClearsStaleStamps: the stamp is
-// a cadence optimization, not a terminal verdict — the per-boot startup sweep
-// re-examines stamped roots and clears a stamp whose root can still emit (a
-// hand-reopened and re-closed step), so a wrong stamp is bounded by one boot.
-func TestCompletionBackstopStartupSweepRevisitsAndClearsStaleStamps(t *testing.T) {
-	backing, rootIDs, stepIDs := closedCompletionCorpus(t, 1)
-	journal := events.NewFake()
-	stores := []beads.GraphStore{{Store: backing}}
+// TestCompletionBackstopStaleStampHealsByDeltaPassOrOperatorClear (ga-vn0uok):
+// the stamp is terminal while the root stays closed, and every sweep honors
+// it — a closed, stamped root is skipped whatever labeled the sweep. A stale
+// stamp (here: a step hand-reopened and re-closed under a new session id after
+// the root converged) therefore heals only through a path that can still see
+// the change: the delta pass when an observed event names the root, or an
+// operator clearing the stamp. A sweep alone cannot heal it, and that residual
+// is the stamp's documented contract (beadmeta keys).
+func TestCompletionBackstopStaleStampHealsByDeltaPassOrOperatorClear(t *testing.T) {
+	// seedStaleStampedRoot returns a stamped, converged single-root corpus
+	// whose step has since been surgically reopened and re-closed under session
+	// id "gcs-resurrected" — a new emittable fact key no observed event names.
+	seedStaleStampedRoot := func(t *testing.T) (beads.Store, *events.Fake, string, string) {
+		t.Helper()
+		backing, rootIDs, stepIDs := closedCompletionCorpus(t, 1)
+		journal := events.NewFake()
+		stores := []beads.GraphStore{{Store: backing}}
+		for range 2 {
+			(&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile")
+		}
+		root, err := backing.Get(rootIDs[0])
+		if err != nil || root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
+			t.Fatalf("seed stamping failed: %v", err)
+		}
+		open, closed := "open", "closed"
+		if err := backing.Update(stepIDs[0], beads.UpdateOpts{Status: &open}); err != nil {
+			t.Fatal(err)
+		}
+		if err := backing.Update(stepIDs[0], beads.UpdateOpts{
+			Status:   &closed,
+			Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-resurrected"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return backing, journal, rootIDs[0], stepIDs[0]
+	}
 
-	for range 2 {
-		(&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile")
-	}
-	root, err := backing.Get(rootIDs[0])
-	if err != nil || root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
-		t.Fatalf("seed stamping failed: %v", err)
-	}
+	t.Run("sweep alone keeps the stamp: no event names the root", func(t *testing.T) {
+		backing, journal, rootID, _ := seedStaleStampedRoot(t)
+		stores := []beads.GraphStore{{Store: backing}}
+		r := (&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile")
+		if r.Emitted != 0 || r.RootsSkippedConverged != 1 {
+			t.Fatalf("sweep = %+v, want the stamped root skipped: a sweep cannot see surgery no event named", r)
+		}
+		root, err := backing.Get(rootID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
+			t.Fatal("the sweep cleared a stamp it had no evidence against")
+		}
+	})
 
-	// Incident surgery: a step is hand-reopened and re-closes under a NEW
-	// session id — a new emittable fact key the delta lane never hears about.
-	open, closed := "open", "closed"
-	if err := backing.Update(stepIDs[0], beads.UpdateOpts{Status: &open}); err != nil {
-		t.Fatal(err)
-	}
-	if err := backing.Update(stepIDs[0], beads.UpdateOpts{
-		Status:   &closed,
-		Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-resurrected"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	t.Run("delta pass emits the owed fact and clears the stamp", func(t *testing.T) {
+		backing, journal, rootID, stepID := seedStaleStampedRoot(t)
+		stores := []beads.GraphStore{{Store: backing}}
+		var index CompletedFactIndex
+		if emitted := index.ReconcileRoots(journal, stores, []string{rootID}, "execution-reconcile"); emitted != 1 {
+			t.Fatalf("delta pass emitted %d fact(s), want the one owed for the re-closed step", emitted)
+		}
+		completed, err := journal.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: stepID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resurrected := 0
+		for _, evt := range completed {
+			if evt.SessionID == "gcs-resurrected" {
+				resurrected++
+			}
+		}
+		if resurrected != 1 {
+			t.Fatalf("journal holds %d resurrected-session fact(s), want 1", resurrected)
+		}
+		assertNotStamped(t, backing, rootID, "the delta pass emitted for the root and left the stale stamp in place")
 
-	// Cadence sweeps skip the stamped root: the fact stays owed.
-	cadence := &CompletionBackstop{}
-	if r := cadence.Pass(journal, stores, "execution-reconcile"); r.Emitted != 0 || r.RootsSkippedConverged != 1 {
-		t.Fatalf("cadence sweep = %+v, want the stamped root skipped", r)
-	}
-
-	// The startup sweep revisits, emits the owed fact, and CLEARS the stamp.
-	startup := &CompletionBackstop{VisitStamped: true}
-	if r := startup.Pass(journal, stores, "execution-reconcile"); r.Emitted != 1 || r.RootsSkippedConverged != 0 {
-		t.Fatalf("startup sweep = %+v, want the owed fact emitted", r)
-	}
-	after, err := backing.Get(rootIDs[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] != "" {
-		t.Fatal("the startup sweep left a STALE stamp on a root it just emitted for")
-	}
+		// A later sweep re-stamps once the fact reads back from the journal.
+		if r := (&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile"); r.Emitted != 0 {
+			t.Fatalf("re-stamp sweep = %+v, want no re-emit", r)
+		}
+		root, err := backing.Get(rootID)
+		if err != nil || root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
+			t.Fatalf("the healed root was not re-stamped: %v", err)
+		}
+	})
 }
 
 // TestCompletionBackstopClearsStampWhenStampedRootReopens: the converged stamp's
