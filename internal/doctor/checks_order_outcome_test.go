@@ -641,3 +641,116 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 		})
 	}
 }
+
+// TestLatestIncompleteOrderOutcome pins the declaration walk: newest-first by
+// Seq, a completion clears every older declaration, failures neither clear nor
+// hide one, and executions are never counted or paired.
+func TestLatestIncompleteOrderOutcome(t *testing.T) {
+	base := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)
+	const subject = "export-sweep:rig:st"
+	c := func(seq uint64) events.Event { return outcomeEvent(seq, subject, events.OrderCompleted, base, "") }
+	f := func(seq uint64) events.Event {
+		return outcomeEvent(seq, subject, events.OrderFailed, base, "exit status 1")
+	}
+	s := func(seq uint64, msg string) events.Event {
+		return outcomeEvent(seq, subject, events.OrderSkipped, base, msg)
+	}
+
+	cases := []struct {
+		name     string
+		outcomes []events.Event
+		wantOK   bool
+		wantMsg  string
+	}{
+		{"empty", nil, false, ""},
+		{"completion only", []events.Event{c(1), c(2)}, false, ""},
+		{"[C,S] warns", []events.Event{c(1), s(2, "partial: one")}, true, "partial: one"},
+		{"[C,S,C] clears", []events.Event{c(1), s(2, "partial: one"), c(3)}, false, ""},
+		{"[C,S,C,S] keeps newest only", []events.Event{c(1), s(2, "partial: one"), c(3), s(4, "skipped: two")}, true, "skipped: two"},
+		{"[C1,C2,S1,S2] quotes newest without counting", []events.Event{c(1), c(2), s(3, "partial: one"), s(4, "partial: two")}, true, "partial: two"},
+		{"[C1,S1,C2] clears without attribution", []events.Event{c(1), s(2, "partial: one"), c(3)}, false, ""},
+		{"[C,S,F] failure does not clear", []events.Event{c(1), s(2, "partial: one"), f(3)}, true, "partial: one"},
+		{"[C,S,F,F,F] failures do not clear", []events.Event{c(1), s(2, "partial: one"), f(3), f(4), f(5)}, true, "partial: one"},
+		{"[S] without companion", []events.Event{s(1, "partial: one")}, true, "partial: one"},
+		{"blank newest does not select older message", []events.Event{c(1), s(2, "partial: one"), c(3), s(4, "")}, true, ""},
+		{
+			"decreasing Ts with increasing Seq clears",
+			[]events.Event{
+				outcomeEvent(1, subject, events.OrderSkipped, base.Add(time.Hour), "partial: one"),
+				outcomeEvent(2, subject, events.OrderCompleted, base, ""),
+			},
+			false, "",
+		},
+		{
+			"equal Ts with increasing Seq warns",
+			[]events.Event{
+				outcomeEvent(1, subject, events.OrderCompleted, base, ""),
+				outcomeEvent(2, subject, events.OrderSkipped, base, "partial: one"),
+			},
+			true, "partial: one",
+		},
+		{
+			"other subject completion does not clear",
+			[]events.Event{s(1, "partial: one"), outcomeEvent(2, "export-sweep", events.OrderCompleted, base, "")},
+			true, "partial: one",
+		},
+		{
+			"other subject declaration is ignored",
+			[]events.Event{c(1), outcomeEvent(2, "export-sweep", events.OrderSkipped, base, "partial: city")},
+			false, "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := latestIncompleteOrderOutcome(tc.outcomes, subject)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v (got %+v)", ok, tc.wantOK, got)
+			}
+			if ok && got.Message != tc.wantMsg {
+				t.Fatalf("message = %q, want %q", got.Message, tc.wantMsg)
+			}
+		})
+	}
+}
+
+// TestOrderOutcomeHealthyCompletionClearsIncompleteOutcome pins that a
+// higher-Seq order.completed clears a recorded declaration, even when its
+// timestamp is not later, and the existing success detail returns.
+func TestOrderOutcomeHealthyCompletionClearsIncompleteOutcome(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		ts   []time.Time
+	}{
+		{"later timestamps", []time.Time{now.Add(-3 * time.Hour), now.Add(-2 * time.Hour), now.Add(-time.Hour)}},
+		{"equal timestamps", []time.Time{now, now, now}},
+		{"decreasing timestamps", []time.Time{now, now.Add(-time.Hour), now.Add(-2 * time.Hour)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "export-sweep", "cooldown", "6h")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.OrderCompleted, Ts: tc.ts[0], Subject: "export-sweep", Actor: "controller"},
+				skippedOrderEvent("export-sweep", tc.ts[1], "partial", "store unreachable",
+					events.OrderSkippedScope{Scope: "rig:st", Reason: "dolt not reachable"}),
+				events.Event{Type: events.OrderCompleted, Ts: tc.ts[2], Subject: "export-sweep", Actor: "controller"},
+			)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != StatusOK {
+				t.Fatalf("status = %v, want StatusOK once a later completion is recorded; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			if result.Message != "all scheduled orders succeeding" {
+				t.Fatalf("message = %q, want the existing success aggregate", result.Message)
+			}
+			if len(result.Details) != 1 || result.Details[0] != "export-sweep: last run succeeded" {
+				t.Fatalf("details = %v, want exactly the existing success detail", result.Details)
+			}
+			if result.FixHint != "" {
+				t.Fatalf("FixHint = %q, want none for a healthy order", result.FixHint)
+			}
+		})
+	}
+}
