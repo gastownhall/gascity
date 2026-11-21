@@ -106,6 +106,32 @@ func seedUnconfirmedSessionVia(t *testing.T, wrap func(*cachingFreshProvider) ru
 	return mgr, sp, store, b.ID, sessName
 }
 
+// routedFreshProvider records ACP route releases while keeping the scripted
+// fresh reads and stale IsRunning answer of cachingFreshProvider.
+type routedFreshProvider struct {
+	*cachingFreshProvider
+	unrouted []string
+}
+
+func (p *routedFreshProvider) RouteACP(string) {}
+func (p *routedFreshProvider) Unroute(name string) {
+	p.unrouted = append(p.unrouted, name)
+}
+
+func seedUnconfirmedACPSession(t *testing.T, answers ...freshAnswer) (*Manager, *routedFreshProvider, beads.Store, string, string) {
+	t.Helper()
+	var routed *routedFreshProvider
+	wrap := func(p *cachingFreshProvider) runtime.Provider {
+		routed = &routedFreshProvider{cachingFreshProvider: p}
+		return routed
+	}
+	mgr, _, store, id, name := seedUnconfirmedSessionVia(t, wrap, StateSuspended, true, false, answers...)
+	if err := store.SetMetadata(id, "transport", "acp"); err != nil {
+		t.Fatalf("SetMetadata(transport): %v", err)
+	}
+	return mgr, routed, store, id, name
+}
+
 func callCount(sp *runtime.Fake, method string) int {
 	n := 0
 	for _, c := range sp.Calls {
@@ -227,6 +253,30 @@ func TestEnsureRunning_UnconfirmedLivenessStartsNothingAndChangesNothing(t *test
 	}
 }
 
+func TestEnsureRunningRuntimeOnly_UnreadableFreshGateReleasesACPRoute(t *testing.T) {
+	mgr, sp, store, id, name := seedUnconfirmedACPSession(t, freshUnknown)
+	start := startEntry["StartRuntimeOnly"](t, mgr, id)
+	before := metadataOf(t, store, id)
+
+	err := start()
+
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("StartRuntimeOnly error = %v, want runtime unavailable", err)
+	}
+	if len(sp.unrouted) != 1 || sp.unrouted[0] != name {
+		t.Errorf("unrouted = %v, want only the ACP route for %q released", sp.unrouted, name)
+	}
+	if got := callCount(sp.Fake, "Start"); got != 0 {
+		t.Errorf("Start called %d times, want 0 before an unreadable gate", got)
+	}
+	if got := callCount(sp.Fake, "FindRuntimesBySessionID"); got != 0 {
+		t.Errorf("orphan scans = %d, want 0 before an unreadable gate", got)
+	}
+	if after := metadataOf(t, store, id); !maps.Equal(before, after) {
+		t.Errorf("bead metadata changed:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
 // A confirmed absence still starts exactly once, and so does a corpse: a
 // listed session with no live pane is not running.
 func TestEnsureRunning_ConfirmedNotRunningStartsOnce(t *testing.T) {
@@ -287,6 +337,36 @@ func TestEnsureRunning_StaleKeyCheckOnUnconfirmedLivenessKeepsResumeState(t *tes
 	}
 }
 
+// Both entry points release the ACP route when a keyed launch succeeds but
+// its stale-key observation cannot answer, preserving the resume identity.
+func TestEnsureRunning_UnreadableStaleKeyCheckReleasesACPRoute(t *testing.T) {
+	for entry, newStart := range startEntry {
+		t.Run(entry, func(t *testing.T) {
+			mgr, sp, store, id, name := seedUnconfirmedACPSession(t, freshAbsent, freshUnknown)
+			start := newStart(t, mgr, id)
+			before := metadataOf(t, store, id)
+
+			err := start()
+
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("%s error = %v, want runtime unavailable", entry, err)
+			}
+			if len(sp.unrouted) != 1 || sp.unrouted[0] != name {
+				t.Errorf("unrouted = %v, want only the ACP route for %q released", sp.unrouted, name)
+			}
+			if got := callCount(sp.Fake, "Start"); got != 1 {
+				t.Errorf("Start called %d times, want one successful launch and no fresh retry", got)
+			}
+			after := metadataOf(t, store, id)
+			for _, k := range []string{"session_key", "started_config_hash", "continuation_reset_pending"} {
+				if after[k] != before[k] {
+					t.Errorf("%s = %q, want %q kept", k, after[k], before[k])
+				}
+			}
+		})
+	}
+}
+
 // A confirmed absence after a successful Start is still the stale-key shape.
 func TestEnsureRunning_StaleKeyCheckOnConfirmedAbsenceStillRetriesFresh(t *testing.T) {
 	for entry, newStart := range startEntry {
@@ -328,6 +408,52 @@ func TestEnsureRunning_SessionExistsConvergesOnFreshRead(t *testing.T) {
 				t.Fatalf("%s error = %v, want both session-exists and runtime-unavailable", entry, err)
 			}
 		})
+	}
+}
+
+func TestEnsureRunning_SessionExistsReleasesACPRouteUnlessFreshRunning(t *testing.T) {
+	for entry, newStart := range startEntry {
+		for state, answer := range map[string]freshAnswer{"absent": freshAbsent, "unknown": freshUnknown, "running": freshRunning} {
+			t.Run(entry+"/"+state, func(t *testing.T) {
+				mgr, sp, store, id, name := seedUnconfirmedACPSession(t, freshAbsent, answer)
+				sp.StartErrors = map[string]error{name: fmt.Errorf("name taken: %w", runtime.ErrSessionExists)}
+				start := newStart(t, mgr, id)
+				before := metadataOf(t, store, id)
+
+				err := start()
+
+				if state == "running" {
+					if entry == "Start" && err != nil {
+						t.Fatalf("Start error = %v, want nil on convergence", err)
+					}
+					if entry == "StartRuntimeOnly" && !errors.Is(err, runtime.ErrSessionExists) {
+						t.Fatalf("StartRuntimeOnly error = %v, want session-exists on convergence", err)
+					}
+					if len(sp.unrouted) != 0 {
+						t.Errorf("unrouted = %v, want the converged ACP route retained", sp.unrouted)
+					}
+				} else {
+					if !errors.Is(err, runtime.ErrSessionExists) {
+						t.Fatalf("%s error = %v, want session-exists", entry, err)
+					}
+					if len(sp.unrouted) != 1 || sp.unrouted[0] != name {
+						t.Errorf("unrouted = %v, want only the ACP route for %q released", sp.unrouted, name)
+					}
+				}
+				if got := errors.Is(err, runtime.ErrRuntimeUnavailable); got != (state == "unknown") {
+					t.Errorf("runtime unavailable = %v, want %v; error = %v", got, state == "unknown", err)
+				}
+				if got := callCount(sp.Fake, "Start"); got != 1 {
+					t.Errorf("Start called %d times, want one refused attempt with no retry", got)
+				}
+				after := metadataOf(t, store, id)
+				for _, k := range []string{"session_key", "started_config_hash", "continuation_reset_pending"} {
+					if after[k] != before[k] {
+						t.Errorf("%s = %q, want %q kept", k, after[k], before[k])
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -571,6 +697,54 @@ func TestEnsureRunning_UnseededAutoRouteAsksTheOtherBackendBeforeStarting(t *tes
 				t.Errorf("Start called %d times, want 0 over a session the other backend runs", got)
 			}
 		})
+	}
+}
+
+// A seeded default route vouches for the fresh-capable leaf. Its absence is
+// authoritative even when auto's other backend would report Running fresh;
+// cached IsRunning is false on both legs so it cannot bypass that decision.
+func TestEnsureRunning_SeededAutoRouteUsesFreshLeafWithoutProbingOtherBackend(t *testing.T) {
+	for entry, newStart := range startEntry {
+		t.Run(entry, func(t *testing.T) {
+			other := &cachingFreshProvider{Fake: runtime.NewFake(), answers: []freshAnswer{freshRunning}}
+			wrap := func(p *cachingFreshProvider) runtime.Provider {
+				front := auto.New(p, other)
+				front.SeedRoutes(nil)
+				return front
+			}
+			mgr, leaf, _, id, _ := seedUnconfirmedSessionVia(t, wrap, StateAsleep, false, false, freshAbsent)
+
+			if err := newStart(t, mgr, id)(); err != nil {
+				t.Fatalf("%s: %v, want a start on the assigned leaf", entry, err)
+			}
+			if got := callCount(leaf.Fake, "Start"); got != 1 {
+				t.Errorf("leaf Start called %d times, want 1", got)
+			}
+			if leaf.observed == 0 {
+				t.Error("no fresh leaf read; a cached answer must not authorize Start")
+			}
+			if other.observed != 0 {
+				t.Errorf("other backend fresh reads = %d, want 0 on a seeded route", other.observed)
+			}
+			if got := callCount(other.Fake, "Start"); got != 0 {
+				t.Errorf("other backend Start called %d times, want 0", got)
+			}
+		})
+	}
+}
+
+func TestEnsureRunningRuntimeOnly_FreshRunningWithoutAliveStartsNothing(t *testing.T) {
+	answer := freshAnswer{live: runtime.Liveness{Running: true, Alive: false}}
+	mgr, sp, _, id, _ := seedUnconfirmedSession(t, StateAsleep, false, false, answer)
+
+	if err := startEntry["StartRuntimeOnly"](t, mgr, id)(); err != nil {
+		t.Fatalf("StartRuntimeOnly: %v, want convergence on the running pane", err)
+	}
+	if sp.observed != 1 {
+		t.Errorf("fresh reads = %d, want 1", sp.observed)
+	}
+	if got := callCount(sp.Fake, "Start"); got != 0 {
+		t.Errorf("Start called %d times, want 0 for a running pane even with a dead agent", got)
 	}
 }
 
