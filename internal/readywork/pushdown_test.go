@@ -283,6 +283,45 @@ func TestReadyStatusLegsFilterMetadataInTheStore(t *testing.T) {
 	}
 }
 
+// TestReadClosedStatusAsksBdListForTheMetadataField pins the invocation that
+// timed out in the field (ga-8g39ur): on a bd-backed leg, `gc ready --status
+// closed --metadata-field gc.root_bead_id=R` asks bd list for the pair, rather
+// than listing the whole closed tier.
+func TestReadClosedStatusAsksBdListForTheMetadataField(t *testing.T) {
+	var mu sync.Mutex
+	var calls [][]string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		mu.Lock()
+		calls = append(calls, slices.Clone(args))
+		mu.Unlock()
+		return []byte("[]"), nil
+	}
+	leg := testLeg("city", beads.NewBdStore("/city", runner))
+	if _, err := Read([]Leg{leg}, Query{Status: StatusClosed, MetadataFields: []string{"gc.root_bead_id=R"}}); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var lists [][]string
+	for _, args := range calls {
+		if len(args) > 0 && args[0] == "list" {
+			lists = append(lists, args)
+		}
+	}
+	if len(lists) == 0 {
+		t.Fatalf("no bd list call among %q", calls)
+	}
+	for _, args := range lists {
+		if !slices.Contains(args, "--status=closed") || !slices.Contains(args, "--all") {
+			t.Fatalf("bd list %q does not read the closed tier", args)
+		}
+		i := slices.Index(args, "--metadata-field")
+		if i < 0 || i+1 >= len(args) || args[i+1] != "gc.root_bead_id=R" {
+			t.Fatalf("bd list %q does not carry --metadata-field gc.root_bead_id=R", args)
+		}
+	}
+}
+
 // TestReadNeverPushesAPredicateABackendCouldCompareDifferently pins the other
 // half: a predicate whose backend comparison is not provably the Go comparison
 // stays Go-side, so no store can drop a row the Go filter keeps.
