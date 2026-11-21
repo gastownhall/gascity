@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -640,4 +641,44 @@ func TestHookClaimKeepsGraphOwnedTeardownAfterRootSettles(t *testing.T) {
 		t.Fatalf("kept = %v, want the teardown step %s (stderr=%q)", kept, teardown.ID, stderr.String())
 	}
 	requireOpen(t, store, teardown.ID)
+}
+
+// TestHookClaimRetiresExternalLifecycleWorkflowWhenInputSettles: a root that
+// declares no gc.input_lifecycle, or declares external explicitly, keeps the
+// anti-repeat retirement: once its input is terminal or handed off to another
+// lane, the candidate is dropped and the root and its open steps close as
+// skipped.
+func TestHookClaimRetiresExternalLifecycleWorkflowWhenInputSettles(t *testing.T) {
+	for _, lifecycle := range []string{"", beadmeta.InputLifecycleExternal} {
+		for _, input := range []string{"closed", "handed_off"} {
+			t.Run(fmt.Sprintf("lifecycle=%q/input=%s", lifecycle, input), func(t *testing.T) {
+				store, root, step := seedDoneWorkflow(t, input)
+				if lifecycle != "" {
+					if err := store.SetMetadata(root.ID, beadmeta.InputLifecycleMetadataKey, lifecycle); err != nil {
+						t.Fatalf("stamp input lifecycle: %v", err)
+					}
+				}
+				opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"rig/worker"}}
+
+				var stderr bytes.Buffer
+				kept := retireDoneWorkflowCandidates([]beads.Bead{step}, opts, graphOwnedRetireOps(store), "/rig", &stderr)
+
+				if len(kept) != 0 {
+					t.Fatalf("kept = %v, want the settled workflow's step retired (stderr=%q)", kept, stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "closed as skipped") {
+					t.Fatalf("stderr = %q, want the skipped-retirement diagnostic", stderr.String())
+				}
+				for _, id := range []string{root.ID, step.ID} {
+					got, err := store.Get(id)
+					if err != nil {
+						t.Fatalf("get %s: %v", id, err)
+					}
+					if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+						t.Fatalf("%s = %s/%q, want closed/skipped", id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+					}
+				}
+			})
+		}
+	}
 }
