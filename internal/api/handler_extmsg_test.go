@@ -252,22 +252,17 @@ func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testi
 
 	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "@mayor: status?", "", "mayor")
 
-	nudgesBySessionName := map[string]string{}
-	for _, call := range fs.sp.Calls {
-		if call.Method == "Nudge" {
-			nudgesBySessionName[call.Name] = call.Message
-		}
+	nudgesBySessionName := extmsgNudgesBySessionName(fs)
+	mayorNudges := nudgesBySessionName[mayor.SessionName]
+	if len(mayorNudges) != 1 {
+		t.Fatalf("mayor nudges = %d, want exactly 1; nudges=%#v", len(mayorNudges), nudgesBySessionName)
 	}
-	mayorNudge := nudgesBySessionName[mayor.SessionName]
-	if mayorNudge == "" {
-		t.Fatalf("missing mayor nudge; calls=%#v", fs.sp.Calls)
+	if strings.Contains(mayorNudges[0], "Addressed to:") {
+		t.Fatalf("addressed participant saw discriminator:\n%s", mayorNudges[0])
 	}
-	if strings.Contains(mayorNudge, "Addressed to:") {
-		t.Fatalf("addressed participant saw discriminator:\n%s", mayorNudge)
-	}
-	peerNudge := nudgesBySessionName[peer.SessionName]
-	if !strings.Contains(peerNudge, "Addressed to: @mayor") {
-		t.Fatalf("peer nudge missing discriminator; peer=%q calls=%#v", peerNudge, fs.sp.Calls)
+	peerNudges := nudgesBySessionName[peer.SessionName]
+	if len(peerNudges) != 1 || !strings.Contains(peerNudges[0], "Addressed to: @mayor") {
+		t.Fatalf("peer nudge missing discriminator; peer=%q nudges=%#v", peerNudges, nudgesBySessionName)
 	}
 }
 
@@ -718,6 +713,81 @@ func TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce(t *testing.T) {
 			}
 			if len(nudges) != 2 {
 				t.Fatalf("nudged sessions = %d, want exactly the member and the target; nudges=%#v", len(nudges), nudges)
+			}
+		})
+	}
+}
+
+// TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
+// pins the member side of explicit-target delivery: when the target of an
+// inbound names a transcript member, that member is notified exactly once —
+// by the addressed-session notice, not once per membership row — and its
+// notice carries no "Addressed to:" discriminator.
+func TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		secondRowSelector func(bound session.Info) string
+	}{
+		{
+			name:              "addressed by session id",
+			secondRowSelector: nil,
+		},
+		{
+			name:              "two membership rows for the same session",
+			secondRowSelector: func(bound session.Info) string { return bound.SessionName },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+
+			ref := extmsg.ConversationRef{
+				ScopeID:        "guild-1",
+				Provider:       "slack",
+				AccountID:      "acct-1",
+				ConversationID: "C123",
+				Kind:           extmsg.ConversationRoom,
+			}
+			bound := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			membershipInput := extmsg.EnsureMembershipInput{
+				Caller:         caller,
+				Conversation:   ref,
+				SessionID:      bound.ID,
+				BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+				Owner:          extmsg.MembershipOwnerManual,
+				Now:            time.Now().UTC(),
+			}
+			if _, err := services.Transcript.EnsureMembership(context.Background(), membershipInput); err != nil {
+				t.Fatalf("EnsureMembership(bound): %v", err)
+			}
+			if tc.secondRowSelector != nil {
+				second := membershipInput
+				second.SessionID = tc.secondRowSelector(bound)
+				if _, err := services.Transcript.EnsureMembership(context.Background(), second); err != nil {
+					t.Fatalf("EnsureMembership(second row): %v", err)
+				}
+			}
+
+			srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "for you", "", bound.ID)
+
+			nudges := extmsgNudgesBySessionName(fs)
+			if len(nudges) != 1 {
+				t.Fatalf("nudged sessions = %d, want only the member; nudges=%#v", len(nudges), nudges)
+			}
+			boundNudges := nudges[bound.SessionName]
+			if len(boundNudges) != 1 {
+				t.Fatalf("member nudges = %d, want 1; nudges=%#v", len(boundNudges), nudges)
+			}
+			if !strings.Contains(boundNudges[0], "for you") {
+				t.Fatalf("member nudge missing message text:\n%s", boundNudges[0])
+			}
+			if strings.Contains(boundNudges[0], "Addressed to:") {
+				t.Fatalf("addressed member saw discriminator:\n%s", boundNudges[0])
 			}
 		})
 	}

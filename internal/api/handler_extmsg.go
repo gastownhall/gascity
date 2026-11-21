@@ -219,6 +219,12 @@ func (s *Server) extmsgNotifyMembers(
 				if excludedResolvedID != "" && preexistingID == excludedResolvedID {
 					return
 				}
+				// The addressed session's notice is sent by its own goroutine;
+				// a member that resolves to it is skipped here so it is
+				// notified exactly once however many rows name it.
+				if addressedID != "" && preexistingID == addressedID {
+					return
+				}
 				notifyResolved(sessionSelector, preexistingID)
 				return
 			}
@@ -231,6 +237,9 @@ func (s *Server) extmsgNotifyMembers(
 				log.Printf("extmsg: materialized session %s as %s for conversation %s/%s", sessionSelector, resolvedID, conv.Provider, conv.ConversationID)
 			}
 			if excludedResolvedID != "" && resolvedID == excludedResolvedID {
+				return
+			}
+			if addressedID != "" && resolvedID == addressedID {
 				return
 			}
 			notifyResolved(sessionSelector, resolvedID)
