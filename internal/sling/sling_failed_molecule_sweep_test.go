@@ -1,6 +1,7 @@
 package sling
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -40,7 +41,7 @@ func TestExistingGraphV2RootAfterFailedMoleculeSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	swept, err := sourceworkflow.SweepFailedMolecules(beadstest.GraphMolecule(store), time.Now().Add(time.Hour), 0)
+	swept, err := sourceworkflow.SweepFailedMolecules(context.Background(), beadstest.FederatedLeg(store), beadstest.GraphMolecule(store), time.Now().Add(time.Hour), sourceworkflow.FailedMoleculeSweepBudget{})
 	if err != nil {
 		t.Fatalf("SweepFailedMolecules: %v", err)
 	}
@@ -69,7 +70,7 @@ func TestExistingGraphV2RootAfterFailedMoleculeSweep(t *testing.T) {
 		t.Fatalf("existingGraphV2Root = %+v (%v), want the one fresh root %s", got, err, fresh.ID)
 	}
 
-	again, err := sourceworkflow.SweepFailedMolecules(beadstest.GraphMolecule(store), time.Now().Add(time.Hour), 0)
+	again, err := sourceworkflow.SweepFailedMolecules(context.Background(), beadstest.FederatedLeg(store), beadstest.GraphMolecule(store), time.Now().Add(time.Hour), sourceworkflow.FailedMoleculeSweepBudget{})
 	if err != nil || len(again.Chains) != 0 || again.Closed != 0 {
 		t.Fatalf("second sweep = %+v (%v), want nothing to close", again, err)
 	}

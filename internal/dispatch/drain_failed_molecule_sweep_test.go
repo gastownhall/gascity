@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func TestEnsureDrainItemRootAfterFailedMoleculeSweep(t *testing.T) {
 		t.Fatalf("mark failed item root: %v", err)
 	}
 
-	swept, err := sourceworkflow.SweepFailedMolecules(beadstest.GraphMolecule(store), time.Now().Add(time.Hour), 0)
+	swept, err := sourceworkflow.SweepFailedMolecules(context.Background(), beadstest.FederatedLeg(store), beadstest.GraphMolecule(store), time.Now().Add(time.Hour), sourceworkflow.FailedMoleculeSweepBudget{})
 	if err != nil {
 		t.Fatalf("SweepFailedMolecules: %v", err)
 	}
@@ -64,7 +65,7 @@ func TestEnsureDrainItemRootAfterFailedMoleculeSweep(t *testing.T) {
 		t.Fatalf("fresh root status=%q molecule_failed=%q, want open and unstamped", fresh.Status, fresh.Metadata[beadmeta.MoleculeFailedMetadataKey])
 	}
 
-	again, err := sourceworkflow.SweepFailedMolecules(beadstest.GraphMolecule(store), time.Now().Add(time.Hour), 0)
+	again, err := sourceworkflow.SweepFailedMolecules(context.Background(), beadstest.FederatedLeg(store), beadstest.GraphMolecule(store), time.Now().Add(time.Hour), sourceworkflow.FailedMoleculeSweepBudget{})
 	if err != nil || len(again.Chains) != 0 || again.Closed != 0 {
 		t.Fatalf("second sweep = %+v, %v; want nothing closed and no error", again, err)
 	}

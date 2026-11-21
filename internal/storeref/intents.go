@@ -35,15 +35,18 @@ const (
 	// callers attribute them to the last store.
 	MoleculeAttachment
 
-	// MoleculeRoots enumerates molecule roots for the wisp GC: the graph
-	// placement at Scope (Authority, Fatal), then the leg each of Work names,
-	// in Work's order (RoleV1, PartialDegrade), where v1 poured roots and the
-	// attachment holders live. The work legs are the caller's census, by ref,
-	// not the epoch's: the GC reads the legs every seat-work question reads
-	// (cmd/gc's WorkLegs), and only when the routes relocate graph, so with
-	// no refs it is the graph placement alone (tickWispGC,
-	// wisp_gc_work_lane.go). A ref names a leg whatever its suspension: the
-	// census decides which rigs serve.
+	// MoleculeRoots enumerates molecule roots for the wisp GC and the
+	// failed-molecule sweep: the graph placement at Scope (Authority, Fatal),
+	// then the leg each of Work names, in Work's order (RoleV1,
+	// PartialDegrade), where v1 poured roots and the attachment holders live.
+	// The work legs are the caller's census, by ref, not the epoch's: the GC
+	// reads the legs every seat-work question reads (cmd/gc's WorkLegs), and
+	// only when the routes relocate graph, so with no refs it is the graph
+	// placement alone (tickWispGC, wisp_gc_work_lane.go); the sweep reads the
+	// city work store and every rig work store whose rig is not suspended,
+	// every store a molecule is minted in, and closes in each leg's own store
+	// (failedMoleculeSweepTargets). A ref names a leg whatever its suspension:
+	// the census decides which rigs serve.
 	MoleculeRoots
 
 	// MoleculeActive is the step reminder's molecule readers for one agent:
