@@ -237,6 +237,26 @@ func TestCompletionBackstopStaleStampHealsByDeltaPassOrOperatorClear(t *testing.
 			t.Fatalf("the healed root was not re-stamped: %v", err)
 		}
 	})
+
+	t.Run("operator-cleared stamp re-proves on the next sweep", func(t *testing.T) {
+		backing, journal, rootID, _ := seedStaleStampedRoot(t)
+		stores := []beads.GraphStore{{Store: backing}}
+		if err := backing.SetMetadata(rootID, beadmeta.CompletionFactsConvergedMetadataKey, ""); err != nil {
+			t.Fatal(err)
+		}
+		if r := (&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile"); r.Emitted != 1 {
+			t.Fatalf("sweep after the operator clear = %+v, want the owed fact emitted", r)
+		}
+		assertNotStamped(t, backing, rootID, "an emitting pass must not stamp")
+
+		if r := (&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile"); r.Emitted != 0 {
+			t.Fatalf("re-stamp sweep = %+v, want no re-emit", r)
+		}
+		root, err := backing.Get(rootID)
+		if err != nil || root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
+			t.Fatalf("the re-proved root was not re-stamped: %v", err)
+		}
+	})
 }
 
 // TestCompletionBackstopClearsStampWhenStampedRootReopens: the converged stamp's
