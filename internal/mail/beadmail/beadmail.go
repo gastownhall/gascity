@@ -512,10 +512,12 @@ type ArchiveFilter struct {
 	Limit           int
 }
 
-// Archive closes a message bead, retaining its body for later retrieval via
-// gc mail peek or bd show. A closed message no longer appears in inbox views
-// (all listing paths filter Status != "open"). Archiving an already-closed
-// message is idempotent and returns ErrAlreadyArchived without mutating it.
+// Archive closes a message bead with [ArchiveCloseReason], retaining its
+// body for later retrieval via gc mail peek or bd show. A closed message no
+// longer appears in inbox views (all listing paths filter Status != "open")
+// and reads as user-removed to the direct-ID operations. Archiving an
+// already-closed message is idempotent and returns ErrAlreadyArchived
+// without mutating it, so a retention-swept bead keeps its sweep reason.
 func (p *Provider) Archive(id string) error {
 	// The cached Get can answer ErrNotFound from a stale tombstone for a bead
 	// that is still open in the backing store; read live so archive repairs it.
@@ -551,21 +553,26 @@ func (p *Provider) Archive(id string) error {
 	return nil
 }
 
-// closeArchived marks an unread message read, then closes it. Archive means
-// "dismissed", and a dismissed message left unread was lost twice over: it
-// kept reading as unread in any history view, and the read-gated retention
-// sweep (SweepReadMessagesBefore / PurgeReadMessageWisps) never reclaims an
-// unread message, so it lingered forever. Marking read first is the
-// same order ArchiveInjectedAutoHandoffs already uses. alreadyRead skips the
-// write when the caller has seen the read label.
+// closeArchived stamps [ArchiveCloseReason] as close_reason, then closes the
+// message. The reason must be written before the close: BdStore.Close forwards
+// it as bd close --reason, and a store with validation.on-close=error refuses
+// a close without one. When the message is unread, the same write also marks
+// it read. Archive means "dismissed", and a dismissed message left unread was
+// lost twice over: it kept reading as unread in any history view, and the
+// read-gated retention sweep (SweepReadMessagesBefore / PurgeReadMessageWisps)
+// never reclaims an unread message, so it lingered forever. Marking read
+// before the close is the same order ArchiveInjectedAutoHandoffs already uses.
+// alreadyRead drops the read part of the write when the caller has seen the
+// read label. A failed write returns before Close, so no close is attempted
+// without the reason.
 func (p *Provider) closeArchived(id string, alreadyRead bool) error {
+	stamp := beads.UpdateOpts{Metadata: map[string]string{"close_reason": ArchiveCloseReason}}
 	if !alreadyRead {
-		if err := p.store.Update(id, beads.UpdateOpts{
-			Labels:   []string{"read"},
-			Metadata: map[string]string{mail.ReadMetadataKey: "true"},
-		}); err != nil {
-			return err
-		}
+		stamp.Labels = []string{"read"}
+		stamp.Metadata[mail.ReadMetadataKey] = "true"
+	}
+	if err := p.store.Update(id, stamp); err != nil {
+		return err
 	}
 	return p.store.Close(id)
 }
@@ -1116,6 +1123,14 @@ func readMessagesBefore(store beads.MailStore, before time.Time, limit int) ([]b
 		TierMode:      beads.TierBoth,
 	})
 }
+
+// ArchiveCloseReason is the close_reason Archive and ArchiveMatching stamp on
+// a message bead before closing it. BdStore forwards it as bd close --reason,
+// so it must satisfy bd's validation.on-close=error check: not empty, not the
+// default "closed", and at least 20 characters. It differs on purpose from
+// [RetentionSweepCloseReason] and [UnreadRetentionSweepCloseReason], so
+// isRemovedMessageBead keeps treating archived mail as user-removed.
+const ArchiveCloseReason = "mail archived: message dismissed from the inbox"
 
 // RetentionSweepCloseReason is the canonical close_reason the read-mail
 // retention sweep stamps on a message bead before closing it. It is the marker
