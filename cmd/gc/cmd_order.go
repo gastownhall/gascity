@@ -296,7 +296,9 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
-older than --stale-after so a fresh in-flight order is not interrupted.
+older than --stale-after so a fresh in-flight order is not interrupted, and
+it leaves an unfinished run open until its dispatch deadline (dispatch time
+plus its effective timeout) and a one-minute completion grace have passed.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
@@ -1040,8 +1042,11 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 	// cooldown clock, matching dispatcher-driven runs (order_dispatch.go) and the
 	// formula path. Without this, a manual `gc order run --rig` is invisible to
 	// the labelOrderTracking history index and the order re-fires every tick
-	// (#3570).
-	run, err := front.CreateRun(scoped, orders.RunOpts{})
+	// (#3570). Like a controller dispatch, the run is bounded by the deadline
+	// its tracking bead is created with, so the recovery sweeps preserve the
+	// bead through the same instant that stops the exec.
+	deadline := manualOrderRunDeadline(a, cfg, time.Now())
+	run, err := front.CreateRun(scoped, orders.RunOpts{Deadline: deadline.at})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1055,7 +1060,7 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 		}
 	}
 
-	result := doOrderRunExecResult(a, cityPath, cfg, vars, stdout, stderr)
+	result := doOrderRunExecResult(a, cityPath, cfg, deadline, vars, stdout, stderr)
 	outcome := orders.RunOutcomeExec
 	if result.code != 0 {
 		outcome = orders.RunOutcomeExecFailed
@@ -1072,7 +1077,18 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 
 // doOrderRunExec runs an exec order directly via shell.
 func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) int {
-	return doOrderRunExecResult(a, cityPath, cfg, vars, stdout, stderr).code
+	return doOrderRunExecResult(a, cityPath, cfg, manualOrderRunDeadline(a, cfg, time.Now()), vars, stdout, stderr).code
+}
+
+// manualOrderRunDeadline is the deadline of a manual exec run started at now:
+// the order's timeout capped by the city's orders.max_timeout, as for a
+// controller dispatch.
+func manualOrderRunDeadline(a orders.Order, cfg *config.City, now time.Time) orderRunDeadline {
+	var maxTimeout time.Duration
+	if cfg != nil {
+		maxTimeout = cfg.Orders.MaxTimeoutDuration()
+	}
+	return newOrderRunDeadline(now, effectiveTimeout(a, maxTimeout))
 }
 
 type orderRunExecResult struct {
@@ -1080,13 +1096,8 @@ type orderRunExecResult struct {
 	failureLabel string
 }
 
-func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
-	var maxTimeout time.Duration
-	if cfg != nil {
-		maxTimeout = cfg.Orders.MaxTimeoutDuration()
-	}
-	timeout := effectiveTimeout(a, maxTimeout)
-	ctx, cancel := withOrderTimeout(context.Background(), timeout)
+func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, deadline orderRunDeadline, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
+	ctx, cancel := deadline.bound(context.Background())
 	defer cancel()
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)

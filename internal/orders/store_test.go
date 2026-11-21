@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
@@ -473,5 +474,54 @@ func TestLatestOpenRunIgnoresClosedRuns(t *testing.T) {
 	}}, nil)
 	if _, found, err := NewStore(beads.OrdersStore{Store: allClosed}).LatestOpenRun("rig/agent"); err != nil || found {
 		t.Fatalf("all-closed LatestOpenRun = (found=%v, err=%v), want (false, nil)", found, err)
+	}
+}
+
+// TestCreateRunPersistsDeadlineAtCreation proves a dispatch deadline rides the
+// tracking bead's single initial Create as an exact UTC RFC3339Nano instant —
+// no follow-up write, no crash window — and that a zero deadline (the
+// pre-dispatch trigger-env-failure marker, which runs nothing) omits the key.
+func TestCreateRunPersistsDeadlineAtCreation(t *testing.T) {
+	deadline := time.Date(2026, 11, 20, 16, 4, 5, 123456789, time.FixedZone("UTC+1", 3600))
+
+	t.Run("deadline stamped by the initial Create", func(t *testing.T) {
+		st, rec := recordingOrdersStore()
+		run, err := st.CreateRun("rig/agent", RunOpts{Deadline: deadline})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		if calls := rec.Calls(); len(calls) != 1 || calls[0].Op != "Create" {
+			t.Fatalf("store writes = %+v, want exactly one Create", calls)
+		}
+		raw := rec.CallsForOp("Create")[0].Bead.Metadata[beadmeta.OrderRunDeadlineMetadataKey]
+		if want := "2026-11-20T15:04:05.123456789Z"; raw != want {
+			t.Fatalf("Create metadata %s = %q, want %q (UTC RFC3339Nano)", beadmeta.OrderRunDeadlineMetadataKey, raw, want)
+		}
+		stored, err := st.store.Get(run.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", run.ID, err)
+		}
+		got, err := time.Parse(time.RFC3339Nano, stored.Metadata[beadmeta.OrderRunDeadlineMetadataKey])
+		if err != nil {
+			t.Fatalf("parsing stored deadline: %v", err)
+		}
+		if !got.Equal(deadline) {
+			t.Fatalf("stored deadline = %v, want exactly %v", got, deadline)
+		}
+	})
+
+	for name, opts := range map[string]RunOpts{
+		"zero deadline":      {},
+		"trigger-env-failed": {Outcome: RunOutcomeTriggerEnvFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st, rec := recordingOrdersStore()
+			if _, err := st.CreateRun("rig/agent", opts); err != nil {
+				t.Fatalf("CreateRun: %v", err)
+			}
+			if _, ok := rec.CallsForOp("Create")[0].Bead.Metadata[beadmeta.OrderRunDeadlineMetadataKey]; ok {
+				t.Fatalf("Create carried %s for %s; a run with no deadline must omit the key", beadmeta.OrderRunDeadlineMetadataKey, name)
+			}
+		})
 	}
 }

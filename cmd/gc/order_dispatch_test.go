@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4082,7 +4083,7 @@ func TestSweepOrphanedOrderTracking_ClosesOpenTrackingBeads(t *testing.T) {
 		t.Fatalf("Create(real work): %v", err)
 	}
 
-	closed, err := sweepOrphanedOrderTracking(store)
+	closed, err := sweepOrphanedOrderTracking(store, time.Now())
 	if err != nil {
 		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
 	}
@@ -4126,7 +4127,7 @@ func TestSweepOrphanedOrderTrackingLimit_ClosesAtMostBudget(t *testing.T) {
 		ids = append(ids, b.ID)
 	}
 
-	closed, err := sweepOrphanedOrderTrackingLimit(store, 2)
+	closed, err := sweepOrphanedOrderTrackingLimit(store, time.Now(), 2)
 	if err != nil {
 		t.Fatalf("sweepOrphanedOrderTrackingLimit: %v", err)
 	}
@@ -4165,7 +4166,7 @@ func TestSweepOrphanedOrderTrackingRetryLimitSpendsRemainingBudget(t *testing.T)
 	}
 
 	fs := &closeFailStore{Store: inner, closeN: 1}
-	n, err := sweepOrphanedOrderTrackingRetryLimit(fs, 3, time.Millisecond, 2)
+	n, err := sweepOrphanedOrderTrackingRetryLimit(fs, time.Now(), 3, time.Millisecond, 2)
 	if err == nil {
 		t.Fatal("expected error from partial close failure")
 	}
@@ -4180,7 +4181,7 @@ func TestSweepOrphanedOrderTrackingRetryLimitSpendsRemainingBudget(t *testing.T)
 func TestSweepOrphanedOrderTracking_NoOrphans(t *testing.T) {
 	store := beads.NewMemStore()
 
-	closed, err := sweepOrphanedOrderTracking(store)
+	closed, err := sweepOrphanedOrderTracking(store, time.Now())
 	if err != nil {
 		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
 	}
@@ -4203,7 +4204,7 @@ func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	closed, err := sweepOrphanedOrderTracking(store)
+	closed, err := sweepOrphanedOrderTracking(store, time.Now())
 	if err != nil {
 		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
 	}
@@ -6893,7 +6894,7 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	// This mirrors newCityRuntime which calls sweepOrphanedOrderTrackingRetry
 	// before buildOrderDispatcher. The sweep is intentionally NOT inside
 	// buildOrderDispatcher so config reloads don't close in-flight beads.
-	closed, err := sweepOrphanedOrderTrackingRetry(store, 3, time.Millisecond)
+	closed, err := sweepOrphanedOrderTrackingRetry(store, time.Now(), 3, time.Millisecond)
 	if err != nil {
 		t.Fatalf("sweepOrphanedOrderTrackingRetry: %v", err)
 	}
@@ -6933,7 +6934,7 @@ func TestStartupSweepPreservesTriggerEnvFailureMarker(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	closed, err := sweepOrphanedOrderTrackingRetry(store, 3, time.Millisecond)
+	closed, err := sweepOrphanedOrderTrackingRetry(store, time.Now(), 3, time.Millisecond)
 	if err != nil {
 		t.Fatalf("sweepOrphanedOrderTrackingRetry: %v", err)
 	}
@@ -6997,7 +6998,7 @@ func TestSweepOrphanedOrderTracking_StampsCloseReason(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	closed, err := sweepOrphanedOrderTracking(store)
+	closed, err := sweepOrphanedOrderTracking(store, time.Now())
 	if err != nil {
 		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
 	}
@@ -7087,7 +7088,7 @@ func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
 
 	// Fail the first 2 ListByLabel calls, succeed on the 3rd.
 	fs := &countFailStore{Store: inner, failCount: 2}
-	closed, err := sweepOrphanedOrderTrackingRetry(fs, 3, time.Millisecond)
+	closed, err := sweepOrphanedOrderTrackingRetry(fs, time.Now(), 3, time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error after retry: %v", err)
 	}
@@ -7111,7 +7112,7 @@ func TestSweepOrphanedOrderTracking_RetryExhausted(t *testing.T) {
 
 	// Fail all 3 attempts.
 	fs := &countFailStore{Store: inner, failCount: 3}
-	_, err = sweepOrphanedOrderTrackingRetry(fs, 3, time.Millisecond)
+	_, err = sweepOrphanedOrderTrackingRetry(fs, time.Now(), 3, time.Millisecond)
 	if err == nil {
 		t.Fatal("expected error when retries exhausted")
 	}
@@ -7136,7 +7137,7 @@ func TestSweepOrphanedOrderTracking_RetryOnPartialClose(t *testing.T) {
 	// partial close is safe. We verify the total count accumulates across
 	// attempts and the final error is wrapped with the attempt count.
 	fs := &closeFailStore{Store: inner, closeN: 1}
-	n, err := sweepOrphanedOrderTrackingRetry(fs, 3, time.Millisecond)
+	n, err := sweepOrphanedOrderTrackingRetry(fs, time.Now(), 3, time.Millisecond)
 	if err == nil {
 		t.Fatal("expected error from CloseAll failure")
 	}
@@ -11109,7 +11110,7 @@ func TestRunDispatchGuardedRecoversPanic(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.runDispatchGuarded(context.Background(), beads.NewMemStore(), execStoreTarget{}, order, "/city", "track-x", nil, nil)
+		m.runDispatchGuarded(context.Background(), beads.NewMemStore(), execStoreTarget{}, order, "/city", "track-x", newOrderRunDeadline(time.Now(), effectiveTimeout(order, 0)), nil, nil)
 	}()
 
 	select {
@@ -11885,4 +11886,586 @@ func TestOrderFormulaVars(t *testing.T) {
 			t.Fatalf("binding_prefix set for a pack with two bindings: %v", got)
 		}
 	})
+}
+
+// TestOrderDispatchExecUsesPersistedDeadline proves the controller dispatch
+// stamps its effective deadline on the tracking bead's initial Create and runs
+// the exec against that same instant: the runner's context deadline equals the
+// persisted one exactly (a relative timeout restarted after the Create would
+// land later), max_timeout caps both, and an earlier parent deadline still
+// stops the run first without moving the persisted deadline.
+func TestOrderDispatchExecUsesPersistedDeadline(t *testing.T) {
+	parentDeadline := time.Now().Add(time.Hour)
+	tests := []struct {
+		name         string
+		timeout      string
+		maxTimeout   time.Duration
+		parent       func() (context.Context, context.CancelFunc)
+		wantDuration time.Duration
+		wantParent   bool
+	}{
+		{name: "order timeout", timeout: "30m", wantDuration: 30 * time.Minute},
+		{name: "max_timeout caps the timeout", timeout: "30m", maxTimeout: 10 * time.Minute, wantDuration: 10 * time.Minute},
+		{
+			name:    "earlier parent deadline stops the run first",
+			timeout: "2h",
+			parent: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), parentDeadline)
+			},
+			wantDuration: 2 * time.Hour,
+			wantParent:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			runnerDeadline := make(chan time.Time, 1)
+			m := &memoryOrderDispatcher{
+				aa: []orders.Order{{
+					Name:     "long-exec",
+					Trigger:  "cooldown",
+					Interval: "1h",
+					Exec:     "scripts/long.sh",
+					Timeout:  tt.timeout,
+				}},
+				storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+				execRun: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+					d, ok := ctx.Deadline()
+					if !ok {
+						t.Error("exec context carries no deadline")
+					}
+					runnerDeadline <- d
+					return []byte("ok\n"), nil
+				},
+				rec:        events.Discard,
+				stderr:     lockedStderr(&bytes.Buffer{}),
+				cfg:        &config.City{},
+				maxTimeout: tt.maxTimeout,
+			}
+			ctx := context.Background()
+			if tt.parent != nil {
+				var cancel context.CancelFunc
+				ctx, cancel = tt.parent()
+				defer cancel()
+			}
+			before := time.Now()
+			m.dispatch(ctx, t.TempDir(), before)
+			m.drain(context.Background())
+			after := time.Now()
+
+			tracked := trackingBeads(t, store, "order-run:long-exec")
+			if len(tracked) != 1 {
+				t.Fatalf("tracking beads = %d, want 1", len(tracked))
+			}
+			raw, ok := tracked[0].Metadata[beadmeta.OrderRunDeadlineMetadataKey]
+			if !ok {
+				t.Fatalf("tracking bead %s carries no %s; metadata = %v", tracked[0].ID, beadmeta.OrderRunDeadlineMetadataKey, tracked[0].Metadata)
+			}
+			persisted, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				t.Fatalf("parsing persisted deadline %q: %v", raw, err)
+			}
+			if persisted.Before(before.Add(tt.wantDuration)) || persisted.After(after.Add(tt.wantDuration)) {
+				t.Fatalf("persisted deadline %v outside [%v, %v] for an effective timeout of %s", persisted, before.Add(tt.wantDuration), after.Add(tt.wantDuration), tt.wantDuration)
+			}
+			var got time.Time
+			select {
+			case got = <-runnerDeadline:
+			default:
+				t.Fatal("exec runner was not called")
+			}
+			want := persisted
+			if tt.wantParent {
+				want = parentDeadline
+			}
+			if !got.Equal(want) {
+				t.Fatalf("exec context deadline = %v, want %v (persisted %v)", got, want, persisted)
+			}
+		})
+	}
+
+	// A formula dispatch shares the launch path: its tracking bead carries
+	// the same persisted deadline, which bounds instantiation (the formula
+	// default timeout), not the graph's lifetime.
+	t.Run("formula order persists the same deadline", func(t *testing.T) {
+		store := beads.NewMemStore()
+		ad := buildOrderDispatcherFromList([]orders.Order{{
+			Name:         "deadline-formula",
+			Trigger:      "cooldown",
+			Interval:     "1m",
+			Formula:      "test-formula",
+			FormulaLayer: sharedTestFormulaDir,
+		}}, store, nil)
+		if ad == nil {
+			t.Fatal("expected non-nil dispatcher")
+		}
+		before := time.Now()
+		ad.dispatch(context.Background(), t.TempDir(), before)
+		ad.drain(context.Background())
+
+		var deadline time.Time
+		for _, b := range trackingBeads(t, store, "order-run:deadline-formula") {
+			raw, present := b.Metadata[beadmeta.OrderRunDeadlineMetadataKey]
+			if !present {
+				continue
+			}
+			parsed, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				t.Fatalf("tracking bead %s %s = %q: %v", b.ID, beadmeta.OrderRunDeadlineMetadataKey, raw, err)
+			}
+			deadline = parsed
+		}
+		if deadline.IsZero() {
+			t.Fatalf("no tracking bead for deadline-formula carries %s", beadmeta.OrderRunDeadlineMetadataKey)
+		}
+		if d := deadline.Sub(before); d <= 0 || d > 35*time.Second {
+			t.Fatalf("persisted deadline is %s after dispatch, want the formula default 30s (it bounds instantiation, not the graph lifetime)", d)
+		}
+	})
+}
+
+// TestOrderDispatchLongExecTrackingSurvivesWatchdogSweep runs an exec order
+// whose run outlives the stale watchdog's window but not its own timeout: a
+// watchdog pass while the exec is still running must leave the dispatch's
+// tracking bead open, or the order loses its single-flight marker mid-run.
+func TestOrderDispatchLongExecTrackingSurvivesWatchdogSweep(t *testing.T) {
+	for _, pass := range staleWatchdogPasses {
+		t.Run(pass.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			var rec memRecorder
+
+			started := make(chan struct{})
+			release := make(chan struct{})
+			fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+				close(started)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return []byte("ok\n"), nil
+			}
+
+			aa := []orders.Order{{
+				Name:     "long-exec",
+				Trigger:  "cooldown",
+				Interval: "1h",
+				Timeout:  "30m",
+				Exec:     "scripts/long.sh",
+				Source:   "/city/orders/long-exec.toml",
+			}}
+			ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
+			if ad == nil {
+				t.Fatal("expected non-nil dispatcher")
+			}
+			start := time.Now()
+			ad.dispatch(context.Background(), t.TempDir(), start)
+			select {
+			case <-started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("exec runner was not called")
+			}
+
+			cr := &CityRuntime{
+				cityName:            "test-city",
+				cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+				standaloneCityStore: store,
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+				logPrefix:           "gc test",
+			}
+			// Still well inside the order's 30m timeout.
+			runStaleWatchdogPass(cr, pass.read, start.Add(orderTrackingSweepWatchdogStaleAfter+5*time.Minute))
+
+			tracked := trackingBeads(t, store, "order-run:long-exec")
+			close(release)
+			ad.drain(context.Background())
+
+			if len(tracked) == 0 {
+				t.Fatal("no tracking bead for long-exec")
+			}
+			for _, b := range tracked {
+				if b.Status == "closed" {
+					t.Fatalf("tracking bead %s closed by the watchdog while its exec was still running inside its 30m timeout (close_reason=%q)", b.ID, b.Metadata["close_reason"])
+				}
+			}
+		})
+	}
+}
+
+// TestOrderDispatchLongExecSurvivesTrackingSweeps drives an uncapped 30-minute
+// exec through every stale sweep that runs while it is still inside its
+// deadline: both watchdog reads at start+3m and the ten-minute on-demand sweep,
+// dry run included, at start+11m. Each must leave the run's tracking bead open
+// and spend neither close budget nor dry-run count on it (an older-deadline-free
+// stale bead beside it takes the one-close budget), so a due tick still finds
+// the single-flight marker and starts no second exec. Released, the run records
+// its own outcome and its normal completion close.
+func TestOrderDispatchLongExecSurvivesTrackingSweeps(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var calls atomic.Int32
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return []byte("ok\n"), nil
+	}
+	aa := []orders.Order{{
+		Name:     "long-exec",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Timeout:  "30m",
+		Exec:     "scripts/long.sh",
+		Source:   "/city/orders/long-exec.toml",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	cityDir := t.TempDir()
+	start := time.Now()
+	ad.dispatch(context.Background(), cityDir, start)
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("exec runner was not called")
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+			ad.drain(context.Background())
+		}
+	}()
+	tracked := trackingBeads(t, store, "order-run:long-exec")
+	if len(tracked) != 1 {
+		t.Fatalf("tracking beads = %d, want 1", len(tracked))
+	}
+	trackingID := tracked[0].ID
+	assertOpen := func(when string) {
+		t.Helper()
+		b, err := store.Get(trackingID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", trackingID, err)
+		}
+		if b.Status == "closed" {
+			t.Fatalf("%s closed tracking bead %s while its 30m exec was still running (close_reason=%q)", when, trackingID, b.Metadata["close_reason"])
+		}
+	}
+
+	for _, pass := range staleWatchdogPasses {
+		cr := &CityRuntime{
+			cityName:            "test-city",
+			cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+			standaloneCityStore: store,
+			stdout:              io.Discard,
+			stderr:              io.Discard,
+			logPrefix:           "gc test",
+		}
+		runStaleWatchdogPass(cr, pass.read, start.Add(3*time.Minute))
+		assertOpen("watchdog " + pass.name)
+	}
+
+	// A stale tracking bead with no deadline, created after the protected run,
+	// so an oldest-first budget would reach the protected run first.
+	legacy, err := store.Create(beads.Bead{
+		Title:  "order:legacy",
+		Labels: []string{"order-run:legacy", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(legacy): %v", err)
+	}
+	sweepAt := start.Add(11 * time.Minute)
+	stores := []beads.Store{store}
+	dry, err := sweepStaleOrderTrackingAcrossStoresDryRun(stores, nil, sweepAt, defaultOrderTrackingSweepStaleAfter, nil, false)
+	if err != nil {
+		t.Fatalf("dry-run sweep: %v", err)
+	}
+	if dry.trackingClosed != 1 {
+		t.Fatalf("dry-run sweep would close %d tracking beads, want 1 (the deadline-free one only)", dry.trackingClosed)
+	}
+	assertOpen("dry-run sweep")
+	swept, err := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, sweepAt, defaultOrderTrackingSweepStaleAfter, nil, orderTrackingSweepMetadataInitiator, false, 1, staleTrackingReadNotClosed)
+	if err != nil {
+		t.Fatalf("on-demand sweep: %v", err)
+	}
+	if swept.trackingClosed != 1 {
+		t.Fatalf("on-demand sweep closed %d tracking beads, want 1", swept.trackingClosed)
+	}
+	assertOpen("on-demand sweep")
+	if got, err := store.Get(legacy.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("deadline-free stale bead %s = (%+v, %v), want closed by the one-close budget", legacy.ID, got, err)
+	}
+
+	// The order is due (1m cooldown) but its run is still in flight.
+	ad.dispatch(context.Background(), cityDir, start.Add(12*time.Minute))
+	select {
+	case <-started:
+		t.Fatal("a due tick started a second exec while the first run's tracking bead was open")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	released = true
+	ad.drain(context.Background())
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("exec runner calls = %d, want 1", n)
+	}
+	b, err := store.Get(trackingID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", trackingID, err)
+	}
+	if b.Status != "closed" || b.Metadata["close_reason"] != completedOrderTrackingCloseReason {
+		t.Fatalf("tracking bead %s = status %q close_reason %q, want closed with %q", trackingID, b.Status, b.Metadata["close_reason"], completedOrderTrackingCloseReason)
+	}
+	if !slicesContain(b.Labels, "exec") {
+		t.Fatalf("tracking bead %s labels = %v, want the run's exec outcome", trackingID, b.Labels)
+	}
+}
+
+// TestOrderTrackingBootSweepHonorsDispatchDeadline restarts the controller
+// while a dispatched run is still inside its deadline: the boot orphan sweep
+// must leave its tracking bead open, so the order's open-work gate keeps it
+// single-flighted. A later sweep at the deadline-plus-grace boundary — the
+// next boot, or a stale sweep — closes it and releases the gate.
+func TestOrderTrackingBootSweepHonorsDispatchDeadline(t *testing.T) {
+	later := []struct {
+		name  string
+		sweep func(store beads.Store, now time.Time) (int, error)
+	}{
+		{
+			name: "next boot",
+			sweep: func(store beads.Store, now time.Time) (int, error) {
+				return sweepOrphanedOrderTrackingRetryLimit(store, now, 1, time.Millisecond, orderTrackingSweepCloseBudget)
+			},
+		},
+		{
+			name: "stale watchdog",
+			sweep: func(store beads.Store, now time.Time) (int, error) {
+				result, err := sweepStaleOrderTrackingAcrossStoresLimit([]beads.Store{store}, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, staleTrackingReadOpenInProgress)
+				return result.trackingClosed, err
+			},
+		},
+	}
+	for _, tt := range later {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			front := orders.NewStore(beads.OrdersStore{Store: store})
+			start := time.Now()
+			deadline := start.Add(30 * time.Minute)
+			run, err := front.CreateRun("long-exec", orders.RunOpts{Deadline: deadline})
+			if err != nil {
+				t.Fatalf("CreateRun: %v", err)
+			}
+
+			n, err := sweepOrphanedOrderTrackingRetryLimit(store, start.Add(5*time.Minute), 1, time.Millisecond, orderTrackingSweepCloseBudget)
+			if err != nil {
+				t.Fatalf("boot sweep: %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("boot sweep closed %d tracking beads, want 0 for a run inside its deadline", n)
+			}
+			if open, err := front.HasOpenWork("long-exec", noWispOpenWork); err != nil || !open {
+				t.Fatalf("HasOpenWork after boot = (%v, %v), want the run's single-flight gate held", open, err)
+			}
+
+			n, err = tt.sweep(store, deadline.Add(runCompletionGraceForTest))
+			if err != nil {
+				t.Fatalf("%s sweep: %v", tt.name, err)
+			}
+			if n != 1 {
+				t.Fatalf("%s sweep at deadline+grace closed %d tracking beads, want 1", tt.name, n)
+			}
+			b, err := store.Get(run.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", run.ID, err)
+			}
+			if b.Status != "closed" {
+				t.Fatalf("tracking bead %s status = %q after the %s sweep at deadline+grace, want closed", run.ID, b.Status, tt.name)
+			}
+			if open, err := front.HasOpenWork("long-exec", noWispOpenWork); err != nil || open {
+				t.Fatalf("HasOpenWork after the %s sweep = (%v, %v), want the gate released", tt.name, open, err)
+			}
+		})
+	}
+
+	// A max_timeout=10m cap puts deadline+grace at start+11m, the same
+	// instant the uncapped 30m run is still held: the boot sweep must close
+	// the capped run there and release its gate.
+	t.Run("max_timeout-capped deadline is eligible at start+11m", func(t *testing.T) {
+		store := beads.NewMemStore()
+		front := orders.NewStore(beads.OrdersStore{Store: store})
+		start := time.Now()
+		run, err := front.CreateRun("long-exec", orders.RunOpts{Deadline: start.Add(10 * time.Minute)})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		n, err := sweepOrphanedOrderTrackingRetryLimit(store, start.Add(11*time.Minute), 1, time.Millisecond, orderTrackingSweepCloseBudget)
+		if err != nil {
+			t.Fatalf("boot sweep: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("boot sweep closed %d tracking beads at start+11m, want 1: a 10m-capped deadline reaches deadline+grace there", n)
+		}
+		b, err := store.Get(run.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", run.ID, err)
+		}
+		if b.Status != "closed" {
+			t.Fatalf("tracking bead %s status = %q at start+11m, want closed", run.ID, b.Status)
+		}
+		if open, err := front.HasOpenWork("long-exec", noWispOpenWork); err != nil || open {
+			t.Fatalf("HasOpenWork after the boot sweep = (%v, %v), want the gate released", open, err)
+		}
+	})
+}
+
+// noWispOpenWork is a wisp-subtree verdict for a store that holds no wisp roots.
+func noWispOpenWork(beads.Store, beads.Bead) (bool, error) { return false, nil }
+
+// runCompletionGraceForTest mirrors orders.runCompletionGrace, the fixed
+// recovery grace past a persisted dispatch deadline.
+const runCompletionGraceForTest = time.Minute
+
+// completionCloseConflictStore fails the first normal completion close of a
+// tracking bead with a transient error, so a dispatch's deferred close must
+// retry to finish its run's lifecycle. Sweep closes pass through.
+type completionCloseConflictStore struct {
+	beads.Store
+	conflicts atomic.Int32
+}
+
+func (s *completionCloseConflictStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if metadata["close_reason"] == completedOrderTrackingCloseReason && s.conflicts.CompareAndSwap(0, 1) {
+		return 0, errors.New("transient close conflict")
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+// TestOrderDispatchProtectedRunPersistsOutcomeAndClose proves the dispatch
+// keeps its own lifecycle while a stale sweep runs inside its protection: a
+// run that succeeds, and one that reaches its deadline while the outer
+// cleanup context stays live and is still finishing in the grace window, each
+// survive the sweep, stamp their outcome and close with the normal completion
+// reason after one transient close conflict. A timed-out run's failure names
+// its effective timeout.
+func TestOrderDispatchProtectedRunPersistsOutcomeAndClose(t *testing.T) {
+	tests := []struct {
+		name        string
+		timeout     string
+		sweepAfter  time.Duration // sweep time, from the dispatch
+		staleAfter  time.Duration
+		wantLabel   string
+		wantFailMsg string // "" when the run must succeed
+	}{
+		{
+			name:       "succeeds",
+			timeout:    "30m",
+			sweepAfter: 11 * time.Minute,
+			staleAfter: defaultOrderTrackingSweepStaleAfter,
+			wantLabel:  "exec",
+		},
+		{
+			name:    "reaches deadline",
+			timeout: "100ms",
+			// Past the deadline and older than the sweep's age cutoff, but
+			// inside the completion grace.
+			sweepAfter:  100*time.Millisecond + runCompletionGraceForTest/2,
+			staleAfter:  10 * time.Second,
+			wantLabel:   "exec-failed",
+			wantFailMsg: "order timeout of 100ms exceeded",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &completionCloseConflictStore{Store: beads.NewMemStore()}
+			var rec memRecorder
+			stopped := make(chan struct{})
+			release := make(chan struct{})
+			fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+				if tt.wantFailMsg != "" {
+					<-ctx.Done() // the deadline stops the run ...
+				}
+				close(stopped)
+				<-release // ... and its cleanup is still finishing.
+				if tt.wantFailMsg != "" {
+					return nil, ctx.Err()
+				}
+				return []byte("ok\n"), nil
+			}
+			ad := buildOrderDispatcherFromListExec([]orders.Order{{
+				Name:     "guarded",
+				Trigger:  "cooldown",
+				Interval: "1h",
+				Timeout:  tt.timeout,
+				Exec:     "scripts/guarded.sh",
+				Source:   "/city/orders/guarded.toml",
+			}}, store, nil, fakeExec, &rec)
+			if ad == nil {
+				t.Fatal("expected non-nil dispatcher")
+			}
+			start := time.Now()
+			ad.dispatch(context.Background(), t.TempDir(), start)
+			select {
+			case <-stopped:
+			case <-time.After(10 * time.Second):
+				close(release)
+				t.Fatal("exec runner did not reach its stop point")
+			}
+			tracked := trackingBeads(t, store, "order-run:guarded")
+			if len(tracked) != 1 {
+				close(release)
+				t.Fatalf("tracking beads = %d, want 1", len(tracked))
+			}
+			trackingID := tracked[0].ID
+
+			swept, err := sweepStaleOrderTrackingAcrossStoresLimit([]beads.Store{store}, nil, start.Add(tt.sweepAfter), tt.staleAfter, nil, orderTrackingSweepMetadataInitiator, false, 10, staleTrackingReadNotClosed)
+			close(release)
+			ad.drain(context.Background())
+			if err != nil {
+				t.Fatalf("sweep: %v", err)
+			}
+			if swept.trackingClosed != 0 {
+				t.Fatalf("sweep closed %d tracking beads, want 0 (the run is inside its deadline plus grace)", swept.trackingClosed)
+			}
+
+			b, err := store.Get(trackingID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", trackingID, err)
+			}
+			if b.Status != "closed" || b.Metadata["close_reason"] != completedOrderTrackingCloseReason {
+				t.Fatalf("tracking bead %s = status %q close_reason %q, want closed with %q", trackingID, b.Status, b.Metadata["close_reason"], completedOrderTrackingCloseReason)
+			}
+			if !slicesContain(b.Labels, tt.wantLabel) {
+				t.Fatalf("tracking bead %s labels = %v, want outcome %q", trackingID, b.Labels, tt.wantLabel)
+			}
+			if n := store.conflicts.Load(); n != 1 {
+				t.Fatalf("injected completion-close conflicts = %d, want 1 (retried once)", n)
+			}
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			var failMsgs []string
+			for _, e := range rec.events {
+				if e.Type == events.OrderFailed {
+					failMsgs = append(failMsgs, e.Message)
+				}
+			}
+			if tt.wantFailMsg == "" {
+				if len(failMsgs) != 0 {
+					t.Fatalf("order.failed events = %q, want none for a successful run", failMsgs)
+				}
+				return
+			}
+			if len(failMsgs) != 1 || !strings.Contains(failMsgs[0], tt.wantFailMsg) {
+				t.Fatalf("order.failed messages = %q, want one naming %q", failMsgs, tt.wantFailMsg)
+			}
+		})
+	}
 }
