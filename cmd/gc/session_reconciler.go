@@ -1395,6 +1395,7 @@ func allDependenciesAliveForTemplateWithClock(
 	cityName string,
 	store beads.Store,
 	clk clock.Clock,
+	cityPaths ...string,
 ) bool {
 	cfgAgent := findAgentByTemplate(cfg, template)
 	if cfgAgent == nil || len(cfgAgent.DependsOn) == 0 {
@@ -1405,7 +1406,7 @@ func allDependenciesAliveForTemplateWithClock(
 		if depCfg == nil {
 			continue // dependency not in config — skip
 		}
-		if !dependencyTemplateAlive(dep, cfg, desiredState, sp, cityName, store, clk) {
+		if !dependencyTemplateAlive(dep, cfg, desiredState, sp, cityName, store, clk, cityPaths...) {
 			return false
 		}
 	}

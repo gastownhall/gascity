@@ -8,12 +8,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/resilience"
+	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
 
 // The cumulative prepare-time budget (ga-r7s62t, Refs #7170): one planner call
@@ -72,7 +74,7 @@ func inPrepare() bool {
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
 	for {
 		f, more := frames.Next()
-		if strings.HasSuffix(f.Function, ".prepareStartCandidateForCity") {
+		if strings.HasSuffix(f.Function, ".prepareStartCandidateForCity") || strings.HasSuffix(f.Function, ".prepareStartCandidateForCityTimed") {
 			return true
 		}
 		if !more {
@@ -237,68 +239,55 @@ func (e *prepareBudgetEnv) requireUntouched(t *testing.T, c startCandidate, befo
 
 // Kills: no bound on the cumulative time a planner call spends preparing.
 func TestExecutePlannedStarts_PrepareBudgetDefersRestOnceSpent(t *testing.T) {
-	for _, async := range []bool{false, true} {
-		name := "sync"
-		if async {
-			name = "async"
-		}
-		t.Run(name, func(t *testing.T) {
-			e := newPrepareBudgetEnv(t, "a", "b", "c")
-			a := e.candidate(t, "a", testPrepareBudget+time.Second)
-			b := e.candidate(t, "b", time.Second)
-			c := e.candidate(t, "c", time.Second)
-			bBefore, cBefore := e.bead(t, b.info.ID), e.bead(t, c.info.ID)
+	e := newPrepareBudgetEnv(t, "a", "b", "c")
+	a := e.candidate(t, "a", testPrepareBudget+time.Second)
+	b := e.candidate(t, "b", time.Second)
+	c := e.candidate(t, "c", time.Second)
+	bBefore, cBefore := e.bead(t, b.info.ID), e.bead(t, c.info.ID)
 
-			if woken := e.run(testPrepareBudget, async, nil, a, b, c); woken != 1 {
-				t.Fatalf("woken = %d, want 1 (only a is prepared)", woken)
-			}
-			if n := e.sp.CountCalls("Start", "a"); n != 1 {
-				t.Fatalf("a Start calls = %d, want 1", n)
-			}
-			e.requireDeferred(t, async, "b", "c")
-			e.requireUntouched(t, b, bBefore)
-			e.requireUntouched(t, c, cBefore)
-			if n := strings.Count(e.log.String(), "prepare budget exhausted"); n != 1 {
-				t.Fatalf("summary lines = %d, want exactly one per planner call:\n%s", n, e.log.String())
-			}
-		})
+	if woken := e.run(testPrepareBudget, false, nil, a, b, c); woken != 1 {
+		t.Fatalf("woken = %d, want 1 (only a is prepared)", woken)
+	}
+	if n := e.sp.CountCalls("Start", "a"); n != 1 {
+		t.Fatalf("a Start calls = %d, want 1", n)
+	}
+	e.requireDeferred(t, false, "b", "c")
+	e.requireUntouched(t, b, bBefore)
+	e.requireUntouched(t, c, cBefore)
+	if n := strings.Count(e.log.String(), "prepare budget exhausted"); n != 1 {
+		t.Fatalf("summary lines = %d, want exactly one per planner call:\n%s", n, e.log.String())
 	}
 }
 
-// The slot, tracker entry, lease and capacity ticket of an async start are all
-// taken after the gate, so a deferred candidate holds none of them.
-func TestExecutePlannedStarts_PrepareBudgetDeferralTakesNoAsyncSlotOrLease(t *testing.T) {
-	e := newPrepareBudgetEnv(t, "a", "b")
-	a := e.candidate(t, "a", testPrepareBudget)
-	b := e.candidate(t, "b", time.Second)
-	limiter := newAsyncStartLimiter(1)
-
-	e.run(testPrepareBudget, true, []startExecutionOption{withAsyncStartLimiter(limiter)}, a, b)
-
-	e.requireDeferred(t, true, "b")
-	// a's start released its slot; with b never reserving one the limiter is
-	// empty and a one-slot limiter admitted a without ever refusing b for a
-	// full slot.
-	if strings.Contains(e.log.String(), "session=b template=b outcome=deferred_by_async_start_limit") {
-		t.Fatalf("b was refused a slot instead of being deferred by the budget:\n%s", e.log.String())
-	}
-	limiter.mu.Lock()
-	inFlight := limiter.inFlight
-	limiter.mu.Unlock()
-	if inFlight != 0 {
-		t.Fatalf("async slots in flight = %d, want 0", inFlight)
-	}
-	if rec := e.sessionInfo(b.info.ID); rec.SessionName != "b" {
-		t.Fatalf("b row unreadable: %+v", rec)
-	}
-	if _, err := os.Stat(e.city + "/.gc/runtime-leases"); err == nil {
-		entries, _ := os.ReadDir(e.city + "/.gc/runtime-leases")
-		for _, ent := range entries {
-			if strings.Contains(ent.Name(), "b") && !strings.Contains(ent.Name(), "a") {
-				t.Fatalf("b took a runtime lease: %s", ent.Name())
+// An async batch admits candidates before preparation charges its meter.
+// A slow prepare cannot make its peers wait for that charge.
+func TestExecutePlannedStarts_AsyncPrepareBudgetDoesNotSerialize(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := newPrepareBudgetEnv(t, "a", "b")
+		a := e.candidate(t, "a", testPrepareBudget+time.Second)
+		b := e.candidate(t, "b", 0)
+		store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
+		defer close(store.release)
+		var tracker asyncStartTracker
+		opts := append([]startExecutionOption(nil), e.startOptions...)
+		opts = append(opts, withPrepareBudget(testPrepareBudget), withAsyncStartExecution(), withAsyncStartTracker(&tracker))
+		done := make(chan int, 1)
+		go func() {
+			done <- executePlannedStartsTraced(context.Background(), []startCandidate{a, b}, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
+		}()
+		synctest.Wait()
+		select {
+		case n := <-done:
+			if n != 2 {
+				t.Fatalf("enqueued = %d, want 2", n)
 			}
+		default:
+			t.Fatal("budget serialized async prepares")
 		}
-	}
+		if aStarts, bStarts := e.sp.CountCalls("Start", "a"), e.sp.CountCalls("Start", "b"); aStarts != 0 || bStarts != 1 {
+			t.Fatalf("Start calls while a prepares: a=%d b=%d, want 0,1", aStarts, bStarts)
+		}
+	})
 }
 
 // The first candidate of a planner call is always prepared, even when the
@@ -712,24 +701,24 @@ func TestPrepareLatencyStore_ChargesInsidePrepare(t *testing.T) {
 
 // The meter's own edges, beside the behavior tests: a nil clock falls back to
 // the wall clock, a backwards clock charges nothing, a limit of zero or less
-// never defers or reads the clock, and spent exactly at the limit defers.
+// never defers, and spent exactly at the limit defers.
 func TestPrepareMeter(t *testing.T) {
 	cand := startCandidate{tp: TemplateParams{TemplateName: "w", SessionName: "w"}}
 	f := &clock.Fake{Time: time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)}
 
 	t.Run("nil clock falls back to the wall clock", func(t *testing.T) {
 		m := &prepareMeter{limit: time.Hour}
-		m.begin()
-		m.end()
+		began := m.begin()
+		m.end(began)
 		if m.spent < 0 || m.spent >= time.Hour {
 			t.Fatalf("spent = %s, want a small non-negative wall-clock charge", m.spent)
 		}
 	})
 	t.Run("backwards clock charges nothing", func(t *testing.T) {
 		m := &prepareMeter{limit: time.Second, clk: f}
-		m.begin()
+		began := m.begin()
 		f.Advance(-time.Minute)
-		m.end()
+		m.end(began)
 		if m.spent != 0 {
 			t.Fatalf("spent = %s, want 0", m.spent)
 		}
@@ -752,4 +741,263 @@ func TestPrepareMeter(t *testing.T) {
 			t.Fatal("did not defer exactly at the limit")
 		}
 	})
+}
+
+// prepareBarrierStore holds the first prepare read before PreWake writes.
+// Reads made by the tick (dependency checks and runtime-lease admission) pass.
+type prepareBarrierStore struct {
+	beads.Store
+	id      string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *prepareBarrierStore) Get(id string) (beads.Bead, error) {
+	if id == s.id && inPrepare() {
+		s.once.Do(func() {
+			close(s.entered)
+			<-s.release
+		})
+	}
+	return s.Store.Get(id)
+}
+
+// Preparation must not hold the tick, and its slot and lease must exclude a
+// second attempt even before PreWake has published the in-flight marker.
+func TestExecutePlannedStarts_AsyncPrepareOffTick(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := newPrepareBudgetEnv(t, "a")
+		a := e.candidate(t, "a", 0)
+		store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
+		defer close(store.release)
+		var tracker asyncStartTracker
+		limiter := newAsyncStartLimiter(2)
+		opts := append([]startExecutionOption(nil), e.startOptions...)
+		opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker), withAsyncStartLimiter(limiter))
+		run := func() int {
+			return executePlannedStartsTraced(context.Background(), []startCandidate{a}, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
+		}
+		done := make(chan int, 1)
+		go func() { done <- run() }()
+		synctest.Wait()
+		select {
+		case <-store.entered:
+		default:
+			t.Fatal("prepare did not reach the barrier")
+		}
+		select {
+		case n := <-done:
+			if n != 1 {
+				t.Fatalf("enqueued = %d, want 1", n)
+			}
+		default:
+			t.Fatal("tick is waiting for prepare before enqueueing")
+		}
+		if got := e.bead(t, a.info.ID).Metadata["last_woke_at"]; got != "" {
+			t.Fatalf("PreWake landed while prepare was blocked: %q", got)
+		}
+		limiter.mu.Lock()
+		inFlight := limiter.inFlight
+		limiter.mu.Unlock()
+		if inFlight != 1 || !tracker.busy() {
+			t.Fatalf("prepare lost its slot or tracker: slots=%d busy=%v", inFlight, tracker.busy())
+		}
+		// A second free slot cannot admit the same runtime name on another tick.
+		if n := run(); n != 0 {
+			t.Fatalf("duplicate enqueued = %d, want 0", n)
+		}
+		if got := e.sp.CountCalls("Start", "a"); got != 0 {
+			t.Fatalf("Start calls = %d before PreWake", got)
+		}
+	})
+}
+
+// A dependent waits in this pass and the next while its prerequisite is still
+// preparing. Once that preparation commits it remains eligible to start.
+func TestExecutePlannedStarts_AsyncPrepareDependencyWaits(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		name := "absent runtime"
+		if live {
+			name = "existing runtime"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				e := newPrepareBudgetEnv(t, "a", "b")
+				e.cfg.Agents[1].DependsOn = []string{"a"}
+				a, b := e.candidate(t, "a", 0), e.candidate(t, "b", 0)
+				if live {
+					if err := e.sp.Start(context.Background(), "a", gcruntime.Config{}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
+				var once sync.Once
+				release := func() { once.Do(func() { close(store.release) }) }
+				defer release()
+				var tracker asyncStartTracker
+				opts := append([]startExecutionOption(nil), e.startOptions...)
+				opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker))
+				run := func(cs ...startCandidate) int {
+					return executePlannedStartsTraced(context.Background(), cs, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
+				}
+				done := make(chan int, 1)
+				go func() { done <- run(a, b) }()
+				synctest.Wait()
+				select {
+				case n := <-done:
+					if n != 1 {
+						t.Fatalf("enqueued = %d, want prerequisite only", n)
+					}
+				default:
+					t.Fatal("tick waited for dependency prepare")
+				}
+				if n := run(b); n != 0 {
+					t.Fatalf("dependent enqueued = %d while prepare is blocked", n)
+				}
+				if row := e.bead(t, b.info.ID); row.Status == "closed" || row.Metadata["last_woke_at"] != "" {
+					t.Fatalf("waiting dependency was closed or prepared: %+v", row)
+				}
+				release()
+				synctest.Wait()
+				if tracker.busy() {
+					t.Fatal("prerequisite prepare did not finish")
+				}
+				if n := run(b); n != 1 {
+					t.Fatalf("dependent enqueued = %d after prerequisite committed", n)
+				}
+				synctest.Wait()
+				if got := e.sp.CountCalls("Start", "b"); got != 1 {
+					t.Fatalf("dependent starts = %d, want 1", got)
+				}
+			})
+		})
+	}
+}
+
+func TestExecutePlannedStarts_AsyncPrepareFailureReleasesReservations(t *testing.T) {
+	for _, cancelPrepare := range []bool{false, true} {
+		name := "error"
+		if cancelPrepare {
+			name = "canceled"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				e := newPrepareBudgetEnv(t, "a")
+				a := e.candidate(t, "a", 7*time.Millisecond)
+				if !cancelPrepare {
+					e.lat.failGet[a.info.ID] = os.ErrDeadlineExceeded
+				}
+				store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
+				var once sync.Once
+				release := func() { once.Do(func() { close(store.release) }) }
+				defer release()
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var tracker asyncStartTracker
+				limiter := newAsyncStartLimiter(1)
+				opts := append([]startExecutionOption(nil), e.startOptions...)
+				opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker), withAsyncStartLimiter(limiter))
+				done := make(chan int, 1)
+				go func() {
+					done <- executePlannedStartsTraced(ctx, []startCandidate{a}, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, e.trace, opts...)
+				}()
+				synctest.Wait()
+				select {
+				case n := <-done:
+					if n != 1 {
+						t.Fatalf("enqueued = %d, want 1", n)
+					}
+				default:
+					t.Fatal("tick waited for prepare")
+				}
+				if cancelPrepare {
+					cancel()
+				}
+				release()
+				synctest.Wait()
+				if tracker.busy() || limiter.inFlight != 0 {
+					t.Fatalf("prepare leaked reservations: busy=%v slots=%d", tracker.busy(), limiter.inFlight)
+				}
+				if got := e.sp.CountCalls("Start", "a"); got != 0 {
+					t.Fatalf("Start calls = %d after failed or canceled prepare", got)
+				}
+				lease, drop, err := tryRuntimeLease(store, e.city, "a", "", 0)
+				if err != nil {
+					t.Fatalf("prepare leaked its name lease: %v", err)
+				}
+				drop()
+				if lease == nil {
+					t.Fatal("lease reacquisition returned no lease")
+				}
+				if row := e.bead(t, a.info.ID); row.Status == "closed" || row.Metadata["last_woke_at"] != "" || row.Metadata["pending_create_claim"] != "true" {
+					t.Fatalf("prepare failure lost the pending create or left it in flight: %+v", row)
+				}
+				if !cancelPrepare && !strings.Contains(e.log.String(), "session=a template=a outcome=failed") {
+					t.Fatalf("prepare failure lost its outcome: %s", e.log.String())
+				}
+			})
+		})
+	}
+}
+
+func TestExecutePlannedStarts_FastPrepareTraceTimings(t *testing.T) {
+	for _, async := range []bool{false, true} {
+		name := "sync"
+		if async {
+			name = "async"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newPrepareBudgetEnv(t, "a")
+			a := e.candidate(t, "a", 7*time.Millisecond)
+			// Async completion flushes the cycle. Read the persisted typed
+			// records so the proof also covers timings surviving that flush.
+			var traceStore *SessionReconcilerTraceStore
+			if async {
+				var err error
+				traceStore, err = newSessionReconcilerTraceStore(e.city, ioDiscard{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := traceStore.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				e.trace.tracer.store = traceStore
+			}
+			if n := e.run(testPrepareBudget, async, nil, a); n != 1 {
+				t.Fatalf("starts = %d, want 1", n)
+			}
+			records := e.records(TraceSiteLifecycleStartRun)
+			if async {
+				var err error
+				records, err = ReadTraceRecords(traceStore.rootDir, TraceFilter{})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var found bool
+			for _, r := range records {
+				if r.SiteCode != TraceSiteLifecycleStartRun || r.RecordType != TraceRecordOperation || r.OutcomeCode == TraceOutcomeStartEnqueued {
+					continue
+				}
+				found = true
+				for _, field := range []string{"lock_get_ms", "prewake_ms", "named_snapshot_ms", "build_ms", "spent_ms"} {
+					if _, ok := r.Fields[field]; !ok {
+						t.Errorf("fast prepare missing trace field %s: %v", field, r.Fields)
+					}
+				}
+				if got := r.Fields["lock_get_ms"]; got != int64(7) && got != float64(7) {
+					t.Errorf("lock_get_ms = %v, want 7", got)
+				}
+				if got := r.Fields["spent_ms"]; got != int64(7) && got != float64(7) {
+					t.Errorf("spent_ms = %v, want 7", got)
+				}
+			}
+			if !found {
+				t.Fatal("no start execution trace result")
+			}
+		})
+	}
 }

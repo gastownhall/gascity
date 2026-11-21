@@ -3128,7 +3128,13 @@ func TestCityRuntimeForceShutdownStopsALateStartItCanceled(t *testing.T) {
 }
 
 func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *testing.T) {
-	testCity, trackStarts := asyncStartCity(t)
+	testCity := t.TempDir()
+	var starts asyncStartTracker
+	t.Cleanup(func() {
+		if !starts.wait(hangBudget) {
+			t.Error("async prepare still running during cleanup")
+		}
+	})
 	store := &failSetMetadataStore{MemStore: beads.NewMemStore(), failKey: "session_key"}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 27, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3173,11 +3179,18 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
-		trackStarts,
-	); got != 0 {
-		t.Fatalf("woken = %d, want 0 when async preparation fails after preWake", got)
+		withAsyncStartTracker(&starts),
+	); got != 1 {
+		t.Fatalf("enqueued = %d, want 1 before async preparation finishes", got)
 	}
-	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
+	if !starts.wait(hangBudget) {
+		t.Fatal("async prepare did not finish")
+	}
+	select {
+	case name := <-sp.startSignals:
+		t.Fatalf("prepare failure called provider Start for %s", name)
+	default:
+	}
 	updated, err := store.Get(session.ID)
 	if err != nil {
 		t.Fatal(err)

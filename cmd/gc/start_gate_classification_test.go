@@ -804,6 +804,18 @@ func drivePrepareBudgetRecords(t *testing.T) {
 			c := e.candidate(t, "c", time.Second)
 
 			e.run(testPrepareBudget, async, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b, c)
+			if async {
+				// All three reservations fit in the first batch, before any
+				// prepare charges the meter. Admitted starts are not deferrals.
+				e.requireDeferred(t, true)
+				requireCommitted(t, memo)
+				for _, name := range []string{"a", "b", "c"} {
+					if n := e.sp.CountCalls("Start", name); n != 1 {
+						t.Fatalf("%s Start calls = %d, want 1", name, n)
+					}
+				}
+				return
+			}
 			e.requireDeferred(t, async, "b", "c")
 			requireCommitted(t, memo, b.info.ID, c.info.ID)
 		})

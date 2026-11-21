@@ -98,6 +98,18 @@ a kill on the reconciler tick or a start on its async slot before the operation
 ran (`SESSION-RUNTIME-034`). Do not add a provider call to
 `populateOperationEventIdentity`.
 
+The reconciler's async start owns its slot and runtime-name lease before
+preparation begins, and retains both through the start commit. Preparation
+(the locked reload, PreWake, named snapshot and command build) runs in that
+same goroutine, with PreWake persisted before provider Start. Its prepare
+meter sums completed preparation durations within a planner call; admission
+does not wait for outstanding prepares to charge it. Dependency, lease and
+capacity checks stay outside that meter. Record preparation timings on
+`reconciler.start.execute` completion results, including failures and fast
+starts; enqueue records precede preparation and carry zero timings.
+Dependency checks treat a held runtime lease as in flight before PreWake,
+even when a runtime from the previous attempt still reports alive.
+
 ## Turn sources
 
 A session's turns come from the routed runtime's protocol, else from the
