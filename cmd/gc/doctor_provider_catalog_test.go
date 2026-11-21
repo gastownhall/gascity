@@ -299,3 +299,66 @@ base = "builtin:gemini"
 		t.Fatalf("unreferenced gemini must not be reported: message=%q details=%q hint=%q", result.Message, result.Details, result.FixHint)
 	}
 }
+
+func TestProviderCatalogReadinessAdvisoryNeedsAuthFollowsInitProbeMapping(t *testing.T) {
+	cases := []struct {
+		name       string
+		toml       string
+		wantDetail string
+	}{
+		{
+			name:       "path_check alias",
+			toml:       "[workspace]\nprovider = \"claude-fast\"\n\n[providers.claude-fast]\npath_check = \"claude\"\n",
+			wantDetail: `Claude Code needs authentication (referenced as provider "claude-fast"): claude is installed but not logged in`,
+		},
+		{
+			name:       "direct ref and alias share one finding",
+			toml:       "[workspace]\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n\n[providers.claude-fast]\ncommand = \"claude\"\npath_check = \"claude\"\n\n[[agent]]\nname = \"worker\"\nprovider = \"claude-fast\"\n",
+			wantDetail: `Claude Code needs authentication (referenced as providers "claude", "claude-fast"): claude is installed but not logged in`,
+		},
+		{
+			name: "wrapper alias command is not probe-supported",
+			toml: "[workspace]\nprovider = \"wrapped\"\n\n[providers.wrapped]\ncommand = \"/opt/bin/bwrap-agent\"\n",
+		},
+		{
+			name: "agent with start_command",
+			toml: "[workspace]\nprovider = \"wrapped\"\n\n[providers.wrapped]\ncommand = \"/opt/bin/bwrap-agent\"\n\n[[agent]]\nname = \"worker\"\nprovider = \"claude\"\nstart_command = \"claude --resume\"\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := writeDoctorCityToml(t, tc.toml)
+			cfg, err := loadCityConfigAllowMissingProviderReferences(cityDir)
+			if err != nil {
+				t.Fatalf("loading config: %v", err)
+			}
+			initProbes := false
+			for _, ref := range explicitProviderRefs(cfg) {
+				if providerReadinessProbeName(ref, cfg) == "claude" {
+					initProbes = true
+				}
+			}
+			if initProbes != (tc.wantDetail != "") {
+				t.Fatalf("precondition: gc init probes claude = %v (refs %q), but case expects a finding = %v", initProbes, explicitProviderRefs(cfg), tc.wantDetail != "")
+			}
+			stubProviderReadiness(t, map[string]api.ReadinessItem{"claude": claudeNeedsAuthItem})
+
+			result := runProviderReadinessAdvisory(cityDir)
+			if tc.wantDetail == "" {
+				if result.Status != doctor.StatusOK {
+					t.Fatalf("status = %v (message %q, details %q), want OK: gc init would not probe claude", result.Status, result.Message, result.Details)
+				}
+				return
+			}
+			if result.Status != doctor.StatusWarning || result.Severity != doctor.SeverityAdvisory {
+				t.Fatalf("status/severity = %v/%v (message %q), want advisory warning", result.Status, result.Severity, result.Message)
+			}
+			if want := "1 referenced provider(s) need authentication: Claude Code"; result.Message != want {
+				t.Fatalf("message = %q, want %q", result.Message, want)
+			}
+			if len(result.Details) != 1 || result.Details[0] != tc.wantDetail {
+				t.Fatalf("details = %q, want [%q]", result.Details, tc.wantDetail)
+			}
+		})
+	}
+}
