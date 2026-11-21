@@ -446,6 +446,9 @@ type runCancelTarget struct {
 	store     beads.ResidentStore
 	root      beads.Bead
 	workflows []string
+	// drains are the drain controls anywhere in the run's tree, whose unit
+	// convoys the cancel retires before it closes the run root.
+	drains []string
 }
 
 // cancelRun winds down the run rooted at runID across every workflow store,
@@ -532,6 +535,18 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 	}
 
 	for _, target := range targets {
+		// A drain's unit convoys carry no gc.root_bead_id, so the workflow
+		// closes below never reach them, and nothing would once the run root
+		// closed. They live in a work store, which need not be the run's leg.
+		for _, info := range legs {
+			for _, drainID := range target.drains {
+				n, err := sourceworkflow.RetireDrainUnitConvoys(resident(info), drainID, func(beads.Bead) string { return beadmeta.OutcomeCanceled })
+				res.closed += n
+				if err != nil {
+					return res, err
+				}
+			}
+		}
 		for _, rootID := range target.workflows {
 			// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
 			n, err := cancelWorkflowRoot(beads.GraphMolecule(beads.GraphStore{Store: target.store}), rootID)
@@ -566,7 +581,8 @@ func cancelWorkflowRoot(store beads.MoleculeTarget, rootID string) (int, error) 
 }
 
 // planRunCancel reads target's workflow tree, records the open workflows the
-// cancel closes (deepest first, the run root last), and returns the assignees
+// cancel closes (deepest first, the run root last) and the drain controls of
+// every workflow in it, closed ones included, and returns the assignees
 // of the in-progress members those closes will sweep, in first-seen order and
 // possibly repeated. A nested item workflow already closed is neither closed
 // again nor searched for holders. A spared teardown step is not swept, so its
@@ -582,6 +598,7 @@ func planRunCancel(target *runCancelTarget) ([]string, error) {
 	}
 	var holders []string
 	for _, node := range tree {
+		target.drains = append(target.drains, sourceworkflow.DrainControlIDs(node.Members)...)
 		if node.Root.ID == "" || isClosedStatus(node.Root.Status) {
 			continue
 		}
