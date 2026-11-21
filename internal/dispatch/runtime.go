@@ -1243,46 +1243,8 @@ func processWorkflowFinalize(store beads.GraphStore, bead beads.Bead, opts Proce
 	if outcome == beadmeta.OutcomeMissingRoot {
 		return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
 	}
-	// Generated spec sidecars are topology records rather than executable
-	// members; preserve their established successful cleanup outcome before the
-	// remaining subtree is skipped.
-	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(storeMolecule, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
-	}
-	// A terminal root makes every still-open generated member non-executable —
-	// except the teardown tail, which is executable precisely because the root
-	// is now terminal. Close the remainder as one ordered, idempotent batch
-	// before completing the finalizer. This also repairs partially materialized
-	// workflows whose unused steps were never reached by ordinary dependency
-	// progression.
-	// One subtree read serves both the teardown-tail policy and the sweep.
-	members, err := molecule.ListSubtree(storeMolecule, rootID)
-	if err != nil {
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: resolving teardown members: %w", rootID, err))
-	}
-	excludeTeardown := molecule.TeardownTailExclusionFromMembers(members)
-	// The finalizer is itself a root member, but it must not sweep itself: it
-	// is the bead that re-drives this function, so it closes last, after the
-	// source chain. Swept here it would close as skipped before the sources
-	// and a crash in between would strand them open with nothing to retry.
-	excludeFromSweep := func(member beads.Bead) bool {
-		return member.ID == bead.ID || excludeTeardown(member)
-	}
-	sweep := map[string]string{
-		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-	}
-	if outcome == beadmeta.OutcomeCanceled {
-		sweep = map[string]string{
-			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
-			"close_reason":              workflowCanceledMemberCloseReason,
-		}
-	}
-	if _, err := molecule.CloseMembersWithMetadataExcept(storeMolecule, members, sweep, excludeFromSweep); err != nil {
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
-	}
-	if _, err := retireWorkflowDrainUnitConvoys(store, members, sweep[beadmeta.OutcomeMetadataKey], opts); err != nil {
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: retiring drain unit convoys: %w", rootID, err))
+	if err := closeTerminalWorkflowResidue(store, bead, rootID, outcome, opts); err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead, err)
 	}
 	if outcome == beadmeta.OutcomePass {
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
@@ -1306,6 +1268,62 @@ func processWorkflowFinalize(store beads.GraphStore, bead beads.Bead, opts Proce
 	}
 
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
+}
+
+// closeTerminalWorkflowResidue closes what the terminal workflow rootID leaves
+// open, ahead of finalizer, its finalizer bead: the generated spec sidecars,
+// every still-open member but the finalizer and the teardown tail, and the
+// open unit convoys of the drains among those members. outcome is the outcome
+// the workflow finalized with.
+func closeTerminalWorkflowResidue(store beads.GraphStore, finalizer beads.Bead, rootID, outcome string, opts ProcessOptions) error {
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(store)
+	// Generated spec sidecars are topology records rather than executable
+	// members; preserve their established successful cleanup outcome before the
+	// remaining subtree is skipped.
+	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(storeMolecule, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
+		return fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err)
+	}
+	// A terminal root makes every still-open generated member non-executable —
+	// except the teardown tail, which is executable precisely because the root
+	// is now terminal. Close the remainder as one ordered, idempotent batch
+	// before completing the finalizer. This also repairs partially materialized
+	// workflows whose unused steps were never reached by ordinary dependency
+	// progression.
+	// One subtree read serves both the teardown-tail policy and the sweep.
+	members, err := molecule.ListSubtree(storeMolecule, rootID)
+	if err != nil {
+		return fmt.Errorf("%s: resolving teardown members: %w", rootID, err)
+	}
+	excludeTeardown := molecule.TeardownTailExclusionFromMembers(members)
+	// The finalizer is itself a root member, but it must not sweep itself: it
+	// is the bead that re-drives processWorkflowFinalize, so it closes last,
+	// after the source chain. Swept here it would close as skipped before the
+	// sources and a crash in between would strand them open with nothing to
+	// retry.
+	excludeFromSweep := func(member beads.Bead) bool {
+		return member.ID == finalizer.ID || excludeTeardown(member)
+	}
+	sweep := map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+	}
+	if outcome == beadmeta.OutcomeCanceled {
+		sweep = map[string]string{
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
+			"close_reason":              workflowCanceledMemberCloseReason,
+		}
+	}
+	if _, err := molecule.CloseMembersWithMetadataExcept(storeMolecule, members, sweep, excludeFromSweep); err != nil {
+		return fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err)
+	}
+	// A teardown drain still runs, so its units stay open with it, for its
+	// own close to retire.
+	drains := sourceworkflow.DrainControls(members, excludeFromSweep)
+	if err := retireWorkflowDrainUnitConvoys(store, finalizer, rootID, drains, sweep[beadmeta.OutcomeMetadataKey], opts); err != nil {
+		return fmt.Errorf("%s: retiring drain unit convoys: %w", rootID, err)
+	}
+	return nil
 }
 
 // completeWorkflowRoot closes the workflow root with outcome ahead of its

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/url"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // runResourcePath is the canonical Run resource URL for one run — the value a
@@ -446,9 +448,10 @@ type runCancelTarget struct {
 	store     beads.ResidentStore
 	root      beads.Bead
 	workflows []string
-	// drains are the drain controls anywhere in the run's tree, whose unit
-	// convoys the cancel retires before it closes the run root.
-	drains []string
+	// drains are the drain controls of the run's tree, every workflow's
+	// teardown tail left out, whose unit convoys the cancel retires before it
+	// closes the run root.
+	drains []beads.Bead
 }
 
 // cancelRun winds down the run rooted at runID across every workflow store,
@@ -469,11 +472,12 @@ type runCancelTarget struct {
 //     interrupts run alongside the closes. The tree is read after the mark, so
 //     a claim that landed before the mark is seen here and one after it is
 //     refused by the gate.
-//  3. Close each open workflow, nested drain items deepest first and the run
-//     root last, reusing the workflow teardown close ordering (descendants
-//     before the root, blockers before blocked) so a strict store accepts the
-//     batch. Each root's close stamps the cancel marker on it too, so a nested
-//     item's own controls stop as canceled.
+//  3. Retire the open unit convoys of the tree's drains
+//     (retireRunDrainUnitConvoys), then close each open workflow, nested drain
+//     items deepest first and the run root last, reusing the workflow teardown
+//     close ordering (descendants before the root, blockers before blocked) so
+//     a strict store accepts the batch. Each root's close stamps the cancel
+//     marker on it too, so a nested item's own controls stop as canceled.
 //
 // Any store read/write failure is returned so the caller reports a retryable
 // 5xx rather than a phantom success. Every state a failure (or a crash) can
@@ -490,7 +494,8 @@ type runCancelTarget struct {
 func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (cancelRunResult, error) {
 	var res cancelRunResult
 	var targets []runCancelTarget
-	legs, resident := workflowLegs(s.state.Stores(), s.state.CityName(), workflowLegQuery{})
+	st := s.state.Stores()
+	legs, resident := workflowLegs(st, s.state.CityName(), workflowLegQuery{})
 	for _, info := range legs {
 		// One leg of the workflowStores federation (graph, city, rigs), read
 		// in its plan role (a scope leg of a split city is a relic leg, S4
@@ -535,29 +540,110 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 	}
 
 	for _, target := range targets {
-		// A drain's unit convoys carry no gc.root_bead_id, so the workflow
-		// closes below never reach them, and nothing would once the run root
-		// closed. They live in a work store, which need not be the run's leg.
-		for _, info := range legs {
-			for _, drainID := range target.drains {
-				n, err := sourceworkflow.RetireDrainUnitConvoys(resident(info), drainID, func(beads.Bead) string { return beadmeta.OutcomeCanceled })
-				res.closed += n
-				if err != nil {
-					return res, err
-				}
-			}
-		}
-		for _, rootID := range target.workflows {
-			// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-			n, err := cancelWorkflowRoot(beads.GraphMolecule(beads.GraphStore{Store: target.store}), rootID)
-			res.closed += n
-			if err != nil {
-				return res, err
-			}
+		// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+		molecules := beads.GraphMolecule(beads.GraphStore{Store: target.store})
+		n, err := closeRunCancelTarget(target, molecules, st, s.state.CityName())
+		res.closed += n
+		if err != nil {
+			return res, err
 		}
 		res.status = RunStatusCanceled
 	}
 	return res, nil
+}
+
+// closeRunCancelTarget closes what a cancel winds down for target: first the
+// open unit convoys of its drains, in the work stores of the epoch st
+// (retireRunDrainUnitConvoys), then its open workflows in molecules, target's
+// store, deepest first and the run root last, so a failure leaves the run root
+// open for the retry. It returns how many beads it closed.
+func closeRunCancelTarget(target runCancelTarget, molecules beads.MoleculeTarget, st storeref.Stores, cityName string) (int, error) {
+	closed, err := retireRunDrainUnitConvoys(st, cityName, target.drains)
+	if err != nil {
+		return closed, err
+	}
+	for _, rootID := range target.workflows {
+		n, err := cancelWorkflowRoot(molecules, rootID)
+		closed += n
+		if err != nil {
+			return closed, err
+		}
+	}
+	return closed, nil
+}
+
+// retireRunDrainUnitConvoys closes the open unit convoys of drains, the drain
+// controls of a run being canceled, each with the verdict its row reached in
+// its drain's manifest and canceled when its row reached none
+// (sourceworkflow.RetireDrainUnitConvoys). A unit carries no
+// gc.root_bead_id, so no workflow close reaches it, and once the run root
+// closed only `gc convoy check` would retire it, on its next pass.
+//
+// A unit is a work bead: its drain minted it in the store that owns the member
+// it tracks, the work store of the drain's scope, which need not be the run's
+// own leg. So every work store of the epoch st is read, each once
+// (sweepEveryWorkStore): the city's, also when a rig named like the city takes
+// its place in the work ledger's listing, and every rig's, a rig the workflow
+// legs retire as relic-free included. The graph placement is not: a drain
+// mints a unit there only for a member the binding holds and its scope's work
+// store does not, and `gc convoy check` retires that unit on its next pass. It
+// returns how many units it closed.
+func retireRunDrainUnitConvoys(st storeref.Stores, cityName string, drains []beads.Bead) (int, error) {
+	if len(drains) == 0 {
+		return 0, nil
+	}
+	closed := 0
+	err := sweepEveryWorkStore(st, cityName, func(store beads.ResidentStore) error {
+		for _, drain := range drains {
+			n, err := sourceworkflow.RetireDrainUnitConvoys(store, drain, beadmeta.OutcomeCanceled)
+			closed += n
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return closed, fmt.Errorf("retiring the run's drain unit convoys: %w", err)
+	}
+	return closed, nil
+}
+
+// sweepEveryWorkStore visits every work store of the epoch st once, with a
+// writable handle on it, and stops at the first error: the work ledger's
+// authority legs (storeref.WorkList), then the city's own work store
+// (storeref.WorkScope) when no WorkList leg reads it. That is when a rig named
+// like the city, cityName, holds a store of its own: WorkList lists that rig in
+// the city's place. Every leg is PolicyFatal, so a failed read is an error.
+func sweepEveryWorkStore(st storeref.Stores, cityName string, visit func(beads.ResidentStore) error) error {
+	list, err := st.Plan(storeref.WorkFederation{Kind: storeref.WorkList, CityName: cityName, SuspendedRigs: storeref.WorkReadsSuspendedRigs})
+	if err != nil {
+		return fmt.Errorf("planning the work ledger's stores: %w", err)
+	}
+	plans := []storeref.ResolvedPlan{list}
+	city, listed := st.Work(), false
+	storeref.EachTypedLeg(list, func(leg storeref.TypedLeg) {
+		listed = listed || beads.SameStore(leg.Reader, city)
+	})
+	if !listed && !beads.IsNilStore(city) {
+		own, err := st.Plan(storeref.WorkFederation{Kind: storeref.WorkScope, Scope: storeref.WorkRef})
+		if err != nil {
+			return fmt.Errorf("planning the city's work store: %w", err)
+		}
+		plans = append(plans, own)
+	}
+	authority := func(leg storeref.TypedLeg, store beads.ResidentStore) error {
+		if leg.Role != storeref.RoleAuthority {
+			return nil
+		}
+		return visit(store)
+	}
+	for _, plan := range plans {
+		if _, err := storeref.Sweep(plan, authority); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // cancelWorkflowRoot closes one workflow root and its open members as
@@ -586,10 +672,12 @@ func cancelWorkflowRoot(store beads.MoleculeTarget, rootID string) (int, error) 
 // of the in-progress members those closes will sweep, in first-seen order and
 // possibly repeated. A nested item workflow already closed is neither closed
 // again nor searched for holders. A spared teardown step is not swept, so its
-// holder is not returned; the teardown tail is judged from the members the
-// tree walk already read (every member of a graph workflow carries its
-// gc.root_bead_id) rather than from a further subtree read, which the close
-// makes for itself, so that no read beyond the walk delays the interrupts.
+// holder is not returned, and a teardown drain, which runs on after its root is
+// terminal, keeps its unit convoys open; the teardown tail is judged from the
+// members the tree walk already read (every member of a graph workflow carries
+// its gc.root_bead_id) rather than from a further subtree read, which the
+// close makes for itself, so that no read beyond the walk delays the
+// interrupts.
 func planRunCancel(target *runCancelTarget) ([]string, error) {
 	// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
 	tree, err := sourceworkflow.WorkflowTree(beads.GraphMolecule(beads.GraphStore{Store: target.store}), target.root.ID)
@@ -598,11 +686,11 @@ func planRunCancel(target *runCancelTarget) ([]string, error) {
 	}
 	var holders []string
 	for _, node := range tree {
-		target.drains = append(target.drains, sourceworkflow.DrainControlIDs(node.Members)...)
+		exclude := molecule.TeardownTailExclusionFromMembers(node.Members)
+		target.drains = append(target.drains, sourceworkflow.DrainControls(node.Members, exclude)...)
 		if node.Root.ID == "" || isClosedStatus(node.Root.Status) {
 			continue
 		}
-		exclude := molecule.TeardownTailExclusionFromMembers(node.Members)
 		holders = append(holders, inProgressAssignees(node.Members, exclude)...)
 		target.workflows = append(target.workflows, node.Root.ID)
 	}
