@@ -238,6 +238,12 @@ show_ids() {
 # Combined stdout+stderr is the caller's to capture; the subshell's exit
 # code is assert_bead_still_claimed's.
 #
+# The bead-store environment (BEADS_DIR and every database-pinning variable
+# the routed paths un-set) is cleared first: the guard discovers the prefix
+# table from BEADS_DIR when set, so an inherited one would silently point
+# these tests at the caller's real store. Tests that need a pinned caller
+# environment use run_guard_env.
+#
 # POG_READ_ATTEMPTS defaults to 1 here (not the production default of 3) so
 # every pre-existing caller that doesn't care about retry behavior keeps its
 # original single-shot timing untouched. Tests that exercise retries set
@@ -249,6 +255,7 @@ run_guard() {
     local read_attempts="${POG_READ_ATTEMPTS:-1}"
     (
         cd "$repo" || exit 1
+        unset BEADS_DIR BEADS_DB BD_DB BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_DATABASE BEADS_DOLT_DATA_DIR
         PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
             GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
             POG_TIMEOUT_SECONDS="$pog_timeout" POG_READ_ATTEMPTS="$read_attempts" LIB="$LIB" \
@@ -267,6 +274,7 @@ run_guard_zsh() {
     local session_id="${6:-}" session_name="${7:-}"
     (
         cd "$repo" || exit 1
+        unset BEADS_DIR BEADS_DB BD_DB BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_DATABASE BEADS_DOLT_DATA_DIR
         PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
             GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
             POG_TIMEOUT_SECONDS="$pog_timeout" LIB="$LIB" \
@@ -1538,6 +1546,292 @@ test_rebase_lib_calls_guard_before_force_with_lease() {
 }
 
 # ---------------------------------------------------------------------------
+# Cross-rig routed branch tokens (ga-f59876): a branch name built from a bead
+# of ANOTHER configured rig (mc-k2p9x, bd-show, ...) resolved no id under the
+# ga-only branch regex, so a writer whose claim on that bead was revoked
+# pushed through as "nothing to check". These tests pin the routed contract:
+# prefixes and their stores discovered from .beads/routes.jsonl, exact-id
+# probes of the routed store, and every verification read of the routed bead
+# made against that store rather than the caller's.
+# ---------------------------------------------------------------------------
+
+# routed_store_key <store>: the state key write_routed_fake_bd derives for a
+# store path (mirrors the mangling inside the fake).
+routed_store_key() {
+    printf '%s' "${1:-}" | sed 's,[^a-zA-Z0-9.-],_,g'
+}
+
+# write_routed_fake_bd <dir>: a fake `bd` whose state is keyed by the store it
+# is pointed at — BEADS_DIR, or any database-pinning variable that wins over
+# it (mirroring bd's own store-selection precedence in cmd/bd/main.go, so a
+# leaked pin visibly reads the wrong store). State lives under
+# <dir>/fake-bd-state/<key>/:
+#   show/<id>.json    — `bd show <id> --json` response (any other id: exit 1)
+#   show-ids.log      — every id `bd show` was asked for, one per line
+#   show-fail-count   — first N `bd show` calls exit 1 (transient failure)
+#   show-call-count   — written by each `bd show` call (1-based)
+#   list.json         — `bd list --assignee=...` response (default "[]")
+#   list-fail-count / list-call-count — same pair for `bd list`
+#   probe-raw         — if present, `bd list --id=...` cats it verbatim
+#                       (garbage or empty probe-output simulation)
+# `bd list --id=a,b` answers the JSON array of the requested ids that have
+# show/<id>.json state — an exact-id filter like the real bd, "[]" for none.
+# Every call appends one line to <dir>/fake-bd-state/calls.log naming the
+# store, the five pin variables, BEADS_DIR and the full argv.
+write_routed_fake_bd() {
+    local dir="$1"
+    mkdir -p "$dir/fake-bd-state"
+    cat > "$dir/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+state="$(dirname "$0")/fake-bd-state"
+store=""
+if [ -n "${BEADS_DB:-}" ]; then store="$BEADS_DB"
+elif [ -n "${BD_DB:-}" ]; then store="$BD_DB"
+elif [ -n "${BEADS_DOLT_SERVER_DATABASE:-}" ]; then store="$BEADS_DOLT_SERVER_DATABASE"
+elif [ -n "${BEADS_DOLT_DATABASE:-}" ]; then store="$BEADS_DOLT_DATABASE"
+elif [ -n "${BEADS_DOLT_DATA_DIR:-}" ]; then store="$BEADS_DOLT_DATA_DIR"
+elif [ -n "${BEADS_DIR:-}" ]; then store="$BEADS_DIR"
+else store="(current)"
+fi
+key="$(printf '%s' "$store" | sed 's,[^a-zA-Z0-9.-],_,g')"
+sdir="$state/$key"
+mkdir -p "$sdir/show" 2>/dev/null || true
+printf 'store=%s key=%s pins=[BEADS_DB=%s BD_DB=%s BEADS_DOLT_SERVER_DATABASE=%s BEADS_DOLT_DATABASE=%s BEADS_DOLT_DATA_DIR=%s] BEADS_DIR=%s cmd=%s args=%s\n' \
+    "$store" "$key" "${BEADS_DB:-}" "${BD_DB:-}" "${BEADS_DOLT_SERVER_DATABASE:-}" \
+    "${BEADS_DOLT_DATABASE:-}" "${BEADS_DOLT_DATA_DIR:-}" "${BEADS_DIR:-}" "$1" "$*" >> "$state/calls.log"
+id_filter=""
+for a in "$@"; do
+    case "$a" in
+        --id=*) id_filter="${a#--id=}" ;;
+    esac
+done
+case "$1" in
+    show)
+        echo "$2" >> "$sdir/show-ids.log"
+        if [ -f "$sdir/show-fail-count" ]; then
+            n="$(cat "$sdir/show-fail-count")"
+            c=0; [ -f "$sdir/show-call-count" ] && c="$(cat "$sdir/show-call-count")"
+            c=$((c + 1)); echo "$c" > "$sdir/show-call-count"
+            if [ "$c" -le "$n" ]; then exit 1; fi
+        fi
+        if [ -f "$sdir/show/$2.json" ]; then cat "$sdir/show/$2.json"; exit 0; fi
+        exit 1
+        ;;
+    list)
+        if [ -f "$sdir/list-fail-count" ]; then
+            n="$(cat "$sdir/list-fail-count")"
+            c=0; [ -f "$sdir/list-call-count" ] && c="$(cat "$sdir/list-call-count")"
+            c=$((c + 1)); echo "$c" > "$sdir/list-call-count"
+            if [ "$c" -le "$n" ]; then exit 1; fi
+        fi
+        if [ -n "$id_filter" ]; then
+            if [ -f "$sdir/probe-raw" ]; then cat "$sdir/probe-raw"; exit 0; fi
+            out=""
+            OLDIFS="$IFS"; IFS=','
+            for i in $id_filter; do
+                IFS="$OLDIFS"
+                if [ -f "$sdir/show/$i.json" ]; then
+                    body="$(cat "$sdir/show/$i.json")"
+                    body="${body#[}"; body="${body%]}"
+                    if [ -n "$body" ]; then
+                        if [ -n "$out" ]; then out="$out,$body"; else out="$body"; fi
+                    fi
+                fi
+            done
+            IFS="$OLDIFS"
+            printf '[%s]' "$out"
+            exit 0
+        fi
+        if [ -f "$sdir/list.json" ]; then cat "$sdir/list.json"; exit 0; fi
+        printf '[]'
+        exit 0
+        ;;
+    hooks)
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+FAKE
+    chmod +x "$dir/bd"
+}
+
+# routed_show <fbd> <store> <id> <status> <assignee> <routed_to> [labels-json]
+routed_show() {
+    local fbd="$1" store="$2" id="$3" status="$4" assignee="$5" rt="$6" labels="${7:-[]}"
+    local sd
+    sd="$fbd/fake-bd-state/$(routed_store_key "$store")/show"
+    mkdir -p "$sd"
+    printf '[{"id":"%s","status":"%s","assignee":"%s","metadata":{"gc.routed_to":"%s"},"labels":%s}]' \
+        "$id" "$status" "$assignee" "$rt" "$labels" > "$sd/$id.json"
+}
+
+# routed_list <fbd> <store> <json>: the store's assignee-fallback response.
+routed_list() {
+    local sd
+    sd="$1/fake-bd-state/$(routed_store_key "$2")"
+    mkdir -p "$sd"
+    printf '%s' "$3" > "$sd/list.json"
+}
+
+# routed_calls <fbd>: every logged fake-bd call, one per line.
+routed_calls() {
+    cat "$1/fake-bd-state/calls.log" 2>/dev/null || true
+}
+
+# routed_store_calls <fbd> <store>: the calls logged against <store>.
+routed_store_calls() {
+    routed_calls "$1" | grep -F "key=$(routed_store_key "$2") " || true
+}
+
+# new_repo_with_branch_at <parent> <branch>: repo at <parent>/gascity on
+# <branch>; prints the repo path.
+new_repo_with_branch_at() {
+    local parent="$1" branch="$2"
+    local d="$parent/gascity"
+    git init -q -b main "$d"
+    git -C "$d" config commit.gpgsign false
+    (
+        cd "$d" || exit 1
+        printf 'base\n' > f.txt
+        git add -A && git commit -qm base
+        git checkout -q -b "$branch"
+    )
+    printf '%s' "$d"
+}
+
+# write_routes <repo> <entry>...: each entry is prefix:path — the path
+# relative to the scope root, exactly as gc's writeAllRoutes writes it.
+write_routes() {
+    local repo="$1"; shift
+    mkdir -p "$repo/.beads"
+    : > "$repo/.beads/routes.jsonl"
+    local e
+    for e in "$@"; do
+        printf '{"prefix":"%s","path":"%s"}\n' "${e%%:*}" "${e#*:}" >> "$repo/.beads/routes.jsonl"
+    done
+}
+
+# new_routed_mc_root <branch>: temp root holding gascity/ (on <branch>,
+# routes ga→. and mc→../mc-rig) and an existing mc-rig/.beads store dir.
+# Prints the root path.
+#
+# The guard addresses the mc store by the literal route join
+# <repo>/../mc-rig/.beads (that string is the BEADS_DIR it exports and the
+# fake-bd state key), so seed and assert through that same form —
+# mcstore="$repo/../mc-rig/.beads" — not the collapsed $root spelling.
+new_routed_mc_root() {
+    local branch="$1" root repo
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/mc-rig/.beads"
+    repo="$(new_repo_with_branch_at "$root" "$branch")"
+    write_routes "$repo" "ga:." "mc:../mc-rig"
+    printf '%s' "$root"
+}
+
+# AC-1: every revocation reason that blocks a local bead blocks a routed one
+# through the same ownership predicate — same BLOCKED line, same reason text —
+# and a routed bead that is still in_progress and assigned to this session
+# allows. Today (ga-only regex) none of these resolve an id at all: rc=0.
+test_routed_revoked_bead_blocks() {
+    local label status assignee rt labels expect root repo fbd mcstore out rc
+    while IFS='|' read -r label status assignee rt labels expect; do
+        [[ -n "$label" ]] || continue
+        root="$(new_routed_mc_root "builder/mc-k2p9x-fix")"
+        repo="$root/gascity"
+        mcstore="$repo/../mc-rig/.beads"
+        fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+        write_routed_fake_bd "$fbd"
+        routed_show "$fbd" "$mcstore" "mc-k2p9x" "$status" "$assignee" "$rt" "$labels"
+        out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+        if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — mc-k2p9x" <<<"$out" \
+            && grep -qF "$expect" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+            record_pass "routed/revoked-$label (rc=$rc, same reason text as the local path)"
+        else
+            record_fail "routed/revoked-$label" "expected non-zero rc with 'BLOCKED — mc-k2p9x' and '$expect', got rc=$rc, output: $out"
+        fi
+        rm -rf "$root" "$fbd"
+    done <<'CASES'
+closed|closed|agent-x|tmpl-x|[]|status is 'closed'
+reassigned|in_progress|agent-other|tmpl-x|[]|assignee is 'agent-other'
+rerouted|in_progress|agent-x|other-tmpl|[]|gc.routed_to is 'other-tmpl'
+hold-mayor|in_progress|agent-x|tmpl-x|["hold:mayor"]|hold:mayor
+hold-external|in_progress|agent-x|tmpl-x|["hold:external"]|hold:external
+CASES
+}
+
+# AC-1 allow side: still-claimed routed bead pushes, and its verification
+# read (bd show) was served from the mc-rig store, not the caller's.
+test_routed_clean_claim_allows() {
+    local root repo fbd mcstore out rc
+    root="$(new_routed_mc_root "builder/mc-k2p9x-fix")"
+    repo="$root/gascity"
+    mcstore="$repo/../mc-rig/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "$mcstore" "mc-k2p9x" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && [[ "$(routed_store_calls "$fbd" "$mcstore" | grep -c 'cmd=show')" -eq 1 ]] \
+        && [[ "$(routed_calls "$fbd" | grep -c 'cmd=show')" -eq 1 ]]; then
+        record_pass "routed/clean-claim-allows (rc=0, bd show read from the mc-rig store)"
+    else
+        record_fail "routed/clean-claim-allows" "expected rc=0 with exactly one bd show, served from the mc-rig store, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# AC-1 under zsh (Layer B sources this guard into the deployer's zsh): one
+# allow and one block case must behave identically there.
+test_routed_cases_under_zsh() {
+    if ! command -v zsh >/dev/null 2>&1; then
+        echo "  skip routed/cases-under-zsh — zsh not installed"
+        return
+    fi
+    local state expect root repo fbd mcstore out rc runner=run_guard_zsh
+    for state in 'in_progress:0' 'closed:1'; do
+        root="$(new_routed_mc_root "builder/mc-k2p9x-fix")"
+        repo="$root/gascity"
+        mcstore="$repo/../mc-rig/.beads"
+        fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+        write_routed_fake_bd "$fbd"
+        routed_show "$fbd" "$mcstore" "mc-k2p9x" "${state%%:*}" "agent-x" "tmpl-x" "[]"
+        out="$($runner "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+        expect="${state#*:}"
+        if [[ "$rc" == "$expect" ]] && [[ "$(routed_store_calls "$fbd" "$mcstore" | grep -c 'cmd=show')" -eq 1 ]]; then
+            record_pass "routed/case-under-zsh (${state%%:*}, rc=$rc, read from the mc-rig store)"
+        else
+            record_fail "routed/case-under-zsh (${state%%:*})" "expected rc=$expect with one mc-rig bd show, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+        fi
+        rm -rf "$root" "$fbd"
+    done
+}
+
+# Routes hygiene: a bd-style dashed entry ("mc-") works like gc's dashless
+# one, and invalid prefixes are each skipped with exactly one WARNING without
+# disabling the surviving entries.
+test_routes_hygiene_dashed_and_invalid_entries() {
+    local root repo fbd mcstore out rc warns
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/mc-rig/.beads"
+    repo="$(new_repo_with_branch_at "$root" "builder/mc-abc12-fix")"
+    write_routes "$repo" "ga-:." "mc-:../mc-rig" '.*:.' 'm|c:../mc-rig' 'a.b:../mc-rig'
+    mcstore="$repo/../mc-rig/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "$mcstore" "mc-abc12" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    warns="$(grep -c 'WARNING' <<<"$out" || true)"
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — mc-abc12" <<<"$out" && [[ "$warns" == "3" ]]; then
+        record_pass "routed/routes-hygiene (rc=$rc, dashed entry works, 3 invalid entries warned and skipped)"
+    else
+        record_fail "routed/routes-hygiene" "expected block on closed mc-abc12 with 3 WARNINGs, got rc=$rc warns=$warns, output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -1597,6 +1891,10 @@ run_all() {
     test_hook_allows_push_on_clean_claim
     test_pre_push_hook_sources_and_calls_guard
     test_rebase_lib_calls_guard_before_force_with_lease
+    test_routed_revoked_bead_blocks
+    test_routed_clean_claim_allows
+    test_routed_cases_under_zsh
+    test_routes_hygiene_dashed_and_invalid_entries
 
     echo
     echo "pass=$pass fail=$fail"
