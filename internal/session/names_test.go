@@ -1390,3 +1390,125 @@ func TestEnsureSessionNameAvailable_RejectsNonReleasablePoolSlotShapes(t *testin
 		})
 	}
 }
+
+func createManualTemplateHolder(t *testing.T, store *beads.MemStore, metadata map[string]string) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("Create(holder): %v", err)
+	}
+	return b
+}
+
+func TestEnsurePoolIdentityLeaseAvailable_ManualIdentifierHolderDoesNotHold(t *testing.T) {
+	configs := map[string]*config.City{
+		"nil_config": nil,
+		"config":     {Agents: []config.Agent{{Name: "worker"}}},
+	}
+	markers := map[string]map[string]string{
+		"session_origin": {"session_origin": "manual"},
+		"manual_session": {"manual_session": "true"},
+	}
+	for cfgName, cfg := range configs {
+		for markerName, marker := range markers {
+			for _, field := range []string{"template", "agent_name", "common_name"} {
+				t.Run(cfgName+"/"+markerName+"/"+field, func(t *testing.T) {
+					store := beads.NewMemStore()
+					metadata := map[string]string{
+						field:          "worker",
+						"alias":        "fixer",
+						"session_name": "s-fixer",
+						"state":        "asleep",
+						"sleep_reason": "drained",
+					}
+					for k, v := range marker {
+						metadata[k] = v
+					}
+					createManualTemplateHolder(t, store, metadata)
+					if err := EnsurePoolIdentityLeaseAvailableWithConfig(beadstest.Sessions(store), cfg, "worker", "worker"); err != nil {
+						t.Fatalf("EnsurePoolIdentityLeaseAvailableWithConfig(manual %s holder) = %v, want nil", field, err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestEnsurePoolIdentityLeaseAvailable_ManualSessionNameOrAliasStillBlocks(t *testing.T) {
+	for _, field := range []string{"alias", "session_name"} {
+		t.Run(field, func(t *testing.T) {
+			store := beads.NewMemStore()
+			metadata := map[string]string{
+				"template":       "worker",
+				"agent_name":     "fixer",
+				"alias":          "fixer",
+				"session_name":   "s-fixer",
+				"session_origin": "manual",
+				"state":          "asleep",
+			}
+			metadata[field] = "worker"
+			createManualTemplateHolder(t, store, metadata)
+			err := EnsurePoolIdentityLeaseAvailableWithConfig(beadstest.Sessions(store), nil, "worker", "worker")
+			if !errors.Is(err, ErrSessionNameExists) {
+				t.Fatalf("EnsurePoolIdentityLeaseAvailableWithConfig(manual %s=worker) = %v, want %v", field, err, ErrSessionNameExists)
+			}
+		})
+	}
+}
+
+func TestEnsurePoolIdentityLeaseAvailable_ConfiguredNamedReservationStillBlocks(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{{Template: "worker"}},
+	}
+	reserved := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "worker")
+	err := EnsurePoolIdentityLeaseAvailableWithConfig(beadstest.Sessions(store), cfg, reserved, "other")
+	if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("EnsurePoolIdentityLeaseAvailableWithConfig(configured reservation %q) = %v, want %v", reserved, err, ErrSessionNameExists)
+	}
+}
+
+func TestEnsurePoolIdentityLeaseAvailable_NonManualIdentifierHolderStillBlocks(t *testing.T) {
+	for _, origin := range []string{"", "ephemeral", "named"} {
+		t.Run("origin_"+origin, func(t *testing.T) {
+			store := beads.NewMemStore()
+			metadata := map[string]string{"template": "worker"}
+			if origin != "" {
+				metadata["session_origin"] = origin
+			}
+			createManualTemplateHolder(t, store, metadata)
+			err := EnsurePoolIdentityLeaseAvailableWithConfig(beadstest.Sessions(store), nil, "worker", "worker")
+			if !errors.Is(err, ErrSessionNameExists) {
+				t.Fatalf("EnsurePoolIdentityLeaseAvailableWithConfig(non-manual template holder) = %v, want %v", err, ErrSessionNameExists)
+			}
+		})
+	}
+}
+
+func TestEnsureSessionNameAvailableWithConfigForOwner_ManualTemplateHolderStillBlocks(t *testing.T) {
+	store := beads.NewMemStore()
+	createManualTemplateHolder(t, store, map[string]string{
+		"template":       "worker",
+		"agent_name":     "fixer",
+		"alias":          "fixer",
+		"session_name":   "s-fixer",
+		"session_origin": "manual",
+		"state":          "asleep",
+		"sleep_reason":   "drained",
+	})
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), nil, "worker", "", "worker"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(manual template holder) = %v, want %v", err, ErrSessionNameExists)
+	}
+	if err := EnsureSessionNameAvailableWithConfig(beadstest.Sessions(store), nil, "worker", ""); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("EnsureSessionNameAvailableWithConfig(manual template holder) = %v, want %v", err, ErrSessionNameExists)
+	}
+	if err := ensureSessionNameAvailableForSelf(beadstest.Sessions(store), "worker", ""); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailableForSelf(manual template holder) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
