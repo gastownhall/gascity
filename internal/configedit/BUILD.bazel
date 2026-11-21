@@ -24,9 +24,9 @@ go_test(
     name = "configedit_test",
     srcs = [
         "city_lock_test.go",
+        "concurrent_editors_test.go",
         "configedit_linux_test.go",
         "configedit_test.go",
-        "concurrent_editors_test.go",
         "formulas_test.go",
         "rig_federation_test.go",
         "rigpatch_identity_internal_test.go",
