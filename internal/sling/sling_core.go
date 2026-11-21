@@ -969,6 +969,9 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 			return result, err
 		}
 		result.RoutedMembers = members.routedMembers()
+		if warning := members.elsewhereWarning(); warning != "" {
+			result.BeadWarnings = append(result.BeadWarnings, warning)
+		}
 		req := RouteRequest{
 			BeadID:  beadID,
 			Target:  agentutil.RoutedToIdentity(&a),

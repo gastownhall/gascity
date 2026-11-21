@@ -3,6 +3,7 @@ package sling
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -22,6 +23,9 @@ type expandedRootMemberRoutes struct {
 	// before steps so a spawned attempt never reads an empty execution route.
 	controls []memberRoutePatch
 	steps    []memberRoutePatch
+	// elsewhere names the open members already routed to another target,
+	// which the fill-only plan leaves on their routes.
+	elsewhere []string
 }
 
 // memberRoutePatch is the metadata one member gains.
@@ -76,6 +80,9 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, store beads.Wo
 			return nil, fmt.Errorf("routing the members of workflow %s: %w", beadID, err)
 		}
 		if patch == nil {
+			if route := otherMemberRoute(member, binding.QualifiedName); route != "" {
+				plan.elsewhere = append(plan.elsewhere, fmt.Sprintf("%s (%s)", member.ID, route))
+			}
 			continue
 		}
 		entry := memberRoutePatch{beadID: member.ID, meta: patch}
@@ -120,4 +127,33 @@ func (p *expandedRootMemberRoutes) routedMembers() int {
 // execution route, so the control dispatcher should look again.
 func (p *expandedRootMemberRoutes) routesControls() bool {
 	return p != nil && len(p.controls) > 0
+}
+
+// otherMemberRoute returns the route an open executable member carries when
+// it names a target other than target: the execution route of a control, the
+// delivery route of any other member. It returns "" otherwise.
+func otherMemberRoute(member beads.Bead, target string) string {
+	kind := member.Metadata[beadmeta.KindMetadataKey]
+	if graphroute.IsWorkflowTopologyKind(kind) || member.Status == "closed" {
+		return ""
+	}
+	key := beadmeta.RoutedToMetadataKey
+	if graphroute.IsControlDispatcherKind(kind) {
+		key = beadmeta.ExecutionRoutedToMetadataKey
+	}
+	route := strings.TrimSpace(member.Metadata[key])
+	if route == "" || route == target {
+		return ""
+	}
+	return route
+}
+
+// elsewhereWarning names the members the plan left on another route, or
+// returns "" when there are none.
+func (p *expandedRootMemberRoutes) elsewhereWarning() string {
+	if p == nil || len(p.elsewhere) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("warning: workflow %s members already routed to other agents were left on their routes: %s",
+		p.rootID, strings.Join(p.elsewhere, ", "))
 }

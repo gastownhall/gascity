@@ -2,6 +2,7 @@ package sling
 
 import (
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -305,5 +306,45 @@ func TestSlingExpandedRootFullyRoutedReslingIsIdempotent(t *testing.T) {
 	}
 	if result.RoutedMembers != 0 {
 		t.Errorf("RoutedMembers = %d, want 0", result.RoutedMembers)
+	}
+}
+
+// TestSlingExpandedRootToAnotherTargetFillsOnlyUnroutedAndWarns is AC-5:
+// slinging a run mostly routed to worker to other routes only the member with
+// no route, leaves the worker members where they are, and names them in a
+// warning.
+func TestSlingExpandedRootToAnotherTargetFillsOnlyUnroutedAndWarns(t *testing.T) {
+	run := newCookedRun(t)
+	mix := run.member(t, "mix batter", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	cook := run.member(t, "cook", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	serve := run.step(t, "serve")
+	run.slungBeforeFix(t, "worker")
+	worker := poolWorker()
+	other := config.Agent{Name: "other", MaxActiveSessions: intPtr(-1)}
+	deps, _ := cookedRunDeps(run, worker, other)
+
+	result, err := DoSling(testOpts(other, run.root.ID), deps, run.store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if got := run.get(t, serve.ID).Metadata[beadmeta.RoutedToMetadataKey]; got != "other" {
+		t.Errorf("unrouted member gc.routed_to = %q, want other", got)
+	}
+	for _, id := range []string{mix.ID, cook.ID} {
+		if got := run.get(t, id).Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+			t.Errorf("member %s gc.routed_to = %q, want it left on worker", id, got)
+		}
+	}
+	var warning string
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, mix.ID) {
+			warning = w
+		}
+	}
+	if warning == "" || !strings.Contains(warning, cook.ID) {
+		t.Fatalf("BeadWarnings = %q, want one warning naming %s and %s", result.BeadWarnings, mix.ID, cook.ID)
+	}
+	if strings.Contains(warning, serve.ID) {
+		t.Errorf("warning %q names %s, which this sling routed", warning, serve.ID)
 	}
 }
