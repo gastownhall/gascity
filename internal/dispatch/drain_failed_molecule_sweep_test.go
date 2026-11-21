@@ -7,7 +7,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -15,7 +14,6 @@ import (
 // molecule_failed stamp, so the drain's same-key re-entry mints a fresh item
 // root instead of adopting the swept one, and a further sweep closes nothing.
 func TestEnsureDrainItemRootAfterFailedMoleculeSweep(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
