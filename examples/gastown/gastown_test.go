@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package gastown_test validates the Gas Town example configuration.
 //
 // This test ensures the example stays valid as the SDK evolves:
@@ -12,28 +14,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"text/template"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 )
-
-func exampleDir() string {
-	if root := bazeltest.OverrideRoot(); root != "" {
-		return filepath.Join(root, "examples", "gastown")
-	}
-	_, filename, _, _ := runtime.Caller(0)
-	return filepath.Dir(filename)
-}
 
 func gastownFormulaSearchPaths() []string {
 	dir := exampleDir()
@@ -990,7 +983,7 @@ func cookPolecatSelfReviewDescription(t *testing.T, vars map[string]string) stri
 	t.Helper()
 
 	store := beads.NewMemStore()
-	result, err := molecule.Cook(context.Background(), store, "mol-polecat-work", gastownFormulaSearchPaths(), molecule.Options{
+	result, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "mol-polecat-work", gastownFormulaSearchPaths(), molecule.Options{
 		Title: "HW-42",
 		Vars:  vars,
 	})

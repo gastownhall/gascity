@@ -20,16 +20,19 @@ import (
 // The zero BindingOptions leaves Relics nil, which BuildBinding reads as "may
 // hold legacy residents" and so keeps the residence probe. That is the honest
 // answer for a caller that took no census.
-func drainResidency(store beads.Store, opts ProcessOptions) (storeref.Topology, error) {
-	if len(opts.MemberStores) == 0 {
-		return storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: store}}, nil
+func drainResidency(store beads.GraphStore, opts ProcessOptions) (storeref.Topology, error) {
+	// storeref's legs hold raw stores: the plan executors ask them for their
+	// own capabilities. T7's typed legs remove these unwraps.
+	if !opts.MemberTail {
+		return storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: store.Store}}, nil
 	}
-	if len(opts.MemberStores) > 1 {
-		return storeref.Topology{}, fmt.Errorf("drain residency: %d member stores, want at most 1", len(opts.MemberStores))
+	if opts.Work == (beads.WorkStore{}) {
+		// The tail's work leg is Work: a zero one would be a nil leg.
+		return storeref.Topology{}, fmt.Errorf("drain residency: %w", errDispatchNoWorkStore)
 	}
-	bindings, refused := storeref.BuildBinding(store, drainInfrastructureClasses(), storeref.BindingOptions{})
+	bindings, refused := storeref.BuildBinding(store.Store, drainInfrastructureClasses(), storeref.BindingOptions{})
 	return storeref.Topology{
-		Work:     storeref.Leg{Ref: storeref.WorkRef, Store: drainWorkClassStore(store, opts)},
+		Work:     storeref.Leg{Ref: storeref.WorkRef, Store: opts.Work.Store},
 		Bindings: bindings,
 		Refused:  refused,
 	}, nil
@@ -63,7 +66,7 @@ func drainInfrastructureClasses() []coordclass.Class {
 // reserved namespace misses with a nil store, and an ordinary id ends in the
 // unprobed work residual whose own read decides the question. Callers must not
 // write through either.
-func resolveDrainMember(store beads.Store, memberID string, opts ProcessOptions) (storeref.Owner, bool, error) {
+func resolveDrainMember(store beads.GraphStore, memberID string, opts ProcessOptions) (storeref.Owner, bool, error) {
 	topo, err := drainResidency(store, opts)
 	if err != nil {
 		return storeref.Owner{}, false, err

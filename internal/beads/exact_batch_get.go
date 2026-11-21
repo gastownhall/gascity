@@ -25,7 +25,7 @@ var _ ExactBatchGetter = (*BdStore)(nil)
 // for a store without the batch (or a single id), so a caller resolves every id
 // it does not find here with Get, in its own order and with Get's errors.
 func PrefetchExact(store Store, ids []string) (map[string]Bead, error) {
-	getter, ok := store.(ExactBatchGetter)
+	getter, ok := As[ExactBatchGetter](store)
 	if !ok || len(ids) < 2 {
 		return map[string]Bead{}, nil
 	}

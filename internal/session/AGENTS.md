@@ -40,6 +40,15 @@ evidence from tests, source, an issue, or a commit.
   extraction candidates unless they are tests, fixtures, or migration/doctor
   repair code.
 - Keep provider-specific runtime behavior behind `internal/runtime`.
+- An operator's submitted message under lane authority (message in `[ops]
+  authoritative`: POST /submit and /messages, and `gc session submit`'s
+  local fallback) is accepted only through `lanesubmit.Accept`
+  (`internal/session/lanesubmit`); the projections keep only their answers.
+  None of them previews that op, reads the op under its key, proposes it or
+  resumes the session for it itself (SESSION-START-025). The one exception
+  is `gc session submit` while its own config does not list message and an
+  API's lane host still does (a rollback before the controller restarts):
+  it answers from the API's lane op as #8399 did, until OJ-21.
 - Deferred submits go through the Manager's `DeferredSubmitQueue`
   (`WithDeferredSubmitQueue`); no non-test session file touches the
   state.json nudge queue directly. Enforced by

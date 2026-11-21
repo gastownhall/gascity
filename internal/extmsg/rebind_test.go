@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 func TestBindingServiceReplaceRebindsActiveBinding(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	svc := fabric.Bindings
 	ref := testConversationRef()
 
@@ -74,7 +75,7 @@ func TestBindingServiceHandoffKeepsBindingWhenDeliveryClearFails(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	delivery := &failingDeliveryContextService{err: errors.New("boom")}
-	svc := newBindingService(store, delivery, nil, newBindingLockPool())
+	svc := newBindingService(beadstest.Mail(store), beadstest.Sessions(store), delivery, nil, newBindingLockPool())
 	ref := testConversationRef()
 
 	// Displaced binding to a concrete session so the handoff attempts to clear
@@ -132,7 +133,7 @@ func TestBindingServiceHandoffRollsBackMembershipWhenReplacementFails(t *testing
 	ref := testConversationRef()
 
 	// Set up the displaced binding with a real transcript so its membership exists.
-	realSvc := NewServices(store).Bindings
+	realSvc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Bindings
 	displaced, err := realSvc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
 		AgentName:    "myrig/frontdesk",
@@ -149,7 +150,7 @@ func TestBindingServiceHandoffRollsBackMembershipWhenReplacementFails(t *testing
 	// left behind, and the displaced membership dropped before the swap is
 	// re-ensured.
 	flaky := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
-	flakySvc := newBindingService(store, nil, flaky, newBindingLockPool())
+	flakySvc := newBindingService(beadstest.Mail(store), beadstest.Sessions(store), nil, flaky, newBindingLockPool())
 	if _, err := flakySvc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
 		AgentName:    "myrig/specialist",
@@ -208,7 +209,7 @@ func TestBindingServiceHandoffReportsDisplacedMembershipRestoreFailure(t *testin
 	store := &atomicTxStore{MemStore: beads.NewMemStore()}
 	ref := testConversationRef()
 
-	realSvc := NewServices(store).Bindings
+	realSvc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Bindings
 	displaced, err := realSvc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
 		AgentName:    "myrig/frontdesk",
@@ -221,7 +222,7 @@ func TestBindingServiceHandoffReportsDisplacedMembershipRestoreFailure(t *testin
 	// failEnsureCount: 2 fails both the replacement ensure (driving the rollback)
 	// and the subsequent displaced-membership restore.
 	flaky := &flakyTranscriptService{failEnsureCount: 2, err: errors.New("boom")}
-	flakySvc := newBindingService(store, nil, flaky, newBindingLockPool())
+	flakySvc := newBindingService(beadstest.Mail(store), beadstest.Sessions(store), nil, flaky, newBindingLockPool())
 	_, err = flakySvc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
 		AgentName:    "myrig/specialist",
@@ -270,7 +271,7 @@ func TestBindingServiceHandoffConvergesOnNonAtomicStore(t *testing.T) {
 	store := &bdLikeStore{MemStore: beads.NewMemStore()}
 	ref := testConversationRef()
 
-	realSvc := NewServices(store).Bindings
+	realSvc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Bindings
 	displaced, err := realSvc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
 		AgentName:    "myrig/frontdesk",
@@ -281,7 +282,7 @@ func TestBindingServiceHandoffConvergesOnNonAtomicStore(t *testing.T) {
 	}
 
 	flaky := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
-	flakySvc := newBindingService(store, nil, flaky, newBindingLockPool())
+	flakySvc := newBindingService(beadstest.Mail(store), beadstest.Sessions(store), nil, flaky, newBindingLockPool())
 	if _, err := flakySvc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
 		AgentName:    "myrig/specialist",
@@ -336,7 +337,7 @@ func TestBindingServiceHandoffConvergesOnNonAtomicStore(t *testing.T) {
 func TestBindingServiceReplaceAcrossKindsAndIdempotence(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Bindings
 	ref := testConversationRef()
 
 	if _, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{

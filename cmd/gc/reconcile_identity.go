@@ -39,11 +39,11 @@ func (v identityVerdict) String() string {
 // readable token on a gone runtime proves nothing.
 //
 // Ownerless needs a backend that seeds identity before it lists the name
-// (v5 X3): identityReadable leaves only (tmux, acp, and subprocess since
-// LL3); any other leaf reads not Known, so Unknown. An exiting runtime may
-// still read Ownerless briefly, because subprocess clears its sidecar before
-// it stops listing the name and acp right after terminating. That is benign:
-// the runtime is going.
+// (v5 X3): identityReadable leaves only (tmux, acp, subprocess since LL3,
+// and a v2-ready exec pack); any other leaf reads not Known, so Unknown. An
+// exiting runtime may still read Ownerless briefly, because subprocess
+// clears its sidecar before it stops listing the name and acp right after
+// terminating. That is benign: the runtime is going.
 func compareIdentity(row session.Info, rt runtimeIdentity) identityVerdict {
 	if !rt.Known {
 		return identityUnknown
