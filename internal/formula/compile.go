@@ -157,6 +157,9 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	if err := validateExplicitGraphCompilerRequirement(resolved); err != nil {
 		return nil, err
 	}
+	if err := validateInputLifecycleRequirement(resolved); err != nil {
+		return nil, err
+	}
 
 	// Stage 10: Expand inline retry-managed steps.
 	retrySteps, err := ApplyRetries(resolved.Steps)
@@ -342,6 +345,9 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 	if graphWorkflow {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}
 		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = beadmeta.FormulaContractGraphV2
+		if f.InputLifecycle == beadmeta.InputLifecycleGraph {
+			rootStep.Metadata[beadmeta.InputLifecycleMetadataKey] = beadmeta.InputLifecycleGraph
+		}
 	} else if rootOnly {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}
 	}

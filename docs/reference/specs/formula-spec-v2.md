@@ -186,6 +186,7 @@ declaration as an error.
 | `type` | string | `workflow` (default), `expansion`, or `aspect` |
 | `phase` | string | Legacy v1 materialization mechanics, not a v2 authoring choice: `"liquid"` (pour) or `"vapor"`. `phase = "vapor"` without `pour` compiles a root-only recipe — steps are not materialized as beads. This selects how v1 stores a run's work (see the section 0.1 hedge: the storage shape is implementation, not part of the definition of a formula); it is accepted for compatibility and must not be used to design new formulas |
 | `pour` | bool | Materialize each step as a bead row (checkpoint recovery). Default `false`. Monotonic through `extends`: any ancestor's `pour = true` sticks |
+| `input_lifecycle` | string | Who settles the workflow's input convoy: `"external"` (default) or `"graph"`. Workflow formulas only; `"graph"` requires `formula_compiler = ">=2.1.0"` (section 3.6) |
 | `catalog` | table | `{name, description}` opting the formula into workflow-catalog discovery (`gc formula catalog`) |
 | `template` | []table | Expansion template steps for `type = "expansion"` formulas (`{target}` / `{target.description}` placeholders) |
 | `compose` | table | Advanced composition rules: `bond_points`, `hooks`, `expand`, `map`, `branch`, `gate`, `aspects` (section 1.7) |
@@ -415,6 +416,8 @@ condition evaluator's: `probe.status == 'complete'`,
   append.
 - Parent vars are inherited; child declarations override.
 - `phase` is taken from the child, else the first parent that declares one.
+- `input_lifecycle` follows the same rule, so a child that declares
+  `"external"` opts out of a parent's `"graph"`.
 - `pour` is monotonic: any ancestor's `pour = true` sticks; a child cannot
   opt out.
 - `contract` and `requires` come from the child, else the first parent —
@@ -476,6 +479,11 @@ validation error:
 - `contract`, if set, must be `"graph.v2"`
   (`contract: invalid value "<value>" (must be graph.v2)`).
 - `type` must be `workflow`, `expansion`, or `aspect`.
+- `input_lifecycle`, if set, must be `"external"` or `"graph"`
+  (`input_lifecycle: invalid value "<value>" (must be external or graph)`),
+  and only a workflow formula may declare it
+  (`input_lifecycle: not allowed on <type> formulas`). Section 3.6 lists the
+  compiler requirement checked after inheritance.
 - A var must not combine `required = true` with a `default`.
 - Step `id` is required and globally unique, including `children`.
 - Step `title` is required unless `expand` is set.
@@ -1145,6 +1153,69 @@ steps and adds a terminal `write-report`. Marking the base's members once
 covers every step a variant leaves alone, and only the overrides and the new
 terminal steps restate membership.
 
+### 3.6. Input Lifecycle
+
+A workflow poured over an input convoy (`gc.input_convoy_id` on its root) is
+normally one consumer of work that another lane settles. When `gc hook
+--claim` finds that input already terminal, or handed off to another lane, it
+retires the workflow: the root and its open steps close with
+`gc.outcome=skipped`, so a run is not repeated for input that has moved on.
+
+Some workflows settle their own input and still have work after it:
+finalization, reporting, notices, teardown. `input_lifecycle = "graph"`
+declares that ownership:
+
+```toml
+formula = "mol-land-and-report"
+input_lifecycle = "graph"   # this graph's own steps settle the input
+
+[requires]
+formula_compiler = ">=2.1.0"
+```
+
+| `input_lifecycle` | Root stamp | Input terminal or handed off at claim time |
+|---|---|---|
+| absent or `"external"` | none | The workflow retires as skipped |
+| `"graph"` | `gc.input_lifecycle=graph` | The workflow keeps running, including teardown after its root closes |
+| any other persisted value | (written outside the compiler) | The claim withholds the workflow's work and logs the root and value; nothing is retired |
+
+Graph ownership removes only the input-terminal retirement. Readiness,
+ancestry stops, control dispatch and teardown membership apply unchanged.
+Only the workflow root carries the stamp; a step's copied
+`gc.input_convoy_id` or `gc.input_lifecycle` is never the policy, because the
+claim resolves a step's `gc.root_bead_id` first and reads the policy from that
+root. Input membership is read from the work store, so the rule holds when the
+graph and its input live in different stores.
+
+Compilation enforces the declaration after inheritance:
+
+- any `input_lifecycle` needs a v2 graph workflow
+  (`formula "<name>": input_lifecycle requires a formulas v2 graph workflow`);
+- `"graph"` needs a composed requirement that excludes the 2.0.0 compiler,
+  which ignores the key and would compile an externally owned workflow
+  (`formula "<name>": input_lifecycle = "graph" requires [requires]
+  formula_compiler = ">=2.1.0"`).
+
+Upgrade every worker that runs `gc hook --claim` before a pack opts in. A
+compiler requirement fences old compilers, not old claimers: an older `gc`
+claiming the step of a graph-owned run still retires it when the input
+settles.
+
+**Cancellation.** For an externally owned workflow, input-terminal
+retirement also clears a run whose cancel stamped intent but failed to wind
+down. A graph-owned run gets a bounded replacement: when a claim meets a
+standalone open graph-owned root (no non-self `gc.root_bead_id`, no
+`gc.drain_control_id`) carrying `gc.cancel_requested` or
+`gc.outcome=canceled`, and its input is terminal or handed off, the claim
+closes the run's workflow tree deepest first with `gc.outcome=canceled`,
+sparing each node's teardown tail. The first close error stops the sweep, so
+outer roots stay open for a retried cancel. While the input is still open the
+claim withholds the root without closing anything. Steps of the run, and drain
+item roots, keep the ordinary stop handling: each closes alone, never the
+whole tree. A cancel that lands after the claim's compare-and-swap releases a
+newly minted claim whose root did not close, and the claim exits nonzero
+(even if the release fails); adopted claims are never released.
+
 ## 4. Accepted But Inert
 
 This specification is normative for implemented behavior. The constructs
@@ -1183,7 +1254,8 @@ them; they are documented to prevent silent surprise.
 |---|---|---|
 | `[requires] formula_compiler = ">=2.0.0"` | formula TOML | Canonical v2 opt-in |
 | `contract = "graph.v2"` | formula TOML | Deprecated opt-in. `gc doctor` warns: `deprecated contract = "graph.v2"; use [requires] formula_compiler = ">=2.0.0"` |
-| `[daemon] formula_v2` | city.toml | Host switch, default `true`. When `false` the host compiler capability is 1.0.0 and v2 formulas fail to compile |
+| `[requires] formula_compiler = ">=2.1.0"` | formula TOML | Required by `input_lifecycle = "graph"` (section 3.6) |
+| `[daemon] formula_v2` | city.toml | Host switch, default `true`. When `false` the host compiler capability is 1.0.0 and v2 formulas fail to compile; when `true` it is 2.1.0 |
 
 The canonical declaration:
 
