@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -152,10 +153,15 @@ func claimHookCandidate(ctx context.Context, candidate beads.Bead, actor string,
 // hookClaimExactWithBdStore is the default ClaimExact seam: the exact claim
 // against the work-directory bd context, writing as actor through bd's
 // --if-revision fence, or its --if-status/--if-assignee guard when bd lacks
-// --if-revision.
+// --if-revision. A bd with neither writes nothing, and the error names the
+// flags it lacks.
 func hookClaimExactWithBdStore(ctx context.Context, dir string, env []string, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, actor)
-	return hookClaimExactThroughStore(store, molecule.ClaimExactWriters{Revision: store, Assignment: store}, actor, req)
+	claimed, verdict, err := hookClaimExactThroughStore(store, molecule.ClaimExactWriters{Revision: store, Assignment: store}, actor, req)
+	if errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		err = fmt.Errorf("bd store supports neither --if-revision nor --if-status/--if-assignee: %w", err)
+	}
+	return claimed, verdict, err
 }
 
 // hookClaimExactThroughStore runs one exact claim and classifies it the way

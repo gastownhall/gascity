@@ -355,15 +355,26 @@ func TestHookClaimExactFencesObservedGeneration(t *testing.T) {
 	}
 }
 
-// fakeAssignmentGuardBd is a bd that knows --if-status/--if-assignee but not
-// --if-revision. It serves one bead, applies a guarded update only while the
-// bead's status and assignee match the guard, and records every command.
+// fakeAssignmentGuardBd is a bd that knows --if-status/--if-assignee (unless
+// noGuard) but not --if-revision. It serves its beads, applies a guarded update
+// only while the bead's status and assignee match the guard, answers --claim
+// as the runner's BEADS_ACTOR, and records every command.
 type fakeAssignmentGuardBd struct {
-	bead beads.Bead
-	ran  [][]string
+	beads   map[string]beads.Bead
+	noGuard bool
+	ran     [][]string
 }
 
-func (f *fakeAssignmentGuardBd) runner(context.Context, map[string]string) beads.CommandRunner {
+func newFakeAssignmentGuardBd(rows ...beads.Bead) *fakeAssignmentGuardBd {
+	f := &fakeAssignmentGuardBd{beads: map[string]beads.Bead{}}
+	for _, b := range rows {
+		f.beads[b.ID] = b
+	}
+	return f
+}
+
+func (f *fakeAssignmentGuardBd) runner(_ context.Context, env map[string]string) beads.CommandRunner {
+	actor := env["BEADS_ACTOR"]
 	return func(_ string, name string, args ...string) ([]byte, error) {
 		f.ran = append(f.ran, append([]string{name}, args...))
 		if name != "bd" || len(args) == 0 {
@@ -371,60 +382,93 @@ func (f *fakeAssignmentGuardBd) runner(context.Context, map[string]string) beads
 		}
 		switch args[0] {
 		case "show":
-			return json.Marshal([]beads.Bead{f.bead})
+			b, ok := f.beads[args[len(args)-1]]
+			if !ok {
+				return nil, fmt.Errorf("unexpected show %q", args)
+			}
+			return json.Marshal([]beads.Bead{b})
 		case "update", "close", "assign", "delete":
 			if len(args) == 2 && args[1] == "--help" {
+				if f.noGuard {
+					return []byte("Flags:\n      --claim\n"), nil
+				}
 				return []byte("Flags:\n      --if-status string\n      --if-assignee string\n"), nil
 			}
 			if args[0] == "update" {
-				return f.update(args[1:])
+				return f.update(actor, args[1:])
 			}
 		}
 		return nil, fmt.Errorf("unexpected command %s %q", name, args)
 	}
 }
 
-func (f *fakeAssignmentGuardBd) update(args []string) ([]byte, error) {
-	next := f.bead
-	next.Metadata = map[string]string{}
-	for k, v := range f.bead.Metadata {
-		next.Metadata[k] = v
-	}
+func (f *fakeAssignmentGuardBd) update(actor string, args []string) ([]byte, error) {
+	var id string
+	var claim bool
 	var ifStatus, ifAssignee *string
+	var sets [][2]string
 	for i := 0; i < len(args); i++ {
 		flag := args[i]
-		if !strings.HasPrefix(flag, "--") || flag == "--json" {
+		switch {
+		case flag == "--json":
 			continue
-		}
-		if i+1 >= len(args) {
+		case flag == "--claim":
+			claim = true
+			continue
+		case !strings.HasPrefix(flag, "--"):
+			id = flag
+			continue
+		case f.noGuard && (flag == "--if-status" || flag == "--if-assignee"):
+			return []byte("Error: unknown flag: " + flag), fakeBdExitError(1)
+		case i+1 >= len(args):
 			return nil, fmt.Errorf("flag %s has no value", flag)
 		}
 		value := args[i+1]
 		i++
 		switch flag {
-		case "--status":
-			next.Status = value
-		case "--assignee":
-			next.Assignee = value
-		case "--set-metadata":
-			k, v, _ := strings.Cut(value, "=")
-			next.Metadata[k] = v
 		case "--if-status":
 			ifStatus = &value
 		case "--if-assignee":
 			ifAssignee = &value
+		case "--status", "--assignee", "--set-metadata":
+			sets = append(sets, [2]string{flag, value})
 		default:
 			return nil, fmt.Errorf("unknown flag: %s", flag)
 		}
 	}
-	if ifStatus == nil || ifAssignee == nil {
-		return nil, fmt.Errorf("unguarded update %q", args)
+	current, ok := f.beads[id]
+	if !ok {
+		return nil, fmt.Errorf("unexpected update of %q", id)
 	}
-	if f.bead.Status != *ifStatus || f.bead.Assignee != *ifAssignee {
+	next := current
+	next.Metadata = map[string]string{}
+	for k, v := range current.Metadata {
+		next.Metadata[k] = v
+	}
+	switch {
+	case claim:
+		if current.Status != "open" || current.Assignee != "" {
+			return nil, fmt.Errorf("%s is already claimed", id)
+		}
+		next.Status, next.Assignee = "in_progress", actor
+	case ifStatus == nil || ifAssignee == nil:
+		return nil, fmt.Errorf("unguarded update %q", args)
+	case current.Status != *ifStatus || current.Assignee != *ifAssignee:
 		return nil, fakeBdExitError(13)
 	}
-	f.bead = next
-	return json.Marshal([]beads.Bead{f.bead})
+	for _, set := range sets {
+		switch set[0] {
+		case "--status":
+			next.Status = set[1]
+		case "--assignee":
+			next.Assignee = set[1]
+		case "--set-metadata":
+			k, v, _ := strings.Cut(set[1], "=")
+			next.Metadata[k] = v
+		}
+	}
+	f.beads[id] = next
+	return json.Marshal([]beads.Bead{next})
 }
 
 // fakeBdExitError is a bd process that exited with the given status.
@@ -452,16 +496,16 @@ func (f *fakeAssignmentGuardBd) updates() [][]string {
 // claim's effects, fenced on the observed status and assignee, never as a
 // --claim.
 func TestHookClaimExactClaimsThroughAssignmentGuardWithoutRevisionFence(t *testing.T) {
-	bd := &fakeAssignmentGuardBd{bead: beads.Bead{
+	bd := newFakeAssignmentGuardBd(beads.Bead{
 		ID: "work-1", Title: "work", Status: "open", Type: "task",
 		Metadata: graphStepMeta("build"),
-	}}
+	})
 	originalRunner := hookClaimCommandRunnerWithEnvContext
 	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
 	hookClaimCommandRunnerWithEnvContext = bd.runner
 
 	opts := poolClaimOpts()
-	req := hookClaimExactPlan(bd.bead, opts.Assignee, true, false, opts.Env, time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC))
+	req := hookClaimExactPlan(bd.beads["work-1"], opts.Assignee, true, false, opts.Env, time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC))
 	claimed, verdict, err := hookClaimExactWithBdStore(context.Background(), t.TempDir(), opts.Env, opts.Assignee, req)
 	if err != nil {
 		t.Fatalf("exact claim: %v; commands=%q", err, bd.ran)
@@ -603,6 +647,85 @@ func TestHookClaimExactReleasesAClaimWhoseObservationMoved(t *testing.T) {
 			}
 			if result.Action != "work" || result.BeadID != "work-2" {
 				t.Fatalf("result = %+v, want work on work-2", result)
+			}
+		})
+	}
+}
+
+// TestHookClaimExactFailsClosedWithoutAnyFence: on a bd with neither
+// --if-revision nor --if-status/--if-assignee, the eligible tier writes nothing
+// to a graph step, names the bead and the missing capability on stderr, and
+// counts it toward claims_errored; it never falls back to --claim for it. A
+// non-graph candidate in the same run still claims through --claim.
+func TestHookClaimExactFailsClosedWithoutAnyFence(t *testing.T) {
+	const missing = "store supports neither --if-revision nor --if-status/--if-assignee"
+	plain := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	for _, tc := range []struct {
+		name      string
+		rows      []beads.Bead
+		wantDrain bool
+	}{
+		{
+			name: "graph step alone",
+			rows: []beads.Bead{
+				{ID: "work-1", Title: "step", Status: "open", Type: "task", Metadata: graphStepMeta("build")},
+			},
+			wantDrain: true,
+		},
+		{
+			name: "non-graph candidate still claims",
+			rows: []beads.Bead{
+				{ID: "work-1", Title: "step", Status: "open", Type: "task", Metadata: graphStepMeta("build")},
+				{ID: "work-2", Title: "plain", Status: "open", Type: "task", Metadata: plain},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bd := newFakeAssignmentGuardBd(tc.rows...)
+			bd.noGuard = true
+			originalRunner := hookClaimCommandRunnerWithEnvContext
+			t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+			hookClaimCommandRunnerWithEnvContext = bd.runner
+
+			f := newExactClaimFixture(t)
+			f.observed = tc.rows
+			ops := f.ops()
+			ops.Claim = hookClaimWithBdStore
+			ops.ClaimExact = hookClaimExactWithBdStore
+			ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) {
+				return bd.beads[id], nil
+			}
+			opts := poolClaimOpts()
+
+			var stdout, stderr bytes.Buffer
+			doHookClaim("bd ready --json", t.TempDir(), opts, ops, &stdout, &stderr)
+
+			if got := bd.beads["work-1"]; got.Status != "open" || got.Assignee != "" || got.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" {
+				t.Fatalf("work-1 = status %q assignee %q generation %q, want it unwritten", got.Status, got.Assignee, got.Metadata[beadmeta.ClaimGenerationMetadataKey])
+			}
+			if !strings.Contains(stderr.String(), "work-1") || !strings.Contains(stderr.String(), missing) {
+				t.Fatalf("stderr = %q, want work-1 and %q named", stderr.String(), missing)
+			}
+			for _, cmd := range bd.ran {
+				if strings.Contains(strings.Join(cmd, " "), "work-1 --claim") {
+					t.Fatalf("--claim ran for the graph step: %q", cmd)
+				}
+			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("decode result %q: %v; stderr=%s", stdout.String(), err, stderr.String())
+			}
+			if tc.wantDrain {
+				if result.Action != "drain" || result.Reason != "claims_errored" {
+					t.Fatalf("result = %+v, want drain/claims_errored", result)
+				}
+				return
+			}
+			if result.Action != "work" || result.BeadID != "work-2" {
+				t.Fatalf("result = %+v, want work on work-2; stderr=%s", result, stderr.String())
+			}
+			if got := bd.beads["work-2"]; got.Status != "in_progress" || got.Assignee != opts.Assignee {
+				t.Fatalf("work-2 = status %q assignee %q, want claimed through --claim", got.Status, got.Assignee)
 			}
 		})
 	}
