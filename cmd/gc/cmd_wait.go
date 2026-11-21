@@ -1232,7 +1232,7 @@ func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDe
 		if state == waitStateReady {
 			// Wait-nudge shadow lookup rides the nudges class; the wait bead
 			// itself is session-class. Route each to its own store; identity today.
-			done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, now)
+			done, err := finalizeReadyWaitFromNudge(sessFront, nudges, sessionInfo, wait, now)
 			if err != nil {
 				// Retain THIS wait, still ready, and keep going: one wait that
 				// cannot be finalized now holds up no other wait in the city.
@@ -1508,17 +1508,18 @@ func cachedSessionCanReceiveWaitNudge(info sessionpkg.Info) bool {
 	}
 }
 
-// finalizeReadyWaitFromNudge closes a ready wait once its shadow nudge reaches a
-// terminal state. sessFront is the session coordination-class front door for the
-// wait bead and cap-diagnostic stamp; nudges is the nudges-class store for the
-// shadow nudge lookup. Identity today (both wrap the same work store).
-func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.NudgesStore, wait sessionpkg.WaitInfo, now time.Time) (bool, error) {
+// finalizeReadyWaitFromNudge closes a ready wait of session sessionInfo once its
+// shadow nudge reaches a terminal state. sessFront is the session
+// coordination-class front door for the wait bead and cap-diagnostic stamp;
+// nudges is the nudges-class store for the shadow nudge lookup. Identity today
+// (both wrap the same work store).
+func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.NudgesStore, sessionInfo sessionpkg.Info, wait sessionpkg.WaitInfo, now time.Time) (bool, error) {
 	nudgeID := wait.NudgeID
 	if opjournal.IsOpID(nudgeID) {
 		// A lane notice's op (wait_lane_notice.go). One that names no op was
 		// never proposed and holds no delivery: the queue's item for the
 		// attempt, under its own id, ends the wait as below if there is one.
-		done, found, err := finalizeWaitFromNotice(sessFront, wait, nudgeID, now)
+		done, found, err := finalizeWaitFromNotice(sessFront, sessionInfo, wait, nudgeID, now)
 		if err != nil || found {
 			return done, err
 		}

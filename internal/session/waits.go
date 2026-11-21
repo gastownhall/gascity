@@ -160,14 +160,29 @@ func WaitInfoFromBead(b beads.Bead) WaitInfo {
 	}
 }
 
+// KeepsWaitsAcrossResets reports whether session s's waits belong to the
+// session rather than to one conversation. An open configured named session
+// stays the same bead across every continuation reset (a restart request,
+// churn, a stale resume key, a wake_mode=fresh wake), and each wait carries
+// its own note, so its waits stay live at every epoch. Every other session's
+// waits, and those of a closed named session or a bead whose named config is
+// gone, are scoped to the conversation they were registered in.
+func KeepsWaitsAcrossResets(s Info) bool {
+	return !s.Closed && IsNamedSessionInfo(s)
+}
+
 // ContinuationStale reports whether the wait belongs to a conversation the
-// session has since retired. A wait is stale when both epochs are set and
-// differ, except that a wait registered while a fresh restart was pending is
-// current both at its registered epoch N (the reset not yet consumed, restored
-// by a refused start, or withdrawn) and at N+1 (the conversation the reset
-// opened). Epochs that do not parse as integers fall back to the plain
-// inequality.
+// session has since retired. The waits of a session that keeps its waits
+// across resets (KeepsWaitsAcrossResets) are never stale. Any other wait is
+// stale when both epochs are set and differ, except that a wait registered
+// while a fresh restart was pending is current both at its registered epoch N
+// (the reset not yet consumed, restored by a refused start, or withdrawn) and
+// at N+1 (the conversation the reset opened). Epochs that do not parse as
+// integers fall back to the plain inequality.
 func (w WaitInfo) ContinuationStale(s Info) bool {
+	if KeepsWaitsAcrossResets(s) {
+		return false
+	}
 	registered, current := w.RegisteredEpoch, s.ContinuationEpoch
 	if registered == "" || current == "" || registered == current {
 		return false
@@ -184,12 +199,18 @@ func (w WaitInfo) ContinuationStale(s Info) bool {
 }
 
 // DeliveryEpoch is the continuation epoch of the conversation the wait's
-// reminder belongs to on session s, the epoch its delivery is fenced on: the
-// registered epoch N, except that a wait registered while a fresh restart was
-// pending belongs to the conversation the reset opened once the session is in
-// it, N+1. A stale wait, a wait with no registered epoch, and a session that
-// records no epoch keep the registered epoch.
+// reminder belongs to on session s, the epoch its delivery is fenced on. A
+// session that keeps its waits across resets (KeepsWaitsAcrossResets) is
+// reminded in the conversation current at dispatch, its continuation epoch.
+// Any other wait belongs to its registered epoch N, except that a wait
+// registered while a fresh restart was pending belongs to the conversation the
+// reset opened once the session is in it, N+1. A stale wait, a wait with no
+// registered epoch, and a session that records no epoch keep the registered
+// epoch.
 func (w WaitInfo) DeliveryEpoch(s Info) string {
+	if KeepsWaitsAcrossResets(s) && s.ContinuationEpoch != "" {
+		return s.ContinuationEpoch
+	}
 	if !w.RegisteredResetPending || w.RegisteredEpoch == "" || s.ContinuationEpoch == "" || w.ContinuationStale(s) {
 		return w.RegisteredEpoch
 	}
@@ -197,18 +218,30 @@ func (w WaitInfo) DeliveryEpoch(s Info) string {
 }
 
 // HeldForPendingReset reports whether the wait's reminder must wait for the
-// start that consumes the session's pending reset: the wait was registered for
-// the conversation that start opens, and the session is still the outgoing
-// incarnation at the registered epoch with a restart in flight. A restart is in
-// flight while the reset is pending and either requested (restart_requested) or
-// committed by the handoff (reset_committed_at), the reading the awake set
-// takes. The reset marker alone does not hold the reminder: the Manager's
-// stale-key recovery leaves it on the session it relaunched at the same epoch,
-// with no start coming to consume it.
+// start that consumes the session's pending reset, with a restart in flight
+// (restartInFlight). A session that keeps its waits across resets
+// (KeepsWaitsAcrossResets) holds every reminder then, so it reaches the
+// conversation the restart opens, not the one being torn down. Any other wait
+// is held only when it was registered for the conversation that start opens
+// and the session is still the outgoing incarnation at the registered epoch.
 func (w WaitInfo) HeldForPendingReset(s Info) bool {
-	return w.RegisteredResetPending &&
-		s.ContinuationEpoch == w.RegisteredEpoch &&
-		strings.TrimSpace(s.ContinuationResetPending) != "" &&
+	if !restartInFlight(s) {
+		return false
+	}
+	if KeepsWaitsAcrossResets(s) {
+		return true
+	}
+	return w.RegisteredResetPending && s.ContinuationEpoch == w.RegisteredEpoch
+}
+
+// restartInFlight reports whether session s has a restart in flight: its reset
+// is pending and either requested (restart_requested) or committed by the
+// handoff (reset_committed_at), the reading the awake set takes. The reset
+// marker alone is not a restart in flight: the Manager's stale-key recovery
+// leaves it on the session it relaunched at the same epoch, with no start
+// coming to consume it.
+func restartInFlight(s Info) bool {
+	return strings.TrimSpace(s.ContinuationResetPending) != "" &&
 		(strings.TrimSpace(s.RestartRequested) == "true" || strings.TrimSpace(s.ResetCommittedAt) != "")
 }
 

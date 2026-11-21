@@ -752,6 +752,8 @@ func TestWaitInfoContinuationStale(t *testing.T) {
 		name         string
 		registered   string
 		flagged      bool
+		named        bool
+		closed       bool
 		sessionEpoch string
 		want         bool
 	}{
@@ -766,12 +768,40 @@ func TestWaitInfoContinuationStale(t *testing.T) {
 		{name: "flagged/non-numeric-session", registered: "2", flagged: true, sessionEpoch: "x", want: true},
 		{name: "flagged/non-numeric-registered", registered: "x", flagged: true, sessionEpoch: "3", want: true},
 		{name: "flagged/empty-session", registered: "2", flagged: true},
+		{name: "named/equal", registered: "2", named: true, sessionEpoch: "2"},
+		{name: "named/next-epoch", registered: "2", named: true, sessionEpoch: "3"},
+		{name: "named/several-epochs-on", registered: "2", named: true, sessionEpoch: "5"},
+		{name: "named/flagged-two-epochs-on", registered: "2", flagged: true, named: true, sessionEpoch: "4"},
+		{name: "named/non-numeric-session", registered: "2", named: true, sessionEpoch: "x"},
+		{name: "closed-named/next-epoch", registered: "2", named: true, closed: true, sessionEpoch: "3", want: true},
+		{name: "closed-named/flagged-at-next-epoch", registered: "2", flagged: true, named: true, closed: true, sessionEpoch: "3"},
+		{name: "closed-unnamed/next-epoch", registered: "2", closed: true, sessionEpoch: "3", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := WaitInfo{RegisteredEpoch: tc.registered, RegisteredResetPending: tc.flagged}
-			if got := w.ContinuationStale(Info{ContinuationEpoch: tc.sessionEpoch}); got != tc.want {
-				t.Fatalf("ContinuationStale(registered=%q flagged=%v, session=%q) = %v, want %v",
-					tc.registered, tc.flagged, tc.sessionEpoch, got, tc.want)
+			s := Info{ContinuationEpoch: tc.sessionEpoch, ConfiguredNamedSession: tc.named, Closed: tc.closed}
+			if got := w.ContinuationStale(s); got != tc.want {
+				t.Fatalf("ContinuationStale(registered=%q flagged=%v, session=%q named=%v closed=%v) = %v, want %v",
+					tc.registered, tc.flagged, tc.sessionEpoch, tc.named, tc.closed, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKeepsWaitsAcrossResets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		s    Info
+		want bool
+	}{
+		{name: "open-named", s: Info{ConfiguredNamedSession: true, ConfiguredNamedIdentity: "desk"}, want: true},
+		{name: "closed-named", s: Info{ConfiguredNamedSession: true, ConfiguredNamedIdentity: "desk", Closed: true}},
+		{name: "identity-without-named-flag", s: Info{ConfiguredNamedIdentity: "desk"}},
+		{name: "unnamed", s: Info{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := KeepsWaitsAcrossResets(tc.s); got != tc.want {
+				t.Fatalf("KeepsWaitsAcrossResets(%+v) = %v, want %v", tc.s, got, tc.want)
 			}
 		})
 	}
@@ -782,6 +812,8 @@ func TestWaitInfoDeliveryEpoch(t *testing.T) {
 		name         string
 		registered   string
 		flagged      bool
+		named        bool
+		closed       bool
 		sessionEpoch string
 		want         string
 	}{
@@ -794,12 +826,21 @@ func TestWaitInfoDeliveryEpoch(t *testing.T) {
 		{name: "flagged/non-numeric-session", registered: "2", flagged: true, sessionEpoch: "x", want: "2"},
 		{name: "flagged/empty-session", registered: "2", flagged: true, want: "2"},
 		{name: "flagged/empty-registered", flagged: true, sessionEpoch: "3", want: ""},
+		{name: "named/at-registered-epoch", registered: "2", named: true, sessionEpoch: "2", want: "2"},
+		{name: "named/next-epoch", registered: "2", named: true, sessionEpoch: "3", want: "3"},
+		{name: "named/several-epochs-on", registered: "2", named: true, sessionEpoch: "5", want: "5"},
+		{name: "named/flagged-two-epochs-on", registered: "2", flagged: true, named: true, sessionEpoch: "4", want: "4"},
+		{name: "named/empty-session", registered: "2", named: true, want: "2"},
+		{name: "named/empty-registered", named: true, sessionEpoch: "3", want: "3"},
+		{name: "closed-named/next-epoch", registered: "2", named: true, closed: true, sessionEpoch: "3", want: "2"},
+		{name: "closed-named/flagged-at-next-epoch", registered: "2", flagged: true, named: true, closed: true, sessionEpoch: "3", want: "3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := WaitInfo{RegisteredEpoch: tc.registered, RegisteredResetPending: tc.flagged}
-			if got := w.DeliveryEpoch(Info{ContinuationEpoch: tc.sessionEpoch}); got != tc.want {
-				t.Fatalf("DeliveryEpoch(registered=%q flagged=%v, session=%q) = %q, want %q",
-					tc.registered, tc.flagged, tc.sessionEpoch, got, tc.want)
+			s := Info{ContinuationEpoch: tc.sessionEpoch, ConfiguredNamedSession: tc.named, Closed: tc.closed}
+			if got := w.DeliveryEpoch(s); got != tc.want {
+				t.Fatalf("DeliveryEpoch(registered=%q flagged=%v, session=%q named=%v closed=%v) = %q, want %q",
+					tc.registered, tc.flagged, tc.sessionEpoch, tc.named, tc.closed, got, tc.want)
 			}
 		})
 	}
@@ -810,6 +851,8 @@ func TestWaitInfoHeldForPendingReset(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		flagged          bool
+		named            bool
+		closed           bool
 		sessionEpoch     string
 		resetPending     string
 		restartRequested string
@@ -825,6 +868,14 @@ func TestWaitInfoHeldForPendingReset(t *testing.T) {
 		{name: "flagged/second-reset-at-next-epoch", flagged: true, sessionEpoch: "3", resetPending: "true", restartRequested: "true"},
 		{name: "flagged/blank-marker", flagged: true, sessionEpoch: "2", resetPending: "  ", restartRequested: "true"},
 		{name: "unflagged/reset-pending", sessionEpoch: "2", resetPending: "true", restartRequested: "true"},
+		{name: "named/restart-requested", named: true, sessionEpoch: "2", resetPending: "true", restartRequested: "true", want: true},
+		{name: "named/reset-committed", named: true, sessionEpoch: "2", resetPending: "true", resetCommittedAt: committedAt, want: true},
+		{name: "named/restart-requested-epochs-on", named: true, sessionEpoch: "4", resetPending: "true", restartRequested: "true", want: true},
+		{name: "named/marker-without-restart", named: true, sessionEpoch: "2", resetPending: "true"},
+		{name: "named/reset-withdrawn", named: true, sessionEpoch: "2", restartRequested: "true"},
+		{name: "named/started", named: true, sessionEpoch: "3", resetCommittedAt: committedAt},
+		{name: "closed-named/restart-requested", named: true, closed: true, sessionEpoch: "2", resetPending: "true", restartRequested: "true"},
+		{name: "closed-named/flagged-outgoing-incarnation", flagged: true, named: true, closed: true, sessionEpoch: "2", resetPending: "true", restartRequested: "true", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := WaitInfo{RegisteredEpoch: "2", RegisteredResetPending: tc.flagged}
@@ -833,10 +884,12 @@ func TestWaitInfoHeldForPendingReset(t *testing.T) {
 				ContinuationResetPending: tc.resetPending,
 				RestartRequested:         tc.restartRequested,
 				ResetCommittedAt:         tc.resetCommittedAt,
+				ConfiguredNamedSession:   tc.named,
+				Closed:                   tc.closed,
 			}
 			if got := w.HeldForPendingReset(s); got != tc.want {
-				t.Fatalf("HeldForPendingReset(flagged=%v, session epoch=%q reset_pending=%q restart_requested=%q reset_committed_at=%q) = %v, want %v",
-					tc.flagged, tc.sessionEpoch, tc.resetPending, tc.restartRequested, tc.resetCommittedAt, got, tc.want)
+				t.Fatalf("HeldForPendingReset(flagged=%v, session epoch=%q reset_pending=%q restart_requested=%q reset_committed_at=%q named=%v closed=%v) = %v, want %v",
+					tc.flagged, tc.sessionEpoch, tc.resetPending, tc.restartRequested, tc.resetCommittedAt, tc.named, tc.closed, got, tc.want)
 			}
 		})
 	}

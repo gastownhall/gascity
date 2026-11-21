@@ -321,7 +321,10 @@ func sessionResetPending(markers PersistedMarkers) bool {
 // persisted markers to build the wait title / session_name / registered_epoch
 // (plus registered_reset_pending while a fresh restart is pending), creates the
 // bead with the canonical type, labels and pending metadata, and returns the
-// WaitInfo projection of the created bead.
+// WaitInfo projection of the created bead. registered_epoch names the
+// conversation the wait was registered in; it scopes the wait to that
+// conversation unless the session keeps its waits across resets
+// (KeepsWaitsAcrossResets), and is never rewritten.
 func (s *Store) CreateWait(spec WaitSpec) (WaitInfo, error) {
 	markers, err := s.PersistedMarkers(spec.SessionID)
 	if err != nil {
