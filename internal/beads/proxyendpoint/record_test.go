@@ -586,6 +586,67 @@ func TestProviderRootFollowsARigOntoItsCitysRoot(t *testing.T) {
 	}
 }
 
+// TestProviderRootWithEnvReadsOnlyTheEnvironmentItIsHanded: every variable
+// bd's resolution reads comes from the handed environment, never from this
+// process's own. A process whose environment differs from the one its bd
+// child runs under (gc pins the child's shared-server mode off) resolves the
+// root that child serves from by handing the child's environment in.
+func TestProviderRootWithEnvReadsOnlyTheEnvironmentItIsHanded(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// This process's own environment moves every arm somewhere else.
+	t.Setenv(RootPathEnv, filepath.Join(t.TempDir(), "process-root"))
+	t.Setenv(DoltDataDirEnv, filepath.Join(t.TempDir(), "process-data"))
+	t.Setenv(SharedServerModeEnv, "1")
+	t.Setenv(SharedServerDirEnv, filepath.Join(t.TempDir(), "process-shared"))
+	shared := filepath.Join(t.TempDir(), "handed-shared")
+
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "an empty environment roots at the scope's own dolt directory",
+			env:  map[string]string{},
+			want: filepath.Join(beadsDir, DefaultRootDirName),
+		},
+		{
+			name: "shared-server mode pinned off",
+			env:  map[string]string{SharedServerModeEnv: "0", SharedServerDirEnv: shared},
+			want: filepath.Join(beadsDir, DefaultRootDirName),
+		},
+		{
+			name: "shared-server mode on",
+			env:  map[string]string{SharedServerModeEnv: "1", SharedServerDirEnv: shared},
+			want: filepath.Join(shared, DefaultRootDirName),
+		},
+		{
+			name: "a handed Dolt data directory",
+			env:  map[string]string{DoltDataDirEnv: "handed-data"},
+			want: filepath.Join(beadsDir, "handed-data"),
+		},
+		{
+			name: "a handed proxy root path",
+			env:  map[string]string{RootPathEnv: "handed-root"},
+			want: filepath.Join(beadsDir, "handed-root"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ProviderRootWithEnv(scope, func(key string) string { return tc.env[key] })
+			if err != nil {
+				t.Fatalf("ProviderRootWithEnv: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("ProviderRootWithEnv = %q, want %q: only the handed environment counts", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProviderRootPrecedence(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")

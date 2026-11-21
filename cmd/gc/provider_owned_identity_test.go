@@ -1,0 +1,912 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	gcapi "github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+)
+
+const (
+	providerOwnedIdentityP = "11111111-2222-3333-4444-555555555555"
+	providerOwnedIdentityQ = "99999999-8888-7777-6666-555555555555"
+	// providerOwnedProxyPort is the live proxy record's port in fixtures. No
+	// listener is behind it: the L3 opener is stubbed wherever it is reached.
+	providerOwnedProxyPort = 45123
+)
+
+// providerOwnedL3Fake stands in for the L3 opener: it records every endpoint
+// it was opened for and every close, and serves L3 from a
+// projectIdentityL3Double.
+type providerOwnedL3Fake struct {
+	l3     *projectIdentityL3Double
+	opened []providerOwnedIdentityEndpoint
+	closed int
+	seeds  int
+	onOpen func()
+}
+
+func (f *providerOwnedL3Fake) ReadProjectID(ctx context.Context) (string, bool, error) {
+	return f.l3.read(ctx)
+}
+
+func (f *providerOwnedL3Fake) SeedProjectID(ctx context.Context, projectID string) (bool, error) {
+	f.seeds++
+	return f.l3.seed(ctx, projectID)
+}
+
+// stubProviderOwnedL3 routes the L3 opener to fake for the rest of the test.
+func stubProviderOwnedL3(t *testing.T, fake *providerOwnedL3Fake) {
+	t.Helper()
+	prev := openProviderOwnedScopeL3Fn
+	openProviderOwnedScopeL3Fn = func(_ context.Context, endpoint providerOwnedIdentityEndpoint) (projectIdentityL3Store, func() error, error) {
+		fake.opened = append(fake.opened, endpoint)
+		if fake.onOpen != nil {
+			fake.onOpen()
+		}
+		return fake, func() error { fake.closed++; return nil }, nil
+	}
+	t.Cleanup(func() { openProviderOwnedScopeL3Fn = prev })
+}
+
+// clearProviderOwnedProxyEnv removes the inherited environment that would
+// move ProviderRoot away from the scope's own default root.
+func clearProviderOwnedProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		proxyendpoint.RootPathEnv,
+		proxyendpoint.DoltDataDirEnv,
+		proxyendpoint.SharedServerModeEnv,
+		proxyendpoint.SharedServerDirEnv,
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+// stubLiveProviderOwnedProxy publishes a live proxy record on
+// providerOwnedProxyPort under a proxy root dedicated to the test, and a
+// process table that vouches for it.
+func stubLiveProviderOwnedProxy(t *testing.T) {
+	t.Helper()
+	stubLiveProviderOwnedProxyOnPort(t, providerOwnedProxyPort)
+}
+
+// stubLiveProviderOwnedProxyOnPort publishes a live proxy record on port
+// under a proxy root dedicated to the test, and a process table that vouches
+// for it.
+func stubLiveProviderOwnedProxyOnPort(t *testing.T, port int) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "proxy-root")
+	t.Setenv(proxyendpoint.RootPathEnv, root)
+	stubProviderOwnedProcessTable(t, publishLiveProxyRecord(t, root, 4242, port))
+}
+
+// liveProxyFixture is a proxy record published under root.
+type liveProxyFixture struct {
+	root   string
+	record proxyendpoint.Record
+}
+
+// publishLiveProxyRecord writes a schema-2 proxy record for pid on port under
+// root, creating root. It is live once a process table vouches for pid
+// (stubProviderOwnedProcessTable).
+func publishLiveProxyRecord(t *testing.T, root string, pid, port int) liveProxyFixture {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := proxyendpoint.RootID(root)
+	if err != nil {
+		t.Fatalf("identify proxy root: %v", err)
+	}
+	record := proxyendpoint.Record{
+		PID:         pid,
+		Port:        port,
+		UpstreamID:  "provider-owned-identity-test",
+		Schema:      proxyendpoint.SchemaV2,
+		Kind:        proxyendpoint.RecordKind,
+		Birth:       proxyendpoint.BirthToken("test-boot", strconv.Itoa(pid)),
+		RootID:      rootID,
+		ControlPort: port + 1,
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyendpoint.PIDPath(root), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return liveProxyFixture{root: root, record: record}
+}
+
+// stubProviderOwnedProcessTable makes the identity step's process table vouch
+// for exactly the given proxies: each pid is alive, runs bd's proxy child for
+// its own root, and carries its record's birth.
+func stubProviderOwnedProcessTable(t *testing.T, proxies ...liveProxyFixture) {
+	t.Helper()
+	byPID := make(map[int]liveProxyFixture, len(proxies))
+	for _, proxy := range proxies {
+		byPID[proxy.record.PID] = proxy
+	}
+	prev := providerOwnedIdentityProcessTable
+	providerOwnedIdentityProcessTable = func() proxyendpoint.ProcessTable {
+		return proxyendpoint.ProcessTable{
+			Alive: func(pid int) bool {
+				_, ok := byPID[pid]
+				return ok
+			},
+			Argv: func(pid int) ([]string, error) {
+				return []string{"bd", proxyendpoint.ChildVerb, proxyendpoint.RootFlag, byPID[pid].root, proxyendpoint.IdleTimeoutFlag, "0"}, nil
+			},
+			Birth: func(pid int) (string, error) { return byPID[pid].record.Birth, nil },
+		}
+	}
+	t.Cleanup(func() { providerOwnedIdentityProcessTable = prev })
+}
+
+// skipProviderOwnedIdentityReconcile makes the provider-owned identity step a
+// no-op, for tests whose exec provider stands in for bd with no store behind
+// the binding it writes.
+func skipProviderOwnedIdentityReconcile(t *testing.T) {
+	t.Helper()
+	prev := reconcileProviderOwnedScopeIdentityFn
+	reconcileProviderOwnedScopeIdentityFn = func(context.Context, string, string) error { return nil }
+	t.Cleanup(func() { reconcileProviderOwnedScopeIdentityFn = prev })
+}
+
+// providerOwnedIdentityCity is a city whose own scope is provider-owned
+// through a fake exec provider: init writes metadata (when set) and exits
+// initExit, every other op succeeds, and each op is logged.
+type providerOwnedIdentityCity struct {
+	dir   string
+	opLog string
+}
+
+func newProviderOwnedIdentityCity(t *testing.T, metadata string, initExit int) providerOwnedIdentityCity {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	clearProviderOwnedProxyEnv(t)
+	city := t.TempDir()
+	tools := t.TempDir()
+	opLog := filepath.Join(tools, "ops.log")
+	writeMetadata := ""
+	if metadata != "" {
+		writeMetadata = "  mkdir -p \"$2/.beads\"\n  printf '%s' " + shellQuoteForTest(metadata) + " > \"$2/.beads/metadata.json\"\n"
+	}
+	provider := filepath.Join(tools, "provider.sh")
+	body := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$1\" >> " + strconv.Quote(opLog) + "\n" +
+		"if [ \"$1\" = init ]; then\n" + writeMetadata + "  exit " + strconv.Itoa(initExit) + "\nfi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(provider, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bd := filepath.Join(tools, "bd")
+	if err := os.WriteFile(bd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"identity\"\n\n[workspace.env]\nBD_BIN = \"" + bd + "\"\n" +
+		"[beads]\nprovider = \"exec:" + provider + "\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	return providerOwnedIdentityCity{dir: city, opLog: opLog}
+}
+
+func shellQuoteForTest(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ops returns the provider ops the city ran, in order, and resets the log.
+func (c providerOwnedIdentityCity) ops(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(c.opLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(c.opLog); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(data))
+}
+
+func (c providerOwnedIdentityCity) entry(t *testing.T) providerScopeOwnershipEntry {
+	t.Helper()
+	entry, ok, err := providerScopeOwnership(c.dir, c.dir)
+	if err != nil || !ok {
+		t.Fatalf("scope ownership = (%+v, %t, %v), want a journaled entry", entry, ok, err)
+	}
+	return entry
+}
+
+// stampedLayers returns the layer of every ProjectIdentityStamped event in
+// the city's event log, in order.
+func (c providerOwnedIdentityCity) stampedLayers(t *testing.T) []string {
+	t.Helper()
+	path := filepath.Join(c.dir, citylayout.RuntimeRoot, "events.jsonl")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	all, err := events.ReadAll(path)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	var layers []string
+	for _, event := range all {
+		if event.Type != events.ProjectIdentityStamped {
+			continue
+		}
+		var payload gcapi.ProjectIdentityStampedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode stamped payload: %v", err)
+		}
+		if payload.NewID != providerOwnedIdentityP {
+			t.Fatalf("stamped event new_id = %q, want %q", payload.NewID, providerOwnedIdentityP)
+		}
+		layers = append(layers, payload.Layer)
+	}
+	return layers
+}
+
+func (c providerOwnedIdentityCity) metadataProjectID(t *testing.T) string {
+	t.Helper()
+	id, err := readManagedMetadataProjectID(scopeMetadataJSONPath(c.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func (c providerOwnedIdentityCity) identity(t *testing.T) (string, bool) {
+	t.Helper()
+	id, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, c.dir)
+	if err != nil {
+		t.Fatalf("ReadProjectIdentity: %v", err)
+	}
+	return id, ok
+}
+
+func proxiedIdentityMetadata(projectID string) string {
+	m := `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"`
+	if projectID != "" {
+		m += `,"project_id":"` + projectID + `"`
+	}
+	return m + "}"
+}
+
+func writeIdentityFile(t *testing.T, scope, id string) {
+	t.Helper()
+	if _, err := writeProjectIdentityIfNeeded(fsys.OSFS{}, scope, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestInitAndHookDirProviderOwnedReconcilesProjectIdentity: a pending
+// proxied-local scope whose bd init left metadata project_id = Dolt
+// _project_id = P and no identity.toml gets identity.toml = P, one L1
+// stamped event, and turns ready only after L1 was written.
+func TestInitAndHookDirProviderOwnedReconcilesProjectIdentity(t *testing.T) {
+	city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP), 0)
+	stubLiveProviderOwnedProxy(t)
+	var stateAtOpen string
+	fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+	fake.onOpen = func() { stateAtOpen = city.entry(t).State }
+	stubProviderOwnedL3(t, fake)
+
+	if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+		t.Fatalf("initAndHookDirResolvingDatabase: %v", err)
+	}
+
+	if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+		t.Fatalf("identity.toml = (%q, present=%t), want %q", got, ok, providerOwnedIdentityP)
+	}
+	if got := city.stampedLayers(t); len(got) != 1 || got[0] != "L1" {
+		t.Fatalf("stamped layers = %v, want exactly [L1]", got)
+	}
+	if got := city.ops(t); strings.Join(got, " ") != "init health" {
+		t.Fatalf("provider ops = %v, want [init health]", got)
+	}
+	if stateAtOpen != providerScopeInitializing {
+		t.Fatalf("journal state when the reconcile ran = %q, want %q", stateAtOpen, providerScopeInitializing)
+	}
+	if got := city.entry(t).State; got != providerScopeReady {
+		t.Fatalf("journal state after the pass = %q, want %q", got, providerScopeReady)
+	}
+	if fake.closed != len(fake.opened) {
+		t.Fatalf("L3 opened %d time(s) and closed %d, want every open closed", len(fake.opened), fake.closed)
+	}
+}
+
+// TestInitAndHookDirProviderOwnedReconcileLayers: with L1 = P, exactly the
+// layers decideReconcile selects are written to P, one stamped event each.
+func TestInitAndHookDirProviderOwnedReconcileLayers(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		l1, l2, l3 string
+		wantLayers []string
+		wantSeeds  int
+	}{
+		{name: "seed L3", l1: providerOwnedIdentityP, l2: providerOwnedIdentityP, wantLayers: []string{"L3"}, wantSeeds: 1},
+		{name: "repair stale L2", l1: providerOwnedIdentityP, l2: providerOwnedIdentityQ, l3: providerOwnedIdentityP, wantLayers: []string{"L2"}},
+		{name: "repair stale L2 and seed L3", l1: providerOwnedIdentityP, l2: providerOwnedIdentityQ, wantLayers: []string{"L2", "L3"}, wantSeeds: 1},
+		{name: "seed missing L2", l1: providerOwnedIdentityP, l3: providerOwnedIdentityP, wantLayers: []string{"L2"}},
+		{name: "seed missing L2 and L3", l1: providerOwnedIdentityP, wantLayers: []string{"L2", "L3"}, wantSeeds: 1},
+		{name: "adopt L1 and L2 from L3", l3: providerOwnedIdentityP, wantLayers: []string{"L1", "L2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(tc.l2), 0)
+			if tc.l1 != "" {
+				writeIdentityFile(t, city.dir, tc.l1)
+			}
+			stubLiveProviderOwnedProxy(t)
+			fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: tc.l3}}
+			stubProviderOwnedL3(t, fake)
+
+			if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+				t.Fatalf("initAndHookDirResolvingDatabase: %v", err)
+			}
+
+			if got := city.stampedLayers(t); strings.Join(got, ",") != strings.Join(tc.wantLayers, ",") {
+				t.Fatalf("stamped layers = %v, want %v", got, tc.wantLayers)
+			}
+			if fake.seeds != tc.wantSeeds {
+				t.Fatalf("L3 seeds = %d, want %d", fake.seeds, tc.wantSeeds)
+			}
+			if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+				t.Fatalf("L1 = (%q, %t), want %q", got, ok, providerOwnedIdentityP)
+			}
+			if got := city.metadataProjectID(t); got != providerOwnedIdentityP {
+				t.Fatalf("L2 = %q, want %q", got, providerOwnedIdentityP)
+			}
+			if fake.l3.projectID != providerOwnedIdentityP {
+				t.Fatalf("L3 = %q, want %q", fake.l3.projectID, providerOwnedIdentityP)
+			}
+			if got := city.entry(t).State; got != providerScopeReady {
+				t.Fatalf("journal state = %q, want %q", got, providerScopeReady)
+			}
+		})
+	}
+}
+
+// TestProviderOwnedIdentityProxiedEndpoint: a proxied scope with a local
+// upstream reaches L3 through bd's live local proxy on the record's port for
+// the metadata dolt_database, and the one session is closed before the
+// reconcile returns.
+func TestProviderOwnedIdentityProxiedEndpoint(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	clearProviderOwnedProxyEnv(t)
+	city := t.TempDir()
+	writeReadyTopologyScope(t, city, readyTopologyScope{
+		beadsConfig: bdTemplateBeadsConfig,
+		metadata:    proxiedLocalMetadata,
+		sidecar:     residentProxySidecar,
+	})
+	stubLiveProviderOwnedProxy(t)
+	fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{}}
+	stubProviderOwnedL3(t, fake)
+	writeIdentityFile(t, city, providerOwnedIdentityP)
+
+	if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, city); err != nil {
+		t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+	}
+
+	if len(fake.opened) != 1 {
+		t.Fatalf("L3 opened %d time(s) for %+v, want exactly one open", len(fake.opened), fake.opened)
+	}
+	opened := fake.opened[0]
+	wantPort := strconv.Itoa(providerOwnedProxyPort)
+	if opened.ProxyPort != providerOwnedProxyPort || opened.Target.Host != proxyendpoint.Host || opened.Target.Port != wantPort || opened.Target.Database != "prov" {
+		t.Fatalf("L3 opened for %+v, want bd's local proxy %s:%s/prov", opened, proxyendpoint.Host, wantPort)
+	}
+	if fake.closed != 1 {
+		t.Fatalf("L3 session closed %d time(s), want 1 before the reconcile returned", fake.closed)
+	}
+	if fake.l3.projectID != providerOwnedIdentityP {
+		t.Fatalf("L3 = %q, want seeded %q", fake.l3.projectID, providerOwnedIdentityP)
+	}
+}
+
+// TestInitAndHookDirProviderOwnedIdentityPinsSharedServerOff: an owned
+// scope's proxy root is resolved under the shared-server opt-out bd runs under
+// for it. With BEADS_DOLT_SHARED_SERVER=1 inherited from an operator's shell,
+// bd still serves the scope from its own root, so the init pass and the ready
+// pass after it both reach the proxy recorded there, and never the live proxy
+// in the shared-server directory.
+func TestInitAndHookDirProviderOwnedIdentityPinsSharedServerOff(t *testing.T) {
+	city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP), 0)
+	shared := t.TempDir()
+	t.Setenv(proxyendpoint.SharedServerModeEnv, "1")
+	t.Setenv(proxyendpoint.SharedServerDirEnv, shared)
+	scopeProxy := publishLiveProxyRecord(t, filepath.Join(city.dir, ".beads", proxyendpoint.DefaultRootDirName), 4301, 45201)
+	sharedProxy := publishLiveProxyRecord(t, filepath.Join(shared, proxyendpoint.DefaultRootDirName), 4302, 45202)
+	stubProviderOwnedProcessTable(t, scopeProxy, sharedProxy)
+	fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+	stubProviderOwnedL3(t, fake)
+
+	for _, pass := range []string{"init", "ready"} {
+		if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+			t.Fatalf("%s pass under an inherited shared-server mode: %v", pass, err)
+		}
+	}
+
+	if len(fake.opened) != 2 {
+		t.Fatalf("L3 opened %d time(s), want once per pass", len(fake.opened))
+	}
+	for _, opened := range fake.opened {
+		if opened.ProxyPort != scopeProxy.record.Port {
+			t.Fatalf("L3 opened through proxy port %d, want the scope's own proxy on %d (the shared-server proxy is on %d)", opened.ProxyPort, scopeProxy.record.Port, sharedProxy.record.Port)
+		}
+	}
+	if got := city.entry(t).State; got != providerScopeReady {
+		t.Fatalf("journal state = %q, want %q", got, providerScopeReady)
+	}
+	if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+		t.Fatalf("identity file = (%q, %t), want %q", got, ok, providerOwnedIdentityP)
+	}
+}
+
+// TestProviderOwnedIdentityDirectEndpoint: a direct scope served by bd's own
+// live server connects to that server's port, even when legacy managed
+// coordinates are in the environment.
+func TestProviderOwnedIdentityDirectEndpoint(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	clearProviderOwnedProxyEnv(t)
+	city := t.TempDir()
+	writeReadyTopologyScope(t, city, readyTopologyScope{beadsConfig: bdTemplateBeadsConfig, metadata: directLocalMetadata})
+	writeIdentityFile(t, city, providerOwnedIdentityP)
+	fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+	stubProviderOwnedL3(t, fake)
+	listener := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = listener.Close() })
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	beadsDir := filepath.Join(city, ".beads")
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(port+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "1")
+
+	if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, city); err != nil {
+		t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+	}
+
+	if len(fake.opened) != 1 {
+		t.Fatalf("L3 opened %d time(s), want 1", len(fake.opened))
+	}
+	opened := fake.opened[0]
+	if opened.ProxyPort != 0 {
+		t.Fatalf("direct scope opened through a proxy port %d", opened.ProxyPort)
+	}
+	if target := opened.Target; target.Host != "127.0.0.1" || target.Port != port || target.Socket != "" || target.Database != "prov" || target.External {
+		t.Fatalf("target = %+v, want bd's own server 127.0.0.1:%s/prov", target, port)
+	}
+}
+
+// acceptCountingListener is a loopback endpoint gc cannot authenticate to: it
+// closes every connection it accepts at once. accepts reports how many dials
+// reached it.
+func acceptCountingListener(t *testing.T) (port int, accepts func() int64) {
+	t.Helper()
+	listener := listenOnRandomPort(t)
+	var accepted atomic.Int64
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener.Addr().(*net.TCPAddr).Port, accepted.Load
+}
+
+// TestReconcileProviderOwnedScopeIdentityDefersExternalEndpoints: an external
+// endpoint (a direct external binding, or the external upstream behind a
+// proxied scope) is never opened in-process. With the real L3 opener in
+// place, the reconcile succeeds, nothing dials the endpoint, and no layer is
+// written. gc cannot authenticate to it the way bd does (credential command,
+// TLS, a per-scope password), so a pass that opened it would fail every start.
+func TestReconcileProviderOwnedScopeIdentityDefersExternalEndpoints(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shape func(port int) readyTopologyScope
+	}{
+		{
+			name: "direct external host:port binding",
+			shape: func(port int) readyTopologyScope {
+				return readyTopologyScope{
+					beadsConfig: bdTemplateBeadsConfig,
+					metadata:    fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_database":"hosted"}`, port),
+				}
+			},
+		},
+		{
+			// Nothing listens on the socket: a dial would fail the reconcile.
+			name: "direct external socket binding",
+			shape: func(int) readyTopologyScope {
+				return readyTopologyScope{
+					beadsConfig: bdTemplateBeadsConfig,
+					metadata:    `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_socket":"/nonexistent/provider-owned-identity.sock","dolt_database":"hosted"}`,
+				}
+			},
+		},
+		{
+			name: "proxied scope with an external upstream",
+			shape: func(port int) readyTopologyScope {
+				return readyTopologyScope{
+					beadsConfig: bdTemplateBeadsConfig,
+					metadata:    proxiedLocalMetadata,
+					sidecar:     fmt.Sprintf(`{"idle_timeout":-1,"external":{"host":"127.0.0.1","port":%d}}`, port),
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearInheritedBeadsEnv(t)
+			clearProviderOwnedProxyEnv(t)
+			port, accepts := acceptCountingListener(t)
+			city := t.TempDir()
+			writeReadyTopologyScope(t, city, tc.shape(port))
+			metadataBefore := mustReadFile(t, scopeMetadataJSONPath(city))
+
+			if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, city); err != nil {
+				t.Fatalf("reconcileProviderOwnedScopeIdentity: %v, want the external endpoint deferred", err)
+			}
+			if got := accepts(); got != 0 {
+				t.Fatalf("the reconcile dialed the external endpoint %d time(s), want 0", got)
+			}
+			if _, ok := (providerOwnedIdentityCity{dir: city}).identity(t); ok {
+				t.Fatal("a deferred scope got an identity file")
+			}
+			if got := mustReadFile(t, scopeMetadataJSONPath(city)); string(got) != string(metadataBefore) {
+				t.Fatalf("metadata.json = %q, want unchanged %q", got, metadataBefore)
+			}
+		})
+	}
+}
+
+// TestInitAndHookDirProviderOwnedReadyExternalScopeStarts: a ready scope bound
+// to an external server gc cannot authenticate to still passes its lifecycle
+// pass, without dialing that server, and its journal entry is untouched.
+func TestInitAndHookDirProviderOwnedReadyExternalScopeStarts(t *testing.T) {
+	city := newProviderOwnedIdentityCity(t, "", 0)
+	port, accepts := acceptCountingListener(t)
+	writeReadyTopologyScope(t, city.dir, readyTopologyScope{
+		beadsConfig: bdTemplateBeadsConfig,
+		metadata:    fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_database":"hosted"}`, port),
+	})
+	if err := markProviderScopeOwnershipReady(city.dir, city.dir); err != nil {
+		t.Fatal(err)
+	}
+	before := city.entry(t)
+
+	if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+		t.Fatalf("ready pass over an external binding: %v, want the identity step deferred", err)
+	}
+	if got := city.ops(t); strings.Join(got, " ") != "start health" {
+		t.Fatalf("provider ops = %v, want [start health]", got)
+	}
+	if got := accepts(); got != 0 {
+		t.Fatalf("the pass dialed the external endpoint %d time(s), want 0", got)
+	}
+	if after := city.entry(t); after != before {
+		t.Fatalf("journal entry = %+v, want unchanged %+v", after, before)
+	}
+}
+
+// TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing: when
+// bd init succeeded but the reconcile fails, the pass returns an error naming
+// the scope and the cause, the journal stays provider_initializing with its
+// intent, nothing under .beads/ is removed or rewritten, and a later pass with
+// the cause removed reconciles and marks the scope ready.
+func TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// arrange sets up the failure and returns the fix.
+		arrange   func(t *testing.T, city providerOwnedIdentityCity) (fake *providerOwnedL3Fake, fix func())
+		wantCause string
+	}{
+		{
+			name: "L1/L3 mismatch refusal",
+			arrange: func(t *testing.T, city providerOwnedIdentityCity) (*providerOwnedL3Fake, func()) {
+				writeIdentityFile(t, city.dir, providerOwnedIdentityQ)
+				stubLiveProviderOwnedProxy(t)
+				fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+				stubProviderOwnedL3(t, fake)
+				return fake, func() {
+					if err := os.Remove(contract.ProjectIdentityPath(city.dir)); err != nil {
+						t.Fatal(err)
+					}
+					writeIdentityFile(t, city.dir, providerOwnedIdentityP)
+				}
+			},
+			wantCause: providerOwnedIdentityQ,
+		},
+		{
+			name: "L3 write error",
+			arrange: func(t *testing.T, city providerOwnedIdentityCity) (*providerOwnedL3Fake, func()) {
+				writeIdentityFile(t, city.dir, providerOwnedIdentityP)
+				stubLiveProviderOwnedProxy(t)
+				fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{seedErr: errors.New("metadata table is read-only")}}
+				stubProviderOwnedL3(t, fake)
+				return fake, func() { fake.l3.seedErr = nil }
+			},
+			wantCause: "metadata table is read-only",
+		},
+		{
+			name: "non-live proxy",
+			arrange: func(t *testing.T, _ providerOwnedIdentityCity) (*providerOwnedL3Fake, func()) {
+				fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+				stubProviderOwnedL3(t, fake)
+				return fake, func() { stubLiveProviderOwnedProxy(t) }
+			},
+			wantCause: "is not live",
+		},
+		{
+			name: "unresolvable endpoint",
+			arrange: func(t *testing.T, city providerOwnedIdentityCity) (*providerOwnedL3Fake, func()) {
+				stubLiveProviderOwnedProxy(t)
+				fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+				stubProviderOwnedL3(t, fake)
+				// A proxy root nothing can resolve: the sidecar is not JSON.
+				if err := os.MkdirAll(filepath.Join(city.dir, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv(proxyendpoint.RootPathEnv, "")
+				sidecar := proxyendpoint.SidecarPath(filepath.Join(city.dir, ".beads"))
+				if err := os.WriteFile(sidecar, []byte("{not json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return fake, func() {
+					if err := os.Remove(sidecar); err != nil {
+						t.Fatal(err)
+					}
+					stubLiveProviderOwnedProxy(t)
+				}
+			},
+			wantCause: "resolve provider-owned Dolt binding",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := proxiedIdentityMetadata(providerOwnedIdentityP)
+			city := newProviderOwnedIdentityCity(t, metadata, 0)
+			_, fix := tc.arrange(t, city)
+			before := city.entry(t)
+			identityBefore, identityErr := os.ReadFile(contract.ProjectIdentityPath(city.dir))
+
+			err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil)
+			if err == nil {
+				t.Fatal("initAndHookDirResolvingDatabase succeeded, want the reconcile failure")
+			}
+			for _, want := range []string{city.dir, tc.wantCause} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want it to name %q", err, want)
+				}
+			}
+			after := city.entry(t)
+			if after.State != providerScopeInitializing || after.Intent != before.Intent || after.Intent == (providerScopeIntent{}) {
+				t.Fatalf("journal entry after failure = %+v, want %q with intent %+v", after, providerScopeInitializing, before.Intent)
+			}
+			if got := string(mustReadFile(t, scopeMetadataJSONPath(city.dir))); got != metadata {
+				t.Fatalf("metadata.json after failure = %q, want bd's %q untouched", got, metadata)
+			}
+			identityAfter, identityAfterErr := os.ReadFile(contract.ProjectIdentityPath(city.dir))
+			if string(identityAfter) != string(identityBefore) || (identityErr == nil) != (identityAfterErr == nil) {
+				t.Fatalf("identity.toml after failure = (%q, %v), want unchanged (%q, %v)", identityAfter, identityAfterErr, identityBefore, identityErr)
+			}
+
+			fix()
+			if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+				t.Fatalf("retry after removing the cause: %v", err)
+			}
+			if got := city.entry(t).State; got != providerScopeReady {
+				t.Fatalf("journal state after retry = %q, want %q", got, providerScopeReady)
+			}
+			if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+				t.Fatalf("identity.toml after retry = (%q, %t), want %q", got, ok, providerOwnedIdentityP)
+			}
+		})
+	}
+}
+
+// TestInitAndHookDirProviderOwnedReadyScopeReconcilesEachPass: a ready scope
+// is reconciled on every pass, or refused with an error, and its journal
+// entry never changes.
+func TestInitAndHookDirProviderOwnedReadyScopeReconcilesEachPass(t *testing.T) {
+	readyCity := func(t *testing.T) (providerOwnedIdentityCity, providerScopeOwnershipEntry) {
+		t.Helper()
+		city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP), 0)
+		stubLiveProviderOwnedProxy(t)
+		stubProviderOwnedL3(t, &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}})
+		if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+			t.Fatalf("first pass: %v", err)
+		}
+		entry := city.entry(t)
+		if entry.State != providerScopeReady {
+			t.Fatalf("journal state after the first pass = %q, want %q", entry.State, providerScopeReady)
+		}
+		city.ops(t)
+		if err := os.Remove(contract.ProjectIdentityPath(city.dir)); err != nil {
+			t.Fatal(err)
+		}
+		return city, entry
+	}
+
+	t.Run("missing L1 is written", func(t *testing.T) {
+		city, before := readyCity(t)
+		if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+			t.Fatalf("ready pass: %v", err)
+		}
+		if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+			t.Fatalf("identity.toml = (%q, %t), want %q", got, ok, providerOwnedIdentityP)
+		}
+		if got := city.ops(t); strings.Join(got, " ") != "start health" {
+			t.Fatalf("provider ops = %v, want [start health]", got)
+		}
+		if after := city.entry(t); after != before {
+			t.Fatalf("journal entry = %+v, want unchanged %+v", after, before)
+		}
+	})
+
+	t.Run("drifted L1 is refused", func(t *testing.T) {
+		city, before := readyCity(t)
+		writeIdentityFile(t, city.dir, providerOwnedIdentityQ)
+		err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil)
+		if err == nil || !strings.Contains(err.Error(), city.dir) || !strings.Contains(err.Error(), providerOwnedIdentityQ) {
+			t.Fatalf("ready pass with drifted L1 = %v, want a refusal naming the scope and %s", err, providerOwnedIdentityQ)
+		}
+		if after := city.entry(t); after != before {
+			t.Fatalf("journal entry = %+v, want unchanged %+v", after, before)
+		}
+	})
+}
+
+// TestInitAndHookDirProviderOwnedInitFailureSkipsIdentity: a failed init op
+// never reaches the reconcile, and the scope stays pending.
+func TestInitAndHookDirProviderOwnedInitFailureSkipsIdentity(t *testing.T) {
+	city := newProviderOwnedIdentityCity(t, "", 1)
+	calls := 0
+	prev := reconcileProviderOwnedScopeIdentityFn
+	reconcileProviderOwnedScopeIdentityFn = func(context.Context, string, string) error {
+		calls++
+		return nil
+	}
+	t.Cleanup(func() { reconcileProviderOwnedScopeIdentityFn = prev })
+	before := city.entry(t)
+
+	if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err == nil {
+		t.Fatal("initAndHookDirResolvingDatabase succeeded with a failing init op")
+	}
+	if calls != 0 {
+		t.Fatalf("reconcile ran %d time(s) after a failed init, want 0", calls)
+	}
+	if got := city.ops(t); strings.Join(got, " ") != "init" {
+		t.Fatalf("provider ops = %v, want [init]", got)
+	}
+	if after := city.entry(t); after != before || after.State != providerScopeInitializing {
+		t.Fatalf("journal entry = %+v, want unchanged pending %+v", after, before)
+	}
+}
+
+// TestReconcileProviderOwnedScopeIdentityNoOpAndIneligible: agreeing layers
+// and ineligible scopes produce no write and no stamped event.
+func TestReconcileProviderOwnedScopeIdentityNoOpAndIneligible(t *testing.T) {
+	t.Run("agreeing layers", func(t *testing.T) {
+		clearInheritedBeadsEnv(t)
+		clearProviderOwnedProxyEnv(t)
+		city := providerOwnedIdentityCity{dir: t.TempDir()}
+		writeReadyTopologyScope(t, city.dir, readyTopologyScope{beadsConfig: bdTemplateBeadsConfig, metadata: proxiedIdentityMetadata(providerOwnedIdentityP)})
+		writeIdentityFile(t, city.dir, providerOwnedIdentityP)
+		stubLiveProviderOwnedProxy(t)
+		fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+		stubProviderOwnedL3(t, fake)
+		paths := []string{scopeMetadataJSONPath(city.dir), contract.ProjectIdentityPath(city.dir)}
+		before := statFiles(t, paths)
+
+		if err := reconcileProviderOwnedScopeIdentity(context.Background(), city.dir, city.dir); err != nil {
+			t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+		}
+		if after := statFiles(t, paths); after != before {
+			t.Fatalf("files after a no-op reconcile = %q, want unchanged %q", after, before)
+		}
+		if fake.seeds != 0 || len(fake.opened) != 1 || fake.closed != 1 {
+			t.Fatalf("L3 seeds=%d opens=%d closes=%d, want 0 seeds and one closed read", fake.seeds, len(fake.opened), fake.closed)
+		}
+		if got := city.stampedLayers(t); len(got) != 0 {
+			t.Fatalf("stamped layers = %v, want none", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		metadata string
+		hosted   bool
+		env      map[string]string
+	}{
+		{name: "no metadata.json"},
+		{name: "embedded", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hq"}`},
+		{name: "doltlite metadata backend", metadata: `{"backend":"doltlite","dolt_mode":"server","dolt_database":"hq"}`},
+		{name: "doltlite city backend", metadata: proxiedIdentityMetadata(""), env: map[string]string{"GC_BEADS_BACKEND": "doltlite"}},
+		{name: "no recorded database", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
+		{name: "hosted credential provider", metadata: proxiedIdentityMetadata(""), hosted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearInheritedBeadsEnv(t)
+			clearProviderOwnedProxyEnv(t)
+			resetHostedCredentialProbeCache()
+			t.Cleanup(resetHostedCredentialProbeCache)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			city := providerOwnedIdentityCity{dir: t.TempDir()}
+			if tc.hosted {
+				writeHostedProbeCity(t, city.dir, true, time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
+			}
+			if tc.metadata != "" {
+				writeReadyTopologyScope(t, city.dir, readyTopologyScope{beadsConfig: bdTemplateBeadsConfig, metadata: tc.metadata})
+			}
+			stubLiveProviderOwnedProxy(t)
+			fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+			stubProviderOwnedL3(t, fake)
+			metadataBefore, _ := os.ReadFile(scopeMetadataJSONPath(city.dir))
+
+			if err := reconcileProviderOwnedScopeIdentity(context.Background(), city.dir, city.dir); err != nil {
+				t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+			}
+			if len(fake.opened) != 0 {
+				t.Fatalf("ineligible scope opened L3 for %+v", fake.opened)
+			}
+			if _, ok := city.identity(t); ok {
+				t.Fatal("ineligible scope got an identity.toml")
+			}
+			if metadataAfter, _ := os.ReadFile(scopeMetadataJSONPath(city.dir)); string(metadataAfter) != string(metadataBefore) {
+				t.Fatalf("metadata.json = %q, want unchanged %q", metadataAfter, metadataBefore)
+			}
+			if got := city.stampedLayers(t); len(got) != 0 {
+				t.Fatalf("stamped layers = %v, want none", got)
+			}
+		})
+	}
+}
+
+// statFiles renders each path's bytes and modification time, so a rewrite
+// with identical content still shows.
+func statFiles(t *testing.T, paths []string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&b, "%s|%d|%s\n", path, info.ModTime().UnixNano(), mustReadFile(t, path))
+	}
+	return b.String()
+}

@@ -173,12 +173,27 @@ func PIDPath(root string) string { return filepath.Join(root, PIDFileName) }
 // persists only the flag value as root_path, and so a gc-owned scope's sidecar
 // carries none and bd roots the proxy wherever DoltDataDir says.
 func ProviderRoot(scopeRoot string) (string, error) {
+	return ProviderRootWithEnv(scopeRoot, os.Getenv)
+}
+
+// ProviderRootWithEnv is ProviderRoot resolved against getenv instead of this
+// process's environment: every variable bd's resolution reads
+// (BEADS_PROXIED_SERVER_ROOT_PATH, BEADS_DOLT_SHARED_SERVER,
+// BEADS_SHARED_SERVER_DIR, BEADS_DOLT_DATA_DIR) is looked up through it, and
+// only the home directory still comes from this process.
+//
+// It is for a caller whose bd runs under an environment that differs from its
+// own. gc pins bd's shared-server mode off for every scope it owns, so a gc
+// process that inherited BEADS_DOLT_SHARED_SERVER=1 from an operator's shell
+// resolves that scope's root by passing the pinned environment here, and never
+// has to change its own environment to do it.
+func ProviderRootWithEnv(scopeRoot string, getenv func(string) string) (string, error) {
 	beadsDir := filepath.Join(pathutil.NormalizePathForCompare(scopeRoot), ".beads")
 	// The value is used RAW, the way bd uses it (beads
 	// internal/doltserver/physical_root.go ResolveProxiedServerRootPath): a
 	// reader that trimmed it would resolve a different directory than the proxy
 	// serves, and parity is the whole contract of this resolver.
-	if env := os.Getenv(RootPathEnv); env != "" {
+	if env := getenv(RootPathEnv); env != "" {
 		return resolveUnderBeadsDir(beadsDir, env), nil
 	}
 	sidecar, err := ReadSidecar(beadsDir)
@@ -188,7 +203,7 @@ func ProviderRoot(scopeRoot string) (string, error) {
 	if root := sidecar.ResolvedRootPath(beadsDir); root != "" {
 		return root, nil
 	}
-	return DoltDataDir(beadsDir)
+	return doltDataDir(beadsDir, getenv)
 }
 
 // DoltDataDir resolves a scope's Dolt data directory the way bd's own
@@ -213,10 +228,15 @@ func ProviderRoot(scopeRoot string) (string, error) {
 // legacy absolute `database` key, which is the removed SQLite backend's file
 // path and has no meaning for a scope bd serves over a proxy.
 func DoltDataDir(beadsDir string) (string, error) {
-	if sharedServerMode() {
+	return doltDataDir(beadsDir, os.Getenv)
+}
+
+// doltDataDir is DoltDataDir with every environment read going through getenv.
+func doltDataDir(beadsDir string, getenv func(string) string) (string, error) {
+	if sharedServerMode(getenv) {
 		// bd mirrors ResolveDoltDir here: an unresolvable shared directory (no
 		// home) falls through to the per-project resolution below.
-		if dir, ok := sharedDoltDir(); ok {
+		if dir, ok := sharedDoltDir(getenv); ok {
 			return dir, nil
 		}
 	}
@@ -224,7 +244,7 @@ func DoltDataDir(beadsDir string) (string, error) {
 	// os.Getenv("BEADS_DOLT_DATA_DIR") as written, so BEADS_DOLT_DATA_DIR=" data"
 	// roots bd at "<.beads>/ data". Trimming it here would have gc resolve
 	// "<.beads>/data" and report no_record for a proxy that is serving fine.
-	if env := os.Getenv(DoltDataDirEnv); env != "" {
+	if env := getenv(DoltDataDirEnv); env != "" {
 		return resolveUnderBeadsDir(beadsDir, env), nil
 	}
 	// Raw here too, and this is the arm where "raw" needed a second reader:
@@ -258,26 +278,27 @@ func resolveUnderBeadsDir(beadsDir, path string) string {
 	return filepath.Join(beadsDir, path)
 }
 
-// sharedServerMode reports whether the environment turns on bd's shared-server
-// mode, in which every project on the host serves out of one Dolt root.
+// sharedServerMode reports whether the environment getenv reads turns on bd's
+// shared-server mode, in which every project on the host serves out of one Dolt
+// root.
 //
 // Only the environment arm of bd's IsSharedServerMode is mirrored; the
 // config.yaml dolt.shared-server arm is bd's own layered config and is not read
 // here. See DoltDataDir for why the omission fails closed.
-func sharedServerMode() bool {
+func sharedServerMode(getenv func(string) string) bool {
 	// bd's IsSharedServerMode compares the raw value, so
 	// BEADS_DOLT_SHARED_SERVER=" 1" leaves shared-server mode OFF for bd; a trim
 	// here would turn it on for gc alone and resolve a root bd does not serve.
-	value := os.Getenv(SharedServerModeEnv)
+	value := getenv(SharedServerModeEnv)
 	return value == "1" || strings.EqualFold(value, "true")
 }
 
 // sharedDoltDir is the Dolt root of bd's shared server, without creating it.
 // Resolution must not have side effects: merely asking where a scope's data
 // lives cannot be allowed to create a ~/.beads tree.
-func sharedDoltDir() (string, bool) {
+func sharedDoltDir(getenv func(string) string) (string, bool) {
 	// bd's SharedServerPath reads BEADS_SHARED_SERVER_DIR raw.
-	if dir := os.Getenv(SharedServerDirEnv); dir != "" {
+	if dir := getenv(SharedServerDirEnv); dir != "" {
 		return filepath.Join(dir, DefaultRootDirName), true
 	}
 	home, err := os.UserHomeDir()
