@@ -266,8 +266,11 @@ type hookClaimOps struct {
 	// verdict's state says: gc.outcome=skipped for complete input, a hard
 	// failure with gc.failure_reason=input_purged for purged input.
 	RetireWorkflow hookRetireWorkflowFunc
-	// ProveInputAbsent proves workflow input ids absent from every store of
-	// the city. Nil proves nothing, so no input is ever read as purged.
+	// ProveInputAbsent proves ids absent from every store of the city: the
+	// workflow inputs the retirement gate reads as purged, and an adopted
+	// bead whose canonical readback found nothing (certifyHookAdoption). Nil
+	// proves nothing, so no input is ever read as purged and no adoption as
+	// missing.
 	ProveInputAbsent workflowInputAbsenceProver
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
@@ -387,6 +390,12 @@ type hookClaimOps struct {
 	// row the controller counted when it spawned the seat, read only by the
 	// demand/claim divergence diagnostics after the drain result is written.
 	ReadSessionTrigger hookReadSessionTriggerFunc
+	// ForgetSessionClaim takes a bead back off the session row's current-claim
+	// stamp by a CAS, through the routed front door StampSessionClaim writes
+	// through: a stamp naming other work, or none, is left alone, so a claim
+	// another invocation of the session stamped since survives it. A dropped
+	// purged adoption forgets its claim through it.
+	ForgetSessionClaim hookForgetSessionClaimFunc
 	// StoreRef names the work leg at dir as the work cells key a claim that
 	// resides in it (claimStoreRef), or "" when it is not knowable. A claim
 	// the class route took resides in the binding instead: the cells' key for
@@ -440,6 +449,7 @@ type (
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
 	hookReadSessionTriggerFunc       func(sessionID string) (string, error)
+	hookForgetSessionClaimFunc       func(sessionID, beadID string) error
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
 	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
@@ -626,12 +636,25 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
-	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
+	// Each pass that finds a proven-missing assignment drops that one row and
+	// looks again, so the loop is bounded by the candidates.
+	for {
+		result, bead, ok := hookClaimExistingAssignment(candidates, *opts)
+		if !ok {
+			break
+		}
 		// Adoption mints no CAS, so until now it minted its receipt on the word
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
 		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		if verdict == hookAdoptionMissing {
+			// No store of the city holds it: it is no longer a candidate, and
+			// another assignment, then the claim tiers below, are the recovery.
+			dropMissingHookAdoption(bead.ID, *opts, *ops, stderr)
+			candidates = withoutHookCandidate(candidates, bead.ID)
+			continue
+		}
 		// Holding a bead is no reason to resume it once its workflow stopped:
 		// the step a worker took before its root failed is exactly the one a
 		// re-poll would otherwise hand straight back. A stopped bead is closed
@@ -654,6 +677,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// #5716 loop, while a drain leaves the bead in place, adoptable by the
 		// next attempt once the store recovers, and the operator with the
 		// recovery command restampHookAdoption printed.
+		break
 	}
 
 	readyResult := claimFirstReadyHookAssignment(candidates, *opts, *ops, dir, stdout, stderr)
@@ -763,6 +787,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ReadSessionTrigger == nil {
 		ops.ReadSessionTrigger = hookSessionTriggerBead
+	}
+	if ops.ForgetSessionClaim == nil {
+		ops.ForgetSessionClaim = hookForgetSessionClaim
 	}
 	if ops.StoreRef == nil {
 		ops.StoreRef = hookClaimStoreRefForDir
@@ -1432,6 +1459,11 @@ const (
 	// hookAdoptionRefused: the canonical store names a different owner. The
 	// receipt is withheld.
 	hookAdoptionRefused
+	// hookAdoptionMissing: the claim's store answered not-found AND the
+	// city-wide absence proof found the bead in no store — it was purged
+	// since it was claimed. The receipt is withheld and the row is no longer
+	// an adoption candidate.
+	hookAdoptionMissing
 	// hookClaimMinted: not an adoption at all — a claim tier just won this
 	// claim and read it back canonically. It tells restampHookAdoption that a
 	// failed re-stamp must still hand the bead out (with the recovery
@@ -1463,8 +1495,7 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
-		return hookAdoptionUnverified, ""
+		return certifyUnreadableHookAdoption(beadID, err, ops, stderr), ""
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 		_, _ = fmt.Fprintf(stderr,
@@ -1479,6 +1510,69 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 		return hookAdoptionRefused, ""
 	}
 	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
+}
+
+// dropMissingHookAdoption takes beadID, an adoption certifyHookAdoption found
+// in no store of the city, back off the session's current-claim stamp, so
+// `gc hook current` stops naming a bead that exists nowhere.
+//
+// The clear is a CAS on beadID (ForgetSessionClaim). The stamp names the
+// session's LATEST claim, which may be other live work, even work another
+// invocation of this session stamped after this one read it, and
+// sessionOwnsLiveClaim reads it as the demand-class drain veto: erasing it
+// could drain the seat mid-turn. Best-effort: a failure, a store with no
+// metadata CAS among them, is reported on stderr, leaves the stamp alone and
+// changes no exit code — a stamp naming a bead that does not exist already
+// reads as owning nothing there.
+func dropMissingHookAdoption(beadID string, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
+	sessionID := hookClaimSessionID(opts.Env)
+	if sessionID == "" {
+		return
+	}
+	if err := ops.ForgetSessionClaim(sessionID, beadID); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: leaving session %s's current claim alone after dropping %s: %v\n", sessionID, beadID, err) //nolint:errcheck
+	}
+}
+
+// withoutHookCandidate returns candidates minus the row whose id is beadID.
+func withoutHookCandidate(candidates []beads.Bead, beadID string) []beads.Bead {
+	kept := make([]beads.Bead, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.ID != beadID {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
+}
+
+// certifyUnreadableHookAdoption decides an adoption whose canonical readback
+// failed with err.
+//
+// A not-found from the claim's own store is not proof the bead is gone: a rig
+// seat's work query federates the city store and the class binding, which its
+// readback does not read (see hookStartedKeyFor). So absence is decided only
+// by the city-wide prover, and only after a not-found — any other readback
+// error, a nil prover, a prover that found the bead or could not finish all
+// leave the adoption hookAdoptionUnverified, the fail-open floor.
+func certifyUnreadableHookAdoption(beadID string, err error, ops hookClaimOps, stderr io.Writer) hookAdoptionVerdict {
+	if !hookClaimBeadIsElsewhere(err) || ops.ProveInputAbsent == nil {
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
+		return hookAdoptionUnverified
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	absent, proofErr := ops.ProveInputAbsent(ctx, []string{beadID})
+	switch {
+	case proofErr != nil:
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v (proving it absent from the city failed: %v)\n", beadID, err, proofErr) //nolint:errcheck
+		return hookAdoptionUnverified
+	case absent:
+		fmt.Fprintf(stderr, "gc hook --claim: not re-serving %s: no store of the city holds it (purged since it was claimed)\n", beadID) //nolint:errcheck
+		return hookAdoptionMissing
+	default:
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
+		return hookAdoptionUnverified
+	}
 }
 
 // restampHookAdoption rewrites an adopted bead's assignee from a legacy
