@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -71,14 +72,16 @@ func (a *anchorCycle) assign(assignee string) {
 	a.edit(beads.UpdateOpts{Assignee: &assignee})
 }
 
-// view is the transaction's view of the cycle, and the reads it makes.
+// view is the transaction's view of the cycle, over the session's own live
+// runtime, and the reads it makes.
 func (a *anchorCycle) view() (txView, effectReads) {
 	a.t.Helper()
 	p, it := a.c.pass(a.t, runtime.NewFake(), nil)
 	if it.Reason != decideFreshCycle {
 		a.t.Fatalf("decideRow = (%q, %q), want the fresh cycle", it.Kind, it.Reason)
 	}
-	return txView{It: it, World: p.World, Alloc: p.Alloc, Row: a.c.w.Census.Rows[a.c.k].Info, Meta: a.c.meta(a.t), RT: &txRuntime{Class: rtAbsent}, Now: censusNow}, p.reads
+	rt := &txRuntime{Class: rtAlive, Same: true, Identity: runtimeIdentity{Known: true, SessionID: a.c.k.ID, Epoch: "3", Token: "tok-3"}}
+	return txView{It: it, World: p.World, Alloc: p.Alloc, Row: a.c.w.Census.Rows[a.c.k].Info, Meta: a.c.meta(a.t), RT: rt, Now: censusNow}, p.reads
 }
 
 // anchorStep is what the probe and the decision answer for the cycle.
@@ -116,15 +119,35 @@ func (a *anchorCycle) wantRefused(why string) {
 	}
 }
 
-// TestFreshCycleAnchorOwnerDecides (#9320, AC-5): the anchor's live row
-// decides the cycle. Released, blank, handed to another session or to an
-// alias-history name (outside ReleaseScope), or finished: refused.
+// wantGoesOn fails unless the cycle passes the defer to the stop's own
+// decision (stopDecide: A4 again, then the fence), which still decides the
+// stop rather than redeciding it.
+func (a *anchorCycle) wantGoesOn(why string) {
+	a.t.Helper()
+	v, reads := a.view()
+	got := probeAnchorCycle(v, reads)
+	if got.err != nil || got.refused() || !reflect.DeepEqual(got.step, stopDecide(v)) {
+		a.t.Fatalf("%s: step %+v, probe err %v; want stopDecide's %+v", why, got.step, got.err, stopDecide(v))
+	}
+	if got.step.Refuse == causeRedecided {
+		a.t.Fatalf("%s: step %+v; want the stop still decided", why, got.step)
+	}
+}
+
+// TestFreshCycleAnchorOwnerDecides (#9320, AC-5, AC-6): the anchor's live
+// row decides the cycle. Released, blank, handed to another session or to an
+// alias-history name (outside ReleaseScope), or finished: refused. Open and
+// assigned to the session's ID, session name or stable alias: goes on.
 func TestFreshCycleAnchorOwnerDecides(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		meta []string
-		edit func(*anchorCycle)
+		name   string
+		meta   []string
+		edit   func(*anchorCycle)
+		goesOn bool
 	}{
+		{name: "the session ID", edit: func(*anchorCycle) {}, goesOn: true},
+		{name: "the session name", edit: func(a *anchorCycle) { a.assign("s-heal") }, goesOn: true},
+		{name: "the stable alias", meta: []string{"alias", "worker-alias"}, edit: func(a *anchorCycle) { a.assign("worker-alias") }, goesOn: true},
 		{name: "released", edit: func(a *anchorCycle) {
 			open := "open"
 			released := ""
@@ -141,6 +164,10 @@ func TestFreshCycleAnchorOwnerDecides(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newAnchorCycle(t, tc.meta...)
 			tc.edit(a)
+			if tc.goesOn {
+				a.wantGoesOn("the live anchor is the session's open work")
+				return
+			}
 			a.wantRefused("the live anchor is not the session's open work")
 		})
 	}
@@ -198,5 +225,63 @@ func TestFreshCycleAnchorReadsPastPrimedCache(t *testing.T) {
 	a.wantRefused("the backing row is released behind a stale cache row")
 	if gets != 1 {
 		t.Fatalf("live anchor Gets = %d, want exactly one", gets)
+	}
+}
+
+// TestFreshCycleAnchorGoesOnPastStaleCacheRow (#9320, AC-6): the converse of
+// a stale release. The primed cache still holds the anchor as another
+// session's, while the backing row is the session's again; the probe reads
+// the backing row, once, and the cycle goes on.
+func TestFreshCycleAnchorGoesOnPastStaleCacheRow(t *testing.T) {
+	a := newAnchorCycle(t)
+	a.assign("gc-other")
+	cached := beads.NewCachingStore(a.backing, nil)
+	if err := cached.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	gets := 0
+	a.readFrom(anchorLiveCounter{Store: cached, id: "gw-new", gets: &gets})
+	a.assign(a.c.k.ID)
+	if stale, err := cached.Get("gw-new"); err != nil || stale.Assignee != "gc-other" {
+		t.Fatalf("precondition: the primed cache row = %+v (err %v), want it still gc-other's", stale, err)
+	}
+	a.wantGoesOn("the backing row is the session's again behind a stale cache row")
+	if gets != 1 {
+		t.Fatalf("live anchor Gets = %d, want exactly one", gets)
+	}
+}
+
+// TestFreshCycleAnchorReadOnlyAfterPreviousGoesOn (#9320, AC-6): the anchor
+// is read only once the previous bead alone lets the cycle go on; a previous
+// bead that defers it costs no anchor read.
+func TestFreshCycleAnchorReadOnlyAfterPreviousGoesOn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		meta     []string
+		previous beads.UpdateOpts
+		goesOn   bool
+	}{
+		{name: "previous bead still open", previous: beads.UpdateOpts{Status: strPtr("open")}},
+		{name: "awake since after the previous bead closed", meta: []string{"awake_started_at", censusNow.Add(-time.Minute).Format(time.RFC3339Nano)}},
+		{name: "previous bead closed before this incarnation woke", goesOn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAnchorCycle(t, tc.meta...)
+			if err := a.backing.Update("gw-old", tc.previous); err != nil {
+				t.Fatal(err)
+			}
+			gets := 0
+			a.readFrom(anchorLiveCounter{Store: a.backing, id: "gw-new", gets: &gets})
+			want := 0
+			if tc.goesOn {
+				want = 1
+				a.wantGoesOn("the previous bead and the anchor both let the cycle go on")
+			} else {
+				a.wantRefused("the previous bead defers the cycle")
+			}
+			if gets != want {
+				t.Fatalf("live anchor Gets = %d, want %d", gets, want)
+			}
+		})
 	}
 }
