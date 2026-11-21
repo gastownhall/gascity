@@ -46,7 +46,10 @@
 # has.
 #
 # This file ONLY defines functions and one default-value assignment;
-# sourcing it must not produce output or otherwise mutate state.
+# sourcing it must not produce output or otherwise mutate state. It is
+# sourced by zsh as well as bash, so it never binds a local named 'status'
+# or 'path' (zsh ties them to $? and $PATH) and uses grep, sed, awk and jq
+# rather than bash-only matching.
 #
 # Set POG_DISABLE=1 to short-circuit assert_bead_still_claimed to a bare
 # `return 0`. This exists for test harnesses that call
@@ -72,6 +75,11 @@ POG_READ_ATTEMPTS="${POG_READ_ATTEMPTS:-3}"
 # *and* the failure is ambiguous (a failed bd read) rather than a clean
 # "no such assignment". Not a valid bead id by construction.
 POG_AMBIGUOUS_SENTINEL="__pog_unresolved_ambiguous__"
+
+# Sentinel emitted by _pog_resolve_bead_id when a branch token routed to
+# another rig's store cannot be checked against that store (the reason has
+# already gone to stderr). Not a valid bead id by construction.
+POG_ROUTE_BLOCK_SENTINEL="__pog_route_store_unreadable__"
 
 # _pog_timeout <seconds> <cmd...>: run <cmd...> bounded by <seconds>,
 # mirroring the timeout/gtimeout fallback shim in
@@ -116,6 +124,173 @@ _pog_read_with_retry() {
     return 1
 }
 
+# _pog_store_read <store> <bd-args...>: _pog_read_with_retry over
+# `bd <bd-args...>` against <store>, a .beads directory. An empty <store>
+# means the caller's own store, read with exactly the caller's environment;
+# any other store is read with BEADS_DIR pointed at it.
+_pog_store_read() {
+    local store="$1"
+    shift
+    if [[ -z "$store" ]]; then
+        _pog_read_with_retry bd "$@"
+        return
+    fi
+    _pog_read_with_retry env BEADS_DIR="$store" bd "$@"
+}
+
+# _pog_beads_dir: prints the caller's .beads directory: $BEADS_DIR when set
+# (the store bd itself reads), else <git top level>/.beads. Prints nothing
+# outside a git work tree with no BEADS_DIR.
+_pog_beads_dir() {
+    if [[ -n "${BEADS_DIR:-}" ]]; then
+        printf '%s' "$BEADS_DIR"
+        return
+    fi
+    local top
+    top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
+    [[ -n "$top" ]] && printf '%s/.beads' "$top"
+}
+
+# _pog_route_store <route-base> <route-path>: prints the .beads directory a
+# routes.jsonl path names, or nothing for "." (the caller's own store). gc
+# writes route paths relative to the scope root that holds the routes file
+# (cmd/gc/rig_beads.go writeAllRoutes), which is <route-base>.
+_pog_route_store() {
+    local base="$1" route_path="$2"
+    case "$route_path" in
+        .) ;;
+        /*) printf '%s/.beads' "$route_path" ;;
+        *) printf '%s/%s/.beads' "$base" "$route_path" ;;
+    esac
+}
+
+# _pog_prefix_table: prints one "<prefix><TAB><store>" line per bead prefix a
+# branch name may carry, read from files gc already maintains. An empty
+# <store> marks a local prefix (the caller's own store); any other <store> is
+# the .beads directory that prefix's beads live in.
+#   1. <beads dir>/routes.jsonl (see _pog_beads_dir): one JSON object per
+#      line with string "prefix" and "path". One trailing "-" is stripped
+#      (gc writes "mc", bd-style routes write "mc-"). A prefix must match
+#      ^[a-z0-9]+(-[a-z0-9]+)*$; any other entry is skipped with one stderr
+#      WARNING, and the first entry for a prefix wins. Path "." is local.
+#   2. A built-in local "ga" when no entry names "ga", so a city with no
+#      routes file keeps the guard's original contract.
+_pog_prefix_table() {
+    local beads_dir routes table="" tab=$'\t' nl=$'\n'
+    beads_dir="$(_pog_beads_dir)"
+    routes="$beads_dir/routes.jsonl"
+    if [[ -n "$beads_dir" && -f "$routes" ]]; then
+        local base parsed kind prefix route_path
+        base="$(dirname "$beads_dir")"
+        parsed="$(jq -rR '
+            select(length > 0)
+            | . as $line
+            | (try fromjson catch null) as $r
+            | if ($r | type) == "object" and ($r.prefix | type) == "string"
+                  and ($r.path | type) == "string" and ($r.path | test("^[^\\t\\n\\r]+$"))
+              then ($r.prefix | sub("-$"; "")) as $p
+                | if ($p | test("^[a-z0-9]+(-[a-z0-9]+)*$"))
+                  then "ok\t\($p)\t\($r.path)"
+                  else "bad\t\($line | @json)"
+                  end
+              else "bad\t\($line | @json)"
+              end' "$routes" 2>/dev/null)" || parsed=""
+        while IFS="$tab" read -r -u 3 kind prefix route_path; do
+            [[ -n "$kind" ]] || continue
+            if [[ "$kind" != "ok" ]]; then
+                echo "push-ownership-guard: WARNING ignoring $routes entry $prefix: it needs a string \"prefix\" of lowercase letters and digits (inner dashes allowed) and a string \"path\"" >&2
+                continue
+            fi
+            [[ "$nl$table" == *"$nl$prefix$tab"* ]] && continue
+            table+="$prefix$tab$(_pog_route_store "$base" "$route_path")$nl"
+        done 3<<<"$parsed"
+    fi
+    if [[ "$nl$table" != *"${nl}ga$tab"* ]]; then
+        table+="ga$tab$nl"
+    fi
+    printf '%s' "$table"
+}
+
+# _pog_branch_candidates <branch> <prefix-table>: prints, in branch order and
+# without repeats, one "<id><TAB><store>" line per bead-id-shaped token in
+# <branch> whose prefix is in <prefix-table> (see _pog_prefix_table). A token
+# starts at the beginning of the name or just after a character outside
+# [0-9A-Za-z], so a word such as `omega-checker` is not the bead ga-checker,
+# and it is <prefix>-((mol|wisp)-)?[0-9a-z]{3,}(\.[0-9]+)*: bd mints base36
+# hashes of at least three characters, `-` and `/` end the hash, sub-bead
+# suffixes repeat to any depth (ga-o3ko1j.4.3), and molecule and wisp ids keep
+# their infix (ga-mol-<hash>) because the longest match wins. Every start
+# position is tried, so overlapping tokens are all found (in bd-zoo-k2p9x
+# both bd-zoo and zoo-k2p9x); at one position the longest matching prefix
+# wins.
+_pog_branch_candidates() {
+    local branch="$1" table="$2"
+    LC_ALL=C awk -F '\t' -v b="$branch" '
+        $1 != "" { n++; P[n] = $1; S[$1] = $2 }
+        END {
+            for (i = 2; i <= n; i++) {
+                x = P[i]; j = i - 1
+                while (j >= 1 && length(P[j]) < length(x)) { P[j + 1] = P[j]; j-- }
+                P[j + 1] = x
+            }
+            len = length(b)
+            for (i = 1; i <= len; i++) {
+                if (i > 1 && substr(b, i - 1, 1) ~ /[0-9A-Za-z]/) continue
+                rest = substr(b, i)
+                for (k = 1; k <= n; k++) {
+                    p = P[k]
+                    if (substr(rest, 1, length(p) + 1) != p "-") continue
+                    if (match(substr(rest, length(p) + 2), /^((mol|wisp)-)?[0-9a-z][0-9a-z][0-9a-z][0-9a-z]*(\.[0-9]+)*/)) {
+                        t = p "-" substr(rest, length(p) + 2, RLENGTH)
+                        if (!(t in seen)) { seen[t] = 1; print t "\t" S[p] }
+                        break
+                    }
+                }
+            }
+        }' <<<"$table"
+}
+
+# _pog_probe_routed_store <store> <ids-csv>: asks <store> which of the
+# comma-separated ids exist, with one exact-id `bd list --id=` read (retried
+# like every other read). Prints the ids present, one per line, and returns
+# 0 when the store answered with a JSON array (an empty array means none of
+# them is a bead there); returns 1 when it gave no such answer.
+_pog_probe_routed_store() {
+    local store="$1" ids="$2" json
+    json="$(_pog_store_read "$store" list --id="$ids" --all --include-infra --include-ephemeral \
+        --include-gates --include-templates --flat --json)" || return 1
+    jq -e 'type == "array"' <<<"$json" >/dev/null 2>&1 || return 1
+    jq -r '.[]?.id? | strings' <<<"$json"
+}
+
+# _pog_resolve_branch_token <branch>: prints "<id><TAB><store>" for the bead
+# the branch name encodes (an empty <store> is the caller's own store), or
+# nothing when it encodes none. The first candidate token (see
+# _pog_branch_candidates) decides: a local token is the id with no read; a
+# routed token is the id once a probe of its store finds it, and is skipped
+# when the store answers that it is absent. A routed store that gives no
+# answer blocks: the reason goes to stderr and POG_ROUTE_BLOCK_SENTINEL is
+# printed.
+_pog_resolve_branch_token() {
+    local branch="$1" tab=$'\t' first tok store present
+    first="$(_pog_branch_candidates "$branch" "$(_pog_prefix_table)" | head -1)"
+    [[ -n "$first" ]] || return 0
+    tok="${first%%"$tab"*}"
+    store="${first#*"$tab"}"
+    if [[ -z "$store" ]]; then
+        printf '%s%s' "$tok" "$tab"
+        return 0
+    fi
+    if ! present="$(_pog_probe_routed_store "$store" "$tok")"; then
+        echo "push-ownership-guard: BLOCKED — branch token $tok routes to the bead store $store, which did not answer whether $tok exists after $POG_READ_ATTEMPTS attempts, so ownership of $tok cannot be verified. Last resort: git push --no-verify" >&2
+        printf '%s' "$POG_ROUTE_BLOCK_SENTINEL"
+        return 0
+    fi
+    if grep -qxF -- "$tok" <<<"$present"; then
+        printf '%s%s%s' "$tok" "$tab" "$store"
+    fi
+}
+
 # _pog_returned_bead_id <json>: prints the id of the bead an already-fetched
 # `bd show <id> --json` payload describes (.[0].id), or nothing when that id
 # is missing, empty or not a string. `bd show` falls back to substring
@@ -126,7 +301,8 @@ _pog_returned_bead_id() {
     jq -r '.[0]?.id? | strings' <<<"$1" 2>/dev/null || true
 }
 
-# _pog_branch_id_bead_inactive <id>: true (rc 0) only if a FRESH bd show
+# _pog_branch_id_bead_inactive <id> [store]: true (rc 0) only if a FRESH bd
+# show against <store> (default: the caller's own; see _pog_store_read)
 # returns <id> itself and confirms its status is neither in_progress nor
 # open -- i.e. the branch-derived bead is no longer the live claim. Fails
 # safe: any read/parse failure, or a response for any other id, returns 1
@@ -135,9 +311,9 @@ _pog_returned_bead_id() {
 # falls through to the existing branch-id-wins path, which itself blocks
 # safely on the same failure via assert_bead_still_claimed's own read.
 _pog_branch_id_bead_inactive() {
-    local id="$1"
+    local id="$1" store="${2:-}"
     local json
-    json="$(_pog_read_with_retry bd show "$id" --json)" || return 1
+    json="$(_pog_store_read "$store" show "$id" --json)" || return 1
     [[ -n "$json" ]] || return 1
     jq -e '.' <<<"$json" >/dev/null 2>&1 || return 1
     [[ "$(_pog_returned_bead_id "$json")" == "$id" ]] || return 1
@@ -299,9 +475,18 @@ _pog_resolve_bead_id() {
     local branch=""
     branch="$(git symbolic-ref --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true)"
 
-    local branch_id=""
+    local branch_id="" branch_store="" tab=$'\t'
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE '(^|[^0-9A-Za-z])ga-((mol|wisp)-)?[0-9a-z]{3,}(\.[0-9]+)*' <<<"$branch" | head -1 | sed -E 's/^[^0-9A-Za-z]//' || true)"
+        local branch_token
+        branch_token="$(_pog_resolve_branch_token "$branch")"
+        if [[ "$branch_token" == "$POG_ROUTE_BLOCK_SENTINEL" ]]; then
+            printf '%s' "$POG_ROUTE_BLOCK_SENTINEL"
+            return
+        fi
+        if [[ -n "$branch_token" ]]; then
+            branch_id="${branch_token%%"$tab"*}"
+            branch_store="${branch_token#*"$tab"}"
+        fi
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
@@ -372,7 +557,7 @@ _pog_resolve_bead_id() {
             '[.[] | select(.metadata.branch == $br or .metadata.build_bead == $bid)][0].id // empty' \
             <<<"${list_json:-[]}" 2>/dev/null || true)"
     fi
-    if [[ -n "$successor_id" && "$successor_id" != "$branch_id" ]] && _pog_branch_id_bead_inactive "$branch_id"; then
+    if [[ -n "$successor_id" && "$successor_id" != "$branch_id" ]] && _pog_branch_id_bead_inactive "$branch_id" "$branch_store"; then
         echo "push-ownership-guard: NOTE branch $branch was reused after $branch_id closed; this session's in-progress $successor_id declares itself that bead's continuation (metadata.branch/build_bead), using $successor_id instead" >&2
         printf '%s' "$successor_id"
         return
@@ -407,7 +592,7 @@ _pog_resolve_bead_id() {
         if [[ "$undeclared_count" == "1" ]]; then
             local undeclared_id
             undeclared_id="$(jq -r '.[0].id // empty' <<<"${list_json:-[]}" 2>/dev/null || true)"
-            if [[ -n "$undeclared_id" && "$undeclared_id" != "$branch_id" ]] && _pog_branch_id_bead_inactive "$branch_id"; then
+            if [[ -n "$undeclared_id" && "$undeclared_id" != "$branch_id" ]] && _pog_branch_id_bead_inactive "$branch_id" "$branch_store"; then
                 local undeclared_json
                 if undeclared_json="$(_pog_read_with_retry bd show "$undeclared_id" --json)" \
                     && [[ -n "$undeclared_json" ]] \
@@ -425,7 +610,9 @@ _pog_resolve_bead_id() {
         echo "push-ownership-guard: WARNING branch name resolves to $branch_id but this session's in-progress assignment is $assignee_id; using $branch_id (branch name wins)" >&2
     fi
 
-    if [[ -n "$branch_id" ]]; then
+    if [[ -n "$branch_id" && -n "$branch_store" ]]; then
+        printf '%s%s%s' "$branch_id" "$tab" "$branch_store"
+    elif [[ -n "$branch_id" ]]; then
         printf '%s' "$branch_id"
     else
         printf '%s' "$assignee_id"
@@ -439,8 +626,13 @@ assert_bead_still_claimed() {
         return 0
     fi
 
-    local id
-    id="$(_pog_resolve_bead_id)"
+    local resolved id store="" tab=$'\t'
+    resolved="$(_pog_resolve_bead_id)"
+    id="${resolved%%"$tab"*}"
+    [[ "$resolved" == *"$tab"* ]] && store="${resolved#*"$tab"}"
+    if [[ "$id" == "$POG_ROUTE_BLOCK_SENTINEL" ]]; then
+        return 1
+    fi
     if [[ "$id" == "$POG_AMBIGUOUS_SENTINEL" ]]; then
         echo "push-ownership-guard: BLOCKED — deploy-gate branch: could not read this session's in-progress assignment (bd unreachable or not on PATH), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
         return 1
@@ -455,8 +647,8 @@ assert_bead_still_claimed() {
     fi
 
     local json
-    if ! json="$(_pog_read_with_retry bd show "$id" --json)" || [[ -z "$json" ]]; then
-        echo "push-ownership-guard: BLOCKED — bd show $id failed after $POG_READ_ATTEMPTS attempts (the bead may be absent from this store, or bd/Dolt may be unreachable), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+    if ! json="$(_pog_store_read "$store" show "$id" --json)" || [[ -z "$json" ]]; then
+        echo "push-ownership-guard: BLOCKED — bd show $id${store:+ against the bead store $store} failed after $POG_READ_ATTEMPTS attempts (the bead may be absent from this store, or bd/Dolt may be unreachable), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
         return 1
     fi
     if ! jq -e '.' <<<"$json" >/dev/null 2>&1; then

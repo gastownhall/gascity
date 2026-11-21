@@ -37,6 +37,9 @@ export GIT_AUTHOR_NAME="Test Author" GIT_AUTHOR_EMAIL="author@example.com"
 export GIT_COMMITTER_NAME="Test Pusher" GIT_COMMITTER_EMAIL="pusher@example.com"
 export GIT_CONFIG_NOSYSTEM=1
 unset GIT_DIR GIT_WORK_TREE 2>/dev/null || true
+# The guard finds routed bead stores from BEADS_DIR (else the repo's own
+# .beads) and must not see the caller's store or database pins.
+unset BEADS_DIR BEADS_DB BD_DB BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_DATABASE BEADS_DOLT_DATA_DIR 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Repo/remote helpers (mirrors scripts/test-rebase-resolve.sh's harness).
@@ -227,6 +230,146 @@ write_id_show_json() {
 # show_ids <fake-bd-dir>: the ids write_id_aware_fake_bd was asked to show, one per line.
 show_ids() {
     cat "$1/fake-bd-state/show-ids.log" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Routed fake `bd` (ga-f59876): models several bead stores, one per .beads
+# directory, so a test can check that a bead routed to another rig is read
+# from that rig's store and not the caller's.
+#
+# The store a call answers from is, in order: the directory named by
+# BEADS_DB, BD_DB or BEADS_DOLT_SERVER_DATABASE when one is set (a pinned
+# database wins over BEADS_DIR, which is how a leaked pin silently reads the
+# wrong store), else $BEADS_DIR, else <fake-bd-dir>/default-store (the
+# caller's store when the guard runs with no BEADS_DIR). Per-store state
+# lives in <store>/fake/:
+#
+#   show/<id>.json       -- `bd show <id>` prints it; any other id exits 1.
+#   list-json            -- `bd list --assignee=...` prints it (default "[]").
+#   probe-fail-count     -- the first N `bd list --id=...` calls exit 1.
+#   probe-out            -- if present, `bd list --id=...` prints it verbatim
+#                           (exit 0) instead of the array of known ids.
+#   show-calls, list-id-calls, list-assignee-calls -- call counters.
+#
+# Every call appends one line to <fake-bd-dir>/calls.log:
+#   store=<answering store> BEADS_DIR=<v> BEADS_DB=<v> BD_DB=<v>
+#   BEADS_DOLT_SERVER_DATABASE=<v> BEADS_DOLT_DATABASE=<v>
+#   BEADS_DOLT_DATA_DIR=<v> | <bd args>
+# where an unset variable logs as <unset>.
+# ---------------------------------------------------------------------------
+
+write_routed_fake_bd() {
+    local dir="$1"
+    mkdir -p "$dir/default-store/fake/show"
+    cat > "$dir/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+store="${BEADS_DB:-${BD_DB:-${BEADS_DOLT_SERVER_DATABASE:-${BEADS_DIR:-$here/default-store}}}}"
+state="$store/fake"
+printf 'store=%s BEADS_DIR=%s BEADS_DB=%s BD_DB=%s BEADS_DOLT_SERVER_DATABASE=%s BEADS_DOLT_DATABASE=%s BEADS_DOLT_DATA_DIR=%s | %s\n' \
+  "$store" "${BEADS_DIR-<unset>}" "${BEADS_DB-<unset>}" "${BD_DB-<unset>}" \
+  "${BEADS_DOLT_SERVER_DATABASE-<unset>}" "${BEADS_DOLT_DATABASE-<unset>}" \
+  "${BEADS_DOLT_DATA_DIR-<unset>}" "$*" >> "$here/calls.log"
+bump() {
+  local c=0
+  [ -f "$state/$1" ] && c="$(cat "$state/$1")"
+  c=$((c + 1))
+  [ -d "$state" ] && echo "$c" > "$state/$1"
+  echo "$c"
+}
+case "$1" in
+  show)
+    bump show-calls >/dev/null
+    if [ -f "$state/show/$2.json" ]; then
+      cat "$state/show/$2.json"
+      exit 0
+    fi
+    exit 1
+    ;;
+  list)
+    ids=""
+    for a in "$@"; do
+      case "$a" in --id=*) ids="${a#--id=}" ;; esac
+    done
+    if [ -z "$ids" ]; then
+      bump list-assignee-calls >/dev/null
+      if [ -f "$state/list-json" ]; then cat "$state/list-json"; else printf '[]'; fi
+      exit 0
+    fi
+    c="$(bump list-id-calls)"
+    if [ -f "$state/probe-fail-count" ] && [ "$c" -le "$(cat "$state/probe-fail-count")" ]; then
+      exit 1
+    fi
+    if [ -f "$state/probe-out" ]; then
+      cat "$state/probe-out"
+      exit 0
+    fi
+    out="["; sep=""
+    IFS=',' read -r -a want <<<"$ids"
+    for id in "${want[@]}"; do
+      if [ -f "$state/show/$id.json" ]; then
+        out="$out$sep$(jq -c '.[0]' "$state/show/$id.json")"; sep=","
+      fi
+    done
+    printf '%s]' "$out"
+    exit 0
+    ;;
+  hooks)
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$dir/bd"
+}
+
+# store_put <store-dir> <id> <status> <assignee> <routed_to> [labels-json-array]:
+# a bead the routed fake bd answers for from <store-dir> (a .beads directory).
+store_put() {
+    local store="$1" id="$2" st="$3" assignee="$4" routed_to="$5" labels="${6:-[]}"
+    mkdir -p "$store/fake/show"
+    printf '[{"id":"%s","status":"%s","assignee":"%s","metadata":{"gc.routed_to":"%s"},"labels":%s}]' \
+        "$id" "$st" "$assignee" "$routed_to" "$labels" > "$store/fake/show/$id.json"
+}
+
+# store_count <store-dir> <counter>: a routed fake bd call counter (0 when unset).
+store_count() {
+    cat "$1/fake/$2" 2>/dev/null || echo 0
+}
+
+# fake_calls <fake-bd-dir>: every call the routed fake bd logged, one per line.
+fake_calls() {
+    cat "$1/calls.log" 2>/dev/null || true
+}
+
+# new_city_with_branch <branch>: a fresh temp root holding gascity/ (a git repo
+# with one commit, checked out to <branch>, plus an empty gascity/.beads) and
+# mc-rig/.beads, the store routes.jsonl entries in these tests point at as
+# ../mc-rig. Prints the root; the repo is <root>/gascity.
+new_city_with_branch() {
+    local branch="$1" root
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-city.XXXXXX")"
+    mkdir -p "$root/gascity/.beads" "$root/mc-rig/.beads/fake/show"
+    (
+        cd "$root/gascity" || exit 1
+        git init -q -b main
+        git config commit.gpgsign false
+        printf 'base\n' > f.txt
+        git add f.txt && git commit -qm base
+        git checkout -q -b "$branch"
+    )
+    printf '%s' "$root"
+}
+
+# write_routes <repo> <jsonl-lines...>: <repo>/.beads/routes.jsonl, one line per argument.
+write_routes() {
+    local repo="$1"
+    shift
+    mkdir -p "$repo/.beads"
+    printf '%s\n' "$@" > "$repo/.beads/routes.jsonl"
 }
 
 # run_guard <repo> <fake-bd-dir> <gc-agent> <gc-template> [pog-timeout-seconds] [gc-session-id] [gc-session-name]
@@ -1538,6 +1681,106 @@ test_rebase_lib_calls_guard_before_force_with_lease() {
 }
 
 # ---------------------------------------------------------------------------
+# Cross-rig (routed) bead branches (ga-f59876).
+# ---------------------------------------------------------------------------
+
+# _routed_ownership_case <label> <status> <assignee> <routed_to> <labels> <allow|block> [bash|zsh]:
+# HEAD is builder/mc-k2p9x-fix, routes.jsonl maps mc to ../mc-rig, and
+# mc-k2p9x lives (with the given fields) only in the mc-rig store. A block
+# must print exactly the line the local path prints for the same bead state
+# (checked against ga-k2p9x in the caller's store, with mc- swapped for ga-),
+# and every read of mc-k2p9x must reach the mc-rig store.
+_routed_ownership_case() {
+    local label="$1" st="$2" assignee="$3" routed_to="$4" labels="$5" want="$6" shell="${7:-bash}"
+    local root repo fbd out rc local_repo local_fbd local_out routed_reads
+    root="$(new_city_with_branch "builder/mc-k2p9x-fix")"
+    repo="$root/gascity"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    store_put "$root/mc-rig/.beads" "mc-k2p9x" "$st" "$assignee" "$routed_to" "$labels"
+    if [[ "$shell" == "zsh" ]]; then
+        out="$(run_guard_zsh "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    else
+        out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    fi
+    routed_reads="$(fake_calls "$fbd" | grep -F -- 'mc-k2p9x' || true)"
+    if [[ -z "$routed_reads" ]] || grep -vqF "store=$(git -C "$repo" rev-parse --show-toplevel)/../mc-rig/.beads " <<<"$routed_reads"; then
+        record_fail "routed/$label" "expected every read of mc-k2p9x to reach the mc-rig store, calls: $(fake_calls "$fbd")"
+        rm -rf "$root" "$fbd"
+        return
+    fi
+    if [[ "$want" == "allow" ]]; then
+        if [[ $rc -eq 0 ]]; then
+            record_pass "routed/$label (rc=0, read from the mc-rig store)"
+        else
+            record_fail "routed/$label" "expected rc=0, got rc=$rc, output: $out"
+        fi
+        rm -rf "$root" "$fbd"
+        return
+    fi
+    local_repo="$(new_repo_with_branch "builder/ga-k2p9x-fix")"
+    local_fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$local_fbd"
+    store_put "$local_fbd/default-store" "ga-k2p9x" "$st" "$assignee" "$routed_to" "$labels"
+    local_out="$(run_guard "$local_repo" "$local_fbd" "agent-x" "tmpl-x" 2>&1)"
+    if [[ $rc -ne 0 ]] && grep -q "BLOCKED" <<<"$out" && [[ "${out//mc-k2p9x/ga-k2p9x}" == "$local_out" ]]; then
+        record_pass "routed/$label (rc=$rc, same block text as the local path)"
+    else
+        record_fail "routed/$label" "expected the local path's block text for mc-k2p9x, got rc=$rc, output: $out; local path printed: $local_out"
+    fi
+    rm -rf "$root" "$fbd" "$local_repo" "$local_fbd"
+}
+
+# AC-1: a writer whose claim on a bead routed to another rig was revoked
+# (closed, reassigned, rerouted, held) is blocked exactly as on a local bead;
+# a live claim on it is allowed.
+test_routed_revoked_bead_blocks() {
+    _routed_ownership_case "closed-blocks" "closed" "agent-x" "tmpl-x" '[]' block
+    _routed_ownership_case "reassigned-blocks" "in_progress" "agent-other" "tmpl-x" '[]' block
+    _routed_ownership_case "rerouted-blocks" "in_progress" "agent-x" "tmpl-other" '[]' block
+    _routed_ownership_case "hold-mayor-blocks" "in_progress" "agent-x" "tmpl-x" '["hold:mayor"]' block
+    _routed_ownership_case "hold-external-blocks" "in_progress" "agent-x" "tmpl-x" '["hold:external"]' block
+    _routed_ownership_case "live-claim-allows" "in_progress" "agent-x" "tmpl-x" '[]' allow
+}
+
+# AC-1 under zsh, which sources this guard into the deployer's shell.
+test_routed_revoked_bead_blocks_under_zsh() {
+    if ! command -v zsh >/dev/null 2>&1; then
+        echo "  skip routed/zsh — zsh not installed"
+        return
+    fi
+    _routed_ownership_case "closed-blocks-under-zsh" "closed" "agent-x" "tmpl-x" '[]' block zsh
+    _routed_ownership_case "live-claim-allows-under-zsh" "in_progress" "agent-x" "tmpl-x" '[]' allow zsh
+}
+
+# Routes hygiene: dash-form ("ga-", "mc-") entries work, and each entry whose
+# prefix cannot be spliced into the token regex (".*", "m|c", "a.b") is
+# skipped with exactly one WARNING without disabling the valid entries.
+test_routes_hygiene_dashed_and_invalid_entries() {
+    local root repo fbd out rc warns
+    root="$(new_city_with_branch "builder/mc-abc12-fix")"
+    repo="$root/gascity"
+    write_routes "$repo" \
+        '{"prefix":"ga-","path":"."}' \
+        '{"prefix":"mc-","path":"../mc-rig"}' \
+        '{"prefix":".*","path":"."}' \
+        '{"prefix":"m|c","path":"../mc-rig"}' \
+        '{"prefix":"a.b","path":"../mc-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    store_put "$root/mc-rig/.beads" "mc-abc12" "closed" "agent-x" "tmpl-x" '[]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    warns="$(grep -c 'WARNING' <<<"$out" || true)"
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — mc-abc12" <<<"$out" && [[ "$warns" == "3" ]]; then
+        record_pass "routed/routes-hygiene (rc=$rc, dashed entries work, 3 invalid entries warned and skipped)"
+    else
+        record_fail "routed/routes-hygiene" "expected a block on closed mc-abc12 with 3 WARNINGs, got rc=$rc warns=$warns, output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -1597,6 +1840,9 @@ run_all() {
     test_hook_allows_push_on_clean_claim
     test_pre_push_hook_sources_and_calls_guard
     test_rebase_lib_calls_guard_before_force_with_lease
+    test_routed_revoked_bead_blocks
+    test_routed_revoked_bead_blocks_under_zsh
+    test_routes_hygiene_dashed_and_invalid_entries
 
     echo
     echo "pass=$pass fail=$fail"
