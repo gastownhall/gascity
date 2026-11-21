@@ -232,3 +232,46 @@ func TestSweepFailedMoleculesWaitsForOwnerInsideGrace(t *testing.T) {
 	}
 	assertOpen(t, store, "root", "member")
 }
+
+// AC-7: with more sweepable chains than the cap, behind older failed sub-DAGs
+// a live owner holds open, each sweep closes at most the cap, oldest first,
+// the held sub-DAGs neither close nor use up the cap, and consecutive sweeps
+// close every sweepable chain.
+func TestSweepFailedMoleculesCapsChainsPerPassOldestFirst(t *testing.T) {
+	cutoff := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	at := func(i int) time.Time { return cutoff.Add(-time.Hour).Add(time.Duration(i) * time.Second) }
+	seed := []beads.Bead{{ID: "live", Title: "live owner that did not fail", Status: "open", CreatedAt: at(0), UpdatedAt: at(0)}}
+	for i := 1; i <= 3; i++ {
+		seed = append(seed, beads.Bead{
+			ID: fmt.Sprintf("held-%d", i), Title: "failed sub-DAG of the live owner", Status: "open", CreatedAt: at(i), UpdatedAt: at(i),
+			Metadata: map[string]string{beadmeta.MoleculeFailedMetadataKey: "true", beadmeta.RootBeadIDMetadataKey: "live"},
+		})
+	}
+	var roots []string
+	for i := 1; i <= 5; i++ {
+		id := fmt.Sprintf("root-%d", i)
+		roots = append(roots, id)
+		seed = append(seed, beads.Bead{ID: id, Title: "failed root", Status: "open", CreatedAt: at(10 + i), UpdatedAt: at(10 + i), Metadata: failedMeta()})
+	}
+	store := beads.NewMemStoreFrom(0, seed, nil)
+
+	for _, want := range []struct {
+		chains []string
+		more   bool
+	}{
+		{roots[0:2], true},
+		{roots[2:4], true},
+		{roots[4:5], false},
+		{nil, false},
+	} {
+		got, err := SweepFailedMolecules(beadstest.WorkMolecule(store), cutoff, 2)
+		if err != nil {
+			t.Fatalf("SweepFailedMolecules: %v", err)
+		}
+		if fmt.Sprint(got.Chains) != fmt.Sprint(want.chains) || got.More != want.more || got.Closed != len(want.chains) {
+			t.Fatalf("sweep = %+v, want chains %v with More=%v", got, want.chains, want.more)
+		}
+	}
+	assertSwept(t, store, roots...)
+	assertOpen(t, store, "live", "held-1", "held-2", "held-3")
+}
