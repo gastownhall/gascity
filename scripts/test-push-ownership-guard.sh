@@ -2157,6 +2157,35 @@ test_routed_missing_store_and_definitive_answers() {
     rm -rf "$root" "$fbd"
 }
 
+
+# AC-7: with no routes.jsonl the prefix table is the built-in ga alone, so a
+# routed-looking token (even one a local config.yaml issue_prefix names) is
+# never probed, and the guard makes exactly the reads it always made, all
+# against the caller's own store.
+_no_routes_case() {
+    local label="$1" branch="$2" list_json="$3" want="$4" root repo fbd out rc args
+    root="$(new_city_with_branch "$branch")"
+    repo="$root/gascity"
+    printf 'issue_prefix: mc\n' > "$repo/.beads/config.yaml"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    store_put "$fbd/default-store" "ga-abc12" "in_progress" "agent-x" "tmpl-x"
+    printf '%s' "$list_json" > "$fbd/default-store/fake/list-json"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    args="$(fake_calls "$fbd" | sed -E 's/^.* \| //' | awk '{ print $1, $2 }' | paste -sd ';' -)"
+    if [[ $rc -eq 0 && "$args" == "$want" ]] && ! fake_calls "$fbd" | grep -qv 'BEADS_DIR=<unset> '; then
+        record_pass "no-routes/$label (rc=0, reads: $args)"
+    else
+        record_fail "no-routes/$label" "expected rc=0 and exactly the reads '$want' against the caller's store, got rc=$rc reads='$args', output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+test_no_routes_behavior_unchanged() {
+    _no_routes_case "routed-looking-token-skipped-for-ga-id" "fix/mc-k2p9x-ga-abc12" '[]' "list --assignee=agent-x;show ga-abc12"
+    _no_routes_case "routed-looking-token-only-uses-assignment" "fix/mc-k2p9x" '[{"id":"ga-abc12"}]' "list --assignee=agent-x;show ga-abc12"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2227,6 +2256,7 @@ run_all() {
     test_routed_walk_overlap_order_and_batching
     test_routed_probe_failure_blocks
     test_routed_missing_store_and_definitive_answers
+    test_no_routes_behavior_unchanged
 
     echo
     echo "pass=$pass fail=$fail"
