@@ -65,11 +65,6 @@ duration_to_seconds() {
     esac
 }
 
-# Build a prefix->rig lookup once. `gc rig list` is queried per bead via
-# prefix_rig below (no associative arrays, for bash 3.2 portability).
-# Best-effort: a single-rig city resolves nothing here and simply runs the
-# bd/gc calls in their default scope.
-RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
 
 # Resolve a bead id's rig into RIG_ARG1/RIG_ARG2 ("--rig" "<name>"), or
 # leave them empty when the prefix is unknown. Callers expand them with
@@ -175,9 +170,21 @@ still_held() {
 EVENTS="$(gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null)" || exit 0
 [ -n "$EVENTS" ] || exit 0
 
+# Order-tracking beads are left out. Every order run creates one and closes it,
+# so they are most of a busy city's closes, and none is ever a blocker: a
+# dependency lookup per tracking bead in the lookback, on every run, is pure
+# cost (the order fires on each of those closes too). A payload with no label
+# list is kept.
 BLOCKERS="$(printf '%s\n' "$EVENTS" \
-    | jq -r '.payload.bead.id // empty' 2>/dev/null | sort -u)" || BLOCKERS=""
+    | jq -r 'select(((.payload.bead.labels // []) | if type == "array" then index("order-tracking") else null end) == null)
+             | .payload.bead.id // empty' 2>/dev/null | sort -u)" || BLOCKERS=""
 [ -n "$BLOCKERS" ] || exit 0
+
+# Build a prefix->rig lookup once, only when there is a blocker to look up.
+# `gc rig list` is queried per bead via set_rig_args (no associative arrays,
+# for bash 3.2 portability). Best-effort: a single-rig city resolves nothing
+# here and simply runs the bd/gc calls in their default scope.
+RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
 
 # Load dedup state (object mapping "<blocker>|<dependent>" -> ISO timestamp).
 STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"

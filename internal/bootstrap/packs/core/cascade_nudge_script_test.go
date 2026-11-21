@@ -795,3 +795,55 @@ func TestCascadeNudgeLeavesItsOwnBlockedCloseUnrecordedBesideAnotherBlocker(t *t
 		t.Fatalf("ga-blk's passing close must nudge worker-1; gc calls:\n%s", logged)
 	}
 }
+
+// TestCascadeNudgeSkipsOrderTrackingCloses pins the filter on order-tracking
+// beads. Every order run creates and closes one, so in a busy city they are
+// most of the bead.closed stream, and none blocks anything. A close of one
+// must cost no dependency lookup and no rig listing; a close of an ordinary
+// bead that carries labels must still be looked up and nudged.
+func TestCascadeNudgeSkipsOrderTrackingCloses(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+	cases := []struct {
+		name      string
+		labels    string
+		wantLooks bool
+	}{
+		{"order-tracking close is skipped", `["exec","order-tracking","order:gate-sweep"]`, false},
+		{"labeled ordinary close is kept", `["gc:task","priority:p1"]`, true},
+		{"close with null labels is kept", `null`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			eventsPath := filepath.Join(dir, "events.jsonl")
+			line := `{"seq":7,"type":"bead.closed","actor":"cache-reconcile","subject":"ga-blk","payload":{"bead":{"id":"ga-blk","status":"closed","labels":` + tc.labels + `}}}` + "\n"
+			if err := os.WriteFile(eventsPath, []byte(line), 0o644); err != nil {
+				t.Fatalf("write events: %v", err)
+			}
+			binDir, logPath := fakeGCBin(t, cascadeFake{
+				eventsPath: eventsPath,
+				depJSON:    `[{"id":"ga-dep","status":"open","assignee":"worker-1"}]`,
+				failDir:    dir,
+			}.body())
+			if out, err := runCascadeNudge(t, binDir, filepath.Join(dir, "state")); err != nil {
+				t.Fatalf("cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+			}
+			got, logged := countNudges(t, logPath)
+			looked := strings.Contains(logged, "gc bd dep list ga-blk")
+			if looked != tc.wantLooks {
+				t.Fatalf("dep lookup for ga-blk = %v, want %v; gc calls:\n%s", looked, tc.wantLooks, logged)
+			}
+			if !tc.wantLooks {
+				if got != 0 || strings.Contains(logged, "gc rig list") {
+					t.Fatalf("an order-tracking close must cost only the events read; gc calls:\n%s", logged)
+				}
+				return
+			}
+			if got != 1 || countNudgesTo(t, logPath, "worker-1") != 1 {
+				t.Fatalf("nudges = %d, want exactly 1 to worker-1; gc calls:\n%s", got, logged)
+			}
+		})
+	}
+}
