@@ -24,7 +24,7 @@
       "description": "Present only on output read from the city's API (supervisor or controller); absent on locally built output. Age in seconds of the cached state the server answered from: its bead cache's snapshot age, or the served response's own age when greater (a stale response served while it refreshes); 0 when the server reported no age."
     },
     "schema_version": {
-      "type": "string",
+      "const": "1",
       "description": "Schema version for this command output."
     },
     "ok": {

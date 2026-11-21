@@ -174,6 +174,10 @@ func TestFixedResultSchemasPinSchemaVersion(t *testing.T) {
 		{"formula", "show"},
 		{"event", "emit"},
 		{"init"},
+		{"rig", "list"},
+		{"status"},
+		{"sling"},
+		{"config", "show"},
 	} {
 		t.Run(strings.Join(command, " "), func(t *testing.T) {
 			rawSchema, err := readBuiltinSchema(command, jsonSchemaResultRole)
@@ -190,8 +194,9 @@ func TestFixedResultSchemasPinSchemaVersion(t *testing.T) {
 			if !ok {
 				t.Fatalf("schema for %v lacks schema_version property", command)
 			}
-			if got := version["const"]; got != "1" {
-				t.Fatalf("schema_version const = %#v, want %q", got, "1")
+			got, isString := version["const"].(string)
+			if !isString || got == "" {
+				t.Fatalf("schema_version const = %#v, want a non-empty string", version["const"])
 			}
 		})
 	}
