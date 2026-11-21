@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -175,6 +176,7 @@ func TestCanonicalSingletonPool_ManualSessionOfTemplateDoesNotHoldSeat(t *testin
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
+			var manualBefore *beads.Bead
 			if tc.seed {
 				b := seedManualSessionOfPoolTemplate(t, store, tc.agentName, tc.state, tc.sleepReason)
 				if tc.otherTemplate {
@@ -187,6 +189,11 @@ func TestCanonicalSingletonPool_ManualSessionOfTemplateDoesNotHoldSeat(t *testin
 						t.Fatalf("closing manual session: %v", err)
 					}
 				}
+				fresh, err := store.Get(b.ID)
+				if err != nil {
+					t.Fatalf("reading the seeded manual bead: %v", err)
+				}
+				manualBefore = &fresh
 			}
 			worker := canonicalSingletonWorker(t)
 			snapshot := &sessionBeadSnapshot{}
@@ -219,6 +226,21 @@ func TestCanonicalSingletonPool_ManualSessionOfTemplateDoesNotHoldSeat(t *testin
 			}
 			if seat.Template != "worker" || seat.AgentName != "worker" {
 				t.Fatalf("seat template/agent_name = %q/%q, want worker/worker", seat.Template, seat.AgentName)
+			}
+			// The seat's runtime session_name is bead-scoped, never the bare
+			// template identity the manual holder shares.
+			if want := PoolSessionName("worker", seat.ID); seat.SessionNameMetadata != want {
+				t.Fatalf("seat session_name = %q, want bead-scoped %q", seat.SessionNameMetadata, want)
+			}
+			// The manual bead is never written: not woken, adopted or closed.
+			if manualBefore != nil {
+				after, err := store.Get(manualBefore.ID)
+				if err != nil {
+					t.Fatalf("re-reading the manual bead: %v", err)
+				}
+				if !reflect.DeepEqual(*manualBefore, after) {
+					t.Fatalf("manual bead changed:\nbefore: %#v\nafter:  %#v", *manualBefore, after)
+				}
 			}
 		})
 	}
