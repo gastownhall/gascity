@@ -243,6 +243,7 @@ func ClaimExactWithWriters(reader ClaimExactReader, writers ClaimExactWriters, r
 	}
 	effects := claimEffectsWithGeneration(req.OnSuccess, toGeneration)
 
+	var revisionUnsupported bool
 	if writers.Revision != nil {
 		res, unsupported, tierErr := claimExactRevisionTier(reader, writers.Revision, id, b, effects)
 		if !unsupported {
@@ -251,11 +252,22 @@ func ClaimExactWithWriters(reader ClaimExactReader, writers ClaimExactWriters, r
 		// The store instance cannot revision-fence this write. Fall through
 		// to the assignment tier rather than failing: the guard fences the
 		// same observed row on the facts it can see.
+		revisionUnsupported = true
 	}
 	if writers.Assignment != nil {
-		return claimExactAssignmentTier(reader, writers.Assignment, req, id, b, toGeneration, effects)
+		res, err := claimExactAssignmentTier(reader, writers.Assignment, req, id, b, toGeneration, effects)
+		if err != nil && revisionUnsupported && beads.IsConditionalWriteUnsupported(err) {
+			// Both fences refused the claim. Name the two capabilities that
+			// were missing so the skip line a hook prints says what to fix,
+			// instead of a bare sentinel the operator has to decode.
+			return ClaimExactResult{Bead: b}, fmt.Errorf("%w: the revision CAS and the status+assignee guard are both unavailable on this store", err)
+		}
+		return res, err
 	}
-	return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	if revisionUnsupported {
+		return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: %w: the revision CAS is unavailable and this claim was given no status+assignee guard writer", id, beads.ErrConditionalWriteUnsupported)
+	}
+	return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: %w: no conditional writer was given", id, beads.ErrConditionalWriteUnsupported)
 }
 
 // claimExactRevisionTier commits through the bead-revision CAS. unsupported
@@ -289,7 +301,11 @@ func claimExactAssignmentTier(reader ClaimExactReader, writer beads.AssignmentGu
 	landed, err := writer.UpdateIfAssignment(id, *req.Want.Status, *req.Want.Assignee, effects)
 	if err != nil {
 		if beads.IsConditionalWriteUnsupported(err) {
-			return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: %w", id, beads.ErrConditionalWriteUnsupported)
+			// Wrap the store's own refusal (it carries the sentinel) so the
+			// caller, which knows whether the revision tier also refused,
+			// can name the missing capabilities once without duplicating the
+			// claim's ID context.
+			return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: %w", id, err)
 		}
 		return ClaimExactResult{Bead: claimExactBestEffortGet(reader, id, b)}, fmt.Errorf("claim exact %q: applying claim effects: %w", id, err)
 	}

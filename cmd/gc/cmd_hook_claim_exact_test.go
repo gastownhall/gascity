@@ -172,7 +172,12 @@ type exactClaimHarness struct {
 	exactErr    error
 	// exactBy, when set, answers each exact claim by bead ID instead of the
 	// single exactResult, so one run can mix outcomes across candidates.
-	exactBy        map[string]molecule.ClaimExactResult
+	exactBy map[string]molecule.ClaimExactResult
+	// exactErrs, when set, fails the exact claim for a bead ID with its
+	// error, so one run can mix a refusing store with a claiming one.
+	exactErrs      map[string]error
+	claimServe     map[string]beads.Bead
+	stderrOut      string
 	releases       [][2]string
 	releasedEvents []hookClaimReleaseRecord
 	reclaimed      bool
@@ -192,10 +197,16 @@ func (h *exactClaimHarness) run(t *testing.T, opts hookClaimOptions) (string, in
 		Runner: func(string, string) (string, error) { return h.runner, nil },
 		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
 			h.claimCalls = append(h.claimCalls, beadID)
+			if served, ok := h.claimServe[beadID]; ok {
+				return served, true, nil
+			}
 			return beads.Bead{}, false, nil
 		},
 		ClaimExact: func(_ context.Context, _ string, _ []string, _ string, req molecule.ClaimExactRequest) (molecule.ClaimExactResult, error) {
 			h.exactReqs = append(h.exactReqs, req)
+			if err, ok := h.exactErrs[req.ID]; ok {
+				return molecule.ClaimExactResult{}, err
+			}
 			if h.exactBy != nil {
 				return h.exactBy[req.ID], h.exactErr
 			}
@@ -230,6 +241,7 @@ func (h *exactClaimHarness) run(t *testing.T, opts hookClaimOptions) (string, in
 	}
 	var stdout, stderr bytes.Buffer
 	code := doHookClaim("query", t.TempDir(), opts, ops, &stdout, &stderr)
+	h.stderrOut = stderr.String()
 	return stdout.String(), code
 }
 
@@ -342,6 +354,47 @@ func TestDoHookClaimExactMovedReleasesTheLandedClaimAndMovesOn(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"action":"work"`) || !strings.Contains(stdout, `"bead_id":"work-2"`) {
 		t.Fatalf("hook wedged on the moved claim instead of serving work-2: %s", stdout)
+	}
+}
+
+// TestDoHookClaimExactCapabilityRefusalFailsClosedForTheGraphStepOnly: a
+// store refusing both conditional fences cannot fence a graph step, so that
+// candidate is skipped with the capability error surfaced — named, not a bare
+// sentinel — and never degraded to the unfenced pool claim, while a plain
+// candidate in the same run still claims through the pool claim.
+func TestDoHookClaimExactCapabilityRefusalFailsClosedForTheGraphStepOnly(t *testing.T) {
+	h := &exactClaimHarness{
+		runner: `[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"build"}},` +
+			`{"id":"pool-1","status":"open","metadata":{"gc.routed_to":"worker"}}]`,
+		exactErrs: map[string]error{
+			"work-1": fmt.Errorf(`claim exact "work-1": conditional writes unsupported: the revision CAS and the status+assignee guard are both unavailable on this store`),
+		},
+		claimServe: map[string]beads.Bead{
+			"pool-1": {ID: "pool-1", Status: "in_progress", Assignee: "worker-1"},
+		},
+	}
+	stdout, code := h.run(t, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	})
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d; stdout=%s stderr=%s", code, stdout, h.stderrOut)
+	}
+	if len(h.exactReqs) != 1 || h.exactReqs[0].ID != "work-1" {
+		t.Fatalf("exact claims = %v, want only the graph step work-1", h.exactReqs)
+	}
+	if len(h.claimCalls) != 1 || h.claimCalls[0] != "pool-1" {
+		t.Fatalf("pool claims = %v, want only pool-1; the graph step must never take the unfenced pool claim", h.claimCalls)
+	}
+	if !strings.Contains(stdout, `"action":"work"`) || !strings.Contains(stdout, `"bead_id":"pool-1"`) {
+		t.Fatalf("the refusing store wedged the hook instead of serving pool-1: %s", stdout)
+	}
+	if !strings.Contains(h.stderrOut, "skipping work-1") ||
+		!strings.Contains(h.stderrOut, "the revision CAS and the status+assignee guard are both unavailable") {
+		t.Fatalf("the capability refusal was not surfaced as a named skip: %s", h.stderrOut)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -596,6 +597,52 @@ func TestClaimExactWithWriters_NeitherWriterFailsClosed(t *testing.T) {
 	}
 	if fresh.Assignee != "" || fresh.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" {
 		t.Fatalf("unsupported store wrote anyway: assignee=%q generation=%q", fresh.Assignee, fresh.Metadata[beadmeta.ClaimGenerationMetadataKey])
+	}
+}
+
+// TestClaimExactWithWritersNamesTheMissingFencesWhenBothTiersRefuse: a store
+// that refuses both conditional fences fails closed, and the failing error
+// names the two fences it could not use — the revision CAS and the
+// status+assignee guard — instead of a bare sentinel, so the operator reading
+// the hook's skip line learns which store capabilities are missing. The
+// nil-guard shape (a strict revision-only claim against a store without the
+// CAS) names the guard it was never given the same way.
+func TestClaimExactWithWritersNamesTheMissingFencesWhenBothTiersRefuse(t *testing.T) {
+	store := beads.NewMemStore()
+	b := mustCreateExactClaimBead(t, store)
+	req := exactClaimRequest(b.ID, ClaimExactPreconditions{Status: strp("open"), Assignee: strp("")}, beads.UpdateOpts{Assignee: strp("worker-9")})
+
+	rev := &exactRevisionWriterStub{err: fmt.Errorf("update: %w", beads.ErrConditionalWriteUnsupported)}
+	assign := &exactAssignmentWriterStub{err: fmt.Errorf("update: %w", beads.ErrConditionalWriteUnsupported)}
+	_, err := ClaimExactWithWriters(store, ClaimExactWriters{Revision: rev, Assignment: assign}, req)
+	if err == nil {
+		t.Fatal("expected an error when both fences are refused")
+	}
+	if !beads.IsConditionalWriteUnsupported(err) {
+		t.Fatalf("error = %v, want IsConditionalWriteUnsupported", err)
+	}
+	for _, want := range []string{"revision CAS", "status+assignee guard"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name the missing fence %q", err, want)
+		}
+	}
+	if rev.calls != 1 || assign.calls != 1 {
+		t.Fatalf("tier calls = revision %d assignment %d, want each consulted once", rev.calls, assign.calls)
+	}
+	fresh, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if fresh.Assignee != "" || fresh.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" {
+		t.Fatalf("store refusing both fences wrote anyway: assignee=%q generation=%q", fresh.Assignee, fresh.Metadata[beadmeta.ClaimGenerationMetadataKey])
+	}
+
+	_, err = ClaimExactWithWriters(store, ClaimExactWriters{Revision: &exactRevisionWriterStub{err: beads.ErrConditionalWriteUnsupported}}, req)
+	if !beads.IsConditionalWriteUnsupported(err) {
+		t.Fatalf("nil-guard error = %v, want IsConditionalWriteUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "status+assignee guard") {
+		t.Fatalf("nil-guard error %q does not name the missing status+assignee guard", err)
 	}
 }
 
