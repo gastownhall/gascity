@@ -76,6 +76,14 @@ func contractExtmsgFamily(t *testing.T, h *contractHarness) {
 	outbound, err := c.PostV0CityByCityNameExtmsgOutboundWithResponse(ctx, city, &genclient.PostV0CityByCityNameExtmsgOutboundParams{XGCRequest: contractCSRF},
 		genclient.PostV0CityByCityNameExtmsgOutboundJSONRequestBody{SessionId: sess.Id, Conversation: &conv, Text: ptr("reply")})
 	expectStatus(t, "outbound message", outbound, err, http.StatusOK, http.StatusUnprocessableEntity)
+	outboundFile, err := c.PostV0CityByCityNameExtmsgOutboundFileWithResponse(ctx, city,
+		&genclient.PostV0CityByCityNameExtmsgOutboundFileParams{XGCRequest: contractCSRF, IdempotencyKey: ptr("contract-file")},
+		genclient.PostV0CityByCityNameExtmsgOutboundFileJSONRequestBody{SessionId: sess.Id, Conversation: conv, FilePath: "/adapter-only/results.txt"})
+	expectStatus(t, "outbound file", outboundFile, err, http.StatusOK)
+	fileReceipt := mustJSON(t, "outbound file", outboundFile.JSON200, outboundFile).Receipt
+	if fileReceipt.Delivered || fileReceipt.FailureKind != "unsupported" {
+		t.Fatalf("adapter without callback must refuse file delivery: %+v", fileReceipt)
+	}
 
 	left, err := c.DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx, city, &genclient.DeleteV0CityByCityNameExtmsgParticipantsParams{XGCRequest: contractCSRF},
 		genclient.DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody{GroupId: groupID, Handle: "contract"})

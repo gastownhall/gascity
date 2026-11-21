@@ -1661,6 +1661,26 @@ export const zBeadsDiagnostic = z.object({
     proxied: zProxiedDiagnostic.optional()
 });
 
+export const zPublishFileReceipt = z.object({
+    Conversation: zConversationRef,
+    Delivered: z.boolean(),
+    Error: z.string().optional(),
+    FailureKind: z.string(),
+    FileID: z.string()
+});
+
+export const zPublishFileRequest = z.object({
+    conversation: zConversationRef,
+    file_path: z.string().min(1),
+    filename: z.string().optional(),
+    idempotency_key: z.string().optional(),
+    initial_comment: z.string().optional(),
+    metadata: z.record(z.string(), z.string()).optional(),
+    reply_to_message_id: z.string().optional(),
+    session_id: z.string().min(1),
+    title: z.string().optional()
+});
+
 export const zPublishReceipt = z.object({
     Conversation: zConversationRef,
     Delivered: z.boolean(),
@@ -3941,6 +3961,12 @@ export const zListBodyConversationTranscriptRecord = z.object({
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+export const zOutboundFileResult = z.object({
+    DeliveryContext: zDeliveryContextRecord.optional(),
+    Receipt: zPublishFileReceipt,
+    TranscriptEntry: zConversationTranscriptRecord.optional()
 });
 
 export const zOutboundResult = z.object({
@@ -10322,6 +10348,22 @@ export const zPostV0CityByCityNameExtmsgOutboundPath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameExtmsgOutboundResponse = zOutboundResult;
+
+export const zPostV0CityByCityNameExtmsgOutboundFileBody = zPublishFileRequest;
+
+export const zPostV0CityByCityNameExtmsgOutboundFileHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
+});
+
+export const zPostV0CityByCityNameExtmsgOutboundFilePath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameExtmsgOutboundFileResponse = zOutboundFileResult;
 
 export const zDeleteV0CityByCityNameExtmsgParticipantsBody = zExtMsgParticipantRemoveInputBody;
 

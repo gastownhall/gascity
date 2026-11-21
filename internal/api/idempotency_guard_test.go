@@ -22,6 +22,7 @@ import (
 // regression that drops the header fails
 // TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
+	"post-v0-city-by-city-name-extmsg-outbound-file": true,
 	"create-bead":             true,
 	"create-session":          true,
 	"send-mail":               true,
