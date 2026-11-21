@@ -327,3 +327,77 @@ func TestDoHookClaimReclaimsStaleAssigneeThenExactClaimsSameCycle(t *testing.T) 
 		t.Fatalf("reclaimed_stale events = %v, want one naming the stale owner", h.reclaimedEv)
 	}
 }
+
+// TestDoHookClaimPromotesReadyGraphStepThroughExactSeam: a ready assignment
+// (open, already owned by this session's identity) that is a graph step
+// promotes through the exact seam, fenced on the observed row including its
+// assignee spelling — and the effects keep the stored owner, so the claim
+// only advances the status.
+func TestDoHookClaimPromotesReadyGraphStepThroughExactSeam(t *testing.T) {
+	h := &exactClaimHarness{
+		runner: `[{"id":"work-1","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"build"}}]`,
+		exactResult: molecule.ClaimExactResult{
+			Bead:    beads.Bead{ID: "work-1", Status: "in_progress", Assignee: "worker-1", Metadata: map[string]string{"gc.routed_to": "worker", "gc.root_bead_id": "root-1", "gc.step_id": "build"}},
+			Outcome: molecule.ClaimExactClaimed,
+			Fence:   molecule.ClaimExactFenceRevision,
+		},
+	}
+	stdout, code := h.run(t, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	})
+
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d; stdout=%s", code, stdout)
+	}
+	if len(h.claimCalls) != 0 {
+		t.Fatalf("pool claim issued for a ready graph step: %v", h.claimCalls)
+	}
+	if len(h.exactReqs) != 1 || h.exactReqs[0].ID != "work-1" {
+		t.Fatalf("exact claims = %+v, want exactly one on work-1", h.exactReqs)
+	}
+	req := h.exactReqs[0]
+	if req.Want.Assignee == nil || *req.Want.Assignee != "worker-1" {
+		t.Fatalf("exact claim fenced on assignee %v, want the stored owner spelling", req.Want.Assignee)
+	}
+	if req.OnSuccess.Assignee != nil {
+		t.Fatalf("exact claim effects reassign %q; a ready promotion keeps the stored owner", *req.OnSuccess.Assignee)
+	}
+	if !strings.Contains(stdout, `"action":"work"`) || !strings.Contains(stdout, `"reason":"ready_assignment"`) {
+		t.Fatalf("no ready-assignment receipt for the exact claim: %s", stdout)
+	}
+}
+
+// TestDoHookClaimReadyGraphStepFencedOnAssignee: the ready tier's exact claim
+// fences on the observed owner; a row whose assignee moved to a rival is a
+// rejection naming the rival, never a pool-claim fallback and never work.
+func TestDoHookClaimReadyGraphStepFencedOnAssignee(t *testing.T) {
+	h := &exactClaimHarness{
+		runner: `[{"id":"work-1","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"build"}}]`,
+		exactResult: molecule.ClaimExactResult{
+			Bead:    beads.Bead{ID: "work-1", Status: "open", Assignee: "rival", Metadata: map[string]string{"gc.root_bead_id": "root-1", "gc.step_id": "build"}},
+			Outcome: molecule.ClaimExactPreconditionFailed,
+		},
+	}
+	stdout, _ := h.run(t, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	})
+
+	if len(h.claimCalls) != 0 {
+		t.Fatalf("assignee-moved ready step fell back to the pool claim: %v", h.claimCalls)
+	}
+	if len(h.exactReqs) != 1 {
+		t.Fatalf("exact claims = %d, want 1", len(h.exactReqs))
+	}
+	if strings.Contains(stdout, `"action":"work"`) {
+		t.Fatalf("handed out work for a moved ready assignment: %s", stdout)
+	}
+	if len(h.rejections) != 1 || h.rejections[0] != [3]string{"work-1", "rival", "worker-1"} {
+		t.Fatalf("rejection events = %v, want one naming the rival owner", h.rejections)
+	}
+}

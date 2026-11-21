@@ -107,27 +107,18 @@ func hookClaimExactThroughStore(actor string, res molecule.ClaimExactResult, err
 	return res.Bead, "", fmt.Errorf("claim exact %q: unresolved outcome %q", res.Bead.ID, res.Outcome)
 }
 
-// hookClaimEligibleTierClaim runs one eligible-tier candidate's claim. A
+// hookClaimTierClaim runs one claim tier's claim for a candidate as actor. A
 // graph step — a candidate carrying both a workflow root and a step identity —
 // claims through the exact seam, fenced to the row this hook observed; it
 // never falls back to the unfenced pool claim, whatever the exact seam
 // answers. Every other candidate takes the pool claim unchanged.
-//
-// reclaimed reports that the reclaim lane just reverted this candidate's
-// stale lease: bd reclaim leaves the row open and unassigned, so the exact
-// fence keys on the row as this invocation now knows it (assignee empty)
-// rather than as the work query saw it.
-func hookClaimEligibleTierClaim(ctx context.Context, candidate beads.Bead, reclaimed bool, opts hookClaimOptions, ops hookClaimOps, dir string) (beads.Bead, bool, bool, error) {
+func hookClaimTierClaim(ctx context.Context, candidate beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string) (beads.Bead, bool, bool, error) {
 	if !hookClaimExactCandidate(candidate) {
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, actor)
 		return claimed, ok, false, err
 	}
-	observed := candidate
-	if reclaimed {
-		observed.Assignee = ""
-	}
-	res, resErr := ops.ClaimExact(ctx, dir, opts.Env, opts.Assignee, hookClaimExactPlan(observed, opts.Assignee))
-	claimed, verdict, err := hookClaimExactThroughStore(opts.Assignee, res, resErr)
+	res, resErr := ops.ClaimExact(ctx, dir, opts.Env, actor, hookClaimExactPlan(candidate, actor))
+	claimed, verdict, err := hookClaimExactThroughStore(actor, res, resErr)
 	return claimed, verdict == hookClaimExactClaimedVerdict, verdict == hookClaimExactMovedVerdict, err
 }
 

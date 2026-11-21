@@ -983,10 +983,20 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
+		claimed, ok, moved, err := hookClaimTierClaim(ctx, candidate, claimActor, opts, ops, dir)
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// re-stamp and the workflow re-check below spend any more store time.
 		landedAt := ops.nowOrWallClock()
+		if moved {
+			// The guarded write committed onto a row that is no longer the
+			// assignment this hook observed. This session owns the bead, so
+			// give it back before trying any other candidate; a failed
+			// release fails closed rather than leak the claim.
+			if !releaseMovedHookExactClaim(claimed, opts, ops, dir, stderr) {
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			continue
+		}
 		if err != nil {
 			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
 				// The read federated and the write did not: the assigned tier
@@ -1188,7 +1198,15 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, moved, err := hookClaimEligibleTierClaim(ctx, candidate, reclaimedFrom != "", opts, ops, dir)
+		claimObserved := candidate
+		if reclaimedFrom != "" {
+			// The reclaim lane just reverted this candidate's stale lease: bd
+			// reclaim leaves the row open and unassigned, so the exact fence
+			// keys on the row as this invocation now knows it, not as the
+			// work query saw it.
+			claimObserved.Assignee = ""
+		}
+		claimed, ok, moved, err := hookClaimTierClaim(ctx, claimObserved, opts.Assignee, opts, ops, dir)
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// workflow re-check below spends any more store time.
 		landedAt := ops.nowOrWallClock()
