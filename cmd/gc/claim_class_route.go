@@ -145,6 +145,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -561,6 +562,19 @@ func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, 
 		r.graph.Get)
 }
 
+// claimExact runs an exact claim against the binding's graph front door: the
+// graph leg reads the row and commits through the revision CAS, and the
+// status+assignee guard joins only when the binding's backing store carries
+// it — a binding engine with neither fence fails closed with the capability
+// named rather than claiming unfenced, exactly as the work leg does.
+func (r *hookClaimClassRoute) claimExact(req molecule.ClaimExactRequest) (molecule.ClaimExactResult, error) {
+	writers := molecule.ClaimExactWriters{Revision: r.graph}
+	if guard, ok := storebinding.AssignmentGuardedUpdaterFor(r.graph); ok {
+		writers.Assignment = guard
+	}
+	return molecule.ClaimExactWithWriters(r.graph, writers, req)
+}
+
 // listContinuation reads a continuation group out of the binding and records
 // every member as resident, so the per-sibling assignment that follows does not
 // re-probe (or re-fail) one bd subprocess at a time.
@@ -659,6 +673,39 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.claim(beadID, assignee)
 		default:
 			return claimed, ok, err
+		}
+	}
+
+	// The exact claim of a graph step follows the pool claim's rule with one
+	// sharpening: the exact seam's own Get IS the work leg's answer. Every
+	// settled outcome — claimed, stale, observation-moved — and every write
+	// error happens on a row the work store demonstrably read, so the
+	// settle-read routes() would spend on such errors cannot change the
+	// verdict; only the Get's own not-found proves absence, and only that
+	// opens the escalation (escalates: no other work leg may hold the id, and
+	// the binding must). holds memoizes residence on the way in, so the
+	// follow-on release of a moved claim and the post-claim stamps route to
+	// the binding without probing again.
+	ops.ClaimExact = func(ctx context.Context, dir string, env []string, actor string, req molecule.ClaimExactRequest) (molecule.ClaimExactResult, error) {
+		if route.knownResident(req.ID) {
+			return route.claimExact(req)
+		}
+		res, err := base.ClaimExact(ctx, dir, env, actor, req)
+		if err == nil || res.Outcome == molecule.ClaimExactClaimed || !hookClaimBeadIsElsewhere(err) {
+			// A committed claim — readback error included — is a bead this
+			// session owns in the work store; anything else that is not a
+			// proven absence is the work store's answer about a row it read.
+			// Escalating either would claim one logical bead in two ledgers.
+			return res, err
+		}
+		routed, probeErr := route.escalates(ctx, hookStore{dir: dir, env: env}, req.ID, actor)
+		switch {
+		case probeErr != nil:
+			return molecule.ClaimExactResult{}, probeErr
+		case routed:
+			return route.claimExact(req)
+		default:
+			return res, err
 		}
 	}
 

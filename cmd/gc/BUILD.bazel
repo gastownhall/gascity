@@ -1286,6 +1286,7 @@ go_test(
         "city_toml_beads_peek_test.go",
         "cityinit_exact_output_test.go",
         "cityinit_impl_test.go",
+        "claim_class_route_exact_test.go",
         "claim_class_route_test.go",
         "claim_class_route_wire_test.go",
         "claim_cross_store_test.go",
