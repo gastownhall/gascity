@@ -19,7 +19,7 @@ import (
 // ready.
 type hookWorkflowStopFixture struct {
 	t      *testing.T
-	store  *beads.MemStore
+	store  beads.Store
 	served []string
 	claims []string
 	// afterClaim runs inside the claim CAS, after it commits: the window in
