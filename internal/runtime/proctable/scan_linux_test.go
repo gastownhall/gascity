@@ -84,7 +84,7 @@ func TestParseProcStatCarriesParentGroupSessionAndStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseProcStat: %v", err)
 	}
-	if want := (procStat{ppid: 11, pgid: 12, sid: 13, startTime: "98765"}); got != want {
+	if want := (procStat{state: "S", ppid: 11, pgid: 12, sid: 13, startTime: "98765"}); got != want {
 		t.Fatalf("parseProcStat = %+v, want %+v", got, want)
 	}
 }

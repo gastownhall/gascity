@@ -424,3 +424,62 @@ func TestSupervisorSystemdDelegationEnvMatchesProctable(t *testing.T) {
 		t.Fatalf("proctable.SupervisorSystemdScopeEnv = %q, want %q", proctable.SupervisorSystemdScopeEnv, supervisorSystemdScopeEnv)
 	}
 }
+
+// bdProxiedBackend is one bd proxy root on a procSweep's procfs: the proxy
+// supervisor and its sql-server backend, both reparented to init and both
+// carrying the ended session's identity, as an agent shell that ran bd leaves
+// them.
+type bdProxiedBackend struct {
+	root       string
+	configPath string
+	proxyPID   int
+	backendPID int
+}
+
+// writeBDProxiedBackend lays out a bd proxy root under the city's default
+// location with a live proxy and its backend on s's procfs.
+func writeBDProxiedBackend(s *procSweep, proxyPID, backendPID int) bdProxiedBackend {
+	s.t.Helper()
+	b := bdProxiedBackend{proxyPID: proxyPID, backendPID: backendPID}
+	b.configPath = writeBdProxyRoot(s.t, s.cityPath, proxyPID)
+	b.root = filepath.Dir(b.configPath)
+	s.process(proxyPID, 1, "bd", "4", sweepLeakAt)
+	writeFakeProcCmdline(s.t, s.root, proxyPID, bdProxyChildArgv(b.configPath)...)
+	s.process(backendPID, 1, "dolt", "4", sweepLeakAt)
+	writeFakeProcCmdline(s.t, s.root, backendPID, "dolt", "sql-server", "--config", b.configPath)
+	return b
+}
+
+// AC-1: a bd-configured sql-server reparented to init with an ended session's
+// identity is bd's backend, not that session's orphan, while a live bd proxy
+// for its root fronts it. The sweep reaps the genuine agent orphan beside it,
+// under either orphan rule, and names the proxy that protects the backend,
+// once per backend process.
+func TestSweepProcessTableOrphansFencesBDProxiedDoltServer(t *testing.T) {
+	s := newProcSweep(t)
+	writeBDProxiedBackend(s, 4200, 4201)
+	s.process(4300, 1, "claude", "4", sweepLeakAt)
+	writeFakeProcCmdline(t, s.root, 4300, "claude", "--resume")
+	t.Cleanup(func() { fencedInfrastructureRoots.put(normalizePathForCompare(s.cityPath), nil) })
+
+	pids, log := s.sweep(nil, sweepClosed, nil)
+	wantPIDs(t, "row closed", pids, 4300)
+	want := "leaving process-table root pid=4201 session=" + sweepRowID + " alone: bd-owned Dolt server (live bd proxy pid=4200)"
+	if !strings.Contains(log, want) {
+		t.Fatalf("stderr %q does not report %q", log, want)
+	}
+	if !strings.Contains(log, "leaving process-table root pid=4200 ") {
+		t.Fatalf("stderr %q does not report the fenced proxy", log)
+	}
+
+	if err := os.RemoveAll(filepath.Join(s.root, "4300")); err != nil {
+		t.Fatal(err)
+	}
+	pids, log = s.sweep(nil, sweepClosed, nil)
+	wantPIDs(t, "row closed, again", pids)
+	if log != "" {
+		t.Fatalf("repeat sweep logged %q, want silence for an already-reported backend", log)
+	}
+	wantPIDs(t, "row stopped", pidsOf(s.sweep(sweepAsleep, sweepAsleep, sweepNoPanes())))
+	wantPIDs(t, "row absent", pidsOf(s.sweep(nil, nil, nil)))
+}

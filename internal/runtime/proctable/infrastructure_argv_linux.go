@@ -36,3 +36,12 @@ func rootStartIdentity(pid int) string {
 	}
 	return stat.startTime
 }
+
+// rootAlive reads pid's state from the same procfs root the scanner enumerates.
+func rootAlive(pid int) bool {
+	stat, ok, err := readProcStat(filepath.Join(scanRoot, strconv.Itoa(pid), "stat"))
+	if err != nil || !ok {
+		return false
+	}
+	return stat.state != "Z" && stat.state != "X"
+}

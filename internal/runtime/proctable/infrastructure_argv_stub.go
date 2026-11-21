@@ -11,3 +11,6 @@ func rootArgv(pid int) ([]string, error) {
 }
 
 func rootStartIdentity(int) string { return "" }
+
+// rootAlive has no process table to read here.
+func rootAlive(int) bool { return false }

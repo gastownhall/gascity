@@ -3860,10 +3860,11 @@ type fencedInfrastructureRootSet struct {
 
 var fencedInfrastructureRoots = &fencedInfrastructureRootSet{}
 
-// sweepRootIsCityInfrastructure classifies a scanned root before the orphan
-// sweep reaps it. It is a variable so tests can supply a classification the
-// host does not produce under `go test`.
-var sweepRootIsCityInfrastructure = proctable.RootIsCityInfrastructure
+// sweepCityInfrastructureRoot is the kill-path fence the orphan sweep
+// consults before it reaps a scanned root (session.CityInfrastructureRoot).
+// It is a variable so tests can supply a classification the host does not
+// produce under `go test`.
+var sweepCityInfrastructureRoot = session.CityInfrastructureRoot
 
 func (s *fencedInfrastructureRootSet) take(cityPath string) map[string]struct{} {
 	s.mu.Lock()
@@ -3969,7 +3970,8 @@ func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bo
 }
 
 // processRootFence is why the sweep holds a reapable root's termination:
-// the root is city infrastructure by argv, or a detached foreign systemd
+// the root is city infrastructure by argv, a Dolt server a live bd proxy
+// owns (session.CityInfrastructureRoot), or a detached foreign systemd
 // user service, reported with its unit, ppid and command name so a root
 // the fence spares can be identified from the log. "" means the root may
 // be reaped. A root the classifier cannot read (the scan's start identity
@@ -3978,12 +3980,9 @@ func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bo
 // reaped. The caller re-checks the fence every sweep and reports each
 // fenced root once per process through the sweep's existing suppression.
 func processRootFence(live runtime.LiveRuntime) (string, error) {
-	infrastructure, err := sweepRootIsCityInfrastructure(live)
-	if err != nil {
-		return "", err
-	}
-	if infrastructure {
-		return "city infrastructure (managed Dolt watchdog, bd proxy or nudge poller)", nil
+	reason, err := sweepCityInfrastructureRoot(live)
+	if err != nil || reason != "" {
+		return reason, err
 	}
 	if unit := proctable.DetachedUserServiceUnit(live.PID); unit != "" {
 		return fmt.Sprintf("detached user service %s (ppid=%d name=%q)", unit, live.PPID, live.Name), nil
@@ -4129,8 +4128,10 @@ func sweepProcessTableOrphans(
 		// from an agent shell): terminating one signals its process group
 		// and takes the city's Dolt server down with it (#6316), and the
 		// fence is per-process argv, so it also covers processes stamped
-		// before their spawners began scrubbing session identity. Or it may
-		// be a detached systemd user service: a foreign unit of its own whose
+		// before their spawners began scrubbing session identity. It may be
+		// the Dolt server a live bd proxy runs, which bd spawned with the
+		// same inherited environment. Or it may be a detached systemd user
+		// service: a foreign unit of its own whose
 		// environment carries the session's identity (inherited from the user
 		// manager's environment, or set with `systemd-run --user --setenv`).
 		// It is not this session's runtime, and a later incarnation's cleanup
