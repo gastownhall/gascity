@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // PostOpenReport is what the post-open observation read over the linked
@@ -43,40 +42,6 @@ func (r PostOpenReport) IgnoredPlaneReason() string {
 	return r.Reality.String()
 }
 
-// postOpenHeadQuery is HEAD alone: the observation's first column, and the
-// statement a single-column read would issue.
-const postOpenHeadQuery = "SELECT DOLT_HASHOF('HEAD')"
-
-// postOpenTables are the tables the observation asks about, in order: the
-// ignored lane's cursor table, then the library's sentinel tables and then its
-// floored sentinel tables, each in the library's own probing order.
-func postOpenTables() []string {
-	tables := append([]string{cursorTableIgnored}, ignoredSentinelTables...)
-	for _, floored := range ignoredSentinelFlooredTables {
-		tables = append(tables, floored.Table)
-	}
-	return tables
-}
-
-// postOpenQuery is the observation's ONE statement: HEAD, then one
-// information_schema COUNT(*) per table in postOpenTables, then one for the
-// sentinel column. Scalar sub-selects against information_schema cannot fail
-// on an absent object — they count zero — so the statement always answers, and
-// HEAD and the ignored plane are read at the same instant on the same
-// connection.
-func postOpenQuery() (string, []any) {
-	var b strings.Builder
-	var args []any
-	b.WriteString(postOpenHeadQuery)
-	for _, table := range postOpenTables() {
-		b.WriteString(", (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?)")
-		args = append(args, table)
-	}
-	b.WriteString(", (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?)")
-	args = append(args, IgnoredSentinelColumnTable, IgnoredSentinelColumnName)
-	return b.String(), args
-}
-
 // ErrPostOpenNoPool reports a post-open read handed no pool.
 var ErrPostOpenNoPool = errors.New("proxyendpoint: post-open read has no pool")
 
@@ -103,14 +68,16 @@ var ErrPostOpenNoPool = errors.New("proxyendpoint: post-open read has no pool")
 // pool is exactly that first statement, so it answered the pre-open hash — the
 // value the probe saw — and an open that had just committed passed the check.
 //
-// So the read pins ONE connection and issues the statement twice on it: the
-// first advances whatever root the connection was holding, and the SECOND is
-// the answer. Pinning is what makes that true — two statements through the
-// pool could land on two connections, and the second could be the stale one.
-// The cost is one extra round trip on a connection the library already holds;
-// no dial, no handshake, no session of gc's own on bd's proxy. It also leaves
-// the connection advanced when it goes back to the pool, which the library's
-// own first read on this path was going to need anyway.
+// So the read pins ONE connection and issues the plane statement AFTER an
+// advancing statement on it: the first advances whatever root the connection
+// was holding, and the plane statement (schemaPlaneQuery, then SHOW COLUMNS
+// for the sentinel column exactly as the probe reads it) is the answer.
+// Pinning is what makes that true — two statements through the pool could
+// land on two connections, and the second could be the stale one. The cost is
+// one extra round trip on a connection the library already holds; no dial, no
+// handshake, no session of gc's own on bd's proxy. It also leaves the
+// connection advanced when it goes back to the pool, which the library's own
+// first read on this path was going to need anyway.
 func ReadPostOpen(ctx context.Context, db *sql.DB) (PostOpenReport, error) {
 	if db == nil {
 		return PostOpenReport{}, ErrPostOpenNoPool
@@ -120,59 +87,28 @@ func ReadPostOpen(ctx context.Context, db *sql.DB) (PostOpenReport, error) {
 		return PostOpenReport{}, fmt.Errorf("post-open read: pinning a pooled connection: %w", err)
 	}
 	defer conn.Close() //nolint:errcheck // returns the connection to the library's pool
-	if _, err := readPostOpenOnce(ctx, conn); err != nil {
-		// A FAILING statement does not advance the session root (be-itm5), so
-		// the second answer would be as stale as the first. Report it.
+	// The advancing statement is the cheapest one that succeeds: HEAD alone,
+	// no catalog scan. Its answer is discarded — it is the statement AFTER it
+	// that observes — so it need not carry the plane, and until ga-7lmbiq it
+	// did, which doubled every post-open observation's catalog scans.
+	//
+	// A FAILING statement does not advance the session root (be-itm5), so the
+	// observation would be as stale as the first answer. Report it.
+	var advanced sql.NullString
+	if err := conn.QueryRowContext(ctx, schemaPlaneHeadQuery).Scan(&advanced); err != nil {
 		return PostOpenReport{}, fmt.Errorf("post-open read (advancing statement): %w", err)
 	}
-	report, err := readPostOpenOnce(ctx, conn)
+	plane, err := readSchemaPlane(ctx, conn)
 	if err != nil {
 		return PostOpenReport{}, fmt.Errorf("post-open read: %w", err)
 	}
-	return report, nil
-}
-
-// readPostOpenOnce issues the observation's statement once on conn.
-//
-// A NULL or empty hash is an error rather than "": the caller reads "" as "not
-// observed", and a statement that ran and returned nothing is a failure to
-// observe, which the caller must be able to log as one.
-//
-// The sentinel reality is derived in the library's order, as readIgnoredReality
-// derives it: the first absent sentinel TABLE floors the lane at
-// IgnoredSentinelTableFloor and nothing after it can lower that; only with
-// every sentinel table present do the absent floored tables and the sentinel
-// column floor it, at the lowest of their floors.
-func readPostOpenOnce(ctx context.Context, conn *sql.Conn) (PostOpenReport, error) {
-	query, args := postOpenQuery()
-	tables := postOpenTables()
-	var head sql.NullString
-	counts := make([]int, len(tables)+1)
-	dest := []any{&head}
-	for i := range counts {
-		dest = append(dest, &counts[i])
+	reality, err := readIgnoredReality(ctx, conn, plane)
+	if err != nil {
+		return PostOpenReport{}, fmt.Errorf("post-open read: %w", err)
 	}
-	if err := conn.QueryRowContext(ctx, query, args...).Scan(dest...); err != nil {
-		return PostOpenReport{}, err
-	}
-	trimmed := strings.TrimSpace(head.String)
-	if !head.Valid || trimmed == "" {
-		return PostOpenReport{}, errors.New("DOLT_HASHOF('HEAD') returned no hash")
-	}
-	report := PostOpenReport{Head: trimmed, IgnoredCursorTable: counts[0] > 0}
-	for i, table := range ignoredSentinelTables {
-		if counts[i+1] == 0 {
-			report.Reality = CursorReality{Limited: true, Floor: IgnoredSentinelTableFloor, Missing: table}
-			return report, nil
-		}
-	}
-	for i, floored := range ignoredSentinelFlooredTables {
-		if counts[1+len(ignoredSentinelTables)+i] == 0 {
-			report.Reality = report.Reality.lowered(floored.Floor, floored.Table)
-		}
-	}
-	if counts[len(counts)-1] == 0 {
-		report.Reality = report.Reality.lowered(IgnoredSentinelColumnFloor, IgnoredSentinelColumnTable+"."+IgnoredSentinelColumnName)
-	}
-	return report, nil
+	return PostOpenReport{
+		Head:               plane.head,
+		IgnoredCursorTable: plane.exists(cursorTableIgnored),
+		Reality:            reality,
+	}, nil
 }
