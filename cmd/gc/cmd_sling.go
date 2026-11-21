@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -885,6 +886,13 @@ type cliBranchResolver struct{}
 
 func (cliBranchResolver) DefaultBranch(dir string) string {
 	return defaultBranchFor(dir)
+}
+
+func (cliBranchResolver) BaseRefMissing(dir, ref string) bool {
+	if dir == "" {
+		return false
+	}
+	return git.New(dir).BaseRefMissing(ref)
 }
 
 // cliNotifier implements sling.Notifier using IPC.

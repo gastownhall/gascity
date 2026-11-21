@@ -96,9 +96,14 @@ type AgentResolver interface {
 	ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool)
 }
 
-// BranchResolver resolves the default branch for a directory.
+// BranchResolver resolves the default branch for a directory and checks the
+// refs a sling hands to a formula as base_branch.
 type BranchResolver interface {
 	DefaultBranch(dir string) string
+	// BaseRefMissing reports true only when dir is a git repository in which
+	// ref resolves to no commit. Anything it cannot decide (dir is not a
+	// repository, git is unavailable) reports false.
+	BaseRefMissing(dir, ref string) bool
 }
 
 // Notifier sends wake notifications to the controller and control
@@ -1116,6 +1121,28 @@ func SlingFormulaUsesBaseBranch(formulaName string) bool {
 // uses a target_branch variable.
 func SlingFormulaUsesTargetBranch(formulaName string) bool {
 	return formulaName == "mol-refinery-patrol"
+}
+
+// checkSlingBaseBranch refuses a formula sling whose base_branch names no ref
+// in the repository the work will be built in. The molecule's workspace step
+// would otherwise fail on it after the bead was already routed and its
+// molecule created. The check reads local refs only (no fetch) and passes
+// whenever the resolver cannot decide, so it refuses only on proof.
+func checkSlingBaseBranch(formulaName, beadID string, opts SlingOpts, deps SlingDeps, a config.Agent) error {
+	if deps.Branches == nil {
+		return nil
+	}
+	ref := BuildSlingFormulaVars(formulaName, beadID, opts.Vars, a, deps)["base_branch"]
+	if ref == "" {
+		return nil
+	}
+	repoDir := SlingFormulaRepoDir(beadID, deps, a)
+	if deps.Branches.BaseRefMissing(repoDir, ref) {
+		// Name the repository by its base name only: the API echoes this error
+		// to clients, and an absolute path is host detail they should not see.
+		return fmt.Errorf("base_branch %q resolves to no ref (neither origin/%s nor %s) in the build repository %q; fetch it or correct base_branch, do not retry unchanged", ref, ref, ref, filepath.Base(repoDir))
+	}
+	return nil
 }
 
 // SlingFormulaRepoDir returns the best repo directory for formula variable

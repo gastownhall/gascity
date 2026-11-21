@@ -135,6 +135,15 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	// Refuse a formula launch whose base_branch resolves to no ref before
+	// anything is written: the reassign reopen below would otherwise leave a
+	// claimed bead open and unassigned by a sling that then fails.
+	if formulaName, beadID := slingLaunchFormula(opts, a); formulaName != "" {
+		if err := checkSlingBaseBranch(formulaName, beadID, opts, deps, a); err != nil {
+			return result, err
+		}
+	}
+
 	// Reassign: make the bead claimable by the target pool/agent before
 	// routing — clear any existing assignee and reopen it if a prior actor
 	// left it in_progress. Without this, a bead claimed by `bd update --claim`
@@ -169,6 +178,36 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 
 	return result, nil
+}
+
+// checkBatchSlingBaseBranches runs checkSlingBaseBranch for every open child
+// of a container sling that launches formulaName, before any child is touched.
+// A plain-bead batch (formulaName == "") has no base_branch to check.
+func checkBatchSlingBaseBranches(formulaName string, open []beads.Bead, opts SlingOpts, deps SlingDeps, a config.Agent) error {
+	if formulaName == "" {
+		return nil
+	}
+	for _, child := range open {
+		if err := checkSlingBaseBranch(formulaName, child.ID, opts, deps, a); err != nil {
+			return fmt.Errorf("child %s: %w", child.ID, err)
+		}
+	}
+	return nil
+}
+
+// slingLaunchFormula names the formula DoSling will launch for opts and the
+// bead it attaches to ("" for a standalone formula), or "" when the sling
+// routes a plain bead. It mirrors DoSling's dispatch.
+func slingLaunchFormula(opts SlingOpts, a config.Agent) (formulaName, beadID string) {
+	switch {
+	case opts.IsFormula:
+		return opts.BeadOrFormula, ""
+	case opts.OnFormula != "":
+		return opts.OnFormula, opts.BeadOrFormula
+	case !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "":
+		return a.EffectiveDefaultSlingFormula(), opts.BeadOrFormula
+	}
+	return "", ""
 }
 
 // resolveIdempotentShortCircuit runs the plain-bead pre-flight idempotency
@@ -2241,6 +2280,12 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		if err := validateBuiltInRouteStoreReachable(deps, b.ID, a); err != nil {
 			return SlingResult{}, err
 		}
+	}
+
+	// Refuse an unresolvable base_branch for any child before the dry-run
+	// preview, so a convoy dry run reports what the real dispatch would do.
+	if err := checkBatchSlingBaseBranches(useFormula, open, opts, deps, a); err != nil {
+		return SlingResult{}, err
 	}
 
 	// Dry-run: return early with container preview info. Every child goes to
