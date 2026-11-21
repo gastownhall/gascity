@@ -654,6 +654,45 @@ func persistSessionCircuitBreakerMetadata(
 	return nil
 }
 
+// sessionCircuitBreakerFencedAttempts bounds the fresh reads of a breaker
+// write fenced on a runtime lease that keeps losing its revision fence.
+const sessionCircuitBreakerFencedAttempts = 3
+
+// persistSessionCircuitBreakerMetadataUnder is persistSessionCircuitBreakerMetadata
+// for the holder of lease, row id's runtime lease: the row's breaker metadata
+// follows identity's entry only through a write fenced on the lease's record
+// (session.RuntimeLease.UpdateMetadataFenced). A row whose record moved, or
+// that closed, keeps the breaker metadata its new holder wrote, and the write
+// returns session.ErrRuntimeLeaseLost. A lease without a record has nothing to
+// fence on and writes nothing.
+func persistSessionCircuitBreakerMetadataUnder(
+	lease *session.RuntimeLease,
+	id string,
+	cb *sessionCircuitBreaker,
+	identity string,
+	now time.Time,
+) error {
+	if lease == nil || lease.Epoch() == 0 || cb == nil {
+		return nil
+	}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	metadata, err := cb.metadataLocked(identity, now)
+	if err != nil {
+		return err
+	}
+	want := session.CircuitStateFromMetadata(metadata)
+	if _, err := lease.UpdateMetadataFenced(sessionCircuitBreakerFencedAttempts, func(_ session.Info, persisted session.PersistedResponse) session.MetadataPatch {
+		if session.CircuitStateFromMetadata(persisted.Metadata) == want {
+			return nil
+		}
+		return session.MetadataPatch(metadata)
+	}); err != nil {
+		return fmt.Errorf("persisting session circuit breaker metadata for %s under its runtime lease: %w", id, err)
+	}
+	return nil
+}
+
 func recordSessionCircuitBreakerRestart(
 	sessFront *session.Store,
 	id string,
@@ -711,6 +750,18 @@ func (b *sessionCircuitBreaker) entrySnapshot(identity string) sessionCircuitBre
 	return sessionCircuitBreakerEntrySnapshot{entry: cloneCircuitBreakerEntry(b.entries[identity]), existed: b.entries[identity] != nil}
 }
 
+// restoreEntry undoes, in this process only, a restart recorded for a start
+// that never ran: identity's entry goes back to snap, and no row is written.
+// No identity is a no-op.
+func (b *sessionCircuitBreaker) restoreEntry(identity string, snap sessionCircuitBreakerEntrySnapshot) {
+	if b == nil || identity == "" {
+		return
+	}
+	b.mu.Lock()
+	b.restoreEntryLocked(identity, snap.entry, snap.existed)
+	b.mu.Unlock()
+}
+
 // restoreEntrySnapshot undoes a restart recorded for a start that never ran
 // (its PreWake was refused): identity's entry goes back to snap and the row's
 // breaker metadata follows. No identity is a no-op.
@@ -718,10 +769,23 @@ func (b *sessionCircuitBreaker) restoreEntrySnapshot(sessFront *session.Store, i
 	if b == nil || identity == "" {
 		return
 	}
-	b.mu.Lock()
-	b.restoreEntryLocked(identity, snap.entry, snap.existed)
-	b.mu.Unlock()
+	b.restoreEntry(identity, snap)
 	if err := persistSessionCircuitBreakerMetadata(sessFront, id, b, identity, now); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+}
+
+// restoreEntrySnapshotUnder is restoreEntrySnapshot for a start that held
+// lease, row id's runtime lease, and never launched: the row's breaker
+// metadata follows only through a write fenced on the lease
+// (persistSessionCircuitBreakerMetadataUnder), so a row another holder took
+// keeps that holder's breaker metadata. No identity is a no-op.
+func (b *sessionCircuitBreaker) restoreEntrySnapshotUnder(lease *session.RuntimeLease, id, identity string, snap sessionCircuitBreakerEntrySnapshot, now time.Time, stderr io.Writer) {
+	if b == nil || identity == "" {
+		return
+	}
+	b.restoreEntry(identity, snap)
+	if err := persistSessionCircuitBreakerMetadataUnder(lease, id, b, identity, now); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 }
