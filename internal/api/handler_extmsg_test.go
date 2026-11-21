@@ -929,3 +929,41 @@ func TestExtmsgNotifyMembersGroupedNoMatchTargetStaysParticipantOnly(t *testing.
 		})
 	}
 }
+
+// TestExtmsgNotifyMembersDoesNotNotifyExcludedExplicitTarget covers an explicit
+// target that resolves to the excluded sender: the sender hears nothing and
+// the member is notified normally.
+func TestExtmsgNotifyMembersDoesNotNotifyExcludedExplicitTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		exclude func(sender session.Info) string
+	}{
+		{name: "excluded by session id", exclude: func(sender session.Info) string { return sender.ID }},
+		{name: "excluded by alias", exclude: func(session.Info) string { return "myrig/sender" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+			ref, member := extmsgBindTestConversation(t, fs, services)
+			sender := createTestSession(t, fs.cityBeadStore, fs.sp, "Sender")
+			if err := fs.cityBeadStore.Update(sender.ID, beads.UpdateOpts{
+				Metadata: map[string]string{"alias": "myrig/sender"},
+			}); err != nil {
+				t.Fatalf("Update(sender alias): %v", err)
+			}
+
+			srv.extmsgNotifyMembers(context.Background(), ref, "Sender", "agent", "hi", tc.exclude(sender), sender.ID)
+
+			nudges := extmsgNudgesBySessionName(fs)
+			if got := nudges[sender.SessionName]; len(got) != 0 {
+				t.Fatalf("excluded sender was nudged: %#v", got)
+			}
+			if got := nudges[member.SessionName]; len(got) != 1 {
+				t.Fatalf("member nudges = %d, want 1; nudges=%#v", len(got), nudges)
+			}
+		})
+	}
+}
