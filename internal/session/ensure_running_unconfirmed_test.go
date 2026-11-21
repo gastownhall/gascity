@@ -598,3 +598,17 @@ func TestEnsureRunning_SessionExistsOnAFreshNotRunningReadIsNotConvergence(t *te
 		})
 	}
 }
+
+// A caller of freshLiveness outside the start paths reads the leaf serving
+// the name fresh behind hybrid too, not the leaf's cached answer.
+func TestFreshLiveness_NonStartCallerReadsTheLeafFreshBehindHybrid(t *testing.T) {
+	never := func(string) bool { return false }
+	wrap := func(p *cachingFreshProvider) runtime.Provider { return hybrid.New(p, runtime.NewFake(), never) }
+	mgr, sp, _, _, sessName := seedUnconfirmedSessionVia(t, wrap, StateAsleep, false, false, freshRunning)
+	if !mgr.liveAgent(sessName, nil) {
+		t.Fatalf("liveAgent = false behind hybrid over a cached-absent leaf that reads running fresh")
+	}
+	if sp.observed != 1 {
+		t.Errorf("fresh leaf reads = %d, want 1", sp.observed)
+	}
+}
