@@ -1445,7 +1445,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		}
 		hasOrphanBinding := false
 		for _, r := range binding.Rigs {
-			if r.Name == rigName {
+			if strings.TrimSpace(r.Name) == rigName {
 				hasOrphanBinding = true
 				break
 			}
@@ -1454,7 +1454,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, rigNotFoundMsg("gc rig remove", rigName, cfg)) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
+		if err := config.PersistRigSiteBindingsRemovingRigs(fsys.OSFS{}, cityPath, cfg.Rigs, rigName); err != nil {
 			fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

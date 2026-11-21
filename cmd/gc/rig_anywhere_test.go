@@ -962,9 +962,33 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 			t.Fatal(err)
 		}
 
+		otherRigDir := filepath.Join(t.TempDir(), "other-rig")
+		if err := os.MkdirAll(otherRigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
 		sitePath := config.SiteBindingPath(cityPath)
-		siteTOML := "[[rig]]\nname = \"orphan-rig\"\npath = \"" + rigDir + "\"\n"
+		siteTOML := fmt.Sprintf("[[rig]]\nname = \"orphan-rig\"\npath = %q\n\n[[rig]]\nname = \"other-rig\"\npath = %q\n", rigDir, otherRigDir)
 		if err := os.WriteFile(sitePath, []byte(siteTOML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// A hand-edited city.toml must survive byte-for-byte: the orphan
+		// cleanup touches only .gc/site.toml.
+		cityTOMLPath := filepath.Join(cityPath, "city.toml")
+		f, err := os.OpenFile(cityTOMLPath, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString("# keep me\n"); err != nil {
+			f.Close() //nolint:errcheck // already failing
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		cityBefore, err := os.ReadFile(cityTOMLPath)
+		if err != nil {
 			t.Fatal(err)
 		}
 
@@ -974,6 +998,14 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
 		}
+
+		cityAfter, err := os.ReadFile(cityTOMLPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(cityBefore, cityAfter) {
+			t.Errorf("city.toml changed on orphan cleanup:\nbefore:\n%s\nafter:\n%s", cityBefore, cityAfter)
+		}
 		if !strings.Contains(stdout.String(), "orphaned") {
 			t.Errorf("stdout = %q, want a mention of the orphaned binding cleanup", stdout.String())
 		}
@@ -982,10 +1014,17 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		otherKept := false
 		for _, r := range binding.Rigs {
 			if r.Name == "orphan-rig" {
 				t.Errorf("site binding still carries orphan-rig: %#v", binding.Rigs)
 			}
+			if r.Name == "other-rig" {
+				otherKept = true
+			}
+		}
+		if !otherKept {
+			t.Errorf("site binding lost other-rig: %#v", binding.Rigs)
 		}
 	})
 
