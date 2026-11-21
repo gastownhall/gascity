@@ -110,6 +110,12 @@ var (
 	managedDoltStartSQLServerFn = startManagedDoltSQLServer
 	managedDoltWaitForReadyFn   = waitForManagedDoltReady
 	managedDoltLogSuffixFn      = managedDoltLogSuffix
+
+	// The platform gate is indirected for the same reason, with one
+	// difference worth stating: a test that stubs it is not bypassing a
+	// safety check, because the hazard the gate guards is an unmanageable
+	// live server, and a test that also stubs the spawn never creates one.
+	managedDoltNativeIdentitySupportedFn = managedDoltNativeIdentitySupported
 )
 
 // init is the re-entry point for the dolt-managed-test watchdog. The watchdog
@@ -153,6 +159,16 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 
 //nolint:unparam // archiveLevel is an explicit override hook; current callers use config/env fallback.
 func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
+	// Refuse to start what this platform cannot afterwards stop or identify.
+	// The stop and inspect paths are both fenced by the same gate, so where it
+	// fails a successful start leaves a database server holding the data
+	// directory's exclusive lock, a PID file, and a runtime-state record
+	// claiming it is running — none of which any supported operation can act
+	// on again. Refusing here is recoverable; an unmanageable server writing
+	// into a live data directory is not.
+	if err := managedDoltNativeIdentitySupportedFn(); err != nil {
+		return managedDoltStartReport{}, err
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStartReport{}, err
@@ -716,7 +732,7 @@ func managedDoltSQLServerSysProcAttr() *syscall.SysProcAttr {
 	if managedDoltTestModeEnabled() {
 		return nil
 	}
-	return &syscall.SysProcAttr{Setpgid: true}
+	return platformManagedDoltSQLServerSysProcAttr()
 }
 
 func managedDoltTestWatchdogEnabled() bool {
@@ -811,11 +827,11 @@ func terminateManagedDoltTestPID(pid int) error {
 	if pid <= 0 {
 		return nil
 	}
-	pgid, err := syscall.Getpgid(pid)
+	pgid, err := platformGetpgid(pid)
 	if err != nil || pgid != pid || pgid <= 1 {
 		return terminateManagedDoltPID("", pid)
 	}
-	if killErr := syscall.Kill(-pgid, syscall.SIGTERM); killErr != nil {
+	if killErr := platformKill(-pgid, syscall.SIGTERM); killErr != nil {
 		return terminateManagedDoltPID("", pid)
 	}
 	deadline := time.Now().Add(managedDoltTestProcessGroupKillWait)
@@ -825,7 +841,7 @@ func terminateManagedDoltTestPID(pid int) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	_ = platformKill(-pgid, syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
 	return nil
 }
@@ -1211,7 +1227,7 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	// (kill(-pgid, ...)). Without this, dolt children (e.g. auto_gc helpers,
 	// archive workers) outlive their parent and leak across test runs
 	// (gastownhall/gascity#2313 follow-up M3).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = platformManagedDoltSQLServerSysProcAttr()
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
@@ -1272,7 +1288,7 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 	if parentPipe == nil {
 		return nil, nil, fmt.Errorf("open parent pipe fd %d", fd)
 	}
-	syscall.CloseOnExec(fd)
+	platformCloseOnExec(fd)
 	done := make(chan struct{})
 	go func() {
 		var buf [1]byte

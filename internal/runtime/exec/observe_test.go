@@ -637,6 +637,8 @@ func TestFreshOnlySeparableLaunchNeverRespawns(t *testing.T) {
 				"stop":      freshOps["stop"],
 				"provision": `cat > "$dir/provision.stdin"; cp "$dir/after_provision" "$dir/state"`,
 				"exec":      `cmd="$(cat)"; echo "$cmd" >> "$dir/exec.log"; case "$cmd" in *has-session*) exit ` + tc.hasSession + ` ;; *) exit 0 ;; esac`,
+				"set-meta":  `cat > "$dir/meta.$3"`,
+				"get-meta":  `cat "$dir/meta.$3" 2>/dev/null; true`,
 			})
 			writeFile(t, filepath.Join(dir, "after_provision"), tc.provisions)
 			err := NewSeamBacked(script).Start(t.Context(), "s", runtime.Config{FreshOnly: true, Command: "claude", Env: map[string]string{"GC_INSTANCE_TOKEN": ours}})

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -246,9 +245,13 @@ func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneEx
 		}
 		// The probe observed this runtime running and matched its
 		// generation, so the handle is the runtime's, as
-		// workerHandleForNudgeTarget resolves a running, matching target.
-		return runtimeWorkerHandleWithConfig(t.cityPath, e.deps.sessions, e.deps.sp, t.cfg, t.sessionName,
-			strings.TrimSpace(t.providerFamily()), strings.TrimSpace(t.sessionTransport()), t.processNames())
+		// workerHandleForNudgeTarget resolves a running, matching target,
+		// held behind the session's queued first turn as that one is.
+		factory, err := workerFactoryWithConfig(t.cityPath, e.deps.sessions, e.deps.sp, t.cfg)
+		if err != nil {
+			return nil, err
+		}
+		return nudgeTargetRuntimeHandle(factory, t)
 	}
 	e.idle = func(t nudgeTarget, obs worker.LiveObservation) bool {
 		return pollerSessionIdleEnoughOn(t, e.deps.sp, defaultNudgePollQuiescence, obs, e.lookReading)

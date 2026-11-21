@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -77,6 +78,18 @@ type Provider struct {
 	// its host work (provisionBox), so the launch that follows runs their
 	// session_setup on the host (execTransport.Launch).
 	hostSetupDue sync.Map
+
+	// weldedProvision holds the names provisionBox started with the welded
+	// `start` op, because the handshake did not then declare a separable
+	// launch: that op launched the agent and took the first turn, so the
+	// launch that follows must not launch again or hand the turn back, even
+	// if a handshake retry has declared a separable launch since
+	// (execTransport.Launch). That launch, or a Stop, forgets the name.
+	weldedProvision sync.Map
+
+	// handbacks holds the first turn a separable launch handed back
+	// (startup_ladder.go).
+	handbacks startupHandbacks
 }
 
 type startupWatchEvent struct {
@@ -116,8 +129,7 @@ func NewProviderForCity(script, cityName, cityPath string, opts ...Option) *Prov
 // cityEnv returns the env an op of a provider built for a city runs with:
 // gc's environment, read through execenv.Environ without a session's
 // identity (sessionlessEnviron), plus the city. It is nil otherwise. Read
-// it before arming the op's deadline: execenv.Environ waits out an
-// in-flight native store open, and that wait is not the op's.
+// it before arming the op's deadline, so the read is not the op's.
 func (p *Provider) cityEnv() []string {
 	if !p.citySet {
 		return nil
@@ -181,6 +193,9 @@ func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit in
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return "", fmt.Errorf("exec provider %s: %w", args[0], err)
+	}
 	cmd.Env = withDeadline(ctx, env)
 	// Run the adapter in its own process group with TERM-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
@@ -324,17 +339,19 @@ func (e *opExitError) Unwrap() error { return e.err }
 // reports its failure as "could not tell"), the observe.v1 ops, and
 // server-stop (it runs only for a pack that declared server-lifecycle). strict
 // is an exit 2 the pack's declarations oblige it not to give
-// (Provider.exitTwoIsStrict), which fails as strictExitTwo maps it. A
-// start-op name collision maps to [runtime.ErrSessionExists]; a start-op
-// [runtime.ExitCodeTempFail] is an endpoint capacity refusal
-// ([runtime.CapacityError]); everything else is base unchanged.
+// (Provider.exitTwoIsStrict), which fails as strictExitTwo maps it. A start
+// or provision op's name collision maps to [runtime.ErrSessionExists], so
+// gc's non-fresh start paths read a provision refused because the name is
+// taken as a collision; a start-op [runtime.ExitCodeTempFail] is an endpoint
+// capacity refusal ([runtime.CapacityError]); everything else is base
+// unchanged.
 func classifyExecExit(op string, code int, msg string, strict bool, base error) error {
 	switch {
 	case code == 2 && strict:
 		return strictExitTwo(op, base)
 	case code == 2 && !exitTwoIsFailure(op):
 		return nil
-	case op == "start" && isStartCollision(msg):
+	case (op == "start" || op == "provision") && isStartCollision(msg):
 		return fmt.Errorf("%w: %w", runtime.ErrSessionExists, base)
 	case op == "start" && code == runtime.ExitCodeTempFail:
 		return &runtime.CapacityError{ExitCode: code, Source: runtime.CapacitySourceExitStatus, Err: base}
@@ -347,7 +364,7 @@ func classifyExecExit(op string, code int, msg string, strict bool, base error) 
 // exit 2 from it is a failure rather than the forward-compatible no-op.
 func exitTwoIsFailure(op string) bool {
 	switch op {
-	case "start", "provision", "is-attached", "observe", "inventory", "kill-object", serverStopOp:
+	case "start", "provision", launchOp, "is-attached", "observe", "inventory", "kill-object", serverStopOp:
 		return true
 	default:
 		return false
@@ -356,7 +373,8 @@ func exitTwoIsFailure(op string) bool {
 
 // exitTwoIsStrict reports whether this pack's exit 2 from op is a failure
 // rather than the unknown-op no-op: from an op a v2-ready script must
-// implement (strictWhenReady), or from a driving op of a pack that selected
+// implement (strictWhenReady), from a metadata op of a pack that un-welds
+// start (metaOp), or from a driving op of a pack that selected
 // carrier.ops (opsCarrierDrivingOp), which declared the op and has no other
 // way to drive the session, so a nudge it never delivered is not reported
 // delivered. A driving op of a pack declaring input-outcome is declared
@@ -365,6 +383,9 @@ func exitTwoIsFailure(op string) bool {
 // answering.
 func (p *Provider) exitTwoIsStrict(op string) bool {
 	if strictWhenReady(op) && p.v2Ready() {
+		return true
+	}
+	if metaOp(op) && p.supportsSeparableLaunch() {
 		return true
 	}
 	if inputOutcomeOp(op) && p.inputOutcomesDeclared() {
@@ -378,6 +399,20 @@ func (p *Provider) exitTwoIsStrict(op string) bool {
 func strictWhenReady(op string) bool {
 	switch op {
 	case "stop", "get-meta", "set-meta", "remove-meta", "peek":
+		return true
+	default:
+		return false
+	}
+}
+
+// metaOp reports one of the three metadata ops. A pack that un-welds start
+// must implement them (supportsSeparableLaunch): its first turn is bound to
+// the launch identity gc publishes with set-meta and read back with get-meta
+// (publishLaunchIdentity), so an exit 2 from one is a missing store, never
+// the unknown-op no-op.
+func metaOp(op string) bool {
+	switch op {
+	case "get-meta", "set-meta", "remove-meta":
 		return true
 	default:
 		return false
@@ -413,8 +448,8 @@ func strictExitTwo(op string, base error) error {
 	}
 }
 
-// isStartCollision reports whether a failed start op's message says the name is
-// already taken by a live session.
+// isStartCollision reports whether a failed start or provision op's message
+// says the name is already taken by a live session.
 func isStartCollision(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	for _, phrase := range startCollisionPhrases {
@@ -428,6 +463,9 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return fmt.Errorf("exec provider %s: %w", args[0], err)
+	}
 	cmd.Env = p.opEnv()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -557,14 +595,14 @@ func startFailureKeepsBox(startErr error, foreignBox bool) bool {
 
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
 // agent launch: it must implement the box-without-agent `provision` op
-// (proc.provision) AND the `exec` op (proc.exec) the controller drives the launch
-// over, using the default tmux carrier. carrier.ops never enables it. Otherwise
-// the welded `start` op provisions and launches in one shot (compat). Gates
+// (proc.provision) and a way for the controller to launch the agent: the
+// `launch` op (proc.launch), or the `exec` op (proc.exec) it drives tmux over
+// with the default carrier, which carrier.ops rules out. Otherwise the welded
+// `start` op provisions and launches in one shot (compat). Gates
 // [runtime.TransportCapabilities.SeparableLaunch]. (Un-weld B3b.)
 func (p *Provider) supportsSeparableLaunch() bool {
-	return !p.opsCarrierSelected() &&
-		p.handshakeCapability(runtime.ProtocolCapabilityProvision) &&
-		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
+	info, err := p.Protocol()
+	return err == nil && info.SeparableLaunch()
 }
 
 // provisionBox creates the box for name. When the pack supports a separable
@@ -574,15 +612,21 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // sharing the host filesystem, and as in Start only into a name the pack
 // reports holding no live box, the host work precedes `provision` and is
 // left out of its config; session_setup then follows the launch
-// (execTransport.Launch).
+// (execTransport.Launch). `provision` is never sent the first turn, which
+// the launch hands back for its caller to queue (finishSeparableLaunch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
+	p.weldedProvision.Delete(name)
 	if !p.supportsSeparableLaunch() {
-		return p.Start(ctx, name, cfg)
+		if err := p.Start(ctx, name, cfg); err != nil {
+			return err
+		}
+		p.weldedProvision.Store(name, struct{}{})
+		return nil
 	}
 	p.hostSetupDue.Delete(name)
 	hostWork := p.sharesHostFS() && p.holdsNoLiveBox(name)
-	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
+	data, err := p.startConfigFor(ctx, name, withoutNudge(cfg), hostWork)
 	if err != nil {
 		return err
 	}
@@ -595,21 +639,37 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 	return nil
 }
 
-// launchAgent starts the agent in the in-box tmux session over the `exec` op, for
-// a pack with a separable launch; for a welded pack it is a no-op (provisionBox /
-// Start already launched). The launch is idempotent: it respawns the pane if the
-// session already exists (relaunch into a warm box) and otherwise creates it
-// (first launch after provision). A FreshOnly launch never respawns: an
-// existing agent session fails it, as an ordinary start failure, so
+// launchAgent starts the agent for a pack with a separable launch; for a welded
+// pack it is a no-op (provisionBox / Start already launched). A pack declaring
+// proc.launch is sent the `launch` op (runLaunchOp). Otherwise the agent starts
+// in the in-box tmux session over the `exec` op. The launch is idempotent: it
+// respawns the pane if the session already exists (relaunch into a warm box) and
+// otherwise creates it (first launch after provision). A FreshOnly launch never
+// respawns: an existing agent session fails it, as an ordinary start failure, so
 // startFresh's token-gated cleanup removes the box it provisioned. It then
-// dismisses startup dialogs — the same
-// Go-side orchestration the welded Start runs. The `exec` op runs in the box's
-// working directory and the box env is set at provision time, so neither an
-// explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
+// publishes the launch's identity, whose failure fails the launch as a
+// failed fence publish does (publishLaunchIdentity), and dismisses startup
+// dialogs — the same Go-side orchestration the welded Start runs. The
+// `exec` op runs in the box's working directory and the box env is set at
+// provision time, so neither an explicit -c nor -e is needed (workdir + env
+// are provision-half). (Un-weld B3b.)
+// It clears the turn an earlier launch of name handed back; this launch's own
+// is handed back after it (finishSeparableLaunch).
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return nil
+	}
+	p.handbacks.set(name, runtime.StartupNudge{})
+	if p.launchDeclared() {
+		if err := p.runLaunchOp(ctx, name, cfg); err != nil {
+			return err
+		}
+		if err := p.publishLaunchIdentity(ctx, name, cfg); err != nil {
+			return err
+		}
+		p.publishReadyPrompt(ctx, name, cfg)
+		return p.dismissStartupDialogs(ctx, name, cfg)
 	}
 	command := cfg.Command
 	if command == "" {
@@ -633,18 +693,24 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	} else if code != 0 {
 		return fmt.Errorf("exec provider: launching agent in %q: tmux exited %d", name, code)
 	}
+	if err := p.publishLaunchIdentity(ctx, name, cfg); err != nil {
+		return err
+	}
 	p.publishReadyPrompt(ctx, name, cfg)
 	return p.dismissStartupDialogs(ctx, name, cfg)
 }
 
 // Relaunch re-launches the agent for the reconciler's launch-only-drift path
-// ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it respawns
-// the agent in the warm box over the exec op (launchAgent) — no reprovision —
-// and, for a pack sharing the host filesystem, then runs session_setup on the
-// host again, as the launch after provision does and as tmux re-runs it on a
-// relaunch. Pre_start and staging are not redone: the box is warm. A
-// welded pack has no in-place relaunch (the agent is welded into `start`), so it
-// degrades to a full reprovision (Stop+Start), which is still correct. On a
+// ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it
+// relaunches the agent in the warm box (launchAgent) — no reprovision — and,
+// for a pack sharing the host filesystem, then runs session_setup on the host
+// again, as the launch after provision does and as tmux re-runs it on a
+// relaunch, and hands the first turn back for its caller to queue
+// (finishSeparableLaunch). A launch that fails, its identity publish
+// included, fails the relaunch and hands nothing back. Pre_start and
+// staging are not redone: the box is warm. A welded pack has no in-place
+// relaunch (the agent is welded into `start`), so it degrades to a full
+// reprovision (Stop+Start), which is still correct. On a
 // v2-ready welded pack the Start is FreshOnly, after `observe` confirms the
 // name absent.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
@@ -652,9 +718,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		if err := p.launchAgent(ctx, name, cfg); err != nil {
 			return err
 		}
-		if p.sharesHostFS() {
-			p.runHostSessionSetup(ctx, name, cfg)
-		}
+		p.finishSeparableLaunch(ctx, name, cfg, p.sharesHostFS())
 		return nil
 	}
 	if err := p.Stop(name); err != nil {
@@ -718,6 +782,10 @@ func (p *Provider) startStartupWatch(
 	env := p.opEnv()
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		cancel()
+		return nil, nil, false, fmt.Errorf("exec provider watch-startup: %w", err)
+	}
 	cmd.Env = withDeadline(watchCtx, env)
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
@@ -929,6 +997,7 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // Stop destroys the named session: script stop <name>
 func (p *Provider) Stop(name string) error {
 	p.forgetReadyPrompt(name)
+	p.weldedProvision.Delete(name)
 	_, err := p.run(nil, "stop", name)
 	return err
 }
@@ -1349,6 +1418,9 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return nil, -1, fmt.Errorf("exec provider exec: %w", err)
+	}
 	cmd.Env = withDeadline(cmdCtx, env)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer

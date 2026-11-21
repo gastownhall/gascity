@@ -222,7 +222,7 @@ func (s Stores) Holds(ref StoreRef) []coordclass.Class {
 }
 
 // Plan plans a T7 federation intent (Molecule, OrderRuns, Workflow, Convoy,
-// CloseOwner, WorkFederation) over the epoch's minted handles, deciding relocation by handle identity (OD-T7-5).
+// CloseOwner, WorkFederation, OrderHistory) over the epoch's minted handles, deciding relocation by handle identity (OD-T7-5).
 // Every other intent is the plane's topology question and is refused here: a
 // plane plans it with Plan over its own topology.
 //
@@ -247,6 +247,8 @@ func (s Stores) Plan(i Intent) (ResolvedPlan, error) {
 		plan, err = s.planCloseOwner(in)
 	case WorkFederation:
 		plan, err = s.planWorkFederation(in)
+	case OrderHistory:
+		plan, err = s.planOrderHistory(in)
 	default:
 		return ResolvedPlan{}, fmt.Errorf("storeref: %T is the plane's topology question; plan it with Plan over the plane's topology, not Stores.Plan", i)
 	}
@@ -425,33 +427,102 @@ func legsHold(legs []PlanLeg, store beads.Store) bool {
 // then the rigs ascending, each scope leg a relic leg on a relocated city
 // unless it is a rig proven relic-free. Every leg is Fatal (intents.go).
 func (s Stores) planWorkflow(in Workflow) (ResolvedPlan, error) {
-	if in.SuspendedRigs != WorkflowReadsSuspendedRigs && in.SuspendedRigs != WorkflowSkipsSuspendedRigs {
-		return ResolvedPlan{}, fmt.Errorf("storeref: a Workflow plan needs the reader's choice about suspended rigs (WorkflowReadsSuspendedRigs or WorkflowSkipsSuspendedRigs), got %d", in.SuspendedRigs)
+	if err := workflowSuspendedRigsChosen("a Workflow", in.SuspendedRigs); err != nil {
+		return ResolvedPlan{}, err
 	}
 	relocated := s.relocated()
 	plan := ResolvedPlan{Mode: ModeUnion}
 	if relocated {
 		plan.Legs = append(plan.Legs, s.leg(coordclass.ClassGraph, s.city.Graph.Raw(), WorkRef, RoleAuthority, PolicyFatal))
 	}
-	scope := func(l Leg, relicFree, keepRetired bool) {
-		switch {
-		case !relocated:
-			plan.Legs = append(plan.Legs, PlanLeg{Leg: l, Role: RoleFederationTail, OnError: PolicyFatal, Gate: beads.FederatedLegRole})
-		case !relicFree:
-			plan.Legs = append(plan.Legs, PlanLeg{Leg: l, Role: RoleRelic, OnError: PolicyFatal, Gate: beads.RelicLegRole})
-		case keepRetired:
-			plan.Legs = append(plan.Legs, PlanLeg{Leg: l, Role: RoleFederationTail, OnError: PolicyFatal, Gate: beads.FederatedLegRole})
+	// The city leg is never retired (OD-T7-11): Work.RelicFree is not read.
+	if l, ok := workflowScopeLeg(s.topo.Work, relocated, false, false); ok {
+		plan.Legs = append(plan.Legs, l)
+	}
+	for _, r := range s.workflowRigs(in.SuspendedRigs) {
+		if l, ok := workflowScopeLeg(r, relocated, r.RelicFree, in.IncludeRetiredRigs); ok {
+			plan.Legs = append(plan.Legs, l)
 		}
 	}
-	// The city leg is never retired (OD-T7-11): Work.RelicFree is not read.
-	scope(s.topo.Work, false, false)
-	rigs := s.topo.orderedRigs()
-	if in.SuspendedRigs == WorkflowReadsSuspendedRigs {
-		rigs = s.topo.orderedAllRigs()
+	return plan, nil
+}
+
+// workflowSuspendedRigsChosen refuses a Workflow-family plan (intent names it,
+// with its article) whose reader made no choice about suspended rigs.
+func workflowSuspendedRigsChosen(intent string, choice WorkflowSuspendedRigs) error {
+	if choice != WorkflowReadsSuspendedRigs && choice != WorkflowSkipsSuspendedRigs {
+		return fmt.Errorf("storeref: %s plan needs the reader's choice about suspended rigs (WorkflowReadsSuspendedRigs or WorkflowSkipsSuspendedRigs), got %d", intent, choice)
 	}
-	for _, r := range rigs {
-		scope(r, r.RelicFree, in.IncludeRetiredRigs)
+	return nil
+}
+
+// workflowRigs is the epoch's rigs ascending, the suspended ones only when the
+// reader reads them.
+func (s Stores) workflowRigs(choice WorkflowSuspendedRigs) []Leg {
+	if choice == WorkflowReadsSuspendedRigs {
+		return s.topo.orderedAllRigs()
 	}
+	return s.topo.orderedRigs()
+}
+
+// workflowScopeLeg is l as a scope leg of the Workflow family: a federated
+// tail when the graph is not relocated, else a relic leg, unless l is proven
+// relic-free, which drops it (false) or, for a reader that keeps retired rigs,
+// keeps it as a federated tail.
+func workflowScopeLeg(l Leg, relocated, relicFree, keepRetired bool) (PlanLeg, bool) {
+	switch {
+	case !relocated:
+		return PlanLeg{Leg: l, Role: RoleFederationTail, OnError: PolicyFatal, Gate: beads.FederatedLegRole}, true
+	case !relicFree:
+		return PlanLeg{Leg: l, Role: RoleRelic, OnError: PolicyFatal, Gate: beads.RelicLegRole}, true
+	case keepRetired:
+		return PlanLeg{Leg: l, Role: RoleFederationTail, OnError: PolicyFatal, Gate: beads.FederatedLegRole}, true
+	default:
+		return PlanLeg{}, false
+	}
+}
+
+// planOrderHistory pins each order-history kind's legs (intents.go): the
+// Workflow family's scope legs, then the city's orders placement, which
+// Plan's dedupe drops where another leg already reads its store.
+func (s Stores) planOrderHistory(in OrderHistory) (ResolvedPlan, error) {
+	if err := workflowSuspendedRigsChosen(fmt.Sprintf("an OrderHistory(%s)", in.Kind), in.SuspendedRigs); err != nil {
+		return ResolvedPlan{}, err
+	}
+	var plan ResolvedPlan
+	switch in.Kind {
+	case OrderHistoryOne:
+		if in.Scope != WorkRef {
+			if name, ok := ScopeRigContext(string(in.Scope)); !ok || name == "" {
+				return ResolvedPlan{}, fmt.Errorf("storeref: an OrderHistory(%s) plan's scope is the city or a rig, got %q", in.Kind, legName(in.Scope))
+			}
+		}
+		relocated := s.relocated()
+		plan = ResolvedPlan{Mode: ModeUnion}
+		if in.Scope != WorkRef {
+			// A rig this epoch did not open (or a suspended one the reader
+			// skips) is no leg: the city and the binding are still read.
+			for _, r := range s.workflowRigs(in.SuspendedRigs) {
+				if r.Ref != in.Scope {
+					continue
+				}
+				if l, ok := workflowScopeLeg(r, relocated, r.RelicFree, false); ok {
+					plan.Legs = append(plan.Legs, l)
+				}
+			}
+		}
+		if l, ok := workflowScopeLeg(s.topo.Work, relocated, false, false); ok {
+			plan.Legs = append(plan.Legs, l)
+		}
+	case OrderHistoryAll:
+		var err error
+		if plan, err = s.planWorkflow(Workflow{SuspendedRigs: in.SuspendedRigs}); err != nil {
+			return ResolvedPlan{}, err
+		}
+	default:
+		return ResolvedPlan{}, fmt.Errorf("storeref: unknown order history kind %d", in.Kind)
+	}
+	plan.Legs = append(plan.Legs, s.leg(coordclass.ClassOrders, s.city.Orders.Raw(), WorkRef, RoleAuthority, PolicyFatal))
 	return plan, nil
 }
 

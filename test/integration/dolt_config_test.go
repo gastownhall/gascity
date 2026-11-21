@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // TestDoltConfigWiringExternalHost validates two things for issue 011:
@@ -275,58 +277,20 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 		t.Fatalf("creating dolt data dir: %v", err)
 	}
 
-	listener, err := net.Listen("tcp", "0.0.0.0:0")
-	if err != nil {
-		t.Fatalf("allocating dolt port: %v", err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	if err := listener.Close(); err != nil {
-		t.Fatalf("closing dolt port probe: %v", err)
-	}
-
-	logPath := filepath.Join(dataDir, "sql-server.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("creating dolt log file: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, doltBinary, "sql-server",
-		"-H", "0.0.0.0", "-P", port, "--data-dir", dataDir)
-	cmd.Env = env
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		t.Fatalf("starting dolt sql-server: %v", err)
-	}
-
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
-
-	// Wait for server to be ready.
-	deadline := time.Now().Add(doltServerReadyTimeout)
-	addr := net.JoinHostPort("127.0.0.1", port)
-	for {
-		conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if dialErr == nil {
-			_ = conn.Close()
-			t.Cleanup(func() {
-				cancel()
-				<-waitCh
-				_ = logFile.Close()
-			})
-			return port
-		}
-		if time.Now().After(deadline) {
-			cancel()
-			<-waitCh
-			_ = logFile.Close()
-			logBytes, _ := os.ReadFile(logPath)
-			t.Fatalf("dolt sql-server did not become ready on %s within %s:\n%s", addr, doltServerReadyTimeout, logBytes)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltBinary,
+		Args: func(port int) []string {
+			return []string{"sql-server", "-H", "0.0.0.0", "-P", strconv.Itoa(port), "--data-dir", dataDir}
+		},
+		Host:    "0.0.0.0",
+		Env:     env,
+		LogPath: filepath.Join(dataDir, "sql-server.log"),
+	})
+	t.Cleanup(func() {
+		_ = srv.Process.Kill()
+		<-srv.Exited
+	})
+	return strconv.Itoa(srv.Port)
 }
 
 // firstReachableNonDefaultAddr returns the first host:port, other than

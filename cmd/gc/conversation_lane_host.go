@@ -103,9 +103,9 @@ const (
 	// laneQuiescentRetry is how long a worker waits for a quiescent city.
 	laneQuiescentRetry = 30 * time.Second
 	// laneWakeRecheck is how long a worker waits after recording a wake
-	// before it passes again, and between passes that find the woken
-	// session still starting; laneWakeHeldRecheck after a wake the row
-	// held, or refused because the row is not dormant.
+	// before it passes again, and between passes that find a session still
+	// starting, woken by the lane or not; laneWakeHeldRecheck after a wake
+	// the row held, or refused because the row is not dormant.
 	laneWakeRecheck     = 5 * time.Second
 	laneWakeHeldRecheck = time.Minute
 	// laneParkAfter is the longest a worker holds its slot waiting for its

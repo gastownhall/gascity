@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -354,4 +356,155 @@ func mustWriteManagedRuntimeState(t *testing.T, fs fsys.FS, city string, port in
 		t.Fatal(err)
 	}
 	return port
+}
+
+// mustWriteProxiedLocalScope writes the files a bd-owned proxied-local scope
+// carries after `gc init` / `gc rig add`: a config with no gc endpoint fields,
+// metadata naming the proxied-server mode, and the provider sidecar with
+// lifecycle fields only (no external upstream).
+//
+//nolint:unparam // helper keeps FS explicit in tests
+func mustWriteProxiedLocalScope(t *testing.T, fs fsys.FS, dir, db string) {
+	t.Helper()
+	if err := fs.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(dir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: db,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(`{"idle_timeout": 1800000000000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// bd owns a proxied-local scope's proxy and Dolt, and gc does not dial it
+// (engdocs/design/beads-proxied-local-default.md, "Native SQL over the
+// proxy"), so the contract returns its target with no endpoint. That is "no
+// SQL store here", not a probe failure.
+func TestResolveDoltConnectionProxiedLocalScopeHasNoDirectEndpoint(t *testing.T) {
+	t.Run("proxied-local", func(t *testing.T) {
+		clearDoltAuthEnv(t)
+		city := t.TempDir()
+		mustWriteProxiedLocalScope(t, fsys.OSFS{}, city, "hq")
+
+		_, _, _, _, _, err := resolveDoltConnection(city, city)
+		if !errors.Is(err, errNoDirectSQLEndpoint) {
+			t.Fatalf("resolveDoltConnection() error = %v, want errNoDirectSQLEndpoint", err)
+		}
+	})
+
+	// A proxied scope with an external upstream carries its endpoint and is
+	// dialed as before.
+	t.Run("proxied-external-upstream", func(t *testing.T) {
+		clearDoltAuthEnv(t)
+		fs := fsys.OSFS{}
+		city := t.TempDir()
+		rig := filepath.Join(t.TempDir(), "frontend")
+		mustWriteCanonicalConfig(t, fs, city, contract.ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: contract.EndpointOriginCityCanonical,
+			EndpointStatus: contract.EndpointStatusUnverified,
+			DoltHost:       "db.example.com",
+			DoltPort:       "3307",
+			DoltUser:       "agent",
+		})
+		mustWriteProxiedMetadata(t, fs, city, "hq")
+		mustWriteCanonicalConfig(t, fs, rig, contract.ConfigState{
+			IssuePrefix:    "fe",
+			EndpointOrigin: contract.EndpointOriginExplicit,
+			EndpointStatus: contract.EndpointStatusUnverified,
+			DoltHost:       "rig-db.example.com",
+			DoltPort:       "4406",
+			DoltUser:       "rig-agent",
+		})
+		mustWriteProxiedMetadata(t, fs, rig, "fe")
+
+		host, port, _, _, _, err := resolveDoltConnection(city, city)
+		if errors.Is(err, errNoDirectSQLEndpoint) || err != nil {
+			t.Fatalf("resolveDoltConnection(city) error = %v, want the external upstream", err)
+		}
+		if host != "db.example.com" || port != 3307 {
+			t.Fatalf("city target = (%q, %d), want (db.example.com, 3307)", host, port)
+		}
+		host, port, _, _, _, err = resolveDoltConnection(city, rig)
+		if errors.Is(err, errNoDirectSQLEndpoint) || err != nil {
+			t.Fatalf("resolveDoltConnection(rig) error = %v, want the external upstream", err)
+		}
+		if host != "rig-db.example.com" || port != 4406 {
+			t.Fatalf("rig target = (%q, %d), want (rig-db.example.com, 4406)", host, port)
+		}
+	})
+}
+
+// mustWriteProxiedMetadata writes metadata naming the proxied-server mode.
+func mustWriteProxiedMetadata(t *testing.T, fs fsys.FS, dir, db string) {
+	t.Helper()
+	if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(dir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: db,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A city whose every scope is proxied-local has no SQL workflow store, so the
+// fast path reports the quiet errNoSQLWorkflowStores and the store scan runs
+// without logging a fallback on every fetch.
+func TestTryFullWorkflowSQLTreatsProxiedLocalScopesAsNoSQLStores(t *testing.T) {
+	clearDoltAuthEnv(t)
+	state := newFakeState(t)
+	rigDir := t.TempDir()
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir, Prefix: "mr"}}
+	mustWriteProxiedLocalScope(t, fsys.OSFS{}, state.cityPath, "hq")
+	mustWriteProxiedLocalScope(t, fsys.OSFS{}, rigDir, "mr")
+	srv := New(state)
+
+	_, err := srv.tryFullWorkflowSQL("nodashid", "", "", 0)
+	if !errors.Is(err, errNoSQLWorkflowStores) {
+		t.Fatalf("tryFullWorkflowSQL() error = %v, want errNoSQLWorkflowStores", err)
+	}
+	_, err = srv.tryFullWorkflowSQL("mr-1", "rig", "myrig", 0)
+	if !errors.Is(err, errNoSQLWorkflowStores) {
+		t.Fatalf("scoped tryFullWorkflowSQL() error = %v, want errNoSQLWorkflowStores", err)
+	}
+}
+
+// Skipping a proxied-local scope must not hide a real failure on a scope that
+// does carry a direct endpoint: with one such scope failing to resolve, the
+// fast path reports that failure, not errNoSQLWorkflowStores.
+func TestTryFullWorkflowSQLSurfacesDirectEndpointFailureBesideProxiedLocal(t *testing.T) {
+	clearDoltAuthEnv(t)
+	fs := fsys.OSFS{}
+	state := newFakeState(t)
+	rigDir := t.TempDir()
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir, Prefix: "mr"}}
+	mustWriteProxiedLocalScope(t, fs, rigDir, "mr")
+	mustWriteCanonicalConfig(t, fs, state.cityPath, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginCityCanonical,
+		EndpointStatus: contract.EndpointStatusUnverified,
+		DoltHost:       "db.example.com",
+		DoltPort:       "not-a-port",
+		DoltUser:       "agent",
+	})
+	mustWriteCanonicalMetadata(t, fs, state.cityPath, "hq")
+	srv := New(state)
+
+	_, err := srv.tryFullWorkflowSQL("nodashid", "", "", 0)
+	if err == nil || errors.Is(err, errNoSQLWorkflowStores) {
+		t.Fatalf("tryFullWorkflowSQL() error = %v, want the city scope's resolve failure", err)
+	}
+	if !strings.Contains(err.Error(), "resolve dolt connection") {
+		t.Fatalf("tryFullWorkflowSQL() error = %v, want a resolve dolt connection error", err)
+	}
 }
