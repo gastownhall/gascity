@@ -475,6 +475,44 @@ func TestHandleExtMsgInboundNormalizedInvariantViolationReturns400(t *testing.T)
 	}
 }
 
+// faultTranscriptService injects a fixed error from List so the
+// transcript-list handler's error-status mapping can be exercised without a
+// live store. The embedded nil interface is never touched since the handler
+// only calls List.
+type faultTranscriptService struct {
+	extmsg.TranscriptService
+	err error
+}
+
+func (f faultTranscriptService) List(context.Context, extmsg.ListTranscriptInput) ([]extmsg.ConversationTranscriptRecord, error) {
+	return nil, f.err
+}
+
+// TestHandleExtMsgTranscriptListInvalidConversationReturns400 pins the fix for
+// gastownhall/gascity#9101: GET /extmsg/transcript's query fields (scope_id,
+// conversation_id, etc.) are all optional per the OpenAPI spec, so a caller
+// that omits a conversation-identifying field triggers
+// extmsg.ErrInvalidConversation from Transcript.List — a client input error —
+// and must get a 4xx naming the real problem, not an opaque 500. This mirrors
+// the bind handler's error-mapping precedent for the same error.
+func TestHandleExtMsgTranscriptListInvalidConversationReturns400(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+	services.Transcript = faultTranscriptService{err: fmt.Errorf("%w: scope_id required", extmsg.ErrInvalidConversation)}
+	fs.extmsgSvc = &services
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/extmsg/transcript"), nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid conversation: status = %d, want %d; body: %s",
+			rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
 func TestTitleCaseProvider(t *testing.T) {
 	cases := []struct {
 		in, want string
