@@ -210,6 +210,11 @@ func readyAnswer(ctx context.Context, cs *crossStore, c compiled, items []beads.
 // special case with an "everything else means ready" fallthrough, which answers
 // `--status closed` with open work.
 //
+// Every --status arm pushes the pushable --metadata-field pairs into each leg's
+// list (listMetadata, pushdown.go) and reads under readNarrowed's exactness
+// guard whenever it pushes anything; the merged rows are still filtered by
+// every predicate afterwards.
+//
 // Every arm states beads.FederatedReadTier, and none has a branch that could
 // state anything else. A tier left at the zero value is not a neutral default
 // across these legs: the work legs' bead-policy layer rewrites it to TierBoth and
@@ -226,23 +231,60 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore)
 	case "":
 		return readReadyCandidates(ctx, legs, c, cs)
 	case StatusOpen:
-		return readOpenStatusCandidates(ctx, legs)
+		return readOpenStatusCandidates(ctx, legs, c)
 	case StatusInProgress:
 		// The crash-recovery tier, and the one whose rows carry blocked_by. The
-		// assignee is pushed into each leg's list; it is matched exactly on every
-		// backend, and re-applied to the merged set like every predicate.
+		// assignee and the pushable metadata pairs are pushed into each leg's
+		// list; both are matched exactly on every backend, and re-applied to the
+		// merged set like every predicate.
 		plain := beads.ListQuery{Status: c.status, TierMode: beads.FederatedReadTier}
-		if c.assignee == "" {
-			return federate(ctx, legs, listRead(plain))
-		}
 		narrowed := plain
 		narrowed.Assignee = c.assignee
-		return readNarrowed(ctx, legs, c, listRead(narrowed), listRead(plain))
+		narrowed.Metadata = listMetadata(c)
+		return readStatusList(ctx, legs, c, plain, narrowed, nil)
 	default:
-		return federate(ctx, legs, listRead(beads.ListQuery{
-			Status:   c.status,
-			TierMode: beads.FederatedReadTier,
-		}))
+		// The blocked and closed tiers, the closed one the largest a store
+		// holds. The pushable metadata pairs are pushed into each leg's list.
+		plain := beads.ListQuery{Status: c.status, TierMode: beads.FederatedReadTier}
+		narrowed := plain
+		narrowed.Metadata = listMetadata(c)
+		return readStatusList(ctx, legs, c, plain, narrowed, nil)
+	}
+}
+
+// readStatusList reads a --status arm's legs: with plain when narrowed asks no
+// leg for less, and otherwise with narrowed under readNarrowed's exactness
+// guard, falling back to plain when the narrowed answer could differ from it.
+//
+// keep, when set, cuts each leg's narrowed rows to the arm's status before the
+// merge, so the guard's window holds only rows the arm can answer with. The
+// plain read is not cut per leg: its merge keeps the first leg's copy of an id
+// whatever its status, as the arm always has.
+func readStatusList(ctx context.Context, legs []Leg, c compiled, plain, narrowed beads.ListQuery, keep func(beads.Bead) bool) ([]beads.Bead, map[string]int, error) {
+	if narrowed.Assignee == "" && len(narrowed.Metadata) == 0 {
+		return federate(ctx, legs, listRead(plain))
+	}
+	return readNarrowed(ctx, legs, c, keepRows(listRead(narrowed), keep), listRead(plain))
+}
+
+// keepRows is read with each leg's rows cut to those keep accepts, or read
+// itself when keep is nil.
+func keepRows(read legRead, keep func(beads.Bead) bool) legRead {
+	if keep == nil {
+		return read
+	}
+	return func(ctx context.Context, leg Leg) legResult {
+		res := read(ctx, leg)
+		if res.err != nil {
+			return res
+		}
+		kept := make([]beads.Bead, 0, len(res.rows))
+		for _, b := range res.rows {
+			if keep(b) {
+				kept = append(kept, b)
+			}
+		}
+		return legResult{rows: kept}
 	}
 }
 
@@ -263,23 +305,36 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore)
 // non-closed row and keeping the mapped "open" ones gives the bd-backed store the
 // same answer without widening ListQuery{Status: "open"} for the controller
 // callers whose readiness gates rely on bd's narrower status (ga-3mv5d3).
-func readOpenStatusCandidates(ctx context.Context, legs []Leg) ([]beads.Bead, map[string]int, error) {
-	items, owners, err := federate(ctx, legs, listRead(beads.ListQuery{
-		AllowScan: true,
-		TierMode:  beads.FederatedReadTier,
-	}))
+//
+// The pushable metadata pairs are pushed into each leg's scan, and that
+// narrowed read keeps each leg's mapped "open" rows before the merge. The cut
+// must come first there: readNarrowed's exactness guard sizes its --limit window
+// with the row predicates, which do not judge status, so an in_progress or
+// blocked row left in the window could push a relic the binding serves out of
+// the probed prefix, and the open cut below would then serve that relic
+// unprobed. The cut below stays for the plain read.
+func readOpenStatusCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
+	plain := beads.ListQuery{AllowScan: true, TierMode: beads.FederatedReadTier}
+	narrowed := plain
+	narrowed.Metadata = listMetadata(c)
+	items, owners, err := readStatusList(ctx, legs, c, plain, narrowed, isOpenRow)
 	if err != nil {
 		return nil, nil, err
 	}
 	out := items[:0]
 	for _, item := range items {
-		if item.Status == StatusOpen {
+		if isOpenRow(item) {
 			out = append(out, item)
 			continue
 		}
 		delete(owners, item.ID)
 	}
 	return out, owners, nil
+}
+
+// isOpenRow reports whether b's mapped status is Gas City's "open".
+func isOpenRow(b beads.Bead) bool {
+	return b.Status == StatusOpen
 }
 
 // legRead reads one leg. Every read goes through the store's LIVE handle: a
