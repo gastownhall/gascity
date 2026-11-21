@@ -90,7 +90,6 @@ go_test(
         "guard_test.go",
         "identity_darwin_test.go",
         "identity_windows_test.go",
-        "infrastructure_argv_linux_test.go",
         "infrastructure_argv_test.go",
         "infrastructure_argv_windows_test.go",
         "kill_unix_test.go",

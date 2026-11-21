@@ -706,7 +706,6 @@ func readParentPID(path string) (int, bool, error) {
 // procStat is what the scanner and the snapshots read from one
 // /proc/<pid>/stat record.
 type procStat struct {
-	state     string // field 3: R, S, D, Z, X, ...
 	ppid      int
 	pgid      int
 	sid       int // session ID: the PID of the session's leader
@@ -754,5 +753,5 @@ func parseProcStat(text string) (procStat, error) {
 	if startTime == "" {
 		return procStat{}, fmt.Errorf("proc stat start time is empty")
 	}
-	return procStat{state: fields[0], ppid: ppid, pgid: pgid, sid: sid, startTime: startTime}, nil
+	return procStat{ppid: ppid, pgid: pgid, sid: sid, startTime: startTime}, nil
 }

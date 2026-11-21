@@ -1,7 +1,6 @@
 package proctable
 
 import (
-	"fmt"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -68,38 +67,6 @@ func IsCityInfrastructureRoot(pid int) bool {
 		return false
 	}
 	return IsCityInfrastructureArgv(argv)
-}
-
-// RootArgv reads pid's argv from the process table the scanner enumerates: on
-// Linux the procfs root the scan reads, injected under test. A kill-path
-// fence that needs more than IsCityInfrastructureArgv — such as proving that
-// a live process owns a scanned root — reads through it so its verdict rests
-// on the same table as the scan's. Under `go test` without an injected procfs
-// root it refuses rather than read the host's live process table.
-func RootArgv(pid int) ([]string, error) {
-	if pid <= 0 {
-		return nil, fmt.Errorf("proctable: argv for PID %d: not a process id", pid)
-	}
-	if err := hostScanGuard(); err != nil {
-		return nil, err
-	}
-	return rootArgv(pid)
-}
-
-// RootAlive reports whether pid names a running, non-zombie process in the
-// process table the scanner enumerates. On Linux it reads <root>/<pid>/stat
-// of the scanned procfs root and nothing else: a missing or malformed entry,
-// or one in the zombie (Z) or dead (X) state, is not alive. Platforms without
-// a process-table reader report false, as does `go test` without an injected
-// procfs root.
-func RootAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	if err := hostScanGuard(); err != nil {
-		return false
-	}
-	return rootAlive(pid)
 }
 
 // RootIsCityInfrastructure reports whether a root the scan found is city

@@ -1,24 +1,12 @@
 package proxyendpoint
 
-import (
-	"path/filepath"
-	"strings"
-)
-
-// Argv shape of the sql-server child bd's proxy supervises.
-const (
-	// ServerVerb is argv[1] of a Dolt SQL server.
-	ServerVerb = "sql-server"
-	// ServerConfigFlag carries the config file a Dolt SQL server runs from;
-	// bd's proxy hands its child ConfigFileName or RuntimeConfigFileName in the
-	// proxy root.
-	ServerConfigFlag = "--config"
-)
+import "path/filepath"
 
 // ConfigOwner reports whether configPath is the sql-server config of a bd
 // proxy root whose proxy.pid names a live `bd db-proxy-child` for that same
 // root, and returns that proxy's PID. Such a record is proof that bd — not gc
-// — owns the sql-server child, so no gc cleanup may kill it.
+// — owns the sql-server child, so gc's Dolt process cleanup must never kill
+// it.
 //
 // It answers the protection question, not the admission one. Validate and
 // Inspect answer "may gc dial this endpoint", which also demands a schema-2
@@ -76,30 +64,4 @@ func ConfigOwner(configPath string, pt ProcessTable) (int, bool) {
 		return 0, false
 	}
 	return record.PID, true
-}
-
-// ServerOwner reports whether argv is a Dolt SQL server whose --config is
-// owned by a live bd proxy per ConfigOwner, and returns that proxy's PID.
-//
-// argv[0] is ignored, as the operator chooses the dolt binary. Both
-// `--config PATH` and `--config=PATH` are read, and every occurrence is
-// considered: a repeated flag is a shape bd does not emit, so a server that
-// names a proven root in any of them is one gc cannot rule out as bd's, the
-// same conservative policy ArgvMentionsRoot applies to the proxy's --root.
-// A relative path proves nothing: it resolves against the server's working
-// directory, which neither argv nor gc's own working directory reveals.
-func ServerOwner(argv []string, pt ProcessTable) (int, bool) {
-	if len(argv) < 2 || argv[1] != ServerVerb {
-		return 0, false
-	}
-	for _, value := range argvFlagValues(argv, ServerConfigFlag) {
-		configPath := strings.TrimSpace(value)
-		if configPath == "" || !filepath.IsAbs(configPath) {
-			continue
-		}
-		if pid, ok := ConfigOwner(configPath, pt); ok {
-			return pid, true
-		}
-	}
-	return 0, false
 }

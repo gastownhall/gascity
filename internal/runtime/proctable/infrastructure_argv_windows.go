@@ -75,10 +75,6 @@ func rootIsCityInfrastructure(live runtime.LiveRuntime) (bool, error) {
 	return IsCityInfrastructureArgv(argv), nil
 }
 
-// rootAlive reports no liveness on Windows, so an ownership proof resting on
-// RootAlive proves nothing there.
-func rootAlive(int) bool { return false }
-
 func rootStartIdentity(pid int) string {
 	identity, err := ProcessIdentity(pid)
 	if err != nil {

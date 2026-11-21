@@ -9060,14 +9060,14 @@ func TestSweepProcessTableOrphansLeavesARootItCannotClassify(t *testing.T) {
 		runtime.LiveRuntime{SessionID: "gm-unreadable", PID: 301, PPID: 1, StartIdentity: "7", IsTracked: false},
 		runtime.LiveRuntime{SessionID: "gm-reaped", PID: 302, PPID: 1, StartIdentity: "8", IsTracked: false},
 	)
-	prev := sweepCityInfrastructureRoot
-	sweepCityInfrastructureRoot = func(live runtime.LiveRuntime) (string, error) {
+	prev := sweepRootIsCityInfrastructure
+	sweepRootIsCityInfrastructure = func(live runtime.LiveRuntime) (bool, error) {
 		if live.PID == 301 {
-			return "", errors.New("command line unreadable")
+			return false, errors.New("command line unreadable")
 		}
-		return "", nil
+		return false, nil
 	}
-	t.Cleanup(func() { sweepCityInfrastructureRoot = prev })
+	t.Cleanup(func() { sweepRootIsCityInfrastructure = prev })
 
 	var stderr bytes.Buffer
 	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr); got != 1 {
