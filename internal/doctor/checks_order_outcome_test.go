@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -1087,6 +1088,55 @@ func TestOrderOutcomeHealthyMixedOutcomeSummary(t *testing.T) {
 			}
 			if result.FixHint != tc.wantHint {
 				t.Fatalf("FixHint = %q, want %q", result.FixHint, tc.wantHint)
+			}
+		})
+	}
+}
+
+// TestOrderOutcomeHealthySuppressedAndInapplicableLeaveDeclarations pins that
+// order.suppressed and order.inapplicable events stay outside the declaration
+// walk: they neither clear an outstanding declaration nor create one.
+func TestOrderOutcomeHealthySuppressedAndInapplicableLeaveDeclarations(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name        string
+		evts        []events.Event
+		wantStatus  CheckStatus
+		wantDetails []string
+	}{
+		{
+			name: "suppressed events neither clear nor create declarations",
+			evts: []events.Event{
+				{Type: events.OrderCompleted, Ts: now.Add(-3 * time.Hour), Subject: "export-sweep", Actor: "controller"},
+				{Type: events.OrderSuppressed, Ts: now.Add(-2 * time.Hour), Subject: "export-sweep", Actor: "controller", Message: "open-work gate held"},
+				skippedOrderEvent("export-sweep", now.Add(-90*time.Minute), "partial", "store unreachable"),
+				{Type: events.OrderSuppressed, Ts: now.Add(-time.Hour), Subject: "export-sweep", Actor: "controller", Message: "open-work gate held"},
+			},
+			wantStatus:  StatusWarning,
+			wantDetails: []string{"export-sweep: recorded incomplete work: partial: store unreachable"},
+		},
+		{
+			name: "inapplicable events do not create declarations",
+			evts: []events.Event{
+				{Type: events.OrderInapplicable, Ts: now.Add(-time.Hour), Subject: "export-sweep", Actor: "controller", Message: "requires backend postgres"},
+			},
+			wantStatus:  StatusOK,
+			wantDetails: []string{"export-sweep: no completed runs yet"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "export-sweep", "cooldown", "6h")
+			writeOrderFiringTestEvents(t, cityPath, tc.evts...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %v, want %v; msg=%q details=%v", result.Status, tc.wantStatus, result.Message, result.Details)
+			}
+			if !reflect.DeepEqual(result.Details, tc.wantDetails) {
+				t.Fatalf("details = %v, want %v", result.Details, tc.wantDetails)
 			}
 		})
 	}
