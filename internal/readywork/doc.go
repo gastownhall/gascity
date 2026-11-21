@@ -48,7 +48,9 @@
 // --metadata-field key=value) and, under the two orders a store can reproduce,
 // --limit are pushed into each leg's query. A store may narrow its answer by
 // them, and never widen it; the predicates are always re-applied to the merged
-// set here, which stays the authority. See pushdown.go for why each pushed
+// set here, which stays the authority. The --status list legs push the same
+// key=value pairs into their List queries under two further conditions a list
+// backend needs (listMetadata). See pushdown.go for why each pushed
 // predicate is no stricter than the Go filter, and for the limit's exactness
 // rules.
 package readywork
