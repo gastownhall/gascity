@@ -590,3 +590,25 @@ func TestTerminateManagedDoltScopeWatchdogChildSkipsReusedPID(t *testing.T) {
 		t.Fatalf("watchdog reap signaled reused dolt child pid %d; identity guard not enforced", reusedPID)
 	}
 }
+
+func startScopeWatchdogForFailedSpawn(city, configFile, logPath string, logFile *os.File) error {
+	_, err := startManagedDoltSQLServerWithScopeWatchdogEnv(city, configFile, logPath, logFile, os.Environ())
+	return err
+}
+
+// TestStartManagedDoltSQLServerWithScopeWatchdogSkipsReusedPIDOnHandshakeFailure
+// pins the ga-llfl37 fix for the production scope watchdog: when its start
+// handshake fails, the cleanup that terminates the watchdog must be guarded by
+// the identity snapshotted right after cmd.Start(), not signal by bare PID.
+func TestStartManagedDoltSQLServerWithScopeWatchdogSkipsReusedPIDOnHandshakeFailure(t *testing.T) {
+	signaled, logged := runFailedWatchdogSpawn(t, true, startScopeWatchdogForFailedSpawn)
+	assertFailedWatchdogSpawnSkippedReusedPID(t, signaled, logged)
+}
+
+// TestStartManagedDoltSQLServerWithScopeWatchdogTerminatesWatchdogOnHandshakeFailure
+// is the happy-path companion: the guard must not stop cleanup of the watchdog
+// this call spawned.
+func TestStartManagedDoltSQLServerWithScopeWatchdogTerminatesWatchdogOnHandshakeFailure(t *testing.T) {
+	signaled, logged := runFailedWatchdogSpawn(t, false, startScopeWatchdogForFailedSpawn)
+	assertFailedWatchdogSpawnTerminated(t, signaled, logged)
+}
