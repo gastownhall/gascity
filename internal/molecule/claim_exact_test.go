@@ -105,6 +105,7 @@ func TestClaimExact_EachPreconditionFieldMismatchesIndependently(t *testing.T) {
 		want ClaimExactPreconditions
 	}{
 		{"status", ClaimExactPreconditions{Status: strp("in_progress")}},
+		{"assignee", ClaimExactPreconditions{Assignee: strp("worker-7")}},
 		{"routed_to", ClaimExactPreconditions{RoutedTo: strp("session-bravo")}},
 		{"root_bead_id", ClaimExactPreconditions{RootBeadID: strp("root-99")}},
 		{"step_id", ClaimExactPreconditions{StepID: strp("test")}},

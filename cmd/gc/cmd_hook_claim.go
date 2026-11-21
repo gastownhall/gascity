@@ -986,7 +986,8 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
+		claimed, verdict, err := claimHookCandidate(ctx, candidate, claimActor, false, false, opts, ops, dir, stderr)
+		ok := verdict == hookClaimVerdictClaimed
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// re-stamp and the workflow re-check below spend any more store time.
 		landedAt := ops.nowOrWallClock()
@@ -1141,6 +1142,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			continue
 		}
 		reclaimedFrom := ""
+		reclaimed := false
 		// gc.exclude_claimants is checked before the reclaim lane too: an
 		// excluded session must not even revert a stale lease it cannot take.
 		if hookClaimExcludesSession(candidate, opts) {
@@ -1162,14 +1164,15 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			if ctx.Err() != nil {
 				break
 			}
-			reclaimed, previousOwner, err := ops.ReclaimStale(ctx, dir, opts.Env, candidate.ID)
-			if err != nil || !reclaimed {
+			reverted, previousOwner, err := ops.ReclaimStale(ctx, dir, opts.Env, candidate.ID)
+			if err != nil || !reverted {
 				// Best-effort optimization, not a claim path of its own: any
 				// non-reclaim outcome leaves the candidate untouched (FR4) and
 				// the hook moves on to the next candidate.
 				continue
 			}
 			reclaimedFrom = previousOwner
+			reclaimed = true
 		}
 		// F-B. The fresh-claim CAS is the mutation that mints a new obligation,
 		// so it is the one the turn-binding window most directly guards.
@@ -1191,7 +1194,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, verdict, err := claimHookCandidate(ctx, candidate, opts.Assignee, true, opts, ops, dir, stderr)
+		claimed, verdict, err := claimHookCandidate(ctx, candidate, opts.Assignee, true, reclaimed, opts, ops, dir, stderr)
 		ok := verdict == hookClaimVerdictClaimed
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// workflow re-check below spends any more store time.
