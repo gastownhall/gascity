@@ -4234,3 +4234,124 @@ func TestRouteSessionPeek_NoCacheAgeFooterWhenCacheStale(t *testing.T) {
 		t.Errorf("routed peek stdout = %q, want only the live pane output %q", got, "peeked\n")
 	}
 }
+
+func TestRouteSessionPeekEmptyOutputNamesTheState(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeSessionListTestCity(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":           "gc-abc",
+			"template":     "mayor",
+			"state":        "asleep",
+			"title":        "x",
+			"session_name": "mayor",
+			"provider":     "claude",
+			"created_at":   "2026-04-23T10:00:00Z",
+			"attached":     false,
+			"running":      false,
+			"last_output":  "",
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeSessionPeek(cityPath, "mayor", 50, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing (not even a newline)", stdout.String())
+	}
+	want := "gc session peek: mayor has no pane output (session state: asleep)\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := routeSessionPeek(cityPath, "mayor", 50, c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("json exit = %d, stderr=%q", code, stderr.String())
+	}
+	var got sessionPeekJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("json output %q: %v", stdout.String(), err)
+	}
+	if got.Output != "" || got.State != "asleep" {
+		t.Errorf("json = %+v, want empty output and state asleep", got)
+	}
+}
+
+// paneGoneProvider answers Peek the way tmux does for a seat with no pane.
+type paneGoneProvider struct {
+	*runtime.Fake
+}
+
+func (paneGoneProvider) Peek(string, int) (string, error) {
+	return "", runtime.ErrSessionNotFound
+}
+
+func TestSessionPeekFallbackNoPaneOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider func() runtime.Provider
+	}{
+		{name: "empty-pane", provider: func() runtime.Provider {
+			f := runtime.NewFake()
+			f.SetPeekOutput("runtime-session", "")
+			return f
+		}},
+		{name: "pane-gone", provider: func() runtime.Provider {
+			return paneGoneProvider{Fake: runtime.NewFake()}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			clearInheritedCityRoutingEnv(t)
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", "fake")
+
+			cityDir := t.TempDir()
+			t.Setenv("GC_CITY", cityDir)
+			writeNamedSessionCityTOML(t, cityDir)
+
+			provider := tc.provider()
+			oldBuild := buildSessionProviderByName
+			buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+				return provider, nil
+			}
+			t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+			}
+			b, err := store.Create(beads.Bead{
+				Title:  "asleep peek session",
+				Type:   session.BeadType,
+				Labels: []string{session.LabelSession},
+				Metadata: map[string]string{
+					"session_name": "runtime-session",
+					"template":     "worker",
+					"state":        "asleep",
+					"work_dir":     cityDir,
+				},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(session): %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := doSessionPeekFallback(b.ID, 2, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want nothing", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "has no pane output (session state: asleep)") {
+				t.Errorf("stderr = %q, want the no-output line with the state", stderr.String())
+			}
+		})
+	}
+}
