@@ -636,3 +636,36 @@ func TestCompletionsStartupSweepRepairsOnlyTheUnstampedGap(t *testing.T) {
 		t.Fatalf("the repaired gap root was not stamped by the following sweep: %v", err)
 	}
 }
+
+// TestCompletionsSweepVisitsReopenedStampedRootForEveryReason (ga-vn0uok): the
+// stamp is terminal only while the root stays closed, and that holds whatever
+// label the sweep carries — the reason does not select what the sweep visits.
+// A stamped root that has reopened is kept by the partition for startup,
+// cursor-gap and cadence sweeps alike, and its stale stamp is cleared.
+func TestCompletionsSweepVisitsReopenedStampedRootForEveryReason(t *testing.T) {
+	for _, reason := range []string{backstopReasonStartup, backstopReasonCursorGap, backstopReasonCadence} {
+		t.Run(reason, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			rootID := seedClosedWorkflowRoot(t, backing, "gcg-reopened")
+			cr, lane, _ := newCompletionSweepRuntime(t, backing)
+			convergeCompletions(t, cr, lane, backing, []string{rootID})
+
+			open := "open"
+			if err := backing.Update(rootID, beads.UpdateOpts{Status: &open}); err != nil {
+				t.Fatal(err)
+			}
+
+			result := cr.runCompletionsSweepChunk(&executionevent.CompletionBackstop{}, lane, reason)
+			if result.RootsVisited != 1 || result.RootsSkippedConverged != 0 {
+				t.Fatalf("%s sweep = %+v, want the reopened stamped root VISITED, not skipped as converged", reason, result)
+			}
+			root, err := backing.Get(rootID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] != "" {
+				t.Fatalf("a %s sweep left a STALE stamp on a reopened root; the backstop now permanently skips it", reason)
+			}
+		})
+	}
+}
