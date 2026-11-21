@@ -130,14 +130,17 @@ func latestIncompleteOrderOutcome(outcomes []events.Event, subject string) (even
 
 // incompleteOrderOutcomeDetail renders a recorded order.skipped declaration.
 // The declaration message carries the outcome, reason and skipped scopes the
-// controller recorded, so it is quoted whole. Declarations are not paired with
-// executions, so the detail describes the recorded evidence rather than a run.
+// controller recorded, so it is quoted whole, with %q as the failure detail
+// quotes its message: scope names can come from the bead store, and quoting
+// keeps their control characters off the terminal. Declarations are not paired
+// with executions, so the detail describes the recorded evidence rather than a
+// run.
 func incompleteOrderOutcomeDetail(order orders.Order, declaration events.Event) string {
 	name := orderDisplayName(order)
 	if strings.TrimSpace(declaration.Message) == "" {
 		return fmt.Sprintf("%s: recorded incomplete work", name)
 	}
-	return fmt.Sprintf("%s: recorded incomplete work: %s", name, declaration.Message)
+	return fmt.Sprintf("%s: recorded incomplete work: %q", name, declaration.Message)
 }
 
 // classifyOrderOutcome turns one order's failure streak into a doctor result.
@@ -170,7 +173,9 @@ func classifyOrderOutcome(order orders.Order, streak int, threshold int, lastMes
 	return StatusWarning, detail
 }
 
-// OrderOutcomeHealthyCheck reports scheduled orders failing repeatedly.
+// OrderOutcomeHealthyCheck reports scheduled orders failing repeatedly, and
+// reports without warning the incomplete work an order declared since its
+// latest completion.
 //
 // Sibling to OrderFiringCurrentCheck, which answers "did it run?" while this
 // answers "did it succeed?". An order that fires faithfully on schedule and fails
@@ -205,7 +210,7 @@ func (c *OrderOutcomeHealthyCheck) Fix(_ *CheckContext) error { return nil }
 
 // Run counts each scheduled order's trailing consecutive failures and reports
 // any order.skipped declaration of incomplete work recorded since its latest
-// completion.
+// completion. Only a failure streak warns; see reportOrderOutcome.
 //
 // Unlike order-firing-current this needs no goroutine-plus-timeout guard: that
 // check wraps its work because the order-history resolver opens the beads/Dolt
@@ -250,11 +255,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
-	worst := StatusOK
-	monitored := 0
-	unhealthy := 0
-	incomplete := false
-	var firstFailingHint string
+	var tally orderOutcomeTally
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
 	for _, order := range allOrders {
@@ -268,60 +269,115 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
 			continue
 		}
-		monitored++
-
-		outcomes := log.bySubject[order.ScopedName()]
-		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(outcomes, order.ScopedName(), log.starts, c.grace)
-		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
-		details := []string{detail}
-		if declaration, ok := latestIncompleteOrderOutcome(outcomes, order.ScopedName()); ok {
-			// An outstanding declaration means work did not run. Trailing
-			// failures keep their own detail alongside it; otherwise the
-			// classifier's success or no-outcome detail would be false.
-			status = worseStatus(status, StatusWarning)
-			incomplete = true
-			declarationDetail := incompleteOrderOutcomeDetail(order, declaration)
-			if streak > 0 || skipped > 0 {
-				details = append(details, declarationDetail)
-			} else {
-				details = []string{declarationDetail}
-			}
-		}
-		worst = worseStatus(worst, status)
-		result.Details = append(result.Details, details...)
-		if status != StatusOK {
-			unhealthy++
-			if firstFailingHint == "" {
-				// gc order history takes a bare name positionally and filters
-				// on a.Name; the scoped form matches zero orders on the
-				// local-iterator path used when the supervisor API is
-				// unavailable — exactly when someone is debugging a broken
-				// city. orderHistoryHintTarget yields the --rig form instead.
-				firstFailingHint = orderHistoryHintTarget(order)
-			}
-		}
+		tally.add(order, c.reportOrderOutcome(order, log))
 	}
 
-	if monitored == 0 {
+	if tally.monitored == 0 {
 		result.Status = StatusOK
 		result.Message = "no cron or cooldown orders"
 		return result
 	}
 
-	result.Status = worst
-	if worst == StatusOK {
-		result.Message = "all scheduled orders succeeding"
-	} else {
-		// "failing repeatedly" would misdescribe an order whose only signal is
-		// a declaration of incomplete work, so any outstanding declaration
-		// switches to an aggregate covering both signals.
-		result.Message = fmt.Sprintf("%d order(s) failing repeatedly", unhealthy)
-		if incomplete {
-			result.Message = fmt.Sprintf("%d order(s) have unhealthy outcomes", unhealthy)
-		}
-		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, firstFailingHint)
+	result.Status = tally.worst
+	result.Message = tally.message()
+	result.Details = tally.details
+	if tally.failing > 0 {
+		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, tally.hintTarget)
 	}
 	return result
+}
+
+// orderOutcomeReport is one monitored order's share of the check result.
+type orderOutcomeReport struct {
+	status  CheckStatus
+	details []string
+	// declared reports an order.skipped declaration recorded since the order's
+	// latest completion.
+	declared bool
+}
+
+// reportOrderOutcome evaluates one monitored order. Its failure streak alone
+// decides the status. An outstanding declaration is listed beside trailing
+// failures, or replaces the classifier's success or no-outcome detail, which
+// the declaration makes false. It never warns: bundled orders declare
+// by-design exclusions on every run (claims held by identities a sweep cannot
+// vouch for, a store that is not a bd store), and the event log cannot tell
+// those from work that keeps failing to run without a judgment call. Warning
+// on every declaration would hold the check at warning for good on such
+// cities and bury the failure streaks it exists to report.
+func (c *OrderOutcomeHealthyCheck) reportOrderOutcome(order orders.Order, log orderOutcomeLog) orderOutcomeReport {
+	subject := order.ScopedName()
+	outcomes := log.bySubject[subject]
+	streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(outcomes, subject, log.starts, c.grace)
+	status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
+	report := orderOutcomeReport{status: status, details: []string{detail}}
+	declaration, ok := latestIncompleteOrderOutcome(outcomes, subject)
+	if !ok {
+		return report
+	}
+	report.declared = true
+	declarationDetail := incompleteOrderOutcomeDetail(order, declaration)
+	if streak > 0 || skipped > 0 {
+		report.details = append(report.details, declarationDetail)
+	} else {
+		report.details = []string{declarationDetail}
+	}
+	return report
+}
+
+// orderOutcomeTally accumulates the monitored orders' reports into the check
+// result.
+type orderOutcomeTally struct {
+	monitored int
+	// failing counts orders whose failure streak warns, and declaring counts
+	// orders with an outstanding declaration; an order can be in both.
+	failing   int
+	declaring int
+	// hintTarget is the first failing order's gc order history argument.
+	hintTarget string
+	worst      CheckStatus
+	details    []string
+}
+
+// add folds one monitored order's report into the tally.
+func (t *orderOutcomeTally) add(order orders.Order, report orderOutcomeReport) {
+	t.monitored++
+	t.worst = worseStatus(t.worst, report.status)
+	t.details = append(t.details, report.details...)
+	if report.declared {
+		t.declaring++
+	}
+	if report.status == StatusOK {
+		return
+	}
+	t.failing++
+	if t.hintTarget == "" {
+		// gc order history takes a bare name positionally and filters on
+		// a.Name; the scoped form matches zero orders on the local-iterator
+		// path used when the supervisor API is unavailable — exactly when
+		// someone is debugging a broken city. orderHistoryHintTarget yields
+		// the --rig form instead.
+		t.hintTarget = orderHistoryHintTarget(order)
+	}
+}
+
+// message summarizes the tally. Failing and declaring orders are counted
+// separately, so a declaration neither hides a failure streak nor lets the
+// summary claim that every order succeeded.
+func (t *orderOutcomeTally) message() string {
+	var summary string
+	switch {
+	case t.failing > 0:
+		summary = fmt.Sprintf("%d order(s) failing repeatedly", t.failing)
+	case t.declaring > 0:
+		summary = "no order failing repeatedly"
+	default:
+		return "all scheduled orders succeeding"
+	}
+	if t.declaring > 0 {
+		summary += fmt.Sprintf("; %d with recorded incomplete work", t.declaring)
+	}
+	return summary
 }
 
 // orderOutcomeLog is everything order-outcome-healthy needs from the event log,

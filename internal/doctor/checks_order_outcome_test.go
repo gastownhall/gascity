@@ -541,10 +541,20 @@ func skippedOrderEvent(subject string, ts time.Time, outcome, reason string, sco
 	}
 }
 
+const (
+	// orderOutcomeOneDeclaringSummary is the check message when no monitored
+	// order fails repeatedly and one has an outstanding declaration.
+	orderOutcomeOneDeclaringSummary = "no order failing repeatedly; 1 with recorded incomplete work"
+	// orderOutcomeOneFailingOneDeclaringSummary is the check message when one
+	// monitored order fails repeatedly and one has an outstanding declaration.
+	orderOutcomeOneFailingOneDeclaringSummary = "1 order(s) failing repeatedly; 1 with recorded incomplete work"
+)
+
 // TestOrderOutcomeHealthyRecordedIncompleteOutcomes pins that a monitored
 // order whose run recorded order.completed followed by an order.skipped
-// declaration surfaces the declaration as an advisory warning immediately,
-// instead of reporting the companion completion as success.
+// declaration reports the quoted declaration in place of the companion
+// completion's success claim and counts it in the message, without warning:
+// a declaration alone never changes the status.
 func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	partial := skippedOrderEvent("export-sweep", now.Add(-time.Hour), "partial", "store unreachable",
@@ -571,7 +581,7 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "export-sweep", Actor: "controller"},
 				partial,
 			},
-			wantDetail: "export-sweep: recorded incomplete work: partial: store unreachable; not run: rig:st (dolt not reachable)",
+			wantDetail: `export-sweep: recorded incomplete work: "partial: store unreachable; not run: rig:st (dolt not reachable)"`,
 		},
 		{
 			name: "cron skipped after completion", trigger: "cron", timing: "0 3 * * *", order: "nightly-digest",
@@ -579,12 +589,12 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "nightly-digest", Actor: "controller"},
 				skipped,
 			},
-			wantDetail: "nightly-digest: recorded incomplete work: skipped: nothing exported; not run: rig:a (suspended), rig:b (no remote)",
+			wantDetail: `nightly-digest: recorded incomplete work: "skipped: nothing exported; not run: rig:a (suspended), rig:b (no remote)"`,
 		},
 		{
 			name: "declaration without companion completion", trigger: "cooldown", timing: "6h", order: "export-sweep",
 			evts:       []events.Event{partial},
-			wantDetail: "export-sweep: recorded incomplete work: partial: store unreachable",
+			wantDetail: `export-sweep: recorded incomplete work: "partial: store unreachable; not run: rig:st (dolt not reachable)"`,
 		},
 		{
 			name: "unreadable declaration keeps its error text", trigger: "cooldown", timing: "1h", order: "broken-declarer",
@@ -592,10 +602,10 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "broken-declarer", Actor: "controller"},
 				unreadable,
 			},
-			wantDetail: "broken-declarer: recorded incomplete work: unreadable outcome declaration: invalid character 'x'",
+			wantDetail: `broken-declarer: recorded incomplete work: "unreadable outcome declaration: invalid character 'x' looking for beginning of value"`,
 		},
 		{
-			name: "blank declaration message still warns", trigger: "cooldown", timing: "1h", order: "blank-declarer",
+			name: "blank declaration message still replaces the success claim", trigger: "cooldown", timing: "1h", order: "blank-declarer",
 			evts: []events.Event{
 				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "blank-declarer", Actor: "controller"},
 				blank,
@@ -603,13 +613,22 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 			wantDetail: "blank-declarer: recorded incomplete work",
 		},
 		{
-			name: "declaration inside controller-start grace still warns", trigger: "cooldown", timing: "6h", order: "export-sweep",
+			name: "declaration inside controller-start grace is still reported", trigger: "cooldown", timing: "6h", order: "export-sweep",
 			evts: []events.Event{
 				{Type: events.ControllerStarted, Ts: now.Add(-time.Hour - time.Minute), Subject: "gc", Actor: "controller"},
 				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "export-sweep", Actor: "controller"},
 				partial,
 			},
-			wantDetail: "export-sweep: recorded incomplete work: partial: store unreachable",
+			wantDetail: `export-sweep: recorded incomplete work: "partial: store unreachable; not run: rig:st (dolt not reachable)"`,
+		},
+		{
+			name: "control characters in the declaration are escaped", trigger: "cooldown", timing: "1h", order: "export-sweep",
+			evts: []events.Event{
+				{Type: events.OrderCompleted, Ts: now.Add(-time.Hour), Subject: "export-sweep", Actor: "controller"},
+				skippedOrderEvent("export-sweep", now.Add(-time.Hour), "partial", "claims kept",
+					events.OrderSkippedScope{Scope: "holder\x1b[2J", Reason: "not vouched\nfor"}),
+			},
+			wantDetail: `export-sweep: recorded incomplete work: "partial: claims kept; not run: holder\x1b[2J (not vouched\nfor)"`,
 		},
 	}
 	for _, tc := range cases {
@@ -620,24 +639,94 @@ func TestOrderOutcomeHealthyRecordedIncompleteOutcomes(t *testing.T) {
 
 			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
 
-			if result.Status != StatusWarning {
-				t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+			if result.Status != StatusOK {
+				t.Fatalf("status = %v, want StatusOK: a declaration alone must not warn; msg=%q details=%v", result.Status, result.Message, result.Details)
 			}
 			if result.Severity != SeverityAdvisory {
 				t.Fatalf("severity = %v, want SeverityAdvisory", result.Severity)
 			}
-			joined := strings.Join(result.Details, "\n")
-			if !strings.Contains(joined, tc.wantDetail) {
-				t.Fatalf("details = %v, want a detail containing %q", result.Details, tc.wantDetail)
+			if !reflect.DeepEqual(result.Details, []string{tc.wantDetail}) {
+				t.Fatalf("details = %q, want exactly %q in place of the success claim", result.Details, tc.wantDetail)
 			}
-			if strings.Contains(joined, "last run succeeded") || strings.Contains(joined, "no completed runs yet") {
-				t.Fatalf("details = %v, must not claim success for an order with outstanding incomplete work", result.Details)
+			if result.Message != orderOutcomeOneDeclaringSummary {
+				t.Fatalf("message = %q, want %q", result.Message, orderOutcomeOneDeclaringSummary)
 			}
-			if result.Message == "all scheduled orders succeeding" {
-				t.Fatalf("message = %q, must not claim every order succeeded", result.Message)
+			if result.FixHint != "" {
+				t.Fatalf("FixHint = %q, want none: gc order history cannot show a declaration", result.FixHint)
 			}
-			if want := fmt.Sprintf(orderOutcomeInspectHintFmt, tc.order); result.FixHint != want {
-				t.Fatalf("FixHint = %q, want %q", result.FixHint, want)
+		})
+	}
+}
+
+// TestOrderOutcomeHealthyEveryRunDeclarationsStayOK pins the steady state of
+// an order that declares incomplete work on every run: [completed, skipped]×N
+// stays StatusOK, quotes only the newest declaration and counts the order
+// once. Bundled orders declare by-design exclusions this way on every run
+// (claims held by identities a sweep cannot vouch for, a store that is not a
+// bd store), and the event log cannot tell those from work that keeps failing
+// to run, such as a scope whose export fails on every run (#8520), without a
+// judgment call. Warning on every declaration would keep the check at ⚠ for
+// good, so only a failure streak warns.
+func TestOrderOutcomeHealthyEveryRunDeclarationsStayOK(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	const runs = 96
+	cases := []struct {
+		name       string
+		order      string
+		outcome    string
+		reason     func(run int) string
+		scope      events.OrderSkippedScope
+		wantDetail string
+	}{
+		{
+			name: "claims held by identities the sweep cannot vouch for", order: "claim-sweep", outcome: "partial",
+			reason: func(run int) string {
+				return fmt.Sprintf("protected %d claim(s) held by identities this city could not vouch for", 100+run)
+			},
+			scope:      events.OrderSkippedScope{Scope: "operator", Reason: "claims kept: not a session of this city"},
+			wantDetail: `claim-sweep: recorded incomplete work: "partial: protected 195 claim(s) held by identities this city could not vouch for; not run: operator (claims kept: not a session of this city)"`,
+		},
+		{
+			name: "store that is not a bd store", order: "dep-sync", outcome: "skipped",
+			reason:     func(int) string { return "not a bd bead store" },
+			scope:      events.OrderSkippedScope{Scope: "city", Reason: "not a bd bead store"},
+			wantDetail: `dep-sync: recorded incomplete work: "skipped: not a bd bead store; not run: city (not a bd bead store)"`,
+		},
+		{
+			name: "scope whose export fails on every run", order: "archive-export", outcome: "partial",
+			reason:     func(int) string { return "some scopes or steps did not run" },
+			scope:      events.OrderSkippedScope{Scope: "city", Reason: "export failed"},
+			wantDetail: `archive-export: recorded incomplete work: "partial: some scopes or steps did not run; not run: city (export failed)"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, tc.order, "cooldown", "5m")
+			evts := make([]events.Event, 0, 2*runs)
+			for run := 0; run < runs; run++ {
+				ts := now.Add(-time.Duration(runs-run) * 5 * time.Minute)
+				evts = append(evts,
+					events.Event{Type: events.OrderCompleted, Ts: ts, Subject: tc.order, Actor: "controller"},
+					skippedOrderEvent(tc.order, ts, tc.outcome, tc.reason(run), tc.scope),
+				)
+			}
+			writeOrderFiringTestEvents(t, cityPath, evts...)
+
+			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
+
+			if result.Status != StatusOK || result.Severity != SeverityAdvisory {
+				t.Fatalf("status/severity = %v/%v, want StatusOK/SeverityAdvisory after %d declaring runs; msg=%q details=%v",
+					result.Status, result.Severity, runs, result.Message, result.Details)
+			}
+			if result.Message != orderOutcomeOneDeclaringSummary {
+				t.Fatalf("message = %q, want %q", result.Message, orderOutcomeOneDeclaringSummary)
+			}
+			if !reflect.DeepEqual(result.Details, []string{tc.wantDetail}) {
+				t.Fatalf("details = %q, want only the newest declaration %q", result.Details, tc.wantDetail)
+			}
+			if result.FixHint != "" {
+				t.Fatalf("FixHint = %q, want none for an order that never failed", result.FixHint)
 			}
 		})
 	}
@@ -825,10 +914,11 @@ func TestConsecutiveOrderFailuresIgnoresDeclarations(t *testing.T) {
 
 // TestOrderOutcomeHealthyIncompleteOutcomeWithFailures pins that a recorded
 // declaration and trailing failures are reported side by side: the failure
-// detail is kept exactly and the newest declaration is added to it.
+// detail is kept exactly, the newest declaration is added to it, and the
+// failure streak alone decides the status.
 func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	const declDetail = "export-sweep: recorded incomplete work: partial: store unreachable; not run: rig:st (dolt not reachable)"
+	const declDetail = `export-sweep: recorded incomplete work: "partial: store unreachable; not run: rig:st (dolt not reachable)"`
 	completed := func(ts time.Time) events.Event {
 		return events.Event{Type: events.OrderCompleted, Ts: ts, Subject: "export-sweep", Actor: "controller"}
 	}
@@ -849,6 +939,8 @@ func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 	cases := []struct {
 		name        string
 		evts        []events.Event
+		wantStatus  CheckStatus
+		wantMessage string
 		wantDetails []string
 	}{
 		{
@@ -857,6 +949,8 @@ func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 				completed(now.Add(-5 * time.Hour)), declared(now.Add(-5 * time.Hour)),
 				failed(now.Add(-3 * time.Hour)), failed(now.Add(-2 * time.Hour)), failed(now.Add(-time.Hour)),
 			},
+			wantStatus:  StatusWarning,
+			wantMessage: orderOutcomeOneFailingOneDeclaringSummary,
 			wantDetails: []string{`export-sweep: 3 consecutive failures, last "exit status 1"`, declDetail},
 		},
 		{
@@ -865,6 +959,8 @@ func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 				completed(now.Add(-5 * time.Hour)), failed(now.Add(-4 * time.Hour)), failed(now.Add(-3 * time.Hour)),
 				failed(now.Add(-2 * time.Hour)), declared(now.Add(-time.Hour)),
 			},
+			wantStatus:  StatusWarning,
+			wantMessage: orderOutcomeOneFailingOneDeclaringSummary,
 			wantDetails: []string{`export-sweep: 3 consecutive failures, last "exit status 1"`, declDetail},
 		},
 		{
@@ -873,6 +969,8 @@ func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 				completed(now.Add(-5 * time.Hour)), older(now.Add(-5 * time.Hour)),
 				completed(now.Add(-3 * time.Hour)), declared(now.Add(-3 * time.Hour)), failed(now.Add(-time.Hour)),
 			},
+			wantStatus:  StatusOK,
+			wantMessage: orderOutcomeOneDeclaringSummary,
 			wantDetails: []string{"export-sweep: 1 consecutive failure(s), under threshold 3", declDetail},
 		},
 		{
@@ -881,6 +979,8 @@ func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 				completed(now.Add(-5 * time.Hour)), declared(now.Add(-5 * time.Hour)),
 				started(now.Add(-time.Hour)), failed(now.Add(-time.Hour + time.Minute)),
 			},
+			wantStatus:  StatusOK,
+			wantMessage: orderOutcomeOneDeclaringSummary,
 			wantDetails: []string{"export-sweep: 1 recent failure(s) within controller-start grace window", declDetail},
 		},
 	}
@@ -892,11 +992,14 @@ func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 
 			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
 
-			if result.Status != StatusWarning {
-				t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %v, want %v; msg=%q details=%v", result.Status, tc.wantStatus, result.Message, result.Details)
 			}
 			if result.Severity != SeverityAdvisory {
 				t.Fatalf("severity = %v, want SeverityAdvisory", result.Severity)
+			}
+			if result.Message != tc.wantMessage {
+				t.Fatalf("message = %q, want %q", result.Message, tc.wantMessage)
 			}
 			if strings.Join(result.Details, "\n") != strings.Join(tc.wantDetails, "\n") {
 				t.Fatalf("details = %q, want %q", result.Details, tc.wantDetails)
@@ -908,7 +1011,8 @@ func TestOrderOutcomeHealthyIncompleteOutcomeWithFailures(t *testing.T) {
 // TestOrderOutcomeHealthyIncompleteOutcomeOrderScope pins which declarations
 // count: only monitored cron/cooldown orders outside suspended rigs, matched by
 // full scoped subject, so a same-named order in another scope neither inherits
-// nor clears the declaration, and the hint keeps the rig-aware target.
+// nor clears the declaration, and the message counts the one monitored
+// declaring order.
 func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	setup := func(t *testing.T) (string, *config.City) {
@@ -954,7 +1058,6 @@ func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
 		name        string
 		evts        []events.Event
 		wantDetails []string
-		wantHint    string
 	}{
 		{
 			name: "rig-scoped declaration survives a city-scope completion",
@@ -965,9 +1068,8 @@ func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
 			}, excluded...),
 			wantDetails: []string{
 				"export-sweep: last run succeeded",
-				"export-sweep:rig:st: recorded incomplete work: partial: store unreachable; not run: rig:st (dolt not reachable)",
+				`export-sweep:rig:st: recorded incomplete work: "partial: store unreachable; not run: rig:st (dolt not reachable)"`,
 			},
-			wantHint: "Inspect with: gc order check && gc order history export-sweep --rig st",
 		},
 		{
 			name: "city-scoped declaration survives a rig-scope completion",
@@ -977,10 +1079,9 @@ func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
 				completed("export-sweep:rig:st", now.Add(-time.Hour)),
 			}, excluded...),
 			wantDetails: []string{
-				"export-sweep: recorded incomplete work: partial: store unreachable; not run: rig:st (dolt not reachable)",
+				`export-sweep: recorded incomplete work: "partial: store unreachable; not run: rig:st (dolt not reachable)"`,
 				"export-sweep:rig:st: last run succeeded",
 			},
-			wantHint: "Inspect with: gc order check && gc order history export-sweep",
 		},
 	}
 	for _, tc := range cases {
@@ -990,25 +1091,28 @@ func TestOrderOutcomeHealthyIncompleteOutcomeOrderScope(t *testing.T) {
 
 			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
 
-			if result.Status != StatusWarning {
-				t.Fatalf("status = %v, want StatusWarning; msg=%q details=%v", result.Status, result.Message, result.Details)
+			if result.Status != StatusOK {
+				t.Fatalf("status = %v, want StatusOK; msg=%q details=%v", result.Status, result.Message, result.Details)
 			}
 			got := append([]string(nil), result.Details...)
 			sort.Strings(got)
 			if strings.Join(got, "\n") != strings.Join(tc.wantDetails, "\n") {
 				t.Fatalf("details = %q, want %q (excluded orders and scopes must not appear)", got, tc.wantDetails)
 			}
-			if result.FixHint != tc.wantHint {
-				t.Fatalf("FixHint = %q, want %q", result.FixHint, tc.wantHint)
+			if result.Message != orderOutcomeOneDeclaringSummary {
+				t.Fatalf("message = %q, want %q (excluded declarations must not be counted)", result.Message, orderOutcomeOneDeclaringSummary)
+			}
+			if result.FixHint != "" {
+				t.Fatalf("FixHint = %q, want none without a failing order", result.FixHint)
 			}
 		})
 	}
 }
 
-// TestOrderOutcomeHealthyMixedOutcomeSummary pins the aggregate: each unhealthy
-// order counts once, an aggregate covering incomplete work replaces "failing
-// repeatedly" whenever a declaration is outstanding, and a failure-only log
-// keeps its exact existing output.
+// TestOrderOutcomeHealthyMixedOutcomeSummary pins the aggregate: only failing
+// orders warn and only a failing order is hinted, even when a declaring order
+// sorts first; failing and declaring orders are counted separately, each at
+// most once; and a failure-only log keeps its exact existing output.
 func TestOrderOutcomeHealthyMixedOutcomeSummary(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	failures := func(subject string) []events.Event {
@@ -1028,6 +1132,7 @@ func TestOrderOutcomeHealthyMixedOutcomeSummary(t *testing.T) {
 	cases := []struct {
 		name        string
 		evts        []events.Event
+		wantStatus  CheckStatus
 		wantMessage string
 		wantDetails []string
 		wantHint    string
@@ -1035,35 +1140,63 @@ func TestOrderOutcomeHealthyMixedOutcomeSummary(t *testing.T) {
 		{
 			name:        "failure-only log keeps existing output",
 			evts:        failures("alpha-sweep"),
+			wantStatus:  StatusWarning,
 			wantMessage: "1 order(s) failing repeatedly",
 			wantDetails: []string{`alpha-sweep: 3 consecutive failures, last "exit status 1"`, "beta-sweep: no completed runs yet"},
 			wantHint:    "Inspect with: gc order check && gc order history alpha-sweep",
 		},
 		{
-			name:        "declaration only",
+			name:        "declaration only does not warn",
 			evts:        []events.Event{declared("beta-sweep")},
-			wantMessage: "1 order(s) have unhealthy outcomes",
-			wantDetails: []string{"alpha-sweep: no completed runs yet", "beta-sweep: recorded incomplete work: skipped: nothing to export"},
-			wantHint:    "Inspect with: gc order check && gc order history beta-sweep",
+			wantStatus:  StatusOK,
+			wantMessage: orderOutcomeOneDeclaringSummary,
+			wantDetails: []string{"alpha-sweep: no completed runs yet", `beta-sweep: recorded incomplete work: "skipped: nothing to export"`},
 		},
 		{
 			name:        "failing order and declaring order count separately",
 			evts:        append(failures("alpha-sweep"), declared("beta-sweep")),
-			wantMessage: "2 order(s) have unhealthy outcomes",
+			wantStatus:  StatusWarning,
+			wantMessage: orderOutcomeOneFailingOneDeclaringSummary,
 			wantDetails: []string{
 				`alpha-sweep: 3 consecutive failures, last "exit status 1"`,
-				"beta-sweep: recorded incomplete work: skipped: nothing to export",
+				`beta-sweep: recorded incomplete work: "skipped: nothing to export"`,
 			},
 			wantHint: "Inspect with: gc order check && gc order history alpha-sweep",
 		},
 		{
-			name:        "both signals on one order count it once",
+			name:        "hint skips a declaring order that sorts before the failing one",
+			evts:        append([]events.Event{declared("alpha-sweep")}, failures("beta-sweep")...),
+			wantStatus:  StatusWarning,
+			wantMessage: orderOutcomeOneFailingOneDeclaringSummary,
+			wantDetails: []string{
+				`alpha-sweep: recorded incomplete work: "skipped: nothing to export"`,
+				`beta-sweep: 3 consecutive failures, last "exit status 1"`,
+			},
+			wantHint: "Inspect with: gc order check && gc order history beta-sweep",
+		},
+		{
+			name:        "both signals on one order count it once per signal",
 			evts:        append([]events.Event{declared("alpha-sweep")}, failures("alpha-sweep")...),
-			wantMessage: "1 order(s) have unhealthy outcomes",
+			wantStatus:  StatusWarning,
+			wantMessage: orderOutcomeOneFailingOneDeclaringSummary,
 			wantDetails: []string{
 				`alpha-sweep: 3 consecutive failures, last "exit status 1"`,
-				"alpha-sweep: recorded incomplete work: skipped: nothing to export",
+				`alpha-sweep: recorded incomplete work: "skipped: nothing to export"`,
 				"beta-sweep: no completed runs yet",
+			},
+			wantHint: "Inspect with: gc order check && gc order history alpha-sweep",
+		},
+		{
+			name: "two failing orders and two declaring orders",
+			evts: append(append(failures("alpha-sweep"), failures("beta-sweep")...),
+				declared("alpha-sweep"), declared("beta-sweep")),
+			wantStatus:  StatusWarning,
+			wantMessage: "2 order(s) failing repeatedly; 2 with recorded incomplete work",
+			wantDetails: []string{
+				`alpha-sweep: 3 consecutive failures, last "exit status 1"`,
+				`alpha-sweep: recorded incomplete work: "skipped: nothing to export"`,
+				`beta-sweep: 3 consecutive failures, last "exit status 1"`,
+				`beta-sweep: recorded incomplete work: "skipped: nothing to export"`,
 			},
 			wantHint: "Inspect with: gc order check && gc order history alpha-sweep",
 		},
@@ -1077,8 +1210,8 @@ func TestOrderOutcomeHealthyMixedOutcomeSummary(t *testing.T) {
 
 			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
 
-			if result.Status != StatusWarning || result.Severity != SeverityAdvisory {
-				t.Fatalf("status/severity = %v/%v, want StatusWarning/SeverityAdvisory; details=%v", result.Status, result.Severity, result.Details)
+			if result.Status != tc.wantStatus || result.Severity != SeverityAdvisory {
+				t.Fatalf("status/severity = %v/%v, want %v/SeverityAdvisory; details=%v", result.Status, result.Severity, tc.wantStatus, result.Details)
 			}
 			if result.Message != tc.wantMessage {
 				t.Fatalf("message = %q, want %q", result.Message, tc.wantMessage)
@@ -1101,7 +1234,7 @@ func TestOrderOutcomeHealthySuppressedAndInapplicableLeaveDeclarations(t *testin
 	cases := []struct {
 		name        string
 		evts        []events.Event
-		wantStatus  CheckStatus
+		wantMessage string
 		wantDetails []string
 	}{
 		{
@@ -1112,15 +1245,15 @@ func TestOrderOutcomeHealthySuppressedAndInapplicableLeaveDeclarations(t *testin
 				skippedOrderEvent("export-sweep", now.Add(-90*time.Minute), "partial", "store unreachable"),
 				{Type: events.OrderSuppressed, Ts: now.Add(-time.Hour), Subject: "export-sweep", Actor: "controller", Message: "open-work gate held"},
 			},
-			wantStatus:  StatusWarning,
-			wantDetails: []string{"export-sweep: recorded incomplete work: partial: store unreachable"},
+			wantMessage: orderOutcomeOneDeclaringSummary,
+			wantDetails: []string{`export-sweep: recorded incomplete work: "partial: store unreachable"`},
 		},
 		{
 			name: "inapplicable events do not create declarations",
 			evts: []events.Event{
 				{Type: events.OrderInapplicable, Ts: now.Add(-time.Hour), Subject: "export-sweep", Actor: "controller", Message: "requires backend postgres"},
 			},
-			wantStatus:  StatusOK,
+			wantMessage: "all scheduled orders succeeding",
 			wantDetails: []string{"export-sweep: no completed runs yet"},
 		},
 	}
@@ -1132,8 +1265,11 @@ func TestOrderOutcomeHealthySuppressedAndInapplicableLeaveDeclarations(t *testin
 
 			result := NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(&CheckContext{CityPath: cityPath})
 
-			if result.Status != tc.wantStatus {
-				t.Fatalf("status = %v, want %v; msg=%q details=%v", result.Status, tc.wantStatus, result.Message, result.Details)
+			if result.Status != StatusOK {
+				t.Fatalf("status = %v, want StatusOK; msg=%q details=%v", result.Status, result.Message, result.Details)
+			}
+			if result.Message != tc.wantMessage {
+				t.Fatalf("message = %q, want %q", result.Message, tc.wantMessage)
 			}
 			if !reflect.DeepEqual(result.Details, tc.wantDetails) {
 				t.Fatalf("details = %v, want %v", result.Details, tc.wantDetails)
