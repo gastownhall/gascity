@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -402,4 +404,77 @@ func cliAgentSuspendResult(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// cityConfigLockFree reports whether nothing holds the city config lock,
+// probing it without waiting.
+func cityConfigLockFree(t *testing.T, cityDir string) bool {
+	t.Helper()
+	path := configedit.CityLockFile(cityDir)
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("opening city config lock: %v", err)
+	}
+	defer f.Close() //nolint:errcheck // read-only probe
+	lock, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path})
+	if errors.Is(err, filelock.ErrBusy) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("probing city config lock: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("releasing city config lock probe: %v", err)
+	}
+	return true
+}
+
+// gc rig add holds the city config lock only through its config write: it is
+// free again by the time the command asks the controller to reload, and a
+// rig add that fails after taking it leaves it free.
+func TestRigAddReleasesCityConfigLock(t *testing.T) {
+	t.Run("before the controller reload", func(t *testing.T) {
+		cityDir := filepath.Join(t.TempDir(), "city")
+		writeSchema2RigCity(t, cityDir, "city1", "[workspace]\n", "")
+		rigDir := filepath.Join(filepath.Dir(cityDir), "frontend")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_DOLT", "skip")
+		t.Setenv("GC_BEADS", "bd")
+		oldReload := rigReloadControllerConfig
+		t.Cleanup(func() { rigReloadControllerConfig = oldReload })
+		reloaded, freeAtReload := false, false
+		rigReloadControllerConfig = func(string) error {
+			reloaded, freeAtReload = true, cityConfigLockFree(t, cityDir)
+			return nil
+		}
+
+		var stdout, stderr bytes.Buffer
+		if code := doRigAdd(fsys.OSFS{}, cityDir, rigDir, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+			t.Fatalf("gc rig add = %d, stderr:\n%s", code, stderr.String())
+		}
+		if !reloaded {
+			t.Fatal("gc rig add never asked the controller to reload")
+		}
+		if !freeAtReload {
+			t.Fatal("gc rig add still held the city config lock when it asked the controller to reload")
+		}
+	})
+	t.Run("after a failure", func(t *testing.T) {
+		cityDir := filepath.Join(t.TempDir(), "city")
+		writeSchema2RigCity(t, cityDir, "city1", "[workspace\n", "")
+		rigDir := filepath.Join(filepath.Dir(cityDir), "frontend")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if code := doRigAdd(fsys.OSFS{}, cityDir, rigDir, nil, "", "", "", false, false, &stdout, &stderr); code == 0 {
+			t.Fatal("gc rig add succeeded on an unparseable city.toml")
+		}
+		if !cityConfigLockFree(t, cityDir) {
+			t.Fatalf("gc rig add failed but still holds the city config lock; stderr:\n%s", stderr.String())
+		}
+	})
 }
