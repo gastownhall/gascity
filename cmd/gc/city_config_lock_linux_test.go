@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -475,6 +477,78 @@ func TestRigAddReleasesCityConfigLock(t *testing.T) {
 		}
 		if !cityConfigLockFree(t, cityDir) {
 			t.Fatalf("gc rig add failed but still holds the city config lock; stderr:\n%s", stderr.String())
+		}
+	})
+}
+
+// requireFinishesPromptly fails the test when run does not return within the
+// race timeout, so a call that waits on a lock fails instead of hanging.
+func requireFinishesPromptly(t *testing.T, what string, run func() error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- run() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatalf("%s waited on a lock it must not take", what)
+	}
+}
+
+func exitCodeErr(code int, stderr *bytes.Buffer) error {
+	if code != 0 {
+		return fmt.Errorf("exit %d, stderr:\n%s", code, stderr.String())
+	}
+	return nil
+}
+
+// The city config lock and the suspension fence guard different files: a
+// config edit does not wait on the fence, and the gc rig suspend fallback,
+// which writes only suspension state, does not wait on the city config lock.
+func TestCityConfigLockAndSuspensionFenceAreIndependent(t *testing.T) {
+	t.Run("config edits with the suspension fence held", func(t *testing.T) {
+		apiCity := filepath.Join(t.TempDir(), "api-city")
+		if err := os.MkdirAll(apiCity, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(apiCity, "city.toml"), []byte(cityConfigLockTestCity), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cliCity := filepath.Join(t.TempDir(), "cli-city")
+		writeSchema2RigCity(t, cliCity, "city1", "[workspace]\n", "")
+		for _, cityDir := range []string{apiCity, cliCity} {
+			releaseFence, err := suspensionstate.Fence(cityDir)
+			if err != nil {
+				t.Fatalf("taking suspension fence: %v", err)
+			}
+			t.Cleanup(releaseFence)
+		}
+
+		cs := newCityConfigLockControllerState(t, apiCity)
+		requireFinishesPromptly(t, "API agent config edit", func() error { return cs.SuspendAgent("worker") })
+		var stdout, stderr bytes.Buffer
+		requireFinishesPromptly(t, "gc agent add", func() error {
+			return exitCodeErr(doAgentAdd(fsys.OSFS{}, cliCity, "helper", "", "", false, &stdout, &stderr), &stderr)
+		})
+	})
+	t.Run("gc rig suspend fallback with the city config lock held", func(t *testing.T) {
+		cityDir := filepath.Join(t.TempDir(), "city")
+		siteToml := "workspace_name = \"city1\"\n\n[[rig]]\nname = \"frontend\"\npath = \"/some/path\"\n"
+		writeSchema2RigCity(t, cityDir, "city1", "[workspace]\n\n[[rigs]]\nname = \"frontend\"\n", siteToml)
+		holdCityConfigLock(t, cityDir)
+
+		var stdout, stderr bytes.Buffer
+		requireFinishesPromptly(t, "gc rig suspend", func() error {
+			return exitCodeErr(doRigSuspend(fsys.OSFS{}, cityDir, "frontend", &stdout, &stderr), &stderr)
+		})
+		st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !suspensionstate.IsRigSuspended(st, "frontend") {
+			t.Fatalf("rig frontend is not suspended: %+v", st)
 		}
 	})
 }
