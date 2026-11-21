@@ -3066,11 +3066,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// the expected child process is alive (when ProcessNames configured).
 		// The desired-session fast path only needs running/alive; attachment
 		// and activity are probed by the narrower branches that use them.
-		running, alive, livenessErr := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
+		obs, livenessErr := observeRuntimeLiveness(sp, name, tp.Hints.ProcessNames)
 		if livenessErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: skipping lifecycle reconciliation of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
 			continue
 		}
+		running, alive := obs.Running, obs.Alive
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
 		if running && !alive {
 			// Warm the peek before recordResetStallIfDue may evict the stale
@@ -3116,19 +3117,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// tick indefinitely — 299 events over 5.3h in #5355, each
 				// carrying the raw pane dump.
 				if !runtime.ContainsProviderRateLimitScreen(output) && dt.markZombieCrash(id) {
-					rec.Record(events.Event{
-						Type:    events.SessionCrashed,
-						Actor:   "gc",
-						Subject: tp.DisplayName(),
-						Message: truncateCrashPaneOutput(output, crashEventPaneOutputMaxLines),
-						Payload: api.SessionLifecyclePayloadJSON(id, tp.TemplateName, "zombie process"),
-					})
+					rec.Record(sessionCrashedEvent(id, tp, output, "zombie process"))
 					telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
 				}
 			}
 		} else {
 			dt.clearZombieCrash(id)
 		}
+		// Dead pane: a remain-on-exit corpse of a committed named row. It is
+		// recorded here, before the heal and wake sections below restart the
+		// row, so its session.crashed precedes the restart's session.woke.
+		recordDeadPaneCrash(infoByID[id], name, obs, tp, peek, rec, stderr)
 		// The snapshot is already current after the zombie-capture block:
 		// markProviderTerminalError advanced infoByID[id] in place via
 		// write-returns-Info (its only same-tick session write on the paths that reach
