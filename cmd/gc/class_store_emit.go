@@ -739,6 +739,19 @@ func (s *emittingClassStore) NamespaceCensusHandle() (beads.NamespaceCensus, boo
 	return beads.NamespaceCensusFor(s.Store)
 }
 
+// SchemaCursor forwards the schema-migration cursor to the backing store.
+// TestEmittingClassStoreKeepsEveryEngineCapability holds this wrapper to every
+// engine method. A backing that cannot report one gets
+// beads.ErrSchemaCursorUnavailable, which beads.CheckSchemaAtTarget reads as
+// "not asked", never as a cursor at target.
+func (s *emittingClassStore) SchemaCursor(ctx context.Context) (current, target int, err error) {
+	reporter, ok := beads.As[beads.SchemaCursorReporter](s.Store)
+	if !ok {
+		return 0, 0, fmt.Errorf("reading the schema cursor of the emitting class store over %T: %w", s.Store, beads.ErrSchemaCursorUnavailable)
+	}
+	return reporter.SchemaCursor(ctx)
+}
+
 func (s *emittingClassStore) DeleteIfMatch(id string, revision int64) error {
 	writer, ok := beads.ConditionalWriterFor(s.Store)
 	if !ok {
