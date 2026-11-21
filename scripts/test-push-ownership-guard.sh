@@ -2300,6 +2300,57 @@ test_no_routes_reads_identical() {
     rm -rf "$repo" "$fbd"
 }
 
+# AC-8: routes present must not add reads when the branch does not need
+# them. A local-first token (builder/ga-k2p9x-port-mc-abc12 — ga before the
+# routed mc token in branch order) resolves locally and the mc store is
+# never probed; a deploy/*-gate branch never probes routed tokens at all.
+# Both shapes make exactly today's reads: the assignment bd list and one
+# current-store bd show.
+test_routes_present_local_first_no_probe() {
+    local root repo fbd out rc routed_reads
+    root="$(new_routed_mc_root "builder/ga-k2p9x-port-mc-abc12")"
+    repo="$root/gascity"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "(current)" "ga-k2p9x" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    routed_reads="$(grep -cv 'BEADS_DIR= ' <<<"$(routed_calls "$fbd")" || true)"
+    if [[ $rc -eq 0 ]] && [[ "$routed_reads" == "0" ]] &&
+        [[ "$(routed_calls "$fbd" | grep -c 'cmd=show')" -eq 1 ]] &&
+        [[ "$(routed_calls "$fbd" | grep -c 'args=list --assignee=agent-x')" -eq 1 ]]; then
+        record_pass "routes-present/local-first-no-probe (today's reads only: one list, one show)"
+    else
+        record_fail "routes-present/local-first-no-probe" "expected rc=0 with one assignment list, one current-store show and zero routed reads, got rc=$rc routed-reads=$routed_reads calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# AC-8: a deploy/*-gate branch containing a routed token keeps exactly its
+# pre-routes reads — the embedded id is the gated bead, so the walk skips
+# routed tokens without probing and the session's assignment decides, with
+# no NOTE line (there is no branch-derived id to compare against, same as
+# before routes existed).
+test_deploy_gate_routed_token_no_probe() {
+    local root repo fbd out rc routed_reads
+    root="$(new_routed_mc_root "deploy/mc-k2p9x-gate")"
+    repo="$root/gascity"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_list "$fbd" "(current)" '[{"id":"ga-fff111","status":"in_progress","assignee":"agent-x"}]'
+    routed_show "$fbd" "(current)" "ga-fff111" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    routed_reads="$(grep -cv 'BEADS_DIR= ' <<<"$(routed_calls "$fbd")" || true)"
+    if [[ $rc -eq 0 ]] && [[ "$routed_reads" == "0" ]] &&
+        [[ "$(routed_calls "$fbd" | grep -c 'cmd=show')" -eq 1 ]] &&
+        [[ "$(routed_calls "$fbd" | grep -c 'args=list --assignee=agent-x')" -eq 1 ]] &&
+        ! grep -qF "NOTE deploy-gate" <<<"$out"; then
+        record_pass "routes-present/deploy-gate-no-probe (today's reads only: one list, one show)"
+    else
+        record_fail "routes-present/deploy-gate-no-probe" "expected rc=0 with one assignment list, one current-store show, zero routed reads and no NOTE, got rc=$rc routed-reads=$routed_reads calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2375,6 +2426,8 @@ run_all() {
     test_routed_missing_store_blocks
     test_empty_array_probe_never_shows_failure
     test_no_routes_reads_identical
+    test_routes_present_local_first_no_probe
+    test_deploy_gate_routed_token_no_probe
 
     echo
     echo "pass=$pass fail=$fail"
