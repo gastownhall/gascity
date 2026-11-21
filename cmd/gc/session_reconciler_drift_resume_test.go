@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -610,5 +611,143 @@ func TestReconcileSessionBeads_ConfigDriftDefersPinnedNamedSession(t *testing.T)
 	}
 	if got.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" {
 		t.Fatal("config_drift_deferred_key = empty, want pinned deferral recorded")
+	}
+}
+
+// TestReconcileSessionBeads_PinnedCommandDriftAppliesAfterWindowQuiet proves the
+// end-to-end contract of issue #348 A on a PINNED named session:
+//
+//   - before the deferral window lapses the drift is NOT applied (the session
+//     keeps running and the deferral stamps are recorded), matching the existing
+//     pinned behavior;
+//   - after the window lapses AND the session is quiet, the Command drift is
+//     applied as a WARM relaunch: the launch-only path relaunches the agent in
+//     the existing box (Relaunch, not Stop+Start), the Core baseline
+//     (started_config_hash) is rebaselined toward the new Command, and the box
+//     stays alive.
+//
+// The quiet boundary is what keeps this safe: a pinned conversation is never
+// respawned mid-turn. The turn-boundary half is pinned by the unit test
+// TestShouldDeferPinnedNamedSessionConfigDriftBoundsCommandOnly.
+func TestReconcileSessionBeads_PinnedCommandDriftAppliesAfterWindowQuiet(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "new-cmd", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	tp := TemplateParams{
+		Command:                 "new-cmd",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+		ResolvedProvider:        &config.ResolvedProvider{Name: "fake", Command: "new-cmd"},
+	}
+	env.desiredState[sessionName] = tp
+
+	session := env.createSessionBead(sessionName, "worker")
+	agentCfg := sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))
+	// Stored baseline = the running config with ONLY the launch half (Command)
+	// changed, so the provision hash matches and the launch hash differs —
+	// launch-only drift, which relaunches the agent in the warm box.
+	oldCfg := agentCfg
+	oldCfg.Command = "old-cmd"
+	if runtime.CoreFingerprint(oldCfg) == runtime.CoreFingerprint(agentCfg) {
+		t.Fatalf("test setup error: stored hash %q should differ from current %q", runtime.CoreFingerprint(oldCfg), runtime.CoreFingerprint(agentCfg))
+	}
+	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(oldCfg))
+	if err != nil {
+		t.Fatalf("marshal old breakdown: %v", err)
+	}
+	if err := env.sp.Start(context.Background(), sessionName, oldCfg); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"pin_awake":                  "true",
+		"session_key":                "prior-key",
+		"started_config_hash":        runtime.CoreFingerprint(oldCfg),
+		"started_provision_hash":     runtime.ProvisionFingerprint(oldCfg),
+		"started_launch_hash":        runtime.LaunchFingerprint(oldCfg),
+		"started_live_hash":          runtime.LiveFingerprint(oldCfg),
+		"core_hash_breakdown":        string(breakdownJSON),
+	})
+
+	// Tick 1: the drift is observed and the bounded pinned-Command timer starts.
+	startsBefore := env.sp.CountCalls("Start", sessionName)
+	env.reconcile([]beads.Bead{session})
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get after tick 1: %v", err)
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" {
+		t.Fatal("tick 1: config_drift_deferred_key = empty, want the pinned-Command timer recorded")
+	}
+	if state := sessionpkg.State(got.Metadata["state"]); state != sessionpkg.StateActive && state != sessionpkg.StateAwake {
+		t.Fatalf("tick 1: state = %q, want active or awake (drift not applied before the window)", got.Metadata["state"])
+	}
+	if got.Metadata["started_config_hash"] != runtime.CoreFingerprint(oldCfg) {
+		t.Fatalf("tick 1: started_config_hash = %q, want preserved %q before the window", got.Metadata["started_config_hash"], runtime.CoreFingerprint(oldCfg))
+	}
+	if n := env.sp.CountCalls("Relaunch", sessionName); n != 0 {
+		t.Fatalf("tick 1: Relaunch calls = %d, want 0 before the window", n)
+	}
+
+	// Tick 2: past the window on a quiet session — the warm relaunch must run.
+	env.clk.Time = env.clk.Now().Add(namedSessionPinnedCommandDriftDeferralLimit + time.Minute)
+	session, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	env.reconcile([]beads.Bead{session})
+	got, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get after tick 2: %v", err)
+	}
+	if n := env.sp.CountCalls("Relaunch", sessionName); n != 1 {
+		t.Fatalf("tick 2: Relaunch calls = %d, want 1 (launch-only Command drift must relaunch in the warm box); stderr=%s", n, env.stderr.String())
+	}
+	if n := env.sp.CountCalls("Stop", sessionName); n != 0 {
+		t.Fatalf("tick 2: Stop calls = %d, want 0 (a launch-only drift must not destroy the box); stderr=%s", n, env.stderr.String())
+	}
+	if n := env.sp.CountCalls("Start", sessionName); n != startsBefore {
+		t.Fatalf("tick 2: Start calls = %d, want %d (relaunch must not re-Start)", n, startsBefore)
+	}
+	if rc := env.sp.LastRelaunchConfig(sessionName); rc == nil {
+		t.Fatal("tick 2: no Relaunch config recorded")
+	} else if rc.Command != agentCfg.Command {
+		t.Fatalf("tick 2: Relaunch config Command = %q, want %q", rc.Command, agentCfg.Command)
+	}
+	if got.Metadata["started_config_hash"] != runtime.CoreFingerprint(agentCfg) {
+		t.Fatalf("tick 2: started_config_hash = %q, want rebaselined %q", got.Metadata["started_config_hash"], runtime.CoreFingerprint(agentCfg))
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("warm box %q is gone; a launch-only drift must relaunch in place, not destroy the box", sessionName)
+	}
+
+	// Tick 3: the rebaselined baseline matches, so the drift episode ends: the
+	// deferral stamps are cleared and no further relaunch is issued.
+	session, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("reload session before tick 3: %v", err)
+	}
+	env.reconcile([]beads.Bead{session})
+	got, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get after tick 3: %v", err)
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredKeyMetadata] != "" {
+		t.Fatalf("tick 3: config_drift_deferred_key = %q, want cleared once the baseline matches", got.Metadata[namedSessionConfigDriftDeferredKeyMetadata])
+	}
+	if n := env.sp.CountCalls("Relaunch", sessionName); n != 1 {
+		t.Fatalf("tick 3: Relaunch calls = %d, want still 1 (no re-relaunch once the baseline matches)", n)
 	}
 }

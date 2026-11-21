@@ -4073,7 +4073,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// tmux-attached, or recent activity). This prevents
 							// draining a working agent mid-task without graceful
 							// handoff. See gastownhall/gascity#119.
-							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(infoByID[id], sessFront, sp, name, clk, driftKey)
+							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(infoByID[id], sessFront, sp, name, clk, driftKey, driftedFields)
 							if deferErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", name, deferErr) //nolint:errcheck
 								if errors.Is(deferErr, runtime.ErrRuntimeUnavailable) {
@@ -6433,6 +6433,17 @@ func sessionHasOpenAssignedWorkForTier(store beads.Store, assignee, status strin
 const (
 	namedSessionActivityThreshold                      = 2 * time.Minute
 	namedSessionRecentActivityConfigDriftDeferralLimit = 30 * time.Second
+	// namedSessionPinnedCommandDriftDeferralLimit bounds how long a Command-only
+	// config drift is deferred on a PINNED named session before the reconciler
+	// applies it. A pinned session is an operator-declared critical
+	// conversation, so non-Command drift still waits for an explicit unpin (see
+	// shouldDeferNamedSessionConfigDrift). Command is the model/launch field: a
+	// model rollout must land without a manual `gc session kill`, so it gets a
+	// bounded window instead of an unconditional deferral. The bound gates WHEN
+	// the pinned exemption lapses, not whether a mid-turn session may be
+	// restarted: after the window the restart still waits for a turn boundary,
+	// so a busy agent is never respawned mid-turn.
+	namedSessionPinnedCommandDriftDeferralLimit = 5 * time.Minute
 	// sessionAttachedConfigDriftFalseNegativeLimit is how long a recorded
 	// attached-drift deferral keeps suppressing a config-drift drain, measured
 	// from the deferral's stored timestamp (NOT from the last positive
@@ -6508,18 +6519,52 @@ func pinnedConfiguredNamedSessionKillProtected(info sessionpkg.Info) bool {
 // Info via namedSessionActiveUseReasonInfo (the runtime activity probes inside it
 // stay raw, §7), and the persisted deferral-timer read/write side is likewise
 // typed.
-func shouldDeferNamedSessionConfigDrift(info sessionpkg.Info, sessFront *sessionpkg.Store, sp runtime.Provider, name string, clk clock.Clock, driftKey string) (string, bool, error) {
+func shouldDeferNamedSessionConfigDrift(info sessionpkg.Info, sessFront *sessionpkg.Store, sp runtime.Provider, name string, clk clock.Clock, driftKey string, driftedFields []string) (string, bool, error) {
 	// A pinned configured named session is an operator-declared critical
 	// conversation (for example, the mayor). Config drift must never collaterally
 	// recycle it. The deferral timer is still recorded so the drift stays
 	// observable rather than silently ignored.
 	if pinnedConfiguredNamedSessionKillProtected(info) {
-		if clk != nil && (info.ConfigDriftDeferredKey != driftKey || info.ConfigDriftDeferredAt == "") {
-			if err := recordNamedSessionConfigDriftDeferredAt(info, sessFront, clk.Now().UTC(), driftKey); err != nil {
-				return "", false, err
+		// Command is the model/launch field. A model rollout (the operator
+		// edits the command) must land on a pinned conversation without a manual
+		// `gc session kill`, so Command-only drift gets a BOUNDED window instead
+		// of the unconditional deferral. Every other drifted field keeps the
+		// unconditional pinned deferral: the pin means "do not recycle this
+		// conversation", and only the model change is expected to roll through it.
+		// An empty breakdown (a session without per-field hashes) is treated as
+		// non-Command — conservative, and it self-heals once the drift is applied.
+		if !pinnedCommandDriftOnly(driftedFields) {
+			if clk != nil && (info.ConfigDriftDeferredKey != driftKey || info.ConfigDriftDeferredAt == "") {
+				if err := recordNamedSessionConfigDriftDeferredAt(info, sessFront, clk.Now().UTC(), driftKey); err != nil {
+					return "", false, err
+				}
 			}
+			return "pinned", true, nil
 		}
-		return "pinned", true, nil
+		reason, deferDrift, err := boundedNamedSessionConfigDriftDeferral(info, sessFront, clk, driftKey, "pinned_command", namedSessionPinnedCommandDriftDeferralLimit)
+		if err != nil {
+			return "", false, err
+		}
+		if deferDrift {
+			return reason, true, nil
+		}
+		// Window lapsed: apply the model change, but only at a turn boundary.
+		// While the session still looks in active use (a pending interaction, an
+		// attached human, or output within namedSessionActivityThreshold) keep
+		// deferring — a respawn mid-turn would lose the turn. The bounded window
+		// above already guarantees the drift is not hidden indefinitely, so this
+		// wait ends as soon as the session goes quiet; the restart then carries
+		// the conversation forward via --resume. A provider that cannot report
+		// activity is treated as still in use, consistent with the pin's intent:
+		// never collateral-kill an operator-declared critical conversation.
+		waitReason, active, observationErr := namedSessionActiveUseReasonInfo(info, sp, name, clk)
+		if observationErr != nil {
+			return "", false, observationErr
+		}
+		if active {
+			return "pinned_command_wait_" + waitReason, true, nil
+		}
+		return "", false, nil
 	}
 	reason, active, observationErr := namedSessionActiveUseReasonInfo(info, sp, name, clk)
 	if observationErr != nil {
@@ -6535,6 +6580,16 @@ func shouldDeferNamedSessionConfigDrift(info sessionpkg.Info, sessFront *session
 		return boundedNamedSessionConfigDriftDeferral(info, sessFront, clk, driftKey, reason, namedSessionRecentActivityConfigDriftDeferralLimit)
 	}
 	return reason, true, nil
+}
+
+// pinnedCommandDriftOnly reports whether a config-drift episode moved ONLY the
+// Command (model/launch) field. It gates the pinned-session bounded window: a
+// pin defers all other drift unconditionally, and only a pure model change is
+// allowed to roll through the pin on a timer. An empty or unrecognized
+// breakdown returns false (treated as non-Command) so a session without
+// per-field hashes keeps the conservative unconditional deferral.
+func pinnedCommandDriftOnly(driftedFields []string) bool {
+	return len(driftedFields) == 1 && driftedFields[0] == "Command"
 }
 
 func boundedNamedSessionConfigDriftDeferral(
