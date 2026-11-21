@@ -2345,7 +2345,10 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 // hookRetireIfInputSettled reports whether candidate belongs to a workflow
 // whose input convoy work is already terminal, or proven to exist in no store,
 // and, if so, retires that workflow (root + open steps closed as skipped, or
-// as a hard failure for purged input). Lookup and close failures, and an
+// as a hard failure for purged input). A root declaring
+// gc.input_lifecycle=graph is exempt from the terminal-input retirement; a
+// root declaring an unknown gc.input_lifecycle withholds the candidate
+// without retiring anything. Lookup and close failures, and an
 // absence proof that could not finish (a store that could hold the input left
 // unread), are logged and keep the candidate so a store hiccup can never
 // suppress real work.
@@ -2356,6 +2359,15 @@ func hookRetireIfInputSettled(candidate beads.Bead, opts hookClaimOptions, ops h
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: checking input convoy for %s: %v\n", candidate.ID, err) //nolint:errcheck
 		return false
+	}
+	switch verdict.Lifecycle {
+	case "", beadmeta.InputLifecycleExternal, beadmeta.InputLifecycleGraph:
+	default:
+		// A policy this claimer cannot interpret: retiring could destroy the
+		// graph's own tail, serving could repeat a retired run. Withhold the
+		// candidate and leave the workflow as it is.
+		fmt.Fprintf(stderr, "gc hook --claim: withholding %s: workflow root %s has unknown gc.input_lifecycle %q; not retiring it\n", candidate.ID, verdict.RootID, verdict.Lifecycle) //nolint:errcheck
+		return true
 	}
 	if verdict.State == workflowInputComplete && verdict.Lifecycle == beadmeta.InputLifecycleGraph {
 		// The workflow's own steps settled its input: its remaining tail

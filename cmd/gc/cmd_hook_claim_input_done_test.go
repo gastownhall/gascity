@@ -721,3 +721,103 @@ func TestHookClaimInputLifecyclePolicyIgnoresStepCopiesSingleStore(t *testing.T)
 		}
 	}
 }
+
+// TestHookClaimWithholdsUnknownInputLifecycle: a root whose persisted
+// gc.input_lifecycle is neither external nor graph declares a policy this
+// claimer cannot interpret. Guessing either way could retire live work or
+// serve a retired run, so the candidate is withheld, the diagnostic names the
+// root and value, and nothing is retired, whether or not the input settled.
+func TestHookClaimWithholdsUnknownInputLifecycle(t *testing.T) {
+	for _, input := range []string{"closed", "open"} {
+		t.Run("input="+input, func(t *testing.T) {
+			store, root, step := seedDoneWorkflow(t, input)
+			if err := store.SetMetadata(root.ID, beadmeta.InputLifecycleMetadataKey, "shared"); err != nil {
+				t.Fatalf("stamp input lifecycle: %v", err)
+			}
+			ops := graphOwnedRetireOps(store)
+			retired := 0
+			ops.RetireWorkflow = func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+				retired++
+				return skipDoneWorkflow(store, verdict.RootID)
+			}
+			opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"rig/worker"}}
+
+			var stderr bytes.Buffer
+			kept := retireDoneWorkflowCandidates([]beads.Bead{step}, opts, ops, "/rig", &stderr)
+
+			if len(kept) != 0 {
+				t.Fatalf("kept = %v, want the step withheld (stderr=%q)", kept, stderr.String())
+			}
+			if retired != 0 {
+				t.Fatalf("RetireWorkflow called %d times, want 0", retired)
+			}
+			for _, want := range []string{root.ID, `"shared"`} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want it to name %s", stderr.String(), want)
+				}
+			}
+			requireOpen(t, store, root.ID, step.ID)
+		})
+	}
+}
+
+// TestDoHookClaimWithholdsUnknownInputLifecycle: the withheld candidate is
+// neither claimed fresh nor handed back as an existing assignment; the claim
+// drains with no work and retires nothing.
+func TestDoHookClaimWithholdsUnknownInputLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		candidate beads.Bead
+	}{
+		{name: "fresh", candidate: beads.Bead{ID: "root-1", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:          beadmeta.KindWorkflow,
+			beadmeta.InputConvoyIDMetadataKey: "convoy-1",
+			beadmeta.RoutedToMetadataKey:      "worker",
+		}}},
+		{name: "adopted", candidate: beads.Bead{ID: "step-1", Status: "in_progress", Assignee: "worker-1", Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:        "root-1",
+			beadmeta.ContinuationGroupMetadataKey: "pool-workflow",
+			beadmeta.RoutedToMetadataKey:          "worker",
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output, err := json.Marshal([]beads.Bead{tc.candidate})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			ops := hookClaimOps{
+				Runner: func(string, string) (string, error) { return string(output), nil },
+				Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+					t.Fatalf("unexpected claim of %s", beadID)
+					return beads.Bead{}, false, nil
+				},
+				InputVerdict: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string, _ workflowInputAbsenceProver) (workflowInputVerdict, error) {
+					return workflowInputVerdict{RootID: "root-1", State: workflowInputComplete, Lifecycle: "shared"}, nil
+				},
+				RetireWorkflow: func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+					t.Fatalf("unexpected retirement of %s", verdict.RootID)
+					return nil
+				},
+				DrainAck: func(io.Writer) error { return nil },
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"worker"},
+				DrainAck:     true,
+				JSON:         true,
+			}, ops, &stdout, &stderr)
+
+			if code != 0 {
+				t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), `"reason":"no_work"`) {
+				t.Fatalf("stdout = %q, want no_work drain", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), `root-1 has unknown gc.input_lifecycle "shared"`) {
+				t.Fatalf("stderr = %q, want the unknown-policy diagnostic", stderr.String())
+			}
+		})
+	}
+}
