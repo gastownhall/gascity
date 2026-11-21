@@ -1738,9 +1738,11 @@ func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, 
 const retiredSessionCleanupLegBudget = 10 * time.Second
 
 // cancelStateAssignedToRetiredSessionBead cancels the retired session's waits
-// and tears down its external-message state. Wait cancellation runs under its
-// own retiredSessionCleanupLegBudget, created here rather than taken from a
-// caller, so it still runs during shutdown; waits it did not reach stay open.
+// and tears down its external-message state. Each leg runs under its own
+// retiredSessionCleanupLegBudget, created here rather than taken from a
+// caller, so a waits leg that exhausts its budget still leaves the
+// external-message leg a full one and teardown still runs during shutdown.
+// What a cut-off leg did not reach stays open.
 func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return
@@ -1764,9 +1766,10 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	}
 	reportRetiredSessionCleanupLeg(stderr, sessionID, "waits", "canceling waits", cutOff, err)
 	sessions := beads.SessionStore{Store: store}
-	if err := extmsg.CloseSessionBindings(context.Background(), extmsgStoreOverSessions(sessions), sessions, sessionID, now); err != nil {
-		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
-	}
+	cutOff, err = runRetiredSessionCleanupLeg(func(ctx context.Context) error {
+		return extmsg.CloseSessionBindings(ctx, extmsgStoreOverSessions(sessions), sessions, sessionID, now)
+	})
+	reportRetiredSessionCleanupLeg(stderr, sessionID, "external-message", "closing external message bindings", cutOff, err)
 }
 
 // runRetiredSessionCleanupLeg runs leg under a fresh

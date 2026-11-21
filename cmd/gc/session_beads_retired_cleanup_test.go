@@ -367,3 +367,39 @@ func TestRetiredCleanupOutcomeClassification(t *testing.T) {
 		}
 	})
 }
+
+// TestRetiredCleanupLegsHaveIndependentBudgets: a waits leg that exhausts its
+// budget leaves the external-message leg a fresh one, which still ends every
+// binding and closes every participant and membership; the lookup-cap stamp
+// survives the waits cut-off.
+func TestRetiredCleanupLegsHaveIndependentBudgets(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	mem := beads.NewMemStore()
+	sessionBead := newRetiredCleanupSessionBead(t, mem)
+	seedRetiredCleanupWaits(t, mem, sessionBead.ID, waitLookupLimit+5, 0)
+	x := newRetiredCleanupExtmsg(mem, sessionBead.ID)
+	x.seed(t, 2, 2, 1, now)
+
+	store := &retiredCleanupBudgetStore{
+		MemStore:    mem,
+		waitLabel:   "session:" + sessionBead.ID,
+		waitDelay:   4 * time.Second,
+		extmsgDelay: 10 * time.Millisecond,
+	}
+	stderr, _ := runRetiredCleanupInBubble(t, store, sessionBead.ID, now)
+
+	wantOnlyCutoffLine(t, stderr, sessionBead.ID, "waits")
+	if open, closed := retiredCleanupWaitCounts(t, mem, sessionBead.ID, now); open == 0 || closed == 0 {
+		t.Fatalf("open/closed waits = %d/%d, want some of each after the waits cut-off", open, closed)
+	}
+	if b, p, m := x.counts(t); b != 0 || p != 0 || m != 0 {
+		t.Fatalf("open bindings/participants/memberships = %d/%d/%d, want 0/0/0", b, p, m)
+	}
+	updated, err := mem.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got := updated.Metadata["wait_lookup_capped_source"]; got != "retired-session-cleanup" {
+		t.Fatalf("wait_lookup_capped_source = %q, want retired-session-cleanup", got)
+	}
+}
