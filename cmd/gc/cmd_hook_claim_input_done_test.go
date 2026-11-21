@@ -682,3 +682,42 @@ func TestHookClaimRetiresExternalLifecycleWorkflowWhenInputSettles(t *testing.T)
 		}
 	}
 }
+
+// TestHookClaimInputLifecyclePolicyIgnoresStepCopiesSingleStore is the
+// single-store side of AC-4: a step carrying a copied gc.input_lifecycle=graph
+// stamp never widens into graph ownership when its authoritative root declares
+// nothing — the root decides (#8870).
+func TestHookClaimInputLifecyclePolicyIgnoresStepCopiesSingleStore(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "closed")
+	if err := store.SetMetadata(step.ID, beadmeta.InputLifecycleMetadataKey, beadmeta.InputLifecycleGraph); err != nil {
+		t.Fatalf("stamp step policy copy: %v", err)
+	}
+	if err := store.SetMetadata(step.ID, beadmeta.InputConvoyIDMetadataKey, root.Metadata[beadmeta.InputConvoyIDMetadataKey]); err != nil {
+		t.Fatalf("stamp step convoy copy: %v", err)
+	}
+	ops := hookClaimOps{
+		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputDone(ctx, beadstest.Work(store), candidate, ids, prove)
+		},
+		RetireWorkflow: func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			return skipDoneWorkflow(store, verdict.RootID)
+		},
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"rig/worker"}}
+
+	var stderr bytes.Buffer
+	kept := retireDoneWorkflowCandidates([]beads.Bead{step}, opts, ops, "/rig", &stderr)
+
+	if len(kept) != 0 {
+		t.Fatalf("kept = %v, want retired: the unstamped root, not the step copy, owns the policy (stderr=%q)", kept, stderr.String())
+	}
+	for _, id := range []string{root.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Fatalf("%s status = %q outcome = %q, want closed/skipped", id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+	}
+}
