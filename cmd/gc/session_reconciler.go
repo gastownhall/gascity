@@ -2342,6 +2342,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if fold := clearSessionUnknownStateMarkers(store, info, snapshot, stderr); fold != nil {
 			tick.apply(id, fold)
 		}
+		// The dead-pane classification below reads the row as this pass found
+		// it. The preserved-named arm of the block below heals the row before
+		// that classification runs, and the heal moves an active row over its
+		// dead runtime asleep, which would hide the crash (#6298); the desired
+		// path heals only after it.
+		deadPaneRow := infoByID[id]
 
 		// Orphan/suspended: bead exists but not in desired state.
 		// Handle BEFORE heal/stability to avoid false crash detection —
@@ -3124,10 +3130,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		} else {
 			dt.clearZombieCrash(id)
 		}
-		// Dead pane: a remain-on-exit corpse of a committed named row. It is
-		// recorded here, before the heal and wake sections below restart the
-		// row, so its session.crashed precedes the restart's session.woke.
-		recordDeadPaneCrash(infoByID[id], name, obs, tp, sp, peek, dt, clk.Now(), rec, stderr)
+		// Dead pane: a remain-on-exit corpse of a committed named row,
+		// classified from deadPaneRow, the row before this pass healed it. It
+		// is recorded before the wake sections below restart the row, so its
+		// session.crashed precedes the restart's session.woke.
+		recordDeadPaneCrash(deadPaneRow, name, obs, tp, sp, peek, dt, clk.Now(), rec, stderr)
 		// The snapshot is already current after the zombie-capture block:
 		// markProviderTerminalError advanced infoByID[id] in place via
 		// write-returns-Info (its only same-tick session write on the paths that reach

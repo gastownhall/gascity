@@ -29,6 +29,7 @@ type deadPaneProvider struct {
 	corpses  map[string]runtime.Liveness
 	obsErr   error // every liveness read fails with it when set
 	startErr error // every Start fails with it, the corpse left listed, when set
+	peekErr  error // every pane capture fails with it when set
 }
 
 func newDeadPaneProvider(f *runtime.Fake) *deadPaneProvider {
@@ -86,6 +87,13 @@ func (p *deadPaneProvider) Start(ctx context.Context, name string, cfg runtime.C
 func (p *deadPaneProvider) Stop(name string) error {
 	delete(p.corpses, name)
 	return p.Fake.Stop(name)
+}
+
+func (p *deadPaneProvider) Peek(name string, lines int) (string, error) {
+	if p.peekErr != nil {
+		return "", p.peekErr
+	}
+	return p.Fake.Peek(name, lines)
 }
 
 // deadPaneEnv is an active always-mode configured named row over its own
@@ -436,10 +444,11 @@ func (e *deadPaneEnv) setMeta(t *testing.T, kv map[string]string) {
 	e.setSessionMetadata(&b, kv)
 }
 
-// TestReconcileNamedCorpseCrashGates: a corpse whose row or runtime is owned
-// by another handler, or whose pane shows a provider rate-limit screen,
-// records no dead-pane crash; the rate-limited dead object stays unrecorded
-// once the screen scrolls away.
+// TestReconcileNamedCorpseCrashGates: a corpse under a row that is not
+// committed active (quarantined, asleep), whose row or runtime is owned by
+// another handler, or whose pane shows a provider rate-limit screen, records
+// no dead-pane crash; the rate-limited dead object stays unrecorded once the
+// screen scrolls away.
 func TestReconcileNamedCorpseCrashGates(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -449,6 +458,18 @@ func TestReconcileNamedCorpseCrashGates(t *testing.T) {
 	}{
 		{name: "pool seat", setup: func(t *testing.T, e *deadPaneEnv) {
 			e.setMeta(t, map[string]string{namedSessionMetadataKey: "", "pool_managed": "true", "pool_slot": "1"})
+		}},
+		{name: "quarantined row", setup: func(t *testing.T, e *deadPaneEnv) {
+			e.setMeta(t, map[string]string{
+				"state":             string(session.StateQuarantined),
+				"state_reason":      "crash-loop",
+				"quarantine_cycle":  "1",
+				"sleep_reason":      string(session.SleepReasonQuarantine),
+				"quarantined_until": e.clk.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339),
+			})
+		}},
+		{name: "asleep row", setup: func(t *testing.T, e *deadPaneEnv) {
+			e.setMeta(t, map[string]string{"state": string(session.StateAsleep), "sleep_reason": string(session.SleepReasonIdle)})
 		}},
 		{name: "rate-limit screen", pane: "Usage limit reached for this account", later: "agent exited"},
 		{name: "runtime drain ack", setup: func(t *testing.T, e *deadPaneEnv) {
@@ -509,4 +530,121 @@ func TestReconcileNamedCorpseCrashGates(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReconcilePreservedNamedCorpseRecordsDeadPaneCrash: a configured named
+// row absent from the tick's desired set is kept by the preserved-named arm,
+// which heals it before the dead-pane classification runs. An active row over
+// its own corpse there records one session.crashed all the same, classified
+// from the row as the tick found it. While the city, its rig or its agent is
+// suspended the row is not restarted (suspension holds the restart, not the
+// record), nor while its template does not resolve; such a row's record
+// names its own identity and template.
+func TestReconcilePreservedNamedCorpseRecordsDeadPaneCrash(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		env      func(t *testing.T) *deadPaneEnv
+		identity string // the row's named identity and backing template
+		held     bool   // the row is not restarted
+		log      string // a line stderr must carry
+	}{
+		{name: "not desired", env: newDeadPaneEnv, identity: "worker"},
+		{name: "city suspended", identity: "worker", held: true, env: func(t *testing.T) *deadPaneEnv {
+			cfg := deadPaneCity()
+			cfg.Workspace.SuspendedOnStart = true
+			return newDeadPaneEnvFor(t, cfg, "worker")
+		}},
+		{name: "rig suspended", identity: "rig-a/worker", held: true, env: func(t *testing.T) *deadPaneEnv {
+			return newDeadPaneEnvFor(t, deadPaneRigCity(t.TempDir(), true), "rig-a/worker")
+		}},
+		{name: "agent suspended", identity: "worker", held: true, env: func(t *testing.T) *deadPaneEnv {
+			cfg := deadPaneCity()
+			cfg.Agents[0].Suspended = true
+			return newDeadPaneEnvFor(t, cfg, "worker")
+		}},
+		{name: "template unresolved", identity: "worker", held: true, log: "resolve preserved named session ", env: func(t *testing.T) *deadPaneEnv {
+			cfg := deadPaneCity()
+			cfg.Agents[0].StartCommand = ""
+			cfg.Agents[0].Provider = "stub"
+			cfg.Providers = map[string]config.ProviderSpec{"stub": {Command: filepath.Join(t.TempDir(), "missing-agent"), PromptMode: "none"}}
+			return newDeadPaneEnvFor(t, cfg, "worker")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := tc.env(t)
+			delete(e.desiredState, e.name)
+			e.sp.SetPeekOutput(e.name, "agent exited")
+			e.sp.kill(e.name, "$7")
+			starts := e.sp.CountCalls("Start", e.name)
+
+			for i := 0; i < 3; i++ {
+				e.tick(t)
+				e.clk.Advance(time.Minute)
+			}
+
+			crashes := e.crashes()
+			if len(crashes) != 1 {
+				t.Fatalf("session.crashed events = %d, want 1 for the preserved row's dead pane; events=%#v stderr=%q", len(crashes), e.rec.Events, e.stderr.String())
+			}
+			payload := crashReason(t, crashes[0])
+			if payload["reason"] != deadPaneCrashReason || payload["session_id"] != e.beadID || payload["template"] != tc.identity || crashes[0].Subject != tc.identity {
+				t.Fatalf("session.crashed subject %q payload %v, want subject and template %q, reason %q, session_id %q", crashes[0].Subject, payload, tc.identity, deadPaneCrashReason, e.beadID)
+			}
+			calls, woke := e.count("Start", events.SessionWoke)
+			if tc.held && (calls != starts || woke != 0) {
+				t.Fatalf("Start(%s) calls = %d (want %d), session.woke = %d (want 0) for a held row; stderr=%q", e.name, calls, starts, woke, e.stderr.String())
+			}
+			if !tc.held && calls != starts+1 {
+				t.Fatalf("Start(%s) calls = %d, want %d: the preserved row is restarted over its corpse; stderr=%q", e.name, calls, starts+1, e.stderr.String())
+			}
+			if !strings.Contains(e.stderr.String(), tc.log) {
+				t.Fatalf("stderr = %q, want %q", e.stderr.String(), tc.log)
+			}
+		})
+	}
+}
+
+// TestReconcileNamedCorpseCrashReadFailures: a failed pane capture still
+// records the dead pane's crash, with no pane tail. A failed runtime
+// metadata read leaves the exit's owner unknown, so it records nothing and
+// logs the read; the pass then heals and restarts the row as usual, so a
+// read that succeeds on the next pass finds no dead object left to record.
+func TestReconcileNamedCorpseCrashReadFailures(t *testing.T) {
+	t.Run("pane capture fails", func(t *testing.T) {
+		e := newDeadPaneEnv(t)
+		e.sp.peekErr = errors.New("capture-pane failed")
+		e.sp.kill(e.name, "$7")
+
+		e.tick(t)
+
+		crashes := e.crashes()
+		if len(crashes) != 1 || crashes[0].Message != "" {
+			t.Fatalf("session.crashed events = %#v, want exactly one with no pane tail; stderr=%q", crashes, e.stderr.String())
+		}
+		if want := "reading dead pane of " + e.name; !strings.Contains(e.stderr.String(), want) {
+			t.Fatalf("stderr = %q, want the failed capture logged (%q)", e.stderr.String(), want)
+		}
+	})
+	t.Run("runtime metadata read fails once", func(t *testing.T) {
+		e := newDeadPaneEnv(t)
+		e.sp.SetPeekOutput(e.name, "agent exited")
+		e.sp.kill(e.name, "$7")
+		e.sp.GetMetaErrors[e.name] = map[string]error{"GC_DRAIN_ACK": errors.New("show-environment failed")}
+		starts := e.sp.CountCalls("Start", e.name)
+
+		e.tick(t)
+		if got := e.sp.CountCalls("Start", e.name); got != starts+1 {
+			t.Fatalf("Start(%s) calls = %d, want %d: the failed read's pass restarts the row over its corpse", e.name, got, starts+1)
+		}
+		delete(e.sp.GetMetaErrors, e.name)
+		e.clk.Advance(time.Minute)
+		e.tick(t)
+
+		if got := len(e.crashes()); got != 0 {
+			t.Fatalf("session.crashed events = %d, want 0: the read failure fails closed; events=%#v", got, e.rec.Events)
+		}
+		if want := "classifying dead pane of " + e.name + ": reading GC_DRAIN_ACK"; !strings.Contains(e.stderr.String(), want) {
+			t.Fatalf("stderr = %q, want the failed read logged (%q)", e.stderr.String(), want)
+		}
+	})
 }

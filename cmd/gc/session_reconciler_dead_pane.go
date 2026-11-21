@@ -57,12 +57,16 @@ func deadPaneOwnedElsewhere(info session.Info, name string, sp runtime.Provider)
 // recordDeadPaneCrash records session.crashed for a configured named row
 // whose runtime name is observed as a remain-on-exit corpse: the pane is
 // gone, so without this record the restart that follows reads the same as
-// an operator's wake (#6298). The pane tail rides on the event; a failed
-// peek is logged and leaves it empty, and the crash is still recorded. A
-// pane showing a provider rate-limit screen is not a crash. One
-// classification is made per dead object (markCorpseCrash); a failed
-// runtime metadata read records nothing and leaves the object for the next
-// tick.
+// an operator's wake (#6298). info is the row as the pass found it, before
+// any heal. The pane tail rides on the event; a failed peek is logged and
+// leaves it empty, and the crash is still recorded. A pane showing a
+// provider rate-limit screen is not a crash. One classification is made per
+// dead object (markCorpseCrash). A failed runtime metadata read leaves the
+// exit's owner unknown, so nothing is recorded and the read error is
+// logged; the heal and restart later in the same pass usually leave no
+// later tick to see that object, so its crash is dropped. A row whose
+// template the pass did not resolve (a preserved named row whose provider
+// is missing, say) is named by its own identity and template.
 func recordDeadPaneCrash(info session.Info, name string, obs runtime.Liveness, tp TemplateParams, sp runtime.Provider, peek func(int) (string, error), dt *drainTracker, now time.Time, rec events.Recorder, stderr io.Writer) {
 	if obs.Alive {
 		dt.clearCorpseCrash(info.ID)
@@ -86,6 +90,9 @@ func recordDeadPaneCrash(info session.Info, name string, obs runtime.Liveness, t
 	}
 	if runtime.ContainsProviderRateLimitScreen(output) {
 		return
+	}
+	if strings.TrimSpace(tp.TemplateName) == "" {
+		tp.TemplateName, tp.InstanceName = strings.TrimSpace(info.Template), namedSessionIdentityInfo(info)
 	}
 	rec.Record(sessionCrashedEvent(info.ID, tp, output, deadPaneCrashReason))
 	telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
