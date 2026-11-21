@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -690,6 +691,50 @@ func TestReadStatusLegsSurviveMigrationRelics(t *testing.T) {
 			t.Fatalf("pushed answer = %v, want the un-pushed answer %v (empty): the relic w-1 must not survive the limit unprobed", got, want)
 		}
 	})
+}
+
+// TestReadClosedStatusAsksBdListForTheMetadataField pins the exact bd
+// invocation behind ga-8g39ur's timeout: a --status closed read with a
+// key=value filter asks the bd leg for `bd list` with --status=closed, --all
+// and the adjacent pair --metadata-field, gc.root_bead_id=root-1, so a closed
+// tier of sixty thousand rows is narrowed by bd, not read whole and filtered
+// in Go afterwards.
+func TestReadClosedStatusAsksBdListForTheMetadataField(t *testing.T) {
+	var mu sync.Mutex
+	var calls [][]string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		mu.Lock()
+		calls = append(calls, args)
+		mu.Unlock()
+		return []byte(`[]`), nil
+	}
+	if _, err := Read([]Leg{testLeg("city", beads.NewBdStore("/city", runner))}, Query{
+		Status:         StatusClosed,
+		MetadataFields: []string{"gc.root_bead_id=root-1"},
+	}); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	var listArgs []string
+	for _, args := range calls {
+		if len(args) > 0 && args[0] == "list" {
+			if listArgs != nil {
+				t.Fatalf("bd list was asked more than once: %v and %v", listArgs, args)
+			}
+			listArgs = args
+		}
+	}
+	if listArgs == nil {
+		t.Fatal("bd list was never called")
+	}
+	joined := strings.Join(listArgs, " ")
+	for _, want := range []string{"--status=closed", "--all"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("bd list args %q miss %s", joined, want)
+		}
+	}
+	if i := slices.Index(listArgs, "--metadata-field"); i < 0 || i+1 >= len(listArgs) || listArgs[i+1] != "gc.root_bead_id=root-1" {
+		t.Errorf("bd list args %v want the adjacent pair --metadata-field gc.root_bead_id=root-1", listArgs)
+	}
 }
 
 // TestReadPushdownNeverChangesTheAnswer is the property the pushdown rests on:
