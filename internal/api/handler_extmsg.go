@@ -209,6 +209,9 @@ func (s *Server) extmsgNotifyMembers(
 				if excludedResolvedID != "" && preexistingID == excludedResolvedID {
 					return
 				}
+				if addressedID != "" && preexistingID == addressedID {
+					return
+				}
 				notifyResolved(sessionSelector, preexistingID)
 				return
 			}
@@ -221,6 +224,9 @@ func (s *Server) extmsgNotifyMembers(
 				log.Printf("extmsg: materialized session %s as %s for conversation %s/%s", sessionSelector, resolvedID, conv.Provider, conv.ConversationID)
 			}
 			if excludedResolvedID != "" && resolvedID == excludedResolvedID {
+				return
+			}
+			if addressedID != "" && resolvedID == addressedID {
 				return
 			}
 			notifyResolved(sessionSelector, resolvedID)
