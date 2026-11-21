@@ -345,6 +345,17 @@ var (
 	// wraps ErrNudgeSubmitUnconfirmed, so callers that retry an unconfirmed
 	// submit retry this one too, and none reports it delivered.
 	ErrNudgeSubmitLost = fmt.Errorf("%w: the provider ended the turn before it recorded the message", ErrNudgeSubmitUnconfirmed)
+	// ErrNudgeSubmitAuthFailed indicates the submit reached the pane, but the
+	// pane shows a provider auth banner. Unlike ErrNudgeSubmitUnconfirmed this
+	// is NOT retryable -- every resend dies on the same banner, and requeueing
+	// burns bounded attempts against an account that cannot recover
+	// in-process. It deliberately wraps neither ErrNudgeSubmitUnconfirmed nor
+	// a runtime delivery sentinel, so no startup retry ladder picks it up and
+	// the startup nudge fails the start instead of warning. The queued-nudge
+	// drain in cmd/gc is not a startup ladder: it requeues this error like any
+	// other failed delivery, charging one bounded attempt each time. The
+	// session needs re-auth and a restart.
+	ErrNudgeSubmitAuthFailed = errors.New("nudge: submit Enter delivered to tmux but pane shows a provider auth failure")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -3874,6 +3885,20 @@ func (t *Tmux) nudgeSession(
 		}
 		delivered = true
 		if !confirmed {
+			// An auth-dead pane never goes busy and answers every prompt with
+			// a banner in 0s, so it drains its composer and would read as
+			// delivered-but-unobserved below, or as a lost submit that a
+			// resend might fix. Neither is true: no retry clears it. Look for
+			// the banner first, on this already-failed path only, so the
+			// confirmed hot path pays nothing. Only the reply region of this
+			// submit is searched (authBannerRegion): an older banner, the
+			// composer, and the nudge's own echoed text are not evidence.
+			// Known limit of the no-echo fallback: with no echo visible, a
+			// banner from an earlier turn within authBannerTailLines rows of
+			// the composer still counts, even when the draft is staged.
+			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneContainsAuthFailure(authBannerRegion(lines, message)) {
+				return fmt.Errorf("%w: session %q", ErrNudgeSubmitAuthFailed, session)
+			}
 			// The window may have expired inside a large paste's ingest with
 			// every submit swallowed, leaving the draft staged in the
 			// composer. Where the family's staged-draft marker is known,
@@ -6248,6 +6273,107 @@ func paneContainsBusyIndicator(lines []string) bool {
 		}
 	}
 	return false
+}
+
+// paneContainsAuthFailure reports whether the pane shows a provider
+// authentication banner that no retry can clear.
+func paneContainsAuthFailure(lines []string) bool {
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "login expired") ||
+			strings.Contains(lower, "please run /login") ||
+			strings.Contains(lower, "oauth token has expired") ||
+			strings.Contains(lower, "authentication_error") {
+			return true
+		}
+	}
+	return false
+}
+
+// authBannerTailLines bounds authBannerRegion when no echo of the sent message
+// is visible above the composer.
+const authBannerTailLines = 15
+
+// authBannerRegion returns the captured lines that can only hold the
+// provider's reply to message: the transcript between the last echo of
+// message and the live composer. The composer box (located as
+// paneShowsDrainedComposer locates it) is dropped, so a staged draft is never
+// read as a banner, and so are the echo and its wrapped rows, so a nudge that
+// quotes a banner does not match itself. Without a visible echo, only the
+// authBannerTailLines rows above the composer are kept, so a banner from an
+// earlier turn far up the scrollback does not count.
+func authBannerRegion(lines []string, message string) []string {
+	cut := len(lines)
+	live := -1
+	for i, line := range lines {
+		for _, marker := range stagedDraftMarkers {
+			if matchesPromptPrefix(line, marker.promptPrefix) {
+				live = i
+			}
+		}
+	}
+	if live >= 0 {
+		cut = live
+		frameStart := live
+		for frameStart > 0 && !isDialogRule(lines[frameStart-1]) {
+			frameStart--
+		}
+		if frameStart > 0 {
+			if _, ok := readClaudeInput(lines[frameStart-1:]); ok {
+				cut = frameStart - 1
+			}
+		}
+	}
+	above := lines[:cut]
+
+	sent := strings.Join(strings.Fields(message), " ")
+	echo := -1
+	consumed := ""
+	if sent != "" {
+	search:
+		for i := len(above) - 1; i >= 0; i-- {
+			for _, marker := range stagedDraftMarkers {
+				rest, ok := promptLineRest(above[i], marker.promptPrefix)
+				if !ok {
+					continue
+				}
+				rest = strings.Join(strings.Fields(rest), " ")
+				if rest != "" && strings.HasPrefix(sent, rest) {
+					echo = i
+					consumed = rest
+					break search
+				}
+			}
+		}
+	}
+	if echo < 0 {
+		if len(above) > authBannerTailLines {
+			return above[len(above)-authBannerTailLines:]
+		}
+		return above
+	}
+	// Skip the rest of the echo: its wrapped rows and, for a multi-paragraph
+	// message, the blank rows between paragraphs. Rows are consumed in order
+	// against the collapsed message, so the skip ends exactly where the echo
+	// does and blank rows after the full echo stay in the region.
+	start := echo + 1
+	for start < len(above) && consumed != sent {
+		row := strings.Join(strings.Fields(above[start]), " ")
+		if row == "" {
+			if len(consumed) >= len(sent) {
+				break
+			}
+			start++
+			continue
+		}
+		candidate := consumed + " " + row
+		if !strings.HasPrefix(sent, candidate) {
+			break
+		}
+		consumed = candidate
+		start++
+	}
+	return above[start:]
 }
 
 // paneShowsDrainedComposer reports whether the last visible composer is bare.
