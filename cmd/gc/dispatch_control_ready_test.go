@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -703,5 +704,47 @@ func TestControlReadyFallbackReadyFollowsScopeModeEachScan(t *testing.T) {
 		} else if !strings.HasPrefix(argv, "--readonly --sandbox ready ") {
 			t.Fatalf("scan %d (%s): bd argv = %q, want it led by --readonly --sandbox ready", i+1, mode, argv)
 		}
+	}
+}
+
+// TestNextWorkflowServeBeadsControlFallbackServesProxiedScope is #7358 end to
+// end: the control-dispatcher work query on a proxied-server scope whose
+// in-process legs cannot be opened falls back to shelling bd, which must not
+// carry --readonly there, so the dispatcher is handed its ready bead instead
+// of a work-query failure.
+func TestNextWorkflowServeBeadsControlFallbackServesProxiedScope(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) (sources, owned []beads.Store, err error) {
+		return nil, nil, fmt.Errorf("legs unavailable for this test")
+	})
+	const session = "gascity--control-dispatcher"
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	installControlReadyBd(t, logPath, true, `[{"id":"ga-cd-1","assignee":"`+session+`","status":"open","issue_type":"task"}]`)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	writeScopeMetadata(t, cityDir, proxiedScopeMetadata)
+
+	query := workflowServeControlReadyQueryForBeads(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		config.BeadsConfig{},
+		session,
+	)
+	got, err := nextWorkflowServeBeads(query, cityDir, map[string]string{"GC_SESSION_NAME": session})
+	if err != nil {
+		t.Fatalf("nextWorkflowServeBeads on a proxied scope: %v", err)
+	}
+	if want := []hookBead{{ID: "ga-cd-1"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("nextWorkflowServeBeads = %#v, want %#v", got, want)
+	}
+	calls := readControlReadyBdCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %q, want exactly one batched fallback call", calls)
+	}
+	if strings.Contains(calls[0], "--readonly") {
+		t.Fatalf("bd argv %q must not carry --readonly on a proxied-server scope", calls[0])
 	}
 }
