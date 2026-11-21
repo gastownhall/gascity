@@ -483,3 +483,67 @@ func TestSweepProcessTableOrphansFencesBDProxiedDoltServer(t *testing.T) {
 	wantPIDs(t, "row stopped", pidsOf(s.sweep(sweepAsleep, sweepAsleep, sweepNoPanes())))
 	wantPIDs(t, "row absent", pidsOf(s.sweep(nil, nil, nil)))
 }
+
+// AC-3: protection lasts only as long as its proof. Once no live proxy for the
+// backend's root remains, a later sweep reaps the backend under the ordinary
+// orphan rules, even though an earlier sweep reported it protected.
+func TestSweepProcessTableOrphansReapsBDDoltServerOnceItsProxyIsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		proxyEnd func(s *procSweep, b bdProxiedBackend)
+		// pidReused: the proxy's pid now runs an ordinary process carrying the
+		// session's identity, an orphan the sweep reaps beside the backend.
+		pidReused bool
+	}{
+		{name: "proxy exited", proxyEnd: func(s *procSweep, b bdProxiedBackend) {
+			if err := os.RemoveAll(filepath.Join(s.root, strconv.Itoa(b.proxyPID))); err != nil {
+				s.t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(b.root, proxyendpoint.PIDFileName)); err != nil {
+				s.t.Fatal(err)
+			}
+		}},
+		{name: "proxy killed, record left behind", proxyEnd: func(s *procSweep, b bdProxiedBackend) {
+			if err := os.RemoveAll(filepath.Join(s.root, strconv.Itoa(b.proxyPID))); err != nil {
+				s.t.Fatal(err)
+			}
+		}},
+		{name: "proxy zombie", proxyEnd: func(s *procSweep, b bdProxiedBackend) {
+			writeFakeProcState(s.t, s.root, b.proxyPID, "Z")
+		}},
+		{name: "proxy pid reused by another process", pidReused: true, proxyEnd: func(s *procSweep, b bdProxiedBackend) {
+			writeFakeProcCmdline(s.t, s.root, b.proxyPID, "sleep", "600")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newProcSweep(t)
+			b := writeBDProxiedBackend(s, 4200, 4201)
+			t.Cleanup(func() { fencedInfrastructureRoots.put(normalizePathForCompare(s.cityPath), nil) })
+
+			wantPIDs(t, "proxy live", pidsOf(s.sweep(nil, sweepClosed, nil)))
+			tc.proxyEnd(s, b)
+			want := []int{b.backendPID}
+			if tc.pidReused {
+				want = []int{b.proxyPID, b.backendPID}
+			}
+			wantPIDs(t, "proxy gone", pidsOf(s.sweep(nil, sweepClosed, nil)), want...)
+		})
+	}
+}
+
+// writeFakeProcState rewrites the state field of pid's stat.
+func writeFakeProcState(t *testing.T, root string, pid int, state string) {
+	t.Helper()
+	path := filepath.Join(root, strconv.Itoa(pid), "stat")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	closeParen := strings.LastIndexByte(text, ')')
+	fields := strings.Fields(text[closeParen+1:])
+	fields[0] = state
+	if err := os.WriteFile(path, []byte(text[:closeParen+1]+" "+strings.Join(fields, " ")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
