@@ -1623,7 +1623,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		if binding, ok := controlRoutes[rigContext]; ok {
 			return binding, nil
 		}
-		binding, err := graphroute.ControlDispatcherBinding(sessions, cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
+		binding, err := graphroute.ControlDispatcherBinding(cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
 		if err != nil {
 			return graphRouteBinding{}, err
 		}

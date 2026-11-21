@@ -1710,14 +1710,19 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, sessions beads.
 	if cfg != nil {
 		if named := config.FindNamedSession(cfg, target); named != nil {
 			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
-				if sessions != (beads.SessionStore{}) {
-					candidates, err := session.NamedSessionResolutionCandidates(sessions, spec)
-					if err != nil {
-						return attemptRouteBinding{}, false, fmt.Errorf("listing named-session candidates for %q: %w", target, err)
-					}
-					if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
-						return attemptRouteBinding{directSessionID: bead.ID}, true, nil
-					}
+				if sessions == (beads.SessionStore{}) {
+					// A named-session continuation can only be resolved through
+					// the sessions store; without a handle, degrading to the
+					// configured name would silently re-route it to the pool
+					// (#8436). Refuse so the miswired caller surfaces.
+					return attemptRouteBinding{}, false, fmt.Errorf("named-session target %q requires the sessions store, but attempt routing received no session handle", target)
+				}
+				candidates, err := session.NamedSessionResolutionCandidates(sessions, spec)
+				if err != nil {
+					return attemptRouteBinding{}, false, fmt.Errorf("listing named-session candidates for %q: %w", target, err)
+				}
+				if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
+					return attemptRouteBinding{directSessionID: bead.ID}, true, nil
 				}
 			}
 			// No canonical bead yet: the session has not been materialized, so

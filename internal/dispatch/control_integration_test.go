@@ -1405,6 +1405,72 @@ func TestProcessControlRetryRoutesAttemptThroughSessions(t *testing.T) {
 	}
 }
 
+// TestProcessControlRetryNamedSessionTargetWithoutSessionHandleErrors is the
+// missing-handle half of #8436's attempt routing: a routing operation that
+// requires session access refuses with a contextual error when it receives no
+// usable session handle, instead of silently degrading the named-session
+// continuation to pool routing. The canonical named-session bead exists — only
+// the sessions store holds it — but ProcessOptions carries no Sessions handle.
+// The retry must fail closed: no second attempt stamped with pool metadata,
+// and an error naming the missing handle rather than blaming the target.
+func TestProcessControlRetryNamedSessionTargetWithoutSessionHandleErrors(t *testing.T) {
+	t.Parallel()
+
+	cityPath, _, _ := namedWorkerSessionCity(t)
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "run",
+		Title: "Run",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{ID: "summarize", Title: "Summarize", Type: "task", Metadata: map[string]string{"gc.run_target": "worker"}},
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "run retry",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.run",
+			"gc.step_id":          "run",
+			"gc.max_attempts":     "3",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.run.attempt.1", 1, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "transient",
+		"gc.failure_reason": "timeout",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	_, err = ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{
+		Work:     beadstest.Work(store),
+		CityPath: cityPath,
+		// Sessions deliberately left zero: attempt routing must not guess a
+		// store for a named-session target it cannot resolve.
+	})
+	if err == nil {
+		t.Fatal("ProcessControl(retry) succeeded without a sessions handle; a named-session target requires session access, and its absence must refuse")
+	}
+	if !strings.Contains(err.Error(), "no session") {
+		t.Fatalf("ProcessControl(retry) error = %q; want it to name the missing session handle rather than blame the target", err.Error())
+	}
+	if attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2.summarize"); attempt2.ID != "" {
+		t.Fatalf("attempt 2 created (assignee %q, gc.routed_to %q) despite the refusal; routing must fail closed, not degrade the named session to pool routing", attempt2.Assignee, attempt2.Metadata["gc.routed_to"])
+	}
+}
+
 // TestProcessControlFanoutRoutesFragmentThroughSessions is the fanout half of
 // TestProcessControlRetryRoutesAttemptThroughSessions: a fragment's work step
 // is assigned the canonical session bead's id, and its control step is

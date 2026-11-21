@@ -85,14 +85,18 @@ type ProcessOptions struct {
 	// store as the graph store ProcessControl is handed.
 	Work beads.WorkStore
 	// Sessions is the sessions-class store attempt routing resolves a session
-	// target through. A zero Sessions is no session store, and every target
-	// only a session bead can resolve loses its resolution. A named-session
-	// target routes by its configured name (metadata only), as it does when
-	// the store holds no canonical bead for it. A raw session name or alias
-	// that names no configured agent is not resolved to its session at all:
+	// target through. Control kinds that route session targets (check,
+	// fanout, drain, retry, retry-eval, ralph) are handed the city's sessions
+	// handle by the dispatch root; kinds that route no session target, and
+	// tests, may leave it zero. A named-session target over the zero handle
+	// fails with a contextual error — its continuation can only be resolved
+	// through the sessions store, and silently routing it by its configured
+	// name would re-route it to the pool (#8436). With a handle that holds no
+	// canonical bead for it, a named-session target still routes by its
+	// configured name (metadata only) and binds on claim. A raw session name
+	// or alias that names no configured agent is not resolved to its session:
 	// the step is routed to the name as written (gc.routed_to) instead of
-	// being assigned to the session. The control dispatcher always sets it;
-	// tests that route no session target may leave it zero.
+	// being assigned to the session.
 	Sessions beads.SessionStore
 	Tracef   func(format string, args ...any)
 
