@@ -138,11 +138,12 @@ type instructionsFileGap struct {
 }
 
 type instructionsProviderExpectation struct {
-	rigName   string
-	rigPath   string
-	scopeName string
-	provider  string
-	expected  string
+	claudeProjectFile bool
+	rigName           string
+	rigPath           string
+	scopeName         string
+	provider          string
+	expected          string
 }
 
 type instructionsRigEntry struct {
@@ -164,6 +165,14 @@ func (c *InstructionsFileCheck) collectGaps() []instructionsFileGap {
 	for _, exp := range expectations {
 		if instructionsFileExists(exp.rigPath, exp.expected) {
 			continue
+		}
+		// Claude also loads project memory from .claude/CLAUDE.md. Do not
+		// manufacture a root file when the provider already has instructions.
+		if exp.claudeProjectFile {
+			info, err := os.Stat(filepath.Join(exp.rigPath, ".claude", "CLAUDE.md"))
+			if err == nil && info.Mode().IsRegular() {
+				continue
+			}
 		}
 		fb := firstFallback(exp.rigPath, exp.expected)
 		if fb == "" {
@@ -230,11 +239,12 @@ func (c *InstructionsFileCheck) instructionsProviderExpectations() []instruction
 			continue
 		}
 		out = append(out, instructionsProviderExpectation{
-			rigName:   rig.name,
-			rigPath:   rig.path,
-			scopeName: rig.scopeName,
-			provider:  provider,
-			expected:  expected,
+			claudeProjectFile: resolved.BuiltinAncestor == "claude" && expected == "CLAUDE.md",
+			rigName:           rig.name,
+			rigPath:           rig.path,
+			scopeName:         rig.scopeName,
+			provider:          provider,
+			expected:          expected,
 		})
 	}
 	return out
