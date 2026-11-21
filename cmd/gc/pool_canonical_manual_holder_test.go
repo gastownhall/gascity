@@ -4,9 +4,12 @@ import (
 	"errors"
 	"maps"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // Issue #8945: a manual session started from a canonical singleton pool's
@@ -142,5 +145,56 @@ func TestCanonicalSingletonPool_ManualSessionOfTemplateDoesNotHoldSeat(t *testin
 			}
 			assertCanonicalWorkerSeat(t, store, info.ID)
 		})
+	}
+}
+
+func TestCanonicalSingletonPool_GuardedCreateBesideManualSession(t *testing.T) {
+	store := beads.NewMemStore()
+	manual := createManualTemplateHolderBead(t, store, "worker", manualTemplateHolderMetadata("worker", "asleep"))
+	worker := canonicalSingletonWorker(t)
+	bp := canonicalSingletonBuildParams(t, store, worker, []beads.Bead{manual})
+
+	usedSlots := map[int]bool{}
+	_, slot, plan, err := selectOrPlanPoolSessionBead(bp, &worker, "worker", nil,
+		SessionRequest{Template: "worker", Tier: "new"}, time.Time{}, map[string]bool{}, usedSlots)
+	if err != nil {
+		t.Fatalf("selectOrPlanPoolSessionBead: %v", err)
+	}
+	if plan == nil {
+		t.Fatal("selectOrPlanPoolSessionBead returned no fresh-seat plan")
+	}
+	if slot != 0 || !usedSlots[0] {
+		t.Fatalf("planned slot = %d (used %#v), want canonical slot 0", slot, usedSlots)
+	}
+
+	info, err := createPoolSessionBeadWithGuardedAliasUsingLock(poolCreateViewOf(bp), &worker, "worker",
+		plan.qualifiedInstance, plan.poolSlot, nil,
+		func(_ string, _ []string, fn func() error) error { return fn() })
+	if err != nil {
+		t.Fatalf("createPoolSessionBeadWithGuardedAliasUsingLock: %v", err)
+	}
+	seat := assertCanonicalWorkerSeat(t, store, info.ID)
+	// The guarded create takes the proven-collision branch of the alias check:
+	// the seat's public alias is deferred (left empty) for the
+	// pool_alias_conflict bookkeeping, not failed closed.
+	aliasErr := sessionpkg.EnsureAliasAvailableWithConfig(beadstest.Sessions(store), nil, "worker", seat.ID)
+	if !errors.Is(aliasErr, sessionpkg.ErrSessionAliasExists) {
+		t.Fatalf("alias %q availability beside manual agent_name=worker = %v, want %v", "worker", aliasErr, sessionpkg.ErrSessionAliasExists)
+	}
+	if alias := seat.Metadata["alias"]; alias != "" {
+		t.Fatalf("seat alias = %q, want deferred (empty) beside manual agent_name=worker", alias)
+	}
+
+	bp.sessionBeads = newSessionBeadSnapshot([]beads.Bead{manual, seat})
+	selected, _, nextPlan, err := selectOrPlanPoolSessionBead(bp, &worker, "worker", nil,
+		SessionRequest{Template: "worker", Tier: "new"}, time.Time{}, map[string]bool{}, map[int]bool{})
+	if err != nil {
+		t.Fatalf("selectOrPlanPoolSessionBead(next tick): %v", err)
+	}
+	if nextPlan != nil {
+		t.Fatal("next tick planned a second fresh seat")
+	}
+	if selected.ID != seat.ID {
+		t.Fatalf("next tick selected %q, want seat %q", selected.ID, seat.ID)
 	}
 }
