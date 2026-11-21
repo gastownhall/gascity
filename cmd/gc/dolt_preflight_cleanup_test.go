@@ -242,16 +242,16 @@ func TestFileOpenedByAnyProcessFromProcFallsBackWhenUnixTableUnreadable(t *testi
 }
 
 func TestRemoveStaleManagedDoltSocketsWithoutLsofKeepsSocket(t *testing.T) {
-	socketPath := filepath.Join("/tmp", "dolt-preflight-cleanup-live-test.sock")
-	_ = os.Remove(socketPath)
+	// A private socket dir keeps concurrent test processes and preflight
+	// cleanups elsewhere on the host from deleting or rebinding this socket.
+	socketDir := shortSocketTempDir(t, "gc-sock-")
+	socketPath := filepath.Join(socketDir, "dolt-live.sock")
+	withManagedDoltSocketGlob(t, filepath.Join(socketDir, "dolt*.sock"))
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("net.Listen(unix): %v", err)
 	}
-	defer func() {
-		_ = listener.Close()
-		_ = os.Remove(socketPath)
-	}()
+	defer func() { _ = listener.Close() }()
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "missing-bin"))
 	if err := removeStaleManagedDoltSockets(); err != nil {
 		t.Fatalf("removeStaleManagedDoltSockets() error = %v", err)
@@ -271,6 +271,13 @@ func withManagedDoltProcPaths(t *testing.T, procDir, unixSocketTable string) {
 		managedDoltProcDir = oldProcDir
 		managedDoltUnixSocketTable = oldUnixSocketTable
 	})
+}
+
+func withManagedDoltSocketGlob(t *testing.T, glob string) {
+	t.Helper()
+	old := managedDoltSocketGlob
+	managedDoltSocketGlob = glob
+	t.Cleanup(func() { managedDoltSocketGlob = old })
 }
 
 func shortUnixSocketPath(t *testing.T) string {
