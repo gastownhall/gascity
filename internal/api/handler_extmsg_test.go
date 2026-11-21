@@ -252,16 +252,15 @@ func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testi
 
 	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "@mayor: status?", "", "mayor")
 
+	nudges := extmsgNudgesBySessionName(fs)
+	if got := len(nudges[mayor.SessionName]); got != 1 {
+		t.Fatalf("addressed participant nudges = %d, want 1; nudges=%#v", got, nudges)
+	}
 	nudgesBySessionName := map[string]string{}
-	for _, call := range fs.sp.Calls {
-		if call.Method == "Nudge" {
-			nudgesBySessionName[call.Name] = call.Message
-		}
+	for name, messages := range nudges {
+		nudgesBySessionName[name] = messages[len(messages)-1]
 	}
 	mayorNudge := nudgesBySessionName[mayor.SessionName]
-	if mayorNudge == "" {
-		t.Fatalf("missing mayor nudge; calls=%#v", fs.sp.Calls)
-	}
 	if strings.Contains(mayorNudge, "Addressed to:") {
 		t.Fatalf("addressed participant saw discriminator:\n%s", mayorNudge)
 	}
@@ -720,6 +719,68 @@ func TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce(t *testing.T) {
 			}
 			if !strings.Contains(boundNudges[0], "Addressed to: @"+target) {
 				t.Fatalf("bound member nudge missing discriminator for %q:\n%s", target, boundNudges[0])
+			}
+		})
+	}
+}
+
+// TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
+// covers an explicit target that is itself a transcript member, addressed by
+// session ID: it is notified exactly once and is not told the message is for
+// someone else, even when several membership rows resolve to it.
+func TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		extraSelector func(member session.Info) string
+	}{
+		{name: "one membership row"},
+		{name: "second row by session name", extraSelector: func(member session.Info) string { return member.SessionName }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+
+			ref := extmsg.ConversationRef{
+				ScopeID:        "scope-1",
+				Provider:       "slack",
+				AccountID:      "acct-1",
+				ConversationID: "C123",
+				Kind:           extmsg.ConversationRoom,
+			}
+			member := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+				Conversation: ref,
+				SessionID:    member.ID,
+				Now:          time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("Bind: %v", err)
+			}
+			if tc.extraSelector != nil {
+				if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+					Caller:         caller,
+					Conversation:   ref,
+					SessionID:      tc.extraSelector(member),
+					BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+					Owner:          extmsg.MembershipOwnerManual,
+					Now:            time.Now().UTC(),
+				}); err != nil {
+					t.Fatalf("EnsureMembership(extra row): %v", err)
+				}
+			}
+
+			srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hi", "", member.ID)
+
+			nudges := extmsgNudgesBySessionName(fs)
+			got := nudges[member.SessionName]
+			if len(got) != 1 {
+				t.Fatalf("addressed member nudges = %d, want 1; nudges=%#v", len(got), nudges)
+			}
+			if strings.Contains(got[0], "Addressed to:") {
+				t.Fatalf("addressed member saw discriminator:\n%s", got[0])
 			}
 		})
 	}
