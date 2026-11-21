@@ -393,3 +393,52 @@ func TestSlingExpandedRootCustomSlingQueryWarnsAndWritesNoMembers(t *testing.T) 
 		t.Fatalf("BeadWarnings = %q, want one naming %s, its 2 unrouted steps and the custom sling_query", result.BeadWarnings, run.root.ID)
 	}
 }
+
+// TestSlingNonExpandedBeadsUnchanged is AC-7: a bead that is not an expanded
+// workflow root (a plain task, or a root-only workflow bead) routes only
+// itself, even when other beads name it as their root.
+func TestSlingNonExpandedBeadsUnchanged(t *testing.T) {
+	tests := []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "plain task", meta: map[string]string{}},
+		{name: "root-only workflow", meta: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			slung, err := store.Create(beads.Bead{Title: "slung", Type: "task", Status: "open", Metadata: tc.meta})
+			if err != nil {
+				t.Fatalf("create slung bead: %v", err)
+			}
+			other, err := store.Create(beads.Bead{Title: "other", Type: "task", Status: "open", ParentID: slung.ID, Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: slung.ID,
+				beadmeta.RoutedToMetadataKey:   "",
+			}})
+			if err != nil {
+				t.Fatalf("create other bead: %v", err)
+			}
+			run := &cookedRun{store: store, root: slung}
+			worker := poolWorker()
+			deps, router := cookedRunDeps(run, worker)
+
+			result, err := DoSling(testOpts(worker, slung.ID), deps, store)
+			if err != nil {
+				t.Fatalf("DoSling: %v", err)
+			}
+			if len(router.routed) != 1 || router.routed[0].BeadID != slung.ID {
+				t.Fatalf("routed = %+v, want only %s", router.routed, slung.ID)
+			}
+			if got := run.get(t, slung.ID).Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+				t.Errorf("slung gc.routed_to = %q, want worker", got)
+			}
+			if got := run.get(t, other.ID).Metadata; !maps.Equal(got, other.Metadata) {
+				t.Errorf("other bead metadata = %v, want unchanged %v", got, other.Metadata)
+			}
+			if result.RoutedMembers != 0 || len(result.BeadWarnings) != 0 {
+				t.Errorf("RoutedMembers = %d, BeadWarnings = %q, want 0 and none", result.RoutedMembers, result.BeadWarnings)
+			}
+		})
+	}
+}
