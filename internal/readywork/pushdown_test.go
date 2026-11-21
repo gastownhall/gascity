@@ -140,6 +140,7 @@ func (s ignoringStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 
 func (s ignoringStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	query.Assignee = ""
+	query.Metadata = nil
 	return s.MemStore.List(query)
 }
 
@@ -221,6 +222,32 @@ func TestReadyStatusLegsFilterMetadataInTheStore(t *testing.T) {
 			want:  beads.ListQuery{Status: StatusClosed, TierMode: beads.FederatedReadTier, Metadata: root},
 			ids:   []string{"c-closed-0-w1", "c-closed-0-w2", "r-closed-0-w1", "r-closed-0-w2"},
 		},
+		{
+			name:  "blocked",
+			query: Query{Status: StatusBlocked},
+			want:  beads.ListQuery{Status: StatusBlocked, TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-blocked-0-w1", "c-blocked-0-w2", "r-blocked-0-w1", "r-blocked-0-w2"},
+		},
+		{
+			name:  "in_progress",
+			query: Query{Status: StatusInProgress},
+			want:  beads.ListQuery{Status: StatusInProgress, TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-in_progress-0-w1", "c-in_progress-0-w2", "r-in_progress-0-w1", "r-in_progress-0-w2"},
+		},
+		{
+			name:  "in_progress with an assignee",
+			query: Query{Status: StatusInProgress, Assignee: "w1"},
+			want:  beads.ListQuery{Status: StatusInProgress, Assignee: "w1", TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-in_progress-0-w1", "r-in_progress-0-w1"},
+		},
+		{
+			// Gas City's open is every non-closed row that maps to open, so the
+			// open leg scans with no status and the pair beside it.
+			name:  "open",
+			query: Query{Status: StatusOpen},
+			want:  beads.ListQuery{AllowScan: true, TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-open-0-w1", "c-open-0-w2", "r-open-0-w1", "r-open-0-w2"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			city, rig := newNarrowingStore(statusLegRows("c")...), newNarrowingStore(statusLegRows("r")...)
@@ -228,6 +255,13 @@ func TestReadyStatusLegsFilterMetadataInTheStore(t *testing.T) {
 			q := tc.query
 			q.MetadataFields = []string{"gc.root_bead_id=R"}
 			got := readIDs(t, legs, q)
+			plain := []Leg{
+				testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, statusLegRows("c"), nil)}),
+				testLeg("rig r", ignoringStore{beads.NewMemStoreFrom(0, statusLegRows("r"), nil)}),
+			}
+			if want := readIDs(t, plain, q); !slices.Equal(got, want) {
+				t.Fatalf("pushed answer = %v, want the unpushed %v", got, want)
+			}
 			slices.Sort(got)
 			if !slices.Equal(got, tc.ids) {
 				t.Fatalf("answer = %v, want %v", got, tc.ids)
