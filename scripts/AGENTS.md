@@ -81,3 +81,18 @@ lines only; a new integration-only test file costs one sorted record line.
 The shard rule is `i % shard_total == shard_index - 1` in
 `scripts/test-go-test-shard` (`TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux`
 restates it and runs each shard through the real script).
+
+## Affected preflight keeps Bazel target coverage
+
+`check-affected` executes shell guards, nogo for changed packages and their
+importers, and selected Bazel test targets. Resolve every selected package's
+registered unit test targets from the graph, including auxiliary Go tests and
+variants; never substitute `go test` or assume `<leaf>_test` covers a package.
+Keep direct readers, importer/aggregate-reader caps and manual/tagged-tier
+boundaries. An unsupported, ambiguous or failed mapping cannot pass.
+
+When the diff requires a full check, return nonzero with a remote-executor/CI
+`make check` requirement. Never silently start a whole-repo local suite or fall
+back to `check-go`. Go-native runners remain explicit human/offline commands.
+`affected_preflight_test.go` drives the real selector and Makefile with command
+recorders; test selection and failures without executing a full suite.
