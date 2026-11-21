@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -28,7 +29,7 @@ func TestHookClaimExactPlanFencesObservedRow(t *testing.T) {
 		},
 	}
 
-	req := hookClaimExactPlan(candidate, "worker-1")
+	req := hookClaimExactPlan(candidate, "worker-1", hookClaimOptions{})
 
 	if req.ID != "work-1" {
 		t.Fatalf("request id = %q, want work-1", req.ID)
@@ -71,7 +72,7 @@ func TestHookClaimExactPlanOmitsRouteFactsTheProjectionLacked(t *testing.T) {
 		ID:       "work-1",
 		Status:   "open",
 		Metadata: map[string]string{"gc.root_bead_id": "root-1", "gc.step_id": "build"},
-	}, "worker-1")
+	}, "worker-1", hookClaimOptions{})
 
 	if req.Want.RoutedTo != nil {
 		t.Fatalf("want.routed_to = %v, want nil (not projected)", req.Want.RoutedTo)
@@ -171,6 +172,7 @@ type exactClaimHarness struct {
 	reclaimFrom string
 	rejections  [][3]string
 	reclaimedEv [][3]string
+	stampCalls  int
 }
 
 func (h *exactClaimHarness) run(t *testing.T, opts hookClaimOptions) (string, int) {
@@ -399,5 +401,105 @@ func TestDoHookClaimReadyGraphStepFencedOnAssignee(t *testing.T) {
 	}
 	if len(h.rejections) != 1 || h.rejections[0] != [3]string{"work-1", "rival", "worker-1"} {
 		t.Fatalf("rejection events = %v, want one naming the rival owner", h.rejections)
+	}
+}
+
+// TestDoHookClaimExactClaimStampsSessionIdentityInOneWrite: a session-run
+// claim of a graph step folds the durable session back-reference and the
+// write-once gc.claimed_at into the claim's single fenced write, so the
+// post-claim identity stamp finds every key current and issues no second
+// metadata write.
+func TestDoHookClaimExactClaimStampsSessionIdentityInOneWrite(t *testing.T) {
+	h := &exactClaimHarness{
+		runner: `[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.step_id":"build"}}]`,
+		exactResult: molecule.ClaimExactResult{
+			Bead:    beads.Bead{ID: "work-1", Status: "in_progress", Assignee: "worker-1", Metadata: map[string]string{"gc.routed_to": "worker", "gc.root_bead_id": "root-1", "gc.step_id": "build"}},
+			Outcome: molecule.ClaimExactClaimed,
+			Fence:   molecule.ClaimExactFenceRevision,
+		},
+	}
+	stdout, code := h.run(t, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		Env:                []string{"GC_SESSION_ID=sess-1", "GC_SESSION_NAME=gc__role-mc-sess1"},
+		JSON:               true,
+	})
+
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d; stdout=%s", code, stdout)
+	}
+	if len(h.exactReqs) != 1 {
+		t.Fatalf("exact claims = %d, want 1", len(h.exactReqs))
+	}
+	meta := h.exactReqs[0].OnSuccess.Metadata
+	if meta["gc.session_id"] != "sess-1" {
+		t.Fatalf("claim effects session id = %q, want sess-1 folded into the claim write", meta["gc.session_id"])
+	}
+	if meta["gc.session_name"] != "gc__role-mc-sess1" {
+		t.Fatalf("claim effects session name = %q, want the session's name", meta["gc.session_name"])
+	}
+	if meta["gc.claimed_at"] == "" {
+		t.Fatal("claim effects carry no gc.claimed_at; the write-once stamp belongs in the claim write")
+	}
+	if h.stampCalls != 0 {
+		t.Fatalf("post-claim stamp writes = %d, want 0 (identity already durable in the claim write)", h.stampCalls)
+	}
+	if !strings.Contains(stdout, `"action":"work"`) {
+		t.Fatalf("no work receipt: %s", stdout)
+	}
+}
+
+// TestHookClaimExactPlanCarriesSessionIdentityByRule pins the session-key
+// rules the claim effects inherit from hookClaimIdentityPatch: session keys
+// only for a session-run claim of a non-control bead, claimed_at write-once
+// (already-present values are never rewritten), and nothing stamped when no
+// session identity is available.
+func TestHookClaimExactPlanCarriesSessionIdentityByRule(t *testing.T) {
+	sessionEnv := []string{"GC_SESSION_ID=sess-1", "GC_SESSION_NAME=gc__role-mc-sess1"}
+	base := beads.Bead{
+		ID:       "work-1",
+		Status:   "open",
+		Metadata: map[string]string{"gc.root_bead_id": "root-1", "gc.step_id": "build"},
+	}
+
+	// Session run: both back-reference keys plus the write-once claimed_at.
+	withSession := hookClaimExactPlan(base, "worker-1", hookClaimOptions{Env: sessionEnv})
+	if withSession.OnSuccess.Metadata["gc.session_id"] != "sess-1" ||
+		withSession.OnSuccess.Metadata["gc.session_name"] != "gc__role-mc-sess1" ||
+		withSession.OnSuccess.Metadata["gc.claimed_at"] == "" {
+		t.Fatalf("session-run effects = %v, want session id+name and claimed_at", withSession.OnSuccess.Metadata)
+	}
+
+	// claimed_at is write-once: an already-claimed row is not re-stamped and
+	// its other keys still fold in.
+	claimedOnce := base
+	claimedOnce.Metadata = map[string]string{"gc.root_bead_id": "root-1", "gc.step_id": "build", "gc.claimed_at": "2026-01-01T00:00:00Z"}
+	rewritten := hookClaimExactPlan(claimedOnce, "worker-1", hookClaimOptions{Env: sessionEnv})
+	if got := rewritten.OnSuccess.Metadata["gc.claimed_at"]; got != "" {
+		t.Fatalf("claimed_at effects = %q, want none (write-once)", got)
+	}
+	if rewritten.OnSuccess.Metadata["gc.session_id"] != "sess-1" {
+		t.Fatalf("session id effects = %q, want sess-1", rewritten.OnSuccess.Metadata["gc.session_id"])
+	}
+
+	// Control beads stay session-free by design.
+	control := base
+	control.Metadata = map[string]string{"gc.root_bead_id": "root-1", "gc.step_id": "build", beadmeta.KindMetadataKey: beadmeta.KindDrain}
+	controlPlan := hookClaimExactPlan(control, "worker-1", hookClaimOptions{Env: sessionEnv})
+	if controlPlan.OnSuccess.Metadata["gc.session_id"] != "" {
+		t.Fatalf("control-bead effects session id = %q, want none", controlPlan.OnSuccess.Metadata["gc.session_id"])
+	}
+	if controlPlan.OnSuccess.Metadata["gc.claimed_at"] == "" {
+		t.Fatal("control-bead effects carry no claimed_at; the claim timestamp is unconditional")
+	}
+
+	// No session identity available: only the write-once claimed_at.
+	bare := hookClaimExactPlan(base, "worker-1", hookClaimOptions{})
+	if bare.OnSuccess.Metadata["gc.session_id"] != "" || bare.OnSuccess.Metadata["gc.session_name"] != "" {
+		t.Fatalf("no-session effects = %v, want no session keys", bare.OnSuccess.Metadata)
+	}
+	if bare.OnSuccess.Metadata["gc.claimed_at"] == "" {
+		t.Fatal("no-session effects carry no claimed_at")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -52,7 +53,13 @@ func hookClaimExactCandidate(candidate beads.Bead) bool {
 // root, and route/continuation group when present — and the claim effects are
 // the pool claim's status transition plus the assignee, applied only when the
 // observed row was unassigned (a ready assignment already carries its owner).
-func hookClaimExactPlan(candidate beads.Bead, actor string) molecule.ClaimExactRequest {
+//
+// The effects also fold in the durable session back-reference
+// (gc.session_id / gc.session_name, for a session-run claim of a non-control
+// bead — the same rule hookClaimIdentityPatch applies) and the write-once
+// gc.claimed_at, so the claim's single fenced write leaves the bead fully
+// identified and the post-claim stamp finds nothing left to write.
+func hookClaimExactPlan(candidate beads.Bead, actor string, opts hookClaimOptions) molecule.ClaimExactRequest {
 	status := strings.TrimSpace(candidate.Status)
 	assignee := strings.TrimSpace(candidate.Assignee)
 	stepID := strings.TrimSpace(candidate.Metadata[beadmeta.StepIDMetadataKey])
@@ -74,6 +81,20 @@ func hookClaimExactPlan(candidate beads.Bead, actor string) molecule.ClaimExactR
 	if assignee == "" {
 		owner := actor
 		onSuccess.Assignee = &owner
+	}
+	metadata := map[string]string{}
+	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" &&
+		!beadmeta.IsControlKind(strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])) {
+		metadata[beadmeta.SessionIDMetadataKey] = sessionID
+		if sessionName := hookClaimSessionName(opts.Env); sessionName != "" {
+			metadata[beadmeta.SessionNameMetadataKey] = sessionName
+		}
+	}
+	if strings.TrimSpace(candidate.Metadata[beadmeta.ClaimedAtMetadataKey]) == "" {
+		metadata[beadmeta.ClaimedAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
+	}
+	if len(metadata) > 0 {
+		onSuccess.Metadata = metadata
 	}
 	return molecule.ClaimExactRequest{ID: candidate.ID, Want: want, OnSuccess: onSuccess}
 }
@@ -117,7 +138,7 @@ func hookClaimTierClaim(ctx context.Context, candidate beads.Bead, actor string,
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, actor)
 		return claimed, ok, false, err
 	}
-	res, resErr := ops.ClaimExact(ctx, dir, opts.Env, actor, hookClaimExactPlan(candidate, actor))
+	res, resErr := ops.ClaimExact(ctx, dir, opts.Env, actor, hookClaimExactPlan(candidate, actor, opts))
 	claimed, verdict, err := hookClaimExactThroughStore(actor, res, resErr)
 	return claimed, verdict == hookClaimExactClaimedVerdict, verdict == hookClaimExactMovedVerdict, err
 }
