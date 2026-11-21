@@ -647,6 +647,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		stdout:            p.Stdout,
 		stderr:            p.Stderr,
 	}
+	cr.bindOrderDispatcherSessions(od)
 	if p.ReconcilerMode == reconcilerV2 {
 		cr.installPlanner(p.V2)
 	}
@@ -2160,7 +2161,17 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryInapplicableReportsFrom(prev)
 		}
 	}
+	cr.bindOrderDispatcherSessions(next)
 	cr.od = next
+}
+
+// bindOrderDispatcherSessions points od's graph routing at this runtime's
+// authoritative sessions store, so a session a dispatched step names is
+// resolved and materialized where every session reader reads it (#8436).
+func (cr *CityRuntime) bindOrderDispatcherSessions(od orderDispatcher) {
+	if mem, ok := od.(*memoryOrderDispatcher); ok {
+		mem.sessions = cr.sessionsBeadStore
+	}
 }
 
 // rescanOrderDispatcher is the reload-side rescan (a same-revision reload): it

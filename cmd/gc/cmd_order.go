@@ -928,7 +928,19 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	moleculeStore := moleculeClassStore(recipe, genericStore, graphStore)
 	moleculeStoreMolecule := moleculeClassTarget(recipe, moleculeStore, moleculeStore)
 
-	if err := applyOrderRecipeRouting(recipe, pool, vars, storeTarget, moleculeStore, cityName, cityPath, cfg); err != nil {
+	// The sessions a step names resolve and materialize in the city's
+	// sessions store, never in the molecule store (#8436).
+	sessions, releaseSessions, err := acquireRoutingSessionStore(cityPath, storeTarget.ScopeRoot, cliStores(cityPath, genericStore))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer func() {
+		if err := releaseSessions(); err != nil {
+			fmt.Fprintf(stderr, "warning: gc order run: closing the city store opened for session routing: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}()
+	if err := applyOrderRecipeRouting(recipe, pool, vars, storeTarget, sessions, cityName, cityPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

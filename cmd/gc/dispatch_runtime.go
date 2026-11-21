@@ -34,10 +34,10 @@ func cliGraphrouteDeps(cityPath string) graphroute.Deps {
 }
 
 // applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI
-// dependencies.
-func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
-	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
-	return graphroute.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, beads.SessionStore{Store: store}, cityName, cfg, cliGraphrouteDeps(cityPath))
+// dependencies. sessions is the city's sessions-class store, where the
+// session targets a step names are resolved and materialized.
+func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, sessions beads.SessionStore, cityName, cityPath string, cfg *config.City) error {
+	return graphroute.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, sessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 var (

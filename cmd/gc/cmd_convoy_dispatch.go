@@ -1736,7 +1736,7 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 		defaultRoute := graphroute.GraphRouteBinding{DirectSessionID: binding.DirectSessionID, RigContext: binding.RigContext}
 		return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 	}
-	return applyGraphRouting(recipe, nil, routedTo, vars, scopeKind, scopeRef, storeRef, store, cityName, cityPath, cfg)
+	return applyGraphRouting(recipe, nil, routedTo, vars, scopeKind, scopeRef, storeRef, storeSessions, cityName, cityPath, cfg)
 }
 
 func workflowExecutionRigContext(bead beads.Bead) string {

@@ -990,7 +990,7 @@ func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 		},
 	}
 
-	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "city:test-city", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
+	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "city:test-city", beadstest.Sessions(store), cfg.Workspace.Name, cityPath, cfg); err != nil {
 		t.Fatalf("applyGraphRouting: %v", err)
 	}
 

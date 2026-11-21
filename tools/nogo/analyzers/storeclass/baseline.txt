@@ -831,8 +831,6 @@ cmd/gc/dispatch_control_ready.go	controlReadyLegSourcesFn	raw-var	1
 cmd/gc/dispatch_execution_emit.go	emitExecutionFacts	mint	2
 cmd/gc/dispatch_execution_emit.go	emitExecutionFacts	raw-param	1
 cmd/gc/dispatch_execution_emit.go	executionEmitTarget	raw-field	1
-cmd/gc/dispatch_runtime.go	applyGraphRouting	mint	1
-cmd/gc/dispatch_runtime.go	applyGraphRouting	raw-param	1
 cmd/gc/doctor_backlog_depth.go	backlogDepthCheck	raw-field	1
 cmd/gc/doctor_backlog_depth.go	newBacklogDepthCheck	raw-param	1
 cmd/gc/doctor_census_owner_liveness.go	censusOwnerLivenessCheck	raw-field	1
@@ -1072,8 +1070,6 @@ cmd/gc/op_sweep.go	opSweeper.incapableNow	unwrap	1
 cmd/gc/op_sweep.go	opSweeper.store	raw-result	1
 cmd/gc/op_sweep.go	opSweeper.store	unwrap	6
 cmd/gc/op_sweep.go	sameBeadStore	raw-param	2
-cmd/gc/order_dispatch.go	applyOrderRecipeRouting	mint	1
-cmd/gc/order_dispatch.go	applyOrderRecipeRouting	raw-param	1
 cmd/gc/order_dispatch.go	closeAndVerifyOrderTrackingBeads	raw-param	1
 cmd/gc/order_dispatch.go	closeOrderTrackingBead	mint	1
 cmd/gc/order_dispatch.go	closeOrderTrackingBead	raw-param	1
