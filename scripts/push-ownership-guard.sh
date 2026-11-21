@@ -140,16 +140,27 @@ _pog_read_with_retry() {
 _pog_store_read() {
     local store="$1"
     shift
-    if [[ -z "$store" ]]; then
-        _pog_read_with_retry bd "$@"
+    local -a _pog_bd=()
+    _pog_store_bd "$store"
+    _pog_read_with_retry "${_pog_bd[@]}" "$@"
+}
+
+# _pog_store_bd <store>: sets the caller's local array _pog_bd to the argv
+# prefix that runs bd against <store>: plain `bd` for an empty <store> (the
+# caller's own, with exactly the caller's environment), else `env` with every
+# POG_STORE_PIN_VARS variable unset and BEADS_DIR=<store>. An argv rather than
+# a function, because _pog_timeout execs an external command.
+_pog_store_bd() {
+    if [[ -z "$1" ]]; then
+        _pog_bd=(bd)
         return
     fi
-    local -a unpin=()
+    _pog_bd=(env)
     local pin
     for pin in "${POG_STORE_PIN_VARS[@]}"; do
-        unpin+=(-u "$pin")
+        _pog_bd+=(-u "$pin")
     done
-    _pog_read_with_retry env "${unpin[@]}" BEADS_DIR="$store" bd "$@"
+    _pog_bd+=(BEADS_DIR="$1" bd)
 }
 
 # _pog_beads_dir: prints the caller's .beads directory: $BEADS_DIR when set
@@ -292,16 +303,40 @@ _pog_branch_candidates() {
 }
 
 # _pog_probe_routed_store <store> <ids-csv>: asks <store> which of the
-# comma-separated ids exist, with one exact-id `bd list --id=` read (retried
-# like every other read). Prints the ids present, one per line, and returns
-# 0 when the store answered with a JSON array (an empty array means none of
-# them is a bead there); returns 1 when it gave no such answer.
+# comma-separated ids exist, with an exact-id `bd list --id=` read (an
+# `id IN (...)` filter that answers [] for absent ids). Only a JSON array is
+# an answer: a non-zero exit, a timeout, or empty or non-array output is
+# retried like every other read (POG_READ_ATTEMPTS, POG_TIMEOUT_SECONDS).
+# Prints the ids present, one per line, and returns 0 on an answer (an empty
+# array means none of them is a bead there); returns 1 when every attempt
+# failed.
 _pog_probe_routed_store() {
-    local store="$1" ids="$2" json
-    json="$(_pog_store_read "$store" list --id="$ids" --all --include-infra --include-ephemeral \
-        --include-gates --include-templates --flat --json)" || return 1
-    jq -e 'type == "array"' <<<"$json" >/dev/null 2>&1 || return 1
-    jq -r '.[]?.id? | strings' <<<"$json"
+    local store="$1" ids="$2" json attempt=1
+    local -a _pog_bd=()
+    _pog_store_bd "$store"
+    while (( attempt <= POG_READ_ATTEMPTS )); do
+        if json="$(_pog_timeout "$POG_TIMEOUT_SECONDS" "${_pog_bd[@]}" list --id="$ids" --all \
+                --include-infra --include-ephemeral --include-gates --include-templates \
+                --flat --json 2>/dev/null)" \
+            && jq -e 'type == "array"' <<<"$json" >/dev/null 2>&1; then
+            jq -r '.[]?.id? | strings' <<<"$json"
+            return 0
+        fi
+        if (( attempt < POG_READ_ATTEMPTS )); then
+            sleep "$attempt"
+        fi
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+# _pog_route_block <token> <store> <reason>: prints, to stderr, the block for
+# a routed branch token whose store cannot say whether the bead exists, then
+# POG_ROUTE_BLOCK_SENTINEL on stdout for _pog_resolve_bead_id to pass on.
+_pog_route_block() {
+    local tok="$1" store="$2" reason="$3"
+    echo "push-ownership-guard: BLOCKED — branch token $tok routes to the bead store $store, but $reason, so ownership of $tok cannot be verified. Re-run the push first; if it keeps failing, fix that store or the entry for ${tok%%-*} in $(_pog_beads_dir)/routes.jsonl; if $tok is not a bead id, rename the branch so it does not look like one. Last resort: git push --no-verify" >&2
+    printf '%s' "$POG_ROUTE_BLOCK_SENTINEL"
 }
 
 # _pog_resolve_branch_token <branch>: prints "<id><TAB><store>" for the bead
@@ -316,9 +351,9 @@ _pog_probe_routed_store() {
 #     of a store probes that store once for every candidate of that store in
 #     this branch, so an ordinary word with a routed prefix (fix/bd-show-json)
 #     costs one read and never a `bd show`.
-# A routed store that gives no answer blocks: the reason goes to stderr and
-# POG_ROUTE_BLOCK_SENTINEL is printed. A store is never read once an earlier
-# token has resolved.
+# A routed token whose store directory is missing, or whose store gives no
+# answer, blocks (see _pog_route_block). A store is never read, and a
+# missing one never blocks, once an earlier token has resolved.
 _pog_resolve_branch_token() {
     local branch="$1" tab=$'\t' nl=$'\n' cands tok store ids present probed="" found=""
     cands="$(_pog_branch_candidates "$branch" "$(_pog_prefix_table)")"
@@ -329,10 +364,13 @@ _pog_resolve_branch_token() {
             return 0
         fi
         if [[ "$nl$probed" != *"$nl$store$nl"* ]]; then
+            if [[ ! -d "$store" ]]; then
+                _pog_route_block "$tok" "$store" "that .beads directory does not exist"
+                return 0
+            fi
             ids="$(awk -F '\t' -v s="$store" '$2 == s { printf "%s%s", sep, $1; sep = "," }' <<<"$cands")"
             if ! present="$(_pog_probe_routed_store "$store" "$ids")"; then
-                echo "push-ownership-guard: BLOCKED — branch token $tok routes to the bead store $store, which did not answer whether $tok exists after $POG_READ_ATTEMPTS attempts, so ownership of $tok cannot be verified. Last resort: git push --no-verify" >&2
-                printf '%s' "$POG_ROUTE_BLOCK_SENTINEL"
+                _pog_route_block "$tok" "$store" "bd list --id=$ids against it gave no answer after $POG_READ_ATTEMPTS attempts"
                 return 0
             fi
             probed+="$store$nl"

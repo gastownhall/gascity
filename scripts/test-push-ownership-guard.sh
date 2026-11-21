@@ -249,6 +249,8 @@ show_ids() {
 #   probe-fail-count     -- the first N `bd list --id=...` calls exit 1.
 #   probe-out            -- if present, `bd list --id=...` prints it verbatim
 #                           (exit 0) instead of the array of known ids.
+#   probe-sleep          -- if present, `bd list --id=...` sleeps this many
+#                           seconds first (a hung read, for timeout tests).
 #   show-calls, list-id-calls, list-assignee-calls -- call counters.
 #
 # Every call appends one line to <fake-bd-dir>/calls.log:
@@ -298,6 +300,9 @@ case "$1" in
       exit 0
     fi
     c="$(bump list-id-calls)"
+    if [ -f "$state/probe-sleep" ]; then
+      sleep "$(cat "$state/probe-sleep")"
+    fi
     if [ -f "$state/probe-fail-count" ] && [ "$c" -le "$(cat "$state/probe-fail-count")" ]; then
       exit 1
     fi
@@ -2005,6 +2010,127 @@ test_routed_walk_overlap_order_and_batching() {
     rm -rf "$WALK_ROOT" "$WALK_FBD"
 }
 
+# route_block_named <output> <token> <store>: true when <output> is the
+# routed-store block for <token>: it names the token and the route target and
+# offers every remedy (re-run, fix the store or routes.jsonl, rename the
+# branch, and --no-verify last).
+route_block_named() {
+    local out="$1" tok="$2" store="$3"
+    grep -qF "BLOCKED — branch token $tok routes to the bead store $store" <<<"$out" \
+        && grep -qi "re-run" <<<"$out" && grep -qF "routes.jsonl" <<<"$out" \
+        && grep -qi "rename the branch" <<<"$out" && grep -qF -- "--no-verify" <<<"$out"
+}
+
+# _probe_failure_case <label> <attempts> <timeout> <exit|hang|empty|non-array>:
+# HEAD is builder/mc-k2p9x-fix (mc routed to ../mc-rig, where mc-k2p9x is
+# live and owned) and every probe of the mc-rig store fails the given way. Passes when the push blocks with the route message after exactly
+# <attempts> probes and never reads mc-k2p9x with bd show.
+_probe_failure_case() {
+    local label="$1" attempts="$2" timeout="$3" mode="$4"
+    local root repo fbd store out rc probes
+    root="$(new_city_with_branch "builder/mc-k2p9x-fix")"
+    repo="$root/gascity"
+    store="$root/mc-rig/.beads"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    store_put "$store" "mc-k2p9x" "in_progress" "agent-x" "tmpl-x"
+    case "$mode" in
+        exit) echo 99 > "$store/fake/probe-fail-count" ;;
+        hang) echo 3 > "$store/fake/probe-sleep" ;;
+        empty) : > "$store/fake/probe-out" ;;
+        non-array) printf '{"id":"mc-k2p9x"}' > "$store/fake/probe-out" ;;
+    esac
+    out="$(POG_READ_ATTEMPTS="$attempts" run_guard "$repo" "$fbd" "agent-x" "tmpl-x" "$timeout" 2>&1)"; rc=$?
+    probes="$(store_count "$store" list-id-calls)"
+    if [[ $rc -ne 0 && "$probes" -eq "$attempts" ]] \
+        && route_block_named "$out" "mc-k2p9x" "$(git -C "$repo" rev-parse --show-toplevel)/../mc-rig/.beads" \
+        && ! fake_calls "$fbd" | grep -q '| show mc-k2p9x'; then
+        record_pass "routed/$label (rc=$rc, blocked after $probes probes)"
+    else
+        record_fail "routed/$label" "expected the route block after exactly $attempts probes, got rc=$rc probes=$probes, output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# AC-6: a routed store that never gives a definitive answer (non-zero exit,
+# timeout, empty or non-array output) blocks after the retry budget with a
+# message naming the token, the route target and the remedies.
+test_routed_probe_failure_blocks() {
+    _probe_failure_case "probe-nonzero-exit-blocks" 3 5 exit
+    _probe_failure_case "probe-timeout-blocks" 1 1 hang
+    _probe_failure_case "probe-empty-output-blocks" 2 5 empty
+    _probe_failure_case "probe-non-array-output-blocks" 2 5 non-array
+}
+
+# AC-6: a route whose target .beads directory does not exist blocks with no
+# read at all; a transient probe failure that clears inside the budget
+# resolves normally; a definitive [] never shows the route message and is not
+# retried; and a store named only after an already-resolved token is never
+# touched.
+test_routed_missing_store_and_definitive_answers() {
+    local root repo fbd out rc probes
+    root="$(new_city_with_branch "builder/zz-k2p9x-fix")"
+    repo="$root/gascity"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"zz","path":"../missing-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && ! -s "$fbd/calls.log" ]] \
+        && route_block_named "$out" "zz-k2p9x" "$(git -C "$repo" rev-parse --show-toplevel)/../missing-rig/.beads" \
+        && grep -qi "does not exist" <<<"$out"; then
+        record_pass "routed/missing-store-blocks-without-reads (rc=$rc)"
+    else
+        record_fail "routed/missing-store-blocks-without-reads" "expected the route block naming the missing store and no bd call, got rc=$rc, output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+
+    root="$(new_city_with_branch "builder/mc-k2p9x-fix")"
+    repo="$root/gascity"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    store_put "$root/mc-rig/.beads" "mc-k2p9x" "closed" "agent-x" "tmpl-x"
+    echo 1 > "$root/mc-rig/.beads/fake/probe-fail-count"
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    probes="$(store_count "$root/mc-rig/.beads" list-id-calls)"
+    if [[ $rc -ne 0 && "$probes" -eq 2 ]] && grep -qF "BLOCKED — mc-k2p9x status is 'closed'" <<<"$out" \
+        && ! grep -qF "branch token" <<<"$out"; then
+        record_pass "routed/probe-fail-once-then-resolves (rc=$rc, 2 probes, closed bead checked)"
+    else
+        record_fail "routed/probe-fail-once-then-resolves" "expected a retry then the closed-bead block, got rc=$rc probes=$probes, output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+
+    root="$(new_city_with_branch "builder/mc-k2p9x-fix")"
+    repo="$root/gascity"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    probes="$(store_count "$root/mc-rig/.beads" list-id-calls)"
+    if [[ $rc -eq 0 && "$probes" -eq 1 ]] && ! grep -qF "branch token" <<<"$out"; then
+        record_pass "routed/empty-array-probe-is-definitive (rc=0, one probe, no route message)"
+    else
+        record_fail "routed/empty-array-probe-is-definitive" "expected one probe, no route message and rc=0, got rc=$rc probes=$probes, output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+
+    root="$(new_city_with_branch "builder/mc-k2p9x-then-zz-abc12")"
+    repo="$root/gascity"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}' '{"prefix":"zz","path":"../missing-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    store_put "$root/mc-rig/.beads" "mc-k2p9x" "in_progress" "agent-x" "tmpl-x"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && ! grep -qF "branch token" <<<"$out" && ! fake_calls "$fbd" | grep -q 'zz-abc12'; then
+        record_pass "routed/later-store-untouched-after-resolution (rc=0)"
+    else
+        record_fail "routed/later-store-untouched-after-resolution" "expected mc-k2p9x to resolve and zz-abc12's missing store never to matter, got rc=$rc, output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2072,6 +2198,8 @@ run_all() {
     test_routed_absent_token_falls_through_to_assignment
     test_routed_walk_finds_later_bead_after_absent_token
     test_routed_walk_overlap_order_and_batching
+    test_routed_probe_failure_blocks
+    test_routed_missing_store_and_definitive_answers
 
     echo
     echo "pass=$pass fail=$fail"
