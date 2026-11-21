@@ -534,7 +534,10 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 		writeJSONLine(conn, convergenceReply{Error: fmt.Sprintf("invalid request: %v", err)})
 		return
 	}
+	// The reply channel is buffered so the event loop never blocks
+	// delivering a reply nobody is waiting for any more.
 	req.replyCh = make(chan convergenceReply, 1)
+	req.handoff = &convergenceHandoff{}
 	// Send to event loop with a timeout to prevent hanging if the loop is stuck.
 	select {
 	case ch <- req:
@@ -547,7 +550,40 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 	case reply := <-req.replyCh:
 		writeJSONLine(conn, reply)
 	case <-time.After(60 * time.Second):
-		writeJSONLine(conn, convergenceReply{Error: "controller did not respond in time"})
+		writeJSONLine(conn, convergenceReplyAfterTimeout(req))
+	}
+}
+
+// Socket replies for a convergence request whose reply wait expired.
+const (
+	// convergeReplyWithdrawnError: the request timed out while still queued
+	// and was withdrawn, so it was never applied.
+	convergeReplyWithdrawnError = "controller did not respond in time; the request was withdrawn and not applied, so it is safe to retry"
+	// convergeReplyClaimedError: the event loop had already started the
+	// request, so it may still be applied after this reply.
+	convergeReplyClaimedError = `controller started the request but its result is not available; it may still be applied, so check "gc converge list" in the same rig scope before retrying`
+)
+
+// convergenceReplyAfterTimeout settles a request whose reply did not arrive
+// within the wait. A reply that is already buffered wins; otherwise the
+// request is withdrawn if the event loop has not claimed it yet. A claimed
+// request keeps running: its reply is returned if it has just arrived, and
+// otherwise the outcome is reported as unknown, since the reply may still
+// arrive after this check.
+func convergenceReplyAfterTimeout(req convergenceRequest) convergenceReply {
+	select {
+	case reply := <-req.replyCh:
+		return reply
+	default:
+	}
+	if req.handoff.withdraw() {
+		return convergenceReply{Error: convergeReplyWithdrawnError}
+	}
+	select {
+	case reply := <-req.replyCh:
+		return reply
+	default:
+		return convergenceReply{Error: convergeReplyClaimedError}
 	}
 }
 
