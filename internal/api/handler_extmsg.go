@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -118,13 +119,19 @@ func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) s
 }
 
 // extmsgNotifyMembers sends a peer-publication reminder to transcript members
-// via the session message API. This treats membership as the routing truth and
-// lets session resolution materialize or wake named sessions on first receive.
+// via the session message API. Transcript members are the conversation's
+// readership; session resolution materializes or wakes a member's named
+// session on first receive.
 //
-// explicitTarget, when non-empty, carries the address-by-handle target so
-// peer members can self-silence on off-target messages (see #2484). Outbound
-// reply broadcasts and self-update notifications pass "" because they are
-// not addressed to a specific agent.
+// explicitTarget, when non-empty, names the session an inbound is addressed
+// to. Peer members get a discriminator line so they can self-silence on
+// off-target messages (see #2484), and the session the target resolves to
+// (extmsgNotifyAddressedSessionID) is notified once, without the
+// discriminator and without materializing anything, whether or not it is a
+// member. In a grouped room that holds only when the target is a participant.
+// The excluded sender is never notified. Outbound reply broadcasts and
+// self-update notifications pass "" because they are not addressed to a
+// specific agent.
 func (s *Server) extmsgNotifyMembers(
 	ctx context.Context,
 	conv extmsg.ConversationRef,
@@ -143,7 +150,7 @@ func (s *Server) extmsgNotifyMembers(
 		return
 	}
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
-	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, explicitTarget)
+	addressedID := s.extmsgNotifyAddressedSessionID(ctx, svc, store, conv, explicitTarget)
 	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
 	if err != nil {
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
@@ -173,7 +180,7 @@ func (s *Server) extmsgNotifyMembers(
 			RecipientSessionID:      resolvedID,
 			Handle:                  handle,
 			ExplicitTarget:          explicitTarget,
-			ExplicitTargetSessionID: explicitTargetSessionID,
+			ExplicitTargetSessionID: addressedID,
 		})
 		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
 			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
@@ -181,6 +188,15 @@ func (s *Server) extmsgNotifyMembers(
 	}
 
 	var wg sync.WaitGroup
+	if addressedID != "" &&
+		(excludedSelector == "" || apiNormalizeSessionTarget(addressedID) != excludedSelector) &&
+		addressedID != excludedResolvedID {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			notifyResolved(addressedID, addressedID)
+		}()
+	}
 	for _, m := range members {
 		wg.Add(1)
 		go func(sessionSelector string) {
@@ -213,22 +229,44 @@ func (s *Server) extmsgNotifyMembers(
 	wg.Wait()
 }
 
-func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Services, conv extmsg.ConversationRef, explicitTarget string) string {
-	if strings.TrimSpace(explicitTarget) == "" || svc == nil || svc.Groups == nil {
+// extmsgNotifyAddressedSessionID resolves an inbound's explicit target to the
+// ID of the session it addresses, without materializing one. In a grouped
+// conversation the target addresses a session only when it names a
+// participant handle (GroupRouteExplicitTarget); any other grouped decision
+// addresses nothing, since a grouped room routes only to its participants. In
+// an ungrouped conversation the target is resolved as a session selector (a
+// session ID, session name, alias, or a named session that has a bead). A
+// target that names no session addresses nothing; other resolution failures
+// are logged and also address nothing.
+func (s *Server) extmsgNotifyAddressedSessionID(ctx context.Context, svc *extmsg.Services, store beads.SessionStore, conv extmsg.ConversationRef, explicitTarget string) string {
+	target := strings.TrimSpace(explicitTarget)
+	if target == "" || svc == nil {
 		return ""
 	}
-	route, err := svc.Groups.ResolveInbound(ctx, extmsg.ExternalInboundMessage{
-		Conversation:   conv,
-		ExplicitTarget: explicitTarget,
-	})
+	if svc.Groups != nil {
+		route, err := svc.Groups.ResolveInbound(ctx, extmsg.ExternalInboundMessage{
+			Conversation:   conv,
+			ExplicitTarget: explicitTarget,
+		})
+		if err != nil {
+			log.Printf("extmsg: resolve explicit target %q for %s/%s failed: %v", explicitTarget, conv.Provider, conv.ConversationID, err)
+			return ""
+		}
+		if route != nil && route.Match != extmsg.GroupRouteNoGroup {
+			if route.Match != extmsg.GroupRouteExplicitTarget {
+				return ""
+			}
+			return strings.TrimSpace(route.TargetSessionID)
+		}
+	}
+	resolvedID, err := s.resolveSessionTargetIDWithContext(ctx, store, target, apiSessionResolveOptions{})
 	if err != nil {
-		log.Printf("extmsg: resolve explicit target %q for %s/%s failed: %v", explicitTarget, conv.Provider, conv.ConversationID, err)
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			log.Printf("extmsg: resolve explicit target %q for %s/%s failed: %v", explicitTarget, conv.Provider, conv.ConversationID, err)
+		}
 		return ""
 	}
-	if route == nil || route.Match != extmsg.GroupRouteExplicitTarget {
-		return ""
-	}
-	return strings.TrimSpace(route.TargetSessionID)
+	return strings.TrimSpace(resolvedID)
 }
 
 func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.ExternalInboundMessage) {
