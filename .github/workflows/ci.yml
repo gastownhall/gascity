@@ -229,7 +229,11 @@ jobs:
       - runner-policy
       - changes
     if: needs.changes.outputs.packs == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    # 2.0/2.3 min wall at p50/p90 (ci-speed-review-2026-11-20.md §3), almost
+    # entirely the pin check and live registry smoke's network round trips
+    # (retried with sleeps on failure), not CPU. Right-size from 32 to 2
+    # vCPU (§11 item 11).
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6

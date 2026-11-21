@@ -68,16 +68,19 @@ on:
         default: "1"
   schedule:
     - cron: "17 3 * * *"
-  pull_request:
-    branches: [main, 'hotfix/**', 'release/**']
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - ready_for_review
-  # Merge queue: a required check must report on every queue entry, or the
-  # entry waits out the queue's response timeout and fails. The gate passes
-  # merge groups through (the pull request's head already ran Mac).
+  # No automatic pull_request trigger: the per-PR smoke tier
+  # (quality/make test/12 cmd-gc shards/acceptance) failed on
+  # TestProxyProcessReapRegistryMatchesAnEquivalentSpelling on 92-100% of PR
+  # runs and cost about $5.1k/30d while gating nothing (not a required
+  # check); see ci-speed-review-2026-11-20.md §6, §7, §11 item 10. Coverage
+  # now comes from the nightly schedule above (full tier) and, on demand,
+  # the needs-mac PR label (dispatch-labeled-pr-suite.yml dispatches this
+  # workflow with suite=needs-mac).
+  #
+  # Merge queue: this is not a required check, so a merge group does not
+  # need it to report. It is kept here anyway, passed straight through by
+  # the gate with no tier run, in case it becomes required later (the
+  # summary job's docstring).
   merge_group:
     types: [checks_requested]
 
@@ -149,34 +152,11 @@ jobs:
           repository: ${{ inputs.head_repo || github.repository }}
           ref: ${{ inputs.head_sha || github.sha }}
           persist-credentials: false
-      # token: '': diff with git, not the pulls/files API, so the shared
-      # installation rate limit cannot fail this gate (see ci.yml changes).
-      # A file is code when it matches every pattern: anything outside the
-      # docs trees and the root's markdown files. A filter failure leaves
-      # the diff unclassified, and the gate then runs the smoke tier.
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
-        id: filter
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
-        with:
-          token: ''
-          predicate-quantifier: every
-          filters: |
-            code:
-              - '**'
-              - '!docs/**'
-              - '!engdocs/**'
-              - '!*.md'
       - name: Decide which tiers should run
         id: gate
         env:
           EVENT_NAME: ${{ github.event_name }}
           SUITE_INPUT: ${{ inputs.suite }}
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          NEEDS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}
-          FILTER_OUTCOME: ${{ steps.filter.outcome }}
-          CODE_CHANGED: ${{ steps.filter.outputs.code }}
         run: |
           run_smoke=false
           run_full=false
@@ -195,31 +175,14 @@ jobs:
                 ;;
               needs-mac)
                 run_full=true
-                reason="manual dispatch (suite=needs-mac)"
+                reason="manual dispatch (suite=needs-mac), e.g. the needs-mac PR label"
                 ;;
               *)
                 reason="manual dispatch (suite=smoke)"
                 ;;
             esac
-          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
-            if [[ "$PR_HEAD_REPO" != "${{ github.repository }}" ]]; then
-              reason="pull request from a fork, skipping"
-            elif [[ "$PR_DRAFT" == "true" ]]; then
-              reason="draft pull request, skipping"
-            elif [[ "$NEEDS_LABEL" == "true" ]]; then
-              run_smoke=true; run_full=true
-              reason="pull request carries needs-mac label"
-            elif [[ "$FILTER_OUTCOME" != "success" ]]; then
-              run_smoke=true
-              reason="pull request diff not classified (filter ${FILTER_OUTCOME:-missing}), running smoke tier"
-            elif [[ "$CODE_CHANGED" == "true" ]]; then
-              run_smoke=true
-              reason="pull request changes code, running smoke tier"
-            else
-              reason="docs-only pull request, skipping"
-            fi
           elif [[ "$EVENT_NAME" == "merge_group" ]]; then
-            reason="merge_group: Mac verified at PR head"
+            reason="merge_group: not a required check, no tier run"
           fi
 
           {
