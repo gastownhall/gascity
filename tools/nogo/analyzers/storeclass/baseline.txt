@@ -483,7 +483,6 @@ cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	read-marker	1
 cmd/gc/cmd_convoy_dispatch.go	controlBeadLedger	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	controlBeadLedger	raw-result	1
-cmd/gc/cmd_convoy_dispatch.go	controlDispatchOptions	mint	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphBinding	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-result	1

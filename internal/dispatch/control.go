@@ -931,7 +931,9 @@ func spawnNextAttempt(ctx context.Context, store beads.GraphStore, control beads
 		if target == "" {
 			continue
 		}
-		applyAttemptStepRoute(&recipe.Steps[i], target, routeCfg, opts.Sessions)
+		if err := applyAttemptStepRoute(&recipe.Steps[i], target, routeCfg, opts.Sessions); err != nil {
+			return fmt.Errorf("routing attempt step %s: %w", recipe.Steps[i].ID, err)
+		}
 	}
 
 	epoch := 0
@@ -1565,17 +1567,19 @@ func loadAttemptRouteConfigE(cityPath string) (*config.City, error) {
 	return cfg, nil
 }
 
-func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.City, sessions beads.SessionStore) {
+func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.City, sessions beads.SessionStore) error {
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
-	if binding, ok := resolveAttemptRouteBinding(target, cfg, sessions); ok {
+	if binding, ok, err := resolveAttemptRouteBinding(target, cfg, sessions); err != nil {
+		return err
+	} else if ok {
 		if binding.directSessionID != "" {
 			delete(step.Metadata, beadmeta.RoutedToMetadataKey)
 			delete(step.Metadata, beadmeta.ExecutionRoutedToMetadataKey)
 			step.Labels = removeAttemptPoolLabels(step.Labels)
 			step.Assignee = binding.directSessionID
-			return
+			return nil
 		}
 		if binding.qualifiedName != "" {
 			step.Metadata[beadmeta.RoutedToMetadataKey] = binding.qualifiedName
@@ -1596,11 +1600,11 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 				}
 			}
 			step.Assignee = ""
-			return
+			return nil
 		}
 		// Config-agent work is routed by alias; a concrete session binds on claim.
 		step.Assignee = ""
-		return
+		return nil
 	}
 
 	// Target not found in config — route via metadata only and clear assignee
@@ -1609,6 +1613,7 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 	step.Metadata[beadmeta.ExecutionRoutedToMetadataKey] = target
 	step.Labels = removeAttemptPoolLabels(step.Labels)
 	step.Assignee = ""
+	return nil
 }
 
 func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget string, cfg *config.City, sessions beads.SessionStore) error {
@@ -1622,21 +1627,23 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 		rigContext = storeRigContext
 		scopeKnown = true
 	}
-	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, sessions); ok {
-		switch {
-		case binding.qualifiedName != "":
-			resolvedExecutionTarget = binding.qualifiedName
-			step.Metadata[beadmeta.ExecutionRoutedToMetadataKey] = binding.qualifiedName
-		case executionTarget != "":
-			// Direct session delivery still executes via the named/session target,
-			// but control beads themselves must remain on control-dispatcher.
-			step.Metadata[beadmeta.ExecutionRoutedToMetadataKey] = executionTarget
-		default:
-			delete(step.Metadata, beadmeta.ExecutionRoutedToMetadataKey)
-		}
-	} else if executionTarget != "" {
+	binding, resolvedTarget, err := resolveAttemptRouteBinding(executionTarget, cfg, sessions)
+	if err != nil {
+		return err
+	}
+	switch {
+	case resolvedTarget && binding.qualifiedName != "":
+		resolvedExecutionTarget = binding.qualifiedName
+		step.Metadata[beadmeta.ExecutionRoutedToMetadataKey] = binding.qualifiedName
+	case resolvedTarget && executionTarget != "":
+		// Direct session delivery still executes via the named/session target,
+		// but control beads themselves must remain on control-dispatcher.
 		step.Metadata[beadmeta.ExecutionRoutedToMetadataKey] = executionTarget
-	} else {
+	case resolvedTarget:
+		delete(step.Metadata, beadmeta.ExecutionRoutedToMetadataKey)
+	case executionTarget != "":
+		step.Metadata[beadmeta.ExecutionRoutedToMetadataKey] = executionTarget
+	default:
 		delete(step.Metadata, beadmeta.ExecutionRoutedToMetadataKey)
 	}
 	step.Labels = removeAttemptPoolLabels(step.Labels)
@@ -1696,25 +1703,29 @@ type attemptRouteBinding struct {
 	directSessionID  string
 }
 
-func resolveAttemptRouteBinding(target string, cfg *config.City, sessions beads.SessionStore) (attemptRouteBinding, bool) {
+func resolveAttemptRouteBinding(target string, cfg *config.City, sessions beads.SessionStore) (attemptRouteBinding, bool, error) {
 	if strings.TrimSpace(target) == "" {
-		return attemptRouteBinding{}, false
+		return attemptRouteBinding{}, false, nil
 	}
 	if cfg != nil {
 		if named := config.FindNamedSession(cfg, target); named != nil {
 			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
 				if sessions != (beads.SessionStore{}) {
-					if candidates, err := session.NamedSessionResolutionCandidates(sessions, spec); err == nil {
-						if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
-							return attemptRouteBinding{directSessionID: bead.ID}, true
-						}
+					candidates, err := session.NamedSessionResolutionCandidates(sessions, spec)
+					if err != nil {
+						return attemptRouteBinding{}, false, fmt.Errorf("listing named-session candidates for %q: %w", target, err)
+					}
+					if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
+						return attemptRouteBinding{directSessionID: bead.ID}, true, nil
 					}
 				}
 			}
+			// No canonical bead yet: the session has not been materialized, so
+			// the target routes by its configured name and binds on claim.
 			return attemptRouteBinding{
 				qualifiedName: named.QualifiedName(),
 				metadataOnly:  true,
-			}, true
+			}, true, nil
 		}
 
 		if agentCfg := config.FindAgent(cfg, target); agentCfg != nil {
@@ -1729,18 +1740,18 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, sessions beads.
 				// retry path has no authored binding to read, so it keys on the
 				// target agent's lifecycle instead.
 				binding.independentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
-				return binding, true
+				return binding, true, nil
 			}
-			return binding, true
+			return binding, true, nil
 		}
 	}
 	if sessions != (beads.SessionStore{}) {
 		if id, err := session.ResolveSessionID(sessions, target); err == nil {
-			return attemptRouteBinding{directSessionID: id}, true
+			return attemptRouteBinding{directSessionID: id}, true, nil
 		}
 	}
 
-	return attemptRouteBinding{}, false
+	return attemptRouteBinding{}, false, nil
 }
 
 func routedAttemptTarget(bead beads.Bead) string {

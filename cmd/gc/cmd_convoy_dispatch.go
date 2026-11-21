@@ -268,8 +268,25 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		return err
 	}
 
+	var sessions beads.SessionStore
+	switch bead.Metadata[beadmeta.KindMetadataKey] {
+	case "check", "fanout", "drain", "retry", "ralph":
+		// The steps and attempts these kinds spawn bind sessions, whose rows
+		// live in the city's sessions store, never in the graph store (#8436).
+		acquired, release, err := acquireRoutingSessionStore(cityPath, storePath, cliStores(cityPath, store))
+		if err != nil {
+			return fmt.Errorf("control dispatch %s: %w", beadID, err)
+		}
+		defer func() {
+			if err := release(); err != nil {
+				fmt.Fprintf(stderr, "warning: control dispatch: closing the city session store: %v\n", err) //nolint:errcheck // best-effort close after dispatch
+			}
+		}()
+		sessions = acquired
+	}
+
 	graph, work := beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: store}
-	opts := controlDispatchOptions(cityPath, storePath, graph, work, controlMemberTail(bead.Metadata[beadmeta.KindMetadataKey], graph, work))
+	opts := controlDispatchOptions(cityPath, storePath, work, sessions, controlMemberTail(bead.Metadata[beadmeta.KindMetadataKey], graph, work))
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
@@ -303,22 +320,6 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			// the open finalizer is the next dispatcher's retry handle.
 			opts.SourceWorkflowLock = makeSourceWorkflowLocker(context.Background(), cityPath, cfg, storePath)
 			opts.SourceWorkflowStores = makeSourceWorkflowStoresLister(cityPath, cfg)
-		}
-		var sessions beads.SessionStore
-		switch bead.Metadata[beadmeta.KindMetadataKey] {
-		case "check", "fanout", "drain":
-			// The steps these kinds spawn bind sessions, whose rows live in the
-			// city's sessions store, never in the graph store (#8436).
-			acquired, release, err := acquireRoutingSessionStore(cityPath, storePath, cliStores(cityPath, store))
-			if err != nil {
-				return fmt.Errorf("control dispatch %s: %w", beadID, err)
-			}
-			defer func() {
-				if err := release(); err != nil {
-					fmt.Fprintf(stderr, "warning: control dispatch: closing the city session store: %v\n", err) //nolint:errcheck // best-effort close after dispatch
-				}
-			}()
-			sessions = acquired
 		}
 		switch bead.Metadata[beadmeta.KindMetadataKey] {
 		case "check", "fanout":
@@ -413,29 +414,27 @@ func controlMemberTail(kind string, graph beads.GraphStore, work beads.WorkStore
 }
 
 // controlDispatchOptions is the store half of a control dispatch's options.
-// work is the scope store the control was dispatched from and graph the
-// ledger that holds the control.
+// work is the scope store the control was dispatched from.
 //
 // Work is the scope store: it owns every convoy and the work members a drain
 // expands over, and it is the store dispatch's work-class reads took before
 // the work handle was named (the member tail when the graph class relocated,
 // else the control's own store, which is then this same store).
 //
-// Sessions is the graph store: attempt routing has always resolved session
-// targets through the control's own store, which on a split city is the
-// binding that holds the sessions class too. The conversion relabels it until
-// typed-store T9 hands dispatch the city's sessions handle.
+// Sessions is the city's sessions-class handle attempt routing resolves
+// session targets through (#8436); zero for a control kind that routes no
+// attempt.
 //
 // With memberTail the scope store is also the work-class member tail, so
 // membership and member reads cross the class boundary (controlMemberTail
 // decides it).
-func controlDispatchOptions(cityPath, storePath string, graph beads.GraphStore, work beads.WorkStore, memberTail bool) dispatch.ProcessOptions {
+func controlDispatchOptions(cityPath, storePath string, work beads.WorkStore, sessions beads.SessionStore, memberTail bool) dispatch.ProcessOptions {
 	return dispatch.ProcessOptions{
 		CityPath:   cityPath,
 		StorePath:  storePath,
 		Work:       work,
 		MemberTail: memberTail,
-		Sessions:   beads.SessionStore(graph),
+		Sessions:   sessions,
 	}
 }
 

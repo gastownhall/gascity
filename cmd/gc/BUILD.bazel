@@ -1130,6 +1130,7 @@ go_test(
         "assigned_work_residency_test.go",
         "assigned_work_scope_test.go",
         "async_start_command_gate_test.go",
+        "attempt_session_store_test.go",
         "autoclose_fence_test.go",
         "autoclose_parent_split_test.go",
         "autoclose_stores_test.go",

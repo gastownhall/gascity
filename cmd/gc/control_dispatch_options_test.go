@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 )
 
@@ -12,7 +13,7 @@ import (
 // internal/dispatch (typed-store T5b). Work is the scope store, which is the
 // store dispatch's work-class reads took before the work handle was named: the
 // member tail on a split city, the control's own store otherwise. Sessions is
-// the control's graph store, as attempt routing has always read it. The member
+// the sessions handle the caller supplies, never the graph store. The member
 // tail is on exactly when the caller asks for it; controlMemberTail decides
 // that (TestControlMemberTail).
 func TestControlDispatchStoreOptions(t *testing.T) {
@@ -25,7 +26,8 @@ func TestControlDispatchStoreOptions(t *testing.T) {
 		"a city that relocates nothing": {graph: scope},
 		"a split city":                  {graph: binding, memberTail: true},
 	} {
-		opts := controlDispatchOptions("/city", "/city", beads.GraphStore{Store: tc.graph}, beads.WorkStore{Store: scope}, tc.memberTail)
+		sessions := beadstest.Sessions(splittest.NewBindingStore(t))
+		opts := controlDispatchOptions("/city", "/city", beads.WorkStore{Store: scope}, sessions, tc.memberTail)
 
 		// What dispatch's work-class reads took before T5b: the member tail
 		// (the scope store), else the control's own (graph) store.
@@ -36,8 +38,8 @@ func TestControlDispatchStoreOptions(t *testing.T) {
 		if !beads.SameStore(opts.Work, was) || !beads.SameStore(opts.Work, scope) {
 			t.Errorf("%s: Work is not the scope store dispatch's work reads took", name)
 		}
-		if !beads.SameStore(opts.Sessions, tc.graph) {
-			t.Errorf("%s: Sessions is not the control's graph store", name)
+		if opts.Sessions != sessions {
+			t.Errorf("%s: Sessions is not the supplied sessions handle", name)
 		}
 		if opts.MemberTail != tc.memberTail {
 			t.Errorf("%s: MemberTail = %v, want %v", name, opts.MemberTail, tc.memberTail)
