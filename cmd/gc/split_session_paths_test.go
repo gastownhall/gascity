@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -38,9 +37,9 @@ func countSessionBeads(t *testing.T, store beads.Store) int {
 
 // TestSplitRetryRecycleKillsTheSessionTheBindingHolds is B5: a pooled retry,
 // ralph or retry-eval recycles its subject's session through the hook the
-// dispatcher installs over the SCOPE store, which is a work store. The session
-// row lives only in the binding, so the recycle could not resolve it and the
-// retry pended or quarantined.
+// dispatcher installs over the scope's sessions handle, which is the binding.
+// Through the scope work store the session row was invisible, so the recycle
+// could not resolve it and the retry pended or quarantined.
 func TestSplitRetryRecycleKillsTheSessionTheBindingHolds(t *testing.T) {
 	cityPath := t.TempDir()
 	binding := sessionSplitRoutes(t, cityPath)
@@ -68,7 +67,7 @@ func TestSplitRetryRecycleKillsTheSessionTheBindingHolds(t *testing.T) {
 	dispatchControlSessionProvider = func() (runtime.Provider, error) { return fake, nil }
 	t.Cleanup(func() { dispatchControlSessionProvider = prev })
 
-	recycle := recycleDispatchSubjectSession(cityPath, work, cfg)
+	recycle := recycleDispatchSubjectSession(cityPath, cliStores(cityPath, work).Sessions(), cfg)
 	if err := recycle(beads.Bead{ID: "gc-1", Assignee: "polecat-1"}); err != nil {
 		t.Fatalf("recycling the subject's session %s (held by the binding as %s): %v", "polecat-1", row.ID, err)
 	}
@@ -98,10 +97,11 @@ func TestSplitRetryRecycleKillsTheSessionTheBindingHolds(t *testing.T) {
 
 // TestSplitDirectSessionResolverMaterializesInTheBindingNotTheCallerStore is
 // B6 (and the sling half of it): a rig-scope drain or sling hands the resolver
-// the RIG work store. Materializing a configured named session through it
-// minted a duplicate gc:session bead there — invisible to every session reader,
-// bound to a phantom that never wakes — instead of finding the canonical one in
-// the binding.
+// the rig scope's sessions handle, which on a split city is the binding.
+// Materializing a configured named session through the rig work store minted a
+// duplicate gc:session bead there — invisible to every session reader, bound to
+// a phantom that never wakes — instead of finding the canonical one in the
+// binding.
 func TestSplitDirectSessionResolverMaterializesInTheBindingNotTheCallerStore(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 	cityPath := t.TempDir()
@@ -116,7 +116,7 @@ func TestSplitDirectSessionResolverMaterializesInTheBindingNotTheCallerStore(t *
 		Providers: map[string]config.ProviderSpec{"test-agent": {DisplayName: "Test Agent"}},
 	}
 
-	id, ok, err := cliDirectSessionResolver(nil)(beadstest.Sessions(rig), "test-city", cityPath, cfg, "refinery", "")
+	id, ok, err := cliDirectSessionResolver(nil)(cliStores(cityPath, rig).Sessions(), "test-city", cityPath, cfg, "refinery", "")
 	if err != nil || !ok {
 		t.Fatalf("resolving the configured named session = %q, %v, %v", id, ok, err)
 	}
@@ -126,7 +126,7 @@ func TestSplitDirectSessionResolverMaterializesInTheBindingNotTheCallerStore(t *
 	if _, err := binding.Get(id); err != nil {
 		t.Fatalf("the resolved session %s is not in the binding: %v", id, err)
 	}
-	again, _, err := cliDirectSessionResolver(nil)(beadstest.Sessions(rig), "test-city", cityPath, cfg, "refinery", "")
+	again, _, err := cliDirectSessionResolver(nil)(cliStores(cityPath, rig).Sessions(), "test-city", cityPath, cfg, "refinery", "")
 	if err != nil || again != id {
 		t.Fatalf("resolving again = %q, %v; want the canonical %s, not a second materialization", again, err, id)
 	}

@@ -268,8 +268,26 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		return err
 	}
 
+	var sessions beads.SessionStore
+	switch bead.Metadata[beadmeta.KindMetadataKey] {
+	case "check", "fanout", "drain", "retry-eval", "retry", "ralph":
+		// The steps and attempts these kinds spawn bind sessions, and the retry
+		// lane recycles them; their rows live in the city's sessions store,
+		// never in the graph store (#8436).
+		acquired, release, err := acquireRoutingSessionStore(cityPath, storePath, cliStores(cityPath, store))
+		if err != nil {
+			return fmt.Errorf("control dispatch %s: %w", beadID, err)
+		}
+		defer func() {
+			if err := release(); err != nil {
+				fmt.Fprintf(stderr, "warning: control dispatch: closing the city session store: %v\n", err) //nolint:errcheck // best-effort close after dispatch
+			}
+		}()
+		sessions = acquired
+	}
+
 	graph, work := beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: store}
-	opts := controlDispatchOptions(cityPath, storePath, graph, work, controlMemberTail(bead.Metadata[beadmeta.KindMetadataKey], graph, work))
+	opts := controlDispatchOptions(cityPath, storePath, work, sessions, controlMemberTail(bead.Metadata[beadmeta.KindMetadataKey], graph, work))
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
@@ -308,12 +326,12 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		case "check", "fanout":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			opts.PrepareFragment = func(fragment *formula.FragmentRecipe, source beads.Bead) error {
-				return decorateDynamicFragmentRecipe(fragment, source, graphStore, loadedCityName(cfg, cityPath), cityPath, cfg)
+				return decorateDynamicFragmentRecipe(fragment, source, sessions, loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
 		case "drain":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			opts.PrepareRecipe = func(recipe *formula.Recipe, source beads.Bead) error {
-				return decorateDrainItemRecipe(recipe, source, graphStore, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
+				return decorateDrainItemRecipe(recipe, source, sessions, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
 			// A drain is the one control kind that reads beads it did not
 			// create. Its control and item roots are graph class and run
@@ -338,12 +356,12 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			// supply the work leg as the member tail so that read crosses the
 			// class boundary. Route-gated exactly like the drain: on every
 			// other city graphStore IS store and the tail stays empty.
-			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, sessions, cfg)
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			// Same cross-store required-artifact source resolution as
 			// retry-eval above.
-			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, sessions, cfg)
 		}
 	}
 
@@ -397,29 +415,27 @@ func controlMemberTail(kind string, graph beads.GraphStore, work beads.WorkStore
 }
 
 // controlDispatchOptions is the store half of a control dispatch's options.
-// work is the scope store the control was dispatched from and graph the
-// ledger that holds the control.
+// work is the scope store the control was dispatched from.
 //
 // Work is the scope store: it owns every convoy and the work members a drain
 // expands over, and it is the store dispatch's work-class reads took before
 // the work handle was named (the member tail when the graph class relocated,
 // else the control's own store, which is then this same store).
 //
-// Sessions is the graph store: attempt routing has always resolved session
-// targets through the control's own store, which on a split city is the
-// binding that holds the sessions class too. The conversion relabels it until
-// typed-store T9 hands dispatch the city's sessions handle.
+// Sessions is the city's sessions-class handle attempt routing resolves
+// session targets through (#8436); zero for a control kind that routes no
+// attempt.
 //
 // With memberTail the scope store is also the work-class member tail, so
 // membership and member reads cross the class boundary (controlMemberTail
 // decides it).
-func controlDispatchOptions(cityPath, storePath string, graph beads.GraphStore, work beads.WorkStore, memberTail bool) dispatch.ProcessOptions {
+func controlDispatchOptions(cityPath, storePath string, work beads.WorkStore, sessions beads.SessionStore, memberTail bool) dispatch.ProcessOptions {
 	return dispatch.ProcessOptions{
 		CityPath:   cityPath,
 		StorePath:  storePath,
 		Work:       work,
 		MemberTail: memberTail,
-		Sessions:   beads.SessionStore(graph),
+		Sessions:   sessions,
 	}
 }
 
@@ -446,12 +462,18 @@ func validateDispatchSessionProviderConfig(cfg *config.City, cityPath string) er
 // so the session provider (two bd reads for its session snapshot) is built on
 // the first recycle rather than for every retry, ralph and retry-eval control
 // the dispatcher processes. A provider that cannot be built fails the recycle
-// that needs it, through ProcessControl's error return.
-func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *config.City) func(beads.Bead) error {
+// that needs it, through ProcessControl's error return. sessions is the city's
+// sessions store, where the subject's session row lives: never a rig or scope
+// work store (#8436). A zero handle fails the recycle rather than killing
+// through some other store.
+func recycleDispatchSubjectSession(cityPath string, sessions beads.SessionStore, cfg *config.City) func(beads.Bead) error {
 	var sp runtime.Provider
 	return func(subject beads.Bead) error {
 		if strings.TrimSpace(subject.Assignee) == "" {
 			return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
+		}
+		if sessions == (beads.SessionStore{}) {
+			return fmt.Errorf("recycling the session of subject %s: %w", subject.ID, graphroute.ErrNoSessionStore)
 		}
 		if sp == nil {
 			provider, err := dispatchControlSessionProvider()
@@ -460,10 +482,7 @@ func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *conf
 			}
 			sp = provider
 		}
-		// The subject's session row is session class: on a split city it lives
-		// only in the binding, never in the scope work store this hook is
-		// built over (write-audit B5).
-		return workerKillSessionTargetWithConfig(cityPath, cliRelocatedSessionStore(store, cfg, cityPath), sp, cfg, subject.Assignee)
+		return workerKillSessionTargetWithConfig(cityPath, sessions, sp, cfg, subject.Assignee)
 	}
 }
 
@@ -1589,11 +1608,11 @@ func workflowFormulaSearchPaths(cfg *config.City, bead beads.Bead) []string {
 	return cfg.FormulaLayers.City
 }
 
-func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source beads.Bead, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source beads.Bead, sessions beads.SessionStore, cityName, cityPath string, cfg *config.City) error {
 	if fragment == nil {
 		return fmt.Errorf("fragment recipe is nil")
 	}
-	defaultRoute, err := graphFallbackBindingForBead(source, store, cityName, cityPath, cfg)
+	defaultRoute, err := graphFallbackBindingForBead(source, sessions, cityName, cityPath, cfg)
 	if err != nil {
 		return err
 	}
@@ -1608,8 +1627,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		if binding, ok := controlRoutes[rigContext]; ok {
 			return binding, nil
 		}
-		// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
-		binding, err := graphroute.ControlDispatcherBinding(beads.SessionStore{Store: store}, cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
+		binding, err := graphroute.ControlDispatcherBinding(cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
 		if err != nil {
 			return graphRouteBinding{}, err
 		}
@@ -1652,7 +1670,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		case "workflow", "scope", "ralph", "retry", "spec":
 			continue
 		}
-		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
+		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, sessions, cityName, cityPath, cfg)
 		if err != nil {
 			return err
 		}
@@ -1692,9 +1710,7 @@ func graphRouteBindingRigContext(binding graphRouteBinding) string {
 	return graphroute.GraphRouteRigContext(binding.QualifiedName)
 }
 
-func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store beads.Store, storeRef, cityName, cityPath string, cfg *config.City) error {
-	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
-	storeSessions := beads.SessionStore{Store: store}
+func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, sessions beads.SessionStore, storeRef, cityName, cityPath string, cfg *config.City) error {
 	if recipe == nil {
 		return fmt.Errorf("recipe is nil")
 	}
@@ -1707,9 +1723,9 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 			}
 			scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 			scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-			return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, graphroute.GraphRouteBinding{}, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
+			return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, graphroute.GraphRouteBinding{}, sessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 		}
-		binding, err := graphFallbackBindingForBead(source, store, cityName, cityPath, cfg)
+		binding, err := graphFallbackBindingForBead(source, sessions, cityName, cityPath, cfg)
 		if err != nil {
 			return err
 		}
@@ -1722,7 +1738,7 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 		}
 		scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 		scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-		return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, binding.QualifiedName, binding.SessionName, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
+		return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, binding.QualifiedName, binding.SessionName, sessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 	}
 	vars, err := drainItemRecipeVars(recipe)
 	if err != nil {
@@ -1730,13 +1746,13 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 	}
 	scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 	scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(storeSessions, cityName, cfg, routedTo, workflowExecutionRigContext(source), cliGraphrouteDeps(cityPath)); err != nil {
+	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(sessions, cityName, cfg, routedTo, workflowExecutionRigContext(source), cliGraphrouteDeps(cityPath)); err != nil {
 		return err
 	} else if ok {
 		defaultRoute := graphroute.GraphRouteBinding{DirectSessionID: binding.DirectSessionID, RigContext: binding.RigContext}
-		return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
+		return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, sessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 	}
-	return applyGraphRouting(recipe, nil, routedTo, vars, scopeKind, scopeRef, storeRef, store, cityName, cityPath, cfg)
+	return applyGraphRouting(recipe, nil, routedTo, vars, scopeKind, scopeRef, storeRef, sessions, cityName, cityPath, cfg)
 }
 
 func workflowExecutionRigContext(bead beads.Bead) string {
@@ -1766,14 +1782,13 @@ func drainItemRecipeVars(recipe *formula.Recipe) (map[string]string, error) {
 	return vars, nil
 }
 
-func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
+func graphFallbackBindingForBead(source beads.Bead, sessions beads.SessionStore, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
 	routedTo := graphroute.WorkflowExecutionRoute(source)
 	if routedTo == "" {
 		return graphRouteBinding{SessionName: source.Assignee}, nil
 	}
 	rigContext := workflowExecutionRigContext(source)
-	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
-	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(beads.SessionStore{Store: store}, cityName, cfg, routedTo, rigContext, cliGraphrouteDeps(cityPath)); err != nil {
+	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(sessions, cityName, cfg, routedTo, rigContext, cliGraphrouteDeps(cityPath)); err != nil {
 		return graphRouteBinding{}, err
 	} else if ok {
 		return binding, nil
@@ -1795,7 +1810,7 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName,
 		binding.SessionName = source.Assignee
 		return binding, nil
 	}
-	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
+	sn := lookupSessionNameOrLegacyIn(sessions, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
 	if sn == "" {
 		return graphRouteBinding{}, fmt.Errorf("could not resolve session name for %q", agentCfg.QualifiedName())
 	}

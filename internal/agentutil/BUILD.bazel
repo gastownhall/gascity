@@ -10,9 +10,9 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/agent",
-        "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
+        "//internal/session",
         "//internal/workdir",
     ],
 )
@@ -27,8 +27,11 @@ go_test(
     ],
     embed = [":agentutil"],
     deps = [
+        "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/config",
         "//internal/runtime",
+        "//internal/session",
         "//internal/testenv",
     ],
 )

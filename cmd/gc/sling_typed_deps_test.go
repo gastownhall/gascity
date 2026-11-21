@@ -298,19 +298,31 @@ func breakCityLedger(t *testing.T, cityDir string) {
 	}
 }
 
-// TestCmdSlingRigScopeDegradesWhenTheCityStoreDoesNotOpen pins the rig-scope
-// city-store open's failure: the sling's work is in the rig ledger, so a city
-// ledger that does not open leaves the sling routing as it did before the
-// sessions store, reading sessions in the rig store, with a warning, instead
-// of refusing the sling.
-func TestCmdSlingRigScopeDegradesWhenTheCityStoreDoesNotOpen(t *testing.T) {
+// TestCmdSlingRigScopeRefusesWhenTheCityStoreDoesNotOpen is AC-6 for the
+// rig-scope city-store open's failure: session beads live only in the city's
+// sessions store, so a city ledger that does not open refuses the sling with
+// context instead of reading or minting sessions in the rig store (#8436), and
+// the rig work bead is left unrouted.
+func TestCmdSlingRigScopeRefusesWhenTheCityStoreDoesNotOpen(t *testing.T) {
 	_, rigDir := setupCmdSlingMultiDefaultTargetsFixture(t, nil)
 	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{ID: "fo-work", Title: "work", Type: "task", Status: "open", Metadata: map[string]string{}}})
 	breakCityLedger(t, filepath.Dir(rigDir))
 
-	stdout, stderr := runCmdSling(t, "foundations/worker-a", "fo-work")
-	if !strings.Contains(stderr, "opening the city store for session lookups") {
-		t.Errorf("stderr = %q, want the city-store warning", stderr)
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"foundations/worker-a", "fo-work"},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Fatalf("gc sling = 0 with the city ledger broken, want a refusal; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "opening the city store for session routing") {
+		t.Errorf("stderr = %q, want the city-store open error with context", stderr.String())
 	}
 	rigStore, err := openStoreAtForCity(rigDir, filepath.Dir(rigDir))
 	if err != nil {
@@ -320,8 +332,11 @@ func TestCmdSlingRigScopeDegradesWhenTheCityStoreDoesNotOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := routed.Metadata[beadmeta.RoutedToMetadataKey]; got != "foundations/worker-a" {
-		t.Errorf("gc.routed_to = %q, want foundations/worker-a; stdout=%s", got, stdout)
+	if got := routed.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
+		t.Errorf("gc.routed_to = %q after a refused sling, want it unrouted", got)
+	}
+	if n := countSessionBeads(t, rigStore); n != 0 {
+		t.Errorf("the rig store holds %d session bead(s) after a refused sling, want none", n)
 	}
 }
 
@@ -349,7 +364,7 @@ func TestCmdSlingRigScopeOnASplitCityOpensNoCityStore(t *testing.T) {
 	breakCityLedger(t, cityDir)
 
 	_, stderr := runCmdSling(t, "foundations/worker-a", "fo-work")
-	if strings.Contains(stderr, "opening the city store for session lookups") {
+	if strings.Contains(stderr, "opening the city store for session routing") {
 		t.Errorf("stderr = %q: a split city's sessions store is the binding, so no city store is opened for it", stderr)
 	}
 }

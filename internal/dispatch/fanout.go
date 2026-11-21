@@ -314,7 +314,9 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 		if target == "" {
 			continue
 		}
-		applyAttemptStepRoute(step, target, routeCfg, opts.Sessions)
+		if err := applyAttemptStepRoute(step, target, routeCfg, opts.Sessions); err != nil {
+			return fmt.Errorf("routing fanout step %s: %w", step.ID, err)
+		}
 	}
 	return nil
 }

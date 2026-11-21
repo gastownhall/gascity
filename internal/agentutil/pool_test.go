@@ -4,8 +4,11 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 type partialSessionLister struct {
@@ -148,5 +151,66 @@ func TestPoolInstanceName(t *testing.T) {
 	}
 	if got := PoolInstanceName("polecat", 1, a3); got != "alpha" {
 		t.Errorf("namepool: got %q, want alpha", got)
+	}
+}
+
+// TestLookupSessionNameReadsTheTemplateKeySessionRowsCarry pins the stored-name
+// read against the row shape production stamps: session rows carry the
+// gc:session label and the registry key "template"
+// (internal/session/manager.go's create), never the "gc.session" label and
+// "gc.template" key this lookup once read, which no writer stamps and which left
+// the stored name unreachable and every caller naming sessions by the computed
+// default.
+func TestLookupSessionNameReadsTheTemplateKeySessionRowsCarry(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "frontend/worker",
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession, "template:frontend/worker"},
+		Metadata: map[string]string{"template": "frontend/worker", "session_name": "s-stored"},
+	}); err != nil {
+		t.Fatalf("creating the worker's session row: %v", err)
+	}
+
+	if got := LookupSessionName(beadstest.Sessions(store), "city", "frontend/worker", ""); got != "s-stored" {
+		t.Errorf("LookupSessionName = %q, want the stored s-stored: the row has the shape production stamps (internal/session/manager.go), so the stored name is what routing must read", got)
+	}
+}
+
+// TestLookupSessionNamePrefersTheAgentsOwnRow pins that the lookup does not
+// answer with whichever row of the template lists first: an ad-hoc session
+// of the template (gc session new) and the agent's pool capacity share its
+// template metadata, but the agent's own row, matched by agent_name, answers.
+// A template with only pool capacity falls back to the computed name.
+func TestLookupSessionNamePrefersTheAgentsOwnRow(t *testing.T) {
+	store := beads.NewMemStore()
+	for _, row := range []beads.Bead{
+		{Metadata: map[string]string{"session_name": "s-adhoc", "session_origin": "manual"}},
+		{Metadata: map[string]string{"session_name": "s-pool", "pool_slot": "1"}},
+		{Metadata: map[string]string{"session_name": "s-own", "agent_name": "frontend/worker"}},
+	} {
+		row.Title = "frontend/worker"
+		row.Type = session.BeadType
+		row.Labels = []string{session.LabelSession, "template:frontend/worker"}
+		row.Metadata["template"] = "frontend/worker"
+		if _, err := store.Create(row); err != nil {
+			t.Fatalf("creating session row %s: %v", row.Metadata["session_name"], err)
+		}
+	}
+	if got := LookupSessionName(beadstest.Sessions(store), "city", "frontend/worker", ""); got != "s-own" {
+		t.Errorf("LookupSessionName = %q, want the agent's own row's s-own", got)
+	}
+
+	pool := beads.NewMemStore()
+	if _, err := pool.Create(beads.Bead{
+		Title:    "frontend/worker",
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession, "template:frontend/worker"},
+		Metadata: map[string]string{"template": "frontend/worker", "session_name": "s-pool", "pool_slot": "1"},
+	}); err != nil {
+		t.Fatalf("creating the pool row: %v", err)
+	}
+	if got, want := LookupSessionName(beadstest.Sessions(pool), "city", "frontend/worker", ""), "frontend--worker"; got != want {
+		t.Errorf("LookupSessionName over only pool capacity = %q, want the computed %q", got, want)
 	}
 }

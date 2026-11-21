@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -906,7 +907,12 @@ city's work store, copy them into the binding with
 							return fmt.Errorf("validate runtime vars: %w", err)
 						}
 						graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
-						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+						sessions, releaseSessions, err := acquireFormulaCookSessions(cityPath, scope.storeRoot, cliStores(cityPath, store), stderr)
+						if err != nil {
+							return err
+						}
+						defer releaseSessions()
+						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, sessions, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
 							return fmt.Errorf("decorate formulas v2 recipe: %w", err)
 						}
 						if graphRootKey != "" {
@@ -1127,7 +1133,12 @@ city's work store, copy them into the binding with
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, cookMetaFlipError(args[0], flip))
 				}
 				graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
-				if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, rootStore, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+				sessions, releaseSessions, err := acquireFormulaCookSessions(cityPath, scope.storeRoot, cliStores(cityPath, store), stderr)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				defer releaseSessions()
+				if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, sessions, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("decorate formulas v2 recipe: %w", err))
 				}
 				if graphRootKey != "" {
@@ -1275,7 +1286,23 @@ func stampFormulaCookGraphV2Root(recipe *formula.Recipe, formulaName, inputConvo
 	return rootKey
 }
 
-func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+// acquireFormulaCookSessions returns the city's sessions store for a cook
+// whose scope stores are scope, opened at scopeRoot, and a release that closes
+// any store it opened, warning on stderr when the close fails. A city store
+// that fails to open is an error, never a fallback to the scope store (#8436).
+func acquireFormulaCookSessions(cityPath, scopeRoot string, scope storeref.Stores, stderr io.Writer) (beads.SessionStore, func(), error) {
+	sessions, release, err := acquireRoutingSessionStore(cityPath, scopeRoot, scope)
+	if err != nil {
+		return beads.SessionStore{}, func() {}, fmt.Errorf("formula cook: %w", err)
+	}
+	return sessions, func() {
+		if err := release(); err != nil {
+			fmt.Fprintf(stderr, "warning: gc formula cook: closing the city session store: %v\n", err) //nolint:errcheck // best-effort warning
+		}
+	}, nil
+}
+
+func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef, rigContext string, sessions beads.SessionStore, cityName, cityPath string, cfg *config.City) error {
 	// cook does not route the workflow root to an agent, but rig-scoped step
 	// targets still need the invocation's rig context to resolve — the same
 	// context sling derives from its entry agent's qualified name. A rig-scoped
@@ -1286,8 +1313,7 @@ func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]st
 	// store-ref encoding (empty QualifiedName so the root stays unrouted;
 	// MetadataOnly mirrors the no-session default binding).
 	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
-	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
-	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, beads.SessionStore{Store: store}, cityName, cfg, cliGraphrouteDeps(cityPath))
+	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, sessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 // wireFormulaCookGraphV2AttachRoot makes the attach bead block on the graph.v2

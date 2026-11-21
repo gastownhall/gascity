@@ -3966,6 +3966,7 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 	}
 	md := newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
 	md.inapplicableReported = &cs.webhookInapplicableReports
+	md.sessions = func() beads.SessionStore { return cs.Stores().Sessions() }
 	return md
 }
 

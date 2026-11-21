@@ -4,6 +4,7 @@
 package graphroute
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -25,6 +26,12 @@ const (
 	// for control beads whose execution route is a concrete session ID.
 	GraphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
 )
+
+// ErrNoSessionStore reports a routing operation that must read or write a
+// session row but was handed no sessions-class store. Graph routing never
+// falls back to the workflow store for session rows: a row written there is
+// invisible to every session reader (#8436).
+var ErrNoSessionStore = errors.New("no sessions store")
 
 // AgentResolver resolves an agent name to a config.Agent.
 type AgentResolver interface {
@@ -330,14 +337,15 @@ func WorkflowExecutionRoute(bead beads.Bead) string {
 // ControlDispatcherBinding resolves the graph routing binding for the control
 // dispatcher in the graph's store scope. Runtime health does not change route
 // identity: desired-state reconciliation starts or recovers the configured
-// dispatcher for that scope.
-func ControlDispatcherBinding(store beads.SessionStore, cityName string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
-	return resolveControlDispatcherBinding(store, cityName, cfg, rigContext, deps)
+// dispatcher for that scope. It reads no session state, so it takes no
+// session store.
+func ControlDispatcherBinding(cityName string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
+	return resolveControlDispatcherBinding(cityName, cfg, rigContext, deps)
 }
 
 // resolveControlDispatcherBinding resolves the control-dispatcher binding for a
 // graph store scope.
-func resolveControlDispatcherBinding(_ beads.SessionStore, _ string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
+func resolveControlDispatcherBinding(_ string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
 	if cfg == nil {
 		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher route requires config")
 	}
@@ -527,13 +535,18 @@ func formulaRoleTarget(target string) string {
 // concrete session bead, returning ok=false when the target is not a
 // direct-session reference (so the caller can fall back to config-agent
 // routing). Exact session bead IDs win over config target names; config-named
-// sessions are materialized through deps.DirectSessionResolver. This is the
+// sessions are materialized through deps.DirectSessionResolver. store must be
+// the city's sessions-class store, never a workflow store: a zero store is
+// ErrNoSessionStore for any non-empty target. This is the
 // canonical implementation shared by the graphroute library path and the CLI
 // projection in cmd/gc.
 func ResolveGraphDirectSessionBinding(store beads.SessionStore, cityName string, cfg *config.City, target, rigContext string, deps Deps) (GraphRouteBinding, bool, error) {
 	target = strings.TrimSpace(target)
-	if store == (beads.SessionStore{}) || target == "" {
+	if target == "" {
 		return GraphRouteBinding{}, false, nil
+	}
+	if store == (beads.SessionStore{}) {
+		return GraphRouteBinding{}, false, fmt.Errorf("resolving session target %q: %w", target, ErrNoSessionStore)
 	}
 	// Exact session bead IDs are unambiguous and must win even when they
 	// collide with a config target name.
@@ -605,7 +618,7 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 			executionRigContext = storeRigContext
 		}
 	}
-	controlRoute, err := ControlDispatcherBinding(store, cityName, cfg, controlRigContext, deps)
+	controlRoute, err := ControlDispatcherBinding(cityName, cfg, controlRigContext, deps)
 	if err != nil {
 		return err
 	}

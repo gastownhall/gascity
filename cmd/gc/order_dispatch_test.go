@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -1354,7 +1355,7 @@ func TestApplyOrderRecipeRoutingNoPoolRejectsMissingAndUnknownStepTargets(t *tes
 					{ID: "order-graph.work", Title: "Work", Metadata: metadata},
 				},
 			}
-			err := applyOrderRecipeRouting(recipe, "", nil, target, beads.NewMemStore(), "test-city", cityPath, cfg)
+			err := applyOrderRecipeRouting(recipe, "", nil, target, beadstest.Sessions(beads.NewMemStore()), "test-city", cityPath, cfg)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
 				t.Fatalf("applyOrderRecipeRouting error = %v, want %q", err, tt.wantErrSub)
 			}

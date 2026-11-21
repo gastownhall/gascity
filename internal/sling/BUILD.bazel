@@ -92,6 +92,7 @@ go_test(
         "//internal/molecule",
         "//internal/pidutil",
         "//internal/runtime",
+        "//internal/session",
         "//internal/sourceworkflow",
         "//internal/suspensionstate",
         "//internal/testenv",

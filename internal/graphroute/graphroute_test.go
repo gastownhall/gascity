@@ -881,7 +881,7 @@ func TestResolveGraphStepBinding_CanonicalSingletonPoolIgnoresMissingSessionName
 }
 
 func TestControlDispatcherBinding_NilConfig(t *testing.T) {
-	_, err := ControlDispatcherBinding(beads.SessionStore{}, "city", nil, "", Deps{})
+	_, err := ControlDispatcherBinding("city", nil, "", Deps{})
 	if err == nil {
 		t.Error("expected error for nil config")
 	}
@@ -889,7 +889,7 @@ func TestControlDispatcherBinding_NilConfig(t *testing.T) {
 
 func TestControlDispatcherBinding_NilResolver(t *testing.T) {
 	cfg := &config.City{}
-	_, err := ControlDispatcherBinding(beads.SessionStore{}, "city", cfg, "", Deps{})
+	_, err := ControlDispatcherBinding("city", cfg, "", Deps{})
 	if err == nil {
 		t.Error("expected error for nil resolver")
 	}
@@ -901,7 +901,7 @@ func TestControlDispatcherBinding_ConfiguredDispatcherUsesCanonicalQueue(t *test
 		Dir:  "gascity",
 	}}}
 
-	binding, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "gascity", Deps{Resolver: testAgentResolver{}})
+	binding, err := ControlDispatcherBinding("test-city", cfg, "gascity", Deps{Resolver: testAgentResolver{}})
 	if err != nil {
 		t.Fatalf("ControlDispatcherBinding: %v", err)
 	}
@@ -950,7 +950,7 @@ func TestControlDispatcherBinding_UsesDispatcherForGraphScope(t *testing.T) {
 		{name: "rig", rigContext: "fixture", want: "fixture/core.control-dispatcher"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			binding, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, tt.rigContext, Deps{Resolver: noMatchAgentResolver{}})
+			binding, err := ControlDispatcherBinding("test-city", cfg, tt.rigContext, Deps{Resolver: noMatchAgentResolver{}})
 			if err != nil {
 				t.Fatalf("ControlDispatcherBinding: %v", err)
 			}
@@ -986,7 +986,7 @@ func TestControlDispatcherBinding_CityOnlyBoundDispatcher(t *testing.T) {
 		t.Fatalf("precondition: bound core.control-dispatcher should NOT match bare %q", config.ControlDispatcherAgentName)
 	}
 
-	binding, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "", Deps{Resolver: noMatchAgentResolver{}})
+	binding, err := ControlDispatcherBinding("test-city", cfg, "", Deps{Resolver: noMatchAgentResolver{}})
 	if err != nil {
 		t.Fatalf("ControlDispatcherBinding(city): %v", err)
 	}
@@ -997,7 +997,7 @@ func TestControlDispatcherBinding_CityOnlyBoundDispatcher(t *testing.T) {
 		t.Fatalf("MetadataOnly = false, want true")
 	}
 
-	if _, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}}); err == nil {
+	if _, err := ControlDispatcherBinding("test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}}); err == nil {
 		t.Fatal("ControlDispatcherBinding(rig) error = nil, want missing rig dispatcher error")
 	}
 }
@@ -1015,7 +1015,7 @@ func TestControlDispatcherBinding_RigScopedDeterministicDispatcher(t *testing.T)
 		MaxActiveSessions: &maxActive,
 	}}}
 
-	binding, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}})
+	binding, err := ControlDispatcherBinding("test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}})
 	if err != nil {
 		t.Fatalf("ControlDispatcherBinding: %v", err)
 	}
@@ -1169,7 +1169,7 @@ func (rigAwareDispatcherResolver) ResolveAgent(cfg *config.City, name, rigContex
 
 func TestControlDispatcherBinding_PlainCityDispatcherDoesNotSatisfyRigScope(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "control-dispatcher"}}}
-	_, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "gc-contrib", Deps{Resolver: rigAwareDispatcherResolver{}})
+	_, err := ControlDispatcherBinding("test-city", cfg, "gc-contrib", Deps{Resolver: rigAwareDispatcherResolver{}})
 	if err == nil {
 		t.Fatal("ControlDispatcherBinding error = nil, want missing rig dispatcher error")
 	}

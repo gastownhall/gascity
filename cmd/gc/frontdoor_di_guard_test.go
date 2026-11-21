@@ -293,18 +293,17 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // lookups, deliverSlingNudge's observe/handle/last-nudge stamp via
 // cliSessionStore/cliSessionFrontDoor derived from the target's cfg+cityPath, and
 // printNudgePreview) while the queued-nudge enqueue stays on the plain store
-// (nudges class, its own E1.2 routing). TWO sling-root session sites remain
-// DEFERRED because their store is threaded cross-package and cannot be routed at
-// the CLI root: (a) cliDirectSessionResolver (populateSlingDepsCallbacks →
-// internal/sling → internal/graphroute → resolveSessionIDMaterializingNamed)
-// materializes session beads on the WORK source store and needs a two-store
-// SlingDeps/graphroute.Deps split (a session-class store added to the deps); and
-// (b) the resolveGraphStepBinding* helpers DEFINED here read session state on a
-// store supplied by their cmd_convoy_dispatch.go caller (never called from a sling
-// root), owned by that caller's effort. So the positive cliSessionStore( tripwire
-// protects the routed sling-nudge arm but NOT those two deferred cross-package
-// sites — consistent with this guard being a regression canary, not a completeness
-// proof.
+// (nudges class, its own E1.2 routing). The two graph-routing session sites
+// take the city's sessions handle their caller supplies (#8436): (a)
+// cliDirectSessionResolver (populateSlingDepsCallbacks → internal/sling →
+// internal/graphroute → resolveSessionIDMaterializingNamed) resolves and
+// materializes through SlingDeps.Sessions, which the sling root acquires with
+// acquireRoutingSessionStore; and (b) the resolveGraphStepBinding* helpers
+// DEFINED here take a beads.SessionStore from their cmd_convoy_dispatch.go
+// caller, which acquires it per control bead. Their typed parameter, not this
+// substring guard, enforces that boundary; the positive cliSessionStore(
+// tripwire protects the routed sling-nudge arm, consistent with this guard
+// being a regression canary, not a completeness proof.
 //
 // cmd_handoff.go routes its full SESSION arm — restartability
 // (sessionRestartableByController), restart-request clear (clearRestartRequest ->

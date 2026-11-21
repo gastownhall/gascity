@@ -400,8 +400,6 @@ cmd/gc/class_store_emit_oprows.go	deferJournalRings	raw-param	1
 cmd/gc/cli_class_stores.go	cliGraphStore	raw-param	1
 cmd/gc/cli_class_stores.go	cliMailStore	raw-param	1
 cmd/gc/cli_class_stores.go	cliNudgesStore	raw-param	1
-cmd/gc/cli_session_store.go	cliRelocatedSessionStore	raw-param	1
-cmd/gc/cli_session_store.go	cliRelocatedSessionStore	raw-result	1
 cmd/gc/cli_session_store.go	cliSessionFrontDoor	raw-param	1
 cmd/gc/cli_session_store.go	cliSessionStore	raw-param	1
 cmd/gc/cli_session_store.go	cliSessionStore	raw-result	1
@@ -483,15 +481,10 @@ cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	read-marker	1
 cmd/gc/cmd_convoy_dispatch.go	controlBeadLedger	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	controlBeadLedger	raw-result	1
-cmd/gc/cmd_convoy_dispatch.go	controlDispatchOptions	mint	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphBinding	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	controlScopeTakesGraphClass	cap-assert	1
-cmd/gc/cmd_convoy_dispatch.go	decorateDrainItemRecipe	mint	1
-cmd/gc/cmd_convoy_dispatch.go	decorateDrainItemRecipe	raw-param	1
-cmd/gc/cmd_convoy_dispatch.go	decorateDynamicFragmentRecipe	mint	1
-cmd/gc/cmd_convoy_dispatch.go	decorateDynamicFragmentRecipe	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	deleteWorkflowBead	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	deleteWorkflowBeadUnguarded	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	deleteWorkflowBeads	raw-param	1
@@ -506,8 +499,6 @@ cmd/gc/cmd_convoy_dispatch.go	findWorkflowBeads	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	findWorkflowBeadsFromRoot	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	graphBindingResidentScope	cap-assert	1
 cmd/gc/cmd_convoy_dispatch.go	graphBindingResidentScope	raw-result	1
-cmd/gc/cmd_convoy_dispatch.go	graphFallbackBindingForBead	mint	1
-cmd/gc/cmd_convoy_dispatch.go	graphFallbackBindingForBead	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	makeSourceWorkflowStoresLister	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	makeSourceWorkflowStoresListerWithOpenStore	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	makeStoreRefResolver	raw-result	2
@@ -517,7 +508,6 @@ cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStores	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStoresWith	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStoresWithProvider	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	recordRootSettleFailure	raw-param	1
-cmd/gc/cmd_convoy_dispatch.go	recycleDispatchSubjectSession	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	reopenTrackingConvoysForReopenedSource	mint	1
 cmd/gc/cmd_convoy_dispatch.go	reopenTrackingConvoysForReopenedSource	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	restoreWorkflowDeleteDeps	raw-param	1
@@ -539,8 +529,6 @@ cmd/gc/cmd_events_reemit_execution.go	openExistingExecutionReemitStore	raw-resul
 cmd/gc/cmd_events_reemit_execution.go	projectExecutionReemitRun	raw-param	1
 cmd/gc/cmd_formula.go	closeFormulaCookFailedGraphV2Roots	mint	1
 cmd/gc/cmd_formula.go	closeFormulaCookFailedGraphV2Roots	raw-param	1
-cmd/gc/cmd_formula.go	decorateFormulaCookGraphV2Recipe	mint	1
-cmd/gc/cmd_formula.go	decorateFormulaCookGraphV2Recipe	raw-param	1
 cmd/gc/cmd_formula.go	emitAttachedFormulaCookExecutionFacts	raw-param	1
 cmd/gc/cmd_formula.go	emitFormulaCookExecutionFacts	mint	1
 cmd/gc/cmd_formula.go	emitFormulaCookExecutionFacts	raw-param	1
@@ -699,9 +687,6 @@ cmd/gc/cmd_sling.go	openSlingCityStore	raw-result	1
 cmd/gc/cmd_sling.go	openSlingStore	raw-result	1
 cmd/gc/cmd_sling.go	openSlingStoreForSource	raw-result	1
 cmd/gc/cmd_sling.go	printNudgePreview	raw-param	1
-cmd/gc/cmd_sling.go	resolveGraphStepBinding	raw-param	1
-cmd/gc/cmd_sling.go	resolveGraphStepBindingWithVars	mint	1
-cmd/gc/cmd_sling.go	resolveGraphStepBindingWithVars	raw-param	1
 cmd/gc/cmd_sling.go	resolveInlineBeadAction	raw-param	1
 cmd/gc/cmd_sling.go	slingCityStore	raw-field	2
 cmd/gc/cmd_sling.go	slingFixedNudge	raw-param	1
@@ -831,8 +816,6 @@ cmd/gc/dispatch_control_ready.go	controlReadyLegSourcesFn	raw-var	1
 cmd/gc/dispatch_execution_emit.go	emitExecutionFacts	mint	2
 cmd/gc/dispatch_execution_emit.go	emitExecutionFacts	raw-param	1
 cmd/gc/dispatch_execution_emit.go	executionEmitTarget	raw-field	1
-cmd/gc/dispatch_runtime.go	applyGraphRouting	mint	1
-cmd/gc/dispatch_runtime.go	applyGraphRouting	raw-param	1
 cmd/gc/doctor_backlog_depth.go	backlogDepthCheck	raw-field	1
 cmd/gc/doctor_backlog_depth.go	newBacklogDepthCheck	raw-param	1
 cmd/gc/doctor_census_owner_liveness.go	censusOwnerLivenessCheck	raw-field	1
@@ -1072,8 +1055,6 @@ cmd/gc/op_sweep.go	opSweeper.incapableNow	unwrap	1
 cmd/gc/op_sweep.go	opSweeper.store	raw-result	1
 cmd/gc/op_sweep.go	opSweeper.store	unwrap	6
 cmd/gc/op_sweep.go	sameBeadStore	raw-param	2
-cmd/gc/order_dispatch.go	applyOrderRecipeRouting	mint	1
-cmd/gc/order_dispatch.go	applyOrderRecipeRouting	raw-param	1
 cmd/gc/order_dispatch.go	closeAndVerifyOrderTrackingBeads	raw-param	1
 cmd/gc/order_dispatch.go	closeOrderTrackingBead	mint	1
 cmd/gc/order_dispatch.go	closeOrderTrackingBead	raw-param	1

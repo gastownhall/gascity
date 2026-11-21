@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // ScaleParams holds resolved scaling parameters for an agent.
@@ -29,38 +29,15 @@ func ScaleParamsFor(a *config.Agent) ScaleParams {
 	return sp
 }
 
-// LookupSessionName resolves an agent's session name. Tries the sessions
-// store first (for bead-derived names); falls back to the canonical
-// agent.SessionNameFor if no bead is found, or for the zero store.
+// LookupSessionName resolves an agent's session name: the name the agent's
+// open session row records in the sessions store
+// (session.FindSessionNameByTemplate), else the canonical
+// agent.SessionNameFor, which is also the answer for the zero store.
 func LookupSessionName(store beads.SessionStore, cityName, qualifiedName, sessionTemplate string) string {
-	if store != (beads.SessionStore{}) {
-		sn := findSessionNameByTemplate(store, qualifiedName)
-		if sn != "" {
-			return sn
-		}
+	if sn := session.FindSessionNameByTemplate(store, qualifiedName); sn != "" {
+		return sn
 	}
 	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate)
-}
-
-// findSessionNameByTemplate queries the sessions store for a session bead
-// matching the qualified agent name and returns its session_name metadata.
-func findSessionNameByTemplate(store beads.SessionStore, qualifiedName string) string {
-	beadList, err := store.List(beads.ListQuery{
-		Type:   "session",
-		Label:  "gc.session",
-		Status: "open",
-	})
-	if err != nil {
-		return ""
-	}
-	for _, b := range beadList {
-		if b.Metadata[beadmeta.TemplateMetadataKey] == qualifiedName {
-			if sn := b.Metadata["session_name"]; sn != "" {
-				return sn
-			}
-		}
-	}
-	return ""
 }
 
 // ExpandedAgent holds a single (possibly pool-expanded) agent identity

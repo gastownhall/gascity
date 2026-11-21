@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -213,7 +214,7 @@ func assertE2c3ControlDispatchFailures(t *testing.T) {
 			t.Fatalf("create %s subject bead: %v", kind, err)
 		}
 		before := subject
-		recycle := recycleDispatchSubjectSession(t.TempDir(), store, cfg)
+		recycle := recycleDispatchSubjectSession(t.TempDir(), beadstest.Sessions(store), cfg)
 		if err := recycle(subject); err == nil || err.Error() != e2c3ProviderConstructionFailure {
 			t.Fatalf("%s recycle error = %v, want %q", kind, err, e2c3ProviderConstructionFailure)
 		}

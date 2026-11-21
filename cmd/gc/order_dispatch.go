@@ -351,7 +351,12 @@ type memoryOrderDispatcher struct {
 	// work ledger; neither class belongs there on a split city. A nil value
 	// relocates nothing, so graphStoreFor/ordersStoreFor hand back the caller's
 	// own store and the dispatch is byte-identical to the single-store path.
-	storageRoutes        *storageRoutes
+	storageRoutes *storageRoutes
+	// sessions returns the city's authoritative sessions-class store: graph
+	// routing resolves and materializes the session rows a step names there,
+	// never in the order's workflow store (#8436). A nil accessor acquires
+	// the city sessions store per dispatch (acquireRoutingSessionStore).
+	sessions             func() beads.SessionStore
 	ep                   events.Provider
 	execRun              ExecRunner
 	rec                  events.Recorder
@@ -2437,7 +2442,10 @@ func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) str
 // The resolved store target is authoritative: order pool/step targets describe
 // execution, while target.ScopeRoot describes the store that will own every
 // graph bead and therefore which control dispatcher can claim its controls.
-func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[string]string, target execStoreTarget, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+// sessions is the city's sessions-class store: a session a step names is
+// resolved and materialized there, never in the store the graph is poured
+// into (#8436).
+func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[string]string, target execStoreTarget, sessions beads.SessionStore, cityName, cityPath string, cfg *config.City) error {
 	if recipe == nil {
 		return fmt.Errorf("order recipe is nil")
 	}
@@ -2445,7 +2453,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 		if strings.TrimSpace(pool) == "" {
 			return nil
 		}
-		return applyGraphRouting(recipe, nil, pool, vars, "", "", "", store, cityName, cityPath, cfg)
+		return applyGraphRouting(recipe, nil, pool, vars, "", "", "", sessions, cityName, cityPath, cfg)
 	}
 	if cfg == nil {
 		return fmt.Errorf("formulas v2 order routing requires city config")
@@ -2464,7 +2472,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 		}
 	}
 	if strings.TrimSpace(pool) != "" {
-		return applyGraphRouting(recipe, nil, pool, vars, scopeKind, scopeRef, storeRef, store, cityName, cityPath, cfg)
+		return applyGraphRouting(recipe, nil, pool, vars, scopeKind, scopeRef, storeRef, sessions, cityName, cityPath, cfg)
 	}
 
 	// With no order-level pool, every executable worker step must carry its own
@@ -2480,7 +2488,6 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 			return fmt.Errorf("formulas v2 order step %q has no routing target; set order pool or gc.run_target", step.ID)
 		}
 	}
-	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(b)).
 	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(
 		recipe,
 		routeVars,
@@ -2489,7 +2496,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 		scopeRef,
 		storeRef,
 		graphroute.GraphRouteBinding{},
-		beads.SessionStore{Store: store},
+		sessions,
 		cityName,
 		cfg,
 		cliGraphrouteDeps(cityPath),
@@ -2827,9 +2834,10 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
-	// The routing decoration resolves sessions and named targets, which live
-	// with the graph class, so it reads through the graph store. The molecule
-	// itself is poured below into the store its CLASS demands
+	// The routing decoration resolves and materializes the sessions a step
+	// names in the city's sessions store (sessions), never in the store the
+	// molecule is poured into, where no session reader looks (#8436). The
+	// molecule itself is poured below into the store its CLASS demands
 	// (moleculeClassStore, as `gc order run` does): a graph.v2 pour or a
 	// root-only wisp into the graph binding, a v1 POURED recipe — a molecule
 	// container plus plain assigned steps, all work class — into the order's
@@ -2841,7 +2849,20 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 
 	// Route before instantiation. A routing failure must not leave an
 	// unreachable graph in the store while reporting the order as completed.
-	if err := applyOrderRecipeRouting(recipe, pool, vars, target, graphStore, m.cityName, cityPath, m.cfg); err != nil {
+	var sessions beads.SessionStore
+	releaseSessions := func() error { return nil }
+	if m.sessions != nil {
+		sessions = m.sessions()
+	} else {
+		sessions, releaseSessions, err = acquireRoutingSessionStore(cityPath, target.ScopeRoot, cliStores(cityPath, store))
+	}
+	if err == nil {
+		err = applyOrderRecipeRouting(recipe, pool, vars, target, sessions, m.cityName, cityPath, m.cfg)
+		if releaseErr := releaseSessions(); releaseErr != nil {
+			logDispatchError(m.stderr, "gc: order %s: closing the city store opened for session routing: %v", scoped, releaseErr)
+		}
+	}
+	if err != nil {
 		logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,

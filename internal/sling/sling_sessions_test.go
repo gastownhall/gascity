@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // These tests pin sling's session-class reads to SlingDeps.Sessions, the
@@ -96,15 +97,16 @@ func TestReslingOfPoolClaimedWorkReadsTheClaimantInTheSessionsStore(t *testing.T
 }
 
 // createNamedSessionBead creates an open session bead for template whose
-// runtime session is sessionName, in store.
+// runtime session is sessionName, in store, with the labels and template key
+// the session manager stamps.
 func createNamedSessionBead(t *testing.T, store beads.Store, template, sessionName string) beads.Bead {
 	t.Helper()
 	sb, err := store.Create(beads.Bead{
 		Title:    "session",
-		Type:     "session",
+		Type:     session.BeadType,
 		Status:   "open",
-		Labels:   []string{"gc.session"},
-		Metadata: map[string]string{beadmeta.TemplateMetadataKey: template, "session_name": sessionName},
+		Labels:   []string{session.LabelSession, "template:" + template},
+		Metadata: map[string]string{"template": template, "session_name": sessionName},
 	})
 	if err != nil {
 		t.Fatalf("creating the session bead: %v", err)
@@ -134,7 +136,7 @@ func TestSlingTargetEnvNamesTheSessionInTheSessionsStore(t *testing.T) {
 		sessions := beads.NewMemStoreFrom(100, nil, nil)
 		sb := createNamedSessionBead(t, sessions, a.QualifiedName(), "s-current")
 		stale := sb
-		stale.Metadata = map[string]string{beadmeta.TemplateMetadataKey: a.QualifiedName(), "session_name": "s-pre-migration"}
+		stale.Metadata = map[string]string{"template": a.QualifiedName(), "session_name": "s-pre-migration"}
 		work := beads.NewMemStoreFrom(200, []beads.Bead{stale}, nil)
 		deps, _ := splitSessionsDeps(t, work, sessions)
 

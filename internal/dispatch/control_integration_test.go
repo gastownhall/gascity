@@ -1405,6 +1405,72 @@ func TestProcessControlRetryRoutesAttemptThroughSessions(t *testing.T) {
 	}
 }
 
+// TestProcessControlRetryNamedSessionTargetWithoutSessionHandleErrors is the
+// missing-handle half of #8436's attempt routing: a routing operation that
+// requires session access refuses with a contextual error when it receives no
+// usable session handle, instead of silently degrading the named-session
+// continuation to pool routing. The canonical named-session bead exists — only
+// the sessions store holds it — but ProcessOptions carries no Sessions handle.
+// The retry must fail closed: no second attempt stamped with pool metadata,
+// and an error naming the missing handle rather than blaming the target.
+func TestProcessControlRetryNamedSessionTargetWithoutSessionHandleErrors(t *testing.T) {
+	t.Parallel()
+
+	cityPath, _, _ := namedWorkerSessionCity(t)
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "run",
+		Title: "Run",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{ID: "summarize", Title: "Summarize", Type: "task", Metadata: map[string]string{"gc.run_target": "worker"}},
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "run retry",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.run",
+			"gc.step_id":          "run",
+			"gc.max_attempts":     "3",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.run.attempt.1", 1, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "transient",
+		"gc.failure_reason": "timeout",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	_, err = ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{
+		Work:     beadstest.Work(store),
+		CityPath: cityPath,
+		// Sessions deliberately left zero: attempt routing must not guess a
+		// store for a named-session target it cannot resolve.
+	})
+	if err == nil {
+		t.Fatal("ProcessControl(retry) succeeded without a sessions handle; a named-session target requires session access, and its absence must refuse")
+	}
+	if !strings.Contains(err.Error(), "no session") {
+		t.Fatalf("ProcessControl(retry) error = %q; want it to name the missing session handle rather than blame the target", err.Error())
+	}
+	if attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2.summarize"); attempt2.ID != "" {
+		t.Fatalf("attempt 2 created (assignee %q, gc.routed_to %q) despite the refusal; routing must fail closed, not degrade the named session to pool routing", attempt2.Assignee, attempt2.Metadata["gc.routed_to"])
+	}
+}
+
 // TestProcessControlFanoutRoutesFragmentThroughSessions is the fanout half of
 // TestProcessControlRetryRoutesAttemptThroughSessions: a fragment's work step
 // is assigned the canonical session bead's id, and its control step is
@@ -1906,7 +1972,10 @@ func TestResolveAttemptRouteBinding_ConfigTargetBeatsCollidingSessionAlias(t *te
 		}},
 	}
 
-	binding, ok := resolveAttemptRouteBinding("gascity/claude", cfg, beadstest.Sessions(store))
+	binding, ok, err := resolveAttemptRouteBinding("gascity/claude", cfg, beadstest.Sessions(store))
+	if err != nil {
+		t.Fatalf("resolveAttemptRouteBinding: %v", err)
+	}
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve config target")
 	}
@@ -1953,7 +2022,10 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 	}
 
 	startCalls := store.calls
-	binding, ok := resolveAttemptRouteBinding("worker", cfg, beadstest.Sessions(store))
+	binding, ok, err := resolveAttemptRouteBinding("worker", cfg, beadstest.Sessions(store))
+	if err != nil {
+		t.Fatalf("resolveAttemptRouteBinding: %v", err)
+	}
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
 	}
@@ -2001,7 +2073,10 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMe
 		}},
 	}
 
-	binding, ok := resolveAttemptRouteBinding("worker", cfg, beadstest.Sessions(store))
+	binding, ok, err := resolveAttemptRouteBinding("worker", cfg, beadstest.Sessions(store))
+	if err != nil {
+		t.Fatalf("resolveAttemptRouteBinding: %v", err)
+	}
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
 	}
@@ -2032,7 +2107,10 @@ func TestApplyAttemptStepRoute_SingleSessionConfigAgentRoutesUnassigned(t *testi
 		}},
 	}
 
-	binding, ok := resolveAttemptRouteBinding("gc.run-operator", cfg, beadstest.Sessions(store))
+	binding, ok, err := resolveAttemptRouteBinding("gc.run-operator", cfg, beadstest.Sessions(store))
+	if err != nil {
+		t.Fatalf("resolveAttemptRouteBinding: %v", err)
+	}
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve config-agent target")
 	}
@@ -2041,7 +2119,9 @@ func TestApplyAttemptStepRoute_SingleSessionConfigAgentRoutesUnassigned(t *testi
 	}
 
 	step := &formula.RecipeStep{ID: "s1", Metadata: map[string]string{}}
-	applyAttemptStepRoute(step, "gc.run-operator", cfg, beadstest.Sessions(store))
+	if err := applyAttemptStepRoute(step, "gc.run-operator", cfg, beadstest.Sessions(store)); err != nil {
+		t.Fatalf("applyAttemptStepRoute: %v", err)
+	}
 	if step.Assignee != "" {
 		t.Fatalf("Assignee = %q, want empty (delivered via gc.routed_to; session binds on claim)", step.Assignee)
 	}
@@ -2629,4 +2709,100 @@ func findAttemptByRef(t *testing.T, store beads.Store, _, stepRef string) beads.
 		}
 	}
 	return beads.Bead{}
+}
+
+// TestSpawnNextAttemptBindsNamedSessionThroughTheSessionsStore pins #8436's
+// attempt path on a split-stores city: the canonical named-session bead lives
+// only in the sessions store, and retry attempt routing binds its concrete ID
+// through ProcessOptions.Sessions while every workflow write stays in the
+// workflow store.
+func TestSpawnNextAttemptBindsNamedSessionThroughTheSessionsStore(t *testing.T) {
+	t.Parallel()
+
+	workflow := beads.NewMemStore()
+	sessions := beads.NewMemStore()
+	named, err := sessions.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--refinery",
+			"template":                  "refinery",
+			"configured_named_session":  "true",
+			"configured_named_identity": "refinery",
+			"configured_named_mode":     "on_demand",
+			"state":                     "asleep",
+			"continuity_eligible":       "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create named session: %v", err)
+	}
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", MaxActiveSessions: &maxActive},
+			{Name: config.ControlDispatcherAgentName},
+		},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Mode:     "on_demand",
+		}},
+	}
+	routeCfg := &routeConfigCache{}
+	routeCfg.once.Do(func() { routeCfg.cfg = cfg })
+
+	spec := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review / fix loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{{
+			ID:       "review-named",
+			Title:    "Code review",
+			Type:     "task",
+			Assignee: "refinery",
+		}},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+
+	root := mustCreate(t, workflow, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, workflow, beads.Bead{
+		Title: "review-loop",
+		Metadata: map[string]string{
+			"gc.kind":             "ralph",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-ns.review-loop",
+			"gc.step_id":          "review-loop",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+		},
+	})
+
+	opts := ProcessOptions{routeCfg: routeCfg, Sessions: beadstest.Sessions(sessions)}
+	if err := spawnNextAttempt(t.Context(), beadstest.Graph(workflow), control, 2, opts); err != nil {
+		t.Fatalf("spawnNextAttempt: %v", err)
+	}
+
+	child := findAttemptByRef(t, workflow, root.ID, "mol-ns.review-loop.iteration.2.review-named")
+	if child.ID == "" {
+		t.Fatal("review-named child not created")
+	}
+	if got := child.Assignee; got != named.ID {
+		t.Fatalf("review-named assignee = %q, want the canonical named session %s resolved through the sessions store; step metadata %+v", got, named.ID, child.Metadata)
+	}
+	sessionRows, err := workflow.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("listing workflow session rows: %v", err)
+	}
+	if len(sessionRows) != 0 {
+		t.Errorf("the workflow store holds %d session row(s) after the attempt; the named session must stay in the sessions store", len(sessionRows))
+	}
 }
