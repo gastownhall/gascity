@@ -2024,6 +2024,153 @@ test_absent_routed_token_not_retried() {
     rm -rf "$root" "$fbd"
 }
 
+# AC-5: the scanner probes and verifies the WHOLE id. A dotted sub-bead
+# (mc-k2p9x.4.3) and a mol-/wisp- molecule id (mc-mol-k2p9x, mc-wisp-k2p9x)
+# stay one token: only the whole id is probed and only it appears in the
+# BLOCKED line. Seeding only the whole id (never the bare mc-k2p9x) makes a
+# truncating scanner answer [] and allow the push, failing the test.
+test_token_shapes_probe_whole_id() {
+    local branch tok root repo fbd mcstore out rc
+    while IFS='|' read -r branch tok; do
+        [[ -n "$branch" ]] || continue
+        root="$(new_routed_mc_root "$branch")"
+        repo="$root/gascity"
+        mcstore="$repo/../mc-rig/.beads"
+        fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+        write_routed_fake_bd "$fbd"
+        routed_show "$fbd" "$mcstore" "$tok" "closed" "agent-x" "tmpl-x" "[]"
+        out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+        if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — $tok" <<<"$out" &&
+            routed_store_calls "$fbd" "$mcstore" | grep -qF -- "--id=$tok"; then
+            record_pass "routed/whole-id ($branch probes and blocks on $tok)"
+        else
+            record_fail "routed/whole-id ($branch)" "expected block on $tok with the whole id probed, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+        fi
+        rm -rf "$root" "$fbd"
+    done <<'CASES'
+fix/port-mc-k2p9x.4.3|mc-k2p9x.4.3
+fix/port-mc-mol-k2p9x|mc-mol-k2p9x
+fix/port-mc-wisp-k2p9x|mc-wisp-k2p9x
+CASES
+}
+
+# AC-5: walk order and prefix selection. Tokens are walked in branch order
+# and the first one whose owning store knows it wins: an earlier absent
+# token is skipped and a later closed bead still blocks. Same-store tokens
+# share one batched probe in branch order; a repeated token is probed once;
+# the longest prefix wins when one is a prefix of another; and a routed miss
+# still falls through to a local token.
+test_walk_order_and_prefix_selection() {
+    local root repo fbd mcstore bdstore out rc
+    # One mid-branch token after a word boundary: fix/registry-update-mc-k2p9x.
+    root="$(new_routed_mc_root "fix/registry-update-mc-k2p9x")"
+    repo="$root/gascity"
+    mcstore="$repo/../mc-rig/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "$mcstore" "mc-k2p9x" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — mc-k2p9x" <<<"$out"; then
+        record_pass "routed/walk-order (mid-branch token blocks)"
+    else
+        record_fail "routed/walk-order (mid-branch)" "expected block on mc-k2p9x, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+
+    # Earlier token absent in its store, later bead closed: blocked for the
+    # later one, with both stores probed once.
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/mc-rig/.beads" "$root/beads/.beads"
+    repo="$(new_repo_with_branch_at "$root" "fix/registry-update-bd-qqq11-mc-k2p9x")"
+    write_routes "$repo" "ga:." "mc:../mc-rig" "bd:../beads"
+    mcstore="$repo/../mc-rig/.beads"
+    bdstore="$repo/../beads/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "$mcstore" "mc-k2p9x" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — mc-k2p9x" <<<"$out" &&
+        [[ "$(routed_store_calls "$fbd" "$bdstore" | grep -c 'cmd=list')" -eq 1 ]] &&
+        [[ "$(routed_store_calls "$fbd" "$mcstore" | grep -c 'cmd=list')" -eq 1 ]]; then
+        record_pass "routed/walk-order (earlier absent, later closed blocks)"
+    else
+        record_fail "routed/walk-order (earlier absent)" "expected block on mc-k2p9x after probing both stores, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+
+    # Same store, two tokens: one batched probe in branch order.
+    root="$(new_routed_mc_root "fix/mc-aaa11-and-mc-bbb22")"
+    repo="$root/gascity"
+    mcstore="$repo/../mc-rig/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "$mcstore" "mc-bbb22" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — mc-bbb22" <<<"$out" &&
+        [[ "$(routed_store_calls "$fbd" "$mcstore" | grep -c 'cmd=list')" -eq 1 ]] &&
+        routed_store_calls "$fbd" "$mcstore" | grep -qF -- '--id=mc-aaa11,mc-bbb22'; then
+        record_pass "routed/walk-order (two tokens, one batched probe)"
+    else
+        record_fail "routed/walk-order (batched)" "expected one probe with --id=mc-aaa11,mc-bbb22 blocking on mc-bbb22, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+
+    # A repeated token is deduplicated: one id in the probe, not two.
+    root="$(new_routed_mc_root "fix/mc-k2p9x-or-mc-k2p9x")"
+    repo="$root/gascity"
+    mcstore="$repo/../mc-rig/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "$mcstore" "mc-k2p9x" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] &&
+        routed_store_calls "$fbd" "$mcstore" | grep -qF -- '--id=mc-k2p9x ' &&
+        ! routed_store_calls "$fbd" "$mcstore" | grep -qF -- '--id=mc-k2p9x,mc-k2p9x'; then
+        record_pass "routed/walk-order (repeated token probed once)"
+    else
+        record_fail "routed/walk-order (dedup)" "expected one probe for a repeated token, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+
+    # Longest prefix wins: bd-zoo-k2p9x belongs to the bd-zoo route's store,
+    # and the shorter bd route's store is never probed.
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/zoo/.beads" "$root/beads/.beads"
+    repo="$(new_repo_with_branch_at "$root" "fix/bd-zoo-k2p9x")"
+    write_routes "$repo" "ga:." "bd:../beads" "bd-zoo:../zoo"
+    bdstore="$repo/../beads/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "$repo/../zoo/.beads" "bd-zoo-k2p9x" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — bd-zoo-k2p9x" <<<"$out" &&
+        [[ -z "$(routed_store_calls "$fbd" "$bdstore")" ]]; then
+        record_pass "routed/walk-order (longest prefix wins)"
+    else
+        record_fail "routed/walk-order (longest prefix)" "expected block via the zoo store with the bd store untouched, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+
+    # A routed miss falls through to a local token: bd-show absent in the
+    # bd store, ga-k2p9x closed locally — blocked by the local bead.
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/beads/.beads"
+    repo="$(new_repo_with_branch_at "$root" "fix/bd-show-ga-k2p9x")"
+    write_routes "$repo" "ga:." "bd:../beads"
+    bdstore="$repo/../beads/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    routed_show "$fbd" "(current)" "ga-k2p9x" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qF "BLOCKED — ga-k2p9x" <<<"$out" &&
+        [[ "$(routed_store_calls "$fbd" "$bdstore" | grep -c 'cmd=list')" -eq 1 ]]; then
+        record_pass "routed/walk-order (routed miss falls through to local)"
+    else
+        record_fail "routed/walk-order (fall through)" "expected block on local ga-k2p9x after the bd probe, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2093,6 +2240,8 @@ run_all() {
     test_config_alias_prefix_resolves
     test_absent_routed_token_skips_to_fallback
     test_absent_routed_token_not_retried
+    test_token_shapes_probe_whole_id
+    test_walk_order_and_prefix_selection
 
     echo
     echo "pass=$pass fail=$fail"
