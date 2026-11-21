@@ -879,7 +879,7 @@ func resolveContextFromDir(mode contextResolutionMode) (resolvedContext, error) 
 				"test binaries; set GC_CITY, GC_CITY_PATH, or GC_CITY_ROOT to an explicit "+
 				"synthetic city)", cwd)
 	}
-	cityPath, err := findCity(cwd)
+	cityPath, err := findCityFromCwd(cwd)
 	if err != nil {
 		return resolvedContext{}, err
 	}

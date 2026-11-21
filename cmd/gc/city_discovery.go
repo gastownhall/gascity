@@ -98,6 +98,21 @@ func cityDiscoveryCwd() (string, error) {
 	return cwd, nil
 }
 
+// findCityFromCwd runs findCity from the process working directory cwd. A
+// not-found miss from a directory that no longer exists becomes a
+// *cwdGoneError naming it; every other result, including a city found by
+// walking up from a stale path or a non-miss error, is returned unchanged.
+func findCityFromCwd(cwd string) (string, error) {
+	cityPath, err := findCity(cwd)
+	if err == nil || !isCityDiscoveryNotFound(err) {
+		return cityPath, err
+	}
+	if _, statErr := os.Stat(cwd); errors.Is(statErr, fs.ErrNotExist) {
+		return "", &cwdGoneError{Dir: cwd}
+	}
+	return "", err
+}
+
 func implicitCityDiscoveryOptions() cityDiscoveryOptions {
 	return cityDiscoveryOptions{
 		ceilingDirs:          implicitCityDiscoveryCeilings(),
