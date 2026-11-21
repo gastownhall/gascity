@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -50,7 +51,13 @@ func hookClaimCandidateIsGraphStep(candidate beads.Bead) bool {
 // reclaimed means this invocation just reverted the candidate's stale lease:
 // the observation predates that revert, so the claim is fenced on the open,
 // unassigned row the reclaim left instead of the observed lease.
-func hookClaimExactPlan(candidate beads.Bead, actor string, assign, reclaimed bool) molecule.ClaimExactRequest {
+//
+// The claim's effects also carry the execution identity the post-claim stamp
+// would otherwise write afterwards (hookClaimIdentityPatch's session keys and
+// write-once gc.claimed_at, compared against the observation), so the claim
+// and its identity land in the one fenced write and the stamp finds nothing
+// of them left to change.
+func hookClaimExactPlan(candidate beads.Bead, actor string, assign, reclaimed bool, env []string, now time.Time) molecule.ClaimExactRequest {
 	status := strings.TrimSpace(candidate.Status)
 	assignee := strings.TrimSpace(candidate.Assignee)
 	if reclaimed {
@@ -76,7 +83,31 @@ func hookClaimExactPlan(candidate beads.Bead, actor string, assign, reclaimed bo
 		assignee := actor
 		onSuccess.Assignee = &assignee
 	}
+	if identity := hookClaimExactIdentity(candidate, env, now); len(identity) > 0 {
+		onSuccess.Metadata = identity
+	}
 	return molecule.ClaimExactRequest{ID: candidate.ID, Want: want, OnSuccess: onSuccess}
+}
+
+// hookClaimExactIdentity is the session back-reference and claim timestamp an
+// exact claim of candidate writes: the same keys, under the same rules, as
+// hookClaimIdentityPatch.
+func hookClaimExactIdentity(candidate beads.Bead, env []string, now time.Time) map[string]string {
+	identity := map[string]string{}
+	sessionID := hookClaimSessionID(env)
+	if sessionID != "" && !beadmeta.IsControlKind(strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])) {
+		if strings.TrimSpace(candidate.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID {
+			identity[beadmeta.SessionIDMetadataKey] = sessionID
+		}
+		if sessionName := hookClaimSessionName(env); sessionName != "" &&
+			strings.TrimSpace(candidate.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
+			identity[beadmeta.SessionNameMetadataKey] = sessionName
+		}
+	}
+	if strings.TrimSpace(candidate.Metadata[beadmeta.ClaimedAtMetadataKey]) == "" {
+		identity[beadmeta.ClaimedAtMetadataKey] = now.UTC().Format(time.RFC3339)
+	}
+	return identity
 }
 
 // claimHookCandidate claims one candidate as actor and reports the verdict. A
@@ -96,7 +127,7 @@ func claimHookCandidate(ctx context.Context, candidate beads.Bead, actor string,
 		}
 		return claimed, hookClaimVerdictNone, err
 	}
-	claimed, verdict, err := ops.ClaimExact(ctx, dir, opts.Env, actor, hookClaimExactPlan(candidate, actor, assign, reclaimed))
+	claimed, verdict, err := ops.ClaimExact(ctx, dir, opts.Env, actor, hookClaimExactPlan(candidate, actor, assign, reclaimed, opts.Env, ops.nowOrWallClock()))
 	if err == nil && verdict == hookClaimVerdictRejected {
 		fmt.Fprintf(stderr, "gc hook --claim: exact claim of %s rejected: the bead no longer matches the work query's observation of it\n", candidate.ID) //nolint:errcheck
 	}
