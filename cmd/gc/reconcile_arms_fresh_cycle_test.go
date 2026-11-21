@@ -59,7 +59,8 @@ func TestArmFreshCycle(t *testing.T) {
 // TestFreshCycleDefers (SESS-612): legacy's defer on the previous bead,
 // read in the effect: open, or closed before this incarnation woke, defers;
 // a lookup that failed or expired defers, as a failed read proves nothing
-// (the #7879 review); no previous bead, or one no store holds, cycles.
+// (the #7879 review); no previous bead, or one no store holds, cycles while
+// the anchor's live row is the session's own (#9320), and defers otherwise.
 func TestFreshCycleDefers(t *testing.T) {
 	closed := beads.Bead{ID: "gw-old", Status: "closed", Metadata: map[string]string{"closed_at": censusNow.Add(-time.Hour).Format(time.RFC3339Nano)}}
 	awakeAfter := session.Info{AwakeStartedAt: censusNow.Add(-time.Minute).Format(time.RFC3339Nano)}
@@ -72,13 +73,15 @@ func TestFreshCycleDefers(t *testing.T) {
 		defers bool
 	}{
 		{"the previous bead open", awakeBefore, freshCyclePrev{found: true, bead: beads.Bead{ID: "gw-old", Status: "in_progress"}}, nil, true},
-		{"closed after this incarnation woke", awakeBefore, freshCyclePrev{found: true, bead: closed}, nil, false},
-		{"closed before this incarnation woke", awakeAfter, freshCyclePrev{found: true, bead: closed}, nil, true},
-		{"its wake time unreadable", session.Info{}, freshCyclePrev{found: true, bead: closed}, nil, false},
+		{"closed after this incarnation woke", awakeBefore, freshCyclePrev{found: true, bead: closed, anchorOwned: true}, nil, false},
+		{"closed before this incarnation woke", awakeAfter, freshCyclePrev{found: true, bead: closed, anchorOwned: true}, nil, true},
+		{"its wake time unreadable", session.Info{}, freshCyclePrev{found: true, bead: closed, anchorOwned: true}, nil, false},
 		{"the lookup expired", awakeBefore, freshCyclePrev{}, errProbeExpired, true},
 		{"the lookup failed", awakeBefore, freshCyclePrev{}, errors.New("store unreachable"), true},
-		{"no store holds it", awakeBefore, freshCyclePrev{}, nil, false},
-		{"no previous bead", awakeBefore, freshCyclePrev{none: true}, nil, false},
+		{"no store holds it", awakeBefore, freshCyclePrev{anchorOwned: true}, nil, false},
+		{"no previous bead", awakeBefore, freshCyclePrev{none: true, anchorOwned: true}, nil, false},
+		{"clean previous, anchor not owned", awakeBefore, freshCyclePrev{found: true, bead: closed}, nil, true},
+		{"no previous, anchor not owned", awakeBefore, freshCyclePrev{none: true}, nil, true},
 	} {
 		if got := freshCycleDefers(tc.row, tc.prev, tc.err); got != tc.defers {
 			t.Errorf("%s: freshCycleDefers = %t, want %t", tc.name, got, tc.defers)
