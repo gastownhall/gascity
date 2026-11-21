@@ -1641,6 +1641,7 @@ case "$1" in
         exit 1
         ;;
     list)
+        if [ -f "$sdir/list-sleep" ]; then sleep 30; fi
         if [ -f "$sdir/list-fail-count" ]; then
             n="$(cat "$sdir/list-fail-count")"
             c=0; [ -f "$sdir/list-call-count" ] && c="$(cat "$sdir/list-call-count")"
@@ -2171,6 +2172,94 @@ test_walk_order_and_prefix_selection() {
     rm -rf "$root" "$fbd"
 }
 
+# AC-6: a probe that never produces a definitive JSON array blocks the push
+# with a message naming the token, the route target and the remedies —
+# after exactly POG_READ_ATTEMPTS tries when the failure is retryable
+# (non-zero exit, empty output, timeout), or on the first try when the
+# output is non-array garbage. A missing route-target .beads directory
+# blocks without invoking bd at all. A successful [] probe shows none of
+# this and is never retried.
+test_routed_probe_failure_blocks() {
+    local mode root repo fbd mcstore out rc key attempts
+    while IFS='|' read -r mode attempts; do
+        [[ -n "$mode" ]] || continue
+        root="$(new_routed_mc_root "builder/mc-k2p9x-fix")"
+        repo="$root/gascity"
+        mcstore="$repo/../mc-rig/.beads"
+        fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+        write_routed_fake_bd "$fbd"
+        key="$(routed_store_key "$mcstore")"
+        mkdir -p "$fbd/fake-bd-state/$key"
+        case "$mode" in
+            exit) echo 99 > "$fbd/fake-bd-state/$key/list-fail-count" ;;
+            empty) : > "$fbd/fake-bd-state/$key/probe-raw" ;;
+            garbage) printf 'not json' > "$fbd/fake-bd-state/$key/probe-raw" ;;
+            timeout) echo 30 > "$fbd/fake-bd-state/$key/list-sleep" ;;
+        esac
+        out="$(POG_READ_ATTEMPTS="${attempts}" POG_TIMEOUT_SECONDS=1 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+        if [[ $rc -ne 0 ]] &&
+            grep -qF "BLOCKED — reading routed store $mcstore for branch token mc-k2p9x (prefix mc, from .beads/routes.jsonl) failed after $attempts attempts" <<<"$out" &&
+            grep -qF "ownership of mc-k2p9x cannot be verified" <<<"$out" &&
+            grep -qF -- "--no-verify" <<<"$out" &&
+            [[ "$(routed_store_calls "$fbd" "$mcstore" | grep -c 'cmd=list')" -eq "$attempts" ]]; then
+            record_pass "routed/probe-failure-blocks ($mode: $attempts attempt(s), token/store/remedies named)"
+        else
+            record_fail "routed/probe-failure-blocks ($mode)" "expected block naming token, store and remedies after exactly $attempts probe(s), got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+        fi
+        rm -rf "$root" "$fbd"
+    done <<'CASES'
+exit|3
+empty|3
+garbage|1
+timeout|1
+CASES
+}
+
+# AC-6: a route whose target .beads directory is missing blocks without
+# invoking bd at all — the message names the token, the missing target and
+# the remedies.
+test_routed_missing_store_blocks() {
+    local root repo fbd gone out rc
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    repo="$(new_repo_with_branch_at "$root" "builder/mc-k2p9x-fix")"
+    write_routes "$repo" "ga:." "mc:../mc-rig"
+    # No mc-rig directory at all.
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    gone="$repo/../mc-rig/.beads"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] &&
+        grep -qF "BLOCKED — branch token mc-k2p9x (prefix mc) routes to store directory $gone (from .beads/routes.jsonl) which does not exist" <<<"$out" &&
+        grep -qF -- "--no-verify" <<<"$out" &&
+        [[ -z "$(routed_calls "$fbd")" ]]; then
+        record_pass "routed/missing-store-blocks (no bd call, token/target/remedies named)"
+    else
+        record_fail "routed/missing-store-blocks" "expected block naming the missing target with zero bd calls, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+# AC-6 companion: a successful [] probe shows none of the failure message
+# and is not retried (the allow path, pinned from the other side).
+test_empty_array_probe_never_shows_failure() {
+    local root repo fbd bdstore out rc
+    root="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-root.XXXXXX")"
+    mkdir -p "$root/beads/.beads"
+    repo="$(new_repo_with_branch_at "$root" "fix/bd-show-json")"
+    write_routes "$repo" "ga:." "bd:../beads"
+    bdstore="$repo/../beads/.beads"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && ! grep -qF "BLOCKED" <<<"$out" &&
+        [[ "$(routed_store_calls "$fbd" "$bdstore" | grep -c 'cmd=list')" -eq 1 ]]; then
+        record_pass "routed/empty-array-no-failure-message (one probe, no BLOCKED line)"
+    else
+        record_fail "routed/empty-array-no-failure-message" "expected rc=0 with one probe and no BLOCKED line, got rc=$rc calls: $(routed_calls "$fbd"), output: $out"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2242,6 +2331,9 @@ run_all() {
     test_absent_routed_token_not_retried
     test_token_shapes_probe_whole_id
     test_walk_order_and_prefix_selection
+    test_routed_probe_failure_blocks
+    test_routed_missing_store_blocks
+    test_empty_array_probe_never_shows_failure
 
     echo
     echo "pass=$pass fail=$fail"
