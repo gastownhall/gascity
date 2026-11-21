@@ -30,24 +30,23 @@ type ClaimExactPreconditions struct {
 	ContinuationGroup *string
 }
 
-// ClaimExactOutcome classifies how ClaimExact resolved. It is always paired
-// with a nil error; a non-nil error means the call could not be confirmed as a
-// clean win (unknown bead, store without conditional-write support, an
-// unsupported onSuccess field) and the outcome is "". On error the returned
-// bead is the freshest snapshot this call held: a re-Get after a failed
-// write, or the pre-write Get snapshot. It is the zero Bead only when the
-// reserved-key guard rejected the call before any read, or when the initial
-// Get itself failed — check for that before inspecting it.
+// ClaimExactOutcome classifies how ClaimExact resolved. A non-nil error
+// normally leaves the outcome empty. If the write succeeded and only the
+// canonical readback failed, the outcome is ClaimExactClaimed alongside
+// the error: callers must not try another claim. On error the returned bead
+// is the freshest available snapshot, possibly the pre-write snapshot or
+// zero if the first read never succeeded.
 type ClaimExactOutcome string
 
 const (
 	// ClaimExactClaimed means the preconditions matched and a single
 	// revision-fenced UpdateIfMatch atomically advanced the generation
 	// transition and applied onSuccess together; no other write could have
-	// interleaved between the two.
+	// interleaved between the two. A non-nil error means the write
+	// committed but its canonical readback failed.
 	ClaimExactClaimed ClaimExactOutcome = "claimed"
 	// ClaimExactPreconditionFailed means the bead's current status, assignee, routing,
-	// or workflow root/group identity did not match want. No write was
+	// or workflow root/step/group identity did not match want. No write was
 	// attempted.
 	ClaimExactPreconditionFailed ClaimExactOutcome = "precondition_failed"
 	// ClaimExactStale means the bead's claim generation was not exactly
@@ -70,7 +69,7 @@ const (
 )
 
 // ClaimExact claims the single bead id only when want's fields match the
-// bead's current status/routing/root/group and the bead's current
+// bead's current status/assignee/routing/root/step/group and the bead's current
 // beadmeta.ClaimGenerationMetadataKey equals fromGeneration. On a match it
 // atomically advances the generation key by one AND applies onSuccess
 // (typically execution identity: Assignee, DirectSessionID/SessionName
@@ -142,7 +141,7 @@ func ClaimExactWithWriter(get func(string) (beads.Bead, error), writer beads.Con
 
 	final, err := get(id)
 	if err != nil {
-		return b, "", fmt.Errorf("claim exact %q: re-read after claim: %w", id, err)
+		return b, ClaimExactClaimed, fmt.Errorf("claim exact %q: re-read after claim: %w", id, err)
 	}
 	return final, ClaimExactClaimed, nil
 }

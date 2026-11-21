@@ -637,26 +637,11 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	route.readLeg = base.ReadWorkMeta
 	ops.ClassRoute = route
 
-	// claimWorkFirst is the work-first escalation every claim seam runs: the
-	// work-scope attempt is the first leg, marked federated because a not-found
-	// from it is the signal to probe the binding, and the call moves to the
-	// binding only on a proven absence.
-	//
-	// ONE marked site serves the generic claim and the exact claim on purpose,
-	// rather than one mark each: they are the same leg of the same fan-out and
-	// differ only in which work-store primitive performs the attempt, so a mark
-	// per spelling would record one federation leg twice (D9 freezes the marker
-	// count). attempt and onBinding are closures so a caller can keep its own
-	// primitive's arguments, and the binding half runs only after route.routes
-	// has proved the work leg absent.
+	// Both work-scope claim primitives use the bd subprocess, so neither
+	// declares an in-process read leg. Test doubles that read a store declare
+	// their own. Escalate to the binding only after proving work-scope absence.
 	claimWorkFirst := func(ctx context.Context, dir string, env []string, beadID, assignee string, attempt, onBinding func() (beads.Bead, bool, error)) (beads.Bead, bool, error) {
-		var claimed beads.Bead
-		var ok bool
-		err := beads.FederatedRead(func() error {
-			var attemptErr error
-			claimed, ok, attemptErr = attempt()
-			return attemptErr
-		})
+		claimed, ok, err := attempt()
 		if ok {
 			// The work store's CAS COMMITTED. Its error, if any, is the
 			// canonical readback failing on a bead this session now owns HERE —
@@ -687,7 +672,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	}
 
 	// The exact claim is a claim, so it escalates on the same terms as ops.Claim
-	// through the same marked leg. Without it a graph step resident in a
+	// through the same work-scope leg. Without it a graph step resident in a
 	// relocated binding that is not yet memoized resident was answered
 	// ErrNotFound by the work store and never reached the binding the reader
 	// served it from.
@@ -708,7 +693,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return write()
 		}
 		// First leg of the escalation; a not-found sends the write to the binding.
-		err := beads.FederatedRead(func() error { return base.StampWorkMeta(ctx, dir, env, beadID, assignee, patch) })
+		err := base.StampWorkMeta(ctx, dir, env, beadID, assignee, patch)
 		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
@@ -725,12 +710,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.graph.Get(beadID)
 		}
 		// First leg of the escalation; a not-found sends the read to the binding.
-		var bead beads.Bead
-		err := beads.FederatedRead(func() error {
-			var readErr error
-			bead, readErr = base.ReadWorkMeta(ctx, dir, env, beadID, assignee)
-			return readErr
-		})
+		bead, err := base.ReadWorkMeta(ctx, dir, env, beadID, assignee)
 		routed, probeErr := route.routesRead(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
@@ -762,12 +742,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.listContinuation(rootID, group)
 		}
 		// First leg; an EMPTY answer sends the query to the binding.
-		var siblings []beads.Bead
-		err := beads.FederatedRead(func() error {
-			var listErr error
-			siblings, listErr = base.ListContinuation(ctx, dir, env, rootID, group)
-			return listErr
-		})
+		siblings, err := base.ListContinuation(ctx, dir, env, rootID, group)
 		if err != nil || len(siblings) > 0 {
 			return siblings, err
 		}
@@ -788,7 +763,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return write()
 		}
 		// First leg of the escalation; a not-found sends the write to the binding.
-		err := beads.FederatedRead(func() error { return base.AssignContinuation(ctx, dir, env, beadID, assignee) })
+		err := base.AssignContinuation(ctx, dir, env, beadID, assignee)
 		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:

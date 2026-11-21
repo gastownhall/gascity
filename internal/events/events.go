@@ -357,10 +357,20 @@ const (
 	// stop parked its session; pendingwatch.RebuildSince says when.
 	SessionPending        = "session.pending"
 	SessionPendingCleared = "session.pending_cleared"
-	ConvoyCreated         = "convoy.created"
-	ConvoyClosed          = "convoy.closed"
-	ControllerStarted     = "controller.started"
-	ControllerStopped     = "controller.stopped"
+	// SessionCreated fires when a session joins the city's set of open
+	// sessions (a session bead created open, or a closed one reopened) and
+	// SessionClosed when one leaves it (its session bead closed), so a client
+	// tracks the session list from the stream instead of polling. The
+	// controller derives each from the ledger's session-bead notifications,
+	// once per transition (session.ListTransitions); the envelope's Subject
+	// and SessionID are the session bead.
+	SessionCreated = "session.created"
+	SessionClosed  = "session.closed"
+
+	ConvoyCreated     = "convoy.created"
+	ConvoyClosed      = "convoy.closed"
+	ControllerStarted = "controller.started"
+	ControllerStopped = "controller.stopped"
 	// ControlStalled fires once per disposition whose bounded retry budget
 	// expires: a semantic refusal the control dispatcher then QUARANTINES
 	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
@@ -568,6 +578,15 @@ const (
 	// payload's "alert" names it (cmd/gc reconcile_observe_v2.go).
 	ReconcilerAlert = "reconciler.alert"
 
+	// SessionStartupHealthAlert fires once per startup-health episode, when a
+	// session's consecutive cold-start failures cross the quarantine
+	// threshold. session.cold_start_timeout is emitted per attempt and is a
+	// raw datapoint; this is the escalation, carrying the consecutive count,
+	// the failure kind and how long starts are held back. AlertDisposition on
+	// the episode latches it to one alert per episode; a successful start
+	// clears the episode so the next one alerts independently (sr-xf2xj).
+	SessionStartupHealthAlert = "session.startup_health_alert"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
@@ -680,6 +699,15 @@ func IsJournalDerived(eventType string) bool {
 	return eventType == OpChanged || eventType == FactRecorded
 }
 
+// IsSessionListDerived reports whether eventType is one the controller
+// derives from session beads' bead.* notifications (session.created,
+// session.closed). No writer may author one: a client applies it to the
+// session list it read, and only the session bead can say whether the session
+// is open.
+func IsSessionListDerived(eventType string) bool {
+	return eventType == SessionCreated || eventType == SessionClosed
+}
+
 // KnownEventTypes lists every event-type constant this package defines.
 // The SSE projection uses this set (via a test) to verify that every
 // event type has a registered payload — a missing registration is a
@@ -705,6 +733,7 @@ var KnownEventTypes = []string{
 	SessionColdStartTimeout,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
+	SessionCreated, SessionClosed,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
@@ -751,9 +780,10 @@ var KnownEventTypes = []string{
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured, StorageBindingStranded,
 	StorageRigImport, StorageRigResidue,
-	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
-	// from KnownEventTypes. Each is emitted by the reconciler but its typed
-	// SSE payload is not yet registered in internal/api (the payload registration lives in a
+	// ProviderHealthGateAlert, ReconcilerAlert and SessionStartupHealthAlert
+	// are intentionally omitted from KnownEventTypes. Each is emitted by the
+	// reconciler but its typed SSE payload is not yet registered in
+	// internal/api (the payload registration lives in a
 	// follow-up that adds the full SSE projection). Until then, subscribers
 	// receive it via the custom-event envelope.
 }

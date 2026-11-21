@@ -899,6 +899,40 @@ func TestClassRoutedClaimExactEscalatesOnlyOnNotFound(t *testing.T) {
 		}
 	})
 
+	t.Run("the work claim committed before readback failed", func(t *testing.T) {
+		route, class, step := setup(t, "gcg-302")
+		work := beads.NewMemStore()
+		work.HonorExplicitIDs = true
+		candidate, err := work.Create(beads.Bead{ID: step.ID, Title: "work step", Type: "task", Status: "open", Metadata: metadata})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reads := 0
+		ops := classRoutedHookClaimOps(hookClaimOps{
+			ClaimExact: func(_ context.Context, _ string, _ []string, b beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
+				return hookClaimExactThroughStore(func(id string) (beads.Bead, error) {
+					reads++
+					if reads == 2 {
+						return beads.Bead{}, beads.ErrNotFound
+					}
+					return work.Get(id)
+				}, work, b, assignee, sessionID)
+			},
+		}, route)
+		_, ok, err := ops.ClaimExact(context.Background(), "/work", nil, candidate, "worker-1", "session-1")
+		workRow, workErr := work.Get(step.ID)
+		bindingRow, bindingErr := class.Get(step.ID)
+		if workErr != nil || workRow.Assignee != "worker-1" || workRow.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" {
+			t.Fatalf("work claim did not commit: %+v, %v", workRow, workErr)
+		}
+		if !ok || !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("committed exact claim = (ok=%v, err=%v), want committed with readback error", ok, err)
+		}
+		if bindingErr != nil || bindingRow.Assignee != "" || bindingRow.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" {
+			t.Errorf("binding changed after a committed work claim: %+v, %v", bindingRow, bindingErr)
+		}
+	})
+
 	t.Run("the work store answered before writing", func(t *testing.T) {
 		route, class, step := setup(t, "gcg-301")
 		candidate := beads.Bead{ID: step.ID, Status: "open", Metadata: metadata}

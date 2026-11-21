@@ -357,7 +357,7 @@ export const getV0CityByCityNameEvents = <ThrowOnError extends boolean = false>(
 /**
  * Emit an event
  *
- * Appends a caller-authored event to the city's event log. op.changed and fact.recorded, which the controller derives from operation-journal rows, are refused 422.
+ * Appends a caller-authored event to the city's event log. op.changed and fact.recorded, which the controller derives from operation-journal rows, and session.created and session.closed, which it derives from session beads, are refused 422.
  */
 export const emitEvent = <ThrowOnError extends boolean = false>(options: Options<EmitEventData, ThrowOnError>) => (options.client ?? client).post<EmitEventResponses, EmitEventErrors, ThrowOnError>({
     url: '/v0/city/{cityName}/events',

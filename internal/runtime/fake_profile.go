@@ -148,7 +148,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed, sharedListingTrait{}}
 	case ProfileExec, ProfileExecV2:
-		return execProfile{core, b, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}, execHostFSTrait{}}
+		return execProfile{core, b, b, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}, execHostFSTrait{}}
 	case ProfileSSH:
 		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
@@ -198,6 +198,11 @@ func (execHostFSTrait) CanScanProcessTable() bool { return false }
 // FindRuntimesBySessionID finds nothing, as exec's scanner does for a pack
 // that cannot scan.
 func (execHostFSTrait) FindRuntimesBySessionID(string) ([]LiveRuntime, error) { return nil, nil }
+
+// FencesTmuxSubtrees is the profiled pack's answer: it declares proc.exec
+// without carrier.ops, so its agent runs in its box's tmux and its scan
+// would not fence. It cannot scan, so no composite reads the answer.
+func (execHostFSTrait) FencesTmuxSubtrees() bool { return false }
 
 // TerminateRuntime refuses, as exec's scanner does for a pack that cannot
 // scan.
@@ -331,6 +336,7 @@ type (
 		IdleWaitProvider
 		RelaunchProvider
 		ServerLifecycleProvider
+		StartupNudgeHandbackProvider
 		sleepTrait
 		probeBudgetTrait
 		execObserveTrait

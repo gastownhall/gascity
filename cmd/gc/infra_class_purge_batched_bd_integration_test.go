@@ -4,6 +4,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -15,21 +17,16 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // purgeReservedPorts are ports a test must never bind or reach.
 var purgeReservedPorts = map[int]bool{3307: true, 45865: true, 8123: true}
 
-// startPurgeDoltServer starts a throwaway dolt sql-server on a free port
-// outside purgeReservedPorts and returns the port. Cleanup stops it by the
-// process it started, never by name.
-func startPurgeDoltServer(t *testing.T) int {
-	t.Helper()
-	doltBin, err := exec.LookPath("dolt")
-	if err != nil {
-		t.Skip("dolt not found")
-	}
-	port := 0
+// pickPurgeDoltPort probes a free port outside purgeReservedPorts. The probe
+// closes the port again, so dolttest.StartSQLServer retries on a fresh pick when
+// something takes it before dolt binds.
+func pickPurgeDoltPort() (int, error) {
 	for range 50 {
 		candidate := 20000 + rand.IntN(40000)
 		if purgeReservedPorts[candidate] {
@@ -40,25 +37,37 @@ func startPurgeDoltServer(t *testing.T) int {
 			continue
 		}
 		if err := lis.Close(); err != nil {
-			t.Fatal(err)
+			return 0, fmt.Errorf("release probed port %d: %w", candidate, err)
 		}
-		port = candidate
-		break
+		return candidate, nil
 	}
-	if port == 0 {
-		t.Fatal("no free port outside the reserved ones")
+	return 0, errors.New("no free port outside the reserved ones")
+}
+
+// startPurgeDoltServer starts a throwaway dolt sql-server on a free port
+// outside purgeReservedPorts and returns the port. dolttest.StartSQLServer
+// retries a probed port that is lost before dolt binds it. Cleanup stops it by
+// the process it started, never by name.
+func startPurgeDoltServer(t *testing.T) int {
+	t.Helper()
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skip("dolt not found")
 	}
 	dataDir := t.TempDir()
-	cmd := exec.Command(doltBin, "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir)
-	cmd.Env = append(os.Environ(), "DOLT_ROOT_PATH="+dataDir)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("starting dolt sql-server: %v", err)
-	}
-	pid := cmd.Process.Pid
-	t.Logf("dolt sql-server pid %d on port %d", pid, port)
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltBin,
+		Args: func(port int) []string {
+			return []string{"sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir}
+		},
+		Env:      append(os.Environ(), "DOLT_ROOT_PATH="+dataDir),
+		PickPort: pickPurgeDoltPort,
+	})
+	port := srv.Port
+	t.Logf("dolt sql-server pid %d on port %d", srv.PID, port)
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill() // the recorded process, pid
-		_, _ = cmd.Process.Wait()
+		_ = srv.Process.Kill() // the recorded process, pid
+		<-srv.Exited
 	})
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -68,7 +77,7 @@ func startPurgeDoltServer(t *testing.T) int {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("dolt sql-server pid %d never listened on %d", pid, port)
+			t.Fatalf("dolt sql-server pid %d never listened on %d", srv.PID, port)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

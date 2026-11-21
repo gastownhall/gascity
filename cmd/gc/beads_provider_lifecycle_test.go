@@ -29,18 +29,7 @@ import (
 
 func freeLoopbackPort(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	defer func() {
-		_ = listener.Close()
-	}()
-	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("listener addr = %T, want *net.TCPAddr", listener.Addr())
-	}
-	return strconv.Itoa(addr.Port)
+	return strconv.Itoa(reserveRandomTCPPort(t))
 }
 
 func setScopedBeadsProviderForTest(t *testing.T, scopeRoot, provider string) {
@@ -8490,6 +8479,14 @@ esac
 //   - probe-init-lock: when init writes the issue_prefix config row, after
 //     its migration step, the dolt stub tries to take the init lock
 //     exclusively and creates init-lock-free or init-lock-held.
+//   - database-absent: the server does not have "hq" until init's CREATE
+//     DATABASE (the dolt stub then creates database-created), and the
+//     database holds none of bd's tables and no migration history, so this
+//     init is the one that created it. Without it the database is already
+//     there, as for every database an earlier init or another client made.
+//   - tables-present: with database-absent, the database the CREATE found
+//     already holds bd's tables: a database that was on the server all along
+//     but read as absent (a USE that failed for a transient reason).
 func gcBeadsBdHealTestStubs(t *testing.T, binDir, sqlLog, bdLog string, issueRows int) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
@@ -8546,6 +8543,22 @@ done
 printf '%%s\n' "$query" >> %q
 table() { printf '+---+\n| c |\n+---+\n| %%s |\n+---+\n' "$1"; }
 case "$query" in
+  'USE `+"`hq`"+`')
+    if [ -f "$dir/database-absent" ] && [ ! -f "$dir/database-created" ]; then
+      echo "error on line 1 for query USE hq: Error 1049 (HY000): database not found: hq" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  'CREATE DATABASE IF NOT EXISTS `+"`hq`"+`')
+    : > "$dir/database-created"
+    exit 0
+    ;;
+  *"FROM information_schema.tables WHERE table_schema = 'hq'"*)
+    if [ ! -f "$dir/database-absent" ]; then exit 0; fi
+    if [ -f "$dir/tables-present" ]; then printf 'cnt\n4\n'; else printf 'cnt\n0\n'; fi
+    exit 0
+    ;;
   'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
     if [ -f "$dir/init-done" ]; then exit 0; fi
     echo "error on line 1 for query SELECT 1 FROM config LIMIT 1: Error 1146 (HY000): table not found: config" >&2
@@ -8876,14 +8889,16 @@ func TestGcBeadsBdInitNeverHandsItsInitLockToBd(t *testing.T) {
 }
 
 // TestGcBeadsBdInitNamesAnUnopenableInitLock pins what init does when it
-// cannot open its database's init lock file, which every init takes where
-// flock is installed, the ready path included: it fails naming the lock file
-// and GC_DOLT_INIT_LOCK_DIR before running bd, instead of dying on the
-// shell's bare redirection error. In the field that is a lock directory or
-// file another OS user (or a sudo run) left behind, which the mode rows
-// reproduce; the other two rows fail the open for any user, root included,
-// so the guard is exercised whoever runs the test. The open fails before
-// flock is ever run, so a stub stands in for it.
+// cannot open its database's init lock file, which every init that migrates
+// takes where flock is installed, the ready path's migration step included:
+// it fails naming the lock file and GC_DOLT_INIT_LOCK_DIR before running bd,
+// instead of dying on the shell's bare redirection error. In the field that
+// is a lock directory or file another OS user (or a sudo run) left behind,
+// which the mode rows reproduce; the other two rows fail the open for any
+// user, root included, so the guard is exercised whoever runs the test. The
+// open fails before flock is ever run, so a stub stands in for it. Each row
+// creates the database in this init and finds a schema in it, so the ready
+// path's migration step runs and takes the lock.
 func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -8924,7 +8939,7 @@ func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 			if tc.modeBased && os.Geteuid() == 0 {
 				t.Skip("root bypasses file modes")
 			}
-			h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done")
+			h := newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done")
 			writeExecutable(t, filepath.Join(h.binDir, "flock"), "#!/bin/sh\nexit 0\n")
 			lockDir := tc.lockDir(t, t.TempDir())
 
@@ -8943,9 +8958,11 @@ func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 // TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser pins where init's lock
 // lives when GC_DOLT_INIT_LOCK_DIR is unset: in a directory of this OS user's
 // own under $TMPDIR, so a lock directory or file another user (or a sudo run)
-// created under the same $TMPDIR never stops this user's init.
+// created under the same $TMPDIR never stops this user's init. The init
+// creates the database and finds a schema in it, so its migration step takes
+// the lock.
 func TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser(t *testing.T) {
-	h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done")
+	h := newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done")
 	writeExecutable(t, filepath.Join(h.binDir, "flock"), "#!/bin/sh\nexit 0\n")
 	tmp := t.TempDir()
 
@@ -8965,7 +8982,8 @@ func TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser(t *testing.T) {
 // pending migrations, or to migrate a clone whose remote is already migrated
 // or has forked) are reported and init carries on; any other failure fails
 // init with bd's message, even one that happens to mention a remote and a
-// migration.
+// migration. Each row creates the database in this init, so the ready path
+// is bootstrapping it and runs the step.
 func TestGcBeadsBdInitWarnsOnlyOnBdsRemoteMigrateRefusal(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -8987,7 +9005,7 @@ func TestGcBeadsBdInitWarnsOnlyOnBdsRemoteMigrateRefusal(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done", tc.marker)
+			h := newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done", tc.marker)
 
 			out, err := h.runInit(t)
 			if (err != nil) != tc.wantErr {
@@ -9007,9 +9025,10 @@ func TestGcBeadsBdInitWarnsOnlyOnBdsRemoteMigrateRefusal(t *testing.T) {
 // verb is also bd's consent to promote the schema of a database on a shared
 // server, which can lock out an older bd that uses the same database
 // (gastownhall/beads#5920), so what bd reports it applied reaches init's
-// output.
+// output. The init creates the database, so it is bootstrapping it and runs
+// the step.
 func TestGcBeadsBdInitReportsWhatBdMigrateSchemaApplied(t *testing.T) {
-	h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done", "migrate-applies")
+	h := newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done", "migrate-applies")
 
 	out, err := h.runInit(t)
 	if err != nil {
@@ -9088,37 +9107,55 @@ func TestGcBeadsBdInitRunsMigrateSchemaOnlyOnABdThatHasIt(t *testing.T) {
 // version witness: a re-cloned rig, or a second scope directory pointed at
 // a shared server. bd's plain init refuses that database ("already
 // initialized") and bd's server-branch guard refuses any bd command on a
-// witness-less server-mode scope, so the script must stamp the witness first,
-// then finish pending migrations and adopt, and never run bd init. The dolt
-// stub answers every probe as "schema present, schema_migrations present,
-// clean working set".
+// witness-less server-mode scope, so the script must stamp the witness and
+// adopt, and never run bd init. It migrates the database only when this init
+// is bootstrapping it, here because this init created it (a concurrent
+// initializer wrote its schema since), and then only after the witness is in
+// place: a database that was already on the server keeps its schema, because
+// migrating it is an operator's consent to give, not gc's. The dolt stub answers every probe as "schema present,
+// schema_migrations present, clean working set".
 func TestGcBeadsBdInitAdoptsAnExistingSchemaFromAFreshScope(t *testing.T) {
-	cityPath := t.TempDir()
-	for _, d := range []string{".gc", ".beads"} {
-		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Canonical server-mode metadata but NO .local_version witness: the
-	// shape gc leaves after normalizing a re-cloned rig (and what the
-	// fresh-scope path produces before its own adopt decision). No gc
-	// helper is on PATH here, so the metadata is written up front.
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
-		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	materializeBuiltinPacksForTest(t, cityPath)
-	script := gcBeadsBdScriptPath(cityPath)
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
-	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
-	// The stub behaves like bd's server-branch legacy guard: any command
-	// other than `bd version` on a server-mode scope with no .local_version
-	// witness is refused. That is what makes the witness ordering testable.
-	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+	for _, tc := range []struct {
+		name        string
+		created     bool
+		wantMigrate bool
+	}{
+		{"database already on the server", false, false},
+		{"database this init created", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			for _, d := range []string{".gc", ".beads"} {
+				if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Canonical server-mode metadata but NO .local_version witness: the
+			// shape gc leaves after normalizing a re-cloned rig (and what the
+			// fresh-scope path produces before its own adopt decision). No gc
+			// helper is on PATH here, so the metadata is written up front.
+			if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+				[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			materializeBuiltinPacksForTest(t, cityPath)
+			script := gcBeadsBdScriptPath(cityPath)
+			binDir := filepath.Join(t.TempDir(), "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+			markers := t.TempDir()
+			if tc.created {
+				if err := os.WriteFile(filepath.Join(markers, "database-absent"), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bdLog := filepath.Join(t.TempDir(), "bd-args.log")
+			// The stub behaves like bd's server-branch legacy guard: any command
+			// other than `bd version` on a server-mode scope with no .local_version
+			// witness is refused. That is what makes the witness ordering testable.
+			writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
 set -eu
 printf '%%s\n' "$*" >> %q
 case "${1:-}" in
@@ -9130,8 +9167,12 @@ if [ ! -f "${BEADS_DIR:?}/.local_version" ]; then
 fi
 exit 0
 `, bdLog))
-	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+			// Without the database-absent marker the server already has "hq";
+			// with it, "hq" appears only once init's CREATE DATABASE runs, and
+			// holds none of bd's tables at that moment.
+			writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/bin/sh
 set -eu
+dir=%q
 query=""
 prev=""
 for arg in "$@"; do
@@ -9142,6 +9183,21 @@ for arg in "$@"; do
   prev="$arg"
 done
 case "$query" in
+  'USE `+"`hq`"+`')
+    if [ -f "$dir/database-absent" ] && [ ! -f "$dir/database-created" ]; then
+      echo "error on line 1 for query USE hq: Error 1049 (HY000): database not found: hq" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  'CREATE DATABASE IF NOT EXISTS `+"`hq`"+`')
+    : > "$dir/database-created"
+    exit 0
+    ;;
+  *"FROM information_schema.tables WHERE table_schema = 'hq'"*)
+    if [ -f "$dir/database-absent" ]; then printf 'cnt\n0\n'; fi
+    exit 0
+    ;;
   *'SELECT COUNT(*) FROM dolt_status'*)
     printf '+---+\n| c |\n+---+\n| 0 |\n+---+\n'
     exit 0
@@ -9150,31 +9206,33 @@ case "$query" in
     exit 0
     ;;
 esac
-`)
+`, markers))
 
-	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
-	if err != nil {
-		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
-	}
-	args, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("bd never ran: %v", err)
-	}
-	if strings.Contains(string(args), "init ") {
-		t.Fatalf("a fresh scope over an already-initialized database must adopt it, not run bd init (bd refuses that as \"already initialized\"); bd was invoked with:\n%s", args)
-	}
-	if !strings.Contains(string(args), "migrate schema") {
-		t.Fatalf("adopting an existing schema must finish its pending migrations; bd was invoked with:\n%s", args)
-	}
-	meta, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
-	if err != nil {
-		t.Fatalf("canonical metadata must be written on adopt: %v", err)
-	}
-	if !strings.Contains(string(meta), `"dolt_mode"`) || !strings.Contains(string(meta), `"server"`) {
-		t.Fatalf("metadata is not canonical server-mode:\n%s", meta)
-	}
-	if _, err := os.Stat(filepath.Join(cityPath, ".beads", ".local_version")); err != nil {
-		t.Fatalf("adopting a current-era schema must stamp the version witness, or bd's server-branch guard refuses the scope: %v", err)
+			out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+			if err != nil {
+				t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+			}
+			args, err := os.ReadFile(bdLog)
+			if err != nil {
+				t.Fatalf("bd never ran: %v", err)
+			}
+			if strings.Contains(string(args), "init ") {
+				t.Fatalf("a fresh scope over an already-initialized database must adopt it, not run bd init (bd refuses that as \"already initialized\"); bd was invoked with:\n%s", args)
+			}
+			if migrated := strings.Contains(string(args), "migrate"); migrated != tc.wantMigrate {
+				t.Fatalf("bd migrate ran = %v, want %v (gc migrates only a database this init created); bd was invoked with:\n%s\noutput:\n%s", migrated, tc.wantMigrate, args, out)
+			}
+			meta, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+			if err != nil {
+				t.Fatalf("canonical metadata must be written on adopt: %v", err)
+			}
+			if !strings.Contains(string(meta), `"dolt_mode"`) || !strings.Contains(string(meta), `"server"`) {
+				t.Fatalf("metadata is not canonical server-mode:\n%s", meta)
+			}
+			if _, err := os.Stat(filepath.Join(cityPath, ".beads", ".local_version")); err != nil {
+				t.Fatalf("adopting a current-era schema must stamp the version witness, or bd's server-branch guard refuses the scope: %v", err)
+			}
+		})
 	}
 }
 
@@ -9228,8 +9286,15 @@ func TestGcBeadsBdInitDoltliteInitializesDelegatedBdWrites(t *testing.T) {
 		"BD_NON_INTERACTIVE=1",
 		"PATH="+os.Getenv("PATH"),
 	)...)
-	created, err := create.CombinedOutput()
+	// Output, not CombinedOutput: bd logs diagnostics to stderr behind a bare
+	// timestamp, and merged ahead of the JSON document it breaks the parse
+	// below. stderr stays reachable on the failure path via *exec.ExitError.
+	created, err := create.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			t.Fatalf("bd create after doltlite init failed: %v\nstdout:\n%s\nstderr:\n%s", err, created, exitErr.Stderr)
+		}
 		t.Fatalf("bd create after doltlite init failed: %v\n%s", err, created)
 	}
 	var createdIssue struct {

@@ -286,7 +286,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Method:        http.MethodPost,
 		Path:          "/events",
 		Summary:       "Emit an event",
-		Description:   "Appends a caller-authored event to the city's event log. op.changed and fact.recorded, which the controller derives from operation-journal rows, are refused 422.",
+		Description:   "Appends a caller-authored event to the city's event log. op.changed and fact.recorded, which the controller derives from operation-journal rows, and session.created and session.closed, which it derives from session beads, are refused 422.",
 		DefaultStatus: http.StatusCreated,
 		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
 		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},

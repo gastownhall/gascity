@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/execenv"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -491,9 +492,9 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
 	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+2)
 	cityStore := s.state.CityBeadStore()
-	if graphStore := relocatedGraphStore(s.state); graphStore != nil {
+	if graph, ok := relocatedGraphStore(s.state); ok {
 		stores = append(stores, sling.SourceWorkflowStore{
-			Store:    graphStore,
+			Store:    graph,
 			StoreRef: sourceworkflow.GraphStoreRef(s.state.CityName()),
 			Strict:   true,
 		})
@@ -523,9 +524,15 @@ func (s *Server) slingRunner() sling.SlingRunner {
 		return s.SlingRunnerFunc
 	}
 	return func(dir, command string, env map[string]string) (string, error) {
+		if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+			return "", fmt.Errorf("sling query refused: %s", reason)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "sh", "-c", command)
+		cmd, err := runtime.ShellCommandContext(ctx, command)
+		if err != nil {
+			return "", fmt.Errorf("running %q: %w", command, err)
+		}
 		if dir != "" {
 			cmd.Dir = dir
 		}
@@ -654,6 +661,9 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			runner := r.server.slingRunner()
 			if runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
+			}
+			if err := sling.CheckSlingQueryBeadID(req.BeadID); err != nil {
+				return err
 			}
 			slingCmd, slingWarn := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.server.state.CityPath(), r.server.state.CityName(), agentCfg, cfg.Rigs)
 			if slingWarn != "" {

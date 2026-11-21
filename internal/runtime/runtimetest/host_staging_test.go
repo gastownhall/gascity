@@ -24,12 +24,17 @@ type hostStagingFake struct {
 	setupFatal       bool // fails the start on a failing session_setup
 	skipSetup        bool // runs no session_setup
 	runsLive         bool // runs session_live
+	intoLiveSession  bool // does host work into a name a live session holds
+	relaunchNoSetup  bool // runs no session_setup on a relaunch
 
 	mu       sync.Mutex
 	received map[string][]string
 }
 
 func (f *hostStagingFake) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if f.IsRunning(name) && !f.intoLiveSession {
+		return f.Fake.Start(ctx, name, cfg)
+	}
 	if !f.skipStaging {
 		staged := cfg
 		if f.providerBlind {
@@ -59,15 +64,33 @@ func (f *hostStagingFake) Start(ctx context.Context, name string, cfg runtime.Co
 		return err
 	}
 	if !f.skipSetup {
-		for _, cmd := range cfg.SessionSetup {
-			if err := runFakeSetup(cmd); err != nil && f.setupFatal {
-				return fmt.Errorf("session_setup: %w", err)
-			}
+		if err := f.runSessionSetup(cfg); err != nil {
+			return err
 		}
 	}
 	if f.runsLive {
 		for _, cmd := range cfg.SessionLive {
 			_ = runFakeSetup(cmd)
+		}
+	}
+	return nil
+}
+
+// Relaunch relaunches the session and runs its session_setup again.
+func (f *hostStagingFake) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := f.Fake.Relaunch(ctx, name, cfg); err != nil {
+		return err
+	}
+	if f.relaunchNoSetup {
+		return nil
+	}
+	return f.runSessionSetup(cfg)
+}
+
+func (f *hostStagingFake) runSessionSetup(cfg runtime.Config) error {
+	for _, cmd := range cfg.SessionSetup {
+		if err := runFakeSetup(cmd); err != nil && f.setupFatal {
+			return fmt.Errorf("session_setup: %w", err)
 		}
 	}
 	return nil
@@ -125,6 +148,8 @@ func TestHostStagingChecksCatchEachViolation(t *testing.T) {
 		{"fails the start on session_setup", func(f *hostStagingFake) { f.setupFatal = true }, checkHostStagingSessionSetup},
 		{"runs no session_setup", func(f *hostStagingFake) { f.skipSetup = true }, checkHostStagingSessionSetup},
 		{"runs session_live", func(f *hostStagingFake) { f.runsLive = true }, checkHostStagingNoSessionLive},
+		{"does host work into a live session's name", func(f *hostStagingFake) { f.intoLiveSession = true }, checkHostStagingNotIntoALiveSession},
+		{"runs no session_setup on a relaunch", func(f *hostStagingFake) { f.relaunchNoSetup = true }, checkHostStagingRelaunchSetup},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -58,27 +57,15 @@ var pingNudgeWakeSocket = func(cityPath string) {
 // back to patrol-interval dispatching.
 func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- struct{}, stderr io.Writer, logPrefix string) (net.Listener, error) {
 	path := nudgequeue.WakeSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("creating nudge wake dir: %w", err)
-	}
-	// A stale socket from a prior supervisor crash blocks Listen with
-	// "address already in use". Removing it is safe because flock-based
-	// queue access protects state; the socket carries no data of its own.
-	_ = os.Remove(path)
-	lis, err := net.Listen("unix", path)
+	// The wake socket carries a single signal byte with no payload and no
+	// authentication, so reaching it is itself the capability: a co-local
+	// user who could connect would be able to force dispatch ticks. Asking
+	// for owner-only protection narrows the socket on Unix and, on Windows,
+	// makes the runtime directory it is bound in owner-only instead, because
+	// mode bits are not an access boundary there.
+	lis, err := localsocket.Listen(path, localsocket.Options{DirMode: 0o755, SocketMode: 0o600})
 	if err != nil {
 		return nil, fmt.Errorf("listening on nudge wake socket: %w", err)
-	}
-	// TOCTOU: there is a narrow window between Listen and Chmod where
-	// the socket exists at the umask-default permissions and a co-local
-	// user could connect. Worst case is a spurious dispatch tick — the
-	// socket carries a single signal byte with no payload or auth — so
-	// this is acceptable for now. A future hardening pass could set
-	// umask before Listen, or use platform-specific abstract namespace
-	// sockets where supported.
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = lis.Close()
-		return nil, fmt.Errorf("chmod nudge wake socket: %w", err)
 	}
 	go func() {
 		<-ctx.Done()
@@ -248,7 +235,7 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		// busy target judges with the snapshot census too, so holding a busy
 		// session back reads no store (nudgeTarget.starvationCensus).
 		ok := false
-		if nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, time.Now()) {
+		if nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, nudgeLaunchReader(target, sp), time.Now()) {
 			target.starvationCensus = snapshotCensus
 			ok, err = tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
 		}
@@ -310,11 +297,13 @@ func nudgeFenceCensusFromSnapshot(snapshot *sessionBeadSnapshot) func() (map[str
 
 // nudgeTargetMayClaimPerSnapshot reports whether a claim for target, judged
 // with the pass's snapshot census, would claim anything: a lock-free dry run
-// (WouldClaimBatch) that reads no store. A dry run that fails answers yes, so
-// the authoritative claim decides.
-func nudgeTargetMayClaimPerSnapshot(queue nudgeQueueHandle, target nudgeTarget, snapshotCensus func() (map[string]struct{}, bool), now time.Time) bool {
+// (WouldClaimBatch) that reads no store. Its startup turns are judged with
+// launch, read only when one is due, and a claim that would only drop a stale
+// turn answers yes, so the pass that drops it runs. A dry run that fails
+// answers yes, so the authoritative claim decides.
+func nudgeTargetMayClaimPerSnapshot(queue nudgeQueueHandle, target nudgeTarget, snapshotCensus func() (map[string]struct{}, bool), launch func() (string, bool), now time.Time) bool {
 	target.fenceCensus = snapshotCensus
-	would, err := queue.Probe.WouldClaimBatch(target.claimTarget(target.cityPath), now)
+	would, err := queue.Probe.WouldClaimBatch(target.claimTarget(target.cityPath, launch), now)
 	return err != nil || would
 }
 

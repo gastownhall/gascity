@@ -32,8 +32,10 @@ func TestSourceWorkflowStoresLeadsWithRelocatedGraphStore(t *testing.T) {
 	if len(stores) != 4 {
 		t.Fatalf("sourceWorkflowStores() returned %d entries, want graph + city + the BeadStores legs (the city's E4 duplicate and the rig)", len(stores))
 	}
-	if stores[0].Store != graph {
-		t.Fatalf("stores[0].Store = %p, want the relocated graph store %p (graph-first)", stores[0].Store, graph)
+	// The leg is the graph class handle over the binding (T7c), so it is
+	// matched by physical identity, never ==.
+	if !beads.SameStore(stores[0].Store, graph) {
+		t.Fatalf("stores[0].Store = %v, want the relocated graph store %p (graph-first)", stores[0].Store, graph)
 	}
 	if stores[0].StoreRef != sourceworkflow.GraphStoreRef("bright-lights") {
 		t.Fatalf("stores[0].StoreRef = %q, want %q", stores[0].StoreRef, sourceworkflow.GraphStoreRef("bright-lights"))
