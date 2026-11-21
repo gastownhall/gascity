@@ -268,8 +268,9 @@ func TestCompletionBackstopStaleStampHealsByDeltaPassOrOperatorClear(t *testing.
 // closed (workflow re-drive/retry). Neither the stamp branch (needs !stamped)
 // nor the OLD clear branch (no root.Status term) fired for that shape, and the
 // cadence filter skipped the still-stamped root outright — so the stamp survived
-// for the rest of the process lifetime AND across reboots. Both the cadence
-// sweep and the startup sweep must revisit the reopened root and clear its stamp.
+// for the rest of the process lifetime AND across reboots. Every sweep —
+// whatever label the lane gave it — must revisit the reopened root and clear
+// its stamp.
 func TestCompletionBackstopClearsStampWhenStampedRootReopens(t *testing.T) {
 	// seedReopenedStampedRoot returns a store whose single root has been stamped
 	// converged and then reopened with every step row still closed. It returns
@@ -312,10 +313,10 @@ func TestCompletionBackstopClearsStampWhenStampedRootReopens(t *testing.T) {
 		assertNotStamped(t, backing, rootID, "a cadence sweep left a STALE stamp on a reopened root; the backstop now permanently skips it")
 	})
 
-	t.Run("startup sweep heals a reopened stamped root", func(t *testing.T) {
+	t.Run("a sweep through a lane that labeled it startup heals the same", func(t *testing.T) {
 		backing, journal, rootID := seedReopenedStampedRoot(t)
 		stores := []beads.GraphStore{{Store: backing}}
-		r := (&CompletionBackstop{VisitStamped: true}).Pass(journal, stores, "execution-reconcile")
+		r := (&CompletionBackstop{}).Pass(journal, stores, "execution-reconcile")
 		if r.Emitted != 0 {
 			t.Fatalf("startup sweep = %+v, want no re-emit (facts already confirmed)", r)
 		}

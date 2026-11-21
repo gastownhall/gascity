@@ -194,23 +194,20 @@ func (l *completionsLane) takePending() []string {
 
 // sweepDue reports whether the full convergence sweep should run now, and WHY.
 //
-// The reason is not decoration. A sweep running because the event feed declared
-// a gap and a sweep running on its hourly cadence are different events with
-// different follow-ups, and the trace field they both land in cannot tell them
-// apart unless the lane says which. The reason also selects VisitStamped (only
-// a startup sweep re-examines converged-stamped roots), so the ORDER of these
-// cases is load-bearing.
+// The reason is a label, not a traversal selector: it names the sweep in its
+// summary line and in the backstop_last_reason trace field, and nothing else.
+// A sweep running because the event feed declared a gap and a sweep running on
+// its hourly cadence are different events with different follow-ups, and the
+// trace field they both land in cannot tell them apart unless the lane says
+// which. What a sweep visits is decided by the convergence stamp alone
+// (executionevent.CompletionBackstop), never by the reason.
 //
-// Startup is checked BEFORE forced, and must be: a startup sweep visits stamped
-// AND unstamped roots, a strict superset of the cursor-gap sweep's unstamped
-// walk, so answering "startup" for a boot that was also forced loses no
-// coverage. The reverse order does lose: the delta-feed gap callback can
-// force() the lane before its first sweep, and if forced won that race the boot
-// sweep would be cursor-gap-labeled with VisitStamped=false — skipping stamped
-// roots so the per-boot stale-stamp heal never runs on the one sweep that could.
-// Once the first full traversal completes, noteSweepChunk sets sweepRan and
-// clears forced together, so this case stops firing and a later force is
-// correctly reported as a cursor gap.
+// Startup is checked BEFORE forced so a boot sweep that was also forced
+// reports as startup, not cursor-gap: the boot's own traversal, not a gap
+// response, is the more accurate account of the first sweep. Once the first
+// full traversal completes, noteSweepChunk sets sweepRan and clears forced
+// together, so this case stops firing and a later force is correctly reported
+// as a cursor gap.
 func (l *completionsLane) sweepDue(now time.Time) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -377,10 +374,6 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	if ep == nil {
 		return executionevent.CompletionBackstopResult{}
 	}
-	// Startup sweeps re-examine stamped roots; the converged stamp is a
-	// cadence optimization whose stale entries (hand-reopened steps, vacuous
-	// stamps from a past wedge) are healed by the per-boot full traversal.
-	backstop.VisitStamped = reason == backstopReasonStartup
 	result := backstop.Pass(ep, graphStores, "execution-reconcile")
 	if result.WarmFailed {
 		// The chunk read nothing: its idempotency record could not be loaded.

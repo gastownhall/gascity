@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -379,14 +380,13 @@ func TestCompletionsSweepReportsWhyItWasDue(t *testing.T) {
 	}
 }
 
-// TestCompletionsLaneForceBeforeFirstSweepStaysStartup pins Finding 2's fix: a
-// feed-gap force that arrives BEFORE the lane's first sweep must not demote that
-// boot sweep from startup to cursor-gap. Only a startup-labeled sweep sets
-// VisitStamped (executionevent's per-boot pass that re-examines converged
-// stamps), so a cursor-gap-labeled first sweep would skip stamped roots and the
-// stale-stamp heal would never run on the one sweep that could — nullifying the
-// "startup sweeps heal stale stamps" property. sweepDue keeps startup ahead of
-// forced until the first full sweep completes.
+// TestCompletionsLaneForceBeforeFirstSweepStaysStartup pins the reason
+// ordering: a feed-gap force that arrives BEFORE the lane's first sweep must
+// not demote that boot sweep's label from startup to cursor-gap. The reason is
+// only a label (the summary line and the backstop_last_reason trace field),
+// but an operator reading the trace must see the boot's own traversal for what
+// it is. sweepDue keeps startup ahead of forced until the first full sweep
+// completes.
 func TestCompletionsLaneForceBeforeFirstSweepStaysStartup(t *testing.T) {
 	now := time.Now()
 	lane := newCompletionsLane()
@@ -397,7 +397,7 @@ func TestCompletionsLaneForceBeforeFirstSweepStaysStartup(t *testing.T) {
 
 	reason, due := lane.sweepDue(now)
 	if !due || reason != backstopReasonStartup {
-		t.Fatalf("a force before the first sweep left it due=%t reason=%q, want due with reason %q — a cursor-gap boot sweep suppresses VisitStamped and skips stamped roots", due, reason, backstopReasonStartup)
+		t.Fatalf("a force before the first sweep left it due=%t reason=%q, want due with reason %q — the boot sweep must keep its startup label", due, reason, backstopReasonStartup)
 	}
 
 	// Once the first full traversal completes, sweepRan latches and the force is
@@ -408,5 +408,179 @@ func TestCompletionsLaneForceBeforeFirstSweepStaysStartup(t *testing.T) {
 	lane.force()
 	if r, due := lane.sweepDue(now.Add(time.Second)); !due || r != backstopReasonCursorGap {
 		t.Fatalf("a gap after the first sweep is due=%t reason=%q, want due with reason %q", due, r, backstopReasonCursorGap)
+	}
+}
+
+// completionStepListingStore counts the per-root step listings
+// (gc.root_bead_id filters) issued through it — the store-cost unit of the
+// completions sweep. On a native Dolt store each such listing is an unindexed
+// JSON_EXTRACT scan of both tiers (#7172), so "how many" is "how expensive".
+type completionStepListingStore struct {
+	beads.Store
+	stepLists int
+}
+
+func (s *completionStepListingStore) ListByMetadata(filter map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if _, ok := filter[beadmeta.RootBeadIDMetadataKey]; ok {
+		s.stepLists++
+	}
+	return s.Store.ListByMetadata(filter, limit, opts...)
+}
+
+// seedClosedWorkflowRoot creates one closed graph.v2 root with one closed
+// step carrying the root/step/session metadata the projector reads. The
+// step's completion fact is deliberately NOT recorded: a root created here
+// converges only through a sweep.
+func seedClosedWorkflowRoot(t *testing.T, store beads.Store, id string) (rootID string) {
+	t.Helper()
+	root, err := store.Create(beads.Bead{ID: id, Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := store.Create(beads.Bead{ID: id + "-step", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepIDMetadataKey:     "build",
+		beadmeta.SessionIDMetadataKey:  "gcs-session",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed := "closed"
+	if err := store.Update(root.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	return root.ID
+}
+
+// newCompletionSweepRuntime builds the smallest controller runtime whose
+// completions lane sweeps the given store through the production chunk path.
+func newCompletionSweepRuntime(t *testing.T, store beads.Store) (*CityRuntime, *completionsLane, *events.Fake) {
+	t.Helper()
+	ep := events.NewFake()
+	cs := &controllerState{
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cityBeadStore: store,
+		eventProv:     ep,
+	}
+	cr := &CityRuntime{cityName: "test-city", cityPath: t.TempDir(), cfg: cs.cfg, cs: cs, logPrefix: "gc", stderr: &bytes.Buffer{}}
+	return cr, cr.completionsLaneOf(), ep
+}
+
+// convergeCompletions drives cadence sweeps through the production chunk path
+// until every named root is stamped converged and a full sweep emits nothing.
+func convergeCompletions(t *testing.T, cr *CityRuntime, lane *completionsLane, store beads.Store, rootIDs []string) {
+	t.Helper()
+	for range 10 {
+		result := cr.runCompletionsSweepChunk(&executionevent.CompletionBackstop{}, lane, backstopReasonCadence)
+		if !result.SweepComplete {
+			t.Fatalf("an unchunked sweep reported incomplete: %+v", result)
+		}
+		stamped := 0
+		for _, id := range rootIDs {
+			root, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] != "" {
+				stamped++
+			}
+		}
+		if result.Emitted == 0 && stamped == len(rootIDs) {
+			return
+		}
+	}
+	t.Fatal("the corpus never converged and stamped")
+}
+
+// completionStamps snapshots every named root's converged stamp value.
+func completionStamps(t *testing.T, store beads.Store, rootIDs []string) map[string]string {
+	t.Helper()
+	stamps := make(map[string]string, len(rootIDs))
+	for _, id := range rootIDs {
+		root, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stamps[id] = root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]
+	}
+	return stamps
+}
+
+func assertSameStamps(t *testing.T, store beads.Store, want map[string]string) {
+	t.Helper()
+	for id, stamp := range want {
+		root, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] != stamp {
+			t.Fatalf("root %s stamp changed: got %q, want %q", id, root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey], stamp)
+		}
+	}
+}
+
+// TestCompletionsStartupSweepSkipsConvergedStampedRoots (ga-vn0uok, #7172): a
+// boot used to turn the first sweep into a full re-verification of every
+// converged-stamped root — one per-root gc.root_bead_id step listing each, an
+// unindexed table scan per root on a native Dolt store, for hours of store
+// load after every controller restart. The stamp's own contract ("terminal
+// while the root stays closed") is the only contract: a startup sweep
+// traverses exactly what a cadence sweep traverses.
+func TestCompletionsStartupSweepSkipsConvergedStampedRoots(t *testing.T) {
+	const roots = 8
+	backing := beads.NewMemStore()
+	rootIDs := make([]string, 0, roots)
+	for i := range roots {
+		id := seedClosedWorkflowRoot(t, backing, fmt.Sprintf("gcg-skip-%d", i))
+		rootIDs = append(rootIDs, id)
+	}
+	store := &completionStepListingStore{Store: backing}
+	cr, lane, ep := newCompletionSweepRuntime(t, store)
+	convergeCompletions(t, cr, lane, backing, rootIDs)
+
+	stampsBefore := completionStamps(t, backing, rootIDs)
+	factsBefore, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.stepLists = 0
+
+	// A fresh backstop is a fresh process: its first sweep is the boot sweep.
+	boot := &executionevent.CompletionBackstop{ChunkSize: completionsBackstopChunk}
+	var visited, skipped int
+	for range 10 {
+		result := cr.runCompletionsSweepChunk(boot, lane, backstopReasonStartup)
+		visited += result.RootsVisited
+		skipped += result.RootsSkippedConverged
+		if result.SweepComplete {
+			break
+		}
+	}
+	if store.stepLists != 0 {
+		t.Fatalf("startup sweep over %d stamped, converged roots issued %d gc.root_bead_id step listing(s) (a full table scan each on Dolt), want 0", roots, store.stepLists)
+	}
+	if visited != 0 || skipped != roots {
+		t.Fatalf("startup sweep visited %d root(s) and skipped %d, want 0 visited and all %d skipped as converged", visited, skipped, roots)
+	}
+	factsAfter, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(factsAfter) != len(factsBefore) {
+		t.Fatalf("journal grew from %d to %d completion fact(s); a converged corpus emits nothing", len(factsBefore), len(factsAfter))
+	}
+	assertSameStamps(t, backing, stampsBefore)
+
+	// Control: a cadence sweep over the same state reports identical counts, so
+	// the boot sweep above honors the stamp exactly as the cadence sweep does.
+	cadence := &executionevent.CompletionBackstop{}
+	if result := cr.runCompletionsSweepChunk(cadence, lane, backstopReasonCadence); result.RootsVisited != 0 || result.RootsSkippedConverged != roots {
+		t.Fatalf("cadence sweep = %+v, want the same skip the startup sweep reported", result)
 	}
 }

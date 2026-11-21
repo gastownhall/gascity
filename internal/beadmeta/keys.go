@@ -252,10 +252,27 @@ const (
 	// completion facts the completions backstop has fully reconciled: the root
 	// is closed, every listed step is closed, and every emittable fact is in
 	// the journal. A closed root's steps never change again, so the stamp is
-	// terminal and the backstop sweep skips stamped roots instead of paying a
-	// per-root step listing to rediscover a converged state every hour
-	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
-	// lane, which reacts to the close events themselves.
+	// terminal and every sweep — a startup sweep included — skips stamped roots
+	// instead of paying a per-root step listing to rediscover a converged state
+	// (ga-wevcl, ga-vn0uok). The stamp's contract is exactly "terminal while
+	// the root stays closed", and it heals through the paths that can still see
+	// a change:
+	//
+	//   - the delta pass re-proves a stamped root an observed event names
+	//     (CompletedFactIndex.ReconcileRoots visits named roots whether or not
+	//     they are stamped), and every sweep keeps a stamped root that is no
+	//     longer closed, so a visit that finds the root not converged clears
+	//     the stamp; live closes on stamped roots stay covered the same way,
+	//     by the close events themselves;
+	//   - step surgery on a closed, stamped root that no observed event names
+	//     (the controller was down, or the write emitted no bead.closed) is
+	//     not re-verified automatically: clear the stamp
+	//     (`gc bd update <root> --unset-metadata gc.completion_facts_converged`)
+	//     or reopen the root, and the next sweep re-proves it.
+	//
+	// Any change to what the stamp proves must rename the key: every root then
+	// reads as unstamped and is re-proved once by the ordinary chunked sweep,
+	// not once per boot.
 	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
 	LabelRevisionMetadataKey            = "gc.label_rev" // label CAS bookkeeping; see beads.NativeDoltStore.updateLabelsIfMatch
 	LastFailureClassMetadataKey         = "gc.last_failure_class"
