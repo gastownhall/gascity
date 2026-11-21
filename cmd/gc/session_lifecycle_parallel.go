@@ -2862,11 +2862,19 @@ func runtimeObservationLive(obs worker.LiveObservation) bool {
 }
 
 func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNames []string) (running bool, alive bool, err error) {
-	if sp == nil || strings.TrimSpace(name) == "" {
-		return false, false, nil
-	}
-	obs, err := runtime.ObserveLivenessWithError(sp, name, processNames)
+	obs, err := observeRuntimeLiveness(sp, name, processNames)
 	return obs.Running, obs.Alive, err
+}
+
+// observeRuntimeLiveness is the provider's whole liveness observation of
+// name: Running and Alive, and for a remain-on-exit corpse its Corpse bit and
+// the dead object's identity. A nil provider or a blank name observes
+// nothing.
+func observeRuntimeLiveness(sp runtime.Provider, name string, processNames []string) (runtime.Liveness, error) {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}, nil
+	}
+	return runtime.ObserveLivenessWithError(sp, name, processNames)
 }
 
 // staleResumeKeyClears reports whether the stale-resume clear resets info's

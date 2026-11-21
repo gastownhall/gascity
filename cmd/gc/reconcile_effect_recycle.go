@@ -162,7 +162,7 @@ func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
 		return txStep{Write: screen.patch, Class: screen.class, Done: true, Facts: facts}
 	}
 	if !k.zombie || runtime.ContainsProviderRateLimitScreen(peek.content) {
-		return txStep{Pass: k, Facts: facts} // legacy records a crash for a zombie alone, and never a rate-limit screen's
+		return txStep{Pass: k, Facts: facts} // legacy records a zombie's crash here, never a rate-limit screen's; its dead-pane crash of a named corpse is not mirrored yet (parity finding dead-pane-crash)
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	k.crash = &events.Event{

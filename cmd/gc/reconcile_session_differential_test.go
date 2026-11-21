@@ -226,6 +226,7 @@ var parityFindings = map[string]parityEntry{
 		"BEHAVIORS SESS-576/577 (A15 idle-timeout; C7a-1, §12.2 #60, v5.9s)", "legacy re-wakes an idle-killed row its demand still wants in the same tick (the kill falls through to the wake pass); v2's stop verb finalizes it asleep (SleepPatch(idle-timeout)) and A18 starts it the next pass, so the restart lands a pass later",
 		append([]string{"sleep_reason", "slept_at"}, parityStartKeys...),
 	},
+	"dead-pane-crash":    {"#6298 (v2 follow-up bead)", "legacy records session.crashed (reason dead pane) once per dead object for a committed named row's remain-on-exit corpse, classified from the row before its heal and recorded before the wake restarts it; v2's start recycle removes the corpse (recycle-by-object) and records no crash for it yet. §12.2 does not list it", nil},
 	"recycle-by-object":  {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
 	"mislabelled-close":  {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", append([]string{"status", "state", "close_reason", "closed_at"}, parityUsageCloseKeys...)},
 	"idle-respawn-drain": {"C6d (D2's idle-respawn row; v5 D2: the finalize sleeps, never closes; §12.2 #63), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, stops it in the tick, retires its slot and starts a fresh seat for the work; v2's A20 begins the idle-respawn drain with its attempt, signals it a patrol later after revalidating claim and activity, and its stop verb finalizes the row asleep, never closed, so resume-on-ready restarts the same row", append([]string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityUsageCloseKeys...)},
@@ -1831,6 +1832,20 @@ func parityFixtures() []parityFixture {
 			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "always", "instance_token", "tok-gc-c")},
 			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", probeErr: true}},
 			Explain:  nil,
+		},
+		// #6298: a named row's rapid crash left as a remain-on-exit corpse.
+		// Legacy records the dead pane's crash once, before the death accrues
+		// its fifth wake failure and quarantines the row.
+		{
+			Name: "a named row's dead pane is recorded once, and its rapid crash quarantines", Behaviors: []string{"SESS-537"}, City: chat(false),
+			Rows: []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "awake", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second),
+				"configured_named_mode", "always", "started_config_hash", "h-1", "wake_attempts", "4")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", corpse: true}},
+			Panes:    map[string]string{"gc-c": "panic: boom"},
+			Explain: map[string]string{
+				"event:session.crashed chat [reason session_id template]": "dead-pane-crash",
+				"provider:KillCorpseObject chat":                          "recycle-by-object", "row:gc-c:*policy": "sleep-policy-keys",
+			},
 		},
 		// A12 on a row it classifies (a Sleep named on_demand row, which A21
 		// never closes): a crash, a terminal error, a rate-limit screen.
