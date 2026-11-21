@@ -239,11 +239,23 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore)
 		narrowed.Assignee = c.assignee
 		return readNarrowed(ctx, legs, c, listRead(narrowed), listRead(plain))
 	default:
-		return federate(ctx, legs, listRead(beads.ListQuery{
-			Status:   c.status,
-			TierMode: beads.FederatedReadTier,
-		}))
+		// The blocked and closed tiers, the closed one the largest a store
+		// holds. The pushable metadata pairs are pushed into each leg's list.
+		plain := beads.ListQuery{Status: c.status, TierMode: beads.FederatedReadTier}
+		narrowed := plain
+		narrowed.Metadata = listMetadata(c)
+		return readStatusList(ctx, legs, c, plain, narrowed)
 	}
+}
+
+// readStatusList reads a --status arm's legs: with plain when narrowed asks no
+// leg for less, and otherwise with narrowed under readNarrowed's exactness
+// guard, falling back to plain when the narrowed answer could differ from it.
+func readStatusList(ctx context.Context, legs []Leg, c compiled, plain, narrowed beads.ListQuery) ([]beads.Bead, map[string]int, error) {
+	if narrowed.Assignee == "" && len(narrowed.Metadata) == 0 {
+		return federate(ctx, legs, listRead(plain))
+	}
+	return readNarrowed(ctx, legs, c, listRead(narrowed), listRead(plain))
 }
 
 // readOpenStatusCandidates answers `--status open` with Gas City's "open": every

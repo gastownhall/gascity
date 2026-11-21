@@ -26,6 +26,7 @@ type narrowingStore struct {
 	mu      sync.Mutex
 	ready   []beads.ReadyQuery
 	ordered []orderedCall
+	lists   []beads.ListQuery
 }
 
 type orderedCall struct {
@@ -95,6 +96,21 @@ func (s *narrowingStore) ReadyOrdered(q beads.ReadyQuery, order beads.ReadyOrder
 	return rows, true, nil
 }
 
+// List records what the leg is asked and answers it as MemStore does, which
+// applies ListQuery.Metadata and Assignee exactly.
+func (s *narrowingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	s.lists = append(s.lists, q)
+	s.mu.Unlock()
+	return s.MemStore.List(q)
+}
+
+func (s *narrowingStore) listQueries() []beads.ListQuery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.lists)
+}
+
 func (s *narrowingStore) readyQueries() []beads.ReadyQuery {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -160,6 +176,76 @@ func TestReadPushesTheSelectivePredicatesIntoEveryLeg(t *testing.T) {
 		if !reflect.DeepEqual(got[0], want) {
 			t.Fatalf("leg asked %+v, want %+v", got[0], want)
 		}
+	}
+}
+
+// statusLegRows seeds one leg with a row per status and metadata shape: one
+// carrying gc.root_bead_id=R, one carrying another root, one carrying none. The
+// in_progress rows are assigned to w1 and w2 in turn.
+func statusLegRows(prefix string) []beads.Bead {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	var rows []beads.Bead
+	for si, status := range []string{StatusOpen, StatusInProgress, StatusBlocked, StatusClosed} {
+		for mi, root := range []string{"R", "other", ""} {
+			for ai, assignee := range []string{"w1", "w2"} {
+				id := fmt.Sprintf("%s-%s-%d-%s", prefix, status, mi, assignee)
+				rows = append(rows, readyRow(id, (si+mi+ai)%4, base.Add(time.Duration(len(rows))*time.Minute), func(b *beads.Bead) {
+					b.Status = status
+					b.Assignee = assignee
+					if root != "" {
+						b.Metadata = beads.StringMap{"gc.root_bead_id": root}
+					}
+				}))
+			}
+		}
+	}
+	return rows
+}
+
+// TestReadyStatusLegsFilterMetadataInTheStore pins what a --status arm asks each
+// leg for (ga-8g39ur): a plain-string key=value --metadata-field travels to the
+// store as ListQuery.Metadata beside the arm's own query, so a store with a
+// large tier in that status is not read whole and filtered here afterwards. The
+// answer is the rows of that status carrying the pair, from every leg.
+func TestReadyStatusLegsFilterMetadataInTheStore(t *testing.T) {
+	root := map[string]string{"gc.root_bead_id": "R"}
+	for _, tc := range []struct {
+		name  string
+		query Query
+		want  beads.ListQuery
+		ids   []string
+	}{
+		{
+			name:  "closed",
+			query: Query{Status: StatusClosed},
+			want:  beads.ListQuery{Status: StatusClosed, TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-closed-0-w1", "c-closed-0-w2", "r-closed-0-w1", "r-closed-0-w2"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city, rig := newNarrowingStore(statusLegRows("c")...), newNarrowingStore(statusLegRows("r")...)
+			legs := []Leg{testLeg("city", city), testLeg("rig r", rig)}
+			q := tc.query
+			q.MetadataFields = []string{"gc.root_bead_id=R"}
+			got := readIDs(t, legs, q)
+			slices.Sort(got)
+			if !slices.Equal(got, tc.ids) {
+				t.Fatalf("answer = %v, want %v", got, tc.ids)
+			}
+			for _, store := range []*narrowingStore{city, rig} {
+				lists := store.listQueries()
+				if len(lists) == 0 {
+					t.Fatal("leg was asked no List query")
+				}
+				// The live handle every leg is read through stamps Live on the
+				// query; the arm's own question is the rest of it.
+				got := lists[0]
+				got.Live = false
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("leg's first List query = %+v, want %+v", got, tc.want)
+				}
+			}
+		})
 	}
 }
 
