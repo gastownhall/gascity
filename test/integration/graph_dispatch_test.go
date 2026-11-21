@@ -414,7 +414,13 @@ func showBead(t *testing.T, cityDir, beadID string) graphBead {
 }
 
 func tryShowBead(cityDir, beadID string) (graphBead, error) {
-	out, err := bdDolt(cityDir, "show", beadID, "--json")
+	return tryShowBeadUntil(cityDir, beadID, time.Time{})
+}
+
+// tryShowBeadUntil is tryShowBead with the underlying bd call bounded by
+// deadline; a zero deadline leaves it on bdDolt's own timeouts.
+func tryShowBeadUntil(cityDir, beadID string, deadline time.Time) (graphBead, error) {
+	out, err := bdDoltUntil(cityDir, deadline, "show", beadID, "--json")
 	if err != nil {
 		return graphBead{}, fmt.Errorf("bd show --json %s failed: %v\noutput: %s", beadID, err, out)
 	}
