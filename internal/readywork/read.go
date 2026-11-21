@@ -226,18 +226,17 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore)
 	case "":
 		return readReadyCandidates(ctx, legs, c, cs)
 	case StatusOpen:
-		return readOpenStatusCandidates(ctx, legs)
+		return readOpenStatusCandidates(ctx, legs, c)
 	case StatusInProgress:
 		// The crash-recovery tier, and the one whose rows carry blocked_by. The
-		// assignee is pushed into each leg's list; it is matched exactly on every
-		// backend, and re-applied to the merged set like every predicate.
+		// assignee and the pushable metadata pairs are pushed into each leg's
+		// list; both are matched exactly on every backend, and re-applied to the
+		// merged set like every predicate.
 		plain := beads.ListQuery{Status: c.status, TierMode: beads.FederatedReadTier}
-		if c.assignee == "" {
-			return federate(ctx, legs, listRead(plain))
-		}
 		narrowed := plain
 		narrowed.Assignee = c.assignee
-		return readNarrowed(ctx, legs, c, listRead(narrowed), listRead(plain))
+		narrowed.Metadata = listMetadata(c)
+		return readStatusList(ctx, legs, c, plain, narrowed)
 	default:
 		// The blocked and closed tiers, the closed one the largest a store
 		// holds. The pushable metadata pairs are pushed into each leg's list.
@@ -275,11 +274,13 @@ func readStatusList(ctx context.Context, legs []Leg, c compiled, plain, narrowed
 // non-closed row and keeping the mapped "open" ones gives the bd-backed store the
 // same answer without widening ListQuery{Status: "open"} for the controller
 // callers whose readiness gates rely on bd's narrower status (ga-3mv5d3).
-func readOpenStatusCandidates(ctx context.Context, legs []Leg) ([]beads.Bead, map[string]int, error) {
-	items, owners, err := federate(ctx, legs, listRead(beads.ListQuery{
-		AllowScan: true,
-		TierMode:  beads.FederatedReadTier,
-	}))
+//
+// The pushable metadata pairs are pushed into each leg's scan.
+func readOpenStatusCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
+	plain := beads.ListQuery{AllowScan: true, TierMode: beads.FederatedReadTier}
+	narrowed := plain
+	narrowed.Metadata = listMetadata(c)
+	items, owners, err := readStatusList(ctx, legs, c, plain, narrowed)
 	if err != nil {
 		return nil, nil, err
 	}
