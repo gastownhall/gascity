@@ -276,6 +276,49 @@ func NewProxiedStore(native *NativeDoltStore, bd Store, pin Pin, opts ...Proxied
 	return store, nil
 }
 
+// NewDemotedProxiedStore builds a split store that starts on the bd leaf: a
+// long-lived open whose pin was admitted but whose native leaf open answered a
+// non-terminal verdict.
+//
+// It exists so such an open is not a bd store for the rest of the process. The
+// store carries the pin and the verdict that demoted it, serves every read from
+// bd exactly as a demoted store does, and recovers through the guard tick's
+// NativeLeafReopener the same way a store that stood down after serving does.
+// So it refuses what could never recover: a terminal verdict, which a fresh
+// open is the only answer to, and a store with no reopener installed.
+func NewDemotedProxiedStore(bd Store, pin Pin, verdict *ProxiedVerdictError, opts ...ProxiedStoreOption) (*ProxiedStore, error) {
+	if bd == nil {
+		return nil, errors.New("demoted proxied store: bd write leaf is nil")
+	}
+	if !pin.Admitted() {
+		return nil, errors.New("demoted proxied store: pin was not admitted; only beads.Admit mints one")
+	}
+	if verdict == nil {
+		return nil, errors.New("demoted proxied store: no verdict says why the native leaf is absent")
+	}
+	if verdict.Terminal() {
+		return nil, fmt.Errorf("demoted proxied store: verdict %s is terminal, so only a fresh open recovers: %w",
+			verdict.Verdict, verdict)
+	}
+	store := &ProxiedStore{
+		bd:       bd,
+		pin:      pin,
+		verdict:  verdict,
+		root:     pin.Root(),
+		database: pin.Database(),
+	}
+	if carrier, ok := bd.(localSidecarCarrier); ok {
+		store.sidecar = carrier.localSidecarHandle()
+	}
+	for _, opt := range opts {
+		opt(store)
+	}
+	if store.reopenNative == nil {
+		return nil, errors.New("demoted proxied store: no native leaf reopener, so the store could never leave the bd leaf")
+	}
+	return store, nil
+}
+
 // ProxiedPrefixAgreement is H10, and it is exported because it is checked in
 // two places: once by the opener with both handles fresh, and again by the
 // guard tick's recovery when it installs a replacement native leaf.
@@ -350,6 +393,22 @@ func (s *ProxiedStore) Report() ProxiedOpenReport {
 	report := s.pin.Report()
 	report.Demoted = s.native == nil
 	return report
+}
+
+// readsBySubprocess reports whether Get forks a process, so a CachingStore
+// over the split bounds its event checks only while it must: never while the
+// native leaf serves reads, and whatever the bd leaf says once it does. A
+// split that hid its bd leaf here would have a demoted controller store fork
+// one bd per event on the event watcher's goroutine.
+func (s *ProxiedStore) readsBySubprocess() bool {
+	s.mu.RLock()
+	native, bd := s.native, s.bd
+	s.mu.RUnlock()
+	if native != nil {
+		return false
+	}
+	r, ok := bd.(subprocessReader)
+	return ok && r.readsBySubprocess()
 }
 
 // readLeaf returns the store reads go to: the native leaf while it is serving,

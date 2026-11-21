@@ -40,6 +40,26 @@ type State struct {
 	AbsentColumns map[string]bool
 }
 
+// Window is what the pool answers for the commits between two hashes: the
+// dolt_log('<since>..<head>') messages and the dolt_diff_summary rows.
+type Window struct {
+	// Commits are the commit messages dolt_log answers, newest first.
+	Commits []string
+	// Tables are the dolt_diff_summary rows.
+	Tables []WindowTable
+	// Err, when set, is what every window statement fails with. The HEAD
+	// statement still answers.
+	Err error
+}
+
+// WindowTable is one dolt_diff_summary row.
+type WindowTable struct {
+	// Name is the table, answered as both from_table_name and to_table_name.
+	Name string
+	// SchemaChange is the row's schema_change column.
+	SchemaChange bool
+}
+
 // PostOpenDB is a *sql.DB whose every connection reads Before on its first
 // statement and After on every later one.
 type PostOpenDB struct {
@@ -47,6 +67,7 @@ type PostOpenDB struct {
 	DB *sql.DB
 
 	before, after State
+	window        Window
 	// Err, when set, is what every statement fails with.
 	err error
 
@@ -67,6 +88,14 @@ func (p *PostOpenDB) Failing(err error) *PostOpenDB {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.err = err
+	return p
+}
+
+// WithWindow scripts the answers to the window statements.
+func (p *PostOpenDB) WithWindow(w Window) *PostOpenDB {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.window = w
 	return p
 }
 
@@ -119,11 +148,15 @@ func (c *conn) Begin() (driver.Tx, error) {
 // QueryContext answers any statement that asks for DOLT_HASHOF('HEAD'),
 // followed by one COUNT(*) per information_schema.tables sub-select (one
 // argument each, the table) and one per information_schema.columns sub-select
-// (two arguments each, table then column), in that order.
+// (two arguments each, table then column), in that order. A dolt_log statement
+// answers the scripted window's commit messages, one row each, and a
+// dolt_diff_summary statement its tables as (from_table_name, to_table_name,
+// schema_change) rows.
 func (c *conn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.db.mu.Lock()
 	c.db.statements = append(c.db.statements, query)
 	failure := c.db.err
+	window := c.db.window
 	state := c.db.after
 	if c.issued == 0 {
 		state = c.db.before
@@ -132,6 +165,26 @@ func (c *conn) QueryContext(_ context.Context, query string, args []driver.Named
 	c.issued++
 	if failure != nil {
 		return nil, failure
+	}
+	switch {
+	case strings.Contains(query, "dolt_log("):
+		if window.Err != nil {
+			return nil, window.Err
+		}
+		out := &rows{columns: 1}
+		for _, message := range window.Commits {
+			out.values = append(out.values, []driver.Value{message})
+		}
+		return out, nil
+	case strings.Contains(query, "dolt_diff_summary("):
+		if window.Err != nil {
+			return nil, window.Err
+		}
+		out := &rows{columns: 3}
+		for _, table := range window.Tables {
+			out.values = append(out.values, []driver.Value{table.Name, table.Name, table.SchemaChange})
+		}
+		return out, nil
 	}
 	if !strings.Contains(query, "DOLT_HASHOF('HEAD')") {
 		return nil, fmt.Errorf("proxyendpointtest: no answer for %q", query)
@@ -150,7 +203,7 @@ func (c *conn) QueryContext(_ context.Context, query string, args []driver.Named
 		key := fmt.Sprint(args[tables+2*i].Value) + "." + fmt.Sprint(args[tables+2*i+1].Value)
 		values = append(values, exists(!state.AbsentColumns[key]))
 	}
-	return &rows{values: values}, nil
+	return &rows{columns: len(values), values: [][]driver.Value{values}}, nil
 }
 
 func exists(present bool) int64 {
@@ -161,12 +214,13 @@ func exists(present bool) int64 {
 }
 
 type rows struct {
-	values []driver.Value
-	done   bool
+	columns int
+	values  [][]driver.Value
+	next    int
 }
 
 func (r *rows) Columns() []string {
-	columns := make([]string, len(r.values))
+	columns := make([]string, r.columns)
 	for i := range columns {
 		columns[i] = fmt.Sprintf("c%d", i)
 	}
@@ -176,10 +230,10 @@ func (r *rows) Columns() []string {
 func (r *rows) Close() error { return nil }
 
 func (r *rows) Next(dest []driver.Value) error {
-	if r.done {
+	if r.next >= len(r.values) {
 		return io.EOF
 	}
-	r.done = true
-	copy(dest, r.values)
+	copy(dest, r.values[r.next])
+	r.next++
 	return nil
 }

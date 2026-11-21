@@ -2720,3 +2720,167 @@ func TestGenerationSetOnlyTheClaimerEndsItsClaim(t *testing.T) {
 		t.Fatalf("B's own settle = %+v, want spent", st)
 	}
 }
+
+// The two hashes the window-attribution tests move HEAD between. They are real
+// Dolt commit-hash shapes, so a detail that names them names what an operator
+// would pass to dolt_log.
+const (
+	windowSinceHead = "0123456789abcdefghijklmnopqrstuv"
+	windowAfterHead = "vutsrqponmlkjihgfedcba9876543210"
+)
+
+// movedHeadPin and movedHeadReport build the two halves of a moved-HEAD
+// observation: the pin admission took at windowSinceHead, and a report at
+// windowAfterHead carrying window and a healthy ignored plane.
+func movedHeadPin() Pin {
+	return Pin{admitted: true, database: "beads", head: windowSinceHead, cursors: pinnedCursors()}
+}
+
+func movedHeadReport(window *proxyendpoint.PostOpenWindow) proxyendpoint.PostOpenReport {
+	return proxyendpoint.PostOpenReport{Head: windowAfterHead, IgnoredCursorTable: true, Window: window}
+}
+
+// requireHeadMoved asserts err is the non-terminal head_moved verdict and that
+// its detail names both hashes, the database and every one of want.
+func requireHeadMoved(t *testing.T, err error, want ...string) {
+	t.Helper()
+	verdict, typed := ProxiedVerdictOf(err)
+	if !typed || verdict.Verdict != ProxiedVerdictHeadMoved {
+		t.Fatalf("err = %v, want the head_moved verdict", err)
+	}
+	if verdict.Terminal() {
+		t.Error("head_moved must stay non-terminal")
+	}
+	for _, w := range append([]string{windowSinceHead, windowAfterHead, `"beads"`}, want...) {
+		if !strings.Contains(verdict.Detail, w) {
+			t.Errorf("the verdict detail lacks %q: %s", w, verdict.Detail)
+		}
+	}
+}
+
+// TestProxiedOpenUnmovedRefusesAnUnattributableWindow is AC-3: a moved HEAD is
+// let through only on evidence that someone other than gc's open moved it. A
+// window that cannot be read, that is too long to read whole, or that lists
+// no commits is no such evidence, so it is head_moved — never "unobserved,
+// proceed" — and the detail says which of those it was.
+func TestProxiedOpenUnmovedRefusesAnUnattributableWindow(t *testing.T) {
+	ordinary := []string{"bd: update ga-1"}
+	for _, tc := range []struct {
+		name   string
+		window *proxyendpoint.PostOpenWindow
+		reason string
+	}{
+		{"no window was read", nil, "no window"},
+		{"a window statement failed", &proxyendpoint.PostOpenWindow{Unreadable: "reading dolt_log: table function not found"}, "table function not found"},
+		{"a hash failed validation", &proxyendpoint.PostOpenWindow{Unreadable: `"before0000" is not a Dolt commit hash`}, "not a Dolt commit hash"},
+		{"the range lists no commits", &proxyendpoint.PostOpenWindow{Tables: []proxyendpoint.WindowTable{{Name: "issues"}}}, "no commits"},
+		{
+			"the range exceeds the commit limit", &proxyendpoint.PostOpenWindow{Commits: ordinary, Tables: []proxyendpoint.WindowTable{{Name: "issues"}}, Truncated: true},
+			fmt.Sprintf("more than %d commits", proxyendpoint.PostOpenWindowCommitLimit),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireHeadMoved(t, ProxiedOpenUnmoved(movedHeadPin(), movedHeadReport(tc.window)), tc.reason)
+		})
+	}
+}
+
+// TestProxiedOpenUnmovedNamesTheOpenShapedWrite is AC-2: a moved HEAD whose
+// window carries anything a library open writes — a schema:-prefixed commit,
+// a schema change on any table, or a change to one of the tables the open's
+// seed, heal, backfill and repair paths commit — is head_moved, and the
+// detail names the commit or table that decided it.
+func TestProxiedOpenUnmovedNamesTheOpenShapedWrite(t *testing.T) {
+	data := func(names ...string) []proxyendpoint.WindowTable {
+		var tables []proxyendpoint.WindowTable
+		for _, name := range names {
+			tables = append(tables, proxyendpoint.WindowTable{Name: name})
+		}
+		return tables
+	}
+	rows := []struct {
+		name   string
+		window proxyendpoint.PostOpenWindow
+		naming string
+	}{
+		{
+			name: "a schema: commit over data-only tables (the aux-rekey shape)",
+			window: proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1", "schema: apply migrations"}, Tables: data("events", "comments"),
+			},
+			naming: "schema: apply migrations",
+		},
+		{
+			name: "the dolt_ignore seed swept into another client's ordinary commit",
+			window: proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1"}, Tables: data("issues", "dolt_ignore"),
+			},
+			naming: "dolt_ignore",
+		},
+		{
+			name: "a schema change on an ordinary table",
+			window: proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1"}, Tables: []proxyendpoint.WindowTable{{Name: "issues", SchemaChange: true}},
+			},
+			naming: "issues",
+		},
+	}
+	for _, table := range []string{"schema_migrations", "ignored_schema_migrations", "custom_types", "custom_statuses", "dolt_nonlocal_tables"} {
+		rows = append(rows, struct {
+			name   string
+			window proxyendpoint.PostOpenWindow
+			naming string
+		}{
+			name:   "a data change to " + table,
+			window: proxyendpoint.PostOpenWindow{Commits: []string{"bd: update ga-1"}, Tables: data("issues", table)},
+			naming: table,
+		})
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			window := tc.window
+			requireHeadMoved(t, ProxiedOpenUnmoved(movedHeadPin(), movedHeadReport(&window)), tc.naming)
+		})
+	}
+}
+
+// TestProxiedOpenUnmovedChecksThePlaneUnderAForeignWindow is AC-4: a window
+// that shows only another client's writes says nothing about the ignored
+// plane, which HEAD cannot see. The plane is read under a foreign move exactly
+// as under an unmoved HEAD, and a plane the open left short of a sentinel is
+// head_moved from the plane check.
+func TestProxiedOpenUnmovedChecksThePlaneUnderAForeignWindow(t *testing.T) {
+	report := movedHeadReport(&proxyendpoint.PostOpenWindow{
+		Commits: []string{"bd: update ga-1"},
+		Tables:  []proxyendpoint.WindowTable{{Name: "issues"}},
+	})
+	report.Reality = proxyendpoint.CursorReality{
+		Limited: true, Floor: proxyendpoint.IgnoredSentinelColumnFloor, Missing: "leases.granted_node",
+	}
+	err := ProxiedOpenUnmoved(movedHeadPin(), report)
+	verdict, typed := ProxiedVerdictOf(err)
+	if !typed || verdict.Verdict != ProxiedVerdictHeadMoved || verdict.Terminal() {
+		t.Fatalf("err = %v, want the non-terminal head_moved verdict from the plane check", err)
+	}
+	for _, want := range []string{
+		"ignored plane", "leases.granted_node",
+		fmt.Sprintf("cursor at %d", proxyendpoint.IgnoredSentinelColumnFloor), windowAfterHead,
+	} {
+		if !strings.Contains(verdict.Detail, want) {
+			t.Errorf("the verdict detail lacks %q: %s", want, verdict.Detail)
+		}
+	}
+}
+
+// TestProxiedOpenUnmovedKeepsAForeignWindow is AC-1's unit half: a moved HEAD
+// whose window shows only another client's ordinary writes — no schema:
+// prefix, data-only changes to tables the open never writes — is no verdict.
+func TestProxiedOpenUnmovedKeepsAForeignWindow(t *testing.T) {
+	window := &proxyendpoint.PostOpenWindow{
+		Commits: []string{"bd: update ga-1", "bd: create ga-2"},
+		Tables:  []proxyendpoint.WindowTable{{Name: "issues"}, {Name: "events"}, {Name: "labels"}},
+	}
+	if err := ProxiedOpenUnmoved(movedHeadPin(), movedHeadReport(window)); err != nil {
+		t.Fatalf("another client's ordinary commit was read as the open's: %v", err)
+	}
+}

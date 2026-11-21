@@ -1209,6 +1209,7 @@ go_test(
         "beads_provider_script_shared_server_linux_test.go",
         "beads_provider_script_trace_test.go",
         "beads_proxied_idle_timeout_test.go",
+        "beads_proxied_native_demoted_test.go",
         "beads_proxied_native_test.go",
         "beads_quiescence_readers_test.go",
         "beads_quiescence_test.go",

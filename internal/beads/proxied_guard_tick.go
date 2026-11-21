@@ -757,6 +757,16 @@ func proxiedGuardSocketOwner(_ context.Context, pin Pin) proxiedOwner {
 // proxied_store.go so the guard's blast radius is one file.
 // ---------------------------------------------------------------------------
 
+// GuardArmedForTest reports whether the store has a running guard and a
+// native leaf reopener for it to recover through: what a long-lived store
+// that started on the bd leaf needs to ever leave it. It is exported for the
+// opener's tests in cmd/gc, which cannot reach the guard itself.
+func (s *ProxiedStore) GuardArmedForTest() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.guard != nil && s.reopenNative != nil
+}
+
 // guardState reads the three facts a tick decides from, atomically: the current
 // pin, the native leaf (nil when stood down) and whether the stand-down was
 // terminal. Reading them one at a time would let a re-pin land between two of

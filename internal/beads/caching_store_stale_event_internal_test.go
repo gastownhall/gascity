@@ -1151,3 +1151,85 @@ func TestCachingStoreCASLandsOnlyOnTheFencedRow(t *testing.T) {
 		t.Errorf("none of the %d CAS attempts landed; the stress fenced nothing", 3*casAttempts)
 	}
 }
+
+// A demoted ProxiedStore reads through its bd leaf, which forks bd per Get, so
+// a CachingStore over it bounds event checks exactly as it does over a
+// BdStore: at most one in flight, and the watcher waits at most the deadline.
+// While the store serves natively the check stays synchronous. Kills: a
+// split store that hides its bd leaf from the cache, so a burst of events
+// after a demotion forks one bd per event on the watcher's goroutine.
+func TestCachingStoreBoundsEventChecksOnADemotedProxiedStore(t *testing.T) {
+	t.Run("demoted: one check in flight, the watcher waits at most the deadline", func(t *testing.T) {
+		bd := &gatedSubprocessStore{MemStore: NewMemStore(), entered: make(chan struct{}, 4)}
+		a, err := bd.Create(Bead{Title: "a"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		b, err := bd.Create(Bead{Title: "b"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		pin := newGuardFixture(t).store.Pin()
+		store, err := NewDemotedProxiedStore(bd, pin,
+			NewNonTerminalProxiedVerdictError(ProxiedVerdictHeadMoved, "opening the linked library moved HEAD", nil),
+			WithNativeLeafReopener(func(context.Context) (*NativeDoltStore, Pin, error) {
+				return nil, Pin{}, errors.New("no recovery in this test")
+			}))
+		if err != nil {
+			t.Fatalf("NewDemotedProxiedStore: %v", err)
+		}
+		cache := newConditionalCacheForTest(t, store)
+		_, _, before := rowFences(cache, b.ID)
+		gate := make(chan struct{})
+		defer close(gate)
+		bd.gate = gate
+		cache.eventCheckAfter = func(time.Duration) <-chan time.Time {
+			fired := make(chan time.Time)
+			go func() {
+				<-bd.entered
+				close(fired)
+			}()
+			return fired
+		}
+
+		a.Title, b.Title = "a elsewhere", "b elsewhere"
+		applied := make(chan struct{})
+		go func() {
+			defer close(applied)
+			cache.ApplyEvent("bead.updated", eventPayload(t, a))
+			cache.ApplyEvent("bead.updated", eventPayload(t, b))
+		}()
+		select {
+		case <-applied:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the event watcher was held by a forking check past its deadline")
+		}
+		got, dirty, seq := rowFences(cache, b.ID)
+		if n := bd.gets.Load(); n != 1 || !dirty || seq <= before || got.Title != "b" {
+			t.Fatalf("bd reads %d; b dirty %v, beadSeq %d (was %d), title %q; want 1, dirty, stamped, b",
+				n, dirty, seq, before, got.Title)
+		}
+	})
+
+	t.Run("native: the check is synchronous", func(t *testing.T) {
+		f := newGuardFixture(t)
+		a, err := f.bd.Create(Bead{Title: "a"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		cache := newConditionalCacheForTest(t, f.store)
+		var bounded atomic.Int32
+		cache.eventCheckAfter = func(d time.Duration) <-chan time.Time {
+			bounded.Add(1)
+			return time.After(d)
+		}
+		a.Title = "a elsewhere"
+		cache.ApplyEvent("bead.updated", eventPayload(t, a))
+		if n := bounded.Load(); n != 0 {
+			t.Fatalf("a natively served store bounded %d event check(s); its reads do not fork", n)
+		}
+		if f.store.Demoted() {
+			t.Fatal("the store demoted during the check, so this row proved nothing about the native leaf")
+		}
+	})
+}

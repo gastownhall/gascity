@@ -1,6 +1,10 @@
 package beads
 
-import "time"
+import (
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+)
 
 // NewNativeDoltStoreForConformance returns a NativeDoltStore backed by the
 // in-memory native storage fixture for the external conformance suite.
@@ -125,3 +129,10 @@ func (s *BdStore) SetTxProjectionTimeoutForTest(d time.Duration) {
 // BdListAssigneeFanOutLimitForTest is bdListAssigneeFanOutLimit, the most
 // per-assignee bd list reads a fanned-out BdStore List runs at once.
 const BdListAssigneeFanOutLimitForTest = bdListAssigneeFanOutLimit
+
+// ProxiedOpenWriteShapeForTest exposes the open-shape classifier to the
+// pinned-module drift guard: it names what makes window look like a library
+// open's own write, or returns "".
+func ProxiedOpenWriteShapeForTest(window *proxyendpoint.PostOpenWindow) string {
+	return proxiedWindowOpenShape(window)
+}
