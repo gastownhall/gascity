@@ -210,3 +210,53 @@ func TestSlingExpandedRootRoutesControlExecutionAndSkipsSettledMembers(t *testin
 		t.Errorf("RoutedMembers = %d, want 2 (the control and the open step)", result.RoutedMembers)
 	}
 }
+
+// slungBeforeFix leaves run in the state a pre-fix `gc sling worker <root>`
+// left: the root routed to worker and tracked by its auto-convoy, the steps
+// still unrouted. It returns the auto-convoy.
+func (r *cookedRun) slungBeforeFix(t *testing.T, target string) beads.Bead {
+	t.Helper()
+	if err := r.store.SetMetadata(r.root.ID, beadmeta.RoutedToMetadataKey, target); err != nil {
+		t.Fatalf("route root: %v", err)
+	}
+	convoy, err := r.store.Create(beads.Bead{Title: AutoConvoyRootTitle(r.root.ID), Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("create auto-convoy: %v", err)
+	}
+	if err := r.store.DepAdd(convoy.ID, r.root.ID, "tracks"); err != nil {
+		t.Fatalf("track root: %v", err)
+	}
+	return convoy
+}
+
+// TestSlingExpandedRootReslingRepairsStuckRun is AC-3: re-slinging a run that
+// a pre-fix sling left stuck is not an idempotent no-op; it routes the
+// unrouted steps and reuses the root's one auto-convoy.
+func TestSlingExpandedRootReslingRepairsStuckRun(t *testing.T) {
+	run := newCookedRun(t)
+	step := run.step(t, "mix batter")
+	convoy := run.slungBeforeFix(t, "worker")
+	worker := poolWorker()
+	deps, _ := cookedRunDeps(run, worker)
+
+	result, err := DoSling(testOpts(worker, run.root.ID), deps, run.store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.Idempotent {
+		t.Fatal("re-sling of a stuck cooked run reported idempotent; its steps stay unrouted")
+	}
+	if got := run.get(t, step.ID).Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Errorf("step gc.routed_to = %q, want worker", got)
+	}
+	roots, err := liveAutoConvoyRoots(deps.Store, run.root.ID)
+	if err != nil {
+		t.Fatalf("liveAutoConvoyRoots: %v", err)
+	}
+	if len(roots) != 1 || roots[0].ID != convoy.ID {
+		t.Errorf("live auto-convoys tracking the root = %v, want exactly %s", roots, convoy.ID)
+	}
+	if result.ConvoyID != convoy.ID {
+		t.Errorf("ConvoyID = %q, want the existing %s", result.ConvoyID, convoy.ID)
+	}
+}

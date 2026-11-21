@@ -218,6 +218,18 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 			result.BeadWarnings = append(result.BeadWarnings, skippedForClaimWarning(opts, a, decision.Assignee))
 		}
 	}
+	// A cooked workflow root routed before its members were routed with it
+	// (#9039) reads as idempotent, but its run is stuck: proceed so the plain
+	// path fills the members' routes. With nothing to fill it stays a no-op.
+	if check.Idempotent && takesPlainBeadPath(opts) {
+		members, err := planExpandedRootMemberRoutes(opts, deps, deps.Store, opts.BeadOrFormula)
+		if err != nil {
+			return false, err
+		}
+		if members.hasPatches() {
+			check.Idempotent = false
+		}
+	}
 	// --reassign clears the claim before routing (reopenForReassign), so the
 	// bead is no longer claimed work and takes the ordinary formula path.
 	// opts.Reassign, not shouldReopenForReassign, so a dry run previews what
@@ -365,6 +377,12 @@ func shouldValidateExistingBead(opts SlingOpts) bool {
 
 func usesFormulaBackedRoute(opts SlingOpts) bool {
 	return opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "")
+}
+
+// takesPlainBeadPath reports whether DoSling routes opts.BeadOrFormula as a
+// plain bead, attaching no formula.
+func takesPlainBeadPath(opts SlingOpts) bool {
+	return !opts.IsFormula && !usesFormulaBackedRoute(opts)
 }
 
 func shouldCheckDepCycle(opts SlingOpts) bool {
