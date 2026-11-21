@@ -142,10 +142,12 @@ func claimHookCandidate(ctx context.Context, candidate beads.Bead, actor string,
 }
 
 // hookClaimExactWithBdStore is the default ClaimExact seam: the exact claim
-// against the work-directory bd context, writing as actor.
+// against the work-directory bd context, writing as actor through bd's
+// --if-revision fence, or its --if-status/--if-assignee guard when bd lacks
+// --if-revision.
 func hookClaimExactWithBdStore(ctx context.Context, dir string, env []string, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, actor)
-	return hookClaimExactThroughStore(store, molecule.ClaimExactWriters{Revision: store}, actor, req)
+	return hookClaimExactThroughStore(store, molecule.ClaimExactWriters{Revision: store, Assignment: store}, actor, req)
 }
 
 // hookClaimExactThroughStore runs one exact claim and classifies it the way

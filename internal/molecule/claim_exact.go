@@ -77,10 +77,15 @@ type ClaimExactReader interface {
 
 // ClaimExactWriters is the write half of an exact claim, kept apart from the
 // reader so a caller whose read and write handles differ (a work leg's bd
-// context, a relocated class binding) can hand each in as it holds it. A nil
-// Revision means the caller has no revision fence to offer.
+// context, a relocated class binding) can hand each in as it holds it.
+//
+// Revision is the revision fence, tried first. Assignment is the
+// status-and-assignee guard the claim falls to when Revision is nil or answers
+// beads.ErrConditionalWriteUnsupported. A nil field means the caller has no
+// such fence to offer; with both nil the claim fails closed.
 type ClaimExactWriters struct {
-	Revision beads.ConditionalWriter
+	Revision   beads.ConditionalWriter
+	Assignment beads.AssignmentGuardedUpdater
 }
 
 // ClaimExactRequest names the one bead an exact claim targets and what the
@@ -102,9 +107,22 @@ type ClaimExactRequest struct {
 // ClaimExactFence names the write fence that committed a claim.
 type ClaimExactFence string
 
-// ClaimExactFenceRevision means the claim landed through one
-// beads.ConditionalWriter.UpdateIfMatch fenced on the revision this call read.
-const ClaimExactFenceRevision ClaimExactFence = "revision"
+const (
+	// ClaimExactFenceRevision means the claim landed through one
+	// beads.ConditionalWriter.UpdateIfMatch fenced on the revision this call
+	// read.
+	ClaimExactFenceRevision ClaimExactFence = "revision"
+	// ClaimExactFenceAssignment means the claim landed through one
+	// beads.AssignmentGuardedUpdater.UpdateIfAssignment guarded on the
+	// observed status and assignee.
+	ClaimExactFenceAssignment ClaimExactFence = "assignment"
+)
+
+// ErrClaimExactReadback is wrapped by the error of a claim whose write landed
+// but whose re-read failed. Such a result carries Outcome ClaimExactClaimed,
+// so a caller can tell a committed claim it could not confirm from a claim
+// that wrote nothing.
+var ErrClaimExactReadback = errors.New("claim exact: the claim landed but its re-read failed")
 
 // ClaimExactResult is how ClaimExactWithWriters resolved: the freshest bead
 // snapshot the call held, the outcome, and the fence that committed a claim
@@ -167,17 +185,31 @@ func ClaimExact(store beads.MoleculeTarget, id string, want ClaimExactPreconditi
 // The flow is ClaimExact's: the reserved-key guard, one Get, the
 // preconditions, the generation check (skipped when req.FromGeneration is
 // nil), then one write that advances the generation and applies
-// req.OnSuccess together. The write is a revision-fenced UpdateIfMatch: every
-// precondition is fenced inside it, because any change to the bead after the
-// Get moves its revision. A revision fence that answers *beads.PreconditionFailedError
-// is ClaimExactStale. With no revision fence, or one that answers
-// beads.ErrConditionalWriteUnsupported, the call writes nothing and returns
-// an error wrapping beads.ErrConditionalWriteUnsupported: there is no
-// unconditional path.
+// req.OnSuccess together. The write goes to the first of two tiers the
+// writers offer:
 //
-// A non-nil error leaves Outcome empty. The returned Bead is the freshest
-// snapshot the call held, and the zero Bead only when the reserved-key guard
-// or the initial Get failed.
+//   - Revision tier: a revision-fenced UpdateIfMatch. Every precondition is
+//     fenced inside the write, because any change to the bead after the Get
+//     moves its revision. *beads.PreconditionFailedError is ClaimExactStale;
+//     beads.ErrConditionalWriteUnsupported wrote nothing and drops the call
+//     to the assignment tier.
+//   - Assignment tier: one UpdateIfAssignment guarded on req.Want's Status
+//     and Assignee, which must both be set. Status and assignee, the facts
+//     that define ownership, are fenced inside the write, so two claimants
+//     cannot both win; the other preconditions and the generation are checked
+//     at read time. A guard that no longer holds is ClaimExactStale. Its
+//     residue is ABA: another actor claiming and releasing the bead between
+//     this call's read and its write.
+//
+// With neither tier available the call writes nothing and returns an error
+// wrapping beads.ErrConditionalWriteUnsupported: there is no unconditional
+// path.
+//
+// A non-nil error leaves Outcome empty, except for a landed write whose
+// re-read failed: that returns ClaimExactClaimed with an error wrapping
+// ErrClaimExactReadback. The returned Bead is the freshest snapshot the call
+// held, and the zero Bead only when the reserved-key guard or the initial Get
+// failed.
 func ClaimExactWithWriters(reader ClaimExactReader, writers ClaimExactWriters, req ClaimExactRequest) (ClaimExactResult, error) {
 	id := req.ID
 	if _, reserved := req.OnSuccess.Metadata[beadmeta.ClaimGenerationMetadataKey]; reserved {
@@ -204,24 +236,43 @@ func ClaimExactWithWriters(reader ClaimExactReader, writers ClaimExactWriters, r
 	}
 
 	effects := claimEffectsWithGeneration(req.OnSuccess, toGeneration)
-	if writers.Revision == nil {
-		return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: %w", id, beads.ErrConditionalWriteUnsupported)
-	}
-	if err := writers.Revision.UpdateIfMatch(id, b.Revision, effects); err != nil {
-		if beads.IsPreconditionFailed(err) {
+	if writers.Revision != nil {
+		err := writers.Revision.UpdateIfMatch(id, b.Revision, effects)
+		switch {
+		case err == nil:
+			return claimExactReadback(reader, id, b, ClaimExactFenceRevision)
+		case beads.IsPreconditionFailed(err):
 			return ClaimExactResult{Bead: bestEffortGet(reader, id, b), Outcome: ClaimExactStale}, nil
+		case !errors.Is(err, beads.ErrConditionalWriteUnsupported):
+			return ClaimExactResult{Bead: bestEffortGet(reader, id, b)}, fmt.Errorf("claim exact %q: applying claim effects: %w", id, err)
 		}
-		if errors.Is(err, beads.ErrConditionalWriteUnsupported) {
-			return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: %w", id, err)
-		}
+	}
+	if writers.Assignment == nil {
+		return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: store supports neither a revision fence nor an assignment guard: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	if req.Want.Status == nil || req.Want.Assignee == nil {
+		return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: the assignment guard needs an observed status and assignee: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	landed, err := writers.Assignment.UpdateIfAssignment(id, *req.Want.Status, *req.Want.Assignee, effects)
+	if err != nil {
 		return ClaimExactResult{Bead: bestEffortGet(reader, id, b)}, fmt.Errorf("claim exact %q: applying claim effects: %w", id, err)
 	}
+	if !landed {
+		return ClaimExactResult{Bead: bestEffortGet(reader, id, b), Outcome: ClaimExactStale}, nil
+	}
+	return claimExactReadback(reader, id, b, ClaimExactFenceAssignment)
+}
 
+// claimExactReadback re-reads a claim whose write landed through fence. A
+// failed re-read still reports the claim, with an error wrapping
+// ErrClaimExactReadback.
+func claimExactReadback(reader ClaimExactReader, id string, read beads.Bead, fence ClaimExactFence) (ClaimExactResult, error) {
 	final, err := reader.Get(id)
 	if err != nil {
-		return ClaimExactResult{Bead: b}, fmt.Errorf("claim exact %q: re-read after claim: %w", id, err)
+		return ClaimExactResult{Bead: read, Outcome: ClaimExactClaimed, Fence: fence},
+			fmt.Errorf("claim exact %q: %w: %w", id, ErrClaimExactReadback, err)
 	}
-	return ClaimExactResult{Bead: final, Outcome: ClaimExactClaimed, Fence: ClaimExactFenceRevision}, nil
+	return ClaimExactResult{Bead: final, Outcome: ClaimExactClaimed, Fence: fence}, nil
 }
 
 // claimEffectsWithGeneration returns a copy of onSuccess with

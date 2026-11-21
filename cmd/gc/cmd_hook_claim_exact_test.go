@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -343,5 +345,146 @@ func TestHookClaimExactFencesObservedGeneration(t *testing.T) {
 	}
 	if len(f.failed) != 0 {
 		t.Fatalf("claim failures = %v, want a rejection, not claims_errored", f.failed)
+	}
+}
+
+// fakeAssignmentGuardBd is a bd that knows --if-status/--if-assignee but not
+// --if-revision. It serves one bead, applies a guarded update only while the
+// bead's status and assignee match the guard, and records every command.
+type fakeAssignmentGuardBd struct {
+	bead beads.Bead
+	ran  [][]string
+}
+
+func (f *fakeAssignmentGuardBd) runner(context.Context, map[string]string) beads.CommandRunner {
+	return func(_ string, name string, args ...string) ([]byte, error) {
+		f.ran = append(f.ran, append([]string{name}, args...))
+		if name != "bd" || len(args) == 0 {
+			return nil, fmt.Errorf("unexpected command %s %q", name, args)
+		}
+		switch args[0] {
+		case "show":
+			return json.Marshal([]beads.Bead{f.bead})
+		case "update", "close", "assign", "delete":
+			if len(args) == 2 && args[1] == "--help" {
+				return []byte("Flags:\n      --if-status string\n      --if-assignee string\n"), nil
+			}
+			if args[0] == "update" {
+				return f.update(args[1:])
+			}
+		}
+		return nil, fmt.Errorf("unexpected command %s %q", name, args)
+	}
+}
+
+func (f *fakeAssignmentGuardBd) update(args []string) ([]byte, error) {
+	next := f.bead
+	next.Metadata = map[string]string{}
+	for k, v := range f.bead.Metadata {
+		next.Metadata[k] = v
+	}
+	var ifStatus, ifAssignee *string
+	for i := 0; i < len(args); i++ {
+		flag := args[i]
+		if !strings.HasPrefix(flag, "--") || flag == "--json" {
+			continue
+		}
+		if i+1 >= len(args) {
+			return nil, fmt.Errorf("flag %s has no value", flag)
+		}
+		value := args[i+1]
+		i++
+		switch flag {
+		case "--status":
+			next.Status = value
+		case "--assignee":
+			next.Assignee = value
+		case "--set-metadata":
+			k, v, _ := strings.Cut(value, "=")
+			next.Metadata[k] = v
+		case "--if-status":
+			ifStatus = &value
+		case "--if-assignee":
+			ifAssignee = &value
+		default:
+			return nil, fmt.Errorf("unknown flag: %s", flag)
+		}
+	}
+	if ifStatus == nil || ifAssignee == nil {
+		return nil, fmt.Errorf("unguarded update %q", args)
+	}
+	if f.bead.Status != *ifStatus || f.bead.Assignee != *ifAssignee {
+		return nil, fakeBdExitError(13)
+	}
+	f.bead = next
+	return json.Marshal([]beads.Bead{f.bead})
+}
+
+// fakeBdExitError is a bd process that exited with the given status.
+type fakeBdExitError int
+
+func (e fakeBdExitError) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+
+// ExitCode reports the exit status, as an *exec.ExitError does.
+func (e fakeBdExitError) ExitCode() int { return int(e) }
+
+// updates returns the bd update commands that were not capability probes.
+func (f *fakeAssignmentGuardBd) updates() [][]string {
+	var out [][]string
+	for _, cmd := range f.ran {
+		if len(cmd) > 1 && cmd[1] == "update" && (len(cmd) != 3 || cmd[2] != "--help") {
+			out = append(out, cmd)
+		}
+	}
+	return out
+}
+
+// TestHookClaimExactClaimsThroughAssignmentGuardWithoutRevisionFence: on a bd
+// that has no --if-revision but does guard an update on status and assignee,
+// the exact claim of a graph step lands as one guarded bd update carrying the
+// claim's effects, fenced on the observed status and assignee, never as a
+// --claim.
+func TestHookClaimExactClaimsThroughAssignmentGuardWithoutRevisionFence(t *testing.T) {
+	bd := &fakeAssignmentGuardBd{bead: beads.Bead{
+		ID: "work-1", Title: "work", Status: "open", Type: "task",
+		Metadata: graphStepMeta("build"),
+	}}
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	hookClaimCommandRunnerWithEnvContext = bd.runner
+
+	opts := poolClaimOpts()
+	req := hookClaimExactPlan(bd.bead, opts.Assignee, true, false, opts.Env, time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC))
+	claimed, verdict, err := hookClaimExactWithBdStore(context.Background(), t.TempDir(), opts.Env, opts.Assignee, req)
+	if err != nil {
+		t.Fatalf("exact claim: %v; commands=%q", err, bd.ran)
+	}
+	if verdict != hookClaimVerdictClaimed {
+		t.Fatalf("verdict = %q, want claimed; commands=%q", verdict, bd.ran)
+	}
+	if claimed.Assignee != opts.Assignee || claimed.Status != "in_progress" {
+		t.Fatalf("claimed = %s/%s, want in_progress/%s", claimed.Status, claimed.Assignee, opts.Assignee)
+	}
+	updates := bd.updates()
+	if len(updates) != 1 {
+		t.Fatalf("bd updates = %q, want exactly one guarded update", updates)
+	}
+	update := strings.Join(updates[0], " ")
+	for _, want := range []string{
+		"--status in_progress",
+		"--assignee " + opts.Assignee,
+		"--set-metadata gc.claim_generation=1",
+		"--set-metadata gc.session_id=mc-sess1",
+		"--if-status open",
+		"--if-assignee ",
+	} {
+		if !strings.Contains(update, want) {
+			t.Errorf("guarded update %q lacks %q", update, want)
+		}
+	}
+	for _, cmd := range bd.ran {
+		if strings.Contains(strings.Join(cmd, " "), "--claim") {
+			t.Fatalf("exact claim issued a --claim: %q", cmd)
+		}
 	}
 }
