@@ -8,9 +8,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // The claim-time class routing unit rows. The split-topology conformance suite
@@ -845,5 +847,105 @@ func TestClaimRouteHoldsKeepsTheAuthorityLegOnACensusCleanBinding(t *testing.T) 
 	}
 	if counter.gets != 1 {
 		t.Errorf("the claim route read the class binding %d time(s) for an id only that binding can mint, want exactly 1: zero means a clean census retired the authority leg, which nothing may do, and more than one means the probe is being repeated", counter.gets)
+	}
+}
+
+// TestClassRoutedClaimExactEscalatesOnlyOnAnAbsentWorkLeg pins the class route
+// for a graph step's exact claim. A step that lives only in the relocated
+// binding is absent from the work leg, whose exact claim then fails its initial
+// read with a not-found and a zero bead: the claim escalates once and lands in
+// the binding through the same fenced tiers, fenced on the same observation,
+// and the binding is memoized so a release of a moved claim follows it there.
+// A work leg that answered — precondition_failed, stale or a write error, all
+// of which return the bead it read — is the answer: the binding is neither
+// read nor written, even when the write error names a not-found.
+func TestClassRoutedClaimExactEscalatesOnlyOnAnAbsentWorkLeg(t *testing.T) {
+	stepMeta := map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "gcg-root",
+		beadmeta.StepIDMetadataKey:     "build",
+	}
+	notFound := func(id string) error {
+		return fmt.Errorf("claim exact %q: %w", id, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound))
+	}
+
+	t.Run("absent from the work leg", func(t *testing.T) {
+		class := newClaimRouteClassStore(t)
+		minted := mintClaimRouteBead(t, class, "gcg-e00", stepMeta)
+		route := newClaimRouteFor(t, class)
+		workCalls := 0
+		ops := classRoutedHookClaimOps(hookClaimOps{
+			ClaimExact: func(_ context.Context, _ string, _ []string, _ string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+				workCalls++
+				return beads.Bead{}, hookClaimVerdictNone, notFound(req.ID)
+			},
+		}, route)
+		req := hookClaimExactPlan(minted, "worker-1", true, false, nil, time.Now())
+		claimed, verdict, err := ops.ClaimExact(context.Background(), "/work", nil, "worker-1", req)
+		if err != nil || verdict != hookClaimVerdictClaimed {
+			t.Fatalf("routed exact claim of gcg-e00 = (verdict=%q err=%v), want claimed in the binding", verdict, err)
+		}
+		if workCalls != 1 {
+			t.Fatalf("work-leg exact claim ran %d time(s), want exactly 1 before the escalation", workCalls)
+		}
+		if strings.TrimSpace(claimed.Assignee) != "worker-1" {
+			t.Fatalf("routed exact claim returned assignee %q, want worker-1", claimed.Assignee)
+		}
+		held, err := class.Get("gcg-e00")
+		if err != nil || strings.TrimSpace(held.Assignee) != "worker-1" || !strings.EqualFold(held.Status, "in_progress") {
+			t.Fatalf("binding holds gcg-e00 as status=%q assignee=%q (err=%v), want in_progress owned by worker-1", held.Status, held.Assignee, err)
+		}
+		if got := held.Metadata[beadmeta.ClaimGenerationMetadataKey]; got != "1" {
+			t.Fatalf("binding's gcg-e00 claim generation = %q, want 1: the escalated claim must go through the fenced tiers", got)
+		}
+		if !route.knownResident("gcg-e00") {
+			t.Fatal("gcg-e00 is not memoized resident after the escalation, so releasing a moved claim would miss the binding")
+		}
+
+		// The memoized second claim skips the work leg and is fenced on the
+		// observation: the binding's row no longer matches it.
+		_, verdict, err = ops.ClaimExact(context.Background(), "/work", nil, "worker-2", hookClaimExactPlan(minted, "worker-2", true, false, nil, time.Now()))
+		if err != nil || verdict != hookClaimVerdictRejected || workCalls != 1 {
+			t.Fatalf("second exact claim = (verdict=%q err=%v, work calls=%d), want rejected in the binding without a work-leg call", verdict, err, workCalls)
+		}
+	})
+
+	read := beads.Bead{ID: "gcg-e10", Status: "open", Metadata: stepMeta}
+	for _, tt := range []struct {
+		name    string
+		verdict hookClaimVerdict
+		err     error
+	}{
+		{"precondition_failed or stale", hookClaimVerdictRejected, nil},
+		{"write error", hookClaimVerdictNone, errors.New("claim exact \"gcg-e10\": applying claim effects: database is locked")},
+		{"write error naming a not-found", hookClaimVerdictNone, fmt.Errorf("claim exact %q: applying claim effects: %w", "gcg-e10", beads.ErrNotFound)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			class := newClaimRouteClassStore(t)
+			minted := mintClaimRouteBead(t, class, "gcg-e10", stepMeta)
+			route := newClaimRouteFor(t, class)
+			legReads := 0
+			ops := classRoutedHookClaimOps(hookClaimOps{
+				ClaimExact: func(context.Context, string, []string, string, molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+					return read, tt.verdict, tt.err
+				},
+				ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+					legReads++
+					return beads.Bead{}, beads.ErrNotFound
+				},
+			}, route)
+			claimed, verdict, err := ops.ClaimExact(context.Background(), "/work", nil, "worker-1", hookClaimExactPlan(minted, "worker-1", true, false, nil, time.Now()))
+			if verdict != tt.verdict || !errors.Is(err, tt.err) || (tt.err == nil && err != nil) || claimed.ID != read.ID {
+				t.Fatalf("exact claim = (bead=%q verdict=%q err=%v), want the work leg's (bead=%q verdict=%q err=%v) unchanged", claimed.ID, verdict, err, read.ID, tt.verdict, tt.err)
+			}
+			if legReads != 0 {
+				t.Fatalf("the work leg was re-read %d time(s); an answered exact claim must not be settled by a read", legReads)
+			}
+			if _, probed := route.resident["gcg-e10"]; probed {
+				t.Fatal("the binding was probed for gcg-e10 after the work leg answered")
+			}
+			if held, getErr := class.Get("gcg-e10"); getErr != nil || strings.TrimSpace(held.Assignee) != "" || held.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" {
+				t.Fatalf("the binding's gcg-e10 was written (assignee=%q generation=%q err=%v) after the work leg answered", held.Assignee, held.Metadata[beadmeta.ClaimGenerationMetadataKey], getErr)
+			}
+		})
 	}
 }

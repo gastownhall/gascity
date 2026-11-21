@@ -145,6 +145,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -561,6 +562,20 @@ func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, 
 		r.graph.Get)
 }
 
+// claimExact runs a graph step's exact claim against the binding through the
+// same two tiers the work store's exact claim uses: the binding's revision
+// fence when the store offers one, else its status/assignee guard.
+func (r *hookClaimClassRoute) claimExact(actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+	var writers molecule.ClaimExactWriters
+	if _, ok := beads.As[beads.ConditionalWriter](r.class); ok {
+		writers.Revision = r.graph
+	}
+	if guard, ok := beads.As[beads.AssignmentGuardedUpdater](r.class); ok {
+		writers.Assignment = guard
+	}
+	return hookClaimExactThroughStore(r.graph, writers, actor, req)
+}
+
 // listContinuation reads a continuation group out of the binding and records
 // every member as resident, so the per-sibling assignment that follows does not
 // re-probe (or re-fail) one bd subprocess at a time.
@@ -659,6 +674,29 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.claim(beadID, assignee)
 		default:
 			return claimed, ok, err
+		}
+	}
+
+	ops.ClaimExact = func(ctx context.Context, dir string, env []string, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+		if route.knownResident(req.ID) {
+			return route.claimExact(actor, req)
+		}
+		// First leg of the escalation. Only an exact claim whose initial read
+		// came back not-found (the zero bead the claim returns for a failed
+		// first read) proves the work leg does not hold the step; a claim that
+		// read the bead answered, whatever its verdict or write error.
+		claimed, verdict, err := base.ClaimExact(ctx, dir, env, actor, req)
+		if verdict != hookClaimVerdictNone || claimed.ID != "" || !hookClaimBeadIsElsewhere(err) {
+			return claimed, verdict, err
+		}
+		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, req.ID, actor, err)
+		switch {
+		case probeErr != nil:
+			return beads.Bead{}, hookClaimVerdictNone, probeErr
+		case routed:
+			return route.claimExact(actor, req)
+		default:
+			return claimed, verdict, err
 		}
 	}
 
