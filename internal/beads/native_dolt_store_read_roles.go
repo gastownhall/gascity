@@ -175,14 +175,28 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			return err
 		}
 		var beads []Bead
+		pagesRead := 0
 		seen := make(map[string]bool)
+		idFilterRefused := false
+		fallbackAssignees := make(map[string]bool)
 		for _, req := range plan {
+			if idFilterRefused {
+				if fallbackAssignees[req.Assignee] {
+					continue
+				}
+				req.IDFilter = ""
+			}
+
 			if req.IssueType != "" && s.typePushdownOff.Load() {
 				req.IssueType = ""
 			}
-			page, err := s.listPlanRequest(ctx, reader, req, &tally)
+			page, err := s.listPlanRequest(ctx, reader, req, &tally, &idFilterRefused)
 			if err != nil {
 				return err
+			}
+			pagesRead++
+			if idFilterRefused {
+				fallbackAssignees[req.Assignee] = true
 			}
 			s.noteRows(len(page.Items))
 			for _, row := range page.Items {
@@ -202,7 +216,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 				beads = append(beads, bead)
 			}
 		}
-		if len(plan) > 1 && query.Sort == SortDefault {
+		if pagesRead > 1 && query.Sort == SortDefault {
 			// One request answers in the backend's default order, and an
 			// unsorted Limit keeps that order's prefix. A union of several is
 			// put back into it, so the prefix ApplyListQuery keeps is the one
@@ -219,26 +233,39 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	return out, nil
 }
 
-// listPlanRequest sends one plan request. A pushed type the backend refuses is
-// sent again without it; type pushdown latches off only when that retry is
-// answered. A retry that fails too returns both errors joined: errors.Is still
-// finds the refusal, and withReadRetry classifies the retry's own failure, so
-// a connection lost on the retry reconnects. Both sends are counted.
-func (s *NativeDoltStore) listPlanRequest(ctx context.Context, reader issueops.Reader, req issueops.ListRequest, tally *nativeListTally) (issueops.IssuePage, error) {
-	page, err := reader.List(ctx, req)
-	tally.noteRequest(req, len(page.Items))
-	if err == nil || req.IssueType == "" || !nativeListTypeRefused(err) {
-		return page, err
+// listPlanRequest sends one plan request, retrying a refused ID predicate
+// without it and a refused type without that type. Only successful type
+// fallback disables type pushdown for the store; ID refusal is local to this
+// List attempt. Every request is counted and a failed retry retains the
+// original refusal alongside the final error for withReadRetry.
+func (s *NativeDoltStore) listPlanRequest(ctx context.Context, reader issueops.Reader, req issueops.ListRequest, tally *nativeListTally, idFilterRefused *bool) (issueops.IssuePage, error) {
+	var refusals []error
+	var refusedType string
+	for {
+		page, err := reader.List(ctx, req)
+		tally.noteRequest(req, len(page.Items))
+		if err == nil {
+			if refusedType != "" {
+				s.disableTypePushdown(refusedType, errors.Join(refusals...))
+			}
+			return page, nil
+		}
+		refusals = append(refusals, err)
+		var unsupported *beadslib.ErrUnsupported
+		if req.IDFilter != "" && errors.As(err, &unsupported) {
+			*idFilterRefused = true
+			req.IDFilter = ""
+			unlimited := 0
+			req.Limit = &unlimited
+			continue
+		}
+		if req.IssueType != "" && nativeListTypeRefused(err) {
+			refusedType = req.IssueType
+			req.IssueType = ""
+			continue
+		}
+		return issueops.IssuePage{}, errors.Join(refusals...)
 	}
-	refusedType := req.IssueType
-	req.IssueType = ""
-	retried, retryErr := reader.List(ctx, req)
-	tally.noteRequest(req, len(retried.Items))
-	if retryErr != nil {
-		return issueops.IssuePage{}, errors.Join(err, retryErr)
-	}
-	s.disableTypePushdown(refusedType, err)
-	return retried, nil
 }
 
 // sortBeadsNativeListDefaultOrder sorts items into the reader role's default
@@ -824,9 +851,10 @@ func nativeListLimitPushdown(query ListQuery) int {
 	if query.Status != "" || !query.IncludeClosed || query.Type != "" || query.TierMode != TierBoth {
 		return 0
 	}
-	// SeekAfter, UpdatedBefore and plural Assignees are Go-side too
+	// IDs, including fallback, remain Go-filtered. SeekAfter, UpdatedBefore
+	// and plural Assignees are Go-side too
 	// (ListQuery.Matches), and each is a residual filter for the same reason.
-	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
+	if len(query.IDs) > 0 || query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
 		return 0
 	}
 	switch query.Sort {

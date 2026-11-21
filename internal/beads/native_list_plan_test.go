@@ -94,7 +94,7 @@ func TestNativeDoltStoreCountsListRequests(t *testing.T) {
 
 func nativeListRequestsEqual(a, b issueops.ListRequest) bool {
 	if a.Status != b.Status || a.IssueType != b.IssueType || a.Assignee != b.Assignee ||
-		a.ParentID != b.ParentID || a.SortBy != b.SortBy || a.Reverse != b.Reverse ||
+		a.IDFilter != b.IDFilter || a.ParentID != b.ParentID || a.SortBy != b.SortBy || a.Reverse != b.Reverse ||
 		a.AllFlag != b.AllFlag || a.IncludeEphemeral != b.IncludeEphemeral || a.IncludeInfra != b.IncludeInfra ||
 		a.IncludeGates != b.IncludeGates || a.IncludeTemplates != b.IncludeTemplates {
 		return false
