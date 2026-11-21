@@ -159,6 +159,91 @@ func TestManagerReloadProxyProcessStartsAndProxies(t *testing.T) {
 	}
 }
 
+// A failed health probe marks a proxy_process service degraded but leaves its
+// process running. Requests must still reach that live process: the verdict is
+// only refreshed on the next controller tick, so refusing on it turns one slow
+// probe into minutes of 503s.
+func TestProxyProcessProxiesLiveProcessAfterFailedHealthProbe(t *testing.T) {
+	t.Setenv("GC_SERVICE_HELPER", "1")
+	setHelperPassthrough(t)
+	stall := filepath.Join(t.TempDir(), "stall-health")
+	t.Setenv("GC_SERVICE_HEALTH_STALL_FILE", stall)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+
+	rt := &testRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{
+			Services: []config.Service{{
+				Name: "bridge",
+				Kind: "proxy_process",
+				Process: config.ServiceProcessConfig{
+					Command:    []string{exe, "-test.run=^TestProxyProcessHelper$", "--"},
+					HealthPath: "/healthz",
+				},
+			}},
+		},
+		sp:    runtime.NewFake(),
+		store: beads.NewMemStore(),
+	}
+	mgr := NewManager(rt)
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	defer mgr.Close() //nolint:errcheck // best-effort cleanup
+
+	if status, _ := mgr.Get("bridge"); status.LocalState != "ready" {
+		t.Fatalf("LocalState = %q, want ready before the stalled probe (reason=%q)", status.LocalState, status.Reason)
+	}
+	if err := os.WriteFile(stall, nil, 0o600); err != nil {
+		t.Fatalf("write stall file: %v", err)
+	}
+	mgr.Tick(context.Background(), time.Now().UTC())
+	status, _ := mgr.Get("bridge")
+	if status.LocalState != "degraded" {
+		t.Fatalf("LocalState = %q, want degraded after the stalled probe (reason=%q)", status.LocalState, status.Reason)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/svc/bridge/publish", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	if ok := mgr.ServeHTTP(rec, req); !ok {
+		t.Fatal("ServeHTTP returned false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d while degraded with a live process (body=%q)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "POST /publish" {
+		t.Fatalf("body = %q, want %q", got, "POST /publish")
+	}
+}
+
+// Without a live, started process there is nothing to proxy to, so the
+// request is refused with 503 whatever the last probe said.
+func TestProxyProcessRefusesWithoutLiveStartedProcess(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		inst *proxyProcessInstance
+	}{
+		{"closed", &proxyProcessInstance{closed: true, cmd: &exec.Cmd{}, status: Status{LocalState: "stopped", Reason: "service_closed"}}},
+		{"no process", &proxyProcessInstance{status: Status{LocalState: "degraded", Reason: "process_exited"}}},
+		{"starting", &proxyProcessInstance{cmd: &exec.Cmd{}, status: Status{LocalState: "starting"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/svc/bridge/publish", strings.NewReader(`{}`))
+			if ok := tc.inst.HandleHTTP(rec, req, "/publish"); !ok {
+				t.Fatal("HandleHTTP returned false, want true")
+			}
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+			}
+		})
+	}
+}
+
 func TestProxyProcessHelper(t *testing.T) {
 	if os.Getenv("GC_SERVICE_HELPER") != "1" {
 		t.Skip("helper process")
@@ -176,7 +261,15 @@ func TestProxyProcessHelper(t *testing.T) {
 	defer ln.Close() //nolint:errcheck // best-effort cleanup
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if stall := os.Getenv("GC_SERVICE_HEALTH_STALL_FILE"); stall != "" {
+			if _, err := os.Stat(stall); err == nil {
+				// Stall until the probe gives up: its client timeout cancels the
+				// request, so the probe fails without a fixed sleep here.
+				<-r.Context().Done()
+				return
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/env", func(w http.ResponseWriter, _ *http.Request) {
