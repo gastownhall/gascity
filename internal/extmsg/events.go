@@ -12,12 +12,16 @@ import "github.com/gastownhall/gascity/internal/events"
 // Actor is the inbound speaker's display name; TargetSession is the
 // resolved recipient session and TargetAgent the bound agent identity for
 // agent-bound conversations (both empty if no routing match).
+// AddressedSession is the session the inbound's adapter addressed it to
+// (InboundResult.AddressedSessionID), which hears it whether or not it is a
+// member of the conversation.
 type InboundEventPayload struct {
-	Provider       string `json:"provider"`
-	ConversationID string `json:"conversation_id"`
-	Actor          string `json:"actor"`
-	TargetSession  string `json:"target_session"`
-	TargetAgent    string `json:"target_agent,omitempty"`
+	Provider         string `json:"provider"`
+	ConversationID   string `json:"conversation_id"`
+	Actor            string `json:"actor"`
+	TargetSession    string `json:"target_session"`
+	TargetAgent      string `json:"target_agent,omitempty"`
+	AddressedSession string `json:"addressed_session,omitempty" doc:"Session the inbound's adapter addressed it to (its addressed_session, resolved), which hears it whether or not it is a member of the conversation."`
 }
 
 // IsEventPayload marks InboundEventPayload as an events.Payload variant.

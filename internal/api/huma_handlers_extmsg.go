@@ -53,6 +53,7 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		Registry:                    reg,
 		EmitEvent:                   s.extmsgEmitEvent(),
 		DefaultAgentForConversation: s.extmsgDefaultAgentForConversation(),
+		ResolveAddressedSession:     s.extmsgResolveAddressedSession(),
 	}
 
 	// Pre-normalized path.
@@ -74,13 +75,13 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 			// inbound path resolves existing bindings rather than creating them.
 			switch {
 			// Permanent conditions the normalized path can surface: an
-			// unroutable/malformed conversation (ErrInvalidConversation), and an
+			// unroutable/malformed conversation (ErrInvalidConversation), an
 			// invariant violation (ErrInvariantViolation) from binding, group-route,
 			// or transcript resolution — corrupt state that retrying cannot repair,
-			// so it is dropped rather than allowed to wedge the stream. The
-			// ErrInvalidInput arm is the bind switch's input-validation arm carried
-			// over for symmetry; the normalized path hard-codes Kind/Provenance so
-			// it has no live ErrInvalidInput source today.
+			// so it is dropped rather than allowed to wedge the stream — and an
+			// addressed_session that names more than one session or conflicts
+			// with a configured named session (ErrInvalidInput, from
+			// extmsgResolveAddressedSession).
 			case errors.Is(handleErr, extmsg.ErrInvalidInput),
 				errors.Is(handleErr, extmsg.ErrInvalidConversation),
 				errors.Is(handleErr, extmsg.ErrInvariantViolation):
@@ -89,14 +90,14 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 				return nil, apierr.Internal.Msg(handleErr.Error())
 			}
 		}
-		message := *input.Body.Message
-		s.runBackground(func(ctx context.Context) {
-			s.extmsgNotifyInboundMembers(ctx, message)
-		})
 		out := &ExtMsgInboundOutput{}
 		if result != nil {
 			out.Body = *result
 		}
+		message, addressedSessionID := *input.Body.Message, out.Body.AddressedSessionID
+		s.runBackground(func(ctx context.Context) {
+			s.extmsgNotifyInboundMembers(ctx, message, addressedSessionID)
+		})
 		return out, nil
 	}
 
@@ -172,7 +173,13 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 		sourceDisplay := s.extmsgSessionHandleForSelector(input.Body.SessionID)
 		text, sessionID := input.Body.Text, input.Body.SessionID
 		s.runBackground(func(ctx context.Context) {
-			s.extmsgNotifyMembers(ctx, notifyConversation, sourceDisplay, "agent", text, sessionID, "")
+			s.extmsgNotifyMembers(ctx, extmsgNotification{
+				Conversation:    notifyConversation,
+				ActorDisplay:    sourceDisplay,
+				ActorKind:       "agent",
+				Text:            text,
+				ExcludeSelector: sessionID,
+			})
 		})
 	}
 	out := &ExtMsgOutboundOutput{}

@@ -74,12 +74,31 @@ type ExternalAttachment struct {
 }
 
 // ExternalInboundMessage is a normalized inbound message from an external platform.
+//
+// ExplicitTarget and AddressedSession both say whom a message is for, on
+// different authority. ExplicitTarget is the handle the sender addressed the
+// message to, as the adapter read it from the message (an "@handle" prefix, a
+// mention). The sender controls it, so it is only a hint. In a conversation a
+// group routes, it selects the participant with that handle. Every notified
+// session other than the one it addresses is told whom the message is for, so
+// it can stay silent. Core never delivers a message to a session because of
+// it.
+//
+// AddressedSession is the session the adapter itself routed the message to,
+// from its own bindings or configuration, never from the message's text: a
+// session ID, session name, alias, or configured named session. In a
+// conversation that has no group, core records the message and delivers it to
+// that session once, whether or not the session reads the conversation,
+// without creating a session for it. In a conversation that has a group, the
+// group decides who hears the message, even when a binding routes it, and
+// AddressedSession is not used.
 type ExternalInboundMessage struct {
 	ProviderMessageID string               `json:"provider_message_id"`
 	Conversation      ConversationRef      `json:"conversation"`
 	Actor             ExternalActor        `json:"actor"`
 	Text              string               `json:"text"`
-	ExplicitTarget    string               `json:"explicit_target,omitempty"`
+	ExplicitTarget    string               `json:"explicit_target,omitempty" doc:"Handle the sender addressed the message to, as read from the message (an @handle prefix or a mention). A hint only: it selects a group participant by handle and tells the other notified sessions whom the message is for, and it never delivers the message to a session."`
+	AddressedSession  string               `json:"addressed_session,omitempty" doc:"Session the adapter routed the message to from its own bindings or configuration, never from the message text: a session ID, session name, alias, or configured named session. In a conversation that has no group, the message is recorded and delivered to that session once, whether or not it is a member; no session is created for it, and a value that names no open session delivers to no one. A conversation that has a group ignores it, even when a binding routes the conversation: the group decides who hears the message. A value that names more than one session is rejected with 400. explicit_target still decides whom the other notified sessions are told the message is for."`
 	ReplyToMessageID  string               `json:"reply_to_message_id,omitempty"`
 	Attachments       []ExternalAttachment `json:"attachments,omitempty"`
 	DedupKey          string               `json:"dedup_key,omitempty"`

@@ -370,6 +370,18 @@ membership add/remove must converge idempotently in the controller:
 - if a crash splits those writes, the next controller reconciliation pass
   or repeated mutating call repairs the drift
 
+One reader sits outside the membership: the session an inbound's adapter
+addressed it to (`ExternalInboundMessage.AddressedSession`). In a conversation
+that has no group, inbound routing resolves that address after the binding,
+group, and default routes, without materializing a session, and the message is
+recorded and delivered to that session once, as a one-off reader, without
+adding a membership. A conversation that has a group ignores the address, even
+when a binding routes it, so only its members read the message. The address
+comes from the adapter's own routing, never from message text.
+`ExplicitTarget` is the opposite: the handle the sender typed, a hint that
+selects a group participant and tells the other readers whom the message is
+for. It never makes a session a reader.
+
 `ResolveInbound` should:
 
 1. find the group for the root conversation
@@ -394,7 +406,8 @@ For an adapter such as Discord:
 4. Append transcript entry.
 5. Resolve group route.
 6. List active conversation memberships.
-7. Deliver the normalized message to every active reader session.
+7. Deliver the normalized message to every active reader session, and once
+   to the session the adapter addressed it to, if any.
 8. Use `TargetSessionID` only for default public response policy.
 9. When a session is added to the thread:
    - ensure transcript membership

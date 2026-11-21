@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -13,28 +14,36 @@ import (
 // TargetSessionID is set when the conversation is bound to a concrete
 // session; TargetAgentName is set when it is bound to a configured agent
 // identity, whose live session the delivery layer resolves (cold-waking one
-// when none is live).
+// when none is live). AddressedSessionID is set when the message's
+// AddressedSession names a session in a conversation that has no group; that
+// session hears the message whether or not it reads the conversation.
 type InboundResult struct {
-	Message         ExternalInboundMessage
-	Binding         *SessionBindingRecord         `json:"Binding,omitempty"`
-	GroupRoute      *GroupRouteDecision           `json:"GroupRoute,omitempty"`
-	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
-	TargetSessionID string
-	TargetAgentName string
+	Message            ExternalInboundMessage
+	Binding            *SessionBindingRecord         `json:"Binding,omitempty"`
+	GroupRoute         *GroupRouteDecision           `json:"GroupRoute,omitempty"`
+	TranscriptEntry    *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
+	TargetSessionID    string
+	TargetAgentName    string
+	AddressedSessionID string `json:"AddressedSessionID,omitempty" doc:"Session the message's addressed_session resolved to, which hears the message whether or not it is a member. Absent when the message carried no addressed_session, when it named no open session, or when the conversation has a group."`
 }
 
 // targetSubject is the event subject for the routed target: the concrete
-// session when one is bound, the agent identity otherwise.
+// session when one is bound, the agent identity when an agent is, and
+// otherwise the session the adapter addressed the message to.
 func (r *InboundResult) targetSubject() string {
-	if r.TargetSessionID != "" {
+	switch {
+	case r.TargetSessionID != "":
 		return r.TargetSessionID
+	case r.TargetAgentName != "":
+		return r.TargetAgentName
 	}
-	return r.TargetAgentName
+	return r.AddressedSessionID
 }
 
-// routed reports whether the message resolved to any delivery target.
+// routed reports whether the message resolved to any delivery target,
+// counting the session its adapter addressed it to.
 func (r *InboundResult) routed() bool {
-	return r.TargetSessionID != "" || r.TargetAgentName != ""
+	return r.TargetSessionID != "" || r.TargetAgentName != "" || r.AddressedSessionID != ""
 }
 
 // InboundDeps bundles the dependencies for inbound processing.
@@ -49,11 +58,19 @@ func (r *InboundResult) routed() bool {
 // routes the message to it. A grouped conversation is never default-routed,
 // even when its own routing finds no target, so the sticky binding cannot
 // shadow the room.
+//
+// ResolveAddressedSession maps an inbound's AddressedSession selector to the
+// concrete ID of the session it names, without creating one, and returns ""
+// when it names none. A selector that names more than one session is an
+// error wrapping ErrInvalidInput, so the inbound is rejected rather than
+// retried. The API layer supplies its session target resolution; nil means
+// no session store, and AddressedSession then addresses no one.
 type InboundDeps struct {
 	Services                    Services
 	Registry                    *AdapterRegistry
 	EmitEvent                   func(eventType, subject string, payload events.Payload)
 	DefaultAgentForConversation func(ref ConversationRef) string
+	ResolveAddressedSession     func(ctx context.Context, selector string) (string, error)
 }
 
 // applyDefaultRoute binds an unrouted, ungrouped conversation to its
@@ -107,6 +124,10 @@ func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundRes
 // unrouted rather than being rebound to the default agent — a durable binding
 // there would resolve before group routing and shadow the room on every later
 // message.
+//
+// The session the adapter addressed the message to is resolved last, so it
+// never changes which binding, group, or default route applies; it adds a
+// recipient (resolveAddressedSession).
 func resolveInboundTarget(ctx context.Context, deps InboundDeps, result *InboundResult, msg ExternalInboundMessage, now time.Time) error {
 	binding, err := deps.Services.Bindings.ResolveByConversation(ctx, msg.Conversation)
 	if err != nil {
@@ -141,14 +162,75 @@ func resolveInboundTarget(ctx context.Context, deps InboundDeps, result *Inbound
 			return err
 		}
 	}
+	return resolveAddressedSession(ctx, deps, result, msg)
+}
+
+// resolveAddressedSession records on result the session msg's AddressedSession
+// names (see ExternalInboundMessage). In a conversation that has a group, the
+// group decides who hears the message, whether the group or a binding routes
+// it, so the address is not used. An address that names no session leaves
+// result as it is.
+func resolveAddressedSession(ctx context.Context, deps InboundDeps, result *InboundResult, msg ExternalInboundMessage) error {
+	selector := strings.TrimSpace(msg.AddressedSession)
+	if selector == "" || deps.ResolveAddressedSession == nil {
+		return nil
+	}
+	grouped, err := inboundConversationGrouped(ctx, deps, result, msg.Conversation)
+	if err != nil {
+		return err
+	}
+	if grouped {
+		return nil
+	}
+	sessionID, err := deps.ResolveAddressedSession(ctx, selector)
+	if err != nil {
+		return fmt.Errorf("resolving addressed session %q: %w", selector, err)
+	}
+	result.AddressedSessionID = strings.TrimSpace(sessionID)
 	return nil
+}
+
+// inboundConversationGrouped reports whether ref, the conversation of the
+// inbound result describes, has a group. Group routing answers that when it
+// ran (result.GroupRoute). A binding routes ahead of the group, so for a bound
+// conversation the group is looked up.
+func inboundConversationGrouped(ctx context.Context, deps InboundDeps, result *InboundResult, ref ConversationRef) (bool, error) {
+	if result.GroupRoute != nil {
+		return result.GroupRoute.Match != GroupRouteNoGroup, nil
+	}
+	caller := Caller{Kind: CallerController, ID: "extmsg-inbound"}
+	_, err := deps.Services.Groups.FindByConversation(ctx, caller, ref)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrGroupNotFound):
+		return false, nil
+	}
+	return false, fmt.Errorf("looking up group: %w", err)
+}
+
+// emitInboundEvent records the extmsg.inbound event for a routed inbound.
+func emitInboundEvent(deps InboundDeps, result *InboundResult) {
+	if deps.EmitEvent == nil {
+		return
+	}
+	conversation := result.Message.Conversation
+	deps.EmitEvent(events.ExtMsgInbound, result.targetSubject(), InboundEventPayload{
+		Provider:         conversation.Provider,
+		ConversationID:   conversation.ConversationID,
+		Actor:            result.Message.Actor.DisplayName,
+		TargetSession:    result.TargetSessionID,
+		TargetAgent:      result.TargetAgentName,
+		AddressedSession: result.AddressedSessionID,
+	})
 }
 
 // HandleInbound processes a raw inbound payload through the full pipeline:
 //  1. Look up adapter by key.
 //  2. Verify and normalize the payload.
 //  3. Resolve binding for the conversation.
-//  4. If no binding, try group routing, then the configured default route.
+//  4. If no binding, try group routing, then the configured default route;
+//     then resolve the session the adapter addressed the message to.
 //  5. Append to transcript.
 //  6. Nudge all conversation members (not just the target).
 //  7. Emit event.
@@ -175,12 +257,12 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 	result := &InboundResult{Message: *msg}
 
 	// Steps 3-4: Resolve the delivery target — existing binding, else group
-	// route, else the configured default route.
+	// route, else the configured default route — and the addressed session.
 	if err := resolveInboundTarget(ctx, deps, result, *msg, msg.ReceivedAt); err != nil {
 		return nil, err
 	}
 	if !result.routed() {
-		// No binding, no group route, no default route — empty target.
+		// No binding, group route, default route, or addressed session.
 		return result, nil
 	}
 
@@ -218,15 +300,7 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 	// Step 6: Emit event.
 	// Wake is handled by the caller (HTTP handler calls state.Enqueue()).
 	// Sessions discover unread entries via gc transcript check --inject.
-	if deps.EmitEvent != nil {
-		deps.EmitEvent(events.ExtMsgInbound, result.targetSubject(), InboundEventPayload{
-			Provider:       msg.Conversation.Provider,
-			ConversationID: msg.Conversation.ConversationID,
-			Actor:          msg.Actor.DisplayName,
-			TargetSession:  result.TargetSessionID,
-			TargetAgent:    result.TargetAgentName,
-		})
-	}
+	emitInboundEvent(deps, result)
 
 	return result, nil
 }
@@ -243,12 +317,12 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 	}
 
 	// Steps 1-2: Resolve the delivery target — existing binding, else group
-	// route, else the configured default route.
+	// route, else the configured default route — and the addressed session.
 	if err := resolveInboundTarget(ctx, deps, result, msg, now); err != nil {
 		return nil, err
 	}
 	if !result.routed() {
-		// No binding, no group route, no default route — empty target.
+		// No binding, group route, default route, or addressed session.
 		return result, nil
 	}
 
@@ -279,15 +353,7 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 	}
 
 	// Step 4: Emit event.
-	if deps.EmitEvent != nil {
-		deps.EmitEvent(events.ExtMsgInbound, result.targetSubject(), InboundEventPayload{
-			Provider:       msg.Conversation.Provider,
-			ConversationID: msg.Conversation.ConversationID,
-			Actor:          msg.Actor.DisplayName,
-			TargetSession:  result.TargetSessionID,
-			TargetAgent:    result.TargetAgentName,
-		})
-	}
+	emitInboundEvent(deps, result)
 
 	return result, nil
 }

@@ -100,6 +100,25 @@ through that rig. A lookup scoped to a suspended rig reads only that shared
 store, or nothing, and never falls back to the other rigs' stores
 (`activeBeadSearchScope`).
 
+## External-message notices
+
+An inbound's notices (`extmsgNotifyMembers`) go to the conversation's
+transcript members, its readership, with one exception: the session the
+inbound's adapter addressed it to. extmsg's inbound routing resolves
+`addressed_session` after the binding, group, and default routes, and only in
+a conversation that has no group: a binding routes ahead of the group, so a
+bound conversation's group is looked up first, and a lookup that fails fails
+the inbound. The resolver (`InboundDeps.ResolveAddressedSession`, wired to
+`extmsgResolveAddressedSession`) never materializes a session, a closed
+session addresses no one, and a selector that names several sessions, or
+conflicts with a configured named session, is a 400. The inbound is then
+recorded for that session, and the fan-out tells it once from
+`InboundResult.AddressedSessionID`, without a second notice through a
+membership row. `explicit_target` is text the sender controls: it selects a
+group participant and decides who sees the "Addressed to:" line, and it is
+never resolved to a session outside the group. Never deliver to a session
+because of it.
+
 ## Deferred creation baseline
 
 Before scheduling an agent session, persist the command the controller resolves

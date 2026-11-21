@@ -220,9 +220,26 @@ X-GC-Request: 1
 ```
 
 A `200` returns the routing result. `TargetAgentName` or `TargetSessionID`
-names who received the turn; both empty means no route matched and the turn
-was dropped. The agent is notified in the background, so its reply arrives
-later on your callback.
+names who the conversation's route delivered the turn to, and
+`AddressedSessionID` names the session you addressed it to (below). All three
+empty means nothing matched and the turn was dropped. The agent is notified in
+the background, so its reply arrives later on your callback.
+
+### Address a turn to a session
+
+When your client already knows which session a turn is for, such as a
+person's answer to the session that asked the question, name that session in
+`addressed_session`. Two fields say whom a turn is for:
+
+| Field | Set from | What the city does with it |
+|---|---|---|
+| `addressed_session` | Your client's own routing: a session ID, session name, alias, or configured named session. Never text from the message. | Records the turn and delivers it to that session once, whether or not the session reads the conversation. It never creates a session, and a grouped conversation ignores it, bound or not: its group decides who hears the turn. |
+| `explicit_target` | The message: the `@handle` the sender typed. | A hint only. It picks a group participant by handle and tells the other sessions whom the turn is for; it never delivers the turn to a session. |
+
+An `addressed_session` that names no open session delivers to no one; one that
+matches more than one session is rejected with `400`. The field needs a city
+whose `gc` knows it: an older one rejects every turn that carries it with
+`422`, bound conversations included (see the resend below).
 
 ## Delivery semantics
 
@@ -233,9 +250,10 @@ Sending a turn:
 | `404` with `code` `city-not-found` | The city is not running: it is starting, restarting, or stopped. | Wait until `GET /v0/cities` lists it with `running: true`, register the adapter again, then resend with the same `provider_message_id`. |
 | No response (connection refused or dropped) | The supervisor is restarting, or the answer was lost. | Same as `city-not-found`. |
 | `401` / `403` | The write was refused: a missing or rejected write grant (`X-GC-City-Write`), a missing `X-GC-Request` header, or a read-only supervisor (one bound to a non-localhost address). | Fix the credential or configuration, then resend with the same `provider_message_id`. |
+| `422` naming `addressed_session` as an unexpected property | The city's `gc` predates `addressed_session`. | Resend the turn without the field, with the same `provider_message_id`. It reaches the conversation's readers, but not the session you addressed. |
 | other `4xx` | The turn is malformed or its state is corrupt. | Drop it; retrying fails the same way. |
 | `5xx` | A store fault; the agent was not notified. A `503` with `detail` `external messaging not enabled` does not clear on its own: the city's bead store did not open, and an operator must repair it and restart the city. | Retry with the same `provider_message_id`. |
-| `200`, no target | No binding or route matched. | Add a route or bind the conversation. |
+| `200`, no target | No binding or route matched, and no `addressed_session` named an open session. | Add a route, bind the conversation, or address the turn to a session. |
 
 The city-scoped routes answer only while the city is running; see
 [City Scope](/reference/api#city-scope) for that readiness boundary.

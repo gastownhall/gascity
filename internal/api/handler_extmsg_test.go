@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -184,7 +185,13 @@ func TestExtmsgNotifyMembersDoesNotMaterializeExcludedNamedSender(t *testing.T) 
 		t.Fatal("named sender should not be materialized before notify")
 	}
 
-	srv.extmsgNotifyMembers(context.Background(), ref, "worker", "agent", "self update", "myrig/worker", "")
+	srv.extmsgNotifyMembers(context.Background(), extmsgNotification{
+		Conversation:    ref,
+		ActorDisplay:    "worker",
+		ActorKind:       "agent",
+		Text:            "self update",
+		ExcludeSelector: "myrig/worker",
+	})
 
 	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("excluded named sender was materialized")
@@ -250,7 +257,13 @@ func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testi
 		t.Fatalf("UpsertParticipant(project-lead): %v", err)
 	}
 
-	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "@mayor: status?", "", "mayor")
+	srv.extmsgNotifyMembers(context.Background(), extmsgNotification{
+		Conversation:   ref,
+		ActorDisplay:   "Alice",
+		ActorKind:      "human",
+		Text:           "@mayor: status?",
+		ExplicitTarget: "mayor",
+	})
 
 	nudges := extmsgNudgesBySessionName(fs)
 	if got := len(nudges[mayor.SessionName]); got != 1 {
@@ -532,11 +545,13 @@ func TestFormatExtmsgNotifyReminderStripsSystemReminderBreakoutSequence(t *testi
 // self-silence on off-target messages.
 func TestFormatExtmsgNotifyReminderExplicitTargetDiscriminator(t *testing.T) {
 	cases := []struct {
-		name           string
-		handle         string
-		explicitTarget string
-		wantContains   string
-		wantNot        string
+		name               string
+		handle             string
+		recipientSelector  string
+		recipientSessionID string
+		explicitTarget     string
+		wantContains       string
+		wantNot            string
 	}{
 		{
 			name:           "off-target peer sees discriminator",
@@ -568,17 +583,37 @@ func TestFormatExtmsgNotifyReminderExplicitTargetDiscriminator(t *testing.T) {
 			explicitTarget: "   ",
 			wantNot:        "Addressed to:",
 		},
+		{
+			// A member reached through its agent identity's membership row,
+			// whom the target names by session ID, as slack-channel sends it.
+			name:               "target naming the recipient's session id, reached by another selector",
+			handle:             "coordinator",
+			recipientSelector:  "myrig/coordinator",
+			recipientSessionID: "gc-42",
+			explicitTarget:     "gc-42",
+			wantNot:            "Addressed to:",
+		},
+		{
+			name:               "target naming another session id",
+			handle:             "coordinator",
+			recipientSelector:  "myrig/coordinator",
+			recipientSessionID: "gc-42",
+			explicitTarget:     "gc-7",
+			wantContains:       "Addressed to: @gc-7 — if that is not you, do not reply.",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := extmsgNotifyReminder{
-				Provider:       "slack",
-				ConversationID: "C123/T456",
-				ActorDisplay:   "alice",
-				ActorKind:      "human",
-				Text:           "19a",
-				Handle:         tc.handle,
-				ExplicitTarget: tc.explicitTarget,
+				Provider:           "slack",
+				ConversationID:     "C123/T456",
+				ActorDisplay:       "alice",
+				ActorKind:          "human",
+				Text:               "19a",
+				RecipientSelector:  tc.recipientSelector,
+				RecipientSessionID: tc.recipientSessionID,
+				Handle:             tc.handle,
+				ExplicitTarget:     tc.explicitTarget,
 			}
 			got := formatExtmsgNotifyReminder(r)
 			if tc.wantContains != "" && !strings.Contains(got, tc.wantContains) {
@@ -629,81 +664,156 @@ func extmsgNudgesBySessionName(fs *fakeState) map[string][]string {
 	return nudges
 }
 
-// TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce covers an inbound
-// on an ungrouped conversation bound to one session whose explicit target
-// names a live session that is not a transcript member: the addressed session
-// is told once, without the self-silence line, and the bound member still
-// hears it with that line.
-func TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce(t *testing.T) {
+// extmsgTestRoom is the ungrouped Slack room the addressed-delivery tests use.
+func extmsgTestRoom() extmsg.ConversationRef {
+	return extmsg.ConversationRef{
+		ScopeID:        "scope-1",
+		Provider:       "slack",
+		AccountID:      "acct-1",
+		ConversationID: "C123",
+		Kind:           extmsg.ConversationRoom,
+	}
+}
+
+// extmsgBindTestConversation binds the test room to a new live session and
+// returns the room and that session, its one transcript member.
+func extmsgBindTestConversation(t *testing.T, fs *fakeState, services extmsg.Services) (extmsg.ConversationRef, session.Info) {
+	t.Helper()
+	ref := extmsgTestRoom()
+	member := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    member.ID,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	return ref, member
+}
+
+// extmsgInboundFixture is a city with external messaging and a live session,
+// worker (alias myrig/asker), that reads no conversation.
+type extmsgInboundFixture struct {
+	fs       *fakeState
+	srv      *Server
+	services extmsg.Services
+	worker   session.Info
+}
+
+func newExtmsgInboundFixture(t *testing.T) *extmsgInboundFixture {
+	t.Helper()
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+	fs.extmsgSvc = &services
+	fs.adapterReg = extmsg.NewAdapterRegistry()
+	worker := createTestSession(t, fs.cityBeadStore, fs.sp, "Asker")
+	if err := fs.cityBeadStore.Update(worker.ID, beads.UpdateOpts{
+		Metadata: map[string]string{"alias": "myrig/asker"},
+	}); err != nil {
+		t.Fatalf("Update(worker alias): %v", err)
+	}
+	return &extmsgInboundFixture{fs: fs, srv: srv, services: services, worker: worker}
+}
+
+// post sends one normalized inbound on ref through the API, fields set over a
+// default human message, and returns the answer once its background notices
+// are done.
+func (f *extmsgInboundFixture) post(t *testing.T, ref extmsg.ConversationRef, fields map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	message := map[string]any{
+		"provider_message_id": "m1",
+		"conversation": map[string]any{
+			"scope_id":        ref.ScopeID,
+			"provider":        ref.Provider,
+			"account_id":      ref.AccountID,
+			"conversation_id": ref.ConversationID,
+			"kind":            ref.Kind,
+		},
+		"actor":       map[string]any{"id": "u1", "display_name": "Alice", "is_bot": false},
+		"text":        "the answer is 42",
+		"received_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	for key, value := range fields {
+		message[key] = value
+	}
+	body, err := json.Marshal(map[string]any{"message": message})
+	if err != nil {
+		t.Fatalf("Marshal(body): %v", err)
+	}
+	req := newPostRequest(cityURL(f.fs, "/extmsg/inbound"), strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	f.srv.ServeHTTP(rec, req)
+	f.srv.waitForBackground()
+	return rec
+}
+
+// extmsgInboundResult decodes a 200 inbound answer.
+func extmsgInboundResult(t *testing.T, rec *httptest.ResponseRecorder) extmsg.InboundResult {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var result extmsg.InboundResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal(inbound result): %v; body: %s", err, rec.Body.String())
+	}
+	return result
+}
+
+// transcript lists the room's transcript entries.
+func (f *extmsgInboundFixture) transcript(t *testing.T, ref extmsg.ConversationRef) []extmsg.ConversationTranscriptRecord {
+	t.Helper()
+	entries, err := f.services.Transcript.List(context.Background(), extmsg.ListTranscriptInput{
+		Caller:       extmsg.Caller{Kind: extmsg.CallerController, ID: "test"},
+		Conversation: ref,
+	})
+	if err != nil {
+		t.Fatalf("Transcript.List: %v", err)
+	}
+	return entries
+}
+
+// inboundEvents returns the recorded extmsg.inbound events.
+func (f *extmsgInboundFixture) inboundEvents(t *testing.T) []events.Event {
+	t.Helper()
+	recorded, err := f.fs.eventProv.List(events.Filter{Type: events.ExtMsgInbound})
+	if err != nil {
+		t.Fatalf("List(extmsg.inbound): %v", err)
+	}
+	return recorded
+}
+
+// TestHandleExtMsgInboundNotifiesNonMemberAddressedSessionOnce covers an
+// inbound on an ungrouped conversation bound to one session whose adapter
+// addressed it to a live session that is not a transcript member: the
+// addressed session is told once, without the self-silence line, and the
+// bound member still hears it with that line.
+func TestHandleExtMsgInboundNotifiesNonMemberAddressedSessionOnce(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		target func(worker session.Info) string
+		name    string
+		address func(worker session.Info) string
 	}{
-		{name: "session id", target: func(worker session.Info) string { return worker.ID }},
-		{name: "alias", target: func(session.Info) string { return "myrig/asker" }},
+		{name: "session id", address: func(worker session.Info) string { return worker.ID }},
+		{name: "alias", address: func(session.Info) string { return "myrig/asker" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fs := newSessionFakeState(t)
-			srv := New(fs)
-			t.Cleanup(srv.waitForBackground)
+			f := newExtmsgInboundFixture(t)
+			ref, bound := extmsgBindTestConversation(t, f.fs, f.services)
+			address := tc.address(f.worker)
 
-			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
-			fs.extmsgSvc = &services
-			fs.adapterReg = extmsg.NewAdapterRegistry()
-
-			ref := extmsg.ConversationRef{
-				ScopeID:        "scope-1",
-				Provider:       "slack",
-				AccountID:      "acct-1",
-				ConversationID: "C123",
-				Kind:           extmsg.ConversationRoom,
-			}
-			bound := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
-			worker := createTestSession(t, fs.cityBeadStore, fs.sp, "Asker")
-			if err := fs.cityBeadStore.Update(worker.ID, beads.UpdateOpts{
-				Metadata: map[string]string{"alias": "myrig/asker"},
-			}); err != nil {
-				t.Fatalf("Update(worker alias): %v", err)
-			}
-			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
-			if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
-				Conversation: ref,
-				SessionID:    bound.ID,
-				Now:          time.Now().UTC(),
-			}); err != nil {
-				t.Fatalf("Bind: %v", err)
+			result := extmsgInboundResult(t, f.post(t, ref, map[string]any{
+				"addressed_session": address,
+				"explicit_target":   address,
+			}))
+			if result.AddressedSessionID != f.worker.ID || result.TargetSessionID != bound.ID {
+				t.Fatalf("result = target %q addressed %q, want target %s addressed %s", result.TargetSessionID, result.AddressedSessionID, bound.ID, f.worker.ID)
 			}
 
-			target := tc.target(worker)
-			body, err := json.Marshal(map[string]any{
-				"message": map[string]any{
-					"provider_message_id": "m1",
-					"conversation": map[string]any{
-						"scope_id":        ref.ScopeID,
-						"provider":        ref.Provider,
-						"account_id":      ref.AccountID,
-						"conversation_id": ref.ConversationID,
-						"kind":            ref.Kind,
-					},
-					"actor":           map[string]any{"id": "u1", "display_name": "Alice", "is_bot": false},
-					"text":            "the answer is 42",
-					"explicit_target": target,
-					"received_at":     time.Now().UTC().Format(time.RFC3339),
-				},
-			})
-			if err != nil {
-				t.Fatalf("Marshal(body): %v", err)
-			}
-			req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(string(body)))
-			rec := httptest.NewRecorder()
-			srv.ServeHTTP(rec, req)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
-			}
-			srv.waitForBackground()
-
-			nudges := extmsgNudgesBySessionName(fs)
-			workerNudges := nudges[worker.SessionName]
+			nudges := extmsgNudgesBySessionName(f.fs)
+			workerNudges := nudges[f.worker.SessionName]
 			if len(workerNudges) != 1 {
 				t.Fatalf("addressed non-member nudges = %d, want 1; nudges=%#v", len(workerNudges), nudges)
 			}
@@ -717,18 +827,272 @@ func TestHandleExtMsgInboundNotifiesNonMemberExplicitTargetOnce(t *testing.T) {
 			if len(boundNudges) != 1 {
 				t.Fatalf("bound member nudges = %d, want 1; nudges=%#v", len(boundNudges), nudges)
 			}
-			if !strings.Contains(boundNudges[0], "Addressed to: @"+target) {
-				t.Fatalf("bound member nudge missing discriminator for %q:\n%s", target, boundNudges[0])
+			if !strings.Contains(boundNudges[0], "Addressed to: @"+address) {
+				t.Fatalf("bound member nudge missing discriminator for %q:\n%s", address, boundNudges[0])
 			}
 		})
 	}
 }
 
-// TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
-// covers an explicit target that is itself a transcript member, addressed by
-// session ID: it is notified exactly once and is not told the message is for
-// someone else, even when several membership rows resolve to it.
-func TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator(t *testing.T) {
+// TestHandleExtMsgInboundExplicitTargetNeverReachesNonMember covers the
+// sender-controlled hint: an inbound whose explicit_target names a live
+// session outside the conversation's membership, and that carries no
+// addressed_session, reaches only the members, who are told whom it is for. A
+// chat user who types "@<session>" cannot put text into a session that does
+// not read the conversation, and a session an adapter already delivers to on
+// its own is not sent a second copy.
+func TestHandleExtMsgInboundExplicitTargetNeverReachesNonMember(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target func(worker session.Info) string
+	}{
+		{name: "session id", target: func(worker session.Info) string { return worker.ID }},
+		{name: "alias", target: func(session.Info) string { return "myrig/asker" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExtmsgInboundFixture(t)
+			ref, bound := extmsgBindTestConversation(t, f.fs, f.services)
+			target := tc.target(f.worker)
+
+			result := extmsgInboundResult(t, f.post(t, ref, map[string]any{"explicit_target": target}))
+			if result.AddressedSessionID != "" {
+				t.Fatalf("AddressedSessionID = %q, want none for an explicit target", result.AddressedSessionID)
+			}
+
+			nudges := extmsgNudgesBySessionName(f.fs)
+			if got := nudges[f.worker.SessionName]; len(got) != 0 {
+				t.Fatalf("non-member named only by explicit_target was nudged: %#v", got)
+			}
+			boundNudges := nudges[bound.SessionName]
+			if len(boundNudges) != 1 || !strings.Contains(boundNudges[0], "Addressed to: @"+target) {
+				t.Fatalf("bound member nudges = %#v, want one carrying the discriminator for %q", boundNudges, target)
+			}
+		})
+	}
+}
+
+// TestHandleExtMsgInboundAddressedSessionOnUnboundConversation covers a
+// conversation with no binding, group, or default route. An inbound its
+// adapter addressed to a session is routed to it: the transcript records it,
+// an extmsg.inbound event names the session, and the session is told once. An
+// inbound that names the session only in explicit_target stays unrouted:
+// nothing is recorded and no session is told.
+func TestHandleExtMsgInboundAddressedSessionOnUnboundConversation(t *testing.T) {
+	t.Run("addressed session", func(t *testing.T) {
+		f := newExtmsgInboundFixture(t)
+		ref := extmsgTestRoom()
+
+		result := extmsgInboundResult(t, f.post(t, ref, map[string]any{"addressed_session": f.worker.ID}))
+		if result.AddressedSessionID != f.worker.ID || result.TargetSessionID != "" || result.TargetAgentName != "" {
+			t.Fatalf("result = target %q/%q addressed %q, want only addressed %s", result.TargetSessionID, result.TargetAgentName, result.AddressedSessionID, f.worker.ID)
+		}
+		if entries := f.transcript(t, ref); len(entries) != 1 || entries[0].Text != "the answer is 42" {
+			t.Fatalf("transcript = %#v, want the addressed inbound recorded once", entries)
+		}
+		recorded := f.inboundEvents(t)
+		if len(recorded) != 1 || recorded[0].Subject != f.worker.ID {
+			t.Fatalf("extmsg.inbound events = %#v, want one with subject %s", recorded, f.worker.ID)
+		}
+		var payload extmsg.InboundEventPayload
+		if err := json.Unmarshal(recorded[0].Payload, &payload); err != nil {
+			t.Fatalf("Unmarshal(extmsg.inbound payload): %v", err)
+		}
+		if payload.AddressedSession != f.worker.ID {
+			t.Fatalf("event addressed_session = %q, want %s", payload.AddressedSession, f.worker.ID)
+		}
+		nudges := extmsgNudgesBySessionName(f.fs)
+		if len(nudges) != 1 || len(nudges[f.worker.SessionName]) != 1 {
+			t.Fatalf("nudges = %#v, want exactly one, to %s", nudges, f.worker.SessionName)
+		}
+	})
+	t.Run("explicit target only", func(t *testing.T) {
+		f := newExtmsgInboundFixture(t)
+		ref := extmsgTestRoom()
+
+		result := extmsgInboundResult(t, f.post(t, ref, map[string]any{"explicit_target": f.worker.ID}))
+		if result.AddressedSessionID != "" || result.TranscriptEntry != nil {
+			t.Fatalf("result = %#v, want an unrouted inbound", result)
+		}
+		if entries := f.transcript(t, ref); len(entries) != 0 {
+			t.Fatalf("transcript = %#v, want nothing recorded", entries)
+		}
+		if recorded := f.inboundEvents(t); len(recorded) != 0 {
+			t.Fatalf("extmsg.inbound events = %#v, want none", recorded)
+		}
+		if nudges := extmsgNudgesBySessionName(f.fs); len(nudges) != 0 {
+			t.Fatalf("nudges = %#v, want none", nudges)
+		}
+	})
+}
+
+// TestHandleExtMsgInboundUnresolvedAddressedSessionMaterializesNothing covers
+// an addressed_session that names no live session: an unknown name, a
+// configured named session with no bead, or a closed session's ID. It
+// addresses no one: nothing is created or told for it, and the bound member
+// still gets its notice with the self-silence line.
+func TestHandleExtMsgInboundUnresolvedAddressedSessionMaterializesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		address func(t *testing.T, fs *fakeState) string
+	}{
+		{name: "configured named session without bead", address: func(*testing.T, *fakeState) string { return "myrig/worker" }},
+		{name: "unknown name", address: func(*testing.T, *fakeState) string { return "nobody" }},
+		{name: "closed session id", address: func(t *testing.T, fs *fakeState) string {
+			closed := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed")
+			if err := fs.cityBeadStore.Close(closed.ID); err != nil {
+				t.Fatalf("Close(%s): %v", closed.ID, err)
+			}
+			return closed.ID
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExtmsgInboundFixture(t)
+			ref, bound := extmsgBindTestConversation(t, f.fs, f.services)
+			address := tc.address(t, f.fs)
+
+			result := extmsgInboundResult(t, f.post(t, ref, map[string]any{
+				"addressed_session": address,
+				"explicit_target":   address,
+			}))
+			if result.AddressedSessionID != "" {
+				t.Fatalf("AddressedSessionID = %q, want none for %q", result.AddressedSessionID, address)
+			}
+			if _, err := session.ResolveSessionID(beadstest.Sessions(f.fs.cityBeadStore), "myrig/worker"); err == nil {
+				t.Fatal("addressed session materialized the configured named session")
+			}
+			nudges := extmsgNudgesBySessionName(f.fs)
+			if len(nudges) != 1 || len(nudges[bound.SessionName]) != 1 {
+				t.Fatalf("nudges = %#v, want exactly one, to member %s", nudges, bound.SessionName)
+			}
+			if got := nudges[bound.SessionName][0]; !strings.Contains(got, "Addressed to: @"+address) {
+				t.Fatalf("member notice missing discriminator for %q:\n%s", address, got)
+			}
+		})
+	}
+}
+
+// TestHandleExtMsgInboundAmbiguousOrConflictingAddressedSessionReturns400
+// pins the error class of an addressed_session that names more than one
+// session (two live sessions share its alias) or conflicts with a configured
+// named session (a live session that is not the named session's bead claims
+// its identity): no retry can change that answer, so it is a permanent 4xx the
+// adapter drops rather than a 5xx that would hold its ordered stream behind
+// the message. Nothing is recorded and no one is told.
+func TestHandleExtMsgInboundAmbiguousOrConflictingAddressedSessionReturns400(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		address string
+		claim   func(t *testing.T, fs *fakeState)
+	}{
+		{name: "alias twins", address: "myrig/asker", claim: func(t *testing.T, fs *fakeState) {
+			twin := createTestSession(t, fs.cityBeadStore, fs.sp, "Twin")
+			if err := fs.cityBeadStore.Update(twin.ID, beads.UpdateOpts{
+				Metadata: map[string]string{"alias": "myrig/asker"},
+			}); err != nil {
+				t.Fatalf("Update(twin alias): %v", err)
+			}
+		}},
+		{name: "configured named session conflict", address: "myrig/worker", claim: func(t *testing.T, fs *fakeState) {
+			createTestSessionBead(t, fs.cityBeadStore, map[string]string{
+				"session_name": "rogue-runtime",
+				"alias":        "myrig/worker",
+				"state":        "active",
+			}, "")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExtmsgInboundFixture(t)
+			ref, _ := extmsgBindTestConversation(t, f.fs, f.services)
+			tc.claim(t, f.fs)
+
+			rec := f.post(t, ref, map[string]any{"addressed_session": tc.address})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("addressed_session %q: status = %d, want %d; body: %s", tc.address, rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			if entries := f.transcript(t, ref); len(entries) != 0 {
+				t.Fatalf("transcript = %#v, want nothing recorded for a rejected inbound", entries)
+			}
+			if nudges := extmsgNudgesBySessionName(f.fs); len(nudges) != 0 {
+				t.Fatalf("nudges = %#v, want none for a rejected inbound", nudges)
+			}
+		})
+	}
+}
+
+// TestHandleExtMsgInboundGroupedRoomIgnoresAddressedSession covers a grouped
+// room: the group decides who hears an inbound, whether the group or a
+// binding routes it, so an addressed_session that names a live session
+// outside the group reaches no one, and the room's readers are told as usual.
+func TestHandleExtMsgInboundGroupedRoomIgnoresAddressedSession(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		bound bool
+	}{
+		{name: "group routes the room"},
+		{name: "binding routes the room", bound: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExtmsgInboundFixture(t)
+			ref := extmsg.ConversationRef{
+				ScopeID:        "guild-1",
+				Provider:       "discord",
+				AccountID:      "acct-1",
+				ConversationID: "thread-1",
+				Kind:           extmsg.ConversationThread,
+			}
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			group, err := f.services.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
+				RootConversation: ref,
+				Mode:             extmsg.GroupModeLauncher,
+				DefaultHandle:    "lead",
+			})
+			if err != nil {
+				t.Fatalf("EnsureGroup: %v", err)
+			}
+			participant := createTestSession(t, f.fs.cityBeadStore, f.fs.sp, "Lead")
+			if _, err := f.services.Groups.UpsertParticipant(context.Background(), caller, extmsg.UpsertParticipantInput{
+				GroupID:   group.ID,
+				Handle:    "lead",
+				SessionID: participant.ID,
+				Public:    true,
+			}); err != nil {
+				t.Fatalf("UpsertParticipant(lead): %v", err)
+			}
+			wantTarget, wantNotified := participant.ID, []session.Info{participant}
+			if tc.bound {
+				bound := createTestSession(t, f.fs.cityBeadStore, f.fs.sp, "Bound")
+				if _, err := f.services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+					Conversation: ref,
+					SessionID:    bound.ID,
+					Now:          time.Now().UTC(),
+				}); err != nil {
+					t.Fatalf("Bind: %v", err)
+				}
+				wantTarget, wantNotified = bound.ID, append(wantNotified, bound)
+			}
+
+			result := extmsgInboundResult(t, f.post(t, ref, map[string]any{"addressed_session": f.worker.ID}))
+			if result.AddressedSessionID != "" || result.TargetSessionID != wantTarget {
+				t.Fatalf("result = target %q addressed %q, want target %s and no addressed session", result.TargetSessionID, result.AddressedSessionID, wantTarget)
+			}
+			nudges := extmsgNudgesBySessionName(f.fs)
+			if got := nudges[f.worker.SessionName]; len(got) != 0 {
+				t.Fatalf("session outside the group was nudged: %#v", got)
+			}
+			for _, reader := range wantNotified {
+				if got := nudges[reader.SessionName]; len(got) != 1 {
+					t.Fatalf("reader %s nudges = %d, want 1; nudges=%#v", reader.SessionName, len(got), nudges)
+				}
+			}
+		})
+	}
+}
+
+// TestExtmsgNotifyMembersAddressedMemberNotifiedOnceWithoutDiscriminator
+// covers an addressed session that is itself a transcript member: it is
+// notified exactly once and is not told the message is for someone else, even
+// when several membership rows resolve to it.
+func TestExtmsgNotifyMembersAddressedMemberNotifiedOnceWithoutDiscriminator(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		extraSelector func(member session.Info) string
@@ -742,26 +1106,10 @@ func TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
 
 			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 			fs.extmsgSvc = &services
-
-			ref := extmsg.ConversationRef{
-				ScopeID:        "scope-1",
-				Provider:       "slack",
-				AccountID:      "acct-1",
-				ConversationID: "C123",
-				Kind:           extmsg.ConversationRoom,
-			}
-			member := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
-			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
-			if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
-				Conversation: ref,
-				SessionID:    member.ID,
-				Now:          time.Now().UTC(),
-			}); err != nil {
-				t.Fatalf("Bind: %v", err)
-			}
+			ref, member := extmsgBindTestConversation(t, fs, services)
 			if tc.extraSelector != nil {
 				if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
-					Caller:         caller,
+					Caller:         extmsg.Caller{Kind: extmsg.CallerController, ID: "test"},
 					Conversation:   ref,
 					SessionID:      tc.extraSelector(member),
 					BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
@@ -772,7 +1120,14 @@ func TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
 				}
 			}
 
-			srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hi", "", member.ID)
+			srv.extmsgNotifyMembers(context.Background(), extmsgNotification{
+				Conversation:       ref,
+				ActorDisplay:       "Alice",
+				ActorKind:          "human",
+				Text:               "hi",
+				ExplicitTarget:     member.ID,
+				AddressedSessionID: member.ID,
+			})
 
 			nudges := extmsgNudgesBySessionName(fs)
 			got := nudges[member.SessionName]
@@ -786,49 +1141,18 @@ func TestExtmsgNotifyMembersExplicitTargetMemberNotifiedOnceWithoutDiscriminator
 	}
 }
 
-// extmsgBindTestConversation binds an ungrouped Slack room to a new live
-// session and returns the room and that session, its one transcript member.
-func extmsgBindTestConversation(t *testing.T, fs *fakeState, services extmsg.Services) (extmsg.ConversationRef, session.Info) {
-	t.Helper()
-	ref := extmsg.ConversationRef{
-		ScopeID:        "scope-1",
-		Provider:       "slack",
-		AccountID:      "acct-1",
-		ConversationID: "C123",
-		Kind:           extmsg.ConversationRoom,
-	}
-	member := createTestSession(t, fs.cityBeadStore, fs.sp, "Bound")
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
-	if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
-		Conversation: ref,
-		SessionID:    member.ID,
-		Now:          time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("Bind: %v", err)
-	}
-	return ref, member
-}
-
-// TestExtmsgNotifyMembersUnresolvedExplicitTargetMaterializesNothing covers an
-// explicit target that names no session without materializing one (an unknown
-// name, a configured named session with no bead) or names a closed session:
-// nothing is created or nudged for it, and the member still gets its notice
-// with the self-silence line.
-func TestExtmsgNotifyMembersUnresolvedExplicitTargetMaterializesNothing(t *testing.T) {
+// TestExtmsgNotifyMembersExplicitTargetNamingMemberHasNoDiscriminator covers
+// the hint path: a member the explicit target names by its own session ID, or
+// by the selector its membership row holds, with no addressed session, hears
+// the inbound without being told it is for someone else. Its handle (from its
+// alias) matches neither spelling.
+func TestExtmsgNotifyMembersExplicitTargetNamingMemberHasNoDiscriminator(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		target func(t *testing.T, fs *fakeState) string
+		name        string
+		rowSelector func(member session.Info) string
 	}{
-		{name: "configured named session without bead", target: func(*testing.T, *fakeState) string { return "myrig/worker" }},
-		{name: "unknown name", target: func(*testing.T, *fakeState) string { return "nobody" }},
-		{name: "closed session id", target: func(t *testing.T, fs *fakeState) string {
-			closed := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed")
-			if err := fs.cityBeadStore.Close(closed.ID); err != nil {
-				t.Fatalf("Close(%s): %v", closed.ID, err)
-			}
-			return closed.ID
-		}},
-		{name: "empty target", target: func(*testing.T, *fakeState) string { return "" }},
+		{name: "row and target by session id", rowSelector: func(member session.Info) string { return member.ID }},
+		{name: "row and target by session name", rowSelector: func(member session.Info) string { return member.SessionName }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := newSessionFakeState(t)
@@ -836,27 +1160,39 @@ func TestExtmsgNotifyMembersUnresolvedExplicitTargetMaterializesNothing(t *testi
 
 			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 			fs.extmsgSvc = &services
-			ref, member := extmsgBindTestConversation(t, fs, services)
-			target := tc.target(t, fs)
+			ref := extmsgTestRoom()
+			member := createTestSession(t, fs.cityBeadStore, fs.sp, "Member")
+			if err := fs.cityBeadStore.Update(member.ID, beads.UpdateOpts{
+				Metadata: map[string]string{"alias": "myrig/member-handle"},
+			}); err != nil {
+				t.Fatalf("Update(member alias): %v", err)
+			}
+			selector := tc.rowSelector(member)
+			if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+				Caller:         extmsg.Caller{Kind: extmsg.CallerController, ID: "test"},
+				Conversation:   ref,
+				SessionID:      selector,
+				BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+				Owner:          extmsg.MembershipOwnerManual,
+				Now:            time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("EnsureMembership: %v", err)
+			}
 
-			srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hi", "", target)
+			srv.extmsgNotifyMembers(context.Background(), extmsgNotification{
+				Conversation:   ref,
+				ActorDisplay:   "Alice",
+				ActorKind:      "human",
+				Text:           "hi",
+				ExplicitTarget: selector,
+			})
 
-			if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
-				t.Fatal("explicit target materialized the configured named session")
+			got := extmsgNudgesBySessionName(fs)[member.SessionName]
+			if len(got) != 1 {
+				t.Fatalf("member nudges = %d, want 1", len(got))
 			}
-			nudges := extmsgNudgesBySessionName(fs)
-			if len(nudges) != 1 || len(nudges[member.SessionName]) != 1 {
-				t.Fatalf("nudges = %#v, want exactly one, to member %s", nudges, member.SessionName)
-			}
-			got := nudges[member.SessionName][0]
-			if target == "" {
-				if strings.Contains(got, "Addressed to:") {
-					t.Fatalf("unaddressed notice carries discriminator:\n%s", got)
-				}
-				return
-			}
-			if !strings.Contains(got, "Addressed to: @"+target) {
-				t.Fatalf("member notice missing discriminator for %q:\n%s", target, got)
+			if strings.Contains(got[0], "Addressed to:") {
+				t.Fatalf("member named by the explicit target saw discriminator:\n%s", got[0])
 			}
 		})
 	}
@@ -913,7 +1249,13 @@ func TestExtmsgNotifyMembersGroupedNoMatchTargetStaysParticipantOnly(t *testing.
 			}
 			target := tc.target(outsider)
 
-			srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hi", "", target)
+			srv.extmsgNotifyMembers(context.Background(), extmsgNotification{
+				Conversation:   ref,
+				ActorDisplay:   "Alice",
+				ActorKind:      "human",
+				Text:           "hi",
+				ExplicitTarget: target,
+			})
 
 			nudges := extmsgNudgesBySessionName(fs)
 			if got := nudges[outsider.SessionName]; len(got) != 0 {
@@ -930,10 +1272,10 @@ func TestExtmsgNotifyMembersGroupedNoMatchTargetStaysParticipantOnly(t *testing.
 	}
 }
 
-// TestExtmsgNotifyMembersDoesNotNotifyExcludedExplicitTarget covers an explicit
-// target that resolves to the excluded sender: the sender hears nothing and
+// TestExtmsgNotifyMembersDoesNotNotifyExcludedAddressedSession covers an
+// addressed session that is the excluded sender: the sender hears nothing and
 // the member is notified normally.
-func TestExtmsgNotifyMembersDoesNotNotifyExcludedExplicitTarget(t *testing.T) {
+func TestExtmsgNotifyMembersDoesNotNotifyExcludedAddressedSession(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		exclude func(sender session.Info) string
@@ -955,7 +1297,14 @@ func TestExtmsgNotifyMembersDoesNotNotifyExcludedExplicitTarget(t *testing.T) {
 				t.Fatalf("Update(sender alias): %v", err)
 			}
 
-			srv.extmsgNotifyMembers(context.Background(), ref, "Sender", "agent", "hi", tc.exclude(sender), sender.ID)
+			srv.extmsgNotifyMembers(context.Background(), extmsgNotification{
+				Conversation:       ref,
+				ActorDisplay:       "Sender",
+				ActorKind:          "agent",
+				Text:               "hi",
+				ExcludeSelector:    tc.exclude(sender),
+				AddressedSessionID: sender.ID,
+			})
 
 			nudges := extmsgNudgesBySessionName(fs)
 			if got := nudges[sender.SessionName]; len(got) != 0 {

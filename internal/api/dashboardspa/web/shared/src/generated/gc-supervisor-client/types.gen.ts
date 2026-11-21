@@ -1711,9 +1711,16 @@ export type ExternalAttachment = {
 
 export type ExternalInboundMessage = {
     actor: ExternalActor;
+    /**
+     * Session the adapter routed the message to from its own bindings or configuration, never from the message text: a session ID, session name, alias, or configured named session. In a conversation that has no group, the message is recorded and delivered to that session once, whether or not it is a member; no session is created for it, and a value that names no open session delivers to no one. A conversation that has a group ignores it, even when a binding routes the conversation: the group decides who hears the message. A value that names more than one session is rejected with 400. explicit_target still decides whom the other notified sessions are told the message is for.
+     */
+    addressed_session?: string;
     attachments?: Array<ExternalAttachment> | null;
     conversation: ConversationRef;
     dedup_key?: string;
+    /**
+     * Handle the sender addressed the message to, as read from the message (an @handle prefix or a mention). A hint only: it selects a group participant by handle and tells the other notified sessions whom the message is for, and it never delivers the message to a session.
+     */
     explicit_target?: string;
     provider_message_id: string;
     received_at: string;
@@ -1941,6 +1948,10 @@ export type HookClaimReclaimedStalePayload = {
 
 export type InboundEventPayload = {
     actor: string;
+    /**
+     * Session the inbound's adapter addressed it to (its addressed_session, resolved), which hears it whether or not it is a member of the conversation.
+     */
+    addressed_session?: string;
     conversation_id: string;
     provider: string;
     target_agent?: string;
@@ -1948,6 +1959,10 @@ export type InboundEventPayload = {
 };
 
 export type InboundResult = {
+    /**
+     * Session the message's addressed_session resolved to, which hears the message whether or not it is a member. Absent when the message carried no addressed_session, when it named no open session, or when the conversation has a group.
+     */
+    AddressedSessionID?: string;
     Binding?: SessionBindingRecord;
     GroupRoute?: GroupRouteDecision;
     Message: ExternalInboundMessage;

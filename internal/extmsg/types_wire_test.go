@@ -195,8 +195,16 @@ func TestInboundOutboundResultsOmitAbsentRecords(t *testing.T) {
 		{
 			name:     "inbound",
 			value:    InboundResult{TargetSessionID: "gc-1"},
-			absent:   []string{`"Binding"`, `"GroupRoute"`, `"TranscriptEntry"`},
+			absent:   []string{`"Binding"`, `"GroupRoute"`, `"TranscriptEntry"`, `"AddressedSessionID"`, `"addressed_session"`},
 			keepKeys: []string{`"Message":`, `"TargetSessionID":"gc-1"`, `"TargetAgentName":`},
+		},
+		{
+			name: "addressed inbound",
+			value: InboundResult{
+				Message:            ExternalInboundMessage{AddressedSession: "myrig/asker"},
+				AddressedSessionID: "gc-2",
+			},
+			keepKeys: []string{`"addressed_session":"myrig/asker"`, `"AddressedSessionID":"gc-2"`},
 		},
 		{
 			name:     "outbound",
