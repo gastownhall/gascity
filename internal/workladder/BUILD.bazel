@@ -14,12 +14,18 @@ go_library(
     visibility = ["//:__subpackages__"],
 )
 
+_WORKLADDER_TEST_DATA = glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+)
+
 go_test(
     name = "workladder_test",
     size = "medium",
     srcs = [
         "codec_test.go",
         "decide_test.go",
+        "landing_budget_test.go",
         "notice_test.go",
         "progress_test.go",
         "property_test.go",
@@ -29,15 +35,17 @@ go_test(
         "table_test.go",
         "testenv_import_test.go",
     ],
-    data = glob(
-        ["**"],
-        exclude = ["BUILD.bazel"],
-    ),
+    args = [
+        "-test.short",
+    ],
+    data = _WORKLADDER_TEST_DATA,
     embed = [":workladder"],
-    # The property sims (the ladder's and the rate-limit episode's) run
-    # 50 to 100 s each on one worker. rules_go deals tests to the 6 shards
-    # by position, so the sims land unevenly: the heaviest shard has run
-    # 190 to 220 s on rbe-west, under the medium timeout (300 s).
+    # The landing suite uses the 10k property budget. Rate-limit sims also run
+    # under -test.short (2k/500 random worlds plus fixed rare-branch seeds).
+    # The 100k ladder proof does not run in CI. Run it explicitly with:
+    # bazel test //internal/workladder:workladder_test \
+    #   --test_arg=-test.short=false --test_timeout=900
+    # The later --test_arg overrides this target's -test.short.
     shard_count = 6,
     deps = ["//internal/testenv"],
 )
