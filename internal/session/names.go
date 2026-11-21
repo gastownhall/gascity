@@ -191,13 +191,45 @@ func EnsureAliasAvailableWithConfigForOwner(store beads.SessionStore, cfg *confi
 // EnsureSessionNameAvailableWithConfig extends session-name reservation checks
 // with configured named-session runtime names.
 func EnsureSessionNameAvailableWithConfig(store beads.SessionStore, cfg *config.City, name, selfID string) error {
-	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, "")
+	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, "", sessionNameClaim{})
 }
 
 // EnsureSessionNameAvailableWithConfigForOwner extends session-name
 // reservation checks with an explicit configured named-session owner.
 func EnsureSessionNameAvailableWithConfigForOwner(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string) error {
-	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, selfOwner)
+	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, selfOwner, sessionNameClaim{})
+}
+
+// EnsurePoolIdentityLeaseAvailableWithConfig reports whether a fresh pool
+// session owned by selfOwner may take name as its identity lease: the
+// identity-derived name a bead-scoped pool session locks and reserves while
+// its runtime name comes from its own bead ID. It runs every check of
+// EnsureSessionNameAvailableWithConfigForOwner except one: an open manual
+// session does not hold the lease through the identifiers derived from its
+// template (agent_name, template, common_name). A manual session still holds
+// the name through its own session_name or live alias, and configured
+// named-session reservations still apply. cfg may be nil.
+func EnsurePoolIdentityLeaseAvailableWithConfig(store beads.SessionStore, cfg *config.City, name, selfOwner string) error {
+	return ensureConfiguredSessionNameAvailable(store, cfg, name, "", selfOwner, sessionNameClaim{manualIdentifiersYieldToPoolLease: true})
+}
+
+// sessionNameClaim describes what kind of name an availability check is
+// proving. The zero value is a runtime session-name claim.
+type sessionNameClaim struct {
+	// manualIdentifiersYieldToPoolLease marks a pool identity-lease claim, which
+	// an open manual session's template-derived identifiers do not hold.
+	manualIdentifiersYieldToPoolLease bool
+}
+
+// holdsIdentifier reports whether an open holder whose agent_name, template
+// or common_name equals the claimed name holds it against this claim.
+func (c sessionNameClaim) holdsIdentifier(b beads.Bead) bool {
+	return !c.manualIdentifiersYieldToPoolLease || !isManualSessionBead(b)
+}
+
+// isManualSessionBead is the bead-level twin of isManualSessionInfo.
+func isManualSessionBead(b beads.Bead) bool {
+	return strings.TrimSpace(b.Metadata["session_origin"]) == "manual" || b.Metadata["manual_session"] == "true"
 }
 
 func withSessionAliasReservationLock(alias string, fn func() error) error {
@@ -341,6 +373,10 @@ func ensureSessionNameAvailableForSelf(store beads.SessionStore, name, selfID st
 }
 
 func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, selfID, selfOwner string) error {
+	return ensureSessionNameAvailableForClaim(store, name, selfID, selfOwner, sessionNameClaim{})
+}
+
+func ensureSessionNameAvailableForClaim(store beads.SessionStore, name, selfID, selfOwner string, claim sessionNameClaim) error {
 	if name == "" {
 		return nil
 	}
@@ -415,6 +451,9 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, s
 		// "<rig>/control-dispatcher", since configured multi-rig dispatchers
 		// occupy distinct namespaces by design.
 		if sessionNameConflictsWithExistingIdentifier(b, name) {
+			if !claim.holdsIdentifier(b) {
+				continue
+			}
 			// Configured named sessions reserve their exact runtime name in
 			// config, so a pool-managed backing-template bead must not squat it.
 			if configuredOwnerCanReusePoolIdentifier(b, name, selfOwner) {
@@ -488,8 +527,8 @@ func configuredNamedSessionOwnerForSessionName(cfg *config.City, b beads.Bead, r
 	return identity
 }
 
-func ensureConfiguredSessionNameAvailable(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string) error {
-	if err := ensureSessionNameAvailableForSelfAndOwner(store, name, selfID, selfOwner); err != nil {
+func ensureConfiguredSessionNameAvailable(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string, claim sessionNameClaim) error {
+	if err := ensureSessionNameAvailableForClaim(store, name, selfID, selfOwner, claim); err != nil {
 		// When a closed bead blocks the name and the caller is materializing
 		// a configured named session that owns this name, allow it. This
 		// handles legacy beads that predate the configured_named_session flag
@@ -502,7 +541,7 @@ func ensureConfiguredSessionNameAvailable(store beads.SessionStore, cfg *config.
 		if !isConfiguredNamedSessionRuntimeName(cfg, name, selfOwner) {
 			return err
 		}
-		if !noLiveSessionNameCollisions(store, name, selfID, selfOwner) {
+		if !noLiveSessionNameCollisions(store, name, selfID, selfOwner, claim) {
 			return err
 		}
 		// All holders are closed and the name belongs to a configured named
@@ -550,9 +589,9 @@ func isConfiguredNamedSessionRuntimeName(cfg *config.City, name, owner string) b
 // noLiveSessionNameCollisions reports whether no live bead conflicts with
 // the given name via session_name, alias, alias_history, or identifier
 // fields. This mirrors the full collision check in
-// ensureSessionNameAvailableForSelf so the legacy-bypass path cannot
+// ensureSessionNameAvailableForClaim so the legacy-bypass path cannot
 // suppress rejections from live alias or identifier collisions.
-func noLiveSessionNameCollisions(store beads.SessionStore, name, selfID, selfOwner string) bool {
+func noLiveSessionNameCollisions(store beads.SessionStore, name, selfID, selfOwner string, claim sessionNameClaim) bool {
 	all, err := ExactMetadataSessionCandidates(store, true,
 		map[string]string{"session_name": name},
 		map[string]string{"alias": name},
@@ -585,6 +624,9 @@ func noLiveSessionNameCollisions(store beads.SessionStore, name, selfID, selfOwn
 		// namespace for new session-name claims.
 		// Live identifier collision blocks.
 		if sessionNameConflictsWithExistingIdentifier(b, name) {
+			if !claim.holdsIdentifier(b) {
+				continue
+			}
 			if configuredOwnerCanReusePoolIdentifier(b, name, selfOwner) {
 				continue
 			}
