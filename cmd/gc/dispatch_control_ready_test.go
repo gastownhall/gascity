@@ -626,3 +626,46 @@ func TestControlReadyFallbackReadyOmitsReadonlyOnProxiedScope(t *testing.T) {
 		}
 	})
 }
+
+// TestControlReadyFallbackReadyKeepsReadonlyOffProxiedScope guards the other
+// side of #7358: wherever bd honors strict --readonly the fallback keeps it,
+// byte-for-byte as before.
+func TestControlReadyFallbackReadyKeepsReadonlyOffProxiedScope(t *testing.T) {
+	serverScopeMetadata := map[string]string{"backend": "dolt", "dolt_mode": "server"}
+	base := fmt.Sprintf("--readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
+	cases := []struct {
+		name             string
+		metadata         map[string]string
+		env              map[string]string
+		includeEphemeral bool
+		want             string
+	}{
+		{name: "server", metadata: serverScopeMetadata, want: base},
+		{name: "server with ephemeral", metadata: serverScopeMetadata, includeEphemeral: true, want: base + " --include-ephemeral"},
+		{name: "doltlite with stale proxied marker", metadata: map[string]string{"backend": "doltlite", "dolt_mode": "proxied-server"}, want: base},
+		{name: "server with proxied env selector", metadata: serverScopeMetadata, env: map[string]string{"BEADS_DOLT_PROXIED_SERVER": "1"}, want: base},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configureIsolatedRuntimeEnv(t)
+			logPath := filepath.Join(t.TempDir(), "bd.log")
+			installControlReadyBd(t, logPath, false, `[{"id":"ga-direct-ready","status":"open"}]`)
+			t.Setenv("GC_BEADS", "bd")
+
+			dir := t.TempDir()
+			writeScopeMetadata(t, dir, tc.metadata)
+
+			result, err := controlReadyFallbackReady(dir, dir, tc.env, tc.includeEphemeral)
+			if err != nil {
+				t.Fatalf("controlReadyFallbackReady: %v", err)
+			}
+			if got := beadIDs(result); !stringSlicesEqual(got, []string{"ga-direct-ready"}) {
+				t.Fatalf("result ids = %q, want [ga-direct-ready]", got)
+			}
+			calls := readControlReadyBdCalls(t, logPath)
+			if len(calls) != 1 || calls[0] != tc.want {
+				t.Fatalf("bd calls = %q, want exactly [%q]", calls, tc.want)
+			}
+		})
+	}
+}
