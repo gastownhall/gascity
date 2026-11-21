@@ -811,6 +811,29 @@ func TestWorkLadderRecycleRereadsTheTrigger(t *testing.T) {
 	}
 }
 
+// BKLG-20261117-epq4. A control dispatcher's trigger is the control bead it
+// is executing in place, open and unassigned until the step closes it, and
+// the dispatcher reads no prompt. The same never-claimed trigger that
+// TestWorkLadderRecyclesAnUnclaimedTrigger nudges and recycles, on a
+// dispatcher's seat, gets neither: the ladder does not govern it.
+func TestWorkLadderExcludesControlDispatcherSeat(t *testing.T) {
+	c := newLadderCity(t)
+	c.env.Cfg.Agents[0].Name = config.ControlDispatcherAgentName
+	b, err := c.work.Create(beads.Bead{Title: "check", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "check"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.trigger = b.ID
+	c.setRow(map[string]string{"template": config.ControlDispatcherAgentName, beadmeta.TriggerBeadIDMetadataKey: b.ID})
+	c.run(time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 || len(c.posted) != 0 {
+		t.Fatalf("nudges %v, posted %+v; want none for a control dispatcher's seat", c.nudgedAt, c.posted)
+	}
+	if meta := c.row().Metadata[session.WorkLadderKey]; meta != "" {
+		t.Fatalf("work_ladder cell = %q, want unwritten: the row was never governed", meta)
+	}
+}
+
 // A nudge the runtime cannot take (runtime.ErrRuntimeUnavailable) is
 // counted as paused, not as an attempt, and recorded as work.nudge_failed.
 func TestWorkLadderRepausesAnUnavailableRuntime(t *testing.T) {

@@ -143,11 +143,11 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 		}
 		if !ladderGoverns(p.cfg, row) {
 			if ladderSeat(p.cfg, row) {
-				// Excluded only as one_shot: settle what an earlier governed
-				// pass left in its cell, so a pending release cannot keep the
-				// hook refusing the claim's start for good. Never nudges,
-				// releases or recycles.
-				p.standDownSeat(row, workladder.Gate{Held: true, Reason: "one_shot"})
+				// Excluded by its agent (ladderExclusion): settle what an
+				// earlier governed pass left in its cell, so a pending
+				// release cannot keep the hook refusing the claim's start for
+				// good. Never nudges, releases or recycles.
+				p.standDownSeat(row, workladder.Gate{Held: true, Reason: ladderExclusion(p.cfg, row)})
 			}
 			continue
 		}
@@ -157,14 +157,33 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 	l.ladderTurns.keep(governed)
 }
 
-// ladderGoverns is the seats the ladder paces: every ladderSeat except a
-// lifecycle=one_shot agent's (ladderOneShot). A one-shot seat executes by
-// running its process, not by answering a prompt; process exit, crash
-// recovery and idle_timeout already own it (gascity#8152), so the ladder must
-// not nudge a quiet one mid-step, release its unstarted-looking claim out
-// from under a still-running script, or recycle it.
+// ladderGoverns is the seats the ladder paces: every ladderSeat whose agent
+// ladderExclusion does not exclude.
 func ladderGoverns(cfg *config.City, row beads.Bead) bool {
-	return ladderSeat(cfg, row) && !ladderOneShot(cfg, row)
+	return ladderSeat(cfg, row) && ladderExclusion(cfg, row) == ""
+}
+
+// ladderExclusion names why the ladder must not pace row's seat, or returns
+// "" when it may. Both excluded kinds execute by running a process, not by
+// answering a prompt, so the ladder must not nudge a quiet one mid-step,
+// release its unstarted-looking claim out from under a still-running step,
+// or recycle it:
+//
+//   - "one_shot": a lifecycle=one_shot agent's seat (ladderOneShot); process
+//     exit, crash recovery and idle_timeout already own it (gascity#8152).
+//   - "control_dispatcher": a control dispatcher's seat
+//     (isControlDispatcherSeat), whose trigger is the control bead it
+//     executes in place, open and unassigned until that step closes it; its
+//     pool's demand owns it.
+func ladderExclusion(cfg *config.City, row beads.Bead) string {
+	switch {
+	case ladderOneShot(cfg, row):
+		return "one_shot"
+	case isControlDispatcherSeat(cfg, row):
+		return "control_dispatcher"
+	default:
+		return ""
+	}
 }
 
 // ladderSeat is the seats whose work_ladder cell the ladder owns: open

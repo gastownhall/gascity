@@ -628,9 +628,10 @@ func wedgedSlotEnv(t *testing.T, assignee string) (*reconcilerTestEnv, beads.Bea
 }
 
 // runWedgedSlot runs the claim backstop and the legacy reconciler for ticks
-// one-minute ticks, the agent quiet throughout, beginning each requested
-// drain on the test clock; it reports the drains requested.
-func runWedgedSlot(t *testing.T, env *reconcilerTestEnv, work beads.Bead, ticks int) int {
+// one-minute ticks, the agent (its runtime session name) quiet throughout,
+// beginning each requested drain on the test clock; it reports the drains
+// requested.
+func runWedgedSlot(t *testing.T, env *reconcilerTestEnv, name string, work beads.Bead, ticks int) int {
 	t.Helper()
 	drains := 0
 	request := func(b beads.Bead) error {
@@ -640,7 +641,7 @@ func runWedgedSlot(t *testing.T, env *reconcilerTestEnv, work beads.Bead, ticks 
 	}
 	var out bytes.Buffer
 	for tick := 0; tick < ticks; tick++ {
-		env.sp.SetActivity("worker", env.clk.Now().Add(-time.Hour))
+		env.sp.SetActivity(name, env.clk.Now().Add(-time.Hour))
 		raw, err := loadSessionBeads(env.store)
 		if err != nil {
 			t.Fatal(err)
@@ -660,7 +661,7 @@ func runWedgedSlot(t *testing.T, env *reconcilerTestEnv, work beads.Bead, ticks 
 // runtime stops; it is not drained again.
 func TestWedgedPoolSlotIsRecycledWhileRoutedWorkWaits(t *testing.T) {
 	env, session, work := wedgedSlotEnv(t, "")
-	drains := runWedgedSlot(t, env, work, 60)
+	drains := runWedgedSlot(t, env, "worker", work, 60)
 	if got := env.sp.CountCalls("Nudge", "worker"); got != idleClaimNudgeMaxAttempts {
 		t.Fatalf("nudges = %d, want %d before the slot is given up on", got, idleClaimNudgeMaxAttempts)
 	}
@@ -676,8 +677,100 @@ func TestWedgedPoolSlotIsRecycledWhileRoutedWorkWaits(t *testing.T) {
 // continuation backstop's to pace.
 func TestPinnedTriggerSlotIsNotDrainedInALoop(t *testing.T) {
 	env, _, work := wedgedSlotEnv(t, "self")
-	if drains := runWedgedSlot(t, env, work, 60); drains != 0 {
+	if drains := runWedgedSlot(t, env, "worker", work, 60); drains != 0 {
 		t.Fatalf("drains %d, want none for a pinned trigger", drains)
+	}
+}
+
+// dispatcherSlotEnv is a control dispatcher's demand-only singleton pool
+// (min 0, max 1) whose live seat is executing the control step it was started
+// for: a check bead routed to it, open and unassigned, as the dispatcher
+// leaves every control bead it runs until the step closes it. Its process is
+// quiet, as it is while a long inline gate runs.
+func dispatcherSlotEnv(t *testing.T) (*reconcilerTestEnv, beads.Bead, beads.Bead) {
+	t.Helper()
+	env := newReconcilerTestEnv(t)
+	name := config.ControlDispatcherAgentName
+	env.cfg = &config.City{Agents: []config.Agent{{Name: name, MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), StartCommand: "true"}}}
+	env.addDesired(name, name, false)
+	session := env.createSessionBead(name, name)
+	step, err := env.store.Create(beads.Bead{Title: "check", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: "check", "gc.routed_to": name,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{"pool_managed": "true", testTriggerBeadIDKey: step.ID, "instance_token": "tok-1"})
+	if err := env.sp.Start(context.Background(), name, runtime.Config{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	return env, session, step
+}
+
+// Kills the control dispatcher drained mid-step (BKLG-20261117-epq4): the
+// dispatcher executes its control beads in place and never claims them, so
+// the check it is running reads open and unassigned for as long as the step
+// runs. The claim backstop read that as a claim the seat missed, nudged a
+// process that reads no prompt three times, and drained it (execution-stalled)
+// about ten minutes in, killing the step; the next dispatcher started it from
+// the beginning, so no step longer than that window could finish. A
+// dispatcher seat is not the claim backstop's: across an hour of ticks it is
+// neither nudged nor drained. Once its step closes and its pool has no
+// demand left, the reconciler still drains it, as a demand-only singleton.
+func TestControlDispatcherExecutingAControlStepIsNotDrained(t *testing.T) {
+	env, session, step := dispatcherSlotEnv(t)
+	name := config.ControlDispatcherAgentName
+	if drains := runWedgedSlot(t, env, name, step, 60); drains != 0 {
+		t.Fatalf("drains %d, want none while the dispatcher executes its step", drains)
+	}
+	if got := env.sp.CountCalls("Nudge", name); got != 0 {
+		t.Fatalf("nudges = %d, want none: the dispatcher reads no claim nudge", got)
+	}
+	if ds := env.dt.get(session.ID); ds != nil || !env.sp.IsRunning(name) {
+		t.Fatalf("drain %+v running %v, want the dispatcher still running its step", ds, env.sp.IsRunning(name))
+	}
+
+	// The step closes and the pool has no demand left: the idle dispatcher is
+	// drained, as the demand-only singleton contract says.
+	closed := "closed"
+	if err := env.store.Update(step.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	delete(env.desiredState, name)
+	raw, err := loadSessionBeads(env.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.reconcile(raw)
+	if ds := env.dt.get(session.ID); ds == nil {
+		cur, _ := env.store.Get(session.ID)
+		t.Fatalf("no drain (state %s), want the idle dispatcher drained once its pool has no demand", cur.Metadata["state"])
+	}
+}
+
+// The control dispatcher's exclusion resolves its template under a rig and a
+// binding, as a city names it (scrolls/core.control-dispatcher), and does not
+// catch a worker whose name merely contains it.
+func TestIsControlDispatcherSeat(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "scrolls", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{Name: config.ControlDispatcherAgentName, Dir: "scrolls", BindingName: "core"},
+			{Name: "worker", Dir: "scrolls"},
+			{Name: "my-control-dispatcher-helper", Dir: "scrolls"},
+		},
+	}
+	for template, want := range map[string]bool{
+		"scrolls/core." + config.ControlDispatcherAgentName: true,
+		"scrolls/worker":                       false,
+		"scrolls/my-control-dispatcher-helper": false,
+		"not-configured":                       false,
+	} {
+		row := beads.Bead{ID: "s", Type: "session", Metadata: map[string]string{"template": template, "pool_managed": "true"}}
+		if got := isControlDispatcherSeat(cfg, row); got != want {
+			t.Errorf("isControlDispatcherSeat(%q) = %v, want %v", template, got, want)
+		}
 	}
 }
 
