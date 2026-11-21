@@ -858,9 +858,16 @@ func (r *splitRun) unconvergedAdvice() string {
 // already written. The journal holds the bytes before and the sha256 after.
 // A city.toml that is neither file but composes the split's [storage] (an
 // edit since the split wrote it, or a [storage] written by hand) counts as
-// written: it is kept as it is, and so is the recorded after-hash.
+// written: it is kept as it is, and so is the recorded after-hash. It holds
+// the city config lock throughout, so no other process's edit of city.toml
+// lands between its read and its write.
 func (r *splitRun) configure() error {
 	cityPath := r.request.CityPath
+	release, err := lockCityConfig(fsys.OSFS{}, cityPath, r.logPrefix, r.stderr)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := raiseMinGCVersion(cityPath, r.journal.MinGCVersion); err != nil {
 		return fmt.Errorf("writing %s: %w", minGCVersionPath(cityPath), err)
 	}
@@ -1216,9 +1223,15 @@ func splitAbandonRefusal(cityPath string, j storageSplitJournal) error {
 // abandonCityTOML takes [storage] back out of city.toml: the bytes from
 // before the split when the file is still the one the split wrote and the
 // recorded bytes prove against their sha256, otherwise the section removed in
-// place, and nothing when it carries none.
+// place, and nothing when it carries none. It holds the city config lock from
+// its read of city.toml through its write.
 func (r *splitRun) abandonCityTOML() (string, error) {
 	cityPath := r.request.CityPath
+	release, err := lockCityConfig(fsys.OSFS{}, cityPath, r.logPrefix, r.stderr)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	toml, err := readSplitCityTOML(cityPath)
 	if err != nil {
 		return "", err

@@ -59,6 +59,11 @@ func (c *providerCatalogDoctorCheck) CanFix() bool {
 }
 
 func (c *providerCatalogDoctorCheck) Fix(_ *doctor.CheckContext) error {
+	release, err := lockCityConfigForDoctorFix(c.cityPath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	cfg, err := loadCityConfigAllowMissingProviderReferences(c.cityPath)
 	if err != nil {
 		return err

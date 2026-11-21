@@ -329,6 +329,14 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		return config.Rig{}, 1
 	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
+	// The city config lock spans the load through Provision's config write.
+	// PostProvision releases it first, before it waits on the controller; the
+	// deferred release covers every failure path.
+	release, ok := lockCityConfigForCommand(fs, cityPath, "gc rig add", stderr)
+	if !ok {
+		return config.Rig{}, 1
+	}
+	defer release()
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -369,6 +377,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		PostProvision: func(pc rig.ProvisionContext) error {
+			release()
 			if adopt {
 				if err := installBeadHooks(rigPath, cityPath); err != nil {
 					fmt.Fprintf(stderr, "gc rig add: installing bead hooks: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1424,6 +1433,11 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	}
 
 	tomlPath := filepath.Join(cityPath, "city.toml")
+	release, ok := lockCityConfigForCommand(fsys.OSFS{}, cityPath, "gc rig remove", stderr)
+	if !ok {
+		return 1
+	}
+	defer release()
 	cfg, err := loadCityConfigForEditFS(fsys.OSFS{}, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1473,6 +1487,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	release()
 
 	// Regenerate routes.
 	resolveRigPaths(cityPath, cfg.Rigs)

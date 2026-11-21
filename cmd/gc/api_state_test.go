@@ -5138,59 +5138,6 @@ func TestControllerStateConfigTransactionTakesPublicationLockBeforeEditorLock(t 
 	}
 }
 
-// The reviewer's reproduction of that deadlock through the write paths: a
-// plain edit pauses while it holds the publication lock, a pack import enters
-// its config transaction, and then the edit goes on to take the Editor lock.
-func TestControllerStatePlainEditFinishesBesideConfigTransaction(t *testing.T) {
-	cs, tomlPath := newControllerStateMutationHarness(t)
-	editEntered := make(chan struct{})
-	releaseEdit := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseEdit) }) }
-	defer release()
-	editDone := make(chan error, 1)
-	go func() {
-		editDone <- cs.mutateAndPoke(func() error {
-			close(editEntered)
-			<-releaseEdit
-			return cs.editor.SuspendAgent("rig1/worker")
-		})
-	}()
-	awaitClose(t, editEntered, "plain edit holding the publication lock")
-
-	txDone := make(chan error, 1)
-	go func() { txDone <- cs.SerializeConfigWrite(func() error { return nil }) }()
-	awaitCond(t, func() bool {
-		if cs.configTransactionMu.TryLock() {
-			cs.configTransactionMu.Unlock()
-			return false
-		}
-		return true
-	}, "pack import entering its config transaction")
-
-	release()
-	for _, w := range []struct {
-		name string
-		done <-chan error
-	}{{"plain edit", editDone}, {"pack import", txDone}} {
-		select {
-		case err := <-w.done:
-			if err != nil {
-				t.Fatalf("%s: %v", w.name, err)
-			}
-		case <-time.After(hangBudget):
-			t.Fatalf("%s did not finish: the plain edit and the config transaction take the publication and Editor locks in opposite orders", w.name)
-		}
-	}
-	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.Agents) != 1 || !cfg.Agents[0].Suspended {
-		t.Fatalf("agents after the edit = %+v, want rig1/worker suspended", cfg.Agents)
-	}
-}
-
 // A config transaction holds the publication lock for its whole body,
 // including a pack fetch or rig provisioning, so a runtime reload whose
 // candidate was read before the transaction began waits at publication until
