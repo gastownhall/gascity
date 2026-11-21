@@ -1977,6 +1977,110 @@ func TestReleaseOrphanedPoolAssignments_ReopensStaleDirectAssigneeForNamedBacked
 	}
 }
 
+// TestReleaseOrphanedPoolAssignments_SkipsWhenReplacementSessionReportsCurrentlyProcessing
+// is the gascity#6362 regression: a replacement session (new session bead,
+// new identity — no alias/session_name/named-identity in common with the
+// predecessor) adopts a predecessor's assigned work without going through a
+// fresh gc hook --claim, so the work bead's own Assignee is still stamped
+// with the drained predecessor's raw session ID. No identity form recognizes
+// the replacement as the owner, so without the currently_processing_bead_id
+// escape hatch this sweep would reopen/reclaim work the replacement is
+// actively executing.
+func TestReleaseOrphanedPoolAssignments_SkipsWhenReplacementSessionReportsCurrentlyProcessing(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "adopted work",
+		Assignee: "th-mw3l9", // the drained predecessor's raw session ID
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	replacement := beads.Bead{
+		ID:     "th-ryrfv",
+		Title:  "replacement session",
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":           "th-ryrfv",
+			"template":               "worker",
+			session.CurrentBeadIDKey: work.ID,
+		},
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", []beads.Bead{replacement}, []beads.Bead{work}, nil, nil, nil)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — replacement session reports actively processing this bead", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "th-mw3l9" {
+		t.Fatalf("assignee = %q, want th-mw3l9 (unchanged — this test only checks release is skipped)", got.Assignee)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesWhenOpenSessionReportsDifferentCurrentBead
+// proves the new currently_processing_bead_id check does not over-protect: an
+// open session that is actively processing a DIFFERENT bead must not shield
+// an unrelated stale assignment from release.
+func TestReleaseOrphanedPoolAssignments_ReleasesWhenOpenSessionReportsDifferentCurrentBead(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "stale work",
+		Assignee: "th-mw3l9",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	unrelatedSession := beads.Bead{
+		ID:     "th-other",
+		Title:  "unrelated live session",
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":           "th-other",
+			"template":               "worker",
+			session.CurrentBeadIDKey: "some-other-bead",
+		},
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", []beads.Bead{unrelatedSession}, []beads.Bead{work}, nil, nil, nil)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s] — no live session reports processing this bead", released, work.ID)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_PreservesCanonicalNamedIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{
@@ -2798,5 +2902,126 @@ func TestDirectSessionBeadIDCandidates_SkipsFlagLikeCandidates(t *testing.T) {
 		if strings.HasPrefix(c, "-") {
 			t.Fatalf("candidate %q starts with %q; stores that shell out would read it as a flag (all: %v)", c, "-", candidates)
 		}
+	}
+}
+
+// TestClearCurrentBeadIDWhenUnassignedDropsStaleAnchor covers the stale-stamp
+// case from gascity#6410: a session stamped bead X while it held X, then X
+// moved to another session. With no assigned work left, the reconciler's clear
+// must drop the stamp so the open session stops shielding X from release.
+func TestClearCurrentBeadIDWhenUnassignedDropsStaleAnchor(t *testing.T) {
+	store := beads.NewMemStore()
+	sess, err := store.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "th-worker",
+			"template":     "worker",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	front := sessionFrontDoor(store)
+	if err := front.RecordCurrentBead(sess.ID, "bd-x"); err != nil {
+		t.Fatalf("RecordCurrentBead: %v", err)
+	}
+	info, err := front.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if info.CurrentlyProcessingBeadID != "bd-x" {
+		t.Fatalf("precondition: CurrentlyProcessingBeadID = %q, want bd-x", info.CurrentlyProcessingBeadID)
+	}
+
+	// Still holding assigned work: the stamp must stay.
+	if patch := clearCurrentBeadIDWhenUnassigned(info, front, true, nil); patch != nil {
+		t.Fatalf("clear with assigned work returned %v, want nil", patch)
+	}
+
+	// No assigned work left: the stamp must go.
+	patch := clearCurrentBeadIDWhenUnassigned(info, front, false, nil)
+	if patch == nil {
+		t.Fatal("clear without assigned work returned nil, want a patch")
+	}
+	if got := patch[session.CurrentBeadIDKey]; got != "" {
+		t.Fatalf("patch[%s] = %q, want empty", session.CurrentBeadIDKey, got)
+	}
+	reloaded, err := front.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Reload session: %v", err)
+	}
+	if reloaded.CurrentlyProcessingBeadID != "" {
+		t.Fatalf("CurrentlyProcessingBeadID = %q after clear, want empty", reloaded.CurrentlyProcessingBeadID)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_SameBeadIDInAnotherStoreIsNotShielded covers
+// gascity#6410 ask 3: the same bead ID can exist in two stores. A live session
+// that anchors bead "gc-1" in the city store must not shield the rig store's
+// "gc-1", which is a different bead assigned to a dead owner. The index is keyed
+// by store ref, so the rig bead should be released.
+func TestReleaseOrphanedPoolAssignments_SameBeadIDInAnotherStoreIsNotShielded(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	// Same ID in both stores: create in the city store first, then the rig store.
+	cityBead, err := cityStore.Create(beads.Bead{Title: "city bead"})
+	if err != nil {
+		t.Fatalf("Create city bead: %v", err)
+	}
+	rigBead, err := rigStore.Create(beads.Bead{
+		Title:    "rig bead",
+		Assignee: "dead-owner",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig bead: %v", err)
+	}
+	if cityBead.ID != rigBead.ID {
+		t.Fatalf("precondition: IDs differ (%s vs %s); the test needs a shared ID", cityBead.ID, rigBead.ID)
+	}
+	if err := rigStore.Update(rigBead.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig bead status: %v", err)
+	}
+	rigBead, err = rigStore.Get(rigBead.ID)
+	if err != nil {
+		t.Fatalf("Reload rig bead: %v", err)
+	}
+
+	// A live city pool session anchored on the city store's bead with the shared ID.
+	openSession := beads.Bead{
+		ID:     "th-city-worker",
+		Title:  "city worker session",
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":           "th-city-worker",
+			"template":               "worker",
+			session.CurrentBeadIDKey: cityBead.ID,
+		},
+	}
+
+	cfg := &config.City{
+		Rigs:                  []config.Rig{{Name: "repo", Path: t.TempDir()}},
+		Agents:                []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+		ResolvedWorkspaceName: "test-city",
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		cityStore,
+		cfg,
+		cityPath,
+		[]beads.Bead{openSession},
+		[]beads.Bead{rigBead},
+		[]beads.Store{rigStore},
+		[]string{"repo"},
+		map[string]beads.Store{"repo": rigStore},
+	)
+	if len(released) != 1 || released[0].ID != rigBead.ID {
+		t.Fatalf("released = %v, want the rig bead %s released; the city session's anchor must not shield it", released, rigBead.ID)
 	}
 }

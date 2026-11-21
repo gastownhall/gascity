@@ -276,12 +276,50 @@ func releaseOrphanedPoolAssignments(
 
 	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
 	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
+	// openCurrentlyProcessing indexes, by work bead ID, every OPEN session that
+	// currently_processing_bead_id names as its live anchor. A replacement
+	// session (new session bead, new identity) that adopts a predecessor's
+	// assigned work without going through a fresh gc hook --claim leaves the
+	// work bead's own Assignee pointed at the drained predecessor — every
+	// identity form above only recognizes CURRENT sessions, so the assignee
+	// reads as dead and this sweep would reopen/reclaim work a live session is
+	// actively executing (gascity#6362). currently_processing_bead_id is a
+	// stronger, more specific signal than assignee-identity matching: the
+	// reconciler only ever stamps it via recordCurrentBeadIDOnWake once its own
+	// wake decision already resolved this exact bead as the session's anchor,
+	// and it is cleared/reassigned every tick the session's anchor changes — so
+	// an open session naming this bead here is concrete, current evidence
+	// someone is doing the work, independent of whatever string sits in
+	// Assignee. Same "retain rather than reap" principle as protectedWakeWork
+	// above (gc-ft31x): uncertainty about identity-string matching is not
+	// permission to reopen work with a live, self-reporting owner.
+	// Keyed by storeScopedBeadKey (mirroring protectedWakeWork above) rather
+	// than a bare bead ID: the same bead ID string can exist in more than one
+	// store, and an anchor stamped against one store's bead must not shield a
+	// same-ID bead living in another.
+	openCurrentlyProcessing := make(map[storeScopedBeadKey]struct{}, len(openSessionInfos))
+	legacyOpenCurrentlyProcessing := make(map[string]struct{}, len(openSessionInfos))
+	var claimRefs []string
+	if storeRefAware {
+		claimRefs = assignedWorkClaimRefs(cityPath, cfg, store)
+	}
 	for _, info := range openSessionInfos {
 		if info.Closed {
 			continue
 		}
 		for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(info, cfg) {
 			legacyOpenIdentifiers[id] = struct{}{}
+		}
+		id := strings.TrimSpace(info.CurrentlyProcessingBeadID)
+		if id == "" {
+			continue
+		}
+		if !storeRefAware {
+			legacyOpenCurrentlyProcessing[id] = struct{}{}
+			continue
+		}
+		for _, storeRef := range openSessionReachableStoreRefInfo(cityPath, cfg, claimRefs, info) {
+			openCurrentlyProcessing[storeScopedBeadKey{StoreRef: storeRef, ID: id}] = struct{}{}
 		}
 	}
 
@@ -311,6 +349,16 @@ func releaseOrphanedPoolAssignments(
 		// Uncertainty about session materialization is not permission to reopen
 		// work (retain rather than reap, gc-ft31x).
 		if _, ok := protectedWakeWork[storeScopedBeadKey{StoreRef: workStoreRef, ID: wb.ID}]; ok {
+			continue
+		}
+		// A live, open session that currently reports this exact bead as its
+		// anchor owns it regardless of what Assignee says — see
+		// openCurrentlyProcessing above (gascity#6362).
+		if storeRefAware {
+			if _, ok := openCurrentlyProcessing[storeScopedBeadKey{StoreRef: workStoreRef, ID: wb.ID}]; ok {
+				continue
+			}
+		} else if _, ok := legacyOpenCurrentlyProcessing[wb.ID]; ok {
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
