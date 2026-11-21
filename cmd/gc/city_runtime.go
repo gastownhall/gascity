@@ -1438,6 +1438,7 @@ var legacyTickPhases = []tickPhase{
 	{name: "demand_desired_state_and_sync", session: true, run: (*CityRuntime).tickDemandDesiredStateAndSync},
 	{name: "reap_stale_extmsg_bindings", run: (*CityRuntime).tickReapStaleExtmsgBindings},
 	{name: "reap_stale_extmsg_participants", run: (*CityRuntime).tickReapStaleExtmsgParticipants},
+	{name: "resume_extmsg_session_teardowns", run: (*CityRuntime).tickResumeExtmsgSessionTeardowns},
 	{name: "refresh_desired_state", session: true, run: (*CityRuntime).tickRefreshDesiredState},
 	{name: "apply_soft_reload_acceptance", session: true, run: (*CityRuntime).tickApplySoftReloadAcceptance},
 	{name: "bead_reconcile_tick", session: true, maintenance: beadReconcileMaintenancePhases, run: (*CityRuntime).tickBeadReconcile},
@@ -1880,6 +1881,17 @@ func (cr *CityRuntime) tickReapStaleExtmsgParticipants(p *tickPass) bool {
 	stores := cr.cityStores()
 	reapStaleExtmsgParticipants(p.ctx, stores.Mail(), stores.Sessions(), cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
+	return false
+}
+
+// tickResumeExtmsgSessionTeardowns finishes the external-message teardowns
+// retired-session cleanup recorded as unfinished (a teardown cut off by its
+// budget, or failed), so a retired session's participants and memberships,
+// which no other sweep closes, converge to closed.
+func (cr *CityRuntime) tickResumeExtmsgSessionTeardowns(p *tickPass) bool {
+	phaseStart := time.Now()
+	resumePendingExtmsgSessionTeardowns(p.ctx, cr.cityStores().Sessions(), time.Now(), cr.stderr)
+	p.recordPhase(TraceSiteControllerTickPhase, "resume_extmsg_session_teardowns", phaseStart, nil)
 	return false
 }
 

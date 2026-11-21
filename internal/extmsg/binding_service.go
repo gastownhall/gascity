@@ -846,6 +846,13 @@ func ReassignSessionParticipants(ctx context.Context, store beads.MailStore, old
 // ResolveInbound / ResolveOutbound, so group routing can still target the
 // dead session. Sweep both explicitly.
 func CloseSessionBindings(ctx context.Context, store beads.MailStore, sessions beads.SessionStore, sessionID string, now time.Time) error {
+	// ctx stops the teardown only between items: it is checked before each
+	// lookup and before each binding's conversation, each participant and
+	// each membership is torn down, and an item that has started runs to
+	// completion under context.WithoutCancel(ctx). A canceled ctx therefore
+	// leaves items untouched, never half removed, and running the teardown
+	// again finishes them; RecordPendingSessionTeardown and
+	// ResumePendingSessionTeardowns do that for a caller that cannot wait.
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
@@ -858,10 +865,7 @@ func CloseSessionBindings(ctx context.Context, store beads.MailStore, sessions b
 	}
 	caller := Caller{Kind: CallerController, ID: "session-retirement"}
 	svc := NewServices(store, sessions)
-	if _, err := svc.Bindings.Unbind(ctx, caller, UnbindInput{
-		SessionID: sessionID,
-		Now:       now,
-	}); err != nil {
+	if err := closeSessionBindingConversations(ctx, store, svc, caller, sessionID, now); err != nil {
 		return err
 	}
 	if err := closeSessionParticipants(ctx, store, svc, caller, sessionID); err != nil {
@@ -870,10 +874,57 @@ func CloseSessionBindings(ctx context.Context, store beads.MailStore, sessions b
 	return closeSessionMemberships(ctx, svc, caller, sessionID, now)
 }
 
+// closeSessionBindingConversations ends every active binding of sessionID
+// with one Unbind per conversation. It checks ctx before its lookup and
+// before each conversation, whose Unbind then runs under
+// context.WithoutCancel(ctx): Unbind checks its ctx again between ending the
+// binding and clearing its delivery contexts, and a cancellation there would
+// leave delivery contexts open behind a closed binding, which nothing sweeps.
+func closeSessionBindingConversations(ctx context.Context, store beads.MailStore, svc Services, caller Caller, sessionID string, now time.Time) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	items, err := store.List(beads.ListQuery{Label: bindingSessionLabel(sessionID)})
+	if err != nil {
+		return fmt.Errorf("list bindings for retired session %s: %w", sessionID, err)
+	}
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if !hasLabel(item, "gc:extmsg-binding") || item.Status == "closed" {
+			continue
+		}
+		record, decodeErr := decodeBindingBead(item)
+		if decodeErr != nil {
+			return fmt.Errorf("decode binding %s for retired session %s: %w", item.ID, sessionID, decodeErr)
+		}
+		key := conversationLockKey(record.Conversation)
+		if _, ok := seen[key]; ok || record.SessionID != sessionID {
+			continue
+		}
+		seen[key] = struct{}{}
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
+		conversation := record.Conversation
+		if _, err := svc.Bindings.Unbind(context.WithoutCancel(ctx), caller, UnbindInput{
+			Conversation: &conversation,
+			SessionID:    sessionID,
+			Now:          now,
+		}); err != nil {
+			return fmt.Errorf("unbind conversation of binding %s for retired session %s: %w", record.ID, sessionID, err)
+		}
+	}
+	return nil
+}
+
 // closeSessionParticipants closes every gc:extmsg-participant bead labeled
 // for sessionID by delegating to RemoveParticipant, which also cleans up the
 // group-owned portion of the corresponding membership. It checks ctx before
-// its residual lookup, which no service entry check covers.
+// its residual lookup, which no service entry check covers, and before each
+// participant, whose removal then runs under context.WithoutCancel(ctx): a
+// cancellation between RemoveParticipant's close of the participant and its
+// membership removal would leave the membership open with nothing pointing
+// a later sweep at it.
 func closeSessionParticipants(ctx context.Context, store beads.MailStore, svc Services, caller Caller, sessionID string) error {
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -903,7 +954,10 @@ func closeSessionParticipants(ctx context.Context, store beads.MailStore, svc Se
 			continue
 		}
 		seen[key] = struct{}{}
-		removeErr := svc.Groups.RemoveParticipant(ctx, caller, RemoveParticipantInput{
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
+		removeErr := svc.Groups.RemoveParticipant(context.WithoutCancel(ctx), caller, RemoveParticipantInput{
 			GroupID: record.GroupID,
 			Handle:  record.Handle,
 		})
@@ -918,12 +972,18 @@ func closeSessionParticipants(ctx context.Context, store beads.MailStore, svc Se
 // closeSessionMemberships closes any membership bead still listing sessionID
 // after the binding and participant sweeps. Catches binding-owned memberships
 // whose binding bead never existed (legacy data) and any other orphan paths.
+// ctx is checked before each membership; its owners are then all removed
+// under context.WithoutCancel(ctx), so a membership is closed or left whole.
 func closeSessionMemberships(ctx context.Context, svc Services, caller Caller, sessionID string, now time.Time) error {
 	memberships, err := svc.Transcript.ListConversationsBySession(ctx, caller, sessionID)
 	if err != nil {
 		return fmt.Errorf("list residual memberships for retired session %s: %w", sessionID, err)
 	}
 	for _, m := range memberships {
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
+		membershipCtx := context.WithoutCancel(ctx)
 		// Iterate stored owners so removeMembershipLocked decrements the
 		// owners slice to empty and closes the bead. Legacy beads with
 		// empty owners still need closing; passing any single owner
@@ -934,7 +994,7 @@ func closeSessionMemberships(ctx context.Context, svc Services, caller Caller, s
 			owners = []MembershipOwner{MembershipOwnerManual}
 		}
 		for _, owner := range owners {
-			removeErr := svc.Transcript.RemoveMembership(ctx, RemoveMembershipInput{
+			removeErr := svc.Transcript.RemoveMembership(membershipCtx, RemoveMembershipInput{
 				Caller:       caller,
 				Conversation: m.Conversation,
 				SessionID:    sessionID,

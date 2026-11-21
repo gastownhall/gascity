@@ -1328,6 +1328,11 @@ resource = "slow_process_gate"
 calls = 1
 
 [[count]]
+path = "cmd/gc/session_beads_retired_cleanup_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
 path = "cmd/gc/session_lifecycle_chaos_test.go"
 resource = "fixed_sleep"
 calls = 1

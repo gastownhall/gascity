@@ -1733,8 +1733,10 @@ func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, 
 // retiredSessionCleanupLegBudget bounds each leg of retired-session cleanup
 // (wait cancellation, then external-message teardown), so a slow store cannot
 // hold the async start slot or reconciler tick running the cleanup for its
-// whole backlog. A leg stops at its next context checkpoint once its budget
-// ends; a store call already in flight finishes first.
+// whole backlog, and bounds each controller pass that resumes an unfinished
+// external-message teardown (resumePendingExtmsgSessionTeardowns). A leg
+// stops at its next context checkpoint once its budget ends; a store call or
+// teardown item already in flight finishes first.
 const retiredSessionCleanupLegBudget = 10 * time.Second
 
 // cancelStateAssignedToRetiredSessionBead cancels the retired session's waits
@@ -1742,7 +1744,9 @@ const retiredSessionCleanupLegBudget = 10 * time.Second
 // retiredSessionCleanupLegBudget, created here rather than taken from a
 // caller, so a waits leg that exhausts its budget still leaves the
 // external-message leg a full one and teardown still runs during shutdown.
-// What a cut-off leg did not reach stays open.
+// Waits a cut-off leg did not reach stay open. An external-message teardown
+// that is cut off or fails is recorded (extmsg.RecordPendingSessionTeardown),
+// and the controller's resume pass runs it again until it finishes.
 func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return
@@ -1752,7 +1756,7 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	}
 	sessFront := sessionFrontDoor(store)
 	capped := false
-	cutOff, err := runRetiredSessionCleanupLeg(func(ctx context.Context) error {
+	cutOff, err := runRetiredSessionCleanupLeg(context.Background(), func(ctx context.Context) error {
 		var err error
 		_, capped, err = sessFront.CancelWaits(ctx, sessionID, now)
 		return err
@@ -1766,20 +1770,27 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	}
 	reportRetiredSessionCleanupLeg(stderr, sessionID, "waits", "canceling waits", cutOff, err)
 	sessions := beads.SessionStore{Store: store}
-	cutOff, err = runRetiredSessionCleanupLeg(func(ctx context.Context) error {
-		return extmsg.CloseSessionBindings(ctx, extmsgStoreOverSessions(sessions), sessions, sessionID, now)
+	messaging := extmsgStoreOverSessions(sessions)
+	cutOff, err = runRetiredSessionCleanupLeg(context.Background(), func(ctx context.Context) error {
+		return extmsg.CloseSessionBindings(ctx, messaging, sessions, sessionID, now)
 	})
 	reportRetiredSessionCleanupLeg(stderr, sessionID, "external-message", "closing external message bindings", cutOff, err)
+	if err == nil {
+		return
+	}
+	if recordErr := extmsg.RecordPendingSessionTeardown(messaging, sessionID, now); recordErr != nil {
+		fmt.Fprintf(stderr, "session beads: recording the unfinished external-message teardown of retired session %s for the controller to finish: %v\n", sessionID, recordErr) //nolint:errcheck
+	}
 }
 
 // runRetiredSessionCleanupLeg runs leg under a fresh
-// retiredSessionCleanupLegBudget deadline and reports whether the leg was cut
-// off: it failed with a deadline error while its own budget had expired. A
-// nil error is success even when the leg finished past its budget, and any
-// other error, including a deadline the store raised before this budget
-// ended, is an ordinary failure.
-func runRetiredSessionCleanupLeg(leg func(context.Context) error) (cutOff bool, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), retiredSessionCleanupLegBudget)
+// retiredSessionCleanupLegBudget deadline derived from parent and reports
+// whether the leg was cut off: it failed with a deadline error while its own
+// budget had expired. A nil error is success even when the leg finished past
+// its budget, and any other error, including a deadline the store raised
+// before this budget ended, is an ordinary failure.
+func runRetiredSessionCleanupLeg(parent context.Context, leg func(context.Context) error) (cutOff bool, err error) {
+	ctx, cancel := context.WithTimeout(parent, retiredSessionCleanupLegBudget)
 	defer cancel()
 	err = leg(ctx)
 	cutOff = errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded)

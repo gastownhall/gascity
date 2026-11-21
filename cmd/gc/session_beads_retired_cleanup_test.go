@@ -30,6 +30,12 @@ type retiredCleanupBudgetStore struct {
 	extmsgDelay time.Duration
 	// closeAllErr, when set, is returned by every CloseAll after its delay.
 	closeAllErr error
+	// listErr, when set, is returned by every other List whose label starts
+	// with listErrPrefix, after its delay.
+	listErr       error
+	listErrPrefix string
+	// createErr, when set, is returned by every Create.
+	createErr error
 
 	mu          sync.Mutex
 	extmsgLists []string
@@ -44,7 +50,17 @@ func (s *retiredCleanupBudgetStore) List(query beads.ListQuery) ([]beads.Bead, e
 	s.extmsgLists = append(s.extmsgLists, query.Label)
 	s.mu.Unlock()
 	time.Sleep(s.extmsgDelay)
+	if s.listErr != nil && strings.HasPrefix(query.Label, s.listErrPrefix) {
+		return nil, s.listErr
+	}
 	return s.MemStore.List(query)
+}
+
+func (s *retiredCleanupBudgetStore) Create(b beads.Bead) (beads.Bead, error) {
+	if s.createErr != nil {
+		return beads.Bead{}, s.createErr
+	}
+	return s.MemStore.Create(b)
 }
 
 func (s *retiredCleanupBudgetStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
@@ -270,26 +286,50 @@ func wantOnlyCutoffLine(t *testing.T, stderr, sessionID, leg string) {
 }
 
 // TestRetiredCleanupBoundsSlowWaitsLeg: when wait cancellation on a slow store
-// outlasts its 10s budget, the next checkpoint stops it, the waits it already
-// canceled keep their metadata, the rest stay open, and exactly one line names
-// the session, the waits leg and the budget.
+// outlasts its 10s budget, the next checkpoint stops it: the pending waits it
+// already canceled keep their metadata, the terminal waits it had not reached
+// stay open, and exactly one line names the session, the waits leg and the
+// budget.
 func TestRetiredCleanupBoundsSlowWaitsLeg(t *testing.T) {
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	mem := beads.NewMemStore()
 	sessionBead := newRetiredCleanupSessionBead(t, mem)
-	seedRetiredCleanupWaits(t, mem, sessionBead.ID, 50, 0)
+	seedRetiredCleanupWaits(t, mem, sessionBead.ID, 50, 10)
 
-	// Lookup ends at 3s; batches end at 6s, 9s and 12s; the checkpoint after
-	// the 12s batch sees the expired budget.
-	store := &retiredCleanupBudgetStore{MemStore: mem, waitLabel: "session:" + sessionBead.ID, waitDelay: 3 * time.Second}
+	// The lookup ends at 6s and the pending waits' CloseAll at 12s; the
+	// checkpoint before the terminal waits' CloseAll sees the expired budget.
+	store := &retiredCleanupBudgetStore{MemStore: mem, waitLabel: "session:" + sessionBead.ID, waitDelay: 6 * time.Second}
 	stderr, elapsed := runRetiredCleanupInBubble(t, store, sessionBead.ID, now)
 
 	wantOnlyCutoffLine(t, stderr, sessionBead.ID, "waits")
-	if open, closed := retiredCleanupWaitCounts(t, mem, sessionBead.ID, now); open != 20 || closed != 30 {
-		t.Fatalf("open/closed waits = %d/%d, want 20/30 (three ten-wait batches before the cut-off)", open, closed)
+	if open, closed := retiredCleanupWaitCounts(t, mem, sessionBead.ID, now); open != 10 || closed != 50 {
+		t.Fatalf("open/closed waits = %d/%d, want 10/50 (the terminal waits left open by the cut-off)", open, closed)
 	}
 	if elapsed != 12*time.Second {
-		t.Fatalf("cleanup took %s, want 12s (one in-flight batch past the 10s budget)", elapsed)
+		t.Fatalf("cleanup took %s, want 12s (one in-flight CloseAll past the 10s budget)", elapsed)
+	}
+}
+
+// TestRetiredCleanupHealthyStoreLargeBacklog: a full lookup page of pending
+// waits on a healthy store at 100ms per call is canceled in one lookup and
+// one CloseAll, well inside the budget: no cut-off and no wait left open.
+func TestRetiredCleanupHealthyStoreLargeBacklog(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	mem := beads.NewMemStore()
+	sessionBead := newRetiredCleanupSessionBead(t, mem)
+	seedRetiredCleanupWaits(t, mem, sessionBead.ID, waitLookupLimit, 0)
+
+	store := &retiredCleanupBudgetStore{MemStore: mem, waitLabel: "session:" + sessionBead.ID, waitDelay: 100 * time.Millisecond}
+	stderr, elapsed := runRetiredCleanupInBubble(t, store, sessionBead.ID, now)
+
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want no diagnostics on a healthy store", stderr)
+	}
+	if open, closed := retiredCleanupWaitCounts(t, mem, sessionBead.ID, now); open != 0 || closed != waitLookupLimit {
+		t.Fatalf("open/closed waits = %d/%d, want 0/%d", open, closed, waitLookupLimit)
+	}
+	if elapsed != 200*time.Millisecond {
+		t.Fatalf("waits leg took %s, want 200ms (one lookup and one CloseAll)", elapsed)
 	}
 }
 
@@ -423,10 +463,59 @@ func (s *retiredCleanupBudgetStore) listsWithPrefix(prefix string) []string {
 	return out
 }
 
+// openRetiredCleanupTeardowns returns the open pending-teardown records naming
+// sessionID.
+func openRetiredCleanupTeardowns(t *testing.T, store beads.Store, sessionID string) int {
+	t.Helper()
+	items, err := store.List(beads.ListQuery{Label: "gc:extmsg-session-teardown"})
+	if err != nil {
+		t.Fatalf("list teardown records: %v", err)
+	}
+	open := 0
+	for _, item := range items {
+		if item.Status != "closed" && item.Metadata["session_id"] == sessionID {
+			open++
+		}
+	}
+	return open
+}
+
+// resumeRetiredCleanupInBubble runs the controller's pass over recorded
+// external-message teardowns inside a synctest bubble and returns its stderr.
+func resumeRetiredCleanupInBubble(t *testing.T, store beads.Store, now time.Time) string {
+	t.Helper()
+	var stderr bytes.Buffer
+	synctest.Test(t, func(*testing.T) {
+		resumePendingExtmsgSessionTeardowns(context.Background(), beads.SessionStore{Store: store}, now, &stderr)
+	})
+	return stderr.String()
+}
+
+// wantNoInboundRoute fails when a group participant handle the fixture seeded
+// for the session still routes an inbound message to it.
+func (x retiredCleanupExtmsg) wantNoInboundRoute(t *testing.T, participants int) {
+	t.Helper()
+	for i := 0; i < participants; i++ {
+		decision, err := x.fabric.Groups.ResolveInbound(context.Background(), extmsg.ExternalInboundMessage{
+			Conversation:   retiredCleanupConversation("group", i),
+			ExplicitTarget: fmt.Sprintf("worker%d", i),
+		})
+		if err != nil {
+			t.Fatalf("ResolveInbound %d: %v", i, err)
+		}
+		if decision.Match != extmsg.GroupRouteNoMatch || decision.TargetSessionID == x.sessionID {
+			t.Fatalf("inbound to worker%d = %+v, want no route to retired session %s", i, decision, x.sessionID)
+		}
+	}
+}
+
 // TestRetiredCleanupExternalMessageCutoff: a slow external-message leg stops at
-// the next service or seed checkpoint once its own budget expires, starts no
-// residual participant lookup on the expired budget, leaves what it did not
-// reach open, and logs exactly one external-message cut-off line.
+// the next checkpoint once its own budget expires, starts no residual
+// participant lookup on the expired budget, never leaves a participant half
+// removed, records the unfinished teardown and logs exactly one
+// external-message cut-off line; once the store recovers, the controller's
+// resume pass closes what the cut-off left and nothing routes to the retired
+// session.
 func TestRetiredCleanupExternalMessageCutoff(t *testing.T) {
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 
@@ -449,6 +538,21 @@ func TestRetiredCleanupExternalMessageCutoff(t *testing.T) {
 		if _, p, m := x.counts(t); p != 2 || m != 3 {
 			t.Fatalf("open participants/memberships = %d/%d, want 2/3 left open", p, m)
 		}
+		if got := openRetiredCleanupTeardowns(t, mem, sessionBead.ID); got != 1 {
+			t.Fatalf("open teardown records = %d, want 1", got)
+		}
+
+		store.extmsgDelay = 0
+		if got := resumeRetiredCleanupInBubble(t, store, now); got != "session reconciler: extmsg session teardowns resumed (finished=1 dropped=0 pending=1)\n" {
+			t.Fatalf("resume stderr = %q, want the one finished teardown", got)
+		}
+		if b, p, m := x.counts(t); b != 0 || p != 0 || m != 0 {
+			t.Fatalf("open bindings/participants/memberships after resume = %d/%d/%d, want 0/0/0", b, p, m)
+		}
+		x.wantNoInboundRoute(t, 2)
+		if got := openRetiredCleanupTeardowns(t, mem, sessionBead.ID); got != 0 {
+			t.Fatalf("open teardown records after resume = %d, want 0", got)
+		}
 	})
 
 	t.Run("ParticipantSweepOutlastsBudget", func(t *testing.T) {
@@ -457,20 +561,80 @@ func TestRetiredCleanupExternalMessageCutoff(t *testing.T) {
 		x := newRetiredCleanupExtmsg(mem, sessionBead.ID)
 		x.seed(t, 0, 8, 0, now)
 		// No call boundary lands on the 10s deadline, so the cut-off point
-		// does not depend on whether the timer or the call wakes first.
+		// does not depend on whether the timer or the call wakes first: the
+		// binding and participant lookups end at 3s and 6s, the first
+		// participant's removal runs whole to 15s, and the checkpoint before
+		// the second participant sees the expired budget.
 		store := &retiredCleanupBudgetStore{MemStore: mem, waitLabel: "session:" + sessionBead.ID, extmsgDelay: 3 * time.Second}
 
 		stderr, _ := runRetiredCleanupInBubble(t, store, sessionBead.ID, now)
 
 		wantOnlyCutoffLine(t, stderr, sessionBead.ID, "external-message")
-		_, p, m := x.counts(t)
-		if p == 0 || p == 8 {
-			t.Fatalf("open participants = %d, want some removed and some left open by the cut-off", p)
+		// A removal the cut-off reached runs whole, so every participant left
+		// open keeps its membership and no closed one leaves one behind.
+		if _, p, m := x.counts(t); p != 7 || m != 7 {
+			t.Fatalf("open participants/memberships = %d/%d, want 7/7 (one participant removed whole)", p, m)
 		}
-		// A removal cut off between its own store calls can close the
-		// participant and leave its membership, never the reverse.
-		if m < p {
-			t.Fatalf("open memberships = %d, want at least %d (one per participant left open)", m, p)
+		if got := openRetiredCleanupTeardowns(t, mem, sessionBead.ID); got != 1 {
+			t.Fatalf("open teardown records = %d, want 1", got)
+		}
+
+		store.extmsgDelay = 0
+		resumeRetiredCleanupInBubble(t, store, now)
+		if b, p, m := x.counts(t); b != 0 || p != 0 || m != 0 {
+			t.Fatalf("open bindings/participants/memberships after resume = %d/%d/%d, want 0/0/0", b, p, m)
+		}
+		x.wantNoInboundRoute(t, 8)
+		if got := openRetiredCleanupTeardowns(t, mem, sessionBead.ID); got != 0 {
+			t.Fatalf("open teardown records after resume = %d, want 0", got)
 		}
 	})
+}
+
+// TestRetiredCleanupRecordsFailedTeardown: an external-message teardown that
+// fails with an ordinary error is recorded for the resume pass too, and a
+// record that cannot be written gets its own diagnostic after the leg's.
+func TestRetiredCleanupRecordsFailedTeardown(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	errLookup := errors.New("binding lookup failed")
+	for _, tc := range []struct {
+		name        string
+		createErr   error
+		wantRecords int
+		wantRecord  string // a second stderr line, "" for none
+	}{
+		{name: "Recorded", wantRecords: 1},
+		{
+			name:       "RecordFails",
+			createErr:  errors.New("store unavailable"),
+			wantRecord: "session beads: recording the unfinished external-message teardown of retired session %s for the controller to finish: record pending teardown for session %s: store unavailable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			sessionBead := newRetiredCleanupSessionBead(t, mem)
+			x := newRetiredCleanupExtmsg(mem, sessionBead.ID)
+			x.seed(t, 0, 1, 0, now)
+			store := &retiredCleanupBudgetStore{
+				MemStore:      mem,
+				waitLabel:     "session:" + sessionBead.ID,
+				listErr:       errLookup,
+				listErrPrefix: retiredCleanupBindingLabelPrefix,
+				createErr:     tc.createErr,
+			}
+
+			stderr, _ := runRetiredCleanupInBubble(t, store, sessionBead.ID, now)
+
+			want := []string{fmt.Sprintf("session beads: closing external message bindings for retired session %s: list bindings for retired session %s: binding lookup failed", sessionBead.ID, sessionBead.ID)}
+			if tc.wantRecord != "" {
+				want = append(want, fmt.Sprintf(tc.wantRecord, sessionBead.ID, sessionBead.ID))
+			}
+			if lines := nonEmptyLines(stderr); !slices.Equal(lines, want) {
+				t.Fatalf("stderr lines = %q, want %q", lines, want)
+			}
+			if got := openRetiredCleanupTeardowns(t, mem, sessionBead.ID); got != tc.wantRecords {
+				t.Fatalf("open teardown records = %d, want %d", got, tc.wantRecords)
+			}
+		})
+	}
 }
