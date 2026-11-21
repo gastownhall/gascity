@@ -392,28 +392,44 @@ func readStepOutput(t *testing.T, path, name string) (string, bool) {
 // (the string the lane job's if compares).
 func multiLaneLanes(t *testing.T, script, event, mode, fresh string, splitPaths ...string) (string, error) {
 	t.Helper()
-	dir := t.TempDir()
-	output := filepath.Join(dir, "output")
 	paths := ""
 	if len(splitPaths) > 0 {
 		paths = splitPaths[0]
 	}
-	out, err := runWorkflowStepScript(t, dir, script, map[string]string{
+	lanes, _, out, err := multiLaneLanesFull(t, script, event, mode, fresh, paths)
+	if err != nil {
+		return out, err
+	}
+	return lanes, nil
+}
+
+// multiLaneLanesFull: multiLaneLanes, plus the step summary and the step's
+// combined output (where a ::notice goes).
+func multiLaneLanesFull(t *testing.T, script, event, mode, fresh, splitPaths string) (lanes, summary, out string, err error) {
+	t.Helper()
+	dir := t.TempDir()
+	output := filepath.Join(dir, "output")
+	summaryPath := filepath.Join(dir, "summary")
+	out, err = runWorkflowStepScript(t, dir, script, map[string]string{
 		"EVENT":               event,
 		"MODE":                mode,
 		"FRESH":               fresh,
-		"SPLIT_STRICT_PATHS":  paths,
+		"SPLIT_STRICT_PATHS":  splitPaths,
 		"GITHUB_OUTPUT":       output,
-		"GITHUB_STEP_SUMMARY": filepath.Join(dir, "summary"),
+		"GITHUB_STEP_SUMMARY": summaryPath,
 	})
 	if err != nil {
-		return out, err
+		return "", "", out, err
 	}
 	lanes, ok := readStepOutput(t, output, "lanes")
 	if !ok {
 		t.Fatalf("Lanes step (event %s, mode %s, fresh %s) wrote no lanes output:\n%s", event, mode, fresh, out)
 	}
-	return lanes, nil
+	s, err := os.ReadFile(summaryPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return lanes, string(s), out, nil
 }
 
 // multiLaneForkCertificates caps the rbe-fork certificates (one per lane) a
@@ -427,13 +443,13 @@ var (
 )
 
 // wantMultiLanes: the lanes each (event, mode) starts, in order, for a pull
-// request that does not touch the split-strict storage paths.
+// request or merge group that does not touch the split-strict storage paths.
 func wantMultiLanes(event, mode string) []string {
 	return wantMultiLanesPaths(event, mode, "false")
 }
 
 // wantMultiLanesPaths is wantMultiLanes with the Split-strict paths step's
-// answer for a pull request ("" off pull requests).
+// answer for a pull request or merge group ("" off every other event).
 func wantMultiLanesPaths(event, mode, splitPaths string) []string {
 	// Every mode tests (the gate fails a run with no lane). Acceptance and
 	// the gating integration lanes run in every mode, the fork pool's
@@ -446,9 +462,13 @@ func wantMultiLanesPaths(event, mode, splitPaths string) []string {
 		lanes = append(lanes, "integration")
 	}
 	// The split-strict gate runs remotely only (no fork certificate, no
-	// local re-execution of two whole suites): nightly, on dispatch, and on
-	// pull requests that touch the storage paths.
-	if mode == "remote" && (event == "schedule" || event == "workflow_dispatch" || (event == "pull_request" && splitPaths == "true")) {
+	// local re-execution of two whole suites): nightly, on dispatch, on pull
+	// requests that touch the storage paths, and on merge groups whose entry
+	// does (ga-splitstrict-mergegroup-stopgap). A merge group takes mode
+	// remote whenever rbe-west is on (vars.RBE_WEST_WORKERS and the executor
+	// secret).
+	if mode == "remote" && (event == "schedule" || event == "workflow_dispatch" ||
+		((event == "pull_request" || event == "merge_group") && splitPaths == "true")) {
 		lanes = append(lanes, "split-strict")
 	}
 	return lanes
@@ -479,13 +499,23 @@ func TestBazelMultiLaneLaneList(t *testing.T) {
 		for _, mode := range multiLaneModes {
 			for _, fresh := range []string{"false", "true"} {
 				for _, splitPaths := range []string{"false", "true"} {
-					if splitPaths == "true" && event != "pull_request" {
+					if splitPaths == "true" && event != "pull_request" && event != "merge_group" {
 						continue
 					}
-					raw, err := multiLaneLanes(t, step.Run, event, mode, fresh, splitPaths)
+					raw, summary, out, err := multiLaneLanesFull(t, step.Run, event, mode, fresh, splitPaths)
 					if err != nil {
-						t.Errorf("Lanes step (event %s, mode %s, fresh %s) failed: %v\n%s", event, mode, fresh, err, raw)
+						t.Errorf("Lanes step (event %s, mode %s, fresh %s) failed: %v\n%s", event, mode, fresh, err, out)
 						continue
+					}
+					// A pull request or merge group on the storage paths that
+					// this mode cannot test says so, in a notice and the step
+					// summary, instead of passing silently.
+					wantNotRun := splitPaths == "true" && mode != "remote"
+					if notice := strings.Contains(out, "::notice title=split-strict not run::"); notice != wantNotRun {
+						t.Errorf("event %s, mode %s, fresh %s, paths %s: split-strict not-run notice %v, want %v\n%s", event, mode, fresh, splitPaths, notice, wantNotRun, out)
+					}
+					if said := strings.Contains(summary, "split-strict: not run (mode "+mode+")"); said != wantNotRun {
+						t.Errorf("event %s, mode %s, fresh %s, paths %s: step summary says split-strict did not run: %v, want %v\n%s", event, mode, fresh, splitPaths, said, wantNotRun, summary)
 					}
 					want := wantMultiLanesPaths(event, mode, splitPaths)
 					var entries []map[string]any
@@ -1987,6 +2017,106 @@ func TestSplitStrictLaneRunsOnTheRoutingCode(t *testing.T) {
 				t.Errorf("%s names %s, but a PR touching it does not run the split-strict lane", baseline, f)
 			}
 		}
+	}
+}
+
+// TestSplitStrictPathsStepJudgesTheChange runs the rbe job's Split-strict
+// paths step, fed the env its expressions yield, against a stub gh
+// (notifyBeadsGHStub). A pull request's list is its files; a merge group's
+// is the compare of the entry's base with its head, in that order (the
+// reverse answers "behind" with no files, which would skip the lane on
+// every entry). The lane runs when a listed file is on the storage paths,
+// when the list cannot be read, and when the compare lists 300 files, the
+// most it lists for a whole comparison: a storage file past them is unseen.
+func TestSplitStrictPathsStepJudgesTheChange(t *testing.T) {
+	step := multiLaneRBEStep(t, readMultiLaneWorkflow(t), "splitpaths")
+	const prNumber = "6969"
+	prCtx := map[string]string{
+		"github.event_name":                "pull_request",
+		"github.repository":                mergeQueueRepo,
+		"github.event.pull_request.number": prNumber,
+	}
+	// n files no storage path matches.
+	docs := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("docs/file-%03d.md", i)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name, event string
+		files       []string // what gh lists; nil: an answer gh cannot read
+		want        string
+	}{
+		{name: "merge group touching cmd/gc", event: "merge_group", files: []string{"docs/x.md", "cmd/gc/x.go"}, want: "true"},
+		{name: "merge group touching only the tmux runtime", event: "merge_group", files: []string{"internal/runtime/tmux/x.go"}, want: "false"},
+		{name: "merge group whose compare cannot be read", event: "merge_group", want: "true"},
+		{name: "merge group compare at its 300-file cap", event: "merge_group", files: docs(300), want: "true"},
+		{name: "merge group compare under its cap", event: "merge_group", files: docs(299), want: "false"},
+		{name: "pull request touching the store layer", event: "pull_request", files: []string{"internal/beads/memstore.go"}, want: "true"},
+		{name: "pull request touching only docs", event: "pull_request", files: []string{"docs/x.md"}, want: "false"},
+		{name: "pull request whose files cannot be read", event: "pull_request", want: "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := prCtx
+			if tc.event == "merge_group" {
+				ctx = mergeGroupCtx(nil)
+			}
+			if !evalGHIf(t, step.If, ctx) {
+				t.Fatalf("the step does not run on %s (if %q)", tc.event, step.If)
+			}
+			gh := newNotifyBeadsGH(t)
+			answer := "gh: Server Error (HTTP 500)" // not JSON: gh exits non-zero
+			if tc.files != nil {
+				entries := make([]map[string]string, len(tc.files))
+				for i, f := range tc.files {
+					entries[i] = map[string]string{"filename": f}
+				}
+				b, err := json.Marshal(entries)
+				if err != nil {
+					t.Fatal(err)
+				}
+				answer = string(b)
+				if tc.event == "merge_group" {
+					answer = `{"status":"ahead","files":` + answer + `}`
+				}
+			}
+			if tc.event == "merge_group" {
+				gh.write(gh.compare, answer)
+			} else {
+				gh.write(gh.files, answer)
+			}
+			env := gh.env()
+			for k, v := range step.Env {
+				env[k] = interpolateGH(t, v, ctx)
+			}
+			dir := t.TempDir()
+			env["GITHUB_REPOSITORY"] = mergeQueueRepo
+			env["GITHUB_OUTPUT"] = filepath.Join(dir, "output")
+			env["GITHUB_STEP_SUMMARY"] = filepath.Join(dir, "summary")
+			out, err := runWorkflowStepScript(t, dir, step.Run, env)
+			if err != nil {
+				t.Fatalf("the step failed: %v\n%s", err, out)
+			}
+			if got, _ := readStepOutput(t, env["GITHUB_OUTPUT"], "touched"); got != tc.want {
+				t.Errorf("touched=%q, want %q\n%s", got, tc.want, out)
+			}
+			gh.checkNoUnexpected()
+			calls := gh.lines(gh.log)
+			compares := gh.lines(filepath.Join(gh.dir, "compare"))
+			if tc.event == "merge_group" {
+				want := []string{mergeQueueBaseSHA + "..." + mergeQueueHeadSHA}
+				if len(calls) != 1 || !reflect.DeepEqual(compares, want) {
+					t.Errorf("gh calls %q comparing %q; want one call comparing %q", calls, compares, want)
+				}
+			} else {
+				files := "repos/" + mergeQueueRepo + "/pulls/" + prNumber + "/files"
+				if len(calls) != 1 || len(compares) != 0 || !strings.Contains(calls[0], files) {
+					t.Errorf("gh calls %q comparing %q; want one call listing %s", calls, compares, files)
+				}
+			}
+		})
 	}
 }
 
