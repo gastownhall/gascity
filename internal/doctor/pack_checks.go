@@ -1,13 +1,20 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/execgrace"
 )
+
+// packScriptKillGrace is how long a canceled pack script gets after SIGTERM
+// before its process group is killed.
+const packScriptKillGrace = 2 * time.Second
 
 // PackScriptCheck implements Check by running a script shipped with
 // a pack. The script follows the pack doctor protocol:
@@ -93,7 +100,22 @@ func (c *PackScriptCheck) Fix(ctx *CheckContext) error {
 
 // Run executes the pack script and interprets its output.
 func (c *PackScriptCheck) Run(ctx *CheckContext) *CheckResult {
-	cmd := exec.Command(c.Script) //nolint:gosec // script path from pack config
+	// Kill the script's whole process group when the runner abandons this
+	// check (CheckContext.Done), so a wedged script and its children do not
+	// outlive the doctor run.
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if ctx != nil && ctx.Done != nil {
+		go func() {
+			select {
+			case <-ctx.Done:
+				cancel()
+			case <-runCtx.Done():
+			}
+		}()
+	}
+	cmd := exec.CommandContext(runCtx, c.Script) //nolint:gosec // script path from pack config
+	execgrace.Apply(cmd, packScriptKillGrace)
 	cmd.Dir = c.PackDir
 	cmd.Env = append(cmd.Environ(), citylayout.PackRuntimeEnv(ctx.CityPath, c.PackName)...)
 	cmd.Env = append(cmd.Env,

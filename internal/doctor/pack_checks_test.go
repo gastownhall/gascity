@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeCheckScript(t *testing.T, dir, content string) string {
@@ -356,5 +360,80 @@ func TestParseScriptOutput(t *testing.T) {
 				t.Errorf("details count = %d, want %d", len(details), tt.wantDetail)
 			}
 		})
+	}
+}
+
+// TestPackScriptCheckKillsProcessGroupOnAbandon: a pack script that spawns a
+// child and waits on it must not outlive the runner's abandonment. When
+// CheckContext.Done closes, Run returns and both the script and its child
+// are gone. Without the fix, Run blocks until the script exits on its own.
+func TestPackScriptCheckKillsProcessGroupOnAbandon(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group signaling is unix-only")
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	t.Setenv("PACK_CHILD_PIDFILE", pidFile)
+	script := writeCheckScript(t, dir, "#!/bin/sh\nsleep 30 &\necho $! > \"$PACK_CHILD_PIDFILE\"\nwait\n")
+
+	done := make(chan struct{})
+	result := make(chan *CheckResult, 1)
+	c := &PackScriptCheck{CheckName: "x:kill", Script: script, PackDir: dir, PackName: "p"}
+	go func() {
+		result <- c.Run(&CheckContext{CityPath: dir, Done: done})
+	}()
+
+	// Wait for the child to be spawned, then abandon the check.
+	var childPID int
+	pollUntil(10*time.Second, func() bool {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		pid, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+		if perr != nil || pid <= 0 {
+			return false
+		}
+		childPID = pid
+		return true
+	})
+	if childPID == 0 {
+		close(done)
+		t.Fatal("pack script never spawned its child")
+	}
+	close(done)
+
+	select {
+	case <-result:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the check was abandoned")
+	}
+
+	// The child must be gone (signal 0 reports ESRCH once it is reaped).
+	gone := pollUntil(2*time.Second, func() bool {
+		return syscall.Kill(childPID, 0) == syscall.ESRCH
+	})
+	if !gone {
+		_ = syscall.Kill(childPID, syscall.SIGKILL)
+		t.Fatalf("child %d of the abandoned pack script is still alive", childPID)
+	}
+}
+
+// pollUntil reports whether cond became true within timeout, checking every
+// 20ms. It uses a ticker rather than a fixed sleep so the census stays flat.
+func pollUntil(timeout time.Duration, cond func() bool) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if cond() {
+			return true
+		}
+		select {
+		case <-deadline.C:
+			return cond()
+		case <-tick.C:
+		}
 	}
 }

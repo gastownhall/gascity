@@ -68,6 +68,7 @@ go_library(
         "//internal/deps",
         "//internal/doltversion",
         "//internal/events",
+        "//internal/execgrace",
         "//internal/formula",
         "//internal/fsys",
         "//internal/git",
