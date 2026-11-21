@@ -285,6 +285,41 @@ func TestWaitForIdleBusyPaneIsNotIdle(t *testing.T) {
 	}
 }
 
+// busyGrokPane is a Grok Build pane mid-turn: its boxed composer stays on
+// screen while its Ctrl+c:cancel footer below the box shows the turn.
+const busyGrokPane = "● Reading internal/config/provider.go\n\n" +
+	"╭──────────────────────────────╮\n" +
+	"│ ❯                            │\n" +
+	"╰──────────────────────────────╯\n" +
+	"  ⠋ Thinking  Ctrl+c:cancel\n"
+
+// This wait classifies each capture without the session's provider family
+// (tmux.ClassifyIdlePane), so a working grok pane settles idle here: only a
+// family-aware reading sees grok's footer. The provider therefore does not
+// say its wait reads grok (runtime.IdleWaitFamilyProvider), and
+// runtime.WaitIdleLiveOn keeps a wait-idle nudge to a grok session from
+// waiting on it and typing into the running turn, while claude, whose
+// indicator this wait reads (TestWaitForIdleBusyPaneIsNotIdle), stays live.
+// Kills: the provider claiming grok's footer, or the gate admitting grok on
+// a runtime that cannot see its turn.
+func TestFamilyBlindWaitKeepsGrokWaitIdleDeliveryOff(t *testing.T) {
+	fastIdlePoll(t)
+	pk := newIdlePack(t, idleHandshake, busyGrokPane)
+	p := NewProvider(pk.script)
+	if err := p.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
+		t.Fatalf("WaitForIdle on a working grok pane = %v; this wait was expected to read it idle, the reason grok is refused here: if it now reads grok's footer, say so (runtime.IdleWaitFamilyProvider) and update this test", err)
+	}
+	if reader, ok := any(p).(runtime.IdleWaitFamilyProvider); ok && reader.IdleWaitReadsFamily("grok") {
+		t.Fatal("the exec provider says its wait reads grok, but the wait above settled idle on a working grok pane")
+	}
+	if runtime.WaitIdleLiveOn(p, "s", "grok") {
+		t.Fatal("WaitIdleLiveOn(exec, grok) = true; want false: the wait cannot see a grok turn")
+	}
+	if !runtime.WaitIdleLiveOn(p, "s", "claude") {
+		t.Fatal("WaitIdleLiveOn(exec, claude) = false; want true: the wait reads claude's indicator")
+	}
+}
+
 // Kills: counting idle observations that are not consecutive.
 func TestWaitForIdleNeedsTwoConsecutiveIdleObservations(t *testing.T) {
 	fastIdlePoll(t)

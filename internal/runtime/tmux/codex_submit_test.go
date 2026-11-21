@@ -59,7 +59,7 @@ func TestClaudeNudgeKeystrokesAreUnchanged(t *testing.T) {
 // item whose paste may still be unsubmitted — losing the nudge outright instead
 // of requeueing it under the attempt cap.
 func TestCodexSubmitIsVerified(t *testing.T) {
-	for _, family := range []string{"claude", "codex"} {
+	for _, family := range []string{"claude", "codex", "grok"} {
 		if !submitVerifyEligibleFamily(family) {
 			t.Errorf("submitVerifyEligibleFamily(%q) = false, want true", family)
 		}
@@ -67,7 +67,7 @@ func TestCodexSubmitIsVerified(t *testing.T) {
 	// Control: a family whose busy indicator this package cannot read stays on
 	// best-effort delivery, because reporting every submit as unconfirmed would
 	// burn the queue's attempts re-pasting messages that already landed.
-	for _, family := range []string{"grok", "kimi", "opencode", "", "some-unregistered-family"} {
+	for _, family := range []string{"kimi", "opencode", "", "some-unregistered-family"} {
 		if submitVerifyEligibleFamily(family) {
 			t.Errorf("submitVerifyEligibleFamily(%q) = true, want false", family)
 		}

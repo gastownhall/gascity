@@ -53,6 +53,10 @@ var (
 	// Stopping a stopped Codex turn's background terminals rides the
 	// embedded raw provider.
 	_ runtime.BackgroundWorkStopper = (*seamBackedProvider)(nil)
+	// The families its idle wait reads ride the embedded raw provider, so a
+	// wait-idle gate (runtime.WaitIdleLiveOn) finds them on the production
+	// leaf.
+	_ runtime.IdleWaitFamilyProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.

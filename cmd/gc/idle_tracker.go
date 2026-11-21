@@ -212,9 +212,10 @@ func (m *memoryIdleTracker) checkIdleByContent(sessionName string, snap runtime.
 // Claude Code TUI over a non-ACP transport. ACP delivers in-process (no
 // repainting pane) and non-Claude providers do not hold a continuously
 // repainting interactive composer, so their activity clock reflects real
-// idleness on its own. This mirrors the identical gate on the nudge path — the
-// wait-idle short-circuit in cmd_nudge.go restricts itself to the claude,
-// non-ACP transport for the same reason (gco-90ui).
+// idleness on its own. The wait-idle short-circuit in cmd_nudge.go asks a
+// different question (gco-90ui): whether a wait-idle nudge would block in the
+// session's idle wait, which it would for every non-ACP session
+// runtime.WaitIdleLiveOn admits, grok's on tmux included.
 func idleTrackerContentClockApplies(provider, transport string) bool {
 	return transport != "acp" && provider == "claude"
 }

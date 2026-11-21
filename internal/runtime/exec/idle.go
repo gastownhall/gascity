@@ -210,7 +210,11 @@ func (p *Provider) readOpsReadyPrompt(ctx context.Context, name string) (string,
 // with no busy indicator on two consecutive observations, and implements
 // [runtime.IdleWaitProvider]. Each observation captures the last
 // tmux.PromptObservationLines lines through the carrier and applies
-// tmux.ClassifyIdlePane, so the boundary is the one local tmux uses.
+// tmux.ClassifyIdlePane, the boundary local tmux uses for every family whose
+// turn the family-blind scan reads. It does not read the session's family, so
+// it cannot see grok's turn footer: the provider does not say its wait reads
+// grok ([runtime.IdleWaitFamilyProvider]), and a wait-idle nudge to a grok
+// session is not delivered live on it ([runtime.WaitIdleLiveOn]).
 //
 // A pack without idleBoundaryDeclared gets [runtime.ErrInteractionUnsupported]
 // without a screen read.
@@ -252,7 +256,8 @@ func (p *Provider) waitForIdle(ctx context.Context, c runtime.Carrier, name stri
 // ctx cancellation, or now() reaching start+timeout. Its twin is the tmux
 // provider's (*tmux.Tmux).WaitForIdle loop, which applies the same prompt
 // check, observation count and poll interval without bounding a capture by
-// the deadline; change the two together. Each capture is classified by
+// the deadline, and also reads the pane's family where a capture needs it;
+// change the two together. Each capture is classified by
 // tmux.ClassifyIdlePane; at the deadline the error wraps
 // [runtime.ErrWaitUnobserved] as well unless a capture read busy.
 func waitForPaneIdle(ctx context.Context, c runtime.Carrier, now func() time.Time, name, promptPrefix string, timeout time.Duration) error {

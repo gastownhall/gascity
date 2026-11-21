@@ -1544,7 +1544,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 		}
 		return true, nil
 	}
-	if providerKind(b) != "claude" {
+	if !runtime.WaitIdleLiveOn(m.sp, sessName, providerKind(b)) {
 		return false, nil
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
@@ -1576,7 +1576,7 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 		}
 		return true, nil
 	}
-	if providerKind(b) != "claude" {
+	if !runtime.WaitIdleLiveOn(m.sp, sessName, providerKind(b)) {
 		return false, nil
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)

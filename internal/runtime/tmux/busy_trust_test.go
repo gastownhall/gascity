@@ -119,14 +119,17 @@ func wantReading(t *testing.T, err error, wantErr, wantIndeterminate bool) {
 
 // The busy reading of the pane scan is policy the leaf owns: only the
 // families whose indicator the scan reads (submitVerifyEligibleFamilies:
-// claude, codex) may report it, named by the pane's GC_PROVIDER or, without
+// claude, codex, grok) may report it, named by the pane's GC_PROVIDER or, without
 // one, by the process the pane runs. Every other family, and a pane whose
 // family cannot be told, reports the busy-indicator string as
 // runtime.ErrIdleIndeterminate, so a caller that holds on busy holds nothing
-// there without knowing which families are trusted. A busy capture whose
-// GC_PROVIDER read fails is a failed read, which callers hold on, not
-// indeterminate. The idle reading and the indeterminate one are untouched for
-// every family.
+// there without knowing which families are trusted. A capture whose reading
+// the family decides — a busy-indicator string, or grok's footer below a
+// composer, which is busy only on a grok pane — and whose GC_PROVIDER read
+// fails is a failed read, which callers hold on: never idle, never
+// indeterminate. A capture no family changes reads without the family, so a
+// failed read leaves it idle. The idle reading and the indeterminate one are
+// untouched for every family.
 func TestSnapshotIdleUntrustedFamilyIsIndeterminate(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
@@ -147,6 +150,10 @@ func TestSnapshotIdleUntrustedFamilyIsIndeterminate(t *testing.T) {
 		{name: "unidentified pane running codex busy", process: "codex", screen: busyTrustBusyPane},
 		{name: "provider read failed busy", process: "claude", envErr: errProviderReadFailed, screen: busyTrustBusyPane, wantErr: true},
 		{name: "provider read failed idle", envErr: errProviderReadFailed, screen: busyTrustIdlePane, wantIdle: true},
+		{name: "grok busy", family: "grok", screen: grokBusyBox},
+		{name: "provider read failed, grok footer below the composer", envErr: errProviderReadFailed, screen: grokBusyBox, wantErr: true},
+		{name: "provider read failed, grok footer under a claude prompt", envErr: errProviderReadFailed, screen: claudeIdleWithGrokHintBelow, wantErr: true},
+		{name: "provider read failed, idle grok composer", envErr: errProviderReadFailed, screen: grokIdleBox, wantIdle: true},
 		{name: "gemini idle", family: "gemini", screen: busyTrustIdlePane, wantIdle: true},
 		{name: "claude idle", family: "claude", screen: busyTrustIdlePane, wantIdle: true},
 		{name: "gemini neither", family: "gemini", screen: busyTrustNeitherPane, wantIndeterminate: true},

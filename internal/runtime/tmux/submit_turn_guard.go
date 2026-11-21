@@ -88,7 +88,8 @@ func (t *Tmux) turnRunning(target, family string) (bool, error) {
 // (paneShowsRunningTurn): for Codex the status rows right above its live
 // composer, so a Working row an earlier turn left in the scrollback is not a
 // running turn; for Claude a busy indicator anywhere in the capture, as
-// SnapshotIdle reads it. A family whose busy reading this leaf does not trust
+// SnapshotIdle reads it; for grok its Ctrl+c:cancel footer below the live
+// composer (grokTurnRunning). A family whose busy reading this leaf does not trust
 // (busyReadingTrusted), and a pane whose family cannot be told, is
 // [runtime.ErrIdleIndeterminate] without a capture: the scan cannot say
 // whether its turn runs. The family is SnapshotIdle's (busyTrustFamily). A
@@ -127,11 +128,12 @@ const codexTurnStatusRows = 6
 // back as busy for good, and a transcript row shaped like another provider's
 // indicator (a tool's "(2s · 3.1 MB)" reads as Claude's spinner) did the same.
 // A Codex pane with no composer on screen cannot be read that way and falls
-// back to Codex's indicator anywhere in lines. Every other family keeps
-// paneContainsBusyIndicator.
+// back to Codex's indicator anywhere in lines. Every other family reads
+// paneBusyReading: grok its own footer below the live composer, the rest the
+// shared indicator scan.
 func paneShowsRunningTurn(lines []string, family string) bool {
 	if family != "codex" {
-		return paneContainsBusyIndicator(lines)
+		return paneBusyReading(lines, family)
 	}
 	const codexBusy = "esc to interrupt"
 	composer := -1
