@@ -2186,6 +2186,45 @@ test_no_routes_behavior_unchanged() {
     _no_routes_case "routed-looking-token-only-uses-assignment" "fix/mc-k2p9x" '[{"id":"ga-abc12"}]' "list --assignee=agent-x;show ga-abc12"
 }
 
+
+# AC-8: with routes present, a branch whose first token is local, or any
+# deploy/*-gate branch (whose embedded id is the gated bead, never this
+# push's), costs no routed probe: exactly one assignment `bd list` and one
+# `bd show` against the caller's own store. A deploy gate still names its
+# first local token in the NOTE, and an unreadable routed store never blocks it.
+_routes_no_probe_case() {
+    local label="$1" branch="$2" live="$3" list_json="$4" want="$5" note="${6:-}"
+    local root repo fbd out rc args want_note=""
+    [[ -z "$note" ]] || want_note=" plus the note: $note"
+    root="$(new_city_with_branch "$branch")"
+    repo="$root/gascity"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"mc","path":"../mc-rig"}' \
+        '{"prefix":"zz","path":"../missing-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    store_put "$fbd/default-store" "$live" "in_progress" "agent-x" "tmpl-x"
+    printf '%s' "$list_json" > "$fbd/default-store/fake/list-json"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    args="$(fake_calls "$fbd" | sed -E 's/^.* \| //' | awk '{ print $1, $2 }' | paste -sd ';' -)"
+    if [[ $rc -eq 0 && "$args" == "$want" ]] && ! fake_calls "$fbd" | grep -qv 'BEADS_DIR=<unset> ' \
+        && { [[ -z "$note" ]] || grep -qF "$note" <<<"$out"; }; then
+        record_pass "routes-no-probe/$label (rc=0, reads: $args)"
+    else
+        record_fail "routes-no-probe/$label" "expected rc=0, no routed probe and exactly the reads '$want'$want_note, got rc=$rc reads='$args', output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
+test_routes_present_local_first_and_deploy_gate_skip_probe() {
+    _routes_no_probe_case "local-first-token" "builder/ga-k2p9x-port-mc-abc12" "ga-k2p9x" '[]' \
+        "list --assignee=agent-x;show ga-k2p9x"
+    _routes_no_probe_case "deploy-gate-routed-token" "deploy/mc-k2p9x-gate" "ga-abc12" '[{"id":"ga-abc12"}]' \
+        "list --assignee=agent-x;show ga-abc12"
+    _routes_no_probe_case "deploy-gate-missing-store-and-local-note" "deploy/zz-k2p9x-ga-old12-gate" "ga-abc12" \
+        '[{"id":"ga-abc12"}]' "list --assignee=agent-x;show ga-abc12" \
+        "deploy-gate branch resolves to ga-old12 (the gated bead, not this push's bead); using this session's in-progress assignment ga-abc12 instead"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2257,6 +2296,7 @@ run_all() {
     test_routed_probe_failure_blocks
     test_routed_missing_store_and_definitive_answers
     test_no_routes_behavior_unchanged
+    test_routes_present_local_first_and_deploy_gate_skip_probe
 
     echo
     echo "pass=$pass fail=$fail"

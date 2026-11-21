@@ -568,7 +568,13 @@ _pog_resolve_bead_id() {
     branch="$(git symbolic-ref --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true)"
 
     local branch_id="" branch_store="" tab=$'\t'
-    if [[ -n "$branch" ]]; then
+    if [[ "$branch" == deploy/*-gate ]]; then
+        # A deploy gate's embedded id is the gated bead, never this push's
+        # (see below), so it is only named in the NOTE: take its first local
+        # token with no bd read, and never probe or block on a routed store.
+        branch_id="$(_pog_branch_candidates "$branch" "$(_pog_prefix_table)" \
+            | awk -F '\t' '$2 == "" { print $1; exit }')"
+    elif [[ -n "$branch" ]]; then
         local branch_token
         branch_token="$(_pog_resolve_branch_token "$branch")"
         if [[ "$branch_token" == "$POG_ROUTE_BLOCK_SENTINEL" ]]; then
