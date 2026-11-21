@@ -67,6 +67,21 @@ func canonicalSingletonBuildParams(t *testing.T, store beads.Store, worker confi
 	}
 }
 
+func poolManagedWorkerBeads(t *testing.T, store beads.Store) []beads.Bead {
+	t.Helper()
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(%q): %v", sessionBeadLabel, err)
+	}
+	var seats []beads.Bead
+	for _, b := range all {
+		if b.Status != "closed" && b.Metadata["pool_managed"] == "true" && b.Metadata["template"] == "worker" {
+			seats = append(seats, b)
+		}
+	}
+	return seats
+}
+
 func assertCanonicalWorkerSeat(t *testing.T, store beads.Store, id string) beads.Bead {
 	t.Helper()
 	if id == "" {
@@ -250,6 +265,38 @@ func TestCanonicalSingletonPool_SeatBesideManualSessionLeavesManualBeadUnchanged
 			}
 			if !maps.Equal(after.Metadata, manual.Metadata) {
 				t.Fatalf("manual metadata changed:\n got %#v\nwant %#v", after.Metadata, manual.Metadata)
+			}
+		})
+	}
+}
+
+func TestCanonicalSingletonPool_SeatBesideManualSessionIsReusedNextTick(t *testing.T) {
+	for _, agentName := range []string{"fixer", "worker"} {
+		t.Run("agent_name_"+agentName, func(t *testing.T) {
+			store := beads.NewMemStore()
+			manual := createManualTemplateHolderBead(t, store, "worker", manualTemplateHolderMetadata(agentName, "asleep"))
+			worker := canonicalSingletonWorker(t)
+			bp := canonicalSingletonBuildParams(t, store, worker, nil)
+			first, err := selectOrCreateDependencyPoolSessionBead(bp, &worker, "worker")
+			if err != nil {
+				t.Fatalf("first tick: %v", err)
+			}
+			seat := assertCanonicalWorkerSeat(t, store, first.ID)
+
+			bp.sessionBeads = newSessionBeadSnapshot([]beads.Bead{manual, seat})
+			second, _, plan, err := selectOrPlanPoolSessionBead(bp, &worker, "worker", nil,
+				SessionRequest{Template: "worker", Tier: "new"}, time.Time{}, map[string]bool{}, map[int]bool{})
+			if err != nil {
+				t.Fatalf("second tick: %v", err)
+			}
+			if plan != nil {
+				t.Fatal("second tick planned a second fresh seat")
+			}
+			if second.ID != seat.ID {
+				t.Fatalf("second tick selected %q, want existing seat %q", second.ID, seat.ID)
+			}
+			if seats := poolManagedWorkerBeads(t, store); len(seats) != 1 {
+				t.Fatalf("open pool_managed worker beads = %d, want 1", len(seats))
 			}
 		})
 	}
