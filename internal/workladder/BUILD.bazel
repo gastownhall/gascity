@@ -42,6 +42,13 @@ go_test(
     deps = ["//internal/testenv"],
 )
 
+# The shard placement guard (scripts/workladder_shards_test.go) reads
+# workladder_test's srcs and shard_count.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
