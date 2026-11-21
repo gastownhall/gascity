@@ -320,3 +320,86 @@ func TestCLICityConfigWritersWaitForCityConfigLock(t *testing.T) {
 		})
 	}
 }
+
+// An API mutation whose refresh fails restores the previous config before a
+// CLI writer queued behind it reads, so the files end up holding the restored
+// config plus only the CLI writer's change.
+func TestControllerRollbackFinishesBeforeQueuedCLIWriterReads(t *testing.T) {
+	want := cliAgentSuspendResult(t)
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfigLockTestCity), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := newCityConfigLockControllerState(t, cityDir)
+
+	inMutate := make(chan struct{})
+	proceed := make(chan struct{})
+	apiDone := make(chan error, 1)
+	go func() {
+		apiDone <- cs.mutateAndPoke(func() error {
+			// An edit the refresh cannot load, so the controller must restore.
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+				return err
+			}
+			close(inMutate)
+			<-proceed
+			return nil
+		})
+	}()
+	select {
+	case <-inMutate:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("API mutation did not start")
+	}
+
+	var stdout, stderr bytes.Buffer
+	cliDone := make(chan int, 1)
+	go func() { cliDone <- doAgentSuspend(fsys.OSFS{}, cityDir, "worker", &stdout, &stderr) }()
+	testutil.AwaitFlockWaiters(t, configedit.CityLockFile(cityDir), 1)
+	close(proceed)
+
+	if err := awaitErr(t, apiDone, "API mutation"); err == nil {
+		t.Fatal("API mutation succeeded, want its refresh to fail")
+	}
+	select {
+	case code := <-cliDone:
+		if code != 0 {
+			t.Fatalf("gc agent suspend = %d, stderr:\n%s", code, stderr.String())
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("gc agent suspend did not finish after the API mutation released the lock")
+	}
+	got, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("city.toml =\n%s\nwant the restored config plus only the CLI change:\n%s", got, want)
+	}
+}
+
+// cliAgentSuspendResult returns the city.toml gc agent suspend writes for
+// worker when it runs alone on cityConfigLockTestCity.
+func cliAgentSuspendResult(t *testing.T) string {
+	t.Helper()
+	cityDir := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfigLockTestCity), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doAgentSuspend(fsys.OSFS{}, cityDir, "worker", &stdout, &stderr); code != 0 {
+		t.Fatalf("gc agent suspend on a pristine city = %d, stderr:\n%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
