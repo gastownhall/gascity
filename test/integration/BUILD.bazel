@@ -119,7 +119,7 @@ go_test(
             # and dolt for the dolt-backed integration shapes, same versions the
             # go-test CI installs via install-bd-archive.sh /
             # install-dolt-archive.sh.
-            "@bd_bin_v1_3_4//:bd",
+            "@bd_bin_v1_4_0_rc_3//:bd",
             "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],

@@ -75,6 +75,15 @@ const (
 	// record schema predates the fields admission reads.
 	ProxiedVerdictLegacySchema ProxiedVerdict = "legacy_schema"
 
+	// ProxiedVerdictDataAuthRequired reports a live proxy whose data port
+	// accepts only bd: its record carries the control_proto marker of beads
+	// v1.4.0, whose proxy opens every data connection with the BDPROXY1
+	// handshake keyed by the owner-only proxy.secret (beads#7885). gc speaks
+	// plain MySQL and beads exports no client for the handshake, so the lane
+	// cannot serve this proxy at all. It is decided from the record alone,
+	// before any dial (proxyendpoint.Record.RequiresDataAuth).
+	ProxiedVerdictDataAuthRequired ProxiedVerdict = "data_auth_required"
+
 	// ProxiedVerdictIdlePolicyFinite reports the deliberate PR2 deviation: a
 	// scope whose proxy has a FINITE idle timeout does not get a long-lived
 	// native handle, because gc cannot hold one across an idle expiry it does
@@ -163,8 +172,9 @@ func (v ProxiedVerdict) String() string { return string(v) }
 //     session, not the database).
 //     Retrying inside the escalation ladder is the point.
 //   - Terminal: a fact about the database, the record, or the policy that a
-//     retry cannot move (schema_skew, not_ours, legacy_schema, database_gone,
-//     access_denied, prefix_mismatch, idle_policy_finite, no_ownership_record),
+//     retry cannot move (schema_skew, not_ours, legacy_schema,
+//     data_auth_required, database_gone, access_denied, prefix_mismatch,
+//     idle_policy_finite, no_ownership_record),
 //     or a state gc has already escalated to exhaustion (proxy_zombie), or a
 //     write whose outcome is unknown (write_indeterminate — the one case where
 //     automatic retry is itself the hazard).

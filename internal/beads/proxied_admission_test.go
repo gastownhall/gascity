@@ -693,6 +693,118 @@ func TestAdmitTable(t *testing.T) {
 	})
 }
 
+// TestAdmitDeclinesADataPortOnlyBdCanUse pins the beads v1.4.0 arm: a live
+// proxy whose record carries the control_proto marker serves its data port to
+// bd alone (the BDPROXY1 handshake, beads#7885), so admission declines it from
+// the record, before any dial and without a bd verb.
+//
+// The dial is the cost that matters. The probe speaks plain MySQL, and against
+// that port it waits out its whole session budget for a greeting the proxy
+// withholds: every flag-on open of a proxied scope paid that budget, and came
+// back budget_exhausted, before falling back to the bd front door anyway.
+func TestAdmitDeclinesADataPortOnlyBdCanUse(t *testing.T) {
+	markDataAuth := func(f *admissionFixture, proto int) {
+		f.t.Helper()
+		f.record.ControlProto = proto
+		f.persist()
+	}
+	refuseDial := func(t *testing.T) func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		return func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			t.Fatal("admission dialed a data port whose record says it accepts only bd's BDPROXY1 handshake")
+			return proxyendpoint.ProbeResult{}
+		}
+	}
+	wantDeclined := func(t *testing.T, err error, label string) {
+		t.Helper()
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("%s: Admit error = %v, want a typed verdict", label, err)
+		}
+		if verdict.Verdict != ProxiedVerdictDataAuthRequired || !verdict.Terminal() {
+			t.Fatalf("%s: verdict = %+v, want a terminal data_auth_required", label, verdict)
+		}
+	}
+
+	t.Run("a live marked proxy is declined from the record in both lanes", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		markDataAuth(f, 1)
+		ops := &admissionOps{}
+		for _, longLived := range []bool{false, true} {
+			in := baseAdmissionInput(f, ops)
+			in.LongLived = longLived
+			in.Probe = refuseDial(t)
+			pin, err := Admit(context.Background(), in)
+			wantDeclined(t, err, fmt.Sprintf("long-lived=%v", longLived))
+			if pin.Admitted() {
+				t.Fatalf("long-lived=%v: a declined admission returned an openable pin", longLived)
+			}
+		}
+		if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+			t.Errorf("a healthy proxy that only bd can use cost %d ping / %d recover, want 0/0: bd has nothing to fix", pings, recovers)
+		}
+	})
+
+	t.Run("a marker value this build has not seen is declined too", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		markDataAuth(f, 2)
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.Probe = refuseDial(t)
+		_, err := Admit(context.Background(), in)
+		wantDeclined(t, err, "control_proto=2")
+	})
+
+	t.Run("a dead marked record still spends its one ping, then declines", func(t *testing.T) {
+		// The ladder above the probe is unchanged: a stopped or killed proxy
+		// is still worth exactly one ping, and bd's restarted proxy is then
+		// read like any other live one.
+		f := newAdmissionFixture(t, "-1")
+		markDataAuth(f, 1)
+		f.alive = false
+		ops := &admissionOps{onPing: func() error {
+			f.alive = true
+			return nil
+		}}
+		in := baseAdmissionInput(f, ops)
+		in.Probe = refuseDial(t)
+		_, err := Admit(context.Background(), in)
+		wantDeclined(t, err, "after the ping")
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 0 {
+			t.Errorf("bd verbs = %d ping / %d recover, want exactly 1/0", pings, recovers)
+		}
+	})
+
+	t.Run("a foreign marked record is still not_ours", func(t *testing.T) {
+		// Validation outranks the marker: a record that is not this root's
+		// says nothing about this root's proxy.
+		f := newAdmissionFixture(t, "-1")
+		markDataAuth(f, 1)
+		f.corrupt(func(rec *proxyendpoint.Record) {
+			rec.RootID = "0000000000000000000000000000000000000000000000000000000000000000"
+		})
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.Probe = refuseDial(t)
+		_, err := Admit(context.Background(), in)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictNotOurs {
+			t.Fatalf("Admit error = %v, want not_ours", err)
+		}
+	})
+
+	t.Run("control: the same proxy without the marker is probed and admitted", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		markDataAuth(f, 0)
+		probes := 0
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.Probe = servedProbe(pinnedCursors(), &probes)
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			t.Fatalf("Admit on an unmarked record: %v", err)
+		}
+		if !pin.Admitted() || probes != 1 {
+			t.Fatalf("an unmarked record: admitted=%v after %d probe session(s), want admitted after 1", pin.Admitted(), probes)
+		}
+	})
+}
+
 // TestAdmitMemoHoldsRepeatedOpensToOneProbeSession pins the memo's reason to
 // exist: `gc doctor` opens a scope 17+ times in one run, and admission's
 // cheapest healthy path still costs one probe SESSION -- an accepted TCP

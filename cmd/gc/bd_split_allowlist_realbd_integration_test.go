@@ -18,6 +18,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/deps"
 )
 
 // realBdWorkspace seeds a temporary bd workspace run by the pinned bd:
@@ -323,15 +325,36 @@ func TestGcBdBurnAndWispGCJudgesReadRealBd(t *testing.T) {
 	checkForwardedWispDelete(t, in, must, wisp)
 }
 
+// realBdCascadeFollowsParentChildOnly reports whether the bd behind read
+// cascades a delete along parent-child edges only, which beads does from
+// 1.4.0 on (GH#6301, beads#8078, in every 1.4.0 candidate), rather than
+// through every transitive dependent over any edge, as it did before.
+func realBdCascadeFollowsParentChildOnly(t *testing.T, read func(args ...string) ([]byte, error)) bool {
+	t.Helper()
+	out, err := read("version")
+	if err != nil {
+		t.Fatalf("bd version: %v\n%s", err, out)
+	}
+	m := regexp.MustCompile(`bd version v?(\d+\.\d+\.\d+)`).FindSubmatch(out)
+	if m == nil {
+		t.Fatalf("no version in the output of bd version: %q", out)
+	}
+	return deps.CompareVersions(string(m[1]), "1.4.0") >= 0
+}
+
 // TestGcBdBurnJudgeCoversAProxiedServerCascade pins the burn judge to bd's
 // proxied-server route, the default transport for a new rig scope. There bd
-// burns a persistent molecule with Cascade, which also deletes every bead
-// that depends on one of its beads, transitively and through any edge (a
-// convoy tracking a step, and whatever depends on the convoy). The beads the
-// judge checks (the member listing and bdBurnDependents) must cover
-// everything bd deletes, and a class-binding bead waiting on the outermost
-// one refuses the burn. The delete gc forwards in place of a judged wisp gc
-// deletes exactly the wisps it names on this route too.
+// burns a persistent molecule with Cascade. Before beads 1.4.0 that also
+// deleted every bead that depends on one of its beads, transitively and
+// through any edge (a convoy tracking a step, and whatever depends on the
+// convoy); from 1.4.0 a cascade follows parent-child edges only (GH#6301,
+// beads#8078), so the burn deletes exactly the molecule's beads and orphans
+// the convoy, as the direct route does. The beads the judge checks (the
+// member listing and bdBurnDependents) must cover everything bd deletes, and
+// a class-binding bead waiting on the outermost dependent refuses the burn:
+// the judge keeps the wider pre-1.4.0 model, which on 1.4.0 refuses more than
+// bd would delete and never less. The delete gc forwards in place of a judged
+// wisp gc deletes exactly the wisps it names on this route too.
 func TestGcBdBurnJudgeCoversAProxiedServerCascade(t *testing.T) {
 	ws, read, must := realBdWorkspace(t, "--proxied-server")
 	t.Cleanup(func() {
@@ -381,7 +404,13 @@ func TestGcBdBurnJudgeCoversAProxiedServerCascade(t *testing.T) {
 	before := realBdAllIDs(t, must)
 	must("mol", "burn", root, "--force")
 	deleted := realBdGone(before, realBdAllIDs(t, must))
-	if !slices.Contains(deleted, convoy) || !slices.Contains(deleted, further) {
+	if realBdCascadeFollowsParentChildOnly(t, read) {
+		want := slices.Sorted(slices.Values(members))
+		if got := slices.Sorted(slices.Values(deleted)); !slices.Equal(got, want) {
+			t.Fatalf("bd's proxied-server burn deleted %v; a bd whose cascade follows parent-child edges only deletes exactly the molecule %v, orphaning %s and leaving %s",
+				deleted, want, convoy, further)
+		}
+	} else if !slices.Contains(deleted, convoy) || !slices.Contains(deleted, further) {
 		t.Fatalf("bd's proxied-server burn deleted %v, sparing what depends on the molecule; this test's premise no longer holds", deleted)
 	}
 	checked := append(slices.Clone(members), cascade...)

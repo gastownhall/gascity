@@ -20,6 +20,14 @@ import (
 // carries the damage beads migration 0059 does on upgrade (beads#7037): two
 // beads that only relate to a blocked bead (relates-to, discovered-from) are
 // flagged blocked although nothing blocks them.
+//
+// Both are also children of an open parent, as gc's molecule steps are of
+// their root. That parent-child edge does not block them, but it is a
+// ready-affecting edge of their own: since beads 1.4.0 (beads#3268) `bd ready`
+// trusts a set is_blocked flag only on a row that is the source of a blocks,
+// parent-child, conditional-blocks or waits-for edge, and reads around it on
+// any other row. Without the parent, the damage would not hide them from
+// `bd ready` under bd 1.4.0; with it, it hides them under every bd.
 type blockedRepairFixture struct {
 	dir    string
 	run    beads.CommandRunner
@@ -88,9 +96,12 @@ func newBlockedRepairFixture(t *testing.T, bdPath string, overBlock bool) blocke
 	blocked := create("blocked")
 	related := create("relates to blocked")
 	found := create("discovered from blocked")
+	parent := create("parent")
 	must(dir, "bd", "dep", "add", blocked, blocker)
 	must(dir, "bd", "dep", "add", related, blocked, "--type", "relates-to")
 	must(dir, "bd", "dep", "add", found, blocked, "--type", "discovered-from")
+	must(dir, "bd", "dep", "add", related, parent, "--type", "parent-child")
+	must(dir, "bd", "dep", "add", found, parent, "--type", "parent-child")
 	f := blockedRepairFixture{dir: dir, run: run}
 	if !overBlock {
 		return f

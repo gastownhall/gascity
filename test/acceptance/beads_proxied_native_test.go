@@ -25,14 +25,24 @@
 // injected effects, on every host. What cannot be pinned there is which verdict a
 // real bd proxy on a real host actually produces when its Dolt child is killed
 // two different ways — and that is the fact the lane's safety argument rests on.
+//
+// A bd from beads v1.4.0 on runs a proxy the lane cannot serve at all: its data
+// port accepts only bd's BDPROXY1 handshake (beads#7885), and the lane declines
+// it from its record, data_auth_required, before any dial
+// (proxiedDataPortBdOnly). On such a bd every row still runs and still measures
+// the ladder — what each disturbance costs in bd verbs, and that the lane
+// settles again once bd's proxy is back — with that refusal over a live proxy
+// as the settled answer in place of a served store (assertLaneSettled).
 package acceptance_test
 
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +63,110 @@ type proxiedNativeCity struct {
 	city     *helpers.City
 	root     string
 	proxyDir string
+	// bdOnly records that the city's proxy serves its data port to bd alone
+	// (proxiedDataPortBdOnly), so the lane's settled answer for a healthy
+	// proxy is its declared refusal rather than a served native store.
+	bdOnly bool
+}
+
+// proxiedDataAuthVerdict is the flag-on lane's verdict for a live proxy whose
+// data port only bd can use: beads v1.4.0 opens every data connection with
+// its BDPROXY1 handshake (beads#7885), which gc cannot perform, and marks its
+// proxy.pid with control_proto, from which the lane declines before any dial.
+const proxiedDataAuthVerdict = "data_auth_required"
+
+// proxiedRecordDoc is the part of bd's proxy.pid this file reads, decoded here
+// rather than with gc's own reader: the row is about whether gc read bd's
+// spelling right, and a shared decoder would agree with gc by construction.
+type proxiedRecordDoc struct {
+	Port         int `json:"port"`
+	ControlProto int `json:"control_proto"`
+}
+
+// proxiedDataPortBdOnly reports whether the live proxy under proxyRoot serves
+// its data port to bd alone, and proves it from both ends when it does.
+//
+// The record answers first: the lane declines a proxy whose proxy.pid carries
+// control_proto. The port answers second, because the marker is gc's evidence
+// and not the protocol itself: a client that sends no BDPROXY1 hello must be
+// sent nothing at all, where a plain-MySQL port greets at once. A bd that kept
+// the marker and dropped the handshake would have the lane declining a proxy
+// it could serve, and every row that expects the refusal would pass for the
+// wrong reason; this is where that fails instead.
+func proxiedDataPortBdOnly(t *testing.T, proxyRoot, label string) bool {
+	t.Helper()
+	var record proxiedRecordDoc
+	readJSONFile(t, filepath.Join(proxyRoot, "proxy.pid"), &record)
+	if record.ControlProto == 0 {
+		return false
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(record.Port))
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("%s: dial bd's proxy data port %s: %v", label, addr, err)
+	}
+	defer conn.Close() //nolint:errcheck // a probe connection
+	start := time.Now()
+	if err := conn.SetReadDeadline(start.Add(10 * time.Second)); err != nil {
+		t.Fatalf("%s: arm the read deadline on %s: %v", label, addr, err)
+	}
+	var first [1]byte
+	n, readErr := conn.Read(first[:])
+	held := time.Since(start).Round(time.Millisecond)
+	if n > 0 {
+		t.Fatalf("%s: proxy.pid carries control_proto %d, so the lane declines this proxy as one only bd can use, but its data port %s sent byte %#x %s after the connect to a client that sent no BDPROXY1 hello: the port speaks plain MySQL",
+			label, record.ControlProto, addr, first[0], held)
+	}
+	t.Logf("%s: proxy.pid carries control_proto %d, and the data port %s sent nothing in %s to a client that sent no BDPROXY1 hello (%v): only bd can use it",
+		label, record.ControlProto, addr, held, readErr)
+	return true
+}
+
+// settledLane names what the flag-on lane must report for a healthy proxy.
+func (c *proxiedNativeCity) settledLane() string {
+	if c.bdOnly {
+		return "BdStore declined with verdict " + proxiedDataAuthVerdict + " over a live proxy (its data port accepts only bd)"
+	}
+	return "a served NativeDoltStore"
+}
+
+// proxiedLiveEvidence is the liveness evidence gc can establish for bd's proxy
+// on this host: argv plus bd's process-birth token on Linux, argv alone
+// elsewhere, because proxyendpoint's birth recipe is Linux-only
+// (birth_other.go records evidence argv).
+func proxiedLiveEvidence() string {
+	if runtime.GOOS == "linux" {
+		return "argv+birth"
+	}
+	return "argv"
+}
+
+// assertLaneSettled is a row's check that the flag-on lane settled on a
+// healthy proxy, and returns the generation it settled on.
+//
+// On a proxy gc can speak to that is the served native store, pinned to the
+// generation in the store's own account. On one whose data port only bd can
+// use (c.bdOnly) it is the lane's declared refusal, data_auth_required, which
+// admission reaches only from a record that validated and a process that is
+// live; the generation then comes from doctor's independent endpoint account,
+// which must agree that the proxy is live on argv and birth evidence. Either
+// way it is the one outcome for a proxy that is up: anything else (a
+// budget_exhausted, a proxy_gone, a native store over a bd-only port) fails.
+func (c *proxiedNativeCity) assertLaneSettled(t *testing.T, payload beadsStorePayloadDoc, result doctorCheckResult, failure string) string {
+	t.Helper()
+	if !c.bdOnly {
+		if payload.Store != "NativeDoltStore" {
+			t.Fatalf("%s: store=%q %s\n  %s\n  want %s", failure, payload.Store, describeProxiedAccount(payload), result.Message, c.settledLane())
+		}
+		return payload.Proxied.Endpoint.Generation
+	}
+	declined := payload.Store == "BdStore" && payload.Proxied != nil && payload.Proxied.Verdict == proxiedDataAuthVerdict
+	live := payload.Endpoint != nil && payload.Endpoint.Verdict == "live" && payload.Endpoint.Evidence == proxiedLiveEvidence()
+	if !declined || !live {
+		t.Fatalf("%s: store=%q %s\n  endpoint: %s\n  %s\n  want %s",
+			failure, payload.Store, describeProxiedAccount(payload), describeEndpointAccount(payload), result.Message, c.settledLane())
+	}
+	return payload.Endpoint.Generation
 }
 
 // newProxiedNativeCity initialises a quiescent proxied city with the flag-on
@@ -79,6 +193,7 @@ func newProxiedNativeCity(t *testing.T, bdPath, doltPath string) *proxiedNativeC
 	city.InitNoStart("claude")
 	assertProxiedScope(t, c.env, c.root, "the lifecycle city")
 	c.proxyDir = proxiedScopeProxyRoot(t, c.root)
+	c.bdOnly = proxiedDataPortBdOnly(t, c.proxyDir, "the lifecycle city")
 	return c
 }
 
@@ -223,8 +338,10 @@ func (c *proxiedNativeCity) reset(t *testing.T) {
 	c.calls.Reset()
 }
 
-// heal brings the city back to a served native lane, so each row starts from the
-// same place. It returns the generation the lane settled on.
+// heal brings the city back to a settled lane, so each row starts from the
+// same place: a served native lane, or on a proxy whose data port only bd can
+// use the lane's declared refusal over a live proxy (settledLane). It returns
+// the generation the lane settled on.
 func (c *proxiedNativeCity) heal(t *testing.T, label string) string {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)
@@ -240,13 +357,17 @@ func (c *proxiedNativeCity) heal(t *testing.T, label string) string {
 			time.Sleep(time.Second)
 			continue
 		}
-		if last.Store == "NativeDoltStore" && last.Proxied != nil && !last.Proxied.Demoted {
+		if !c.bdOnly && last.Store == "NativeDoltStore" && last.Proxied != nil && !last.Proxied.Demoted {
 			return last.Proxied.Endpoint.Generation
+		}
+		if c.bdOnly && last.Store == "BdStore" && last.Proxied != nil && last.Proxied.Verdict == proxiedDataAuthVerdict &&
+			last.Endpoint != nil && last.Endpoint.Verdict == "live" {
+			return last.Endpoint.Generation
 		}
 		time.Sleep(time.Second)
 	}
-	t.Fatalf("%s: the city never came back to a served native lane: store=%q %s\n  %s",
-		label, last.Store, describeProxiedAccount(last), lastResult.Message)
+	t.Fatalf("%s: the city never came back to a settled lane (%s): store=%q %s\n  endpoint: %s\n  %s",
+		label, c.settledLane(), last.Store, describeProxiedAccount(last), describeEndpointAccount(last), lastResult.Message)
 	return ""
 }
 
@@ -376,21 +497,23 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 	var baseGeneration string
 	t.Run("healthy-baseline", func(t *testing.T) {
 		// The control every other row is read against: on an undisturbed city
-		// the lane serves natively and spends no bd verb to decide it.
+		// the lane settles (serves natively, or on a proxy only bd can use
+		// declines it with data_auth_required) and spends no bd verb to decide
+		// it.
 		c.reset(t)
 		payload, result := c.account(t, "an undisturbed proxied city")
 		census := c.census(t)
 		t.Logf("healthy baseline: %s; store=%q %s", census, payload.Store, describeProxiedAccount(payload))
-		if payload.Store != "NativeDoltStore" {
-			t.Fatalf("an undisturbed proxied city did not serve natively: store=%q %s\n  %s",
-				payload.Store, describeProxiedAccount(payload), result.Message)
-		}
+		baseGeneration = c.assertLaneSettled(t, payload, result, "an undisturbed proxied city did not settle")
 		if census.Pings != 0 {
 			t.Errorf("admission spent %d ping(s) on a healthy proxy, want 0:\n%s", census.Pings, c.calls.Describe())
 		}
-		baseGeneration = payload.Proxied.Endpoint.Generation
+		if census.DoltStops != 0 {
+			t.Errorf("admission spent %d `bd dolt stop` on a healthy proxy, want 0:\n%s", census.DoltStops, c.calls.Describe())
+		}
 		if baseGeneration == "" {
-			t.Fatalf("a served open pinned no generation: %s", describeProxiedAccount(payload))
+			t.Fatalf("the lane's account of a healthy proxy names no generation: %s\n  endpoint: %s",
+				describeProxiedAccount(payload), describeEndpointAccount(payload))
 		}
 	})
 
@@ -408,10 +531,7 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 		payload, result, census := c.admit(t, "a city whose proxy was stopped")
 		t.Logf("stop-ping-repin: %s; store=%q %s", census, payload.Store, describeProxiedAccount(payload))
 
-		if payload.Store != "NativeDoltStore" {
-			t.Fatalf("the lane did not re-pin after a stop: store=%q %s\n  %s",
-				payload.Store, describeProxiedAccount(payload), result.Message)
-		}
+		generation := c.assertLaneSettled(t, payload, result, "the lane did not re-pin after a stop")
 		if census.Pings != 1 {
 			t.Errorf("a stopped proxy cost %d ping(s), want exactly 1 — bd either adopts or restarts its proxy, and one ask is the whole escalation an absent record is worth:\n%s",
 				census.Pings, c.calls.Describe())
@@ -420,10 +540,10 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 			t.Errorf("a stopped proxy cost %d `bd dolt stop`; recover is for a zombie, not for an absent record:\n%s",
 				census.DoltStops, c.calls.Describe())
 		}
-		if got := payload.Proxied.Endpoint.Generation; got == baseGeneration {
-			t.Errorf("the lane re-pinned to the same generation %q across a full stop/start; the generation is {pid,birth} and cannot survive one", got)
+		if generation == baseGeneration {
+			t.Errorf("the lane re-pinned to the same generation %q across a full stop/start; the generation is {pid,birth} and cannot survive one", generation)
 		}
-		baseGeneration = payload.Proxied.Endpoint.Generation
+		baseGeneration = generation
 	})
 
 	t.Run("dead-record-one-ping", func(t *testing.T) {
@@ -450,18 +570,15 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 		payload, result, census := c.admit(t, "a city whose proxy was killed")
 		t.Logf("dead-record-one-ping: %s; store=%q %s", census, payload.Store, describeProxiedAccount(payload))
 
-		if payload.Store != "NativeDoltStore" {
-			t.Fatalf("the lane did not recover from a dead record: store=%q %s\n  %s",
-				payload.Store, describeProxiedAccount(payload), result.Message)
-		}
+		generation := c.assertLaneSettled(t, payload, result, "the lane did not recover from a dead record")
 		if census.Pings != 1 {
 			t.Errorf("a dead record cost %d ping(s), want exactly 1:\n%s", census.Pings, c.calls.Describe())
 		}
 		if census.DoltStops != 0 {
 			t.Errorf("a dead record cost %d `bd dolt stop`, want 0:\n%s", census.DoltStops, c.calls.Describe())
 		}
-		if got := payload.Proxied.Endpoint.Generation; got == baseGeneration {
-			t.Errorf("the lane re-pinned to the killed generation %q", got)
+		if generation == baseGeneration {
+			t.Errorf("the lane re-pinned to the killed generation %q", generation)
 		}
 		baseGeneration = c.heal(t, "after the dead-record row")
 	})
@@ -606,7 +723,7 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 		}
 		restored = true
 		baseGeneration = c.heal(t, "after the root came back")
-		t.Logf("root-move: re-pinned to %s after the root was restored", baseGeneration)
+		t.Logf("root-move: the lane settled again at %s after the root was restored", baseGeneration)
 	})
 
 	t.Run("scope-artifacts-no-gc-claim", func(t *testing.T) {
@@ -685,14 +802,11 @@ func (c *proxiedNativeCity) childCrashRow(t *testing.T, want childCrashExpectati
 		t.Errorf("%s cost %s, want %d ping(s) and %d `bd dolt stop`: %s\n%s",
 			want.label, census, want.pings, want.doltStops, want.mechanism, c.calls.Describe())
 	}
-	if payload.Store != "NativeDoltStore" {
-		t.Fatalf("%s: the lane did not come back after the escalation: store=%q %s\n  %s",
-			want.label, payload.Store, describeProxiedAccount(payload), result.Message)
+	generation := c.assertLaneSettled(t, payload, result, want.label+": the lane did not come back after the escalation")
+	if generation == baseGeneration {
+		t.Errorf("%s: the lane is still pinned to generation %q, which no longer has a Dolt child behind it", want.label, generation)
 	}
-	if got := payload.Proxied.Endpoint.Generation; got == baseGeneration {
-		t.Errorf("%s: the lane is still pinned to generation %q, which no longer has a Dolt child behind it", want.label, got)
-	}
-	return payload.Proxied.Endpoint.Generation
+	return generation
 }
 
 // namesNotIn returns the members of a that b does not contain.

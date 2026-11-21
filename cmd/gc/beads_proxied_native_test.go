@@ -722,6 +722,75 @@ esac`)
 			t.Fatal("the memo let a second ping be spent on a generation gc had just asked bd for")
 		}
 	})
+
+	// beads v1.4.0's proxy serves its data port to bd alone (BDPROXY1,
+	// beads#7885) and says so in its record (control_proto). The lane declines
+	// such a proxy from the record: no probe session, and, the verdict being
+	// terminal, no second pass of the long-lived ladder either.
+	markDataAuth := func(f *proxiedScopeFixture) {
+		f.t.Helper()
+		f.record.ControlProto = 1
+		body, err := json.Marshal(f.record)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		if err := os.WriteFile(proxyendpoint.PIDPath(f.root), body, 0o600); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	refuseDial := func(t *testing.T) func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		return func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			t.Fatal("the lane dialed a data port whose record says only bd can use it")
+			return proxyendpoint.ProbeResult{}
+		}
+	}
+
+	t.Run("a healthy proxy only bd can use spends nothing and ends a long-lived open on its first pass", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		markDataAuth(f)
+		ops := &scriptedProviderOps{}
+		opener := newOpener(t, f, ops, refuseDial(t))
+		backoffs := 0
+		opener.sleep = func(context.Context, time.Duration) error {
+			backoffs++
+			return nil
+		}
+
+		_, err := opener.admit(context.Background(), true)
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed || verdict.Verdict != beads.ProxiedVerdictDataAuthRequired || !verdict.Terminal() {
+			t.Fatalf("admit = %v, want a terminal data_auth_required", err)
+		}
+		if spent := ops.spent(); len(spent) != 0 {
+			t.Errorf("a healthy proxy cost %v; bd has nothing to fix", spent)
+		}
+		if backoffs != 0 {
+			t.Errorf("the long-lived ladder slept %d time(s) for a second pass; the record's answer cannot change between passes", backoffs)
+		}
+	})
+
+	t.Run("a stopped proxy bd restarts as one only bd can use costs exactly one probe", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		opener := newOpener(t, f, ops, refuseDial(t))
+		f.removeRecord()
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error {
+			err := ops.run(op)
+			f.writeRecord(7002, "55667788")
+			markDataAuth(f)
+			return err
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		_, err := opener.admit(context.Background(), false)
+		if verdict, typed := beads.ProxiedVerdictOf(err); !typed || verdict.Verdict != beads.ProxiedVerdictDataAuthRequired {
+			t.Fatalf("admit = %v, want data_auth_required once bd's proxy is back", err)
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe]: an absent record is still worth one ask", spent)
+		}
+	})
 }
 
 // TestProxiedGuardRecoveryAdmitsWithoutForkingBd is council A-F1's production
