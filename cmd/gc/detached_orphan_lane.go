@@ -102,8 +102,13 @@ type detachedOrphanReport struct {
 	// legs counts the plan legs this pass was allowed to read. A pass reporting
 	// zero legs converged nothing, which must not read as "nothing to converge".
 	legs int
-	// unresolved counts named candidates this pass could not repair: the bead
-	// lives on a leg this plane refuses, it was claimed or closed since its
+	// vetoed counts candidates left unrouted on purpose: the back-reference
+	// names a configured named session whose template route is not shown to be
+	// its own lane (detachedOrphanVetoesNamedSeat). No pass restores them, so
+	// they are not counted in unresolved.
+	vetoed int
+	// unresolved counts the other candidates this pass could not repair: the
+	// bead lives on a leg this plane refuses, it was claimed or closed since its
 	// event, or its session carries no recoverable route. All three wait for the
 	// convergence lane, which is why one counter serves.
 	unresolved int
@@ -121,6 +126,9 @@ func (r detachedOrphanReport) fields() map[string]any {
 		"candidates":     r.candidates,
 		"leg_reads":      r.legReads,
 		"legs":           r.legs,
+	}
+	if r.vetoed > 0 {
+		out["vetoed"] = r.vetoed
 	}
 	if r.unresolved > 0 {
 		out["unresolved"] = r.unresolved
@@ -325,8 +333,9 @@ type detachedOrphanRouteResolver struct {
 	err         error
 }
 
-// route resolves a candidate's pool route, building the leg's index on first use.
-func (r *detachedOrphanRouteResolver) route(sessionID, sessionName string) (string, error) {
+// route resolves a candidate's pool route, and whether a named-seat veto refused
+// it, building the leg's index on first use.
+func (r *detachedOrphanRouteResolver) route(sessionID, sessionName string) (route string, vetoed bool, err error) {
 	if !r.built {
 		r.built = true
 		var reads int
@@ -334,9 +343,10 @@ func (r *detachedOrphanRouteResolver) route(sessionID, sessionName string) (stri
 		r.reads += reads
 	}
 	if r.err != nil {
-		return "", r.err
+		return "", false, r.err
 	}
-	return r.index.route(sessionID, sessionName), nil
+	route, vetoed = r.index.route(sessionID, sessionName)
+	return route, vetoed, nil
 }
 
 // rigRetired reports whether the plan leg labeled label is a rig store proven
@@ -360,6 +370,7 @@ func (l *detachedOrphanLane) deltaPass(plan storeref.ResolvedPlan, sessions bead
 	}
 	var errs []error
 	repaired := make(map[string]struct{}, len(candidates))
+	vetoed := map[string]struct{}{}
 	partial, walkErr := walkPlaneLegs(plan, runtimePlane, func(leg planeLeg) error {
 		report.legs++
 		rows, reads, err := liveOpenCandidates(leg.store, candidates)
@@ -386,10 +397,18 @@ func (l *detachedOrphanLane) deltaPass(plan storeref.ResolvedPlan, sessions bead
 				repaired[row.ID] = struct{}{}
 				report.restored++
 			}
+			if outcome.vetoed {
+				vetoed[row.ID] = struct{}{}
+			}
 		}
 		return nil
 	})
-	report.unresolved = len(candidates) - len(repaired)
+	for id := range vetoed {
+		if _, ok := repaired[id]; !ok {
+			report.vetoed++
+		}
+	}
+	report.unresolved = len(candidates) - len(repaired) - report.vetoed
 	report.partial = partial
 	report.err = errors.Join(append(errs, walkErr)...)
 	return report
@@ -416,13 +435,14 @@ func (l *detachedOrphanLane) backstopPassOnPlane(plan storeref.ResolvedPlan, ses
 		result, err := sweepDetachedHandoffOrphansOnLeg(leg.store, sessions, !l.rigRetired(leg.label))
 		report.candidates += result.candidates
 		report.restored += result.restored
+		report.vetoed += result.vetoed
 		report.legReads += result.reads
 		if err != nil {
 			return fmt.Errorf("%s: %w", leg.label, err)
 		}
 		return nil
 	})
-	report.unresolved = report.candidates - report.restored
+	report.unresolved = report.candidates - report.restored - report.vetoed
 	report.partial = partial
 	report.err = errors.Join(append(errs, walkErr)...)
 	return report
@@ -431,6 +451,7 @@ func (l *detachedOrphanLane) backstopPassOnPlane(plan storeref.ResolvedPlan, ses
 // detachedOrphanRestoreOutcome is what one candidate's repair decided.
 type detachedOrphanRestoreOutcome struct {
 	restored bool
+	vetoed   bool
 	writes   int
 	err      error
 }
@@ -440,13 +461,19 @@ type detachedOrphanRestoreOutcome struct {
 func restoreDetachedOrphanRoute(store beads.Store, live beads.Bead, resolver *detachedOrphanRouteResolver) detachedOrphanRestoreOutcome {
 	sessionID := strings.TrimSpace(live.Metadata[beadmeta.SessionIDMetadataKey])
 	sessionName := strings.TrimSpace(live.Metadata[beadmeta.SessionNameMetadataKey])
-	route, err := resolver.route(sessionID, sessionName)
+	route, vetoed, err := resolver.route(sessionID, sessionName)
 	if err != nil {
 		return detachedOrphanRestoreOutcome{err: fmt.Errorf("bead %s: %w", live.ID, err)}
 	}
+	if vetoed {
+		// The back-reference names a named seat whose template route is not
+		// shown to be its own lane: left unrouted on purpose and counted as
+		// vetoed. The convergence scan logs each such bead with its own line.
+		return detachedOrphanRestoreOutcome{vetoed: true}
+	}
 	if route == "" {
-		// No recoverable route: the session bead is gone, carries no template, or
-		// its name is ambiguous. Counted as unresolved rather than logged per
+		// No recoverable route: the session bead is gone, carries no template,
+		// or its name is ambiguous. Counted as unresolved rather than logged per
 		// tick — the convergence scan says so once, loudly, with its own line.
 		return detachedOrphanRestoreOutcome{}
 	}
@@ -540,8 +567,8 @@ func (cr *CityRuntime) runDetachedOrphanBackstop(reason string) detachedOrphanRe
 	// The convergence lane always says it ran. A clean pass that logs nothing is
 	// indistinguishable from a lane that stopped running, and this one runs on a
 	// background goroutine where nothing else would notice.
-	summary := fmt.Sprintf("pass reason=%s legs=%d reads=%d candidates=%d restored=%d unresolved=%d partial=%t took=%s",
-		reason, report.legs, report.legReads, report.candidates, report.restored, report.unresolved, report.partial,
+	summary := fmt.Sprintf("pass reason=%s legs=%d reads=%d candidates=%d restored=%d vetoed=%d unresolved=%d partial=%t took=%s",
+		reason, report.legs, report.legReads, report.candidates, report.restored, report.vetoed, report.unresolved, report.partial,
 		report.duration.Round(time.Millisecond))
 	fmt.Fprintf(cr.stderr, "%s: detached handoff orphan sweep (backstop): %s\n", cr.logPrefix, summary) //nolint:errcheck // best-effort stderr
 	return report

@@ -372,7 +372,7 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, s
 		// fresh canonical bead for the same identity. The design doc specifies:
 		// "Closed historical beads do not poison future canonical
 		// materialization of the reserved identity." Recognition is by the
-		// boolean flag OR the recorded identity (wasConfiguredNamedSession) so a
+		// boolean flag OR the recorded identity (WasConfiguredNamedSession) so a
 		// stale/legacy bead missing the flag still releases its name (ga-841) —
 		// independent of whether the caller passed a matching selfOwner, since
 		// the configured-named reservation is re-enforced by the cfg-aware check
@@ -381,7 +381,7 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, s
 			if continuityIneligibleConfiguredOwner(b, selfOwner) {
 				continue
 			}
-			if b.Status == "closed" && wasConfiguredNamedSession(b) {
+			if b.Status == "closed" && WasConfiguredNamedSession(b) {
 				continue
 			}
 			// A retired ephemeral pool slot must not permanently reserve the

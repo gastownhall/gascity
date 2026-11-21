@@ -1966,7 +1966,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 // releases its reserved runtime name instead of stranding it and blocking
 // respawn (ga-841). Any other row's is empty.
 func retiredIdentifiersPatch(b beads.Bead) MetadataPatch {
-	if !wasConfiguredNamedSession(b) {
+	if !WasConfiguredNamedSession(b) {
 		return MetadataPatch{}
 	}
 	patch := MetadataPatch(UpdatedAliasMetadata(b.Metadata, ""))

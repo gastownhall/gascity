@@ -569,3 +569,67 @@ func TestCompletionFactIndexWiringAbsorbsAndInvalidates(t *testing.T) {
 	standalone.absorbCompletionFact(fact)
 	standalone.invalidateCompletionFacts()
 }
+
+// TestDetachedOrphanLaneDeltaSkipsNamedSessionWork: the tick's delta pass
+// resolves routes through the same index as the backstop, so the work of a named
+// seat named apart from its template stays unrouted (counted vetoed, not
+// unresolved) while the pool orphan beside it is restored.
+func TestDetachedOrphanLaneDeltaSkipsNamedSessionWork(t *testing.T) {
+	seat := detachedOrphanParkedWork("D-N", "N-7", "seat-a")
+	cr, store := detachedOrphanRuntime(t,
+		detachedOrphanSessionBead(),
+		detachedOrphanNamedSeatBead("N-7", "seat-a", detachedOrphanTestPool),
+		detachedOrphanWorkBead("D-1"),
+		seat)
+	lane := cr.detachedOrphanLaneOf()
+	lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-1")))
+	lane.observe(beadCreatedEvent(t, seat))
+
+	report := cr.sweepDetachedHandoffOrphansDelta()
+	if report.err != nil {
+		t.Fatalf("delta pass: %v", report.err)
+	}
+	if report.restored != 1 || report.vetoed != 1 || report.unresolved != 0 {
+		t.Fatalf("delta restored=%d vetoed=%d unresolved=%d, want 1, 1 and 0", report.restored, report.vetoed, report.unresolved)
+	}
+	if got := mustRoutedTo(t, store, "D-N"); got != "" {
+		t.Fatalf("named seat's parked work gc.routed_to=%q, want empty", got)
+	}
+	if got := mustRoutedTo(t, store, "D-1"); got != detachedOrphanTestPool {
+		t.Fatalf("pool orphan gc.routed_to=%q, want %q", got, detachedOrphanTestPool)
+	}
+}
+
+// TestDetachedOrphanBackstopCountsNamedSeatVetoesApartFromUnresolved: a bead
+// left unrouted on purpose, because its back-reference names a named seat whose
+// template route is not its own lane, is reported as vetoed, apart from a real
+// strand whose session bead is gone. An operator reading unresolved=N on the
+// pass line or in the trace then sees only the beads that still need a repair.
+func TestDetachedOrphanBackstopCountsNamedSeatVetoesApartFromUnresolved(t *testing.T) {
+	var stderr bytes.Buffer
+	store := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
+		detachedOrphanNamedSeatBead("N-7", "seat-a", detachedOrphanTestPool),
+		detachedOrphanParkedWork("D-N", "N-7", "seat-a"),
+		detachedOrphanParkedWork("D-LOST", "S-404", "gone"),
+	}, nil)}
+	cr := &CityRuntime{cityName: "city", standaloneCityStore: store, logPrefix: "gc", stderr: &stderr}
+
+	report := cr.runDetachedOrphanBackstop(backstopReasonCadence)
+	if report.err != nil {
+		t.Fatalf("backstop: %v", report.err)
+	}
+	if report.candidates != 2 || report.restored != 0 || report.vetoed != 1 || report.unresolved != 1 {
+		t.Fatalf("backstop candidates=%d restored=%d vetoed=%d unresolved=%d, want 2, 0, 1 and 1",
+			report.candidates, report.restored, report.vetoed, report.unresolved)
+	}
+	line := stderr.String()
+	for _, want := range []string{"vetoed=1", "unresolved=1"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("the backstop line %q is missing %q", line, want)
+		}
+	}
+	fields := report.fields()
+	if fields["vetoed"] != 1 || fields["unresolved"] != 1 {
+		t.Fatalf("trace fields vetoed=%v unresolved=%v, want 1 and 1", fields["vetoed"], fields["unresolved"])
+	}
+}

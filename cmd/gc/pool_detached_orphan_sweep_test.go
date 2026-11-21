@@ -1231,3 +1231,236 @@ func TestSweepDetachedHandoffOrphans_PartialSessionListStillResolvesByID(t *test
 		t.Fatalf("gc.routed_to=%q, want gascity/gastown.polecat", got.Metadata[beadmeta.RoutedToMetadataKey])
 	}
 }
+
+// detachedOrphanNamedSeatBead is a configured named session's bead: the flag,
+// the recorded identity, and the template its pool instances share.
+func detachedOrphanNamedSeatBead(id, sessionName, template string) beads.Bead {
+	return beads.Bead{
+		ID:     id,
+		Title:  "named seat session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"template":                   template,
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gascity/" + sessionName,
+		},
+	}
+}
+
+// detachedOrphanPlainSessionBead is a pool instance's session bead: a template
+// and a session name, no configured-named markers.
+func detachedOrphanPlainSessionBead(id, sessionName, template string) beads.Bead {
+	return beads.Bead{
+		ID:     id,
+		Title:  "pool session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"template":     template,
+		},
+	}
+}
+
+// detachedOrphanParkedWork is open, unassigned, unrouted work with a pushed
+// branch and whichever session back-references are non-empty: the shape both a
+// detached orphan and a named seat's parked bead share.
+func detachedOrphanParkedWork(id, sessionID, sessionName string) beads.Bead {
+	meta := map[string]string{beadmeta.WorkBranchMetadataKey: "work/" + id}
+	if sessionID != "" {
+		meta[beadmeta.SessionIDMetadataKey] = sessionID
+	}
+	if sessionName != "" {
+		meta[beadmeta.SessionNameMetadataKey] = sessionName
+	}
+	return beads.Bead{ID: id, Title: "parked work", Type: "task", Status: "open", Metadata: meta}
+}
+
+// A configured named session's open, unassigned work was parked by that seat,
+// not detached by a failed done sequence, and the session's template route is
+// not the lane that serves it. The sweep must not re-stamp gc.routed_to from a
+// named session bead, or a pool instance of the template claims the seat's
+// work. The pool session of the same template is the control: its orphan is
+// still restored.
+func TestSweepDetachedHandoffOrphans_SkipsNamedSessionWork(t *testing.T) {
+	const template = "gascity/worker"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		detachedOrphanNamedSeatBead("N-1", "alpha", template),
+		detachedOrphanPlainSessionBead("P-1", "worker-2", template),
+		detachedOrphanParkedWork("W-N", "N-1", "alpha"),
+		detachedOrphanParkedWork("W-P", "P-1", "worker-2"),
+	}, nil)
+
+	n, err := sweepDetachedHandoffOrphans(store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("restored=%d, want 1 (only the pool session's orphan)", n)
+	}
+	if got := mustRoutedTo(t, store, "W-N"); got != "" {
+		t.Fatalf("named seat's parked work gc.routed_to=%q, want empty", got)
+	}
+	if got := mustRoutedTo(t, store, "W-P"); got != template {
+		t.Fatalf("pool orphan gc.routed_to=%q, want %q", got, template)
+	}
+}
+
+// A named seat's session_name shared with a plain session bead must not let a
+// back-reference to the seat resolve through the plain bead's route. Whether
+// the parked work names the seat by ID, by ID and name, by name alone, or by an
+// unknown ID plus the name, the sweep cannot tell it is pool work, so it
+// restores nothing.
+func TestSweepDetachedHandoffOrphans_NamedSessionVetoesNameFallback(t *testing.T) {
+	const (
+		template = "gascity/worker"
+		name     = "alpha"
+	)
+	closedPlain := detachedOrphanPlainSessionBead("P-1", name, template)
+	closedPlain.Status = "closed"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		detachedOrphanNamedSeatBead("N-1", name, template),
+		closedPlain,
+		detachedOrphanParkedWork("W-ID", "N-1", ""),
+		detachedOrphanParkedWork("W-ID-NAME", "N-1", name),
+		detachedOrphanParkedWork("W-NAME", "", name),
+		detachedOrphanParkedWork("W-UNKNOWN-ID", "X-404", name),
+	}, nil)
+
+	n, err := sweepDetachedHandoffOrphans(store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("restored=%d, want 0", n)
+	}
+	for _, id := range []string{"W-ID", "W-ID-NAME", "W-NAME", "W-UNKNOWN-ID"} {
+		if got := mustRoutedTo(t, store, id); got != "" {
+			t.Errorf("%s gc.routed_to=%q, want empty", id, got)
+		}
+	}
+}
+
+// The named-seat veto holds across the leg store and the session-class store
+// in either direction: backfill never lets the other store's plain bead answer
+// for a name or ID a named seat holds. An exact ID match on the plain bead
+// still resolves, so a pool orphan carrying gc.session_id is not stranded.
+func TestDetachedOrphanRoutesForLegNamedVetoSurvivesBackfill(t *testing.T) {
+	const (
+		template = "gascity/worker"
+		name     = "alpha"
+	)
+	named := detachedOrphanNamedSeatBead("N-1", name, template)
+	plain := detachedOrphanPlainSessionBead("P-1", name, template)
+	cases := []struct {
+		name        string
+		leg, route  []beads.Bead
+		ownSessions bool
+		plainByID   string
+	}{
+		{name: "named in leg, plain in session store", leg: []beads.Bead{named}, route: []beads.Bead{plain}, ownSessions: true, plainByID: template},
+		{name: "plain in leg, named in session store", leg: []beads.Bead{plain}, route: []beads.Bead{named}, ownSessions: true, plainByID: template},
+		{name: "relic-free leg, named only in session store", leg: []beads.Bead{plain}, route: []beads.Bead{named}, ownSessions: false, plainByID: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			legStore := beads.NewMemStoreFrom(0, tc.leg, nil)
+			routeStore := beads.NewMemStoreFrom(0, tc.route, nil)
+			idx, _, err := detachedOrphanRoutesForLeg(legStore, routeStore, tc.ownSessions)
+			if err != nil {
+				t.Fatalf("detachedOrphanRoutesForLeg: %v", err)
+			}
+			if got, vetoed := idx.route("N-1", name); got != "" || !vetoed {
+				t.Errorf("route(N-1, %q)=(%q, %t), want (\"\", true)", name, got, vetoed)
+			}
+			if got, vetoed := idx.route("", name); got != "" || !vetoed {
+				t.Errorf("route(\"\", %q)=(%q, %t), want (\"\", true)", name, got, vetoed)
+			}
+			if got, vetoed := idx.route("P-1", name); got != tc.plainByID || vetoed != (tc.plainByID == "") {
+				t.Errorf("route(P-1, %q)=(%q, %t), want (%q, %t)", name, got, vetoed, tc.plainByID, tc.plainByID == "")
+			}
+		})
+	}
+}
+
+// A session bead that carries only the configured-named identity (a legacy
+// bead, or one closed by a path that kept only the identity) is still a named
+// seat, as the session package recognizes it (ga-841). Its parked work is not
+// routed to the template's pool.
+func TestSweepDetachedHandoffOrphans_SkipsIdentityOnlyNamedSessionWork(t *testing.T) {
+	seat := beads.Bead{
+		ID:     "N-1",
+		Title:  "retired named seat session",
+		Type:   sessionBeadType,
+		Status: "closed",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                   "gascity/worker",
+			namedSessionIdentityMetadata: "gascity/alpha",
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		seat,
+		detachedOrphanParkedWork("W-N", "N-1", ""),
+	}, nil)
+
+	n, err := sweepDetachedHandoffOrphans(store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("restored=%d, want 0", n)
+	}
+	if got := mustRoutedTo(t, store, "W-N"); got != "" {
+		t.Fatalf("gc.routed_to=%q, want empty", got)
+	}
+}
+
+// detachedOrphanSeatBeadWithIdentity is detachedOrphanNamedSeatBead with its
+// recorded identity given outright. An empty identity leaves the flag alone.
+func detachedOrphanSeatBeadWithIdentity(id, sessionName, template, identity string) beads.Bead {
+	b := detachedOrphanNamedSeatBead(id, sessionName, template)
+	if identity == "" {
+		delete(b.Metadata, namedSessionIdentityMetadata)
+		return b
+	}
+	b.Metadata[namedSessionIdentityMetadata] = identity
+	return b
+}
+
+// A [[named_session]] declared without a name of its own takes its template's
+// qualified name as its identity (config.NamedSession.IdentityName), so the
+// template route its session bead carries is the seat's own lane: the seat
+// claims gc.routed_to=<template> work itself, its GC_ALIAS being the probe
+// target. Its detached work is restored to that route, by ID or by name alone,
+// or nothing would ever route it again. A seat that records no identity (the
+// flag alone) cannot be shown to own the route and stays vetoed, as does a seat
+// named apart from its template (TestSweepDetachedHandoffOrphans_SkipsNamedSessionWork).
+func TestSweepDetachedHandoffOrphans_RestoresNamedSeatWorkToItsOwnTemplateRoute(t *testing.T) {
+	const template = "gascity/worker"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		detachedOrphanSeatBeadWithIdentity("N-1", "gascity--worker", template, template),
+		detachedOrphanSeatBeadWithIdentity("N-2", "gascity--flagged", template, ""),
+		detachedOrphanParkedWork("W-ID", "N-1", ""),
+		detachedOrphanParkedWork("W-NAME", "", "gascity--worker"),
+		detachedOrphanParkedWork("W-FLAG", "N-2", "gascity--flagged"),
+	}, nil)
+
+	result, err := sweepDetachedHandoffOrphansWithRouteStore(store, nil)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.candidates != 3 || result.restored != 2 || result.vetoed != 1 {
+		t.Fatalf("candidates=%d restored=%d vetoed=%d, want 3, 2 and 1", result.candidates, result.restored, result.vetoed)
+	}
+	for _, id := range []string{"W-ID", "W-NAME"} {
+		if got := mustRoutedTo(t, store, id); got != template {
+			t.Errorf("%s gc.routed_to=%q, want the seat's own route %q", id, got, template)
+		}
+	}
+	if got := mustRoutedTo(t, store, "W-FLAG"); got != "" {
+		t.Errorf("W-FLAG gc.routed_to=%q, want empty: a seat with no recorded identity cannot be shown to own its template route", got)
+	}
+}
