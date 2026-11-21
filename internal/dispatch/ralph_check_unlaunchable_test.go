@@ -447,6 +447,50 @@ func TestProcessRalphControlRemovedWorkDirStoreCopyIsNotHeld(t *testing.T) {
 	}
 }
 
+// TestProcessRalphControlWorkDirRemovedMidRunNotesAttemptLog pins #6295: a
+// check whose work dir is removed while it runs (the close of its bead
+// deleting a per-bead work dir) is graded by its exit status exactly as
+// before, and the attempt log says the work dir vanished so the producer can
+// tell it from a genuine verdict.
+func TestProcessRalphControlWorkDirRemovedMidRunNotesAttemptLog(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	checkPath := ".gc/scripts/checks/verify.sh"
+	writeExecutableScript(t, filepath.Join(cityPath, checkPath),
+		"#!/bin/sh\nrm -rf \"$GC_WORK_DIR\"\necho 'artifact invalid' >&2\nexit 1\n")
+	store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+	workDir := filepath.Join(cityPath, "worktrees", "attempt-1")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(control.ID, beadmeta.WorkDirMetadataKey, workDir); err != nil {
+		t.Fatalf("set work_dir: %v", err)
+	}
+
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("ProcessControl error = %v, want the failed check graded", err)
+	}
+	if result.Action != "fail" {
+		t.Fatalf("result = %+v, want fail", result)
+	}
+	got := mustGet(t, store, control.ID)
+	if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("control status=%q outcome=%q, want closed fail", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	log := got.Metadata[beadmeta.AttemptLogMetadataKey]
+	wantNote := "gc: check working directory " + workDir + " was removed or replaced while the check ran"
+	if !strings.Contains(log, wantNote) {
+		t.Fatalf("gc.attempt_log = %q, want it to contain %q", log, wantNote)
+	}
+	if !strings.Contains(log, "artifact invalid") {
+		t.Errorf("gc.attempt_log = %q, want the check's own stderr kept", log)
+	}
+	if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
+		t.Errorf("gc.check_infra_retry = %q, want empty (the failed check is graded, not an infrastructure re-run)", r)
+	}
+}
+
 // TestProcessRalphCheckUnlaunchableScriptStaysOpen covers the legacy
 // kind=check lane: a missing script holds the check and its logical bead open,
 // spends no infrastructure budget, and clones no next attempt.
