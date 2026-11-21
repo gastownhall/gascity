@@ -1847,6 +1847,48 @@ test_routed_config_issue_prefix_alias() {
     _alias_case "config-alias-never-overrides-route" 'issue_prefix: dg' yes
 }
 
+# AC-4: an ordinary branch word with a routed prefix (fix/bd-show-json, bd
+# routed) is not a bead: one definitive probe of the bd store answers that
+# bd-show is absent, nothing is retried, no `bd show bd-show` is issued, and
+# resolution falls through to the assignment fallback: with no in-progress
+# assignment the push is allowed, and with exactly one that bead is checked.
+test_routed_absent_token_falls_through_to_assignment() {
+    local root repo fbd out rc list_calls show_calls
+    root="$(new_city_with_branch "fix/bd-show-json")"
+    repo="$root/gascity"
+    mkdir -p "$root/beads-rig/.beads/fake/show"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"bd","path":"../beads-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    list_calls="$(store_count "$root/beads-rig/.beads" list-id-calls)"
+    show_calls="$(fake_calls "$fbd" | grep -c '| show ' || true)"
+    if [[ $rc -eq 0 && "$list_calls" -eq 1 && "$show_calls" -eq 0 ]] \
+        && fake_calls "$fbd" | grep -F -- '--id=bd-show ' | grep -qF "/../beads-rig/.beads "; then
+        record_pass "routed/absent-token-allows-with-no-assignment (rc=0, one probe, no bd show)"
+    else
+        record_fail "routed/absent-token-allows-with-no-assignment" "expected rc=0 after exactly one bd-store probe and no bd show, got rc=$rc probes=$list_calls shows=$show_calls, output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+
+    root="$(new_city_with_branch "fix/bd-show-json")"
+    repo="$root/gascity"
+    mkdir -p "$root/beads-rig/.beads/fake/show"
+    write_routes "$repo" '{"prefix":"ga","path":"."}' '{"prefix":"bd","path":"../beads-rig"}'
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_routed_fake_bd "$fbd"
+    printf '[{"id":"ga-abc12"}]' > "$fbd/default-store/fake/list-json"
+    store_put "$fbd/default-store" "ga-abc12" "closed" "agent-x" "tmpl-x"
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "ga-abc12 status is 'closed'" <<<"$out" \
+        && ! fake_calls "$fbd" | grep -q '| show bd-show'; then
+        record_pass "routed/absent-token-falls-through-to-single-assignment (rc=$rc, ga-abc12 checked)"
+    else
+        record_fail "routed/absent-token-falls-through-to-single-assignment" "expected the single in-progress assignment ga-abc12 (closed) to be checked and block, got rc=$rc, output: $out; calls: $(fake_calls "$fbd")"
+    fi
+    rm -rf "$root" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1911,6 +1953,7 @@ run_all() {
     test_routed_revoked_bead_blocks_under_zsh
     test_routed_reads_drop_database_pins
     test_routed_config_issue_prefix_alias
+    test_routed_absent_token_falls_through_to_assignment
 
     echo
     echo "pass=$pass fail=$fail"
