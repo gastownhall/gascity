@@ -188,3 +188,23 @@ func TestOrderDispatchMaterializesRigNamedSessionInTheCitySessionStore(t *testin
 	}
 	f.assertResidency(t, first)
 }
+
+// TestOrderDispatchReopensPlainlyClosedNamedSessionInTheCitySessionStore is
+// AC-2: a configured named session closed with a plain status close (its
+// identifiers not retired) is reopened in place, same id, in the city's
+// session store by the next route; the rig store gains no session row.
+func TestOrderDispatchReopensPlainlyClosedNamedSessionInTheCitySessionStore(t *testing.T) {
+	f := newRigNamedSessionOrderFixture(t)
+	first := f.dispatch(t)
+	if first == "" {
+		t.Fatal("the routed step has no assignee; want the named session's id")
+	}
+	if err := f.city.Close(first); err != nil {
+		t.Fatalf("plain close of %s: %v", first, err)
+	}
+	again := f.dispatch(t)
+	if again != first {
+		t.Errorf("route after a plain close bound session %q, want the reopened %q", again, first)
+	}
+	f.assertResidency(t, first)
+}
