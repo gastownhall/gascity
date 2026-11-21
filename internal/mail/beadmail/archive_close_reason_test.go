@@ -1,10 +1,13 @@
 package beadmail
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -123,4 +126,115 @@ func TestArchiveStampsCloseReasonForOnCloseValidation(t *testing.T) {
 			assertArchivedWithReason(t, store, id)
 		}
 	})
+}
+
+// fakeBdMessage is the one message bead a fakeBdOnCloseRunner holds, encoded
+// the way bd show --json reports an issue.
+type fakeBdMessage struct {
+	ID          string            `json:"id"`
+	Title       string            `json:"title"`
+	Status      string            `json:"status"`
+	IssueType   string            `json:"issue_type"`
+	Assignee    string            `json:"assignee"`
+	From        string            `json:"from"`
+	Labels      []string          `json:"labels"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	CloseReason string            `json:"close_reason,omitempty"`
+}
+
+// fakeBdOnCloseRunner emulates a bd binary holding one message bead with
+// validation.on-close: error. It answers show, applies update's
+// --set-metadata and --add-label flags, and refuses bd close unless --reason
+// passes bdValidateCloseReason. Every close argv is recorded.
+type fakeBdOnCloseRunner struct {
+	msg        fakeBdMessage
+	closeCalls [][]string
+}
+
+func (f *fakeBdOnCloseRunner) run(_ string, name string, args ...string) ([]byte, error) {
+	if name != "bd" || len(args) == 0 {
+		return nil, fmt.Errorf("unexpected command: %s %v", name, args)
+	}
+	switch args[0] {
+	case "show":
+		if args[len(args)-1] != f.msg.ID {
+			return nil, fmt.Errorf("bd show: unexpected id in %v", args)
+		}
+		return json.Marshal([]fakeBdMessage{f.msg})
+	case "update":
+		return f.update(args)
+	case "close":
+		return f.close(args)
+	}
+	return nil, fmt.Errorf("unexpected bd subcommand: %v", args)
+}
+
+func (f *fakeBdOnCloseRunner) update(args []string) ([]byte, error) {
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--set-metadata":
+			i++
+			k, v, ok := strings.Cut(args[i], "=")
+			if !ok {
+				return nil, fmt.Errorf("bd update: malformed --set-metadata %q", args[i])
+			}
+			if f.msg.Metadata == nil {
+				f.msg.Metadata = map[string]string{}
+			}
+			f.msg.Metadata[k] = v
+		case "--add-label":
+			i++
+			if !slices.Contains(f.msg.Labels, args[i]) {
+				f.msg.Labels = append(f.msg.Labels, args[i])
+			}
+		case "--json", f.msg.ID:
+		default:
+			return nil, fmt.Errorf("bd update: unexpected arg %q in %v", args[i], args)
+		}
+	}
+	return []byte(`{}`), nil
+}
+
+func (f *fakeBdOnCloseRunner) close(args []string) ([]byte, error) {
+	f.closeCalls = append(f.closeCalls, slices.Clone(args))
+	reason := ""
+	if i := slices.Index(args, "--reason"); i >= 0 && i+1 < len(args) {
+		reason = args[i+1]
+	}
+	if err := bdValidateCloseReason(reason); err != nil {
+		return nil, fmt.Errorf("exit status 1: %w", err)
+	}
+	f.msg.Status = "closed"
+	f.msg.CloseReason = reason
+	return []byte(`{}`), nil
+}
+
+// TestArchiveThroughBdStoreSendsCloseReason covers AC-3: through a real
+// BdStore, Archive's bd close carries --reason ArchiveCloseReason, which bd's
+// on-close validation accepts.
+func TestArchiveThroughBdStoreSendsCloseReason(t *testing.T) {
+	const id = "bd-msg1"
+	runner := &fakeBdOnCloseRunner{msg: fakeBdMessage{
+		ID:        id,
+		Title:     "archive me",
+		Status:    "open",
+		IssueType: "message",
+		Assignee:  "recipient",
+		From:      "sender",
+		Labels:    []string{},
+		CreatedAt: time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC),
+	}}
+	p := newTestProvider(beads.NewBdStore(t.TempDir(), runner.run))
+
+	if err := p.Archive(id); err != nil {
+		t.Fatalf("Archive(%s) = %v; want nil (bd close must carry a valid --reason)", id, err)
+	}
+	want := []string{"close", "--force", "--json", "--reason", ArchiveCloseReason, id}
+	if len(runner.closeCalls) != 1 || !slices.Equal(runner.closeCalls[0], want) {
+		t.Fatalf("bd close calls = %q; want exactly one %q", runner.closeCalls, want)
+	}
+	if runner.msg.Status != "closed" {
+		t.Errorf("bead status = %q, want closed", runner.msg.Status)
+	}
 }
