@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -131,4 +132,115 @@ func TestFreshCycleRepro_LiveAnchorOwnershipControlsCycle(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A cached owner probe may locate the anchor, but its row cannot authorize a
+// kill. Record only the explicit live reader's Get, not the resolver's owner
+// probe. Independent status and assignee reads would observe different rows.
+type freshCycleAnchorReadStore struct {
+	beads.Store
+	reads     int
+	err       error
+	afterRead func()
+}
+
+// Handles preserves cached reads and records the authoritative live Get.
+func (s *freshCycleAnchorReadStore) Handles() beads.StoreHandles {
+	h := beads.HandlesFor(s.Store)
+	h.Live = freshCycleAnchorLiveReader{LiveReader: h.Live, probe: s}
+	return h
+}
+
+// List answers live queries without invalidating a separate by-ID cache. Use the
+// existing live handle so Q1 sees the backing release while the owner probe
+// still encounters the primed assigned/open row.
+func (s *freshCycleAnchorReadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Live {
+		return beads.LiveFor(s.Store).List(q)
+	}
+	return s.Store.List(q)
+}
+
+type freshCycleAnchorLiveReader struct {
+	beads.LiveReader
+	probe *freshCycleAnchorReadStore
+}
+
+// Get records the live anchor read and then applies the staged backing change.
+func (r freshCycleAnchorLiveReader) Get(id string) (beads.Bead, error) {
+	if id != "ga-anchor" {
+		return r.LiveReader.Get(id)
+	}
+	s := r.probe
+	s.reads++
+	if s.err != nil {
+		return beads.Bead{}, s.err
+	}
+	row, err := r.LiveReader.Get(id)
+	if s.afterRead != nil {
+		f := s.afterRead
+		s.afterRead = nil
+		f()
+	}
+	return row, err
+}
+
+func TestFreshCycleRepro_AnchorOwnershipUsesOneLiveRowPastPrimedCache(t *testing.T) {
+	env, session, name, backing, anchor := freshCycleAnchorOwnerEnv(t)
+	cached := beads.NewCachingStore(backing, nil)
+	if err := cached.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	probe := &freshCycleAnchorReadStore{Store: cached}
+	rigs := map[string]beads.Store{"gascity": probe}
+	sw := testSeatWork(env.city, env.cfg, env.store, rigs)
+	sw.once.Do(sw.load)
+	released := ""
+	if err := backing.Update(anchor.ID, beads.UpdateOpts{Assignee: &released}); err != nil {
+		t.Fatal(err)
+	}
+	stale := mustGetBead(t, cached, anchor.ID)
+	if stale.Assignee != "witness" || stale.Status != "open" {
+		t.Fatalf("fixture cache = %+v; want the stale assigned/open owner row", stale)
+	}
+	probe.reads = 0
+	probe.afterRead = func() {
+		// A later state change must not mix with the status of the first row.
+		owner := "witness"
+		if err := backing.Update(anchor.ID, beads.UpdateOpts{Assignee: &owner}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := mustGetBead(t, env.store, session.ID)
+	callsBefore := len(env.sp.SnapshotCalls())
+
+	reconcileFreshCycleReproWithSeatWork(env, sw, []beads.Bead{session}, []beads.Bead{anchor}, rigs)
+
+	if probe.reads != 1 {
+		t.Errorf("authoritative anchor Get calls = %d, want one coherent status/assignee read", probe.reads)
+	}
+	assertFreshAnchorOwnerRetained(t, env, before, name, callsBefore)
+}
+
+// Legacy deliberately falls through to cycling when Q1 has ruled out a live
+// claim but Q2 cannot read the anchor. v2's defer-on-error rule is separate.
+func TestFreshCycleRepro_LiveAnchorReadErrorStillCycles(t *testing.T) {
+	env, session, _, backing, anchor := freshCycleAnchorOwnerEnv(t)
+	cached := beads.NewCachingStore(backing, nil)
+	if err := cached.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	probe := &freshCycleAnchorReadStore{Store: cached}
+	rigs := map[string]beads.Store{"gascity": probe}
+	sw := testSeatWork(env.city, env.cfg, env.store, rigs)
+	sw.once.Do(sw.load)
+	probe.reads = 0
+	probe.err = errors.New("anchor live read unavailable")
+
+	reconcileFreshCycleReproWithSeatWork(env, sw, []beads.Bead{session}, []beads.Bead{anchor}, rigs)
+
+	if probe.reads == 0 {
+		t.Fatal("the guard never attempted the failing live anchor read")
+	}
+	assertCycled(t, env, session, "legacy anchor-read errors retain the pre-existing cycle behavior")
 }
