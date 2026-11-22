@@ -242,19 +242,35 @@ function waitingHumanRow(bead: Bead, nowMs: number): BeadAttentionRow | null {
   };
 }
 
+// The workflow-topology `gc.kind` values, mirrored from internal/beadmeta
+// kindsets.go WorkflowTopologyKinds (key: beadmeta.KindMetadataKey). These are
+// controller-owned latch beads — "agents must never claim them" — so a
+// graph.v2 root sits in_progress with no assignee for its whole run by design.
+// Matched trimmed and case-folded like sourceworkflow.IsWorkflowRoot. Keep in
+// sync with the Go set.
+const KIND_META_KEY = 'gc.kind';
+const WORKFLOW_TOPOLOGY_KINDS: ReadonlySet<string> = new Set(['workflow', 'scope', 'spec']);
+
+function isWorkflowTopologyBead(bead: Bead): boolean {
+  const kind = bead.metadata?.[KIND_META_KEY]?.trim().toLowerCase();
+  return kind !== undefined && WORKFLOW_TOPOLOGY_KINDS.has(kind);
+}
+
 // Stalled: in-progress work whose assignee shows no sign of life — no assignee
 // at all, no session resolving to the assignee, a session in a non-live state,
 // or no activity (session last_active / bead heartbeat) for over an hour. When
 // the session read failed (`sessions` undefined), only the no-assignee check
 // runs: without session data we cannot distinguish "worker gone" from "worker
 // alive but not heartbeating", so we do not guess — a sessions outage must not
-// paint the board stalled.
+// paint the board stalled. Workflow-topology beads are never stalled here:
+// their health is judged at run level, and a stuck workflow surfaces through
+// its own assignee-carrying step beads.
 function stalledRow(
   bead: Bead,
   sessions: readonly BeadAttentionSession[] | undefined,
   nowMs: number,
 ): BeadAttentionRow | null {
-  if (bead.status !== 'in_progress') return null;
+  if (bead.status !== 'in_progress' || isWorkflowTopologyBead(bead)) return null;
   const assignee = bead.assignee?.trim() ?? '';
   const detail = stalledDetail(bead, assignee, sessions, nowMs);
   if (detail === null) return null;

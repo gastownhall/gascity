@@ -470,3 +470,40 @@ describe('inProgressCardNote (gp-6xd)', () => {
     expect(inProgressCardNote(bead({ status: 'open' }), [], NOW)).toBeNull();
   });
 });
+
+describe('workflow topology beads are exempt from the stalled rule (#7232)', () => {
+  // A graph.v2 workflow root is a controller-owned latch: in_progress, no
+  // assignee, untouched while its steps run.
+  function workflowRoot(overrides: Partial<Bead> = {}): Bead {
+    return bead({
+      id: 'R-wf',
+      status: 'in_progress',
+      updated_at: '2026-06-07T10:00:00.000Z',
+      metadata: {
+        'gc.kind': 'workflow',
+        'gc.formula_contract': 'graph.v2',
+        'gc.workflow_expanded': 'true',
+      },
+      ...overrides,
+    });
+  }
+
+  it('does not flag a running workflow root with or without a sessions list (AC-1)', () => {
+    expect(select({ beads: [workflowRoot()], sessions: [session({})] })).toEqual([]);
+    expect(select({ beads: [workflowRoot()] })).toEqual([]);
+  });
+
+  it('exempts a padded mixed-case gc.kind workflow root', () => {
+    expect(select({ beads: [workflowRoot({ metadata: { 'gc.kind': ' Workflow ' } })] })).toEqual(
+      [],
+    );
+  });
+
+  it('still reports a held workflow root as waiting-human', () => {
+    const rows = select({
+      beads: [workflowRoot({ labels: ['hold:mayor'] })],
+      sessions: [session({})],
+    });
+    expect(rows.map((row) => `${row.beadId}:${row.reason}`)).toEqual(['R-wf:waiting-human']);
+  });
+});
