@@ -354,6 +354,13 @@ type hookClaimOps struct {
 	// not-found from ONE leg be checked against the others before it opens the
 	// escalation. See claim_class_route.go.
 	ClassRoute *hookClaimClassRoute
+	// WorkLegRoute is the work-axis claim route these seams follow to the leg
+	// that HOLDS a bead the primary leg proved absent, or nil on a claim that
+	// did not scope to a primary (a full fan-out, a custom work_query, a
+	// single-store city). Like ClassRoute it is not a seam: it is carried so
+	// hookStartedKeyFor can key a routed claim by the leg it landed in. See
+	// claim_work_leg_route.go.
+	WorkLegRoute *hookClaimWorkLegRoute
 	// ClassesRelocated reports that the city relocates its coordination
 	// classes even when ClassRoute is nil because the route degraded (a
 	// binding with no claim CAS): a bead its leg serves may then reside in the
@@ -984,7 +991,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// re-stamp and the workflow re-check below spend any more store time.
 		landedAt := ops.nowOrWallClock()
 		if err != nil {
-			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
+			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err) || errors.Is(err, errHookClaimWorkLegUnreadable)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
 				// arrives here while the claim runs against this store's bd
@@ -1005,6 +1012,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				// the same reason (hookClaimBeadIsAWisp): the refusal lands before
 				// any write, so nothing is outstanding, and retrying against the
 				// same binding cannot change the answer.
+				//
+				// A work-leg probe that reported an UNREADABLE leg
+				// (errHookClaimWorkLegUnreadable) is the same shape: the probe
+				// stopped before any write, nothing is outstanding anywhere, and
+				// the residence it could not settle is not going to be settled by
+				// this session retrying it.
 				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
 				claimsErrored = true
 				continue
@@ -1949,6 +1962,17 @@ func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, verdict hookAdoptio
 	if route := ops.ClassRoute; route != nil && route.knownResident(beadID) {
 		ref := route.storeRef()
 		return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != ""}
+	}
+	// A bead this invocation's work-leg route homed in another work leg was
+	// claimed THERE — the minted CAS committed in that leg, or an adoption's
+	// readback found it held there — so the started entry keys the leg the
+	// claim lives in, spelled by the same StoreRef the census and the ladder
+	// spell it with, and it is a proven residence.
+	if leg := ops.WorkLegRoute; leg != nil {
+		if home, ok := leg.home[beadID]; ok {
+			ref := ops.StoreRef(home.dir)
+			return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != ""}
+		}
 	}
 	ref := ops.StoreRef(dir)
 	proven := verdict == hookClaimMinted || verdict == hookAdoptionOwned

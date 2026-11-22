@@ -483,25 +483,15 @@ func (r *hookClaimClassRoute) escalates(ctx context.Context, from hookStore, id,
 // legProvedAbsent reports whether from, the leg a claim-time write for id ran
 // against, is proved not to hold the bead, given the error the write returned.
 //
-// The write's own not-found is the proof. Any other error is settled by reading
-// the same leg through the caller's read seam (the package comment says why): a
-// not-found there proves it, and a read that finds the bead or fails proves
-// nothing. Three errors skip the read because they already answer it: a named
-// wisp refusal is the leg saying it HOLDS the bead; a store that did not answer
-// (workQueryStoreUnavailable: a timeout, a refused connection, contention) would
-// only be asked again while it is struggling; and a context that is done cannot
-// carry a read that would mean anything.
+// The rule is shared with the work-leg claim route (hookClaimLegProvedAbsent,
+// claim_work_leg_route.go): both routes open only on proof, and the same errors
+// close both — a named wisp refusal is the leg saying it HOLDS the bead; a
+// store that did not answer (workQueryStoreUnavailable) would only be asked
+// again while it is struggling; a context that is done cannot carry a read
+// that would mean anything; and a work-leg probe that reported an unreadable
+// LEG settled the same question for the same reason.
 func (r *hookClaimClassRoute) legProvedAbsent(ctx context.Context, from hookStore, id, assignee string, workErr error) bool {
-	switch {
-	case workErr == nil:
-		return false
-	case hookClaimBeadIsElsewhere(workErr):
-		return true
-	case r.readLeg == nil, hookClaimBeadIsAWisp(workErr), ctx.Err() != nil, workQueryStoreUnavailable(workErr):
-		return false
-	}
-	_, err := r.readLeg(ctx, from.dir, from.env, id, assignee)
-	return hookClaimBeadIsElsewhere(err)
+	return hookClaimLegProvedAbsent(ctx, r.readLeg, from, id, assignee, workErr)
 }
 
 // anotherWorkLegHolds reports whether some work leg OTHER than the one that

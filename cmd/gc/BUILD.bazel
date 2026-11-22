@@ -153,6 +153,7 @@ go_library(
         "claim_loop_guard.go",
         "claim_stall_guard.go",
         "claim_store_ref.go",
+        "claim_work_leg_route.go",
         "class_flip_guard.go",
         "class_store.go",
         "class_store_cache.go",

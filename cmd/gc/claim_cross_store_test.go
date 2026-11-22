@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -158,5 +165,127 @@ func TestAgentScriptCrossStoreBeadEnvFailsOnUnloadableCityConfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "vw-1") {
 		t.Fatalf("error %q should name the bead", err)
+	}
+}
+
+// TestHookClaimLandsRigRoutedCandidateInTheRigStore is issue #9159: on a city
+// whose federated work query reads every rig store from the primary (city)
+// leg, a city-scoped agent's `gc hook --claim` is served a rig-store bead
+// routed to it. The claim must run against the store that holds the bead (the
+// rig store its prefix names), not the primary leg's city workspace, where it
+// fails "bead not found" and the hook drains claims_errored forever.
+func TestHookClaimLandsRigRoutedCandidateInTheRigStore(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	for _, d := range []string{filepath.Join(cityDir, ".gc"), filepath.Join(rigDir, ".beads")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[rigs]]\nname = \"frontend\"\npath = " + strconv.Quote(rigDir) + "\nprefix = \"fe\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStore.IDPrefix = "fe"
+	bead, err := rigStore.Create(beads.Bead{Title: "rig work", Type: "task", Metadata: map[string]string{"gc.routed_to": "overseer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var claimDirs []string
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, env map[string]string) beads.CommandRunner {
+		return func(dir, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				return nil, errors.New("unexpected command " + name)
+			}
+			store := cityStore
+			if filepath.Clean(dir) == filepath.Clean(rigDir) {
+				store = rigStore
+			}
+			show := func(id string) ([]byte, error) {
+				b, err := store.Get(id)
+				if err != nil {
+					return []byte(`{"error": "no issues found matching the provided IDs", "schema_version": 1}`), errors.New("exit status 1: Issue " + id + " not found")
+				}
+				return json.Marshal([]beads.Bead{b})
+			}
+			switch {
+			case len(args) >= 3 && args[0] == "update" && args[2] == "--claim":
+				mu.Lock()
+				claimDirs = append(claimDirs, dir)
+				mu.Unlock()
+				id := args[1]
+				if _, err := store.Get(id); err != nil {
+					return []byte("Error: claiming bead " + id + ": bead not found"), errors.New("exit status 1: bead not found")
+				}
+				status, assignee := "in_progress", env["BEADS_ACTOR"]
+				if err := store.Update(id, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+					return nil, err
+				}
+				return show(id)
+			case len(args) >= 3 && args[0] == "update" && args[1] == "--json":
+				id := args[2]
+				opts := beads.UpdateOpts{Metadata: map[string]string{}}
+				for i := 3; i+1 < len(args); i += 2 {
+					if args[i] == "--set-metadata" {
+						k, v, _ := strings.Cut(args[i+1], "=")
+						opts.Metadata[k] = v
+					}
+				}
+				if err := store.Update(id, opts); err != nil {
+					return []byte("Error: bead not found"), errors.New("exit status 1: bead not found")
+				}
+				return show(id)
+			case len(args) >= 3 && args[0] == "show" && args[1] == "--json":
+				return show(args[len(args)-1])
+			case len(args) >= 2 && args[0] == "dep" && args[1] == "list":
+				return []byte("[]"), nil
+			case len(args) >= 1 && args[0] == "query":
+				return []byte("[]"), nil
+			default:
+				return nil, errors.New("unexpected bd invocation: " + strings.Join(args, " "))
+			}
+		}
+	}
+
+	// The federated primary leg's answer: the rig bead, served from the city leg.
+	out, err := json.Marshal([]beads.Bead{bead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workQuery := "printf '%s' '" + string(out) + "'"
+	env := []string{"BEADS_DIR=" + filepath.Join(cityDir, ".beads")}
+	opts := hookClaimOptions{
+		Assignee:           "overseer",
+		IdentityCandidates: []string{"overseer"},
+		RouteTargets:       []string{"overseer"},
+		Env:                env,
+		JSON:               true,
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	resolveRigPaths(cityDir, cfg.Rigs)
+	var stdout, stderr bytes.Buffer
+	code := claimHookWork(newHookCity(cityDir, cfg), workQuery, cityDir, env, []hookStore{{dir: cityDir, env: env}}, opts,
+		func(string, error) {}, &stdout, &stderr)
+
+	held, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || strings.Contains(stdout.String(), `"drain"`) || held.Status != "in_progress" || held.Assignee != "overseer" {
+		t.Fatalf("rig-routed %s: code=%d rig store holds status=%q assignee=%q; claims ran in %q; stdout=%s stderr=%s\nwant the claim to run in the rig store %s and own the bead",
+			bead.ID, code, held.Status, held.Assignee, claimDirs, stdout.String(), stderr.String(), rigDir)
 	}
 }

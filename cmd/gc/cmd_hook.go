@@ -940,7 +940,13 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// wrapped before the class route, whose binding writes announce themselves.
 	base := city.claimOps()
 	base.ProvisionWorktree = provisionWorktree
-	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(base, city.path), opened, err, city.recorder, stderr)
+	// The work-axis route sits between the bead-events wrapper and the class
+	// route: a write it re-runs through a holding leg is still a work-store
+	// write the run views should see announced, and the binding stays the LAST
+	// resort — a work-shaped id no work leg holds escalates exactly as it did
+	// before this route existed (claim_work_leg_route.go).
+	legRoute := hookClaimWorkLegRouteForInvocation(city.path, city.cfg, queryEnv, stores, stderr)
+	ops, proceed := routedHookClaimOps(workLegRoutedHookClaimOps(withHookClaimBeadEvents(base, city.path), legRoute), opened, err, city.recorder, stderr)
 	if !proceed {
 		return 1
 	}
