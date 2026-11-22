@@ -2,6 +2,7 @@ package sling
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -230,4 +231,71 @@ func TestSlingExpandedRootFullyRoutedStaysIdempotent(t *testing.T) {
 	if len(live) != 1 || live[0].ID != convoy.ID {
 		t.Fatalf("auto-convoy roots = %+v, want exactly the existing %s", live, convoy.ID)
 	}
+}
+
+// TestSlingExpandedRootWarnsOtherRoutedMembers pins the never-move rule's
+// observability: members already routed to a different agent keep their
+// routes when the root is slung to a new target, and the sling says so in one
+// bead warning naming each member and the agent it stays with.
+func TestSlingExpandedRootWarnsOtherRoutedMembers(t *testing.T) {
+	store := cookedWorkflowStore(t)
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	other := config.Agent{Name: "other", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker, other}}
+	runner := newFakeRunner()
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps = withStore(deps, store)
+	deps.Router = &recordingRouter{store: store}
+
+	// Half the run already runs on worker: one step routed, the control
+	// execution-routed. wf-1.mix carries no route.
+	if err := store.SetMetadata("wf-1.flip", beadmeta.RoutedToMetadataKey, "worker"); err != nil {
+		t.Fatalf("pre-route wf-1.flip: %v", err)
+	}
+	if err := store.SetMetadata("wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey, "worker"); err != nil {
+		t.Fatalf("pre-route the control's execution: %v", err)
+	}
+
+	result, err := DoSling(testOpts(other, "wf-1"), deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.Idempotent {
+		t.Fatal("sling of a partly unrouted run came back idempotent; nothing would be routed")
+	}
+	// Only the unrouted member takes the new target's route.
+	if result.RoutedMembers != 1 {
+		t.Fatalf("RoutedMembers = %d, want 1 (only the unrouted wf-1.mix)", result.RoutedMembers)
+	}
+	if got := mustMeta(t, store, "wf-1.mix", beadmeta.RoutedToMetadataKey); got != "other" {
+		t.Errorf("wf-1.mix gc.routed_to = %q, want other", got)
+	}
+	// The worker-routed members are left exactly where they were.
+	if got := mustMeta(t, store, "wf-1.flip", beadmeta.RoutedToMetadataKey); got != "worker" {
+		t.Errorf("wf-1.flip gc.routed_to = %q, want worker (in-flight work never moves)", got)
+	}
+	if got := mustMeta(t, store, "wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey); got != "worker" {
+		t.Errorf("control gc.execution_routed_to = %q, want worker (in-flight work never moves)", got)
+	}
+	if got := mustMeta(t, store, "wf-1.finalize", beadmeta.RoutedToMetadataKey); got != "core.control-dispatcher" {
+		t.Errorf("control gc.routed_to = %q, want core.control-dispatcher (untouched)", got)
+	}
+	// One warning names both members that stayed with worker.
+	if len(result.BeadWarnings) != 1 {
+		t.Fatalf("BeadWarnings = %q, want exactly one other-routed warning", result.BeadWarnings)
+	}
+	for _, want := range []string{"wf-1.flip", "wf-1.finalize", "worker"} {
+		if !strings.Contains(result.BeadWarnings[0], want) {
+			t.Errorf("warning %q does not name %q", result.BeadWarnings[0], want)
+		}
+	}
+}
+
+func mustMeta(t *testing.T, store *beads.MemStore, id, key string) string {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("reading %s: %v", id, err)
+	}
+	return b.Metadata[key]
 }

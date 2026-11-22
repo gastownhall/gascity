@@ -18,6 +18,14 @@ type memberRoutePatch struct {
 	meta    map[string]string
 }
 
+// otherRoutedMember is a member the plan left on another agent's route: the
+// member is eligible for routing but already carries a route for someone
+// other than the sling target, and member routing never moves in-flight work.
+type otherRoutedMember struct {
+	beadID string
+	target string
+}
+
 // memberRoutePlan is the computed-but-unwritten routing plan for the members
 // of an expanded workflow root a plain sling targets (issue #9039): `gc
 // formula cook` leaves every executable member unrouted and the expanded root
@@ -35,6 +43,10 @@ type memberRoutePlan struct {
 	stepPatches    []memberRoutePatch
 	// unroutedMembers counts members the plan routes.
 	unroutedMembers int
+	// otherRouted collects eligible members already routed to a different
+	// agent: they get no patch, and apply reports them in one warning so the
+	// operator can see the run did not move to the sling target whole.
+	otherRouted []otherRoutedMember
 }
 
 // hasPatches reports whether the plan would write any member route.
@@ -52,29 +64,43 @@ func (p *memberRoutePlan) hasControlPatches() bool {
 // of the store that holds the root. The caller stamps the root's own route
 // only after this returns, so a failed member write leaves the root unrouted
 // and re-running the same sling completes the run instead of short-circuiting
-// as idempotent.
+// as idempotent. Members the plan found already routed to a different agent
+// are reported in one bead warning whether or not anything was written: the
+// run did not move to the target whole, and the operator should see which
+// members stayed behind.
 func (p *memberRoutePlan) apply(writer beads.Writer, result *SlingResult) error {
-	if !p.hasPatches() {
+	if p == nil {
 		return nil
 	}
-	if writer == nil {
-		return fmt.Errorf("routing members of expanded workflow %s to %s: no store holds the workflow", p.rootID, p.target)
-	}
-	applied := 0
-	for _, entry := range p.controlPatches {
-		if err := writer.SetMetadataBatch(entry.beadID, entry.meta); err != nil {
-			return fmt.Errorf("routing member %s of expanded workflow %s to %s: %w; re-run the same sling to complete routing the run", entry.beadID, p.rootID, p.target, err)
+	if p.hasPatches() {
+		if writer == nil {
+			return fmt.Errorf("routing members of expanded workflow %s to %s: no store holds the workflow", p.rootID, p.target)
 		}
-		applied++
-	}
-	for _, entry := range p.stepPatches {
-		if err := writer.SetMetadataBatch(entry.beadID, entry.meta); err != nil {
-			return fmt.Errorf("routing member %s of expanded workflow %s to %s: %w; re-run the same sling to complete routing the run", entry.beadID, p.rootID, p.target, err)
+		applied := 0
+		for _, entry := range p.controlPatches {
+			if err := writer.SetMetadataBatch(entry.beadID, entry.meta); err != nil {
+				return fmt.Errorf("routing member %s of expanded workflow %s to %s: %w; re-run the same sling to complete routing the run", entry.beadID, p.rootID, p.target, err)
+			}
+			applied++
 		}
-		applied++
+		for _, entry := range p.stepPatches {
+			if err := writer.SetMetadataBatch(entry.beadID, entry.meta); err != nil {
+				return fmt.Errorf("routing member %s of expanded workflow %s to %s: %w; re-run the same sling to complete routing the run", entry.beadID, p.rootID, p.target, err)
+			}
+			applied++
+		}
+		if result != nil {
+			result.RoutedMembers = applied
+		}
 	}
-	if result != nil {
-		result.RoutedMembers = applied
+	if result != nil && len(p.otherRouted) > 0 {
+		named := make([]string, 0, len(p.otherRouted))
+		for _, m := range p.otherRouted {
+			named = append(named, fmt.Sprintf("%s (%s)", m.beadID, m.target))
+		}
+		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+			"warning: members of workflow %s already routed elsewhere were left in place: %s; a sling fills missing routes, it never moves in-flight work",
+			p.rootID, strings.Join(named, ", ")))
 	}
 	return nil
 }
@@ -122,6 +148,14 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, beadID string)
 			return nil, err
 		}
 		if len(patch) == 0 {
+			// No write, but an eligible member already routed to a different
+			// agent is worth reporting: the run the operator just slung did
+			// not move whole, and nothing else would say so.
+			if memberRouteEligible(member) {
+				if route := memberRouteTarget(member); route != "" && route != routedTo {
+					plan.otherRouted = append(plan.otherRouted, otherRoutedMember{beadID: member.ID, target: route})
+				}
+			}
 			continue
 		}
 		entry := memberRoutePatch{beadID: member.ID, meta: patch}
@@ -134,4 +168,28 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, beadID string)
 		plan.unroutedMembers++
 	}
 	return plan, nil
+}
+
+// memberRouteTarget is the route key a member's routing turns on: a control
+// member runs its spawned work through gc.execution_routed_to while its own
+// gc.routed_to stays the control dispatcher, so that is the route to compare;
+// every other member's route is gc.routed_to.
+func memberRouteTarget(b beads.Bead) string {
+	key := beadmeta.RoutedToMetadataKey
+	if graphroute.IsControlDispatcherKind(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])) {
+		key = beadmeta.ExecutionRoutedToMetadataKey
+	}
+	return strings.TrimSpace(b.Metadata[key])
+}
+
+// memberRouteEligible mirrors the members UnroutedMemberPatch considers for
+// routing at all: workflow topology beads never take a route, and closed,
+// assigned, or session-bound beads are not the sling's to move. Only eligible
+// members count as "routed elsewhere" — a closed bead that once ran on
+// another agent is settled, not left behind.
+func memberRouteEligible(b beads.Bead) bool {
+	if graphroute.IsWorkflowTopologyKind(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])) {
+		return false
+	}
+	return b.Status != "closed" && strings.TrimSpace(b.Assignee) == "" && b.Metadata[beadmeta.SessionIDMetadataKey] == ""
 }
