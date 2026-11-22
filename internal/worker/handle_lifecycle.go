@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Start ensures the worker exists and its runtime is live.
@@ -115,6 +116,36 @@ func (h *SessionHandle) Reset(ctx context.Context) (err error) {
 	return err
 }
 
+// ResetFenced is Reset for a request made from inside the session: it records
+// the restart only while the session row still records the caller's
+// incarnation, instanceToken being the caller's GC_INSTANCE_TOKEN
+// (session.Manager.RequestFreshRestartFenced). casOnly reports whether the
+// city records only by compare-and-swap (a v2 city); nil allows the checked
+// write. instanceToken is never logged.
+func (h *SessionHandle) ResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationReset)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		err = fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+		return err
+	}
+	err = h.manager.RequestFreshRestartFenced(id, instanceToken, casOnly)
+	return err
+}
+
+// CheckResetFenced reports ResetFenced's decision on a fresh read of the
+// session row, writing nothing (session.Manager.CheckFreshRestartFenced).
+// instanceToken is never logged.
+func (h *SessionHandle) CheckResetFenced(_ context.Context, instanceToken string, casOnly func() bool) error {
+	id := h.currentSessionID()
+	if id == "" {
+		return fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+	}
+	return h.manager.CheckFreshRestartFenced(id, instanceToken, casOnly)
+}
+
 // Stop suspends the worker runtime while preserving conversation state.
 //
 // This carries OPERATOR intent: it has targeted, single-session callers (the
@@ -138,7 +169,13 @@ func (h *SessionHandle) Stop(ctx context.Context, by sessionpkg.Actor) (err erro
 // across every session bead with no state pre-filter. Only that sweep may use
 // it: it additionally tears down a DRAINING seat instead of rejecting it with an
 // illegal transition, because rejecting those made every restart skip them and
-// leave them alive holding their pool slot names (ga-rxhu2).
+// leave them alive holding their pool slot names (ga-rxhu2), and a CREATING
+// seat whose start brought the runtime up but has not committed it active,
+// because rejecting that made the stop error out and leave the live runtime
+// running past the shutdown (ga-fqdzdy). Neither writes the row: a creating
+// row keeps its in-flight marker for the next start to read. `gc rig restart`
+// sweeps a rig through this stop while the controller runs, so there the
+// teardown can land under a start still in flight (SESSION-START-026).
 //
 // Kept as a separate method rather than a flag on Stop so the latitude cannot
 // reach a targeted operator path by accident — that is exactly how it leaked
@@ -290,13 +327,23 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		state.Pending = pending
 		return state, nil
 	case sessionpkg.StateActive, sessionpkg.StateAwake:
+		state.Program = h.programStatus(info.SessionName)
 		pending, err := h.Pending(ctx)
 		if err != nil {
 			return State{}, err
 		}
+		// Under the program-status shadow switch, the phase this view
+		// settles on is recorded beside the record this view read
+		// (observation), the reading its phase decides with under on; the
+		// phase returned is this view's alone.
+		defer func() { h.manager.RecordObservationShadow(info, state.Program, observationVerdict(state.Phase)) }()
 		if pending != nil {
 			state.Phase = PhaseBlocked
 			state.Pending = pending
+			return state, nil
+		}
+		if phase, decided := ProgramPhase(state.Program); decided {
+			state.Phase = phase
 			return state, nil
 		}
 		state.Phase = PhaseReady
@@ -343,6 +390,17 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 	return state, nil
 }
 
+// programStatus reads runtime session sessionName's judged program status
+// through the session manager; a reading the runtime cannot take is Unread
+// (ProgramStatusOf).
+func (h *SessionHandle) programStatus(sessionName string) runtime.ProgramStatus {
+	ps, err := h.manager.ProgramStatusByName(sessionName)
+	if err != nil {
+		return runtime.ProgramStatus{}
+	}
+	return ps
+}
+
 // Message sends a user turn to the worker.
 func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req MessageRequest) (result MessageResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
@@ -375,6 +433,14 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 		ctx = runtime.WithNudgeDeliveryKey(ctx, req.DeliveryKey)
 	}
 	outcome, err := h.manager.Submit(ctx, by, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
+	if err != nil && req.QueueBehindPending && errors.Is(err, sessionpkg.ErrPendingInteraction) &&
+		!errors.Is(err, sessionpkg.ErrReplacementNotPrepared) {
+		if err = h.manager.QueueSubmit(id, req.Text); err != nil {
+			return MessageResult{}, err
+		}
+		result = MessageResult{Queued: true}
+		return result, nil
+	}
 	if err != nil {
 		return MessageResult{}, err
 	}
@@ -742,20 +808,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if firstProviderSessionStart(info.State, pr.Metadata) &&
 		h.session.Resume.SessionIDFlag != "" &&
 		strings.TrimSpace(info.SessionKey) != "" {
-		command := strings.TrimSpace(info.Command)
-		if command == "" {
-			command = strings.TrimSpace(h.session.Command)
-		}
-		if command == "" {
-			command = strings.TrimSpace(info.Provider)
-		}
-		if command == "" {
-			command = strings.TrimSpace(h.session.Provider)
-		}
-		if command == "" {
-			return "", fmt.Errorf("%w: command is required for first start", ErrHandleConfig)
-		}
-		return command + " " + h.session.Resume.SessionIDFlag + " " + info.SessionKey, nil
+		return startCommandWithSessionID(info, h.session)
 	}
 	resumeInfo := info
 	if command := strings.TrimSpace(h.session.Command); command != "" {
@@ -773,7 +826,69 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
+	if h.unlaunchedSessionKey(info, pr) {
+		return startCommandWithSessionID(resumeInfo, h.session)
+	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+// unlaunchedSessionKey reports whether the row's stored session key never
+// launched a conversation a resume could reattach to, so the start should open
+// a fresh conversation under the stored key with the provider's session-id
+// flag instead. The key must have a session-id flag to open one with, no
+// committed start may vouch for it, and the keyed transcript the resume would
+// reattach to must be probeable and absent under the roots this launch reads.
+// A committed start (started_config_hash) with no conversation reset pending
+// (continuation_reset_pending) vouches for the key, which then resumes
+// whatever the probe reads: a conversation under a root the probe cannot see,
+// such as a wrapper's own config dir, is not started over, and one whose
+// transcript is gone fails its resume into the session manager's
+// committed-conversation rule. A pending reset means the hash no longer speaks
+// for the key: a churn reset keeps the hash while it clears the key, which the
+// session sync then mints anew. The probe is the same probe and root rule the
+// reconciler's own start applies (workertranscript.KeyedProbeRoots): the
+// handle's search paths, plus the projects root of an absolute
+// CLAUDE_CONFIG_DIR the launch's env names. A relative or ~ value adds no
+// root; a provider whose transcript layout cannot be probed, a missing key or
+// work dir, and a transcript that is present all keep the resume.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, pr sessionpkg.PersistedResponse) bool {
+	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(info.SessionKey) == "" {
+		return false
+	}
+	if strings.TrimSpace(pr.Metadata["started_config_hash"]) != "" &&
+		strings.TrimSpace(pr.Metadata["continuation_reset_pending"]) == "" {
+		return false
+	}
+	hints := h.runtimeHints()
+	workDir := strings.TrimSpace(hints.WorkDir)
+	if workDir == "" {
+		workDir = info.WorkDir
+	}
+	provider := h.historyProvider(info)
+	roots := h.adapter.SearchPaths
+	if dir, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		roots = MergeSearchPaths(append(append([]string(nil), roots...), dir))
+	}
+	present, probeable := workertranscript.HasKeyedTranscript(
+		workertranscript.KeyedProbeRoots(roots, provider), provider, workDir, info.SessionKey)
+	return probeable && !present
+}
+
+func startCommandWithSessionID(info sessionpkg.Info, spec SessionSpec) (string, error) {
+	command := strings.TrimSpace(info.Command)
+	if command == "" {
+		command = strings.TrimSpace(spec.Command)
+	}
+	if command == "" {
+		command = strings.TrimSpace(info.Provider)
+	}
+	if command == "" {
+		command = strings.TrimSpace(spec.Provider)
+	}
+	if command == "" {
+		return "", fmt.Errorf("%w: command is required to start session", ErrHandleConfig)
+	}
+	return command + " " + spec.Resume.SessionIDFlag + " " + info.SessionKey, nil
 }
 
 func firstProviderSessionStart(state sessionpkg.State, metadata map[string]string) bool {
@@ -835,5 +950,21 @@ func submitIntent(intent DeliveryIntent) sessionpkg.SubmitIntent {
 		return sessionpkg.SubmitIntentInterruptNow
 	default:
 		return sessionpkg.SubmitIntentDefault
+	}
+}
+
+// observationVerdict is the shadow observation token for a phase this view
+// settled on for a live session: Busy is busy, Blocked pending, and Ready
+// idle; any other phase reads indeterminate.
+func observationVerdict(phase Phase) runtime.ProgramVerdict {
+	switch phase {
+	case PhaseBusy:
+		return runtime.ProgramVerdictBusy
+	case PhaseBlocked:
+		return runtime.ProgramVerdictPending
+	case PhaseReady:
+		return runtime.ProgramVerdictIdle
+	default:
+		return runtime.ProgramVerdictIndeterminate
 	}
 }

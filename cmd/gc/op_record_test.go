@@ -265,7 +265,14 @@ type cliOpWakeFixture struct {
 
 func newCLIOpWakeFixture(t *testing.T) *cliOpWakeFixture {
 	t.Helper()
-	rec := beadstest.NewOpRecordingStore(&beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true})
+	return newCLIOpWakeFixtureOver(t, &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true})
+}
+
+// newCLIOpWakeFixtureOver is the wake fixture with its session bead in
+// backing, which its recording store wraps.
+func newCLIOpWakeFixtureOver(t *testing.T, backing beads.Store) *cliOpWakeFixture {
+	t.Helper()
+	rec := beadstest.NewOpRecordingStore(backing)
 	b, err := rec.Create(beads.Bead{
 		Title:  "wake op session",
 		Type:   session.BeadType,
@@ -611,8 +618,8 @@ func TestSessionWakeOpDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
 	}
 }
 
-// A --key under the builtin default still warns over a store that cannot
-// record ops: the run asked for a dedup the journal cannot give.
+// A --key under the builtin default still warns over a store it does not
+// record on: the run asked for a dedup the journal does not give it.
 func TestSessionWakeOpDefaultAutoWarnsForAKeyOnAnIncapableStore(t *testing.T) {
 	newCLIOpHarness(t, nil)
 	f := newCLIOpWakeFixture(t)
@@ -621,22 +628,62 @@ func TestSessionWakeOpDefaultAutoWarnsForAKeyOnAnIncapableStore(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("wake = %d; stderr=%s", code, stderr)
 	}
-	if !strings.Contains(stderr, "warning: op journal open failed (conditional_writes_unsupported)") {
-		t.Fatalf("stderr = %q, want the open warning for a --key run", stderr)
+	if !strings.Contains(stderr, "warning: op journal open failed (not_recorded_by_default)") || !strings.Contains(stderr, "[ops]") {
+		t.Fatalf("stderr = %q, want the open warning for a --key run, naming the [ops] opt-in", stderr)
 	}
 }
 
-// The builtin default records on a store that can record ops.
-func TestSessionWakeOpDefaultAutoRecordsOnACapableStore(t *testing.T) {
-	newCLIOpHarness(t, nil)
-	f := newCLIOpWakeFixture(t)
-	if code, _, stderr := f.run(t, "", false); code != 0 || stderr != "" {
-		t.Fatalf("wake = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
-	}
-	op := cliOpOnly(t, f.rec)
-	if op.Status != opjournal.StatusClosed {
-		t.Fatalf("op = %+v, want closed", op)
-	}
+// The builtin default records only over a SQLite sessions store. Over a
+// store that can record ops but is not SQLite-backed (a Dolt-served one in
+// production) the wake runs unrecorded and quiet, without the op store even
+// opening; an explicit auto records over that same store.
+func TestSessionWakeOpDefaultAutoRecordsOnlyOnSQLite(t *testing.T) {
+	t.Run("default over SQLite records", func(t *testing.T) {
+		newCLIOpHarness(t, nil)
+		sq, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gc"))
+		if err != nil {
+			t.Fatalf("OpenSQLiteStore: %v", err)
+		}
+		t.Cleanup(func() { _ = sq.(interface{ CloseStore() error }).CloseStore() })
+		f := newCLIOpWakeFixtureOver(t, sq)
+		f.deps.store = sq
+		if code, _, stderr := f.run(t, "", false); code != 0 || stderr != "" {
+			t.Fatalf("wake = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
+		}
+		if op := cliOpOnly(t, f.rec); op.Status != opjournal.StatusClosed {
+			t.Fatalf("op = %+v, want closed", op)
+		}
+	})
+	t.Run("default over a capable non-SQLite store is quiet", func(t *testing.T) {
+		h := newCLIOpHarness(t, nil)
+		f := newCLIOpWakeFixture(t)
+		code, stdout, stderr := f.run(t, "", true)
+		if code != 0 || stderr != "" {
+			t.Fatalf("wake = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
+		}
+		if _, ok := cliOpJSON(t, []byte(stdout))["op_id"]; ok {
+			t.Fatalf("JSON %s carries op_id for an unrecorded run", stdout)
+		}
+		if rows := cliOpRows(t, f.rec); len(rows) != 0 {
+			t.Fatalf("op rows = %+v, want none", rows)
+		}
+		if h.opens != 0 {
+			t.Fatalf("the op store opened %d time(s), want none", h.opens)
+		}
+		if b, _ := f.rec.Get(f.id); b.Metadata["state"] == "suspended" {
+			t.Fatal("the wake did not run")
+		}
+	})
+	t.Run("explicit auto over a capable non-SQLite store records", func(t *testing.T) {
+		newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+		f := newCLIOpWakeFixture(t)
+		if code, _, stderr := f.run(t, "", false); code != 0 || stderr != "" {
+			t.Fatalf("wake = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
+		}
+		if op := cliOpOnly(t, f.rec); op.Status != opjournal.StatusClosed {
+			t.Fatalf("op = %+v, want closed", op)
+		}
+	})
 }
 
 // cliOpBdLeafProxy stands in for the default topology's proxied sessions
@@ -649,24 +696,34 @@ type cliOpBdLeafProxy struct {
 
 func (p cliOpBdLeafProxy) ConditionalWritesResolveTarget() beads.Store { return p.leaf }
 
-// The builtin default over a proxied sessions store follows the bd behind
-// it, as the CHANGELOG's upgrading note says: a bd whose update, close,
-// assign and delete all advertise --if-revision opens the op journal, so the
-// default records through bd; a released bd, which lacks the flag, fails the
-// open as a store that cannot record ops, which the default treats as off.
+// The builtin default over a proxied sessions store records nothing,
+// whatever the bd behind it supports: its writes land in bd, which is not
+// SQLite, so the op store is not opened and no bd capability probe runs. An
+// explicit auto follows the bd: one whose update, close, assign and delete all
+// advertise --if-revision opens the op journal, and a released bd, which
+// lacks the flag, fails the open as a store that cannot record ops.
 func TestCLIOpDefaultAutoOverAProxiedBdStore(t *testing.T) {
+	const ifRevision, released = "Flags:\n      --if-revision int   fence\n", "Flags:\n      --json   JSON output\n"
 	for _, tc := range []struct {
-		name    string
-		help    string
-		records bool
-		probes  []string
+		name     string
+		explicit bool
+		help     string
+		records  bool
+		probes   []string
 	}{
-		{"bd with --if-revision", "Flags:\n      --if-revision int   fence\n", true, []string{"update", "close", "assign", "delete"}},
-		{"released bd", "Flags:\n      --json   JSON output\n", false, []string{"update"}},
+		{"default, bd with --if-revision", false, ifRevision, false, nil},
+		{"default, released bd", false, released, false, nil},
+		{"explicit auto, bd with --if-revision", true, ifRevision, true, []string{"update", "close", "assign", "delete"}},
+		{"explicit auto, released bd", true, released, false, []string{"update"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			oldLookup := cliOpLookupEnv
-			cliOpLookupEnv = func(string) (string, bool) { return "", false }
+			cliOpLookupEnv = func(k string) (string, bool) {
+				if tc.explicit && k == "GC_OPS_LIFECYCLE" {
+					return "auto", true
+				}
+				return "", false
+			}
 			t.Cleanup(func() { cliOpLookupEnv = oldLookup })
 			var probes []string
 			bd := beads.NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
@@ -679,16 +736,24 @@ func TestCLIOpDefaultAutoOverAProxiedBdStore(t *testing.T) {
 			var stderr bytes.Buffer
 			op := newCLIOp(&config.City{}, cliOpBdLeafProxy{Store: beads.NewMemStore(), leaf: bd},
 				cliOpRequest{verb: "gc session wake", kind: opjournal.KindWake, stderr: &stderr})
-			if op.rec.Mode != rollout.Auto || !op.rec.QuietCannotRecord {
-				t.Fatalf("recorder mode=%s quiet=%t, want the builtin auto default, quiet over a store that cannot record", op.rec.Mode, op.rec.QuietCannotRecord)
+			if op.rec.Mode != rollout.Auto || op.rec.QuietCannotRecord == tc.explicit {
+				t.Fatalf("recorder mode=%s quiet=%t, want auto, quiet only under the builtin default", op.rec.Mode, op.rec.QuietCannotRecord)
 			}
 			st, err := op.rec.Open()
-			if tc.records {
+			var notDefault *opjournal.NotRecordedByDefaultError
+			switch {
+			case tc.records:
 				if err != nil || st.Prefix() != "gc" {
 					t.Fatalf("Open() = %v, %v; want the op journal over the bd leaf's gc namespace", st, err)
 				}
-			} else if !errors.Is(err, beads.ErrConditionalWriteUnsupported) || !legacyop.CannotRecord(legacyop.DegradeReason(err)) {
-				t.Fatalf("Open() = %v, want a store that cannot record ops (conditional_writes_unsupported)", err)
+			case !tc.explicit:
+				if !errors.As(err, &notDefault) || !notDefault.Backend.DoltServed || legacyop.DegradeReason(err) != legacyop.DegradeNotRecordedByDefault {
+					t.Fatalf("Open() = %v, want the default's not_recorded_by_default for a Dolt-served store", err)
+				}
+			default:
+				if !errors.Is(err, beads.ErrConditionalWriteUnsupported) || !legacyop.CannotRecord(legacyop.DegradeReason(err)) {
+					t.Fatalf("Open() = %v, want a store that cannot record ops (conditional_writes_unsupported)", err)
+				}
 			}
 			if !slices.Equal(probes, tc.probes) {
 				t.Fatalf("bd probes = %v, want %v", probes, tc.probes)

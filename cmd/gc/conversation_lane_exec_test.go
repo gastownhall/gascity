@@ -56,15 +56,19 @@ func newLaneTestStore() laneTestStore {
 // laneFixture is one session row over a fake runtime, the stores a lane
 // needs, and a fake clock.
 type laneFixture struct {
-	dir     string
-	cfg     *config.City
-	store   beads.Store
-	sp      *runtime.Fake
-	clk     *laneTestClock
-	id      string
-	name    string
-	token   string
-	started bool
+	dir   string
+	cfg   *config.City
+	store beads.Store
+	sp    *runtime.Fake
+	// provider, when set, is the runtime the fixture's lane host and
+	// producers see instead of sp (a profiled fake over sp, so sp still
+	// records its calls).
+	provider runtime.Provider
+	clk      *laneTestClock
+	id       string
+	name     string
+	token    string
+	started  bool
 }
 
 // laneFixtureOpt adjusts a fixture's session row metadata before it is
@@ -187,6 +191,23 @@ func (f *laneFixture) get(t *testing.T, st *opjournal.Store, id string) opjourna
 		t.Fatalf("Get(%s): %v", id, err)
 	}
 	return op
+}
+
+// runtime is the provider the fixture's host and producers see: provider
+// when set, else sp.
+func (f *laneFixture) runtime() runtime.Provider {
+	if f.provider != nil {
+		return f.provider
+	}
+	return f.sp
+}
+
+// asT3Bridge makes the fixture's host and producers see sp as t3bridge: a
+// protocol-mode runtime whose turns, starts included, its own protocol
+// records.
+func (f *laneFixture) asT3Bridge() runtime.Provider {
+	f.provider = runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f.sp})
+	return f.provider
 }
 
 // deps are the executor's dependencies over the fixture.
@@ -1590,6 +1611,61 @@ func TestLaneExecAdmitsTheDrainNoticeIntoAStopRequestedRow(t *testing.T) {
 			}
 			if nudges := f.nudges(); len(nudges) != 1 || !strings.Contains(nudges[0].Message, "ack your drain") {
 				t.Fatalf("nudges = %+v, want only the drain notice", nudges)
+			}
+		})
+	}
+}
+
+// TestLaneExecProbeBoundaryAt proves a busy keystroke boundary names its
+// deadline, the last activity plus the quiescence window, only when the
+// quiescence window is the sole reason it is closed: an unknown activity, a
+// deadline at or past now, a protocol-mode or ACP runtime, and a boundary
+// that is open all leave it zero (the polling grid is the fallback).
+func TestLaneExecProbeBoundaryAt(t *testing.T) {
+	now := laneT0
+	for _, tc := range []struct {
+		name     string
+		opts     []laneFixtureOpt
+		protocol bool
+		activity time.Time // zero: the runtime reports none
+		want     time.Time
+		boundary opjournal.Tri
+	}{
+		{name: "busy", activity: now.Add(-time.Second), want: now.Add(defaultNudgePollQuiescence - time.Second), boundary: opjournal.TriNo},
+		{name: "just active", activity: now, want: now.Add(defaultNudgePollQuiescence), boundary: opjournal.TriNo},
+		{name: "deadline now", activity: now.Add(-defaultNudgePollQuiescence), boundary: opjournal.TriYes},
+		{name: "deadline passed", activity: now.Add(-time.Minute), boundary: opjournal.TriYes},
+		{name: "unknown activity", boundary: opjournal.TriNo},
+		{name: "acp", opts: []laneFixtureOpt{func(meta map[string]string) { meta["transport"] = "acp" }}, activity: now.Add(-time.Second), boundary: opjournal.TriNo},
+		{name: "protocol", protocol: true, activity: now.Add(-time.Second), boundary: opjournal.TriUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t, tc.opts...)
+			if tc.protocol {
+				f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+			}
+			f.sp.SetActivity(f.name, tc.activity)
+			v, info := f.view(t)
+			e := newConversationLaneExec(f.deps(f.laneStore(t)), info)
+			e.now = f.clk.Now
+			// The quiescence rule as the production idle check applies it,
+			// on the fake clock.
+			e.idle = func(_ nudgeTarget, obs worker.LiveObservation) bool {
+				return obs.LastActivity != nil && f.clk.Now().Sub(*obs.LastActivity) >= defaultNudgePollQuiescence
+			}
+			p, err := e.Probe(context.Background(), v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.protocol {
+				if p.Caps.Live {
+					t.Fatalf("Probe = %+v, want a runtime that is not live", p)
+				}
+			} else if p.Boundary != tc.boundary {
+				t.Fatalf("boundary %v, want %v", p.Boundary, tc.boundary)
+			}
+			if !p.BoundaryAt.Equal(tc.want) {
+				t.Fatalf("BoundaryAt %s, want %s", p.BoundaryAt, tc.want)
 			}
 		})
 	}

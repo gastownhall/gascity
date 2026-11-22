@@ -208,14 +208,16 @@ func laneInterruptReadKey(cityPath, sessionID string) string {
 // §5.4); ctx is the effect's. turn is the turn it targeted, "" for session
 // scope; exact says it was confined to that turn and incarnation (an atomic
 // turn fence and the input fence). An interrupt the runtime did not settle,
-// or a turn not seen to end, is failed{no_boundary}, naming turn. Unknown,
-// since it may have reached the agent: a replacement whose preparation
-// failed after its turn settled; a restart on failure that stopped the
-// runtime and could not start it again (session.ErrRestartNotStarted: the
-// turn ended with the runtime, and the start's error stays the op's last
-// error; the controller's heal of a row whose runtime is gone, SESS-531,
-// marks the row asleep, which may reset its continuation, and A18's relaunch
-// of a row it wants awake, or a later wake, starts a runtime again); one
+// or a turn not seen to end, is failed{no_boundary}, naming turn. A restart
+// on failure that stopped the runtime and could not start it again
+// (session.ErrRestartNotStarted) is failed{restart_not_started}, naming
+// turn, with the start's error as the op's last error: the turn ended with
+// the runtime, so the op is credited, and a retry would find no runtime and
+// hide the failure as skipped{stale} (the controller's heal of a row whose
+// runtime is gone, SESS-531, marks the row asleep, which may reset its
+// continuation, and A18's relaunch of a row it wants awake, or a later wake,
+// starts a runtime again). Unknown, since it may have reached the agent: a
+// replacement whose preparation failed after its turn settled; one
 // sent whose outcome the session cannot tell
 // (session.ErrInterruptOutcomeUnknown: a send that failed after its check, a
 // protocol dispatch that failed, a restart on failure withheld because the
@@ -257,7 +259,9 @@ func laneInterruptResult(ctx context.Context, res worker.InterruptResult, err er
 		return opjournal.Settled{Turn: turn, Via: laneViaLive, Degradation: degradation}
 	case errors.Is(err, runtime.ErrInterruptNotSettled), errors.Is(err, runtime.ErrTurnNotEnded):
 		return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonNoBoundary, Turn: turn}
-	case errors.Is(err, session.ErrReplacementNotPrepared), errors.Is(err, session.ErrRestartNotStarted),
+	case errors.Is(err, session.ErrRestartNotStarted):
+		return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonRestartNotStarted, Turn: turn, Cause: err}
+	case errors.Is(err, session.ErrReplacementNotPrepared),
 		errors.Is(err, session.ErrInterruptOutcomeUnknown), errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed):
 		return opjournal.Unknown{Cause: err}
 	case errors.Is(err, runtime.ErrTurnNotCurrent):
@@ -310,7 +314,9 @@ func newLaneInterrupts() *laneInterrupts {
 
 // record makes ref conv's interrupt, replacing any before it, and returns
 // the ref it replaced (the zero ref for none). A ref with no op or no turn
-// names nothing for a fold to credit and is not recorded.
+// gives a retry of its op no turn to stay on, so it is not recorded: the
+// retry of a session-scoped op that ran without one closes
+// failed{ambiguous_delivery} unsent (interruptTarget).
 func (r *laneInterrupts) record(conv string, ref opjournal.InterruptRef) opjournal.InterruptRef {
 	if r == nil || ref.Op == "" || ref.Turn == "" {
 		return opjournal.InterruptRef{}

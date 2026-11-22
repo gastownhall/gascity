@@ -27,3 +27,17 @@ func TestTrimTOMLFilenameStripsSupportedSuffixes(t *testing.T) {
 		})
 	}
 }
+
+func TestTrimFormulaExtStripsEveryResolvableSpelling(t *testing.T) {
+	for file, want := range map[string]string{
+		"build-review":              "build-review",
+		"build-review.toml":         "build-review",
+		"build-review.formula.toml": "build-review",
+		"build-review.formula.json": "build-review",
+		"README.md":                 "README.md",
+	} {
+		if got := TrimFormulaExt(file); got != want {
+			t.Errorf("TrimFormulaExt(%q) = %q, want %q", file, got, want)
+		}
+	}
+}

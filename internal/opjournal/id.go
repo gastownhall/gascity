@@ -32,6 +32,10 @@ const (
 	maxTokenLen        = 128
 )
 
+// MaxClientKeyLen is the longest client key, in bytes, Propose accepts
+// (ValidateClientKey).
+const MaxClientKeyLen = maxClientKeyLen
+
 // The id families this package mints itself. ownIDFamilies is the one list of
 // them: PinnedID refuses each, and every <family>IDInfix of this package is
 // "-" + one of them + "-" (TestOwnIDFamiliesCoverEveryInfix), so a family
@@ -141,6 +145,12 @@ var pinnedIDRe = regexp.MustCompile(`^[^\s,"@#]+-[a-z][a-z0-9]{0,15}-[a-z2-7]{26
 // knows a row by its id alone, its read having failed, tells a journal row by
 // it.
 func IsPinnedID(id string) bool { return pinnedIDRe.MatchString(id) }
+
+// IsOpID reports whether id has the shape of an op id (<prefix>-op-<26
+// base32 characters>), as DeriveID mints them. A producer that stores
+// either an op id or another reference in one field (a wait's nudge_id)
+// tells them apart by it.
+func IsOpID(id string) bool { return validOpID(id) }
 
 // ValidateClientKey refuses a client key Propose would refuse: empty, longer
 // than 512 bytes, not UTF-8, with a control character, or with leading or

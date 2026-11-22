@@ -84,8 +84,8 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 // acceptSessionCreate validates the create request, starts the asynchronous
 // create, and returns the 202 response.
 func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
@@ -195,7 +195,7 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 		}
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(
 			s.state.CityPath(),
-			configuredWorkspaceSessionEnv(s.state.Config()),
+			configuredWorkspaceSessionEnv(s.state.Config()), configuredProgramStatusMode(s.state.Config()),
 			alias,
 			explicitName,
 			template,
@@ -211,7 +211,7 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
 		}
-		handle, handleErr := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+		handle, handleErr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 		if handleErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
 			return
@@ -228,15 +228,15 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 			reservationIDs = append(reservationIDs, workDirQualifiedName)
 		}
 		createErr := session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
-			if aliasErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); aliasErr != nil {
+			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
 				return aliasErr
 			}
 			if reserveConcreteIdentity && workDirQualifiedName != alias {
-				if aliasErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), workDirQualifiedName, ""); aliasErr != nil {
+				if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), workDirQualifiedName, ""); aliasErr != nil {
 					return aliasErr
 				}
 			}
-			if nameErr := session.EnsureSessionNameAvailableWithConfig(store.Store, s.state.Config(), explicitName, ""); nameErr != nil {
+			if nameErr := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), explicitName, ""); nameErr != nil {
 				return nameErr
 			}
 			var err error
@@ -329,6 +329,9 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 	if body.Async {
 		return nil, apierr.InvalidRequest.Msg("async session creation is only supported for configured agent templates")
 	}
+	if err := s.checkInitialMessage(body.Message); err != nil {
+		return nil, err
+	}
 
 	workDir := s.state.CityPath()
 
@@ -375,19 +378,19 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 	go func() {
 		defer finishRequest()
 		defer s.recoverSessionCreate(reqID)
-		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), configuredProgramStatusMode(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 		if cfgErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
 		}
-		handle, handleErr := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+		handle, handleErr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 		if handleErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
 			return
 		}
 		var info session.Info
 		createErr := session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
-			if aliasErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); aliasErr != nil {
+			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
 				return aliasErr
 			}
 			var err error
@@ -399,7 +402,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			return
 		}
 		if msg := strings.TrimSpace(body.Message); msg != "" {
-			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
+			if sendErr := s.deliverInitialMessage(context.Background(), store, info.ID, msg); sendErr != nil {
 				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
 					s.emitSessionCreateFailedFor(reqID, info.ID, "message_delivery_failed",
 						fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
@@ -562,12 +565,12 @@ func (sessionTranscriptGetResponse) Schema(r huma.Registry) *huma.Schema {
 
 func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchInput) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -605,7 +608,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		sessFront.RepairTypeBestEffort(id)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	updateFn := func() error {
 		if titlePtr != nil || aliasPtr != nil {
 			if err := mgr.UpdatePresentation(id, titlePtr, aliasPtr); err != nil {
@@ -625,7 +628,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 			return nil, apierr.Forbidden.Msg("forbidden: alias is controller-managed for this session")
 		}
 		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
-			if avErr := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), *aliasPtr, id); avErr != nil {
+			if avErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); avErr != nil {
 				return avErr
 			}
 			return updateFn()
@@ -655,12 +658,12 @@ func (s *Server) humaHandleSessionPermissionMode(_ context.Context, input *Sessi
 
 func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissionModeBody) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, idRef)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, idRef)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -677,9 +680,9 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if !session.IsSessionBeadOrRepairable(b) {
 		return nil, apierr.InvalidRequest.Msg(id + " is not a session")
 	}
-	session.RepairEmptyType(store.Store, &b)
+	session.RepairEmptyType(store, &b)
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -763,10 +766,11 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 	// Idempotency: accept (and deliver) at most once per Idempotency-Key. A
 	// replay returns the original 202 body — same request_id and event_cursor —
 	// without starting a second delivery. The target is folded into the scope
-	// because it lives in the URL, not the body.
+	// because it lives in the URL, not the body. Under lane authority the op
+	// under the key answers a retry instead (withMessageIdempotency).
 	accepted, err := s.withMessageIdempotency(sessionActionIdempotencyPath(input.ID, "submit"), input.IdempotencyKey, input.Body,
-		func() (asyncAcceptedBody, error) {
-			return s.acceptSessionSubmit(ctx, input)
+		func(lane bool) (asyncAcceptedBody, error) {
+			return s.acceptSessionSubmit(ctx, input, lane)
 		})
 	if err != nil {
 		return nil, err
@@ -775,16 +779,17 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 }
 
 // acceptSessionSubmit validates the submit target, records the request as a
-// message op under the ops.content gate (session_ops.go), starts the
-// asynchronous delivery, and returns the 202 body.
-func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitInput) (asyncAcceptedBody, error) {
+// message op under the ops.content gate (session_ops.go), or proposes it as
+// a lane op when lane (acceptMessageOp), starts the asynchronous delivery,
+// and returns the 202 body.
+func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitInput, lane bool) (asyncAcceptedBody, error) {
 	intent := input.Body.Intent
 	if intent == "" {
 		intent = session.SubmitIntentDefault
 	}
 	req := &messageOpRequest{
 		target: input.ID, key: input.IdempotencyKey, text: input.Body.Message,
-		intent: intent, operation: RequestOperationSessionSubmit,
+		intent: intent, resume: input.Body.Resume, lane: lane, operation: RequestOperationSessionSubmit,
 	}
 	message, resume := input.Body.Message, input.Body.Resume
 	return s.acceptMessageOp(ctx, req, func(d messageDelivery) {
@@ -847,7 +852,7 @@ func (s *Server) sendSubmit(ctx context.Context, d messageDelivery, send *messag
 type messageDelivery struct {
 	adm   *legacyop.Admission
 	reqID string
-	store beads.Store
+	store beads.SessionStore
 	// target is the session as addressed; deliverTo, when set, is the
 	// session the delivery goes to without re-resolving target.
 	target    string
@@ -856,16 +861,18 @@ type messageDelivery struct {
 
 // acceptMessageOp is the acceptance /submit and /messages share: it
 // validates req's target, admits req as a message op under the ops.content
-// gate (session_ops.go), records the request's acceptance so its request_id
+// gate (session_ops.go), or, when the city's lane host executes message
+// (req.lane), proposes it as a lane op instead (acceptMessageLane), records
+// the request's acceptance so its request_id
 // resolves through GET /request/{requestId} (request_outcome.go), starts
 // deliver on its own goroutine and returns the 202 body. A replay is answered
 // with its body and starts nothing: its request_id is the one first accepted.
 func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, deliver func(messageDelivery)) (asyncAcceptedBody, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	conv, err := s.messageTargetConversation(ctx, store.Store, req.target)
+	conv, err := s.messageTargetConversation(ctx, store, req)
 	if err != nil {
 		return asyncAcceptedBody{}, err
 	}
@@ -882,7 +889,10 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	if err != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
 	}
-	adm, replay, err := s.admitMessageOp(ctx, store.Store, req, eventCursor)
+	if req.lane {
+		return s.acceptMessageLane(ctx, store, req, ep, eventCursor)
+	}
+	adm, replay, err := s.admitMessageOp(ctx, store, req, eventCursor)
 	if err != nil {
 		return asyncAcceptedBody{}, err
 	}
@@ -906,7 +916,7 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	adm.Accept(inflightAnswer{operation: req.operation, body: body})
 	s.ops.runAfterAdmit()
 
-	d := messageDelivery{adm: adm, reqID: reqID, store: store.Store, target: req.target}
+	d := messageDelivery{adm: adm, reqID: reqID, store: store, target: req.target}
 	// Require delivers to the op's conversation: the op is the request.
 	// Otherwise the delivery re-resolves the target, as it always has.
 	if adm.Recorded && s.ops.content.Mode == gate.Require {
@@ -924,10 +934,14 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	return body, nil
 }
 
-// messageTargetConversation validates a /submit or /messages target: a
-// deliverable session with no pending interaction. It returns the target's
-// conversation, "" for a configured named session with no row yet.
-func (s *Server) messageTargetConversation(ctx context.Context, store beads.Store, target string) (string, error) {
+// messageTargetConversation validates req's target, a /submit or /messages
+// target: a deliverable session with no pending interaction. It returns the
+// target's conversation, "" for a configured named session with no row yet.
+// A request the lane accepts (req.lane) is checked for a pending
+// interaction only once no op under its key answers it
+// (acceptMessageLane).
+func (s *Server) messageTargetConversation(ctx context.Context, store beads.SessionStore, req *messageOpRequest) (string, error) {
+	target := req.target
 	conv, err := s.sessionTargetDeliverable(ctx, store, target)
 	if errors.Is(err, session.ErrSessionNotFound) {
 		return "", apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", target))
@@ -938,6 +952,9 @@ func (s *Server) messageTargetConversation(ctx context.Context, store beads.Stor
 		// helper so they surface as 409 (matching /stop, /respond, and the
 		// synchronous message twin) instead of a 500 from humaStoreError.
 		return "", humaResolveError(err)
+	}
+	if req.lane {
+		return conv, nil
 	}
 	if err := s.rejectPendingInteraction(ctx, store, target); err != nil {
 		return "", err
@@ -977,8 +994,8 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 	// Idempotency: accept (and deliver) at most once per Idempotency-Key; see
 	// humaHandleSessionSubmit.
 	accepted, err := s.withMessageIdempotency(sessionActionIdempotencyPath(input.ID, "messages"), input.IdempotencyKey, input.Body,
-		func() (asyncAcceptedBody, error) {
-			return s.acceptSessionMessage(ctx, input)
+		func(lane bool) (asyncAcceptedBody, error) {
+			return s.acceptSessionMessage(ctx, input, lane)
 		})
 	if err != nil {
 		return nil, err
@@ -987,12 +1004,13 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 }
 
 // acceptSessionMessage validates the message target, records the request as
-// a message op under the ops.content gate (session_ops.go), starts the
-// asynchronous delivery, and returns the 202 body.
-func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessageInput) (asyncAcceptedBody, error) {
+// a message op under the ops.content gate (session_ops.go), or proposes it
+// as a lane op when lane (acceptMessageOp), starts the asynchronous
+// delivery, and returns the 202 body.
+func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessageInput, lane bool) (asyncAcceptedBody, error) {
 	req := &messageOpRequest{
 		target: input.ID, key: input.IdempotencyKey, text: input.Body.Message,
-		intent: session.SubmitIntentDefault, operation: RequestOperationSessionMessage,
+		intent: session.SubmitIntentDefault, resume: input.Body.Resume, lane: lane, operation: RequestOperationSessionMessage,
 	}
 	message, resume := input.Body.Message, input.Body.Resume
 	return s.acceptMessageOp(ctx, req, func(d messageDelivery) {
@@ -1176,18 +1194,18 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionKillInpu
 // killSession kills target's runtime, recorded as a kill op under
 // ops.lifecycle, and returns the answer.
 func (s *Server) killSession(target, key string, force bool) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, target)
+	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
 
-	fields, err := s.runSyncOp(s.killOpRequest(store.Store, id, key), humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
-		killed, err := s.operatorKill(context.Background(), store.Store, id, force, adm)
+	fields, err := s.runSyncOp(s.killOpRequest(store, id, key), humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
+		killed, err := s.operatorKill(context.Background(), store, id, force, adm)
 		res := killOpResult(err, adm.Minted)
 		if killed.AlreadyInactive {
 			// A named session's runtime was already gone: nothing was killed.
@@ -1232,17 +1250,29 @@ var resetSessionPolicy = opjournal.Policy{Restart: opjournal.RestartPolicy{Mode:
 // resetSession records a fresh restart of target, as a restart op under
 // ops.lifecycle, and returns the answer.
 func (s *Server) resetSession(ctx context.Context, target, key string) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, target)
+	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
+	// A reset the controller will not act on is refused before anything is
+	// written: a queued fresh restart would never run, or would run later
+	// under a controller that manages the row's state.
+	if refuser, ok := s.state.(UnknownStateRefuser); ok {
+		info, err := session.NewStore(store).Get(id)
+		if err != nil {
+			return syncAnswer{}, humaSessionManagerError(err)
+		}
+		if why := refuser.UnknownStateRefusal(info); why != "" {
+			return syncAnswer{}, apierr.SessionConflict.Msg("session " + id + " cannot be reset: " + why)
+		}
+	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return syncAnswer{}, humaSessionManagerError(err)
 	}
@@ -1263,22 +1293,24 @@ func (s *Server) resetSession(ctx context.Context, target, key string) (syncAnsw
 
 // humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
 
-func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
+func (s *Server) humaHandleSessionRespond(ctx context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
 	// Idempotency: deliver the interaction response at most once per
 	// Idempotency-Key. The cached value is the answer, so a replay rebuilds
 	// the identical body without a second Respond (which would fail with
 	// no_pending once the first one cleared the interaction). Under a
 	// recording ops.control gate the op row backs the cache across restarts.
-	answer, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "respond"), input.IdempotencyKey, input.Body,
+	// A lane respond's answer whose op is still open is not cached: a retry
+	// reads the op through the row under its key (respondSessionLane).
+	answer, err := withIdempotencyKeeping(s.idem, sessionActionIdempotencyPath(input.ID, "respond"), input.IdempotencyKey, input.Body,
 		func() (syncAnswer, error) {
 			// Huma validates Body.Action (minLength:1); no handler guard needed.
-			return s.respondSession(input.ID, input.IdempotencyKey, runtime.InteractionResponse{
+			return s.respondSession(ctx, input.ID, input.IdempotencyKey, runtime.InteractionResponse{
 				RequestID: input.Body.RequestID,
 				Action:    input.Body.Action,
 				Text:      input.Body.Text,
 				Metadata:  input.Body.Metadata,
 			})
-		})
+		}, syncAnswer.final)
 	if err != nil {
 		return nil, err
 	}
@@ -1313,16 +1345,16 @@ func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionCon
 // returns the answer. A configured named session with no row yet is
 // materialized first, after require's refusals that need no conversation.
 func (s *Server) suspendSession(ctx context.Context, target, key string) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	if err := s.checkBeforeEffect(opjournal.KindSuspend, key); err != nil {
 		return syncAnswer{}, err
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, target)
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
@@ -1373,12 +1405,12 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 // whose via differs from del, which only an op recorded before close ops
 // carried del can reach, is idempotency_mismatch as well.
 func (s *Server) closeSession(ctx context.Context, target, key string, del bool) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, target)
+	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
@@ -1389,7 +1421,7 @@ func (s *Server) closeSession(ctx context.Context, target, key string, del bool)
 		strings.Contains(strings.TrimSpace(b.Metadata[apiNamedSessionIdentityKey]), "/") {
 		return syncAnswer{}, apierr.SessionConflict.Msg("configured always-on named sessions cannot be closed while config-managed")
 	}
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return syncAnswer{}, humaSessionManagerError(err)
 	}
@@ -1410,7 +1442,7 @@ func (s *Server) closeSession(ctx context.Context, target, key string, del bool)
 		// Optional: permanently delete the bead after closing.
 		res := syncOpResult(opjournal.KindClose, nil, adm.Minted)
 		if del {
-			if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
+			if err := deleteSessionBeadAfterClose(store, id); err != nil {
 				log.Printf("gc api: deleting bead after close %s: %v", id, err)
 				return syncOpResult(opjournal.KindClose, err, adm.Minted), apierr.Internal.Msg("closed but delete failed: " + err.Error())
 			}
@@ -1456,17 +1488,25 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionContro
 // the answer. A configured named session with no row yet is materialized
 // first, after require's refusals that need no conversation.
 func (s *Server) wakeSessionOp(ctx context.Context, target, key string) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	if err := s.checkBeforeEffect(opjournal.KindWake, key); err != nil {
 		return syncAnswer{}, err
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, target)
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
+	}
+	// A wake the controller will not act on because it skips the row's state
+	// is refused before anything is written, as a reset is: the wake's writes
+	// (the explicit wake request, its cleared blockers and archive stamp, its
+	// canceled waits) would take effect at once, and the request would fire
+	// later, under a controller that manages the state.
+	if why := s.wakeUnknownStateRefusal(store, id); why != "" {
+		return syncAnswer{}, apierr.SessionConflict.Msg("session " + id + " cannot be woken: " + why)
 	}
 	req := syncOpRequest{kind: opjournal.KindWake, conv: id, key: key}
 	fields, err := s.runSyncOp(req, humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
@@ -1524,6 +1564,27 @@ func (s *Server) wakeSession(store beads.SessionStore, id string) error {
 	return nil
 }
 
+// wakeUnknownStateRefusal is why the controller will not act on a wake of
+// session id because it skips the stored row's state, or "" when it does not
+// skip it or the State does not say (UnknownStateRefuser). A row the wake
+// refuses on its own (closed, closing, archived without continuity:
+// session.LifecycleWakeConflictState) keeps that answer, and a row that does
+// not read is left to the wake, which reports it.
+func (s *Server) wakeUnknownStateRefusal(store beads.SessionStore, id string) string {
+	refuser, ok := s.state.(UnknownStateRefuser)
+	if !ok {
+		return ""
+	}
+	info, row, err := session.NewStore(store).GetPersistedResponse(id)
+	if err != nil {
+		return ""
+	}
+	if _, conflict := session.LifecycleWakeConflictState(row.Status, row.Metadata); conflict {
+		return ""
+	}
+	return refuser.UnknownStateRefusal(info)
+}
+
 // --- Session Rename ---
 
 // humaHandleSessionRename is the Huma-typed handler for POST /v0/session/{id}/rename.
@@ -1579,16 +1640,16 @@ func (s *Server) humaHandleSessionUnpin(ctx context.Context, input *SessionIDInp
 
 func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	// A pin materializes a configured named session not yet created, as gc
 	// session pin does; that row is the pin's to keep.
-	id, err := s.resolveSessionIDWithConfig(store.Store, idRef)
+	id, err := s.resolveSessionIDWithConfig(store, idRef)
 	materialized := false
 	if err != nil && pinned {
-		id, err = s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, idRef)
+		id, err = s.resolveSessionIDMaterializingNamedWithContext(ctx, store, idRef)
 		materialized = err == nil
 	}
 	if err != nil {
@@ -1620,7 +1681,7 @@ func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (
 		return nil, humaStoreError(err)
 	}
 	s.state.Enqueue(reconcilekey.Session(id))
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -1633,12 +1694,12 @@ func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (
 
 func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRenameInput) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -1661,7 +1722,7 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 		sessFront.RepairTypeBestEffort(id)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	if err := mgr.Rename(id, input.Body.Title); err != nil {
 		return nil, humaSessionManagerError(err)
 	}

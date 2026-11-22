@@ -2,12 +2,12 @@
 
 // The [ops] gates' builtin default on the default city topologies.
 //
-// The three ops gates default to auto, but no released bd supports
-// --if-revision, so a fresh `gc init` city (its sessions store served through
-// bd) cannot record ops, and neither can a file-store city (no id prefix).
-// Under the builtin default such a store is treated as off: the op-recorded
-// verbs an agent runs print nothing about the op journal, gc doctor's
-// ops-recording check is OK, and no ops.recording_degraded event is raised.
+// The three ops gates default to auto, which records only over a SQLite
+// sessions store, so neither a fresh `gc init` city (its sessions store served
+// through bd, a Dolt-served store) nor a file-store city records ops. Under
+// the builtin default such a store is treated as off: the op-recorded verbs
+// an agent runs print nothing about the op journal, gc doctor's ops-recording
+// check is OK, and no ops.recording_degraded event is raised.
 package acceptance_test
 
 import (
@@ -27,7 +27,9 @@ func TestOpsDefaultAutoIsQuietOnAProxiedDefaultCity(t *testing.T) {
 
 func TestOpsDefaultAutoIsQuietOnAFileCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	// A born-split city's sessions store is SQLite, which records ops; this
+	// test's subject is a single-store file city.
+	c.InitSingleStore("claude")
 	assertOpsDefaultQuiet(t, c, testEnv)
 }
 
@@ -69,7 +71,7 @@ func assertOpsDefaultQuiet(t *testing.T, c *helpers.City, env *helpers.Env) {
 			continue
 		}
 		found = true
-		if r.Status != "ok" || !strings.Contains(r.Message, "auto by default") {
+		if r.Status != "ok" || !strings.Contains(r.Message, "auto (default) records nothing") {
 			t.Errorf("doctor ops-recording = %s %q, want ok naming the default", r.Status, r.Message)
 		}
 	}
