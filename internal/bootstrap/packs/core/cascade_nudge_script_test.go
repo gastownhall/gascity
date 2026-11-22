@@ -133,6 +133,13 @@ type cascadeFake struct {
 	members  map[string][]string
 	rigJSON  string
 	failDir  string
+	// filterEvents makes the `events` branch behave like the real CLI
+	// instead of `cat`: it exits 1 when the events file is absent, honors
+	// `--type` as an exact match and `--since` (Ns/Nm/Nh) against each
+	// event's `ts`. A line that is not JSON passes through untouched, as a
+	// torn events.jsonl write would. Tests that leave it false keep the old
+	// whole-file semantics.
+	filterEvents bool
 }
 
 // body renders the fake into the shell fragment fakeGCBin runs after logging
@@ -141,7 +148,32 @@ type cascadeFake struct {
 func (f cascadeFake) body() string {
 	var b strings.Builder
 	b.WriteString("case \"$1\" in\n")
-	b.WriteString("events) cat '" + f.eventsPath + "' ;;\n")
+	if f.filterEvents {
+		fmt.Fprintf(&b, `events)
+  [ -f '%s' ] || exit 1
+  typ=''
+  since=''
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --type) typ="$2"; shift ;;
+      --since) since="$2"; shift ;;
+    esac
+    shift
+  done
+  jq -c -r -R --arg t "$typ" --arg s "$since" '
+    def dur: if endswith("m") then (.[0:-1] | tonumber) * 60
+             elif endswith("h") then (.[0:-1] | tonumber) * 3600
+             elif endswith("s") then (.[0:-1] | tonumber)
+             else tonumber end;
+    try (fromjson | select(($t == "" or .type == $t)
+       and ($s == "" or ((try (.ts | fromdateiso8601) catch 0) >= (now - ($s | dur))))))
+    catch .' '%s'
+  ;;
+`, f.eventsPath, f.eventsPath)
+	} else {
+		b.WriteString("events) cat '" + f.eventsPath + "' ;;\n")
+	}
 	down := f.downJSON
 	if down == "" {
 		down = "[]"

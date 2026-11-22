@@ -15,16 +15,18 @@
 # $GC_PACK_STATE_DIR/nudge-on-route-state.json, so it is both city- and
 # pack-scoped — multi-city installs never cross-pollinate.
 #
-# Two event sources, one window. Routing is often stamped in the CREATE
+# Two event sources, two windows. Routing is often stamped in the CREATE
 # payload (`gc order run`, formula pours, poured step beads), so the only
 # lifecycle event such a bead ever emits before it is claimed is
 # bead.created (#4382); bead.updated alone misses every one of them. And
 # the controller fires this order on its own dispatch cadence — under
-# max_dispatches_per_tick that can be many minutes apart — while a fixed
-# wall-clock lookback only sees the last couple of minutes, so events
-# between two runs were dropped. Each run therefore processes every
-# bead.created/bead.updated event with seq > the high-water seq recorded by
-# the previous run (bounded by WINDOW), and records the new high-water mark.
+# max_dispatches_per_tick that can be many minutes apart — while a short
+# wall-clock lookback only sees the last couple of minutes. Each run
+# therefore processes every bead.created/bead.updated event with seq > the
+# high-water seq recorded by the previous run: the fast window is read
+# first, the catch-up window bounds the first run and any read the fast
+# window cannot be trusted to cover, and the new high-water mark is
+# recorded.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -41,14 +43,19 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 CITY="${GC_CITY:-.}"
-# Upper bound on how far back one run reads. The real cut is the persisted
-# high-water seq; this only bounds the read (and is the lookback on the very
-# first run, when no seq has been recorded yet).
-WINDOW="${GC_NUDGE_ON_ROUTE_WINDOW:-${GC_NUDGE_ON_ROUTE_LOOKBACK:-1h}}"
+# Fast window, read on every run that has a persisted mark. In steady state
+# the previous run's high-water seq sits just below the log head, so this
+# short read is enough and the run costs one gc events call.
+LOOKBACK="${GC_NUDGE_ON_ROUTE_WINDOW:-${GC_NUDGE_ON_ROUTE_LOOKBACK:-2m}}"
+# Catch-up window: the lookback on the very first run (no mark yet) and on
+# the re-read after an event-log reset. Bounds how far back any run reads;
+# the real cut is always the persisted high-water seq.
+MAX_LOOKBACK="${GC_NUDGE_ON_ROUTE_MAX_LOOKBACK:-1h}"
 # Dedup entries older than this are pruned so the state file stays bounded.
-# Must comfortably exceed WINDOW so an active routing — which keeps
+# Must comfortably exceed MAX_LOOKBACK so an active routing — which keeps
 # re-emitting bead.updated as the reconciler refreshes it — is never
-# pruned and re-nudged. Accepts a simple Ns / Nm / Nh duration.
+# pruned and re-nudged, even by a catch-up read. Accepts a simple
+# Ns / Nm / Nh duration.
 RETENTION="${GC_NUDGE_ON_ROUTE_RETENTION:-2h}"
 NUDGE_MESSAGE="${GC_NUDGE_ON_ROUTE_MESSAGE:-check for assigned work}"
 
@@ -97,28 +104,36 @@ MEMBERS
 # Pull recent events. Best-effort: a read failure (API down) must not crash
 # the controller's order loop. One unfiltered read: `gc events --type` takes
 # a single exact type and both bead.created and bead.updated are needed.
-EVENTS="$(gc events --since "$WINDOW" 2>/dev/null)" || exit 0
-[ -n "$EVENTS" ] || exit 0
-
+# A run with no usable mark reads the catch-up window; a run with a mark
+# reads the fast window, and re-reads the catch-up window when the log head
+# fell below the mark (the log was reset or rebuilt).
 LAST_SEQ="$(cat "$SEQ_FILE" 2>/dev/null || true)"
 case "$LAST_SEQ" in ''|*[!0-9]*) LAST_SEQ=0 ;; esac
 
-# Newest event seq this run read (the next high-water mark).
-HEAD_SEQ="$(printf '%s\n' "$EVENTS" | jq -r '.seq // 0' 2>/dev/null | sort -n | tail -1)" || HEAD_SEQ=""
-case "$HEAD_SEQ" in ''|*[!0-9]*) HEAD_SEQ=0 ;; esac
-# Event log reset/rebuilt below our mark: start over rather than wedge.
-if [ "$LAST_SEQ" -gt 0 ] && [ "$HEAD_SEQ" -gt 0 ] && [ "$HEAD_SEQ" -lt "$LAST_SEQ" ]; then
-    echo "nudge-on-route: event seq went backwards ($HEAD_SEQ < $LAST_SEQ); resetting mark" >&2
-    LAST_SEQ=0
-fi
+read_events() {
+    EVENTS="$(gc events --since "$1" 2>/dev/null)" || exit 0
+}
 
-# Warn when the read did not reach back to the previous mark (the walk was
-# bounded by WINDOW or truncated): routings in that gap are not seen.
-MIN_SEQ="$(printf '%s\n' "$EVENTS" | jq -r '.seq // empty' 2>/dev/null | sort -n | head -1)" || MIN_SEQ=""
-case "$MIN_SEQ" in ''|*[!0-9]*) MIN_SEQ=0 ;; esac
-if [ "$LAST_SEQ" -gt 0 ] && [ "$MIN_SEQ" -gt $((LAST_SEQ + 1)) ]; then
-    echo "nudge-on-route: events $((LAST_SEQ + 1))..$((MIN_SEQ - 1)) were not read (outside WINDOW or truncated walk); routings in that range are skipped" >&2
+# Newest event seq in $EVENTS (the next high-water mark), 0 when none parse.
+head_seq() {
+    _h="$(printf '%s\n' "$EVENTS" | jq -r '.seq // 0' 2>/dev/null | sort -n | tail -1)" || _h=""
+    case "$_h" in ''|*[!0-9]*) _h=0 ;; esac
+    echo "$_h"
+}
+
+if [ "$LAST_SEQ" -gt 0 ]; then
+    read_events "$LOOKBACK"
+    HEAD_SEQ="$(head_seq)"
+    if [ "$HEAD_SEQ" -gt 0 ] && [ "$HEAD_SEQ" -lt "$LAST_SEQ" ]; then
+        echo "nudge-on-route: event seq went backwards ($HEAD_SEQ < $LAST_SEQ); resetting mark" >&2
+        LAST_SEQ=0
+        read_events "$MAX_LOOKBACK"
+    fi
+else
+    read_events "$MAX_LOOKBACK"
 fi
+[ -n "$EVENTS" ] || exit 0
+HEAD_SEQ="$(head_seq)"
 
 # Reduce to unique "<bead_id>\t<routed_to>" pairs from events newer than the
 # previous run's high-water seq. Only events that actually carry a non-empty
