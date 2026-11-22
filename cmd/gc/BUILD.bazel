@@ -2396,6 +2396,7 @@ go_test(
         "session_reconciler_progress_test.go",
         "session_reconciler_read_after_write_test.go",
         "session_reconciler_relaunch_preparedstart_test.go",
+        "session_reconciler_restart_collision_test.go",
         "session_reconciler_restart_request_test.go",
         "session_reconciler_uncommitted_start_test.go",
         "session_reconciler_test.go",
