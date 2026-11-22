@@ -319,7 +319,7 @@ gc analyze work-record [flags]
 |------|------|---------|-------------|
 | `--city` | string |  | city directory (default: discover from cwd) |
 | `--json` | bool |  | emit JSON instead of a table |
-| `--limit` | int | `500` | maximum number of closed beads to scan |
+| `--limit` | int | `500` | maximum number of closed beads to scan (0 = scan every closed bead) |
 
 ## gc bd
 

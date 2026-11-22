@@ -45,7 +45,7 @@ Read-only: this command never writes beads.`,
 		},
 	}
 	cmd.Flags().StringVar(&opts.cityPath, "city", "", "city directory (default: discover from cwd)")
-	cmd.Flags().IntVar(&opts.limit, "limit", 500, "maximum number of closed beads to scan")
+	cmd.Flags().IntVar(&opts.limit, "limit", 500, "maximum number of closed beads to scan (0 = scan every closed bead)")
 	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "emit JSON instead of a table")
 	return cmd
 }
@@ -53,6 +53,9 @@ Read-only: this command never writes beads.`,
 // runAnalyzeWorkRecord is the testable core: resolves the city, opens the
 // store, and delegates to analyzeWorkRecordFromStore.
 func runAnalyzeWorkRecord(opts workRecordCmdOptions, stdout, _ io.Writer) error {
+	if opts.limit < 0 {
+		return fmt.Errorf("--limit %d: want a non-negative count (0 scans every closed bead)", opts.limit)
+	}
 	cityPath, err := resolveWorkRecordCityPath(opts.cityPath)
 	if err != nil {
 		return err

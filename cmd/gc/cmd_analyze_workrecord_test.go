@@ -81,3 +81,17 @@ func TestNewAnalyzeCmdRegistersWorkRecordSubcommand(t *testing.T) {
 		t.Fatalf("expected a %q subcommand registered under %q", "work-record", "analyze")
 	}
 }
+
+func TestRunAnalyzeWorkRecordRejectsNegativeLimit(t *testing.T) {
+	var out strings.Builder
+	err := runAnalyzeWorkRecord(workRecordCmdOptions{limit: -1}, &out, &out)
+	if err == nil {
+		t.Fatal("runAnalyzeWorkRecord(limit=-1) = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "--limit -1") {
+		t.Errorf("error %q does not name the rejected --limit value", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("wrote %q to stdout for a rejected --limit", out.String())
+	}
+}
