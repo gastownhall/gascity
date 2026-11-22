@@ -841,6 +841,12 @@ func TestCascadeNudgeMatchesEveryBeadClosedShape(t *testing.T) {
 		wantReads  int
 	}{
 		{
+			name:       "wrapped",
+			events:     []string{cascadeShapeClose["wrapped"]},
+			wantNudges: 1,
+			wantReads:  1,
+		},
+		{
 			name:       "flat",
 			events:     []string{cascadeShapeClose["flat"]},
 			wantNudges: 1,
