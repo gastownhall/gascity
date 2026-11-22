@@ -108,8 +108,14 @@ func (c *bdBeadsVersionCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	var skew, unknown []string
 	compared := 0
 	// One read per distinct binary: a city whose rigs share one bd (a symlink
-	// or a shared pin) reads it once.
-	versions := map[string]string{}
+	// or a shared pin) reads it once, and every scope resolving that binary
+	// gets the same verdict — including scopes sharing a shim, whose not-
+	// compared reason must stay the shim's, not a misread (devel).
+	type binaryRead struct {
+		version    string
+		unreadable bool
+	}
+	binaries := map[string]*binaryRead{}
 	for _, target := range c.scopes() {
 		if !providerUsesBdStoreContract(rawBeadsProviderForScope(target.ScopeRoot, c.cityPath)) {
 			continue
@@ -124,26 +130,26 @@ func (c *bdBeadsVersionCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		if abs, evalErr := filepath.EvalSymlinks(bdPath); evalErr == nil {
 			key = abs
 		}
-		bdVersion, read := versions[key]
-		if !read {
-			info, err := c.readBinaryBuildInfo(bdPath)
-			if err != nil {
-				unknown = append(unknown, fmt.Sprintf("%s: %s carries no readable Go build info (a shim or non-Go binary)", label, bdPath))
-				versions[key] = ""
-				continue
+		read, cached := binaries[key]
+		if !cached {
+			read = &binaryRead{}
+			if info, err := c.readBinaryBuildInfo(bdPath); err != nil {
+				read.unreadable = true
+			} else {
+				read.version, _ = contract.BeadsModuleVersion(info)
 			}
-			bdVersion, _ = contract.BeadsModuleVersion(info)
-			versions[key] = bdVersion
+			binaries[key] = read
 		}
-		if bdVersion == "" {
+		switch {
+		case read.unreadable:
+			unknown = append(unknown, fmt.Sprintf("%s: %s carries no readable Go build info (a shim or non-Go binary)", label, bdPath))
+		case read.version == "":
 			unknown = append(unknown, fmt.Sprintf("%s: %s embeds no comparable beads version (a (devel) or replaced build)", label, bdPath))
-			continue
+		case read.version != ownVersion:
+			skew = append(skew, fmt.Sprintf("%s: %s embeds beads %s, gc links %s", label, bdPath, read.version, ownVersion))
+		default:
+			compared++
 		}
-		if bdVersion != ownVersion {
-			skew = append(skew, fmt.Sprintf("%s: %s embeds beads %s, gc links %s", label, bdPath, bdVersion, ownVersion))
-			continue
-		}
-		compared++
 	}
 
 	if len(skew) > 0 {

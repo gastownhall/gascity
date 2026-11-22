@@ -228,3 +228,147 @@ func TestBdBeadsVersionCheckNamesTheSkewedRig(t *testing.T) {
 		t.Errorf("the city's pinned bd is named as skewed although it matches:\n%s", details)
 	}
 }
+
+// writeRecordingShimBD places a bd on PATH that records any execution at
+// marker and answers nothing: the check must read build info without ever
+// running bd, so the marker staying absent is the proof.
+func writeRecordingShimBD(t *testing.T, path, marker string) {
+	t.Helper()
+	script := "#!/bin/sh\n: > " + marker + "\nexit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write shim bd %s: %v", path, err)
+	}
+}
+
+// TestBdBeadsVersionCheckUnknownSidesStayOK is AC-6: when either side's beads
+// version cannot be named — no bd resolved, a shim or non-Go bd, a (devel) or
+// replaced build, gc without module info — or the city has no bd-backed scope,
+// the check reports OK with the reason, never a warning or error, and never
+// executes bd.
+func TestBdBeadsVersionCheckUnknownSidesStayOK(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, f *bdBeadsVersionFixture) (marker string)
+		wantTrace string
+	}{
+		{
+			name: "no bd on PATH",
+			setup: func(_ *testing.T, _ *bdBeadsVersionFixture) string {
+				return ""
+			},
+			wantTrace: "no bd resolved",
+		},
+		{
+			name: "shim bd that would record execution",
+			setup: func(t *testing.T, f *bdBeadsVersionFixture) string {
+				marker := filepath.Join(t.TempDir(), "executed")
+				writeRecordingShimBD(t, filepath.Join(f.binDir, "bd"), marker)
+				return marker
+			},
+			wantTrace: "no readable Go build info",
+		},
+		{
+			name: "bd built from source at (devel)",
+			setup: func(t *testing.T, f *bdBeadsVersionFixture) string {
+				writeBuildinfoBd(t, filepath.Join(f.binDir, "bd"), "(devel)")
+				return ""
+			},
+			wantTrace: "embeds no comparable beads version",
+		},
+		{
+			name: "gc without module build info",
+			setup: func(t *testing.T, f *bdBeadsVersionFixture) string {
+				writeBuildinfoBd(t, filepath.Join(f.binDir, "bd"), "v1.3.4")
+				return ""
+			},
+			wantTrace: "no module build info",
+		},
+		{
+			name: "gc at (devel)",
+			setup: func(t *testing.T, f *bdBeadsVersionFixture) string {
+				writeBuildinfoBd(t, filepath.Join(f.binDir, "bd"), "v1.3.4")
+				return ""
+			},
+			wantTrace: "unknown",
+		},
+		{
+			name: "gc links a replaced beads module",
+			setup: func(t *testing.T, f *bdBeadsVersionFixture) string {
+				writeBuildinfoBd(t, filepath.Join(f.binDir, "bd"), "v1.3.4")
+				return ""
+			},
+			wantTrace: "replaced",
+		},
+		{
+			name: "file-backed city with no bd-backed scope",
+			setup: func(t *testing.T, f *bdBeadsVersionFixture) string {
+				cityTOML := "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n"
+				if err := os.WriteFile(filepath.Join(f.city, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+					t.Fatalf("write city.toml: %v", err)
+				}
+				marker := filepath.Join(t.TempDir(), "executed")
+				writeRecordingShimBD(t, filepath.Join(f.binDir, "bd"), marker)
+				return marker
+			},
+			wantTrace: "no scope uses the bd store contract",
+		},
+		{
+			name: "two scopes sharing one unreadable shim keep the shim's reason",
+			setup: func(t *testing.T, f *bdBeadsVersionFixture) string {
+				f.cfg.Rigs = []config.Rig{
+					{Name: "rig-a", Path: "rigs/a"},
+					{Name: "rig-b", Path: "rigs/b"},
+				}
+				marker := filepath.Join(t.TempDir(), "executed")
+				writeRecordingShimBD(t, filepath.Join(f.binDir, "bd"), marker)
+				return marker
+			},
+			wantTrace: "no readable Go build info",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBdBeadsVersionFixture(t)
+			marker := tc.setup(t, f)
+
+			check := newBdBeadsVersionCheck(f.city, f.cfg)
+			switch tc.name {
+			case "gc without module build info":
+				check.readOwnBuildInfo = func() (*debug.BuildInfo, bool) { return nil, false }
+			case "gc at (devel)":
+				check.readOwnBuildInfo = func() (*debug.BuildInfo, bool) {
+					return gcBuildInfoWithBeads("(devel)"), true
+				}
+			case "gc links a replaced beads module":
+				check.readOwnBuildInfo = func() (*debug.BuildInfo, bool) {
+					info := gcBuildInfoWithBeads("v1.3.4")
+					info.Deps[0].Replace = &debug.Module{Path: "../beads", Version: "v0.0.0"}
+					return info, true
+				}
+			default:
+				ownBeads(check)
+			}
+			r := bdBeadsVersionCheckResult(t, check, f.city)
+
+			if r.Status != doctor.StatusOK {
+				t.Fatalf("an unknown side reported %v, want OK: %+v", r.Status, r)
+			}
+			if r.Severity != doctor.SeverityAdvisory {
+				t.Fatalf("an unknown side carried severity %v; the check never gates anything", r.Severity)
+			}
+			if !strings.Contains(r.Message, tc.wantTrace) {
+				t.Errorf("OK message %q does not carry the reason (%q)", r.Message, tc.wantTrace)
+			}
+			if marker != "" {
+				if _, err := os.Stat(marker); err == nil {
+					t.Error("the check executed bd to learn its version; build info must be read from the file")
+				}
+			}
+			if tc.name == "two scopes sharing one unreadable shim keep the shim's reason" {
+				if got := strings.Count(r.Message, "no readable Go build info"); got != 3 {
+					t.Errorf("OK message names the shim reason %d time(s) across 3 scopes, want 3:\n%s", got, r.Message)
+				}
+			}
+		})
+	}
+}
