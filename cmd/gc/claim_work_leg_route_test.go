@@ -181,6 +181,12 @@ func (f *workLegFixture) ops() hookClaimOps {
 // whose reader serves rows, with the route under test.
 func (f *workLegFixture) claim(primary hookStore, route *hookClaimWorkLegRoute, rows string) (int, hookClaimJSONResult, string) {
 	f.t.Helper()
+	return f.claimWith(primary, workLegRoutedHookClaimOps(f.ops(), route, false), rows)
+}
+
+// claimWith is claim with the caller's composed ops.
+func (f *workLegFixture) claimWith(primary hookStore, ops hookClaimOps, rows string) (int, hookClaimJSONResult, string) {
+	f.t.Helper()
 	run := func(_, dir string, _ []string) (string, error) {
 		if dir != primary.dir {
 			f.t.Fatalf("work query ran against %q, want only the primary %q", dir, primary.dir)
@@ -194,7 +200,6 @@ func (f *workLegFixture) claim(primary hookStore, route *hookClaimWorkLegRoute, 
 		DrainAck:           true,
 		JSON:               true,
 	}
-	ops := workLegRoutedHookClaimOps(f.ops(), route, false)
 	var stdout, stderr bytes.Buffer
 	code := claimHookWorkWithRunner("gc ready --json", primary.dir, primary.env, []hookStore{primary}, opts, ops, run, func(string, error) {}, &stdout, &stderr)
 	var result hookClaimJSONResult
@@ -399,4 +404,71 @@ func TestHookClaimWorkLegRoutePrimaryHitBuildsNoOtherLeg(t *testing.T) {
 			t.Fatalf("env builds %v, beta ops %v; want only alpha built and beta untouched", f.envBuilds, f.callsIn("beta"))
 		}
 	})
+}
+
+// workLegRecordingBinding is a class binding that notes each read and claim
+// it serves in the fixture's call log, so a row can order the binding's
+// answers against the work legs' reads.
+type workLegRecordingBinding struct {
+	beads.Store
+	f *workLegFixture
+}
+
+func (b workLegRecordingBinding) Get(id string) (beads.Bead, error) {
+	b.f.calls = append(b.f.calls, "binding-read binding -")
+	return b.Store.Get(id)
+}
+
+func (b workLegRecordingBinding) Claim(id, assignee string) (beads.Bead, bool, error) {
+	b.f.calls = append(b.f.calls, "binding-claim binding -")
+	claimer, ok := b.Store.(interface {
+		Claim(id, assignee string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		return beads.Bead{}, false, fmt.Errorf("the recorded binding %T has no compare-and-swap claim", b.Store)
+	}
+	return claimer.Claim(id, assignee)
+}
+
+// TestHookClaimWorkLegRouteWorkLegsBeforeBinding pins AC-5: a work-shaped id
+// only the class binding holds is read, once, through every other serving
+// work leg, each proving absence, before the class route consults the
+// binding; and the claim lands in the binding as it does without the route.
+func TestHookClaimWorkLegRouteWorkLegsBeforeBinding(t *testing.T) {
+	f := newWorkLegFixture(t, "alpha", "beta")
+	stored := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, stored, "wk-77", map[string]string{"gc.routed_to": f.agent.Name})
+	primary := f.primary("")
+	ops := classRoutedHookClaimOps(workLegRoutedHookClaimOps(f.ops(), f.route(""), true), newClaimRouteFor(t, workLegRecordingBinding{Store: stored, f: f}))
+
+	code, result, stderr := f.claimWith(primary, ops, f.routedRow("wk-77"))
+	if code != 0 || result.Action != "work" || result.BeadID != "wk-77" {
+		t.Fatalf("claim = exit %d %+v, want exit 0 action=work for wk-77; stderr=%q", code, result, stderr)
+	}
+	if held, err := stored.Get("wk-77"); err != nil || held.Assignee != f.agent.Name {
+		t.Fatalf("binding holds wk-77 as %+v (err %v), want it claimed by %s", held, err, f.agent.Name)
+	}
+
+	firstBinding := -1
+	for i, call := range f.calls {
+		fields := strings.Fields(call)
+		switch {
+		case strings.HasPrefix(fields[0], "binding-"):
+			if firstBinding < 0 {
+				firstBinding = i
+			}
+		case fields[1] == f.dirOf("alpha") || fields[1] == f.dirOf("beta"):
+			if firstBinding >= 0 {
+				t.Fatalf("calls = %v: work leg op %q after the binding was consulted", f.calls, call)
+			}
+		}
+	}
+	if firstBinding < 0 {
+		t.Fatalf("calls = %v: the binding was never consulted", f.calls)
+	}
+	for _, rig := range []string{"alpha", "beta"} {
+		if got := f.callsIn(rig); len(got) != 1 || got[0] != "read" {
+			t.Fatalf("ops on rig %s = %v, want exactly one read proving absence", rig, got)
+		}
+	}
 }
