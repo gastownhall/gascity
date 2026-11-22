@@ -136,6 +136,28 @@ func (f *fakeBD) spawns() []string {
 	return out
 }
 
+// spawnPIDs returns the pid of every child spawned so far, in spawn order.
+func (f *fakeBD) spawnPIDs() []int {
+	f.t.Helper()
+	data, err := os.ReadFile(f.spawnLog)
+	if err != nil {
+		f.t.Fatalf("reading spawn log: %v", err)
+	}
+	var out []int
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		field, _, _ := strings.Cut(line, " ")
+		pid, err := strconv.Atoi(field)
+		if err != nil {
+			f.t.Fatalf("spawn log line %q: %v", line, err)
+		}
+		out = append(out, pid)
+	}
+	return out
+}
+
 // waitFor polls cond until it holds, failing the test after 5s.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
