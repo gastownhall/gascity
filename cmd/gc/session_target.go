@@ -12,10 +12,28 @@ import (
 // sessionRuntimeTarget captures the public identity and runtime session name
 // needed by session-facing CLI commands.
 type sessionRuntimeTarget struct {
-	cityPath    string
-	display     string
+	cityPath string
+	display  string
+	// sessionName names the runtime session the commands act on through
+	// the provider (a container's tmux "main" included).
 	sessionName string
+	// durableName is the name the durable session row (and the claims its
+	// identities hold) live under: the resolved logical session name, or for
+	// the env-derived current session GC_SESSION_NAME, else the display
+	// identity — never a container-local GC_TMUX_SESSION. Empty means the
+	// durable name is the runtime name, the ordinary local shape.
+	durableName string
 	sessionID   string // resolved session bead ID; empty for the env-derived current session
+}
+
+// durableRowName returns the name durable operations address this target's
+// session row by. It is the runtime session name unless the two differ (a
+// container-local runtime name).
+func (t sessionRuntimeTarget) durableRowName() string {
+	if strings.TrimSpace(t.durableName) != "" {
+		return strings.TrimSpace(t.durableName)
+	}
+	return t.sessionName
 }
 
 func defaultSessionDisplayIdentity() string {
@@ -39,6 +57,10 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 	if sessionName == "" {
 		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (GC_SESSION_NAME not set)")
 	}
+	durable := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	if durable == "" {
+		durable = display
+	}
 	cityPath, ok := resolveExplicitCityPathEnv()
 	if !ok {
 		if cityPath, ok = resolveCityPathFromGCDir(); !ok {
@@ -55,6 +77,7 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 		cityPath:    cityPath,
 		display:     display,
 		sessionName: sessionName,
+		durableName: durable,
 	}, nil
 }
 
@@ -97,6 +120,7 @@ func sessionRuntimeTargetFromNudge(target nudgeTarget) sessionRuntimeTarget {
 		cityPath:    target.cityPath,
 		display:     display,
 		sessionName: target.sessionName,
+		durableName: target.sessionName,
 		sessionID:   target.sessionID,
 	}
 }
