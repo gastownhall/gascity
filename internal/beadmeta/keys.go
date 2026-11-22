@@ -333,8 +333,9 @@ const (
 	// SkippedBlockersMetadataKey is written by workflow-finalize on a root it
 	// closes gc.outcome=pass, and only when one or more of the finalizer's
 	// direct blocks blockers closed gc.outcome=skipped. The value is those
-	// blockers' IDs, sorted and comma-joined. It is absent on every other
-	// close, so a pass with skipped work reads apart from one where every
+	// blockers' IDs, sorted and comma-joined. It is absent or empty on every
+	// other close (a finalize retry that re-settles a root carrying it writes
+	// it empty), so a pass with skipped work reads apart from one where every
 	// blocker ran.
 	SkippedBlockersMetadataKey = "gc.skipped_blockers"
 	SourceBeadIDMetadataKey    = "gc.source_bead_id"

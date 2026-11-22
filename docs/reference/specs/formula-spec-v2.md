@@ -1107,7 +1107,9 @@ intentionally leave parent source beads open for investigation. A blocker
 closed `gc.outcome = skipped` does not fail the workflow. When the root
 closes pass with one or more skipped blockers, the same update writes
 `gc.skipped_blockers` on the root: those blockers' IDs, sorted and
-comma-joined. The key is absent on every other close.
+comma-joined. The key is absent or empty on every other close: a finalize
+retry that re-settles a root carrying it, for example as canceled, writes it
+empty.
 
 **Teardown is post-settlement.** Teardown work
 (`gc.scope_role = "teardown"`) is the one part of a workflow that outlives

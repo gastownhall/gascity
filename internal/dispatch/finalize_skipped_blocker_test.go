@@ -78,6 +78,22 @@ func (f skippedBlockerFixture) finalize(t *testing.T) (ControlResult, beads.Bead
 	return result, mustGetBead(t, f.store, f.root.ID)
 }
 
+// closeRootPassed stands in for a first finalize attempt that closed the root
+// pass with gc.skipped_blockers=marker and then failed before closing the
+// finalizer, which stays open for the retry.
+func (f skippedBlockerFixture) closeRootPassed(t *testing.T, marker string) {
+	t.Helper()
+	if err := f.store.SetMetadataBatch(f.root.ID, map[string]string{
+		"gc.outcome":          "pass",
+		"gc.skipped_blockers": marker,
+	}); err != nil {
+		t.Fatalf("stamp root: %v", err)
+	}
+	if err := f.store.Close(f.root.ID); err != nil {
+		t.Fatalf("close root: %v", err)
+	}
+}
+
 func outcomeMeta(outcome string) map[string]string {
 	return map[string]string{"gc.outcome": outcome}
 }
@@ -297,7 +313,7 @@ func TestCloseWorkflowRootQuarantineRefusalWritesNoSkippedBlockers(t *testing.T)
 	f := newSkippedBlockerFixture(t, store, []map[string]string{outcomeMeta("skipped")}, nil)
 	quarantineWorkflowRoot(t, store, f.root.ID)
 
-	err := closeWorkflowRoot(beadstest.Graph(store), f.root.ID, "pass", []string{f.blockers[0].ID})
+	err := closeWorkflowRoot(beadstest.Graph(store), f.root, f.root.ID, "pass", []string{f.blockers[0].ID})
 	if !errors.Is(err, errRootQuarantined) {
 		t.Fatalf("closeWorkflowRoot err = %v, want errRootQuarantined", err)
 	}
@@ -455,21 +471,11 @@ func TestProcessWorkflowFinalizeSkippedBlockerEdges(t *testing.T) {
 	t.Run("crash retry keeps the marker", func(t *testing.T) {
 		t.Parallel()
 
-		store := beads.NewMemStore()
-		f := newSkippedBlockerFixture(t, store, []map[string]string{
+		f := newSkippedBlockerFixture(t, beads.NewMemStore(), []map[string]string{
 			outcomeMeta("pass"),
 			outcomeMeta("skipped"),
 		}, nil)
-		// The root closed with the marker; the crash left the finalizer open.
-		if err := store.SetMetadataBatch(f.root.ID, map[string]string{
-			"gc.outcome":          "pass",
-			"gc.skipped_blockers": f.blockers[1].ID,
-		}); err != nil {
-			t.Fatalf("stamp root: %v", err)
-		}
-		if err := store.Close(f.root.ID); err != nil {
-			t.Fatalf("close root: %v", err)
-		}
+		f.closeRootPassed(t, f.blockers[1].ID)
 		result, root := f.finalize(t)
 		if result.Action != "workflow-pass" {
 			t.Fatalf("action = %q, want workflow-pass", result.Action)
@@ -501,4 +507,94 @@ func TestProcessWorkflowFinalizeSkippedBlockerEdges(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestProcessWorkflowFinalizeRetryRegradeEmptiesSkippedBlockers pins that
+// gc.skipped_blockers never outlives the pass it describes. The root closes
+// before its finalizer, so a finalize retry can re-settle a root the first
+// attempt closed pass with the marker; when the retry settles it any other way
+// than a pass with skips, the same close writes the marker empty. The fail
+// row's culprit is an ordinary abort_scope member rather than a teardown step,
+// because a teardown's outcome must never re-grade the root
+// (formula-spec-v2.md, "Teardown is post-settlement").
+func TestProcessWorkflowFinalizeRetryRegradeEmptiesSkippedBlockers(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		// regrade is what changes between the first attempt's root close and
+		// the retry.
+		regrade     func(t *testing.T, f skippedBlockerFixture)
+		wantAction  string
+		wantOutcome string
+	}{{
+		name: "run above the drain item canceled",
+		regrade: func(t *testing.T, f skippedBlockerFixture) {
+			t.Helper()
+			run := mustCreateWorkflowBead(t, f.store, beads.Bead{
+				Title: "run",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			})
+			drain := mustCreateWorkflowBead(t, f.store, beads.Bead{
+				Title:    "drain",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "drain", "gc.root_bead_id": run.ID},
+			})
+			if err := f.store.SetMetadata(f.root.ID, "gc.drain_control_id", drain.ID); err != nil {
+				t.Fatalf("link the item root to its drain: %v", err)
+			}
+			// Run cancel skips the closed item root and marks the open run.
+			if err := f.store.SetMetadata(run.ID, "gc.cancel_requested", "true"); err != nil {
+				t.Fatalf("cancel the run: %v", err)
+			}
+		},
+		wantAction:  "workflow-canceled",
+		wantOutcome: "canceled",
+	}, {
+		name: "abort_scope member failed hard",
+		regrade: func(t *testing.T, f skippedBlockerFixture) {
+			t.Helper()
+			mustCreateWorkflowBead(t, f.store, beads.Bead{
+				Title:  "preflight",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.root_bead_id":  f.root.ID,
+					"gc.scope_ref":     "body",
+					"gc.scope_role":    "member",
+					"gc.outcome":       "fail",
+					"gc.failure_class": "hard",
+					"gc.on_fail":       "abort_scope",
+				},
+			})
+		},
+		wantAction:  "workflow-fail",
+		wantOutcome: "fail",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSkippedBlockerFixture(t, beads.NewMemStore(), []map[string]string{
+				outcomeMeta("pass"),
+				outcomeMeta("skipped"),
+			}, nil)
+			f.closeRootPassed(t, f.blockers[1].ID)
+			tc.regrade(t, f)
+			result, root := f.finalize(t)
+
+			if result.Action != tc.wantAction {
+				t.Fatalf("action = %q, want %q", result.Action, tc.wantAction)
+			}
+			if root.Status != "closed" || root.Metadata["gc.outcome"] != tc.wantOutcome {
+				t.Fatalf("root status=%q gc.outcome=%q, want closed/%s", root.Status, root.Metadata["gc.outcome"], tc.wantOutcome)
+			}
+			if got := root.Metadata["gc.skipped_blockers"]; got != "" {
+				t.Fatalf("root gc.skipped_blockers = %q after the retry closed it %s, want it empty", got, tc.wantOutcome)
+			}
+		})
+	}
 }
