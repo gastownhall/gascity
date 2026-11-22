@@ -514,3 +514,106 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 		}
 	})
 }
+
+// TestNudgeOnRouteEvaluatesEachEventOnce pins the mark's retry contract. A
+// run that evaluates a routed pair whose nudge fails (usually a pool with no
+// live member yet) advances the mark anyway — the pair has no dedup entry,
+// so the bead's next bead.updated retries it — and the next run with nothing
+// above the mark attempts no nudge and leaves the mark alone. A line that is
+// not JSON (a torn events.jsonl write) must not drop the rest of the batch
+// or wedge the mark: every event is evaluated line by line.
+func TestNudgeOnRouteEvaluatesEachEventOnce(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; nudge-on-route.sh requires it")
+	}
+
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	writeEvents := func(lines ...string) {
+		t.Helper()
+		if err := os.WriteFile(eventsPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatalf("write events: %v", err)
+		}
+	}
+	failMarker := filepath.Join(dir, "worker-1")
+	seed := []string{
+		"not json",
+		nudgeEvent(2, "bead.updated", nudgeAgo(30*time.Second), "ga-plain", "", false),
+		nudgeEvent(3, "bead.updated", nudgeAgo(30*time.Second), "ga-rty", "worker-1", false),
+	}
+	writeEvents(seed...)
+	binDir, logPath := fakeGCBin(t, cascadeFake{
+		eventsPath:   eventsPath,
+		failDir:      dir,
+		filterEvents: true,
+	}.body())
+	stateDir := filepath.Join(dir, "state")
+
+	// Run 1: the nudge to worker-1 fails (fail marker), so the pair stays
+	// unrecorded, but the events were evaluated: the mark advances.
+	if err := os.WriteFile(failMarker, nil, 0o644); err != nil {
+		t.Fatalf("write fail marker: %v", err)
+	}
+	out, err := runNudgeOnRoute(t, binDir, stateDir)
+	if err != nil {
+		t.Fatalf("run 1 failed: %v\n%s", err, out)
+	}
+	if got := countNudgesTo(t, logPath, "worker-1"); got != 1 {
+		t.Fatalf("run 1: nudge attempts to worker-1 = %d, want 1", got)
+	}
+	if nudgeStateHasKey(t, stateDir, "ga-rty|worker-1") {
+		t.Fatal("run 1: the failed pair must not be recorded as nudged")
+	}
+	if got := nudgeReadSeq(t, stateDir); got != "3" {
+		t.Fatalf("run 1: seq mark = %q, want 3 (the failed nudge must not hold the mark back)", got)
+	}
+
+	// Run 2: same events, nothing above the mark, marker gone. No new
+	// attempt, mark unchanged.
+	if err := os.Remove(failMarker); err != nil {
+		t.Fatalf("remove fail marker: %v", err)
+	}
+	out, err = runNudgeOnRoute(t, binDir, stateDir)
+	if err != nil {
+		t.Fatalf("run 2 failed: %v\n%s", err, out)
+	}
+	if got, logged := countNudges(t, logPath); got != 1 {
+		t.Fatalf("run 2: nudges = %d, want still 1 (no event above the mark); gc calls:\n%s", got, logged)
+	}
+	if got := nudgeReadSeq(t, stateDir); got != "3" {
+		t.Fatalf("run 2: seq mark = %q, want still 3", got)
+	}
+
+	// Run 3: seq 4 re-emits the pair (the reconciler refreshes live
+	// routings); the retry goes out and is recorded.
+	writeEvents(append(append([]string{}, seed...),
+		nudgeEvent(4, "bead.updated", nudgeAgo(20*time.Second), "ga-rty", "worker-1", false))...)
+	out, err = runNudgeOnRoute(t, binDir, stateDir)
+	if err != nil {
+		t.Fatalf("run 3 failed: %v\n%s", err, out)
+	}
+	if got := countNudgesTo(t, logPath, "worker-1"); got != 2 {
+		t.Fatalf("run 3: nudges to worker-1 = %d, want 2 (one failed attempt, one retry)", got)
+	}
+	if !nudgeStateHasKey(t, stateDir, "ga-rty|worker-1") {
+		t.Fatal("run 3: the retried pair must be recorded once delivered")
+	}
+	if got := nudgeReadSeq(t, stateDir); got != "4" {
+		t.Fatalf("run 3: seq mark = %q, want 4", got)
+	}
+
+	// A batch with nothing routed still advances the mark.
+	writeEvents(
+		nudgeEvent(5, "bead.updated", nudgeAgo(15*time.Second), "ga-none", "", false),
+		nudgeEvent(6, "bead.updated", nudgeAgo(10*time.Second), "ga-none2", "", false))
+	out, err = runNudgeOnRoute(t, binDir, stateDir)
+	if err != nil {
+		t.Fatalf("run 4 failed: %v\n%s", err, out)
+	}
+	if got, logged := countNudges(t, logPath); got != 2 {
+		t.Fatalf("run 4: nudges = %d, want still 2; gc calls:\n%s", got, logged)
+	}
+	if got := nudgeReadSeq(t, stateDir); got != "6" {
+		t.Fatalf("run 4: seq mark = %q, want 6 (nothing routed still advances the mark)", got)
+	}
+}

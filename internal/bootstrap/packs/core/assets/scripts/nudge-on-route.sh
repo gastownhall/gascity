@@ -129,9 +129,12 @@ read_events() {
 }
 
 # Lowest (LOW_SEQ) and newest (HEAD_SEQ) event seq in $EVENTS; 0 when none
-# parse. HEAD_SEQ is the next high-water mark.
+# parse. HEAD_SEQ is the next high-water mark. Parsed line by line so one
+# malformed line (a torn events.jsonl write) never drops the rest.
 seq_bounds() {
-    _b="$(printf '%s\n' "$EVENTS" | jq -r '.seq // empty' 2>/dev/null | sort -n)" || _b=""
+    _b="$(printf '%s\n' "$EVENTS" \
+        | jq -R -r 'fromjson? | try (.seq // empty) catch empty' 2>/dev/null \
+        | sort -n)" || _b=""
     LOW_SEQ="$(printf '%s\n' "$_b" | sed -n '1p')"
     HEAD_SEQ="$(printf '%s\n' "$_b" | sed -n '$p')"
     case "$LOW_SEQ" in ''|*[!0-9]*) LOW_SEQ=0 ;; esac
@@ -176,15 +179,18 @@ fi
 # (.payload.bead // .payload): the API envelope wraps the bead under
 # .payload.bead while the `gc events` local fallback emits the bead fields
 # directly under .payload (#5968) — same normalization as the sibling
-# notify-on-human-gate-creation.sh.
+# notify-on-human-gate-creation.sh. Parsed line by line so one malformed
+# line never drops the rest of the batch.
 PAIRS="$(printf '%s\n' "$EVENTS" \
-    | jq -r --argjson last "$LAST_SEQ" '
-        select((.seq // 0) > $last
-               and (.type == "bead.created" or .type == "bead.updated"))
-        | (.payload.bead // .payload) as $b
-        | select($b.metadata."gc.routed_to" != null
-                 and $b.metadata."gc.routed_to" != "")
-        | [$b.id, $b.metadata."gc.routed_to"] | @tsv' 2>/dev/null \
+    | jq -R -r --argjson last "$LAST_SEQ" '
+        fromjson? | try (
+            select((.seq // 0) > $last
+                   and (.type == "bead.created" or .type == "bead.updated"))
+            | (.payload.bead // .payload) as $b
+            | select($b.metadata."gc.routed_to" != null
+                     and $b.metadata."gc.routed_to" != "")
+            | [$b.id, $b.metadata."gc.routed_to"] | @tsv
+        ) catch empty' 2>/dev/null \
     | sort -u)" || PAIRS=""
 
 # Advance the high-water mark to the newest event seen, regardless of type,
@@ -227,16 +233,19 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
 done <<EOF
 $PAIRS
 EOF
-advance_seq
 
 # Prune entries older than RETENTION so the state file stays bounded.
 STATE="$(echo "$STATE" | jq --argjson keep "$RETENTION_S" \
     'with_entries(select((now - (.value | fromdateiso8601)) <= $keep))')" || true
 
-# Atomic write: temp file in the same dir, then rename.
+# Atomic write: temp file in the same dir, then rename. The dedup state is
+# written before the seq mark on purpose: a crash between the two
+# re-evaluates the batch, and dedup absorbs the repeats, while the reverse
+# order would skip events whose pairs were never recorded.
 TMP="$(mktemp "$PACK_STATE_DIR/.nudge-on-route-state.XXXXXX")"
 printf '%s\n' "$STATE" > "$TMP"
 mv -f "$TMP" "$STATE_FILE"
+advance_seq
 
 if [ "$NUDGED" -gt 0 ]; then
     echo "nudge-on-route: nudged $NUDGED newly-routed bead(s)"
