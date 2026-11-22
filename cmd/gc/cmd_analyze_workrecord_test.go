@@ -41,7 +41,7 @@ func TestAnalyzeWorkRecordFromStoreJSON(t *testing.T) {
 		t.Fatalf("analyzeWorkRecordFromStore: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{`"total_gated"`, `"covered"`, `"missing"`, `"coverage"`} {
+	for _, want := range []string{`"ok":true`, `"total_gated"`, `"covered"`, `"missing"`, `"coverage"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("JSON output missing %q; got:\n%s", want, out)
 		}

@@ -309,6 +309,14 @@ versus how many are missing one, per the work-record close gate
 workflow roots, scope/run/check/drain steps, etc.) and non-task beads are
 excluded — they are not subject to the gate.
 
+Scope: scans the city (HQ) bead store only; rig stores are not included.
+"Covered" means the bead carries a valid gc.work_outcome value; it does not
+re-check the rest of the close contract (e.g. commits for "shipped").
+
+--limit caps the newest closed rows read before eligibility filtering, so a
+bounded report covers only the gated beads among them; use --limit 0 for an
+exact report.
+
 Read-only: this command never writes beads.
 
 ```
@@ -319,7 +327,7 @@ gc analyze work-record [flags]
 |------|------|---------|-------------|
 | `--city` | string |  | city directory (default: discover from cwd) |
 | `--json` | bool |  | emit JSON instead of a table |
-| `--limit` | int | `500` | maximum number of closed beads to scan (0 = scan every closed bead) |
+| `--limit` | int | `500` | maximum number of closed beads to read before eligibility filtering (0 = scan every closed bead; use 0 for an exact report) |
 
 ## gc bd
 
