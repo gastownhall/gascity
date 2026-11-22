@@ -68,6 +68,27 @@ func runPodLocalTmux(argv []string) (string, error) {
 	return string(out), err
 }
 
+// ValidateMarkedPodStaticConfig validates, without a Kubernetes client and
+// without any API access, the pod-creation settings a marked process
+// carries: the scheduling projections (node selector, tolerations, affinity,
+// priority class) and the managed in-cluster service alias. Startup
+// validation calls it so a malformed setting fails a pod-hosted dispatcher
+// at its start with the setting named, instead of surfacing only when a
+// retry first recycles a session.
+//
+// It deliberately shares the parsers NewProvider uses and stays out of
+// NewPodLocal: an already-running worker acknowledging a drain must not be
+// blocked by pod-creation settings its own commands never parse.
+func ValidateMarkedPodStaticConfig() error {
+	if _, err := parseSchedulingEnv(); err != nil {
+		return err
+	}
+	if _, _, err := managedServiceAlias(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // podLocalProvider is the in-pod provider behind NewPodLocal: the same
 // default-server tmux session the controller observes through pod exec,
 // reached without a clientset or kubeconfig. Only own-session metadata and

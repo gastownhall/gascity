@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
@@ -429,9 +430,50 @@ func controlDispatchOptions(cityPath, storePath string, graph beads.GraphStore, 
 // instead of surfacing only when a retry first recycles a session. It builds the
 // provider from config alone, without the session snapshot the recycle path
 // reads, so it costs no bd call.
+//
+// A marked process (a pod-hosted dispatcher, GC_K8S_POD_SESSION) validates
+// statically instead of eagerly constructing the ordinary provider, which
+// would need Kubernetes credentials the pod does not hold: the selection must
+// resolve in the composed registry — the tmux fallback is not accepted for
+// this marked path — an effective k8s or hybrid selection must pass the
+// client-free static pod-creation checks, and constructing the marked
+// registry provider is client-free, so no live API probe is needed.
 func validateDispatchSessionProviderConfig(cfg *config.City, cityPath string) error {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	if _, marked := sessionk8s.MarkedPodSession(); marked {
+		return validateMarkedDispatchSessionProviderConfig(ctx)
+	}
 	sp, err := newSessionProviderFromContext(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): constructing session provider: %w", err)
+	}
+	if sp == nil {
+		return fmt.Errorf("control dispatcher: session provider config is invalid: no provider for %q", ctx.providerName)
+	}
+	return nil
+}
+
+// validateMarkedDispatchSessionProviderConfig is
+// validateDispatchSessionProviderConfig's marked-process path. The pod's
+// identity is its marker value (the process is marked only when that value
+// is non-empty), so identity needs no further check here; what can fail a
+// dispatcher start is a selection that resolves to nothing and the static
+// pod-creation settings.
+func validateMarkedDispatchSessionProviderConfig(ctx sessionProviderContext) error {
+	reg, err := runtimeRegistryForCity(ctx.cfg)
+	if err != nil {
+		return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): composing the runtime registry: %w", err)
+	}
+	if !reg.Resolves(ctx.providerName) {
+		return fmt.Errorf("control dispatcher: session provider config is invalid: session provider %q does not resolve to a registered runtime, and a marked worker's startup validation does not accept the fallback", ctx.providerName)
+	}
+	switch ctx.providerName {
+	case "k8s", "hybrid":
+		if err := sessionk8s.ValidateMarkedPodStaticConfig(); err != nil {
+			return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): static %q pod settings: %w", ctx.providerName, err)
+		}
+	}
+	sp, err := reg.New(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): constructing session provider: %w", err)
 	}
