@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -415,7 +416,7 @@ func TestSessionKillFence_ConditionalStoreLifecycle(t *testing.T) {
 	store := openConditionalKillFenceStore(t)
 	b := createKillFenceSessionBead(t, store)
 
-	fence, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
+	fence, err := sessionpkg.WriteKillFence(beadstest.Sessions(store), b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("writeSessionKillFence: %v", err)
 	}
@@ -423,7 +424,7 @@ func TestSessionKillFence_ConditionalStoreLifecycle(t *testing.T) {
 	if !fence.Owns(fenced) {
 		t.Fatalf("fence does not own the row it wrote: %#v", fenced.Metadata)
 	}
-	if err := fence.Rollback(store); err != nil {
+	if err := fence.Rollback(beadstest.Sessions(store)); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	restored := mustGetBead(t, store, b.ID)
@@ -436,15 +437,15 @@ func TestSessionKillFence_ConditionalStoreLifecycle(t *testing.T) {
 	if got := restored.Metadata["last_woke_at"]; got != "2026-09-01T10:00:00Z" {
 		t.Errorf("restored last_woke_at = %q, want the pre-kill value", got)
 	}
-	if err := fence.Clear(store); !errors.Is(err, sessionpkg.ErrKillFenceSuperseded) {
+	if err := fence.Clear(beadstest.Sessions(store)); !errors.Is(err, sessionpkg.ErrKillFenceSuperseded) {
 		t.Fatalf("clear after rollback = %v, want sessionpkg.ErrKillFenceSuperseded", err)
 	}
 
-	fence, err = sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
+	fence, err = sessionpkg.WriteKillFence(beadstest.Sessions(store), b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("second writeSessionKillFence: %v", err)
 	}
-	if err := fence.Clear(store); err != nil {
+	if err := fence.Clear(beadstest.Sessions(store)); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	cleared := mustGetBead(t, store, b.ID)
@@ -465,7 +466,7 @@ func TestApplySessionKillFencePatch_RedecidesAfterConcurrentWrite(t *testing.T) 
 	b := createKillFenceSessionBead(t, store)
 
 	var observedStates []string
-	err := sessionpkg.ApplyKillFencePatch(store, b.ID, func(cur beads.Bead) (map[string]string, bool) {
+	err := sessionpkg.ApplyKillFencePatch(beadstest.Sessions(store), b.ID, func(cur beads.Bead) (map[string]string, bool) {
 		observedStates = append(observedStates, cur.Metadata["state"])
 		if len(observedStates) == 1 {
 			// A concurrent writer lands after this observation.
@@ -640,7 +641,7 @@ func TestSessionKillFenceRollbackKeepsWritesSince(t *testing.T) {
 	if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_intent": "user-hold", "held_until": held}); err != nil {
 		t.Fatal(err)
 	}
-	fence, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
+	fence, err := sessionpkg.WriteKillFence(beadstest.Sessions(store), b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("writeSessionKillFence: %v", err)
 	}
@@ -651,7 +652,7 @@ func TestSessionKillFenceRollbackKeepsWritesSince(t *testing.T) {
 	if err := store.SetMetadataBatch(b.ID, map[string]string{"quarantined_until": q, "wait_hold": "true"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fence.Rollback(store); err != nil {
+	if err := fence.Rollback(beadstest.Sessions(store)); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	got := mustGetBead(t, store, b.ID)
@@ -668,14 +669,14 @@ func TestSessionKillFenceRollbackKeepsWritesSince(t *testing.T) {
 func TestSessionKillFenceRollbackLeavesAKeyRewrittenSince(t *testing.T) {
 	store := openConditionalKillFenceStore(t)
 	b := createKillFenceSessionBead(t, store)
-	fence, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
+	fence, err := sessionpkg.WriteKillFence(beadstest.Sessions(store), b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("writeSessionKillFence: %v", err)
 	}
 	if err := store.SetMetadataBatch(b.ID, map[string]string{"last_woke_at": "2026-10-11T00:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fence.Rollback(store); err != nil {
+	if err := fence.Rollback(beadstest.Sessions(store)); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	if got := mustGetBead(t, store, b.ID).Metadata["last_woke_at"]; got != "2026-10-11T00:00:00Z" {
@@ -708,7 +709,7 @@ func TestSessionKillFenceWithoutCASWritesOnlyWhatTheKillChanged(t *testing.T) {
 	store := &batchHookStore{Store: mem, hook: func() {
 		_ = mem.SetMetadataBatch(b.ID, map[string]string{"suspended_at": "2026-10-11T00:00:00Z"})
 	}}
-	if _, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC()); err != nil {
+	if _, err := sessionpkg.WriteKillFence(beadstest.Sessions(store), b.ID, time.Now().UTC()); err != nil {
 		t.Fatalf("writeSessionKillFence: %v", err)
 	}
 	if got := mustGetBead(t, mem, b.ID).Metadata["suspended_at"]; got != "2026-10-11T00:00:00Z" {
@@ -744,7 +745,7 @@ func TestKillSleepPatchWritesTheFencesHoldKeys(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		fence, err := sessionpkg.WriteKillFence(store, b.ID, now)
+		fence, err := sessionpkg.WriteKillFence(beadstest.Sessions(store), b.ID, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -763,7 +764,7 @@ func TestSessionKillFenceUnmintsLostAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := sessionpkg.OpenDispositionMints(id)
-	if _, err := sessionpkg.WriteKillFence(casLoser{m}, id, time.Now()); err == nil {
+	if _, err := sessionpkg.WriteKillFence(beadstest.Sessions(casLoser{m}), id, time.Now()); err == nil {
 		t.Fatal("a kill fence under a CAS that always loses landed")
 	}
 	if n := sessionpkg.OpenDispositionMints(id) - before; n != 0 {

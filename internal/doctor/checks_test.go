@@ -8,12 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -70,12 +71,17 @@ func holdControllerLock(t *testing.T, cityDir string) {
 	if err != nil {
 		t.Fatalf("open lock file: %v", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		_ = f.Close()
-		t.Fatalf("flock: %v", err)
+		t.Fatalf("lock controller lock file: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = lock.Release()
 		_ = f.Close()
 	})
 }
@@ -220,6 +226,38 @@ func TestConfigValidCheck_BadRig(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Errorf("status = %d, want Error", r.Status)
+	}
+}
+
+func TestConfigValidCheck_GuardedRigWarnsNotEnforced(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs:      []config.Rig{{Name: "beta", Path: filepath.Join(t.TempDir(), "beta"), Federation: config.RigFederationRig}},
+	}
+	c := NewConfigValidCheck(cfg)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "NOT protected") {
+		t.Errorf("status = %d, msg = %q; want a warning that rig beta is not protected", r.Status, r.Message)
+	}
+}
+
+func TestConfigValidCheck_GuardedRigSharingADirectory(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "shared")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: shared, Prefix: "al"},
+			{Name: "beta", Path: shared, Prefix: "be", Federation: config.RigFederationRig},
+		},
+	}
+	c := NewConfigValidCheck(cfg)
+	// A nil context must not panic.
+	r := c.Run(nil)
+	if r.Status != StatusError || !strings.Contains(r.Message, "needs its own store directory") {
+		t.Errorf("status = %d, msg = %q; want the shared-directory error", r.Status, r.Message)
 	}
 }
 
@@ -825,7 +863,7 @@ func TestAgentSessionsCheck_AllRunning(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -839,7 +877,7 @@ func TestAgentSessionsCheck_Missing(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -853,10 +891,121 @@ func TestAgentSessionsCheck_SkipsSuspended(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "worker", Suspended: true}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (suspended skipped); msg = %s", r.Status, r.Message)
+	}
+}
+
+// A pool instance or bead-named session is named after its session row, not
+// after agent.SessionNameFor; a running one the registry maps to an agent gives
+// that agent a session, and an agent whose registered sessions are not running
+// has none.
+func TestAgentSessionsCheck_RegisteredSessionCounts(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-gcg-7", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "probe"}}}
+	registry := func() (map[string]string, error) {
+		return map[string]string{"worker-gcg-7": "worker", "s-gcg-9": "probe"}, nil
+	}
+	r := NewAgentSessionsCheck(cfg, "test", "", sp, registry).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if want := []string{"probe"}; !reflect.DeepEqual(r.Details, want) {
+		t.Fatalf("details = %v, want %v", r.Details, want)
+	}
+}
+
+// A registry that cannot be read leaves the check unable to tell which agents
+// have sessions; it says so instead of naming every pool agent sessionless.
+func TestAgentSessionsCheck_UnreadableRegistryWarns(t *testing.T) {
+	sp := runtime.NewFake()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	registry := func() (map[string]string, error) { return nil, errors.New("session store unavailable") }
+	r := NewAgentSessionsCheck(cfg, "test", "", sp, registry).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "session registry") {
+		t.Fatalf("message = %q, want it to name the session registry", r.Message)
+	}
+	if len(r.Details) != 0 {
+		t.Fatalf("details = %v, want none", r.Details)
+	}
+}
+
+// A provider that attests its listing is listed once: a registered session
+// absent from the listing is not running and is never probed, so an agent with
+// many asleep rows costs no per-row provider call. A listed session is still
+// confirmed through IsRunning.
+func TestAgentSessionsCheck_AttestedListingSkipsUnlistedProbes(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-gcg-9", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "probe"}}}
+	registry := func() (map[string]string, error) {
+		return map[string]string{
+			"worker-gcg-1": "worker", "worker-gcg-2": "worker", "worker-gcg-9": "worker",
+			"s-gcg-3": "probe", "s-gcg-4": "probe",
+		}, nil
+	}
+	r := NewAgentSessionsCheck(cfg, "test", "", sp, registry).Run(&CheckContext{})
+	if want := []string{"probe"}; r.Status != StatusWarning || !reflect.DeepEqual(r.Details, want) {
+		t.Fatalf("result = %d %q %v, want Warning naming %v", r.Status, r.Message, r.Details, want)
+	}
+	if n := sp.CountCalls("ListRunning", ""); n != 1 {
+		t.Errorf("ListRunning called %d times, want 1", n)
+	}
+	for _, name := range []string{"worker-gcg-1", "worker-gcg-2", "s-gcg-3", "s-gcg-4", "worker", "probe"} {
+		if n := sp.CountCalls("IsRunning", name); n != 0 {
+			t.Errorf("IsRunning(%q) called %d times, want 0: it is not in the attested listing", name, n)
+		}
+	}
+	if n := sp.CountCalls("IsRunning", "worker-gcg-9"); n != 1 {
+		t.Errorf("IsRunning(worker-gcg-9) called %d times, want 1 to confirm the listed session", n)
+	}
+}
+
+// A listing the provider does not attest, or one that fails, proves no
+// absence: the check probes each name through IsRunning as before.
+func TestAgentSessionsCheck_UnattestedOrFailedListingProbesEachName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sp   func(*runtime.Fake) runtime.Provider
+	}{
+		{"unattested", func(f *runtime.Fake) runtime.Provider {
+			f.ListingUnattested = true
+			return f
+		}},
+		{"partial", func(f *runtime.Fake) runtime.Provider {
+			return &partialListDoctorProvider{Fake: f, listErr: &runtime.PartialListError{Err: errors.New("remote backend down")}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "worker-gcg-9", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp := tc.sp(fake)
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "probe"}}}
+			registry := func() (map[string]string, error) {
+				return map[string]string{"worker-gcg-9": "worker", "s-gcg-3": "probe"}, nil
+			}
+			r := NewAgentSessionsCheck(cfg, "test", "", sp, registry).Run(&CheckContext{})
+			if want := []string{"probe"}; r.Status != StatusWarning || !reflect.DeepEqual(r.Details, want) {
+				t.Fatalf("result = %d %q %v, want Warning naming %v", r.Status, r.Message, r.Details, want)
+			}
+			for _, name := range []string{"worker-gcg-9", "s-gcg-3", "probe"} {
+				if n := fake.CountCalls("IsRunning", name); n != 1 {
+					t.Errorf("IsRunning(%q) called %d times, want 1: the listing proves no absence", name, n)
+				}
+			}
+		})
 	}
 }
 
@@ -1087,7 +1236,7 @@ func TestOrphanSessionsCheck_NoOrphans(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -1106,7 +1255,7 @@ func TestOrphanSessionsCheck_Found(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -1125,7 +1274,7 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	if err := c.Fix(&CheckContext{}); err != nil {
 		t.Fatalf("Fix() error: %v", err)
 	}
@@ -1159,7 +1308,7 @@ func TestOrphanSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(
 			sp.StopErrors["stale-worker"] = tc.stopErr
 
 			cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
-			err := NewOrphanSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			err := NewOrphanSessionsCheck(cfg, "test", "", sp, nil).Fix(&CheckContext{CityPath: t.TempDir()})
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("Fix() error = %v, want nil for an orphan already gone with its server", err)
@@ -1195,7 +1344,7 @@ func TestOrphanSessionsCheck_FixSkipsWhenControllerRunning(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	err := c.Fix(&CheckContext{CityPath: cityDir})
 	if err == nil {
 		t.Fatal("Fix() error = nil, want refusal while controller is running")
@@ -1221,7 +1370,7 @@ func TestOrphanSessionsCheck_PartialListWarns(t *testing.T) {
 	}
 
 	cfg := &config.City{}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -1241,9 +1390,91 @@ func TestOrphanSessionsCheck_FixFailsOnPartialList(t *testing.T) {
 	}
 
 	cfg := &config.City{}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	if err := c.Fix(&CheckContext{}); err == nil {
 		t.Fatal("Fix() error = nil, want partial list failure")
+	}
+}
+
+// A running session with an open registry row is accounted for, whatever its
+// name; Run reports and Fix stops only a session neither config nor the
+// registry accounts for.
+func TestOrphanSessionsCheck_RegisteredSessionsAreNotOrphans(t *testing.T) {
+	sp := runtime.NewFake()
+	for _, name := range []string{"worker-gcg-7", "s-gcg-9", "stale-worker"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	registry := func() (map[string]string, error) {
+		return map[string]string{"worker-gcg-7": "worker", "s-gcg-9": "worker"}, nil
+	}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, registry)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if want := []string{"stale-worker"}; !reflect.DeepEqual(r.Details, want) {
+		t.Fatalf("details = %v, want %v", r.Details, want)
+	}
+	if err := c.Fix(&CheckContext{CityPath: t.TempDir()}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	if sp.IsRunning("stale-worker") {
+		t.Error("orphan session still running after fix")
+	}
+	for _, name := range []string{"worker-gcg-7", "s-gcg-9"} {
+		if !sp.IsRunning(name) {
+			t.Errorf("registered session %q was stopped by fix", name)
+		}
+	}
+}
+
+// A registry that cannot be read makes every bead-named session look orphaned;
+// Run warns without naming any, and Fix stops nothing.
+func TestOrphanSessionsCheck_UnreadableRegistryStopsNothing(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-gcg-7", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	registryErr := errors.New("session store unavailable")
+	registry := func() (map[string]string, error) { return nil, registryErr }
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, registry)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if len(r.Details) != 0 {
+		t.Fatalf("details = %v, want none", r.Details)
+	}
+	err := c.Fix(&CheckContext{CityPath: t.TempDir()})
+	if !errors.Is(err, registryErr) {
+		t.Fatalf("Fix() error = %v, want it to wrap %v", err, registryErr)
+	}
+	if n := sp.CountCalls("Stop", "worker-gcg-7"); n != 0 {
+		t.Errorf("Stop called %d times, want 0 when the registry cannot be read", n)
+	}
+}
+
+// A session row is written before its runtime starts, so reading the rows after
+// listing the runtimes never takes a just-started session for an orphan.
+func TestOrphanSessionsCheck_ReadsRegistryAfterListing(t *testing.T) {
+	sp := runtime.NewFake()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	listingsSeen := 0
+	registry := func() (map[string]string, error) {
+		listingsSeen += sp.CountCalls("ListRunning", "")
+		return map[string]string{}, nil
+	}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, registry)
+	c.Run(&CheckContext{})
+	if err := c.Fix(&CheckContext{CityPath: t.TempDir()}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	if listingsSeen != 3 {
+		t.Fatalf("registry reads saw %d prior listings in total, want 3 (Run after 1, Fix after 2)", listingsSeen)
 	}
 }
 
@@ -4559,5 +4790,59 @@ func TestRigDoltServerCheck_NonDoltRigIsNotApplicable(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "not applicable") {
 		t.Fatalf("message = %q, want a not-applicable answer", r.Message)
+	}
+}
+
+// TestDoltServerCheck_UnreachableManagedDoltNamesItsInfraScope: a managed
+// Dolt server gc started in a transient systemd user scope leaves no unit
+// behind once it exits (--collect). When the store is not reachable, doctor
+// names the recorded scope and where its journal records are.
+func TestDoltServerCheck_UnreachableManagedDoltNamesItsInfraScope(t *testing.T) {
+	const unit = "gascity-infra-0123456789abcdef.scope"
+	for _, tc := range []struct {
+		name       string
+		infraScope string
+	}{
+		{name: "started in an infra scope", infraScope: unit},
+		{name: "started unscoped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+			fs := fsys.OSFS{}
+			writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				EndpointStatus: contract.EndpointStatusVerified,
+			})
+			writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+			_ = ln.Close()
+			runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")
+			if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%s,"data_dir":%q,"infra_scope":%q}`,
+				os.Getpid(), port, filepath.Join(dir, ".beads", "dolt"), tc.infraScope)
+			if err := os.WriteFile(filepath.Join(runtimeDir, "dolt-state.json"), []byte(state), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+			if r.Status != StatusError {
+				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+			}
+			mentions := strings.Contains(r.FixHint, "journalctl --user-unit="+unit) &&
+				strings.Contains(r.FixHint, fmt.Sprintf("pid %d", os.Getpid()))
+			if want := tc.infraScope != ""; mentions != want {
+				t.Fatalf("fix hint names the infra scope journal = %t, want %t; hint = %q", mentions, want, r.FixHint)
+			}
+			if tc.infraScope == "" && strings.Contains(r.FixHint, "journalctl") {
+				t.Fatalf("fix hint for an unscoped server mentions journalctl: %q", r.FixHint)
+			}
+		})
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -458,7 +459,7 @@ func TestInterruptRefusesAStopPendingRow(t *testing.T) {
 func TestLeaselessManagerFailsAtUse(t *testing.T) {
 	ExpectNoCityRefusalsForTest(t)
 	m := newManagerLeaseFixture(t)
-	mgr := NewManagerWithOptions(m.f.store, m.sp)
+	mgr := NewManagerWithOptions(beadstest.Sessions(m.f.store), m.sp)
 	cmd, hints := BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}
 	if err := mgr.Start(context.Background(), Actor{Kind: ActorOperator}, m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
 		t.Fatalf("start without a city = %v, want ErrRuntimeLeaseNoCity", err)

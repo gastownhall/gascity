@@ -136,6 +136,26 @@ type rulesPlan struct {
 	openUnits []string
 }
 
+// contentSince is when the oldest content candidate became deliverable: its
+// creation, or its not_before when later. It is zero when no content is a
+// candidate.
+func (rp *rulesPlan) contentSince() time.Time {
+	var since time.Time
+	for _, e := range rp.content {
+		if !e.candidate() {
+			continue
+		}
+		at := e.op.CreatedAt
+		if e.op.NotBefore.After(at) {
+			at = e.op.NotBefore
+		}
+		if since.IsZero() || at.Before(since) {
+			since = at
+		}
+	}
+	return since
+}
+
 func (rp *rulesPlan) waitOpDetail(op Op, r WaitReason, detail string, until time.Time) {
 	rp.waits = append(rp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail, Until: until})
 	rp.next = minTime(rp.next, until)
@@ -143,8 +163,14 @@ func (rp *rulesPlan) waitOpDetail(op Op, r WaitReason, detail string, until time
 }
 
 // closeOp closes read, the op as read (its revision guards the write), from
-// cur, the op with any bookkeeping the rules record.
+// cur, the op with any bookkeeping the rules record. A stale close of an op
+// whose scope the incarnation has moved past, the scope rule's, records that
+// incarnation (FencedOff): an op closed so never ran, unlike one the
+// executor found nothing to do for.
 func (rp *rulesPlan) closeOp(read, cur Op, o Outcome) {
+	if o.Arm == ArmSkipped && o.Reason == ReasonStale && scopeCmp(read.Scope, rp.inc) < 0 {
+		o.Result = Result{Generation: rp.inc.gen, ContextEpoch: rp.inc.epoch}
+	}
 	rp.closes = append(rp.closes, ruleClose{cur: read, next: closedAt(cur, o, rp.by, rp.now)})
 }
 

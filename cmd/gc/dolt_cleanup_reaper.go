@@ -253,7 +253,8 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 //     even if the cmdline says it's a test path or its scope looks deleted
 //     (defense in depth).
 //  2. Else protect a process bd owns: the `bd db-proxy-child` supervisor
-//     itself, or a sql-server whose --config is a config.yaml with a live
+//     itself, or a sql-server whose --config is a config.yaml (or the
+//     proxy-child.runtime-config.yaml of a port-moved child) with a live
 //     proxy.pid record beside it. Checked before every reap rule below,
 //     including the test-config-path allowlist, because a real-bd lifecycle
 //     test in t.TempDir() produces exactly that shape.

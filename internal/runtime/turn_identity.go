@@ -143,16 +143,44 @@ type EndedTurn struct {
 	// StartedAt is the source's start time at its own precision; zero when
 	// unknown.
 	StartedAt time.Time
-	// EndedAt is the source's end time, or the observer's for an inferred end.
+	// EndedAt is the source's end time, or the observer's for an inferred
+	// end. A turn inferred to have ended on a provider error ended at the
+	// error, as its source recorded it.
 	EndedAt time.Time
 	// Status is how the turn ended; empty when the source closed it only
-	// because a newer turn started.
+	// because a newer turn started, and for an inferred end, except failed
+	// for a turn its source shows stopped at a provider error.
 	Status TurnStatus
 	// Inferred reports that the end was inferred from an idle boundary.
 	Inferred bool
 	// DeliveryKeys are the delivery keys whose messages the runtime itself
 	// reports as this turn's input. They are never parsed from delivered text.
 	DeliveryKeys []string
+	// Failure is the provider error a failed turn ended on, as its source
+	// classified it; the zero value for a turn that did not fail, or whose
+	// source records no error.
+	Failure TurnFailure
+}
+
+// TurnFailure is the provider error a turn ended on, as the turn's source
+// classified it when it recorded the error. Nothing in it is read out of
+// the error's text.
+type TurnFailure struct {
+	// Code is the source's own class for the error, verbatim; empty when it
+	// recorded none.
+	Code string
+	// HTTPStatus is the HTTP status the source recorded; 0 when none.
+	HTTPStatus int
+	// RateLimited reports that the provider refused the turn with a rate
+	// limit (HTTP 429, or the source's rate-limit class).
+	RateLimited bool
+	// Quota reports that the source classed the rate limit a spent usage
+	// quota: an allowance that comes back only when the account's period
+	// resets, so a new conversation is refused too. It implies RateLimited.
+	Quota bool
+	// Message is the error's text, bounded by its source: for people, never
+	// for a decision.
+	Message string
 }
 
 // TurnHistory is one read of a session's current and recent turns.
@@ -228,9 +256,10 @@ func TurnCapabilitiesFor(p Provider, name string) TurnCapabilities {
 // agent on this host, so the transcript the agent writes lands on this host's
 // filesystem, where gc can read it for turns (X11 §3.2: the transcript tiers
 // need the reader on the transcript's host). A runtime that runs the agent
-// elsewhere (a pod, a remote host, an exec script's own box) does not
-// implement it. Composites do not either: the trait is read on the routed
-// leaf ([LocalTranscriptsFor]).
+// elsewhere (a pod, a remote host) does not implement it; an exec runtime
+// implements it and answers true only when its pack's handshake shares the
+// host filesystem ([ProtocolInfo.SharesHostFS]). Composites do not implement
+// it: the trait is read on the routed leaf ([LocalTranscriptsFor]).
 type LocalTranscriptProvider interface {
 	LocalTranscripts() bool
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -36,7 +37,7 @@ func TestV2ClosedManualRowOnStaleCensusIsNeitherCreatedNorStarted(t *testing.T) 
 	}
 
 	// The operator's close lands on the store; v2's cache has not seen it.
-	mgr := session.NewManagerWithOptions(leg.backing, w.sp, session.WithCityPath(cityPath), session.WithClock(w.s.clk))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(leg.backing), w.sp, session.WithCityPath(cityPath), session.WithClock(w.s.clk))
 	if _, err := mgr.CloseDetailed(context.Background(), testActorIn(t, session.ActorOperator, cityPath), "gc-1"); err != nil {
 		t.Fatalf("close: %v", err)
 	}
