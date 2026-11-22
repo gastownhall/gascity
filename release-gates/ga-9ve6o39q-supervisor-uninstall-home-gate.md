@@ -46,6 +46,7 @@ ci_lane_run: n/a (no CI-config change).
 skip_justification: all 319 printed skip sites are unchanged, including platform/lane, helper-only, missing opt-in fixture/provider and environment-absence conditions. The new uninstall guard runs after the skip predicates; seedSupervisorServiceUnit serves only the new tests. The SHARED-HUNKS entry in cmd/gc/cmd_supervisor_test.go was inspected. Actual test-binary import closures select cmd/gc for same-command base measurement; every selected remote/native skip matches its reason at the pinned base. All environment-absence top-ups and the native floor completed (16 steps, exit 0); none of the owned tests skipped. Focused baseline runs are supplemental skip evidence, never the full-suite substitute.
 
 ```text
+COMPARE-NOTE the remote worker's account differs between the runs in 1 SKIP(s), read as the same reason because the account is the only difference (an account is rbe-, a letter and two digits, standing alone; the logs are not changed): TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd (base rbe-a13, head rbe-a11)
 COMPARE-SUMMARY head_skips=68 judged=68 pre-existing=68 new=0 reason-changed=0 diff-owned=0 no-reason=0 not-judged=0  => ALL PRE-EXISTING
 COMPARE-SUMMARY head_skips=4 judged=4 pre-existing=4 new=0 reason-changed=0 diff-owned=0 no-reason=0 not-judged=0  => ALL PRE-EXISTING
 COMPARE-SUMMARY head_skips=189 judged=189 pre-existing=189 new=0 reason-changed=0 diff-owned=0 no-reason=0 not-judged=0  => ALL PRE-EXISTING
