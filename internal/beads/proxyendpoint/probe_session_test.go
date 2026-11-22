@@ -607,6 +607,12 @@ type fakeProbeConnector struct {
 	// headErr is what the HEAD statement fails with when the server cannot
 	// answer DOLT_HASHOF('HEAD').
 	headErr error
+	// tableCase, when set, rewrites each name SHOW TABLES lists, standing in
+	// for a database whose tables carry a different case than the probe asks
+	// about.
+	tableCase func(string) string
+	// tablesErr is what SHOW TABLES fails with.
+	tablesErr error
 	// dials counts every Connect call, failed ones included.
 	dials  atomic.Int64
 	opened atomic.Int64
@@ -692,15 +698,7 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 		return &fakeColumnRows{column: "DOLT_HASHOF('HEAD')", values: []string{head}}, nil
 	}
 	if query == tablesQuery {
-		// SHOW TABLES lists every table the database carries: each one the
-		// probe could ask about, less the fixture's absent ones.
-		var listed []string
-		for _, table := range c.connector.knownTables() {
-			if !c.connector.absentTables[table] {
-				listed = append(listed, table)
-			}
-		}
-		return &fakeColumnRows{column: "Tables_in_fixture", values: listed}, nil
+		return c.connector.showTables()
 	}
 	if strings.HasPrefix(strings.ToUpper(query), "SHOW COLUMNS FROM ") {
 		// SHOW COLUMNS names its table in the statement and fails on an absent
@@ -732,6 +730,26 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 		return nil, errors.New("proxyendpoint: the probe fixture has no answer for " + query)
 	}
 	return &fakeProbeRows{value: value}, nil
+}
+
+// showTables answers SHOW TABLES: every table the database carries, each one
+// the probe could ask about less the fixture's absent ones, in tableCase's case
+// when the fixture sets one, or tablesErr.
+func (c *fakeProbeConnector) showTables() (driver.Rows, error) {
+	if c.tablesErr != nil {
+		return nil, c.tablesErr
+	}
+	var listed []string
+	for _, table := range c.knownTables() {
+		if c.absentTables[table] {
+			continue
+		}
+		if c.tableCase != nil {
+			table = c.tableCase(table)
+		}
+		listed = append(listed, table)
+	}
+	return &fakeColumnRows{column: "Tables_in_fixture", values: listed}, nil
 }
 
 // knownTables is every table name a probe session can ask about.
@@ -805,12 +823,58 @@ func (r *fakeShowColumnsRows) Next(dest []driver.Value) error {
 	return nil
 }
 
+// TestProbeSessionReadsMixedCaseTablesAsPresent pins tableSet's case folding:
+// Dolt resolves table names without regard to case, so a SHOW TABLES that
+// lists a sentinel as Wisps or LEASES still has that table, and the reality is
+// not limited by a case difference.
+func TestProbeSessionReadsMixedCaseTablesAsPresent(t *testing.T) {
+	fake := &fakeProbeConnector{
+		cursors: map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26},
+		tableCase: func(table string) string {
+			switch table {
+			case "wisps":
+				return "Wisps"
+			case "leases":
+				return "LEASES"
+			}
+			return strings.ToUpper(table[:1]) + table[1:]
+		},
+	}
+	report, err := readCursorsOver(context.Background(), fake)
+	if err != nil {
+		t.Fatalf("readCursorsOver: %v", err)
+	}
+	if report.Cursors.Main != 66 || report.Cursors.Ignored != 26 {
+		t.Fatalf("cursors = %+v, want main=66 ignored=26: mixed-case cursor tables must read as present", report.Cursors)
+	}
+	if !report.Reality.Checked() {
+		t.Fatalf("a completed session left its reality unchecked (%+v)", report.Reality)
+	}
+	if report.Reality.Limited {
+		t.Fatalf("reality = %+v, want unlimited: a mixed-case SHOW TABLES name is the same table", report.Reality)
+	}
+}
+
+// TestProbeSessionFailsWhenShowTablesFails pins that a SHOW TABLES the server
+// cannot answer fails the session rather than reading every table as absent,
+// and leaves the reality unchecked.
+func TestProbeSessionFailsWhenShowTablesFails(t *testing.T) {
+	fake := &fakeProbeConnector{
+		cursors:   map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26},
+		tablesErr: errors.New("Error 1105 (HY000): show tables failed"),
+	}
+	report, err := readCursorsOver(context.Background(), fake)
+	if err == nil {
+		t.Fatalf("readCursorsOver succeeded (%+v), want the SHOW TABLES error", report)
+	}
+	if report.Reality.Checked() {
+		t.Fatal("a session whose SHOW TABLES failed marked its reality checked")
+	}
+}
+
 // fakeProbeHead is the HEAD hash the fixture answers when a test names none.
 const fakeProbeHead = "fakehead0000000000000000000000000"
 
-// fakeProbeRows is one row: an integer column, which is the shape of every
-// answer the probe reads, plus whatever extra columns the statement carries
-// (the main-lane existence statement carries HEAD).
 // fakeColumnRows is a one-column result: SHOW TABLES' table names, or the one
 // HEAD hash.
 type fakeColumnRows struct {
@@ -832,19 +896,14 @@ func (r *fakeColumnRows) Next(dest []driver.Value) error {
 	return nil
 }
 
+// fakeProbeRows is one row: an integer column, which is the shape of every
+// cursor and count answer the probe reads.
 type fakeProbeRows struct {
 	value int64
-	extra []driver.Value
 	done  bool
 }
 
-func (r *fakeProbeRows) Columns() []string {
-	columns := []string{"value"}
-	for i := range r.extra {
-		columns = append(columns, fmt.Sprintf("extra%d", i))
-	}
-	return columns
-}
+func (r *fakeProbeRows) Columns() []string { return []string{"value"} }
 
 func (r *fakeProbeRows) Close() error { return nil }
 
@@ -854,6 +913,5 @@ func (r *fakeProbeRows) Next(dest []driver.Value) error {
 	}
 	r.done = true
 	dest[0] = r.value
-	copy(dest[1:], r.extra)
 	return nil
 }

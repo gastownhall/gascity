@@ -267,14 +267,14 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 }
 
 // TestProbeSessionReadsHeadOnItsFirstStatement is council pr2 D-F3's probe
-// half: the pre-open HEAD observation rides as a second column on the
-// statement every session already issues first, so it costs no statement, no
-// round trip and no session of its own.
+// half: the pre-open HEAD observation is read on the session's own first
+// statement (headQuery), before anything else the session reads, and every
+// table existence question after it is answered by one SHOW TABLES.
 //
 // It pins the COST as well as the value, because the cheap shape is the
-// finding: a HEAD read issued as its own statement would pass a value-only test
-// while adding a round trip to every probe, and one issued on its own session
-// would add an accepted connection on bd's proxy per open.
+// finding: one session and 5 statements on a healthy database. A HEAD read on
+// a session of its own would add an accepted connection on bd's proxy per open,
+// and a per-table existence read would multiply the statements a probe issues.
 func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
 	fake := &fakeProbeConnector{
 		cursors: map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26},

@@ -172,9 +172,10 @@ const (
 // ErrNoDatabase reports a probe asked to read cursors without naming a database.
 //
 // The cursor reads are scoped by DATABASE(): with no database selected it is
-// NULL, both existence probes count zero rows, both cursors read zero, and the
-// probe reports `served` with main=0 ignored=0 — a proxy that answered and a
-// database that is catastrophically behind, which is not what happened. The
+// NULL, so a probe with no database selected cannot read evidence for its
+// cursors: both would read zero, and the probe would report `served` with
+// main=0 ignored=0 — a proxy that answered and a database that is
+// catastrophically behind, which is not what happened. The
 // design's own sketch of the session (doltpool.Open(host, port, "root", "", ""))
 // invites exactly that call, so the probe refuses it rather than answering it.
 // The refusal is not connection-level and not a timeout, so it classifies as
@@ -649,9 +650,10 @@ func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResul
 // readCursors reads both schema cursors over one pinned private connection.
 //
 // One connection, not two: Dolt pins a session to the catalog snapshot it had
-// when a statement failed, so an existence probe and a read that disagreed
-// about which connection they ran on could report a table as absent that the
-// other connection can see. The existence probe itself is bd's own ordering
+// when a statement failed, so a SHOW TABLES existence answer and a read that
+// disagreed about which connection they ran on could report a table as absent
+// that the other connection can see. Answering existence from SHOW TABLES
+// before any cursor read follows bd's own ordering
 // (internal/storage/schema/schema.go) and exists for the harsher version of the
 // same hazard: a bare SELECT against a not-yet-created cursor table poisons the
 // pooled connection for the rest of its life.
