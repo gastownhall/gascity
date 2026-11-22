@@ -361,6 +361,10 @@ func (e *Editor) ResumeAgent(name string) error {
 //     agents/<name>/agent.toml; also strip any legacy [[patches.agent]]
 //     suspended override (in memory and, when unambiguous, surgically on
 //     disk too) so it can't shadow the new value.
+//   - OriginDerived + rig-stamped with a [[rigs.overrides]] or
+//     [[rigs.patches]] entry that sets suspended: that rig setter decides
+//     the composed value (rig setters apply after city patches), so set its
+//     bool surgically in place.
 //   - OriginDerived + pack-declared: surgically append a [[patches.agent]]
 //     block on disk, falling back to the in-memory patch (and the generic
 //     lossy writeback) only when the surgical append refuses.
@@ -410,6 +414,16 @@ func mutateAgentSuspended(fs fsys.FS, tomlPath string, raw, expanded *config.Cit
 			}
 			return ErrUnmodified
 		}
+		setter, ok, err := rigSuspensionSetter(raw, expanded, name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := config.SetRigAgentSuspendedForEdit(fs, tomlPath, raw, setter.rig, setter.table, setter.agent, suspended); err != nil {
+				return err
+			}
+			return ErrUnmodified
+		}
 		dir, base := config.ParseQualifiedName(name)
 		if err := config.AppendAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base, suspended); err != nil {
 			if !errors.Is(err, config.ErrSurgicalAgentEditUnsupported) {
@@ -424,6 +438,86 @@ func mutateAgentSuspended(fs fsys.FS, tomlPath string, raw, expanded *config.Cit
 		return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 	}
 	return fmt.Errorf("agent %q: unknown origin", name)
+}
+
+// rigAgentSetter names the rig-level [[rigs.overrides]] or [[rigs.patches]]
+// entry that decides a pack-stamped agent's composed suspension.
+type rigAgentSetter struct {
+	rig   string
+	table string
+	agent string
+}
+
+// rigSuspensionSetter returns the rig setter that decides the suspension of
+// the expanded agent identified by name, if any. Composition applies a
+// rig's overrides, then its patches, after every city [[patches.agent]], and
+// matches them on the agent's bare Name; the last entry that sets suspended
+// therefore wins. A rig is treated as the stamping rig when the agent's Dir
+// equals the dir the rig's setters leave it with (the rig name unless a
+// setter rewrites dir). It refuses, rather than guesses, when several rigs
+// or several entries in the deciding table claim the agent.
+func rigSuspensionSetter(raw, expanded *config.City, name string) (rigAgentSetter, bool, error) {
+	agent, ok := findAgentByIdentity(expanded, name)
+	if !ok || agent.Dir == "" {
+		return rigAgentSetter{}, false, nil
+	}
+	var found []rigAgentSetter
+	for _, rig := range raw.Rigs {
+		stampedDir := rig.Name
+		decider := rigAgentSetter{}
+		counts := map[string]int{}
+		for _, group := range []struct {
+			table   string
+			entries []config.AgentOverride
+		}{
+			{config.RigSetterOverrides, rig.Overrides},
+			{config.RigSetterPatches, rig.RigPatches},
+		} {
+			for _, ov := range group.entries {
+				if ov.Agent != agent.Name {
+					continue
+				}
+				if ov.Dir != nil {
+					stampedDir = *ov.Dir
+				}
+				if ov.Suspended != nil {
+					counts[group.table]++
+					decider = rigAgentSetter{rig: rig.Name, table: group.table, agent: agent.Name}
+				}
+			}
+		}
+		if stampedDir != agent.Dir || decider.rig == "" {
+			continue
+		}
+		if counts[decider.table] > 1 {
+			return rigAgentSetter{}, false, fmt.Errorf("%w: agent %q: rig %q has %d [[rigs.%s]] entries setting suspended for %q; keep one and retry",
+				config.ErrSurgicalAgentEditUnsupported, name, rig.Name, counts[decider.table], decider.table, agent.Name)
+		}
+		found = append(found, decider)
+	}
+	switch len(found) {
+	case 0:
+		return rigAgentSetter{}, false, nil
+	case 1:
+		return found[0], true, nil
+	default:
+		rigs := make([]string, 0, len(found))
+		for _, f := range found {
+			rigs = append(rigs, f.rig)
+		}
+		return rigAgentSetter{}, false, fmt.Errorf("%w: agent %q: rigs %s all set suspended for %q; the owning rig is ambiguous",
+			config.ErrSurgicalAgentEditUnsupported, name, strings.Join(rigs, ", "), agent.Name)
+	}
+}
+
+// findAgentByIdentity returns the first agent in cfg matching identity.
+func findAgentByIdentity(cfg *config.City, identity string) (config.Agent, bool) {
+	for _, a := range cfg.Agents {
+		if config.AgentMatchesIdentity(&a, identity) {
+			return a, true
+		}
+	}
+	return config.Agent{}, false
 }
 
 func findLocalDiscoveredAgent(fs fsys.FS, expanded *config.City, cityRoot, name string) (config.Agent, bool, error) {

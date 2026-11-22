@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "actor_fold.go",
         "agent_discovery.go",
+        "agent_suspend_setter.go",
         "bead_policy_validation.go",
         "beads_migrate_command.go",
         "beads_proxied_idle.go",

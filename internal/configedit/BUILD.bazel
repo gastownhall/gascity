@@ -21,6 +21,7 @@ go_library(
 go_test(
     name = "configedit_test",
     srcs = [
+        "agent_suspension_source_test.go",
         "configedit_linux_test.go",
         "configedit_test.go",
         "formulas_test.go",
