@@ -181,8 +181,11 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		targets[i] = resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 	}
 	// A due key that no open session lists reaches no branch of the loop
-	// below. Each one is counted orphaned once per pass. A pass whose every
-	// due key is matched reads nothing more.
+	// below. One whose fenced items resolve to the single open session
+	// holding their predecessor's pool seat is handed to that session's
+	// target for this pass; its claim's own live census still decides
+	// whether they move. Every other one is counted orphaned once per pass.
+	// A pass whose every due key is matched reads nothing more.
 	if orphanKeys := unmatchedNudgeQueueKeys(dueKeys, targets); len(orphanKeys) > 0 {
 		// A fenced session the snapshot does not list (a closed row) is read
 		// through the session front door, which returns closed rows too.
@@ -195,6 +198,12 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 			firstErr = err
 		}
 		for _, k := range decided {
+			if k.Resolution == nudgeOrphanSuccessor {
+				if successor, ok := inheritNudgeOrphanKey(targets, k); ok {
+					logRoute(debugOut, "nudge-dispatch-tick", "adopt", "orphaned-seat", "agent", k.Key, "session", successor)
+					continue
+				}
+			}
 			skipCounts["orphaned"]++
 			logNudgeDispatchSkip(debugOut, "orphaned", k.Key, k.Fence, fmt.Sprintf("resolution=%s items=%d", k.Resolution, k.Items))
 		}

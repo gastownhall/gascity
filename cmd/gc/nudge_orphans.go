@@ -341,3 +341,17 @@ func resolveNudgeOrphanKeysForPass(queue nudgeQueueHandle, keys []string, open [
 	r := newNudgeOrphanSeatResolver(open, lookup, nudgeOrphanPredecessorLookupsPerPass)
 	return decideNudgeOrphanKeys(r, keys, dueNudgeOrphanItems(state, keys, now))
 }
+
+// inheritNudgeOrphanKey hands k's key to the target of k's successor for the
+// pass and returns that target's session name. It reports false when that
+// session has no deliverable target (the pass skips it as no-target), which
+// leaves the key orphaned.
+func inheritNudgeOrphanKey(targets []nudgeTarget, k nudgeOrphanKey) (string, bool) {
+	for i := range targets {
+		if targets[i].sessionID == k.Successor.ID && targets[i].sessionName != "" {
+			targets[i].inheritedKeys = append(targets[i].inheritedKeys, k.Key)
+			return targets[i].sessionName, true
+		}
+	}
+	return "", false
+}

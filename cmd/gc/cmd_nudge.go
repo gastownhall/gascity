@@ -181,6 +181,11 @@ type nudgeTarget struct {
 	// city's sessions: the dispatcher's snapshot census, or the poll gate's
 	// cached one. No claim reads it.
 	starvationCensus func() (map[string]struct{}, bool)
+	// inheritedKeys are queue keys a dispatch pass hands this target for
+	// that pass only: the orphaned keys of a predecessor that held the same
+	// pool seat (nudge_orphans.go). The claim's Leg B still decides whether
+	// their fenced items move.
+	inheritedKeys []string
 }
 
 type nudgeStatusJSON struct {
@@ -239,7 +244,7 @@ func (t nudgeTarget) pollerKey() string {
 func (t nudgeTarget) queueKeys() []string {
 	sources := [][]string{t.claimKeys}
 	if !t.fromClaim {
-		sources = [][]string{{t.alias, t.sessionID, t.agent.QualifiedName(), t.identity, t.sessionName}, t.aliasHistory}
+		sources = [][]string{{t.alias, t.sessionID, t.agent.QualifiedName(), t.identity, t.sessionName}, t.aliasHistory, t.inheritedKeys}
 	}
 	var keys []string
 	seen := map[string]bool{}
