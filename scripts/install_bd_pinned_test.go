@@ -95,12 +95,14 @@ func newInstallBdEnv(t *testing.T) *installBdEnv {
 	return e
 }
 
+func (e *installBdEnv) setenv(kv ...string) { e.env = append(e.env, kv...) }
+
 func (e *installBdEnv) dest() string { return filepath.Join(e.installDir, "bd") }
 
-// run runs `make install-bd` (or target) against the real Makefile.
-func (e *installBdEnv) run(t *testing.T, target string) (string, error) {
+// run runs `make install-bd` against the real Makefile.
+func (e *installBdEnv) run(t *testing.T) (string, error) {
 	t.Helper()
-	cmd := exec.Command("make", "--no-print-directory", "-f", filepath.Join(e.repoRoot, "Makefile"), target,
+	cmd := exec.Command("make", "--no-print-directory", "-f", filepath.Join(e.repoRoot, "Makefile"), "install-bd",
 		"INSTALL_DIR="+e.installDir,
 	)
 	cmd.Dir = e.repoRoot
@@ -170,7 +172,7 @@ func TestInstallBdPinnedFreshInstall(t *testing.T) {
 	goSum := filepath.Join(e.repoRoot, "go.sum")
 	modBefore, sumBefore := optionalFileSum(t, goMod), optionalFileSum(t, goSum)
 
-	out, err := e.run(t, "install-bd")
+	out, err := e.run(t)
 	if err != nil {
 		t.Fatalf("make install-bd: %v\n%s", err, out)
 	}
@@ -249,7 +251,7 @@ func TestInstallBdPinnedFastPath(t *testing.T) {
 	writeFakeBd(t, e.dest(), installBdPin)
 	before := fileSum(t, e.dest())
 
-	out, err := e.run(t, "install-bd")
+	out, err := e.run(t)
 	if err != nil {
 		t.Fatalf("make install-bd: %v\n%s", err, out)
 	}
@@ -307,7 +309,7 @@ func TestInstallBdPinnedReplacesSkewedBd(t *testing.T) {
 		t.Fatalf("hard-link the old bd: %v", err)
 	}
 
-	out, err := e.run(t, "install-bd")
+	out, err := e.run(t)
 	if err != nil {
 		t.Fatalf("make install-bd: %v\n%s", err, out)
 	}
@@ -332,4 +334,144 @@ func TestInstallBdPinnedReplacesSkewedBd(t *testing.T) {
 		t.Fatalf("the old bd's inode was modified: %q\n%s", kept, out)
 	}
 	assertNoInstallBdLeftovers(t, e, out)
+}
+
+// TestInstallBdPinnedFailsClosed: when the pinned bd cannot be built, or the
+// build does not embed the pin, install-bd fails and the installed bd is the
+// old one, byte for byte.
+func TestInstallBdPinnedFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     []string
+		wantOut []string
+	}{
+		{
+			name:    "build fails",
+			env:     []string{"STUB_INSTALL_FAIL=1"},
+			wantOut: []string{"C toolchain", installBdPin},
+		},
+		{
+			name:    "staged bd embeds another version",
+			env:     []string{"STUB_STAGED_VERSION=v1.1.0"},
+			wantOut: []string{"v1.1.0", installBdPin},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInstallBdEnv(t)
+			e.setenv(tc.env...)
+			writeFakeBd(t, e.dest(), installBdSkewed)
+			before := fileSum(t, e.dest())
+
+			out, err := e.run(t)
+			if err == nil {
+				t.Fatalf("make install-bd succeeded:\n%s", out)
+			}
+			if fileSum(t, e.dest()) != before {
+				t.Fatalf("the installed bd changed after a failed install-bd\n%s", out)
+			}
+			for _, want := range tc.wantOut {
+				if !strings.Contains(out, want) {
+					t.Errorf("output lacks %q:\n%s", want, out)
+				}
+			}
+			assertNoInstallBdLeftovers(t, e, out)
+		})
+	}
+}
+
+// TestInstallBdPinnedRefusesReplacedBeads: gc links a go.mod replacement of
+// beads, not the pin, so no bd built from the pin matches it.
+func TestInstallBdPinnedRefusesReplacedBeads(t *testing.T) {
+	e := newInstallBdEnv(t)
+	e.setenv(`STUB_REPLACE_JSON=,"Replace":[{"Old":{"Path":"github.com/steveyegge/beads"},"New":{"Path":"../beads"}}]`)
+	out, err := e.run(t)
+	if err == nil {
+		t.Fatalf("make install-bd succeeded with beads replaced:\n%s", out)
+	}
+	if !strings.Contains(out, "replaces github.com/steveyegge/beads") {
+		t.Fatalf("output does not name the replace directive:\n%s", out)
+	}
+	if installs := e.goInstalls(t); len(installs) != 0 {
+		t.Fatalf("go install ran with beads replaced: %q", installs)
+	}
+	if _, err := os.Stat(e.dest()); !os.IsNotExist(err) {
+		t.Fatalf("a bd was installed with beads replaced (%v)", err)
+	}
+}
+
+// TestInstallBdPinnedNotesShadowingPathBd: when the bd PATH resolves is not
+// the installed one, install-bd names both and leaves the other alone.
+func TestInstallBdPinnedNotesShadowingPathBd(t *testing.T) {
+	e := newInstallBdEnv(t)
+	shadowDir := t.TempDir()
+	shadow := filepath.Join(shadowDir, "bd")
+	writeFakeBd(t, shadow, installBdSkewed)
+	before := fileSum(t, shadow)
+	e.setenv("PATH=" + e.binDir + string(os.PathListSeparator) + shadowDir + string(os.PathListSeparator) + pathWithoutCommand("bd"))
+
+	out, err := e.run(t)
+	if err != nil {
+		t.Fatalf("make install-bd: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, shadow) || !strings.Contains(out, e.dest()) {
+		t.Fatalf("output does not name the shadowing %s and the installed %s:\n%s", shadow, e.dest(), out)
+	}
+	if fileSum(t, shadow) != before {
+		t.Fatal("install-bd modified the shadowing bd")
+	}
+}
+
+// TestMakeInstallKeepsGcWhenInstallBdFails: install-bd runs before install
+// replaces anything, so a failed bd build leaves the installed gc and its
+// companion as they were and the pair stays consistent.
+func TestMakeInstallKeepsGcWhenInstallBdFails(t *testing.T) {
+	e := newInstallBdEnv(t)
+	e.setenv("STUB_INSTALL_FAIL=1")
+	tmp := t.TempDir()
+	buildDir := filepath.Join(tmp, "build")
+	if err := os.Mkdir(buildDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	installed := map[string]string{}
+	for _, bin := range []string{"gc", "gc-osc7501"} {
+		writeExecutable(t, filepath.Join(buildDir, bin), "new "+bin)
+		writeExecutable(t, filepath.Join(e.installDir, bin), "old "+bin)
+		installed[bin] = "old " + bin
+	}
+	writeFakeBd(t, e.dest(), installBdSkewed)
+	bdBefore := fileSum(t, e.dest())
+
+	makefile, err := os.ReadFile(filepath.Join(e.repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	const rule = "\ninstall: check-self-contained install-bd\n"
+	if !strings.Contains(string(makefile), rule) {
+		t.Fatal("Makefile install target no longer depends on check-self-contained and install-bd as expected")
+	}
+	// Keep install-bd, drop the real gc build.
+	testMakefile := filepath.Join(tmp, "Makefile")
+	if err := os.WriteFile(testMakefile, []byte(strings.Replace(string(makefile), rule, "\ninstall: install-bd\n", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("make", "--no-print-directory", "-f", testMakefile, "install",
+		"BUILD_DIR="+buildDir,
+		"INSTALL_DIR="+e.installDir,
+	)
+	cmd.Dir = e.repoRoot
+	cmd.Env = e.env
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("make install succeeded although install-bd failed:\n%s", out)
+	}
+	for bin, want := range installed {
+		got, err := os.ReadFile(filepath.Join(e.installDir, bin))
+		if err != nil || string(got) != want {
+			t.Fatalf("installed %s = %q (%v), want %q after install-bd failed\n%s", bin, got, err, want, out)
+		}
+	}
+	if fileSum(t, e.dest()) != bdBefore {
+		t.Fatalf("the installed bd changed after install-bd failed\n%s", out)
+	}
+	assertNoInstallBdLeftovers(t, e, string(out))
 }

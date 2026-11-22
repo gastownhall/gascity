@@ -52,7 +52,7 @@ pinned_beads_version() {
 	esac
 	require=${json#*\"Require\":\[}
 	require=${require%%]*}
-	version=$(printf '%s' "$require" | tr '{}' '\n\n' |
+	version=$(printf '%s' "$require" | tr -s '{}' '\n' |
 		grep -F "\"Path\":\"$beads_module\"," |
 		sed -n 's/.*"Version":"\([^"]*\)".*/\1/p' | head -n 1)
 	if [ -z "$version" ]; then
@@ -72,21 +72,48 @@ embedded_beads_version() {
 		awk -v m="$beads_module" '$1 == "mod" && $2 == m { print $3; exit }'
 }
 
+# note_path_bd names the bd PATH resolves when it is not the one at $dest:
+# commands that run `bd` keep using that one. It is never modified here.
+note_path_bd() {
+	local found
+	found=$(command -v bd 2>/dev/null || true)
+	if [ -n "$found" ] && [ "$(resolve_path "$found")" != "$(resolve_path "$dest")" ]; then
+		echo "NOTE: bd on PATH is $found, not $dest; put $install_dir first on PATH (or point BD_BIN at $dest) so commands run the pinned bd."
+	fi
+}
+
+resolve_path() {
+	readlink -f "$1" 2>/dev/null || printf '%s\n' "$1"
+}
+
 pin=$(pinned_beads_version)
 
 if [ "$(embedded_beads_version "$dest")" = "$pin" ]; then
 	echo "bd at $dest is already built from $beads_module $pin; nothing to do"
+	note_path_bd
 	exit 0
 fi
 
 mkdir -p "$install_dir"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/gc-install-bd.XXXXXX")
 echo "Building bd from $beads_module@$pin"
-(
+if ! (
 	cd "$stage"
 	GOFLAGS='' GOWORK=off CGO_ENABLED=1 GOBIN="$stage" \
 		go install -tags gms_pure_go "$beads_module/cmd/bd@$pin"
-)
+); then
+	echo "ERROR: building bd from $beads_module@$pin failed; $dest is unchanged." >&2
+	echo "       bd's embedded storage needs CGO, so a C toolchain (cc) is required." >&2
+	exit 1
+fi
+if [ "$(uname -s)" = Darwin ]; then
+	GC_SIGN_IDENTIFIER=com.gascity.bd "$repo_root/scripts/sign-darwin-local.sh" "$stage/bd"
+fi
+built=$(embedded_beads_version "$stage/bd")
+if [ "$built" != "$pin" ]; then
+	echo "ERROR: the bd built from $beads_module@$pin embeds beads '${built:-unknown}', not $pin; $dest is unchanged." >&2
+	exit 1
+fi
 
 tmp="$install_dir/.bd.tmp.$$"
 cp -f "$stage/bd" "$tmp"
@@ -106,3 +133,4 @@ if [ "$install_dir" != "$HOME/.local/bin" ]; then
 	fi
 fi
 echo "Installed bd ($beads_module $pin) to $dest"
+note_path_bd
