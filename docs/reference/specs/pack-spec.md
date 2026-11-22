@@ -615,13 +615,20 @@ commands/
 The directory path is the default command word list. `run.sh` is the default
 entrypoint. `help.md` is optional help text.
 
-An optional `command.toml` may override the default command words or script:
+An optional `command.toml` may override the default command words or script, or
+opt into delegated help:
 
 | Field | Type | Required | Rule |
 |---|---|---|---|
 | `command` | array of string | no | Command words. Defaults to the directory path under `commands/`. |
 | `description` | string | no | Short help text. |
 | `run` | string | no | Entrypoint path relative to the command directory. Defaults to `run.sh`. |
+| `native_help` | bool | no | Delegates help to the script: `gc <binding> <command> --help` runs the script with exactly `--help` and shows its stdout instead of `description` and `help.md`. Defaults to `false`. Set it only when the script's own `--help` has no side effects and exits 0. |
+
+A delegated help run uses the same environment as a normal run, reads stdin from
+`/dev/null`, and discards stderr. A non-zero exit, a spawn error, a run longer
+than 5 seconds, or empty (or whitespace-only) output falls back to the static
+help.
 
 A command runs with the invoking environment plus these variables:
 
