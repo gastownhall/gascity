@@ -39,9 +39,16 @@ set"*). Without that nudge, a bead whose `metadata.gc.routed_to` is newly set
 or changed sits unclaimed against any worker not currently in an active turn
 cycle. This order ships that workaround.
 
-**Event contract.** Triggers on `bead.updated`. For each event whose bead
-carries a non-empty `metadata.gc.routed_to`, nudges that target with
-`check for assigned work`.
+**Event contract.** Triggers on `bead.updated`. Each run reads both
+`bead.created` and `bead.updated` events and, for each one whose bead carries
+a non-empty `metadata.gc.routed_to`, nudges that target with
+`check for assigned work`. The bead is read from either payload shape
+(`payload.bead` from the API, flat `payload` from the local fallback).
+
+Routing stamped at creation (`gc order run`, formula pours, poured step beads)
+emits only `bead.created` before the bead is claimed. An order matches one
+event type, so such a bead is picked up on the next `bead.updated` fire; on a
+live city that is seconds to a couple of minutes away.
 
 `routed_to` may be a concrete session **or** a pool base. Sling collapses a
 multi-session slot to the pool base (`NormalizePoolRouteTarget`), so a
@@ -53,22 +60,41 @@ has no members (a single-session agent or an explicit slot). Without this,
 nudges to a pool base silently no-op — defeating the warm-idle pool wake this
 order exists to provide.
 
+**Reading by seq.** The controller promises no gap between fires, so a
+wall-clock window alone drops events. The script persists the highest event
+seq it evaluated and selects only events above it. Each run reads the fast
+window (`GC_NUDGE_ON_ROUTE_LOOKBACK`). City event seqs are contiguous, so when
+that read's lowest seq is above `mark + 1` events were missed, and the run
+re-reads the catch-up window (`GC_NUDGE_ON_ROUTE_MAX_LOOKBACK`). That is also
+the read when there is no usable mark (first run, unreadable file, or a mark
+above the log head after a reset). If even the catch-up read starts above the
+mark, the run writes `catch-up read starts at seq <low> above mark <mark>`
+to stderr and carries on. The mark advances after every successful read,
+including runs where a nudge failed: a failed pair has no dedup entry, so the
+next `bead.updated` for that bead retries it. A failed `gc events` read leaves
+the mark untouched.
+
 **Idempotence.** A `(bead, routed_to)` pair is nudged at most once. The
 reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup
 state's last-seen timestamp is refreshed on every sighting and the pair is
 never pruned-then-renudged while the routing is live.
 
-**Dedup state.** `$GC_PACK_STATE_DIR/nudge-on-route-state.json` — a JSON object
-mapping `"<bead>|<routed_to>"` to an ISO timestamp. `GC_PACK_STATE_DIR`
-resolves per city + pack, so multi-city installs never cross-pollinate. Entries
-older than the retention window are pruned on each run.
+**State.** Both files live in `$GC_PACK_STATE_DIR`, which resolves per
+city + pack, so multi-city installs never cross-pollinate:
+
+- `nudge-on-route-seq` — the highest event seq evaluated (one integer).
+- `nudge-on-route-state.json` — a JSON object mapping `"<bead>|<routed_to>"`
+  to an ISO timestamp. Entries older than the retention window are pruned on
+  each run. The retention must be at least the catch-up window, or a catch-up
+  read can re-nudge a pruned pair; the script warns on stderr when it is not.
 
 **Configuration** (all optional, via `[order.env]` or the controller env):
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `GC_NUDGE_ON_ROUTE_LOOKBACK` | `2m` | Event lookback window |
-| `GC_NUDGE_ON_ROUTE_RETENTION` | `1h` | Dedup-entry retention (Ns/Nm/Nh) |
+| `GC_NUDGE_ON_ROUTE_LOOKBACK` | `2m` | Fast window, read on every run |
+| `GC_NUDGE_ON_ROUTE_MAX_LOOKBACK` | `1h` | Catch-up window: first run, after a gap, after a log reset |
+| `GC_NUDGE_ON_ROUTE_RETENTION` | `2h` | Dedup-entry retention (Ns/Nm/Nh), at least the catch-up window |
 | `GC_NUDGE_ON_ROUTE_MESSAGE` | `check for assigned work` | Nudge text |
 
 ## `cascade-nudge-on-blocker-close`

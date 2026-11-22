@@ -564,3 +564,124 @@ func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
 		}
 	})
 }
+
+// TestNudgeOnRouteCatchesUpPastTheFastWindow pins the gap check. Each run
+// reads the GC_NUDGE_ON_ROUTE_LOOKBACK fast window; when its seqs do not
+// reach back to the mark, events were missed (the controller fired late), so
+// the script re-reads the catch-up window instead of dropping them. A
+// catch-up read that still starts above the mark names the span it skipped.
+func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
+	const target = "gascity/builder"
+	const gapLine = "nudge-on-route: catch-up read starts at seq "
+	const retentionLine = "is shorter than GC_NUDGE_ON_ROUTE_MAX_LOOKBACK"
+
+	t.Run("a routing older than the fast window is caught up", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.seedSeq("10")
+		r.writeEvents(
+			nudgeEvent{seq: 11, typ: "bead.updated", bead: "ga-late", routedTo: target, age: 10 * time.Minute},
+			nudgeEvent{seq: 12, typ: "session.started", bead: "s-1", age: 30 * time.Second},
+		)
+		out := r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudges to %s = %d, want 1 for seq 11 just above the mark; gc calls:\n%s", target, got, logged)
+		}
+		if got := r.seq(); got != "12" {
+			t.Fatalf("seq mark = %q, want 12, the highest seq read", got)
+		}
+		if reads := r.sinceReads(); strings.Join(reads, ",") != "2m,1h" {
+			t.Fatalf("events reads = %q, want [2m 1h]: the fast read, then the catch-up", reads)
+		}
+		if strings.Contains(out, gapLine) {
+			t.Fatalf("catch-up reached the mark, want no gap line; output:\n%s", out)
+		}
+	})
+
+	t.Run("an empty fast read is caught up", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.seedSeq("10")
+		r.writeEvents(
+			nudgeEvent{seq: 11, typ: "bead.updated", bead: "ga-late", routedTo: target, age: 10 * time.Minute},
+			nudgeEvent{seq: 12, typ: "bead.updated", bead: "ga-plain", age: 5 * time.Minute},
+		)
+		r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudges to %s = %d, want 1; gc calls:\n%s", target, got, logged)
+		}
+		if reads := r.sinceReads(); strings.Join(reads, ",") != "2m,1h" {
+			t.Fatalf("events reads = %q, want [2m 1h]", reads)
+		}
+		if got := r.seq(); got != "12" {
+			t.Fatalf("seq mark = %q, want 12", got)
+		}
+	})
+
+	t.Run("steady state reads only the fast window", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.seedSeq("10")
+		r.writeEvents(nudgeEvent{seq: 11, typ: "bead.created", bead: "ga-new", routedTo: target, age: 30 * time.Second})
+		out := r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudges to %s = %d, want 1; gc calls:\n%s", target, got, logged)
+		}
+		if reads := r.sinceReads(); strings.Join(reads, ",") != "2m" {
+			t.Fatalf("events reads = %q, want only [2m]", reads)
+		}
+		if got := r.seq(); got != "11" {
+			t.Fatalf("seq mark = %q, want 11", got)
+		}
+		if strings.Contains(out, gapLine) || strings.Contains(out, retentionLine) {
+			t.Fatalf("steady state wants no warning; output:\n%s", out)
+		}
+	})
+
+	t.Run("an incomplete catch-up names the skipped span", func(t *testing.T) {
+		// Seqs 11-19 stand for events that aged past the catch-up window or
+		// were cut by the events walk budget.
+		r := newNudgeOnRouteRig(t, true)
+		r.seedSeq("10")
+		r.writeEvents(
+			nudgeEvent{seq: 20, typ: "bead.updated", bead: "ga-after", routedTo: target, age: 30 * time.Second},
+			nudgeEvent{seq: 21, typ: "session.started", bead: "s-1", age: 30 * time.Second},
+		)
+		out := r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudges to %s = %d, want 1; gc calls:\n%s", target, got, logged)
+		}
+		if reads := r.sinceReads(); strings.Join(reads, ",") != "2m,1h" {
+			t.Fatalf("events reads = %q, want [2m 1h]", reads)
+		}
+		want := gapLine + "20 above mark 10; 9 older event(s) not evaluated"
+		if !strings.Contains(out, want) {
+			t.Fatalf("output lacks %q:\n%s", want, out)
+		}
+		if got := r.seq(); got != "21" {
+			t.Fatalf("seq mark = %q, want 21: the mark advances past the gap", got)
+		}
+	})
+
+	t.Run("retention shorter than the catch-up window warns and still runs", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.writeEvents(nudgeEvent{seq: 1, typ: "bead.created", bead: "ga-new", routedTo: target, age: 30 * time.Second})
+		out := r.run("GC_NUDGE_ON_ROUTE_RETENTION=30m")
+		want := "nudge-on-route: GC_NUDGE_ON_ROUTE_RETENTION (30m) is shorter than GC_NUDGE_ON_ROUTE_MAX_LOOKBACK (1h); a catch-up read can re-nudge pruned pairs"
+		if !strings.Contains(out, want) {
+			t.Fatalf("output lacks %q:\n%s", want, out)
+		}
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudges to %s = %d, want 1 despite the warning; gc calls:\n%s", target, got, logged)
+		}
+	})
+
+	t.Run("defaults and a first run warn about nothing", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.writeEvents(nudgeEvent{seq: 40, typ: "bead.created", bead: "ga-new", routedTo: target, age: 30 * time.Second})
+		out := r.run()
+		if strings.Contains(out, retentionLine) || strings.Contains(out, gapLine) {
+			t.Fatalf("want no warning with defaults and no prior mark; output:\n%s", out)
+		}
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudges to %s = %d, want 1; gc calls:\n%s", target, got, logged)
+		}
+	})
+}
