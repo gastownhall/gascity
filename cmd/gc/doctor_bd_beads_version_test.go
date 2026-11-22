@@ -267,3 +267,109 @@ func TestBdBeadsVersionCheckIsWarmupEligibleAndRegistered(t *testing.T) {
 		}
 	}
 }
+
+// TestBdBeadsVersionCheckOKWhenAVersionIsUnknown: when either version cannot
+// be known, or no scope is bd-backed, nothing is compared. The check is OK and
+// says why; it never warns, never errors and never executes bd.
+func TestBdBeadsVersionCheckOKWhenAVersionIsUnknown(t *testing.T) {
+	replacedBd := bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+	replacedBd.Main.Replace = &debug.Module{Path: "../beads"}
+	gcWithoutBeads := &debug.BuildInfo{Main: debug.Module{Path: "github.com/gastownhall/gascity", Version: "(devel)"}}
+	gcReplacedBeads := gcBuildInfoLinkingBeads()
+	gcReplacedBeads.Deps[0].Replace = &debug.Module{Path: "../beads"}
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, f *bdBeadsVersionFixture)
+		// reason is a fragment of the message saying why nothing was compared.
+		reason string
+	}{
+		{
+			name:   "bd not resolved",
+			setup:  func(t *testing.T, _ *bdBeadsVersionFixture) { t.Setenv("PATH", t.TempDir()) },
+			reason: "bd not resolved",
+		},
+		{
+			name:   "shim or non-Go bd",
+			setup:  func(*testing.T, *bdBeadsVersionFixture) {},
+			reason: "no Go build info",
+		},
+		{
+			name: "(devel) bd",
+			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads("(devel)")
+			},
+			reason: "names no beads version",
+		},
+		{
+			name: "bd with an empty version",
+			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads("")
+			},
+			reason: "names no beads version",
+		},
+		{
+			name:   "bd built from a replaced beads module",
+			setup:  func(_ *testing.T, f *bdBeadsVersionFixture) { f.bdInfo[f.bd] = replacedBd },
+			reason: "names no beads version",
+		},
+		{
+			name: "gc without build info",
+			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+				f.gcInfo, f.gcInfoOK = nil, false
+			},
+			reason: "gc was built without module build info",
+		},
+		{
+			name: "gc linking no beads module",
+			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+				f.gcInfo = gcWithoutBeads
+			},
+			reason: "gc's build info names no beads version",
+		},
+		{
+			name: "gc linking a replaced beads module",
+			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+				f.gcInfo = gcReplacedBeads
+			},
+			reason: "gc's build info names no beads version",
+		},
+		{
+			name: "no bd-backed scope",
+			setup: func(t *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+				t.Setenv("GC_BEADS", "file")
+			},
+			reason: "no scope uses a bd-backed store",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBdBeadsVersionFixture(t)
+			tc.setup(t, f)
+
+			r := f.run(t, &config.City{Workspace: config.Workspace{Name: "demo"}})
+			if r.Status != doctor.StatusOK {
+				t.Fatalf("status = %v, want OK: %+v", r.Status, r)
+			}
+			if !strings.Contains(r.Message, tc.reason) {
+				t.Fatalf("message %q does not give the reason %q", r.Message, tc.reason)
+			}
+		})
+	}
+}
+
+// TestBdBeadsVersionCheckOKWithoutCityConfig: with no city config there is
+// no scope to compare.
+func TestBdBeadsVersionCheckOKWithoutCityConfig(t *testing.T) {
+	f := newBdBeadsVersionFixture(t)
+	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+
+	r := f.run(t, nil)
+	if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "no city config") {
+		t.Fatalf("result = %+v, want OK naming the missing city config", r)
+	}
+}
