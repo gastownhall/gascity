@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +49,7 @@ func TestDispatchAllQueuedNudgesCountsOrphanedKeys(t *testing.T) {
 	}})
 
 	var debugOut strings.Builder
-	if _, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot, &debugOut); err != nil {
+	if _, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot, nil, &debugOut); err != nil {
 		t.Fatalf("dispatch pass 1: %v", err)
 	}
 	state, err := nudgequeue.LoadState(dir)
@@ -69,7 +72,7 @@ func TestDispatchAllQueuedNudgesCountsOrphanedKeys(t *testing.T) {
 		t.Fatalf("the padded helper key was reported orphaned:\n%s", out)
 	}
 
-	if _, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot, nil); err != nil {
+	if _, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot, nil, nil); err != nil {
 		t.Fatalf("dispatch pass 2: %v", err)
 	}
 	state, err = nudgequeue.LoadState(dir)
@@ -85,12 +88,14 @@ func TestDispatchAllQueuedNudgesCountsOrphanedKeys(t *testing.T) {
 }
 
 // orphanSeatFixture is a supervisor-mode city on the file store whose
-// sessions are created through the production session manager.
+// sessions are created through the production session manager. Its passes
+// share one predecessor memo, as the controller's do.
 type orphanSeatFixture struct {
-	dir   string
-	store beads.NudgesStore
-	fake  *runtime.Fake
-	mgr   *session.Manager
+	dir          string
+	store        beads.NudgesStore
+	fake         *runtime.Fake
+	mgr          *session.Manager
+	predecessors nudgeOrphanPredecessorMemo
 }
 
 func newOrphanSeatFixture(t *testing.T) *orphanSeatFixture {
@@ -172,7 +177,7 @@ func (f *orphanSeatFixture) dispatch(t *testing.T, sp runtime.Provider, debugOut
 	if debugOut != nil {
 		w = debugOut
 	}
-	delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, sp, snapshot, w)
+	delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, sp, snapshot, &f.predecessors, w)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -329,7 +334,9 @@ func TestDispatchDoesNotAdoptOrphanWithoutUniqueSeatHolder(t *testing.T) {
 // TestResolveNudgeOrphanSeat pins the typed resolution of one orphaned item:
 // through its session fence to the predecessor's pool seat, and to the single
 // open session holding that seat once the predecessor no longer holds its
-// fence. Every resolution other than successor leaves the key queued.
+// fence; an item already fenced to an open session that holds its fence
+// resolves to that session. Every resolution other than successor leaves the
+// key queued.
 func TestResolveNudgeOrphanSeat(t *testing.T) {
 	cases := []struct {
 		name string
@@ -337,6 +344,9 @@ func TestResolveNudgeOrphanSeat(t *testing.T) {
 		// expected successor session ID ("" for none).
 		build          func(t *testing.T, f *orphanSeatFixture) (item queuedNudge, budget int, wantSuccessor string)
 		wantResolution nudgeOrphanResolution
+		// hideFence leaves the item's fenced session out of the open
+		// sessions, as a read older than that session would.
+		hideFence bool
 	}{
 		{
 			name: "closed pool predecessor with a unique successor",
@@ -389,13 +399,25 @@ func TestResolveNudgeOrphanSeat(t *testing.T) {
 			wantResolution: nudgeOrphanNotPoolSeat,
 		},
 		{
-			name: "fenced predecessor is still open and holds its fence",
+			name: "an item a claim re-fenced to the open seat holder resolves to that holder",
 			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
 				p := f.createSeat(t, "worker-2", "2")
-				f.createSeat(t, "worker-2", "2")
+				f.closeSession(t, p.ID)
+				s := f.createSeat(t, "worker-2", "2")
+				item := fencedOrphanItem(p)
+				item.SessionID, item.ContinuationEpoch = s.ID, s.ContinuationEpoch
+				return item, nudgeOrphanPredecessorLookupsPerPass, s.ID
+			},
+			wantResolution: nudgeOrphanSuccessor,
+		},
+		{
+			name: "fenced session is open and holds its fence but the open read does not list it",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				p := f.createSeat(t, "worker-2", "2")
 				return fencedOrphanItem(p), nudgeOrphanPredecessorLookupsPerPass, ""
 			},
 			wantResolution: nudgeOrphanFencedSessionLive,
+			hideFence:      true,
 		},
 		{
 			name: "no record answers the fenced session id",
@@ -448,7 +470,13 @@ func TestResolveNudgeOrphanSeat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadSessionBeadSnapshot: %v", err)
 			}
-			seat := newNudgeOrphanSeatResolver(snapshot.OpenInfos(), sessionFrontDoor(f.store.Store).Get, budget).resolve(item)
+			var open []session.Info
+			for _, info := range snapshot.OpenInfos() {
+				if !tc.hideFence || info.ID != item.SessionID {
+					open = append(open, info)
+				}
+			}
+			seat := newNudgeOrphanSeatResolver(open, sessionFrontDoor(f.store.Store).Get, budget).resolve(item)
 			if seat.Resolution != tc.wantResolution {
 				t.Fatalf("resolution = %q, want %q", seat.Resolution, tc.wantResolution)
 			}
@@ -540,38 +568,41 @@ func (s *getRecordingStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
+// countingPass runs one dispatch pass and returns what it delivered, how many
+// whole-queue snapshots it read, and the session Gets it made outside the
+// open snapshot (by ID or session name).
+func (f *orphanSeatFixture) countingPass(t *testing.T) (delivered int, snapshots int, foreignGets []string) {
+	t.Helper()
+	snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+	open := make(map[string]bool)
+	for _, info := range snapshot.OpenInfos() {
+		open[info.ID] = true
+		open[info.SessionName] = true
+	}
+	handle := openNudgeQueue(f.dir, f.store)
+	queue := &snapshotCountingQueue{NudgeQueue: handle.Queue}
+	handle.Queue = queue
+	sessStore := &getRecordingStore{Store: f.store.Store}
+	delivered, err = dispatchQueuedNudges(handle, f.dir, supervisorCfg(), f.store.Store, sessStore, f.fake, snapshot, &f.predecessors, nil)
+	if err != nil {
+		t.Fatalf("dispatchQueuedNudges: %v", err)
+	}
+	for _, id := range sessStore.gets {
+		if !open[id] {
+			foreignGets = append(foreignGets, id)
+		}
+	}
+	return delivered, queue.snapshots, foreignGets
+}
+
 // A pass whose every due key an open session lists reads no whole-queue
 // snapshot and looks up no session outside the open snapshot (by ID or
 // session name); a pass with an
 // orphaned key reads the snapshot once and looks up its fenced predecessor.
 func TestDispatchSteadyStatePassReadsNoOrphanState(t *testing.T) {
-	pass := func(t *testing.T, f *orphanSeatFixture) (delivered int, snapshots int, foreignGets []string) {
-		t.Helper()
-		snapshot, err := loadSessionBeadSnapshot(f.store.Store)
-		if err != nil {
-			t.Fatalf("loadSessionBeadSnapshot: %v", err)
-		}
-		open := make(map[string]bool)
-		for _, info := range snapshot.OpenInfos() {
-			open[info.ID] = true
-			open[info.SessionName] = true
-		}
-		handle := openNudgeQueue(f.dir, f.store)
-		queue := &snapshotCountingQueue{NudgeQueue: handle.Queue}
-		handle.Queue = queue
-		sessStore := &getRecordingStore{Store: f.store.Store}
-		delivered, err = dispatchQueuedNudges(handle, f.dir, supervisorCfg(), f.store.Store, sessStore, f.fake, snapshot, nil)
-		if err != nil {
-			t.Fatalf("dispatchQueuedNudges: %v", err)
-		}
-		for _, id := range sessStore.gets {
-			if !open[id] {
-				foreignGets = append(foreignGets, id)
-			}
-		}
-		return delivered, queue.snapshots, foreignGets
-	}
-
 	t.Run("every due key matched", func(t *testing.T) {
 		f := newOrphanSeatFixture(t)
 		s := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
@@ -579,7 +610,7 @@ func TestDispatchSteadyStatePassReadsNoOrphanState(t *testing.T) {
 		f.startIdle(t, f.createSeat(t, "worker-9", "9").ID)
 		f.fake.Calls = nil
 
-		delivered, snapshots, foreign := pass(t, f)
+		delivered, snapshots, foreign := f.countingPass(t)
 		if delivered != 1 {
 			t.Fatalf("delivered = %d, want 1", delivered)
 		}
@@ -599,7 +630,7 @@ func TestDispatchSteadyStatePassReadsNoOrphanState(t *testing.T) {
 		f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
 		f.fake.Calls = nil
 
-		delivered, snapshots, foreign := pass(t, f)
+		delivered, snapshots, foreign := f.countingPass(t)
 		if delivered != 1 {
 			t.Fatalf("delivered = %d, want 1", delivered)
 		}
@@ -607,4 +638,408 @@ func TestDispatchSteadyStatePassReadsNoOrphanState(t *testing.T) {
 			t.Fatalf("snapshots=%d gets outside the open snapshot=%v, want one snapshot and one lookup of %s", snapshots, foreign, p.ID)
 		}
 	})
+}
+
+// An adopted orphan whose claimed delivery does not succeed is left re-fenced
+// to the successor but still under the predecessor's key. A later due pass
+// hands that key to the successor again and delivers the item to it exactly
+// once. Each case leaves the item so through one production path: a refusal
+// the claim releases for a retry, a lapsed in-flight lease (a controller that
+// died mid-delivery), and a second delivery group the first pass defers.
+func TestDispatchRetriesAdoptedOrphanAfterUndeliveredClaim(t *testing.T) {
+	enqueueOne := func(t *testing.T, f *orphanSeatFixture, p session.Info) {
+		t.Helper()
+		f.enqueueFencedTo(t, p, "continue the claimed work", time.Now().Add(-time.Minute))
+	}
+	refusedBy := func(err error) func(t *testing.T, f *orphanSeatFixture, s session.Info) {
+		return func(t *testing.T, f *orphanSeatFixture, s session.Info) {
+			t.Helper()
+			f.fake.NudgeErrors = map[string]error{s.SessionName: err}
+			delivered := f.dispatch(t, f.fake, nil)
+			if msgs := f.nudgeCalls(); delivered != 0 || len(msgs) != 1 || !strings.HasPrefix(msgs[0], s.SessionName+":") {
+				t.Fatalf("refused first pass: delivered=%d nudges=%v, want one undelivered attempt on %s", delivered, msgs, s.SessionName)
+			}
+			f.fake.NudgeErrors = nil
+		}
+	}
+	cases := []struct {
+		name    string
+		enqueue func(t *testing.T, f *orphanSeatFixture, p session.Info)
+		// interrupt leaves the adopted item undelivered, re-fenced to s.
+		interrupt func(t *testing.T, f *orphanSeatFixture, s session.Info)
+		// retried is the message the later pass must deliver.
+		retried string
+	}{
+		{name: "the successor is busy", enqueue: enqueueOne, interrupt: refusedBy(runtime.ErrSessionBusy), retried: "continue the claimed work"},
+		{name: "the successor refuses while an interaction is pending", enqueue: enqueueOne, interrupt: refusedBy(runtime.ErrNudgeRefusedPendingInteraction), retried: "continue the claimed work"},
+		{
+			name:    "the in-flight lease lapsed",
+			enqueue: enqueueOne,
+			interrupt: func(t *testing.T, f *orphanSeatFixture, s session.Info) {
+				t.Helper()
+				// What a claim that died mid-delivery leaves behind.
+				target := resolveNudgeTargetFromSessionInfo(f.dir, supervisorCfg(), s)
+				now := time.Now()
+				if err := updateNudgeQueueState(f.dir, "test-lapsed-claim", func(state *nudgeQueueState) error {
+					for _, item := range state.Pending {
+						item = refencedQueuedNudge(target, item)
+						item.DeliveryBatch = newQueuedNudgeBatchID()
+						item.ClaimedAt = now.Add(-2 * defaultQueuedNudgeClaimTTL).UTC()
+						item.LeaseUntil = now.Add(-defaultQueuedNudgeClaimTTL).UTC()
+						state.InFlight = append(state.InFlight, item)
+					}
+					state.Pending = nil
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			retried: "continue the claimed work",
+		},
+		{
+			name: "a second delivery group waits for a later pass",
+			enqueue: func(t *testing.T, f *orphanSeatFixture, p session.Info) {
+				t.Helper()
+				f.enqueueFencedTo(t, p, "first reminder", time.Now().Add(-2*time.Minute))
+				submit := newQueuedNudgeWithOptions(p.ID, "then the user's prompt", nudgequeue.SourceSubmit, time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: p.ID, ContinuationEpoch: p.ContinuationEpoch})
+				if err := enqueueQueuedNudge(f.dir, submit); err != nil {
+					t.Fatal(err)
+				}
+			},
+			interrupt: func(t *testing.T, f *orphanSeatFixture, s session.Info) {
+				t.Helper()
+				delivered := f.dispatch(t, f.fake, nil)
+				if msgs := f.nudgeCalls(); delivered != 1 || len(msgs) != 1 || !strings.HasPrefix(msgs[0], s.SessionName+":") || !strings.Contains(msgs[0], "first reminder") {
+					t.Fatalf("first pass: delivered=%d nudges=%v, want only the first reminder delivered to %s", delivered, msgs, s.SessionName)
+				}
+			},
+			retried: "then the user's prompt",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOrphanSeatFixture(t)
+			p := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+			tc.enqueue(t, f, p)
+			f.closeSession(t, p.ID)
+			s := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+			f.fake.Calls = nil
+
+			tc.interrupt(t, f, s)
+			state := f.state(t)
+			var left []queuedNudge
+			for _, bucket := range [][]queuedNudge{state.Pending, state.InFlight} {
+				for _, item := range bucket {
+					if item.Agent == p.ID {
+						left = append(left, item)
+					}
+				}
+			}
+			if len(left) != 1 || left[0].SessionID != s.ID || left[0].Message != tc.retried {
+				t.Fatalf("queued under %s after the first attempt = %+v, want only %q, re-fenced to %s", p.ID, left, tc.retried, s.ID)
+			}
+
+			// Let the retry delay pass and the successor go idle again.
+			if err := updateNudgeQueueState(f.dir, "test-retry-due", func(state *nudgeQueueState) error {
+				for i := range state.Pending {
+					state.Pending[i].DeliverAfter = time.Now().Add(-time.Second).UTC()
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			f.fake.Activity[s.SessionName] = time.Now().Add(-10 * time.Second)
+			f.fake.Calls = nil
+			delivered := f.dispatch(t, f.fake, nil)
+			if msgs := f.nudgeCalls(); delivered != 1 || len(msgs) != 1 || !strings.HasPrefix(msgs[0], s.SessionName+":") || !strings.Contains(msgs[0], tc.retried) {
+				t.Fatalf("retry pass: delivered=%d nudges=%v, want %q delivered once to successor %s", delivered, msgs, tc.retried, s.SessionName)
+			}
+			state = f.state(t)
+			for _, bucket := range [][]queuedNudge{state.Pending, state.InFlight} {
+				for _, item := range bucket {
+					if item.Agent == p.ID {
+						t.Fatalf("item %s still queued under the predecessor's key: %+v", item.ID, item)
+					}
+				}
+			}
+			if got := state.DispatchSkips["orphaned"]; got != 0 {
+				t.Fatalf("DispatchSkips[orphaned] = %d, want 0: the key went to the successor on every pass; full map %#v", got, state.DispatchSkips)
+			}
+			f.fake.Activity[s.SessionName] = time.Now().Add(-10 * time.Second)
+			f.fake.Calls = nil
+			if delivered := f.dispatch(t, f.fake, nil); delivered != 0 || len(f.nudgeCalls()) != 0 {
+				t.Fatalf("a further pass delivered %d (%v), want nothing", delivered, f.nudgeCalls())
+			}
+		})
+	}
+}
+
+// A pass reads at most nudgeOrphanPredecessorLookupsPerPass fenced sessions,
+// newest items first, and carries the closed rows it read to the next pass. So
+// an adoptable orphan older than that many unadoptable ones (closed
+// predecessors whose seats no session holds) is adopted on a later pass rather
+// than deferred until it expires, and once every due fence is carried a pass
+// reads none.
+func TestDispatchOrphanLookupBudgetAdvancesAcrossPasses(t *testing.T) {
+	f := newOrphanSeatFixture(t)
+	now := time.Now()
+	p := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+	adoptable := f.enqueueFencedTo(t, p, "continue the claimed work", now.Add(-2*time.Hour))
+	f.closeSession(t, p.ID)
+	vacant := nudgeOrphanPredecessorLookupsPerPass + 1
+	for i := 0; i < vacant; i++ {
+		v := f.createSeat(t, fmt.Sprintf("worker-v%d", i), "1")
+		f.enqueueFencedTo(t, v, "left for a vacant seat", now.Add(-time.Hour+time.Duration(i)*time.Second))
+		f.closeSession(t, v.ID)
+	}
+	s := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+	f.fake.Calls = nil
+
+	delivered, _, reads := f.countingPass(t)
+	if delivered != 0 || len(reads) != nudgeOrphanPredecessorLookupsPerPass || slices.Contains(reads, p.ID) {
+		t.Fatalf("pass 1: delivered=%d reads=%d (%v), want nothing delivered and the %d newest fences read, not %s",
+			delivered, len(reads), reads, nudgeOrphanPredecessorLookupsPerPass, p.ID)
+	}
+	delivered, _, reads = f.countingPass(t)
+	msgs := f.nudgeCalls()
+	if delivered != 1 || len(reads) != 2 || !slices.Contains(reads, p.ID) || len(msgs) != 1 || !strings.HasPrefix(msgs[0], s.SessionName+":") || !strings.Contains(msgs[0], "continue the claimed work") {
+		t.Fatalf("pass 2: delivered=%d reads=%v nudges=%v, want only the two unread fences read and %s adopted by %s",
+			delivered, reads, msgs, adoptable.ID, s.SessionName)
+	}
+	delivered, _, reads = f.countingPass(t)
+	if delivered != 0 || len(reads) != 0 {
+		t.Fatalf("pass 3: delivered=%d reads=%v, want no fence read once every due one is carried", delivered, reads)
+	}
+	if pending := f.state(t).Pending; len(pending) != vacant {
+		t.Fatalf("pending = %d items, want the %d vacant-seat items still queued", len(pending), vacant)
+	}
+}
+
+// A resolver answers an earlier pass's settled reads (a closed row, an ID no
+// record answers) without a lookup and reads again what was not settled (a
+// failed read, an open row the open sessions did not list); a carried row the
+// open sessions now list is answered from them. The memo keeps only the latest
+// pass's settled reads.
+func TestNudgeOrphanPredecessorMemoCarriesSettledReads(t *testing.T) {
+	records := map[string]session.Info{
+		"closed":   {ID: "closed", Closed: true, Template: "worker", AgentName: "worker-2", PoolSlot: "2", PoolManaged: true},
+		"reopened": {ID: "reopened", Closed: true, Template: "worker", AgentName: "worker-3", PoolSlot: "3", PoolManaged: true},
+		"unlisted": {ID: "unlisted", Template: "worker", AgentName: "worker-4", PoolSlot: "4", PoolManaged: true},
+	}
+	var reads []string
+	lookup := func(id string) (session.Info, error) {
+		reads = append(reads, id)
+		if id == "failing" {
+			return session.Info{}, errors.New("store unavailable")
+		}
+		if info, ok := records[id]; ok {
+			return info, nil
+		}
+		return session.Info{}, beads.ErrNotFound
+	}
+	var memo nudgeOrphanPredecessorMemo
+	pass := func(open []session.Info, fences ...string) map[string]nudgeOrphanPredecessor {
+		reads = nil
+		r := newNudgeOrphanSeatResolver(open, lookup, nudgeOrphanPredecessorLookupsPerPass)
+		r.carried = memo.carried()
+		got := make(map[string]nudgeOrphanPredecessor, len(fences))
+		for _, id := range fences {
+			got[id] = r.predecessor(id)
+		}
+		memo.keep(r.predecessors)
+		return got
+	}
+	fences := []string{"closed", "missing", "failing", "unlisted", "reopened"}
+
+	pass(nil, fences...)
+	if !slices.Equal(reads, fences) {
+		t.Fatalf("pass 1 reads = %v, want every fence read once: %v", reads, fences)
+	}
+	reopened := records["reopened"]
+	reopened.Closed = false
+	got := pass([]session.Info{reopened}, fences...)
+	if want := []string{"failing", "unlisted"}; !slices.Equal(reads, want) {
+		t.Fatalf("pass 2 reads = %v, want only the unsettled fences %v read again", reads, want)
+	}
+	if p := got["closed"]; p.info.ID != "closed" || !p.info.Closed || p.resolution != "" {
+		t.Fatalf("carried closed row = %+v, want the closed record", p)
+	}
+	if p := got["missing"]; p.resolution != nudgeOrphanFencedSessionUnknown {
+		t.Fatalf("carried missing fence = %+v, want fenced-session-unknown", p)
+	}
+	if p := got["reopened"]; !p.open || p.info.Closed {
+		t.Fatalf("reopened fence = %+v, want the open session, not the carried closed row", p)
+	}
+	if p := got["failing"]; p.resolution != nudgeOrphanLookupError || p.err == nil {
+		t.Fatalf("failing fence = %+v, want a lookup error", p)
+	}
+	pass(nil, "closed")
+	if len(reads) != 0 {
+		t.Fatalf("pass 3 reads = %v, want none", reads)
+	}
+	if carried := memo.carried(); len(carried) != 1 || carried["closed"].info.ID != "closed" {
+		t.Fatalf("memo after pass 3 = %+v, want only the fence pass 3 named", carried)
+	}
+	memo.forget()
+	if carried := memo.carried(); len(carried) != 0 {
+		t.Fatalf("memo after forget = %+v, want empty", carried)
+	}
+	var none *nudgeOrphanPredecessorMemo
+	none.keep(map[string]nudgeOrphanPredecessor{"closed": {settled: true}})
+	if carried := none.carried(); carried != nil {
+		t.Fatalf("nil memo carried %+v, want nothing", carried)
+	}
+}
+
+// decideNudgeOrphanKeys hands a key to a successor only when every fenced item
+// under it resolves to the same one and it carries no unfenced startup turn;
+// it spends a lookup budget on the newest items first, and reports each failed
+// fenced-session read once.
+func TestDecideNudgeOrphanKeys(t *testing.T) {
+	seat := func(id, agentName string, closed bool) session.Info {
+		return session.Info{ID: id, Closed: closed, Template: "worker", AgentName: agentName, PoolSlot: "1", PoolManaged: true, SessionName: "s-" + id}
+	}
+	open := []session.Info{seat("succ-a", "worker-a", false), seat("succ-b", "worker-b", false)}
+	records := map[string]session.Info{
+		"pred-a":  seat("pred-a", "worker-a", true),
+		"pred-a2": seat("pred-a2", "worker-a", true),
+		"pred-b":  seat("pred-b", "worker-b", true),
+	}
+	lookup := func(id string) (session.Info, error) {
+		if id == "pred-err" {
+			return session.Info{}, errors.New("store unavailable")
+		}
+		if info, ok := records[id]; ok {
+			return info, nil
+		}
+		return session.Info{}, beads.ErrNotFound
+	}
+	base := time.Now().Add(-time.Minute)
+	n := 0
+	item := func(key, fence string, age time.Duration) queuedNudge {
+		n++
+		return queuedNudge{ID: fmt.Sprintf("nudge-%d", n), Agent: key, SessionID: fence, Source: "hook-claim-continuation", CreatedAt: base.Add(-age)}
+	}
+	unfencedStartupTurn := func(key string) queuedNudge {
+		turn := item(key, "", 0)
+		turn.Source = nudgequeue.SourceSubmit
+		turn.Reference = nudgequeue.StartupTurnReference("launch-1")
+		return turn
+	}
+	type want struct {
+		key        string
+		resolution nudgeOrphanResolution
+		successor  string
+	}
+	cases := []struct {
+		name    string
+		budget  int
+		items   []queuedNudge
+		want    []want
+		wantErr int
+	}{
+		{
+			name:   "items of two predecessors of one seat go to its holder",
+			budget: nudgeOrphanPredecessorLookupsPerPass,
+			items:  []queuedNudge{item("k", "pred-a", time.Minute), item("k", "pred-a2", 0)},
+			want:   []want{{"k", nudgeOrphanSuccessor, "succ-a"}},
+		},
+		{
+			name:   "items whose seats have different holders are ambiguous",
+			budget: nudgeOrphanPredecessorLookupsPerPass,
+			items:  []queuedNudge{item("k", "pred-a", time.Minute), item("k", "pred-b", 0)},
+			want:   []want{{"k", nudgeOrphanSeatAmbiguous, ""}},
+		},
+		{
+			name:   "an unfenced startup turn keeps a resolvable key",
+			budget: nudgeOrphanPredecessorLookupsPerPass,
+			items:  []queuedNudge{unfencedStartupTurn("k"), item("k", "pred-a", time.Minute)},
+			want:   []want{{"k", nudgeOrphanStartupTurn, ""}},
+		},
+		{
+			name:    "a failed read is a lookup error, reported once per fence",
+			budget:  nudgeOrphanPredecessorLookupsPerPass,
+			items:   []queuedNudge{item("k1", "pred-err", time.Minute), item("k1", "pred-err", 0), item("k2", "pred-err", 0)},
+			want:    []want{{"k1", nudgeOrphanLookupError, ""}, {"k2", nudgeOrphanLookupError, ""}},
+			wantErr: 1,
+		},
+		{
+			name:   "the budget goes to the newest items first",
+			budget: 1,
+			items:  []queuedNudge{item("k-old", "pred-b", time.Hour), item("k-new", "pred-a", 0)},
+			want:   []want{{"k-old", nudgeOrphanLookupDeferred, ""}, {"k-new", nudgeOrphanSuccessor, "succ-a"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var keys []string
+			due := make(map[string][]queuedNudge)
+			for _, it := range tc.items {
+				if _, ok := due[it.Agent]; !ok {
+					keys = append(keys, it.Agent)
+				}
+				due[it.Agent] = append(due[it.Agent], it)
+			}
+			decided, err := decideNudgeOrphanKeys(newNudgeOrphanSeatResolver(open, lookup, tc.budget), keys, due)
+			var errs []error
+			if err != nil {
+				errs = err.(interface{ Unwrap() []error }).Unwrap()
+			}
+			if len(errs) != tc.wantErr {
+				t.Fatalf("errors = %v, want %d", errs, tc.wantErr)
+			}
+			if len(decided) != len(tc.want) {
+				t.Fatalf("decided = %+v, want %d keys", decided, len(tc.want))
+			}
+			for i, w := range tc.want {
+				if got := decided[i]; got.Key != w.key || got.Resolution != w.resolution || got.Successor.ID != w.successor {
+					t.Fatalf("key %d = {%s %s %s}, want {%s %s %s}", i, got.Key, got.Resolution, got.Successor.ID, w.key, w.resolution, w.successor)
+				}
+			}
+		})
+	}
+}
+
+// inheritNudgeOrphanKey hands a key only to a successor target that can be
+// delivered to: one without a session name leaves the key orphaned.
+func TestInheritNudgeOrphanKeyNeedsADeliverableTarget(t *testing.T) {
+	k := nudgeOrphanKey{Key: "pred-a", Resolution: nudgeOrphanSuccessor, Successor: session.Info{ID: "succ-a"}}
+	targets := []nudgeTarget{{sessionID: "other", sessionName: "s-other"}, {sessionID: "succ-a"}}
+	if name, ok := inheritNudgeOrphanKey(targets, k); ok || name != "" || len(targets[1].inheritedKeys) != 0 {
+		t.Fatalf("inherit to a target with no session name = %q, %v, keys %v; want refused", name, ok, targets[1].inheritedKeys)
+	}
+	targets[1].sessionName = "s-succ-a"
+	if name, ok := inheritNudgeOrphanKey(targets, k); !ok || name != "s-succ-a" || !slices.Equal(targets[1].inheritedKeys, []string{"pred-a"}) || len(targets[0].inheritedKeys) != 0 {
+		t.Fatalf("inherit = %q, %v, keys %v / %v; want only s-succ-a handed pred-a", name, ok, targets[1].inheritedKeys, targets[0].inheritedKeys)
+	}
+}
+
+// failingSnapshotQueue is a queue whose whole-queue Snapshot read fails.
+type failingSnapshotQueue struct {
+	storebinding.NudgeQueue
+	err error
+}
+
+func (q failingSnapshotQueue) Snapshot() (nudgequeue.State, error) {
+	return nudgequeue.State{}, q.err
+}
+
+// A pass that cannot read the queue counts every orphaned key a lookup error,
+// returns the read error, and leaves the carried reads as they were.
+func TestResolveNudgeOrphanKeysForPassCannotReadQueue(t *testing.T) {
+	handle := openNudgeQueue(t.TempDir(), beads.NudgesStore{})
+	handle.Queue = failingSnapshotQueue{NudgeQueue: handle.Queue, err: errors.New("queue unreadable")}
+	var memo nudgeOrphanPredecessorMemo
+	memo.keep(map[string]nudgeOrphanPredecessor{"pred-a": {info: session.Info{ID: "pred-a", Closed: true}, settled: true}})
+
+	decided, err := resolveNudgeOrphanKeysForPass(handle, []string{"k1", "k2"}, nil, nil, &memo, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "queue unreadable") {
+		t.Fatalf("err = %v, want the queue read error", err)
+	}
+	if len(decided) != 2 || decided[0].Key != "k1" || decided[1].Key != "k2" || decided[0].Resolution != nudgeOrphanLookupError || decided[1].Resolution != nudgeOrphanLookupError {
+		t.Fatalf("decided = %+v, want k1 and k2 counted lookup-error", decided)
+	}
+	if carried := memo.carried(); len(carried) != 1 || carried["pred-a"].info.ID != "pred-a" {
+		t.Fatalf("memo = %+v, want its read kept", carried)
+	}
 }
