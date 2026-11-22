@@ -998,13 +998,25 @@ func (expandedConfigLoadCheck) WarmupEligible() bool { return false }
 func (expandedConfigLoadCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	if _, err := loadCityConfig(ctx.CityPath, io.Discard); err != nil {
+	if err := validateCityConfigLoads(ctx.CityPath); err != nil {
 		return errorCheck("expanded-config-load",
 			fmt.Sprintf("expanded config load error: %v", err),
 			expandedConfigLoadFixHint(err),
 			nil)
 	}
 	return okCheck("expanded-config-load", "expanded config loaded")
+}
+
+// validateCityConfigLoads loads the composed city config for a validator.
+// The one-shot loader quarantines a rig whose packs fail; a validator reports
+// that rig's error instead, so it fails on the same config a strict load
+// (controller reload, start) refuses.
+func validateCityConfigLoads(cityPath string) error {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return err
+	}
+	return cfg.QuarantineError()
 }
 
 func expandedConfigLoadFixHint(err error) string {

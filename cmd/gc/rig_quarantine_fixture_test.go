@@ -11,6 +11,63 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// rigQuarantineCity is a city with a healthy rig "good" (agent worker from a
+// local pack import) and a rig "bad" whose locked remote import's cache has
+// local worktree changes (issue #6656 trigger 3).
+type rigQuarantineCity struct {
+	cityDir string
+	goodDir string
+	badDir  string
+}
+
+func newRigQuarantineCity(t *testing.T) rigQuarantineCity {
+	t.Helper()
+	root := t.TempDir()
+	gcHome := filepath.Join(root, "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Cleanup(config.ResetRemoteCacheValidationCache)
+
+	commit := seedDirtyBrokenCache(t, root, gcHome)
+
+	writeQuarantineFile(t, root, "goodpack/pack.toml", "[pack]\nname = \"goodpack\"\nschema = 1\n\n[[agent]]\nname = \"worker\"\nscope = \"rig\"\n")
+
+	c := rigQuarantineCity{
+		cityDir: filepath.Join(root, "city"),
+		goodDir: filepath.Join(root, "rigs", "good"),
+		badDir:  filepath.Join(root, "rigs", "bad"),
+	}
+	for _, d := range []string{c.goodDir, c.badDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeQuarantineFile(t, c.cityDir, "city.toml", fmt.Sprintf(`[workspace]
+name = "quarantine-city"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "good"
+prefix = "gd"
+
+[rigs.imports.tools]
+source = "../goodpack"
+
+[[rigs]]
+name = "bad"
+prefix = "bd"
+
+[rigs.imports.broken]
+source = %q
+version = "^1.0"
+`, quarantineBrokenSource))
+	writeQuarantineFile(t, c.cityDir, ".gc/site.toml", quarantineSiteBindings(c.goodDir, c.badDir))
+	writeQuarantineFile(t, c.cityDir, "packs.lock", "schema = 1\n"+brokenLockEntry(commit))
+	return c
+}
+
 const quarantineBrokenSource = "https://github.com/example/broken.git"
 
 // seedDirtyBrokenCache installs quarantineBrokenSource in the repo cache under

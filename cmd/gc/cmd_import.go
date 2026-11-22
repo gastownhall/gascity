@@ -45,10 +45,7 @@ var (
 	// A var so command tests that stub syncImports/installLockedImports
 	// (and so have no real cache content on disk for the loader to expand)
 	// can stub this too. See #5382.
-	validateComposedConfigAfterInstall = func(cityPath string) error {
-		_, err := loadCityConfig(cityPath, io.Discard)
-		return err
-	}
+	validateComposedConfigAfterInstall = validateCityConfigLoads
 )
 
 // resolveImportVersion and resolveImportHeadCommit carry a leading cityRoot so
