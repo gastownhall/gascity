@@ -245,3 +245,20 @@ func commitAsyncStartBounded(
 	logLifecycleOutcome(stderr, "start", wave, name, template, "commit_unavailable", started, time.Now(), err, phases)
 	return false
 }
+
+// commitSyncStartBounded runs commit, the per-result writes of the synchronous
+// start path, held to commitPhaseBound under the per-session key the post-start
+// observations and the async commit share. It returns the commit's verdict and
+// whether the commit answered. When it did not (the bound lapsed, or an
+// observation of the session is outstanding and the commit is refused without
+// running) it logs commit_unavailable and makes no store or runtime call.
+func commitSyncStartBounded(
+	_ context.Context,
+	_ string,
+	result startResult,
+	_ int,
+	_ io.Writer,
+	commit func(startResult) startCommitVerdict,
+) (verdict startCommitVerdict, answered bool) {
+	return commit(result), true
+}
