@@ -1394,6 +1394,7 @@ go_test(
         "cmd_handoff_seam_test.go",
         "cmd_handoff_test.go",
         "cmd_hook_claim_adoption_ownership_test.go",
+        "cmd_hook_claim_auto_reclaim_test.go",
         "cmd_hook_claim_budget_deferred_test.go",
         "cmd_hook_claim_claimed_at_test.go",
         "cmd_hook_claim_collapsed_identity_test.go",
