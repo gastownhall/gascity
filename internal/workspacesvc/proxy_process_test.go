@@ -336,6 +336,31 @@ func TestProxyProcessProxiesLiveProcessAfterFailedHealthProbe(t *testing.T) {
 	requireProxiedBridgeHook(t, mgr, "while degraded by a non-2xx probe")
 }
 
+// TestProxyProcessDegradedStatusSurvivesProxiedRequests: proxying requests
+// through a degraded service leaves its degraded status and probe reason in
+// place, and the next passing probe reports it ready again.
+func TestProxyProcessDegradedStatusSurvivesProxiedRequests(t *testing.T) {
+	mgr, marker := startHealthToggleManager(t)
+
+	setHealthFailMode(t, marker, "hang")
+	mgr.Tick(context.Background(), time.Now().UTC())
+	requireDegraded(t, mgr, "health check failed")
+	before, _ := mgr.Get("bridge")
+
+	requireProxiedBridgeHook(t, mgr, "while degraded")
+	requireProxiedBridgeHook(t, mgr, "while degraded")
+	requireDegraded(t, mgr, "health check failed")
+	if after, _ := mgr.Get("bridge"); after.Reason != before.Reason {
+		t.Fatalf("reason after proxied requests = %q, want the probe's %q", after.Reason, before.Reason)
+	}
+
+	setHealthFailMode(t, marker, "")
+	mgr.Tick(context.Background(), time.Now().UTC())
+	if status, _ := mgr.Get("bridge"); status.State != "ready" || status.LocalState != "ready" || status.Reason != "" {
+		t.Fatalf("status after a passing probe = %s/%s %q, want ready/ready with no reason", status.State, status.LocalState, status.Reason)
+	}
+}
+
 func countProxyProcessHelperEnvKey(key string) int {
 	count := 0
 	for _, entry := range os.Environ() {
