@@ -4,7 +4,11 @@ package beads
 
 import (
 	"context"
+	"maps"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -91,4 +95,89 @@ func TestBDReadCoalesce_JoinsOnlyBeforeSpawn(t *testing.T) {
 	waitFor(t, "the late caller's child to spawn", func() bool { return len(f.spawns()) == 2 })
 	f.releaseAll()
 	wantOutput(t, (<-second)[0], "2 list --json")
+}
+
+// TestBDReadCoalesce_DistinctCallsNeverShare covers AC-7: concurrent calls
+// that differ only in dir, in one arg, in BEADS_DIR or in a credential env
+// var each spawn their own child and get that child's output, and identical
+// mutations and identical bd sql calls never coalesce.
+func TestBDReadCoalesce_DistinctCallsNeverShare(t *testing.T) {
+	t.Parallel()
+	f := newFakeBD(t)
+	gate := newBDExecGate(16)
+	dumps := filepath.Join(f.root, "env")
+	dirA, dirB := filepath.Join(f.root, "a"), filepath.Join(f.root, "b")
+	for _, d := range []string{dirA, dirB} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	type call struct {
+		dir     string
+		argv    string
+		env     map[string]string
+		wantEnv string // a line this call's child must have seen in its env
+	}
+	calls := []call{
+		{dir: dirA, argv: "list --json", wantEnv: "PWD=" + dirA},
+		{dir: dirB, argv: "list --json", wantEnv: "PWD=" + dirB},
+		{dir: f.root, argv: "list --json --label a"},
+		{dir: f.root, argv: "list --json --label b"},
+		{dir: f.root, argv: "list --json", env: map[string]string{"BEADS_DIR": dirA}, wantEnv: "BEADS_DIR=" + dirA},
+		{dir: f.root, argv: "list --json", env: map[string]string{"BEADS_DIR": dirB}, wantEnv: "BEADS_DIR=" + dirB},
+		{dir: f.root, argv: "show gc-1 --json", env: map[string]string{"BEADS_DOLT_PASSWORD": "p1"}, wantEnv: "BEADS_DOLT_PASSWORD=p1"},
+		{dir: f.root, argv: "show gc-1 --json", env: map[string]string{"BEADS_DOLT_PASSWORD": "p2"}, wantEnv: "BEADS_DOLT_PASSWORD=p2"},
+		{dir: f.root, argv: "update gc-1 --status open"},
+		{dir: f.root, argv: "update gc-1 --status open"},
+		{dir: f.root, argv: "sql SELECT 1"},
+		{dir: f.root, argv: "sql SELECT 1"},
+	}
+
+	results := make([]gateCallResult, len(calls))
+	var wg sync.WaitGroup
+	for i, c := range calls {
+		env := f.env()
+		env["GC_TEST_ENV_DUMP"] = dumps
+		maps.Copy(env, c.env)
+		run := execCommandRunner(context.Background(), env, false, processEnvSnapshotExcludingNativeDoltOpen, gate)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out, err := run(c.dir, "bd", strings.Fields(c.argv)...)
+			results[i] = gateCallResult{argv: c.argv, out: string(out), err: err}
+		}()
+	}
+	waitFor(t, "every distinct call to spawn its own child", func() bool { return len(f.alive()) == len(calls) })
+	f.releaseAll()
+	wg.Wait()
+
+	if n := len(f.spawns()); n != len(calls) {
+		t.Errorf("spawned %d children for %d distinct calls, want %d", n, len(calls), len(calls))
+	}
+	seen := map[string]int{}
+	for i, r := range results {
+		if r.err != nil {
+			t.Errorf("call %d %q: %v", i, r.argv, r.err)
+			continue
+		}
+		seq, argv, _ := strings.Cut(strings.TrimSpace(r.out), " ")
+		if argv != r.argv {
+			t.Errorf("call %d %q got output %q, want its own child's output", i, r.argv, r.out)
+		}
+		if prev, dup := seen[seq]; dup {
+			t.Errorf("calls %d and %d both got child %s's output", prev, i, seq)
+		}
+		seen[seq] = i
+		if want := calls[i].wantEnv; want != "" {
+			data, err := os.ReadFile(dumps + "." + seq)
+			if err != nil {
+				t.Errorf("call %d: reading child %s env: %v", i, seq, err)
+				continue
+			}
+			if !strings.Contains("\n"+string(data), "\n"+want+"\n") {
+				t.Errorf("call %d got child %s's output, but that child's env lacks %q", i, seq, want)
+			}
+		}
+	}
 }
