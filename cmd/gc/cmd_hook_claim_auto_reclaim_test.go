@@ -347,6 +347,71 @@ func TestHookClaimNeverReclaimsWhenAgentLeavesKnobOff(t *testing.T) {
 	}
 }
 
+// TestHookClaimReclaimFlagFollowsResolvedAgent is AC-4: the knob reaches the
+// claim door through config layers other than the agent's own [[agent]]
+// block — a [[patches.agent]] entry, and the GC_TEMPLATE agent a pool
+// instance with an unconfigured per-instance name resolves to.
+func TestHookClaimReclaimFlagFollowsResolvedAgent(t *testing.T) {
+	t.Run("patch", func(t *testing.T) {
+		clearGCEnv(t)
+		disableManagedDoltRecoveryForTest(t)
+		t.Setenv("GC_BEADS", "file")
+		bd := &fakeAutoReclaimBD{reclaimReply: `{"reclaimed":[],"count":0}`}
+		arrangeAutoReclaimClaim(t, autoReclaimWorkQuery,
+			"[[patches.agent]]\nname = \"worker\"\nauto_reclaim_stale_claims = true\n", bd)
+
+		result, code := runAutoReclaimClaim(t)
+		if code != 1 {
+			t.Fatalf("gc hook --claim exited %d for a no-work drain, want 1", code)
+		}
+		if got := bd.reclaimArgv(); len(got) != 1 {
+			t.Fatalf("bd reclaim ran %q, want one: a [[patches.agent]] entry must set the claim door's knob", got)
+		}
+		if result.Action != "drain" || result.Reason != "no_work" {
+			t.Fatalf("result = %+v, want a no_work drain", result)
+		}
+	})
+	t.Run("pool template", func(t *testing.T) {
+		clearGCEnv(t)
+		disableManagedDoltRecoveryForTest(t)
+		t.Setenv("GC_BEADS", "file")
+		cityDir := writeAutoReclaimCity(t, autoReclaimWorkQuery, "auto_reclaim_stale_claims = true\n")
+		// A pool instance whose per-instance name is not a config entry: the
+		// runtime identity steps aside to worker-adhoc-1, so the hook resolves
+		// its agent through the GC_TEMPLATE fallback.
+		sessionID := newAutoReclaimSessionBead(t, cityDir, map[string]string{
+			"session_name":   "worker-adhoc-1",
+			"template":       "worker",
+			"alias":          "",
+			"agent_name":     "worker-adhoc-1",
+			"session_origin": "ephemeral",
+			"state":          string(session.StateActive),
+			"instance_token": "live-token",
+		})
+		t.Setenv("GC_CITY", cityDir)
+		t.Setenv("GC_TEMPLATE", "worker")
+		t.Setenv("GC_ALIAS", "")
+		t.Setenv("GC_AGENT", "worker-adhoc-1")
+		t.Setenv("GC_SESSION_ID", sessionID)
+		t.Setenv("GC_SESSION_NAME", "worker-adhoc-1")
+		t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+		t.Setenv("GC_INSTANCE_TOKEN", "live-token")
+		bd := &fakeAutoReclaimBD{reclaimReply: `{"reclaimed":[],"count":0}`}
+		bd.install(t)
+
+		result, code := runAutoReclaimClaim(t)
+		if code != 1 {
+			t.Fatalf("gc hook --claim exited %d for a no-work drain, want 1", code)
+		}
+		if got := bd.reclaimArgv(); len(got) != 1 {
+			t.Fatalf("bd reclaim ran %q, want one: the pool instance inherits the template agent's knob", got)
+		}
+		if result.Action != "drain" || result.Reason != "no_work" {
+			t.Fatalf("result = %+v, want a no_work drain", result)
+		}
+	})
+}
+
 // TestHookClaimReclaimEligibilityGatesAreHonored pins the reclaim lane's
 // eligibility gates at the cmd level: a knob-on session still attempts no
 // reclaim for a candidate that is routed elsewhere, still inside its
