@@ -3115,7 +3115,9 @@ Dead-letter one or more pending or in-flight nudges by ID.
 
 Each dropped nudge is terminalized through the same dead-letter path a
 failed delivery attempt uses, so it lands in "gc nudge status" as dead
-rather than disappearing silently. Find IDs with "gc nudge status".
+rather than disappearing silently. Find IDs with "gc nudge status", and
+the IDs of nudges left for sessions that have closed with
+"gc nudge status --orphaned".
 
 Dropping an in-flight nudge dead-letters it even if it was already
 injected into the session but not yet acked.
@@ -3156,6 +3158,17 @@ prints the failure record instead of a partial result.
 
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.
 
+With --orphaned it takes no session and lists, city-wide, every pending,
+in-flight and dead item whose key no open session matches: an item left for
+a session that has closed. Each row names the item's queue and shadow bead
+IDs, key, bucket, due and expiry times, the session it is fenced to and that
+session's state, and its resolution: "successor &lt;session&gt;" when the one open
+session holding the fenced session's pool seat will adopt it on the next
+dispatch pass, or the reason none will (seat-vacant, seat-ambiguous,
+not-pool-seat, fenced-session-live, fenced-session-unknown, unfenced,
+startup-turn, lookup-error). An item nobody adopts is dead-lettered when it
+expires; remove one sooner with "gc nudge drop &lt;id&gt;".
+
 ```
 gc nudge status [session] [flags]
 ```
@@ -3163,6 +3176,7 @@ gc nudge status [session] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
+| `--orphaned` | bool |  | List the city's queued nudges whose key no open session matches |
 
 ## gc order
 
