@@ -498,7 +498,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			continue
 		}
 		var budget *promptBudgetJSON
-		if strictMode && a.PromptTemplate != "" {
+		if strictMode && startupPromptTemplate(cfg, &a) != "" {
 			var budgetErr error
 			budget, budgetErr = reportPromptDeliveryBudget(rendered.Text, &a, cfg, resolved, stderr)
 			if budgetErr != nil {
