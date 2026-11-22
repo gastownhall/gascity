@@ -3441,24 +3441,171 @@ func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 	}
 }
 
-// TestBdStoreListPushesCallerLimitForSortCreatedDesc pins that a bare
-// SortCreatedDesc issues-tier query (no SeekAfter/Metadata/etc.) pushes the
-// caller's real Limit to bd list. Only paginated (SeekAfter-bearing) reads
-// need the unbounded fetch — see TestSeekGatesForceClientSideLimit, which
-// pins the same baseline at the gate-function level.
+// TestBdStoreListPushesCallerLimitForSortCreatedDesc preserves the bounded
+// issues-tier fast path for callers that explicitly accept backing-order ties.
 func TestBdStoreListPushesCallerLimitForSortCreatedDesc(t *testing.T) {
-	runner := fakeRunner(map[string]struct {
-		out []byte
-		err error
+	assertBdStoreCreatedPage(t, mixedPriorityCreatedRows(), beads.ListQuery{
+		Label:                    "bounded-caller",
+		IncludeClosed:            true,
+		Limit:                    2,
+		Sort:                     beads.SortCreatedDesc,
+		AllowBackingCreatedLimit: true,
+	}, []string{"bd-new-low", "bd-middle"}, 2)
+}
+
+// TestBdStoreListCreatedDescSelectsNewestPopulation checks membership after
+// the backing has ordered and truncated a mixed-priority population (#9415).
+func TestBdStoreListCreatedDescSelectsNewestPopulation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		q    beads.ListQuery
 	}{
-		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 3`: {
-			out: []byte(`[{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]}]`),
-		},
-	})
-	s := beads.NewBdStore("/city", runner)
-	_, err := s.List(beads.ListQuery{Label: "bounded-caller", Limit: 3, Sort: beads.SortCreatedDesc})
+		{"closed_report", beads.ListQuery{Status: "closed", IncludeClosed: true}},
+		{"label_filtered", beads.ListQuery{Label: "bounded-caller", IncludeClosed: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.q.Sort = beads.SortCreatedDesc
+			tc.q.Limit = 2
+			assertBdStoreCreatedPage(t, mixedPriorityCreatedRows(), tc.q,
+				[]string{"bd-new-low", "bd-middle"}, -1)
+		})
+	}
+}
+
+func TestBdStoreListCreatedDescKeepsLargestIDsAtBoundary(t *testing.T) {
+	var rows []beads.Bead
+	for _, id := range []string{"bd-a", "bd-m", "bd-z"} {
+		row := mixedPriorityCreatedRows()[2]
+		row.ID = id
+		rows = append(rows, row)
+	}
+	for _, tc := range []struct {
+		name       string
+		backing    bool
+		want       []string
+		fetchLimit int
+	}{
+		{"exact", false, []string{"bd-z", "bd-m"}, -1},
+		{"backing_ties_opt_in", true, []string{"bd-m", "bd-a"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertBdStoreCreatedPage(t, rows, beads.ListQuery{
+				Label:                    "bounded-caller",
+				IncludeClosed:            true,
+				Sort:                     beads.SortCreatedDesc,
+				Limit:                    2,
+				AllowBackingCreatedLimit: tc.backing,
+			}, tc.want, tc.fetchLimit)
+		})
+	}
+}
+
+func TestBdStoreListCreatedPopulationControls(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		q    beads.ListQuery
+		want []string
+	}{
+		{"unlimited", beads.ListQuery{Sort: beads.SortCreatedDesc}, []string{"bd-new-low", "bd-middle", "bd-old-high"}},
+		{"default_bounded", beads.ListQuery{Limit: 2}, []string{"bd-old-high", "bd-middle"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.q.Status = "closed"
+			tc.q.IncludeClosed = true
+			assertBdStoreCreatedPage(t, mixedPriorityCreatedRows(), tc.q, tc.want, tc.q.Limit)
+		})
+	}
+}
+
+func mixedPriorityCreatedRows() []beads.Bead {
+	base := time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)
+	rows := make([]beads.Bead, 0, 4)
+	for i, id := range []string{"bd-old-high", "bd-middle", "bd-new-low", "bd-unrelated"} {
+		priority := i * 2
+		if priority > 4 {
+			priority = 0
+		}
+		row := beads.Bead{
+			ID: id, Title: id, Type: "task", Status: "closed", Priority: &priority,
+			CreatedAt: base.Add(time.Duration(i) * time.Hour), Labels: []string{"bounded-caller"},
+		}
+		if id == "bd-unrelated" {
+			row.Status = "open"
+			row.Labels = []string{"other-label"}
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// assertBdStoreCreatedPage models bd's default priority ASC, created_at DESC,
+// id ASC order and its --sort created variant (created_at DESC, id ASC). It
+// filters and limits that population BEFORE returning JSON to the store, so
+// client-side sorting cannot repair a prematurely truncated page.
+// wantBackingLimit=-1 leaves the exact-read fetching strategy unconstrained.
+func assertBdStoreCreatedPage(t *testing.T, rows []beads.Bead, q beads.ListQuery, want []string, wantBackingLimit int) {
+	t.Helper()
+	var calls []string
+	backingLimit := -1
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		if name != "bd" || len(args) == 0 || args[0] != "list" {
+			return nil, fmt.Errorf("unexpected command: %s %v", name, args)
+		}
+		value := func(flag string) string {
+			for i, arg := range args {
+				if arg == flag && i+1 < len(args) {
+					return args[i+1]
+				}
+				if strings.HasPrefix(arg, flag+"=") {
+					return strings.TrimPrefix(arg, flag+"=")
+				}
+			}
+			return ""
+		}
+		if _, err := fmt.Sscan(value("--limit"), &backingLimit); err != nil {
+			return nil, fmt.Errorf("reading backing limit: %w", err)
+		}
+		page := make([]beads.Bead, 0, len(rows))
+		for _, row := range rows {
+			if label := value("--label"); label != "" && !slices.Contains(row.Labels, label) {
+				continue
+			}
+			if status := value("--status"); status != "" && row.Status != status {
+				continue
+			}
+			if !slices.Contains(args, "--all") && row.Status == "closed" {
+				continue
+			}
+			page = append(page, row)
+		}
+		slices.SortFunc(page, func(a, b beads.Bead) int {
+			if value("--sort") != "created" && *a.Priority != *b.Priority {
+				return *a.Priority - *b.Priority
+			}
+			if cmp := b.CreatedAt.Compare(a.CreatedAt); cmp != 0 {
+				return cmp
+			}
+			return strings.Compare(a.ID, b.ID)
+		})
+		if backingLimit > 0 && len(page) > backingLimit {
+			page = page[:backingLimit]
+		}
+		return json.Marshal(page)
+	}
+	got, err := beads.NewBdStore("/city", runner).List(q)
 	if err != nil {
 		t.Fatalf("List: %v", err)
+	}
+	ids := make([]string, len(got))
+	for i, row := range got {
+		ids[i] = row.ID
+	}
+	if !slices.Equal(ids, want) {
+		t.Errorf("List returned IDs %v, want %v (backing calls: %v)", ids, want, calls)
+	}
+	if wantBackingLimit >= 0 && backingLimit != wantBackingLimit {
+		t.Errorf("backing limit = %d, want %d to preserve the bounded/unlimited contract; calls: %v", backingLimit, wantBackingLimit, calls)
 	}
 }
 
@@ -3875,12 +4022,14 @@ esac
 
 // --- ListByLabel ---
 
+// ListByLabel is an exact created-desc read: bd list --limit would keep
+// priority-ordered rows, so the limit is applied Go-side (--limit 0, #9415).
 func TestBdStoreListByLabel(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:digest --include-infra --include-gates --limit 5`: {
+		`bd list --json --label=order-run:digest --include-infra --include-gates --limit 0`: {
 			out: []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`),
 		},
 	})
@@ -3933,7 +4082,7 @@ func TestBdStoreListByLabelEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:none --include-infra --include-gates --limit 1`: {out: []byte(`[]`)},
+		`bd list --json --label=order-run:none --include-infra --include-gates --limit 0`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.ListByLabel("order-run:none", 1)
