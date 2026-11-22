@@ -209,3 +209,74 @@ func TestPodLocalIsRunningProbesOwnSessionLocally(t *testing.T) {
 		t.Errorf("IsRunning ran tmux %v; want %v", tm.calls[0], want)
 	}
 }
+
+func TestPodLocalRefusesControllerOwnedOperations(t *testing.T) {
+	tm := &fakeTmux{}
+	p, err := newPodLocal("worker-1", tm.run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sp runtime.Provider = p
+	for _, name := range []string{"worker-1", "main", "other"} {
+		ops := map[string]func() error{
+			"Start":           func() error { return sp.Start(context.Background(), name, runtime.Config{}) },
+			"Stop":            func() error { return sp.Stop(name) },
+			"Interrupt":       func() error { return sp.Interrupt(name) },
+			"Attach":          func() error { return sp.Attach(name) },
+			"Nudge":           func() error { return sp.Nudge(name, nil) },
+			"Peek":            func() error { _, err := sp.Peek(name, 10); return err },
+			"ListRunning":     func() error { _, err := sp.ListRunning(name); return err },
+			"GetLastActivity": func() error { _, err := sp.GetLastActivity(name); return err },
+			"ClearScrollback": func() error { return sp.ClearScrollback(name) },
+			"CopyTo":          func() error { return sp.CopyTo(name, "/src", "dst") },
+			"SendKeys":        func() error { return sp.SendKeys(name, "Enter") },
+			"RunLive":         func() error { return sp.RunLive(name, runtime.Config{}) },
+		}
+		if name == "other" {
+			ops["SetMeta"] = func() error { return sp.SetMeta(name, "K", "v") }
+			ops["GetMeta"] = func() error { _, err := sp.GetMeta(name, "K"); return err }
+			ops["RemoveMeta"] = func() error { return sp.RemoveMeta(name, "K") }
+		}
+		for op, call := range ops {
+			err := call()
+			if !errors.Is(err, guard.ErrControllerOwnedRuntime) {
+				t.Errorf("%s(%q) = %v; want guard.ErrControllerOwnedRuntime", op, name, err)
+			}
+			if errors.Is(err, runtime.ErrSessionNotFound) || runtime.IsSessionGone(err) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Errorf("%s(%q) refusal %v reads as absence or unavailability", op, name, err)
+			}
+		}
+	}
+	if len(tm.calls) != 0 {
+		t.Fatalf("refused operations ran tmux: %v", tm.calls)
+	}
+	if p.IsRunning("other") || p.IsAttached("worker-1") || p.ProcessAlive("worker-1", []string{"claude"}) {
+		t.Fatal("pod-local probes of other sessions, attachment or processes report true; want false")
+	}
+	if len(tm.calls) != 0 {
+		t.Fatalf("restricted probes ran tmux: %v", tm.calls)
+	}
+	if caps := p.Capabilities(); caps != (runtime.ProviderCapabilities{}) {
+		t.Fatalf("Capabilities() = %+v; want none", caps)
+	}
+}
+
+func TestPodLocalStopStaysARefusalThroughCleanup(t *testing.T) {
+	p, err := newPodLocal("worker-1", (&fakeTmux{}).run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"worker-1", "other"} {
+		err := runtime.StopForCleanup(p, name)
+		if !errors.Is(err, runtime.ErrStopRefused) || !errors.Is(err, guard.ErrControllerOwnedRuntime) {
+			t.Fatalf("StopForCleanup(%q) = %v; want ErrStopRefused and ErrControllerOwnedRuntime", name, err)
+		}
+	}
+	// A false probe of another session must never become confirmed absence.
+	if runtime.FreshReadable(p) {
+		t.Fatal("pod-local provider is FreshReadable; its false probes would confirm another session gone")
+	}
+	if _, ok := any(p).(runtime.LivenessObserverWithError); ok {
+		t.Fatal("pod-local provider implements LivenessObserverWithError; want only the boolean probe")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/guard"
@@ -38,10 +39,21 @@ func execTmux(ctx context.Context, args ...string) (string, string, error) {
 	return stdout.String(), stderr.String(), err
 }
 
+var _ runtime.Provider = (*PodLocal)(nil)
+
 // PodLocal is the session provider a gc process inside a generated pod uses.
 // It constructs no Kubernetes client: it serves only the pod's own session,
 // reading and writing that session's tmux environment and probing its
 // liveness on the pod's local tmux server.
+//
+// The controller owns every other runtime operation, so PodLocal refuses
+// lifecycle and delivery operations for every name, and metadata access to
+// any other session, with an error wrapping guard.ErrControllerOwnedRuntime;
+// Stop's refusal also wraps runtime.ErrStopRefused. It claims no capabilities
+// and offers no fresh liveness observation, so a false probe of another
+// session never confirms that session gone. Like the guard provider, it does
+// not satisfy the shared provider conformance contract, which exercises a
+// successful lifecycle.
 type PodLocal struct {
 	self string
 	run  tmuxRunner
@@ -167,4 +179,62 @@ func (p *PodLocal) IsRunning(name string) bool {
 // does not serve.
 func (p *PodLocal) refuse(op, name string) error {
 	return fmt.Errorf("pod-local session provider for %q: runtime %s %q: %w", p.self, op, name, guard.ErrControllerOwnedRuntime)
+}
+
+// Start refuses: the controller starts sessions.
+func (p *PodLocal) Start(_ context.Context, name string, _ runtime.Config) error {
+	return p.refuse("start", name)
+}
+
+// Stop refuses with an error wrapping both guard.ErrControllerOwnedRuntime
+// and runtime.ErrStopRefused: the session stays running.
+func (p *PodLocal) Stop(name string) error {
+	return fmt.Errorf("%w: %w", runtime.ErrStopRefused, p.refuse("stop", name))
+}
+
+// Interrupt refuses: the controller steers sessions.
+func (p *PodLocal) Interrupt(name string) error { return p.refuse("interrupt", name) }
+
+// IsAttached reports false: the pod observes no attachment.
+func (p *PodLocal) IsAttached(string) bool { return false }
+
+// Attach refuses: the controller owns attachment.
+func (p *PodLocal) Attach(name string) error { return p.refuse("attach", name) }
+
+// ProcessAlive reports false: the pod observes no runtime processes.
+func (p *PodLocal) ProcessAlive(string, []string) bool { return false }
+
+// Nudge refuses: the controller delivers input.
+func (p *PodLocal) Nudge(name string, _ []runtime.ContentBlock) error {
+	return p.refuse("nudge", name)
+}
+
+// Peek refuses: the controller observes output.
+func (p *PodLocal) Peek(name string, _ int) (string, error) { return "", p.refuse("peek", name) }
+
+// ListRunning refuses: the controller enumerates sessions.
+func (p *PodLocal) ListRunning(prefix string) ([]string, error) {
+	return nil, p.refuse("list-running", prefix)
+}
+
+// GetLastActivity refuses: the controller observes activity.
+func (p *PodLocal) GetLastActivity(name string) (time.Time, error) {
+	return time.Time{}, p.refuse("get-last-activity", name)
+}
+
+// ClearScrollback refuses: the controller owns the pane.
+func (p *PodLocal) ClearScrollback(name string) error { return p.refuse("clear-scrollback", name) }
+
+// CopyTo refuses: the controller stages files.
+func (p *PodLocal) CopyTo(name, _, _ string) error { return p.refuse("copy-to", name) }
+
+// SendKeys refuses: the controller delivers input.
+func (p *PodLocal) SendKeys(name string, _ ...string) error { return p.refuse("send-keys", name) }
+
+// RunLive refuses: the controller applies live session commands.
+func (p *PodLocal) RunLive(name string, _ runtime.Config) error { return p.refuse("run-live", name) }
+
+// Capabilities reports none.
+func (p *PodLocal) Capabilities() runtime.ProviderCapabilities {
+	return runtime.ProviderCapabilities{}
 }
