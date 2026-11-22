@@ -67,7 +67,7 @@ windows-lane: LOAD_GATE_SUMMARY threshold=15 waited_seconds=0 wait_timed_out=0 r
 
 ## Required CI accounting
 
-- `ci_required_closure`: `python3 $GC_CITY_ROOT/packs/actual/deployer/scripts/ci_required_triggers.py /var/tmp/gc-merge-validate.Z2X64n a175518ea6436c3b64c702cc70e7f4de2fa4f754 3cb4aff6fa79b4d4ed5cc9b6956192a9f7d7ccb0 fork`; merged workflow blob `fa2c1f1b1466278b2eed8f4288d5a4f8eb3cc612`; `6 LEAF jobs need a status` (the aggregate itself takes none).
+- `ci_required_closure`: `python3 $GC_CITY_ROOT/packs/actual/deployer/scripts/ci_required_triggers.py /var/tmp/gc-merge-validate.Z2X64n a175518ea6436c3b64c702cc70e7f4de2fa4f754 3cb4aff6fa79b4d4ed5cc9b6956192a9f7d7ccb0 origin`; merged workflow blob `fa2c1f1b1466278b2eed8f4288d5a4f8eb3cc612`; `6 LEAF jobs need a status` (the aggregate itself takes none).
 
 | Job | Status | Evidence |
 |---|---|---|
@@ -79,6 +79,7 @@ windows-lane: LOAD_GATE_SUMMARY threshold=15 waited_seconds=0 wait_timed_out=0 r
 | windows-lane-test | DEFERRED-TO-PR-CI reason=non-linux-runner | Runner-policy resolves runner_windows to blacksmith-4vcpu-windows-2025. Native test allowlist import closure computed with GOOS=windows: no changed files. |
 
 - `windows_reach: none` for both credential-provider and the native Windows allowlist; both closure computations exit 0.
+- Publication target: origin (the guarded dry-run succeeded); origin-head closure recomputed and identical to the earlier fork-head accounting.
 - `deferred_to_pr_ci: windows-lane-test (non-linux-runner)`; `not_covered: none`.
 - Merge requires CI / required green on the current PR head and the deferred native Windows job successful.
 
