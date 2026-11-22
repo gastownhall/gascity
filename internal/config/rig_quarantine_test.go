@@ -151,7 +151,7 @@ func loadIsolated(t *testing.T, f rigQuarantineFixture) (*City, *Provenance) {
 // assertBadRigQuarantined checks the AC-1 shape: the healthy rig loads, the
 // quarantined rig keeps its city.toml declaration but contributes no pack
 // content, and the quarantine is reported once, by name.
-func assertBadRigQuarantined(t *testing.T, f rigQuarantineFixture, cfg *City, wantErr string) {
+func assertBadRigQuarantined(t *testing.T, f rigQuarantineFixture, cfg *City, wantErr ...string) {
 	t.Helper()
 	hasGoodWorker := false
 	for _, a := range cfg.Agents {
@@ -200,7 +200,7 @@ func assertBadRigQuarantined(t *testing.T, f rigQuarantineFixture, cfg *City, wa
 		t.Errorf("QuarantinedRigs[0].Rig = %q, want bad", q.Rig)
 	}
 	msg := q.Err.Error()
-	for _, want := range []string{`import "broken"`, `gc import install`, wantErr} {
+	for _, want := range append([]string{`import "broken"`}, wantErr...) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("QuarantinedRigs[0].Err = %q, want it to mention %q", msg, want)
 		}
@@ -225,7 +225,7 @@ func TestLoadIsolateRigPackFailuresQuarantinesDirtyCacheRig(t *testing.T) {
 	f.dirtyCache(t)
 
 	cfg, prov := loadIsolated(t, f)
-	assertBadRigQuarantined(t, f, cfg, "has local worktree changes")
+	assertBadRigQuarantined(t, f, cfg, "has local worktree changes", `gc import install`)
 
 	quarantineInProv := 0
 	for _, w := range prov.Warnings {

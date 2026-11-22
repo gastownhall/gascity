@@ -191,6 +191,7 @@ go_test(
         "rig_merge_strategy_test.go",
         "rig_quarantine_strict_test.go",
         "rig_quarantine_test.go",
+        "rig_quarantine_triggers_test.go",
         "service_test.go",
         "session_model_phase0_spec_test.go",
         "session_setup_path_test.go",
