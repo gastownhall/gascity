@@ -240,38 +240,6 @@ provider = "claude"
 	}
 }
 
-func TestProviderCatalogReadinessAdvisoryReportsNeedsAuthProvider(t *testing.T) {
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-provider = "claude"
-
-[providers.claude]
-base = "builtin:claude"
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	oldProbe := initProbeProvidersReadiness
-	initProbeProvidersReadiness = func(_ context.Context, providers []string, _ bool) (map[string]api.ReadinessItem, error) {
-		out := make(map[string]api.ReadinessItem, len(providers))
-		for _, provider := range providers {
-			out[provider] = api.ReadinessItem{Name: provider, DisplayName: provider, Status: api.ProbeStatusNotInstalled}
-		}
-		out["claude"] = api.ReadinessItem{Name: "claude", DisplayName: "Claude Code", Status: api.ProbeStatusNeedsAuth}
-		return out, nil
-	}
-	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
-
-	result := newProviderCatalogReadinessAdvisoryCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
-	if result.Status == doctor.StatusOK {
-		t.Fatalf("status = OK (message %q), want a warning: a city provider whose CLI needs auth must be surfaced by gc doctor", result.Message)
-	}
-	report := result.Message + "\n" + strings.Join(result.Details, "\n")
-	if !strings.Contains(report, "Claude Code") && !strings.Contains(report, "claude") {
-		t.Fatalf("doctor result does not name the logged-out provider: message=%q details=%v", result.Message, result.Details)
-	}
-}
-
 func TestProviderCatalogReadinessAdvisoryIgnoresNeedsAuthForUnreferencedProvider(t *testing.T) {
 	cityDir := writeDoctorCityToml(t, `[workspace]
 provider = "claude"
@@ -310,6 +278,11 @@ func TestProviderCatalogReadinessAdvisoryNeedsAuthFollowsInitProbeMapping(t *tes
 			name:       "path_check alias",
 			toml:       "[workspace]\nprovider = \"claude-fast\"\n\n[providers.claude-fast]\npath_check = \"claude\"\n",
 			wantDetail: `Claude Code needs authentication (referenced as provider "claude-fast"): claude is installed but not logged in`,
+		},
+		{
+			name:       "alias that only names a builtin base",
+			toml:       "[workspace]\nprovider = \"claude-opus\"\n\n[providers.claude-opus]\nbase = \"builtin:claude\"\n",
+			wantDetail: `Claude Code needs authentication (referenced as provider "claude-opus"): claude is installed but not logged in`,
 		},
 		{
 			name:       "direct ref and alias share one finding",

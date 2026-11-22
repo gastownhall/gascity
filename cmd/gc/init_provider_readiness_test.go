@@ -250,6 +250,41 @@ func TestProviderStatusFixHintIncludesClaudeSetupTokenForNeedsAuth(t *testing.T)
 	}
 }
 
+func TestProviderReadinessProbeNameFollowsBaseChain(t *testing.T) {
+	if command := config.BuiltinProviders()["zcode"].Command; command == "zcode" {
+		t.Fatalf("precondition: builtin zcode runs %q; the zcode-glm case covers a builtin whose command is not its probe name", command)
+	}
+	base := func(name string) *string { return &name }
+	cfg := &config.City{Providers: map[string]config.ProviderSpec{
+		"claude-opus":      {Base: base("builtin:claude")},
+		"zcode-glm":        {Base: base("builtin:zcode")},
+		"claude-local":     {Command: "claude"},
+		"claude-local-max": {Base: base("provider:claude-local")},
+		"wrapped":          {Base: base("builtin:claude"), Command: "/opt/bin/bwrap-agent"},
+		"wrapped-max":      {Base: base("provider:wrapped")},
+	}}
+	if err := config.BuildResolvedProviderCache(cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+	cases := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "alias that only names a builtin base", ref: "claude-opus", want: "claude"},
+		{name: "builtin whose command is not its probe name", ref: "zcode-glm", want: "zcode"},
+		{name: "chain rooted at a provider that names its CLI", ref: "claude-local-max", want: "claude"},
+		{name: "chain that swaps in a wrapper command", ref: "wrapped-max", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := providerReadinessProbeName(tc.ref, cfg); got != tc.want {
+				t.Fatalf("providerReadinessProbeName(%q) = %q, want %q", tc.ref, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
