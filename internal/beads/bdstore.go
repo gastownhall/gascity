@@ -96,7 +96,7 @@ func ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx context.Context, env
 }
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string, withoutAmbientBeads bool) CommandRunner {
-	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen)
+	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen, processBDExecGate())
 }
 
 // ExecCommandRunnerWithExactEnvContext is like ExecCommandRunnerWithEnvContext,
@@ -106,10 +106,13 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string, wit
 // invariant than the WithoutAmbientBeads pair, which strips only BEADS_*:
 // here the mutation runs in exactly the environment the query ran in.
 func ExecCommandRunnerWithExactEnvContext(ctx context.Context, env map[string]string) CommandRunner {
-	return execCommandRunner(ctx, env, false, func() []string { return nil })
+	return execCommandRunner(ctx, env, false, func() []string { return nil }, processBDExecGate())
 }
 
-func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string) CommandRunner {
+// execCommandRunner builds the runner every exported constructor returns. Each
+// bd child is admitted through gate immediately before it spawns; any other
+// command runs at once.
+func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string, gate *bdExecGate) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		baseEnv := baseEnvFn()
 		execName := name
@@ -162,9 +165,24 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 		})
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
+		var waited time.Duration
+		release := func() {}
+		if name == "bd" {
+			admitStart := time.Now()
+			var admitErr error
+			release, admitErr = gate.acquire(ctx, bdCommandIsRead(args))
+			waited = time.Since(admitStart)
+			if admitErr != nil {
+				slotErr := fmt.Errorf("waiting for a bd exec slot: %w", admitErr)
+				recordBDExecTelemetry(name, dir, args, start, waited, nil, "", slotErr)
+				trace("slot-wait", slotErr)
+				return nil, slotErr
+			}
+		}
 		out, err := cmd.Output()
+		release()
 
-		recordBDExecTelemetry(name, dir, args, start, out, stderr.String(), err)
+		recordBDExecTelemetry(name, dir, args, start, waited, out, stderr.String(), err)
 
 		status, traceErr, resultErr := classifyBDExecResult(
 			parent, ctx, name, timeout, start, out, stderr.String(), err)
@@ -225,7 +243,7 @@ func newBDExecTrace(start time.Time, dir, name string, args []string) func(statu
 // failure was not an *exec.ExitError (for example a context kill or a spawn
 // failure). It is independent of the legacy line-format trace (gated by
 // GC_BD_TRACE_JSON, not GC_BD_TRACE).
-func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out []byte, stderr string, err error) {
+func recordBDExecTelemetry(name, dir string, args []string, start time.Time, waited time.Duration, out []byte, stderr string, err error) {
 	if name != "bd" {
 		return
 	}
@@ -238,7 +256,7 @@ func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out
 			traceExit = -1
 		}
 	}
-	TraceBDCall("go:bdstore.runner", dir, args, start, traceExit, err)
+	traceBDCall("go:bdstore.runner", dir, args, start, traceExit, err, bdTraceExtra{waitMs: waited.Milliseconds()})
 	telemetry.RecordBDCall(context.Background(),
 		args, float64(time.Since(start).Milliseconds()),
 		err, out, stderr)
@@ -422,14 +440,10 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	if len(args) >= 2 && args[0] == "create" && args[1] == "--graph" {
 		return bdGraphApplyCommandTimeout
 	}
-	switch args[0] {
-	case "count", "list", "ready", "show", "sql", "stats", "version":
-		return bdReadCommandTimeout
-	case "query":
-		return bdQueryCommandTimeout
-	default:
-		return bdCommandTimeout
+	if verb, ok := bdVerbs[args[0]]; ok {
+		return *verb.timeout
 	}
+	return bdCommandTimeout
 }
 
 // bdStdoutErrorDetail extracts a human-readable error description from
