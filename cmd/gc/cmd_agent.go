@@ -880,8 +880,8 @@ func cmdAgentSuspend(args []string, stdout, stderr io.Writer) int {
 
 // doAgentSuspend sets suspended=true on the named agent's durable config.
 // Inline agents are edited in city.toml; city-local discovered agents update
-// agents/<name>/agent.toml. Pack-derived agents still require [[patches]].
-// Accepts an injected FS for testability.
+// agents/<name>/agent.toml; pack-derived agents are edited through
+// [configedit.Editor]. Accepts an injected FS for testability.
 func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) int {
 	return doAgentSuspendOrResume(fs, cityPath, name, true, stdout, stderr)
 }
@@ -958,22 +958,24 @@ func cmdAgentResume(args []string, stdout, stderr io.Writer) int {
 
 // doAgentResume clears suspended on the named agent's durable config.
 // Inline agents are edited in city.toml; city-local discovered agents update
-// agents/<name>/agent.toml. Pack-derived agents still require [[patches]].
-// Accepts an injected FS for testability.
+// agents/<name>/agent.toml; pack-derived agents are edited through
+// [configedit.Editor]. Accepts an injected FS for testability.
 func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) int {
 	return doAgentSuspendOrResume(fs, cityPath, name, false, stdout, stderr)
 }
 
 // doAgentSuspendOrResume is the shared CLI fallback for `gc agent suspend`
-// and `gc agent resume`. It mirrors [configedit.Editor.SuspendAgent] /
-// ResumeAgent for the no-API path:
+// and `gc agent resume` when the controller API is unreachable:
 //
 //   - Inline city.toml [[agent]]: toggle Suspended, write city.toml.
+//   - Root pack.toml [[agent]]: toggle Suspended in pack.toml.
 //   - Convention-discovered (agents/<name>/): write agent.toml, and
 //     strip any legacy [[patches.agent]] suspended override that would
 //     otherwise shadow the new value.
-//   - Pack-declared [[agent]] (city.toml or pack.toml): tell the user
-//     to use [[patches]].
+//   - Any other pack-derived agent: delegate to
+//     [configedit.Editor.SuspendAgent] / ResumeAgent, which edits the
+//     deciding local setter (rig override or patch, else a city agent
+//     patch) and verifies the composed result, rolling back on failure.
 func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, stdout, stderr io.Writer) int {
 	verb, past := "suspend", "Suspended"
 	if !suspended {
@@ -1041,6 +1043,15 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 		fmt.Fprintf(stdout, "%s agent '%s'\n", past, name) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	fmt.Fprintf(stderr, "gc agent %s: agent %q is defined by a pack — use [[patches]] to override\n", verb, name) //nolint:errcheck // best-effort stderr
-	return 1
+	editor := configedit.NewEditor(fs, tomlPath)
+	edit := editor.ResumeAgent
+	if suspended {
+		edit = editor.SuspendAgent
+	}
+	if err := edit(resolved.QualifiedName()); err != nil {
+		fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s agent '%s'\n", past, name) //nolint:errcheck // best-effort stdout
+	return 0
 }
