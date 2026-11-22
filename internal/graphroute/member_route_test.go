@@ -121,6 +121,67 @@ func TestUnroutedMemberPatch(t *testing.T) {
 		}
 	})
 
+	t.Run("control member gains the execution route, never the target as its own", func(t *testing.T) {
+		// Cook stamps a control's own route (the control dispatcher) and
+		// leaves gc.execution_routed_to empty; a launch fills the execution
+		// route with the sling target. Member routing must fill exactly that.
+		control := beads.Bead{
+			ID: "ctl-1", Title: "gate the run", Type: "task", Status: "open",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindRalph,
+				beadmeta.RoutedToMetadataKey: "core.control-dispatcher",
+			},
+		}
+		patch, err := UnroutedMemberPatch(control, poolBinding)
+		if err != nil {
+			t.Fatalf("UnroutedMemberPatch: %v", err)
+		}
+		want := map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "worker"}
+		if !equalPatch(patch, want) {
+			t.Fatalf("patch = %v, want %v", patch, want)
+		}
+	})
+
+	t.Run("rig-scoped target carries the execution rig context", func(t *testing.T) {
+		control := beads.Bead{
+			ID: "ctl-2", Title: "gate the run", Type: "task", Status: "open",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey: "core.control-dispatcher",
+			},
+		}
+		binding := GraphRouteBinding{QualifiedName: "acme/worker", MetadataOnly: true}
+		patch, err := UnroutedMemberPatch(control, binding)
+		if err != nil {
+			t.Fatalf("UnroutedMemberPatch: %v", err)
+		}
+		want := map[string]string{
+			beadmeta.ExecutionRoutedToMetadataKey:   "acme/worker",
+			beadmeta.ExecutionRigContextMetadataKey: "acme",
+		}
+		if !equalPatch(patch, want) {
+			t.Fatalf("patch = %v, want %v", patch, want)
+		}
+	})
+
+	t.Run("control with an execution route already set is left alone", func(t *testing.T) {
+		control := beads.Bead{
+			ID: "ctl-3", Title: "gate the run", Type: "task", Status: "open",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:              beadmeta.KindRalph,
+				beadmeta.RoutedToMetadataKey:          "core.control-dispatcher",
+				beadmeta.ExecutionRoutedToMetadataKey: "other-worker",
+			},
+		}
+		patch, err := UnroutedMemberPatch(control, poolBinding)
+		if err != nil {
+			t.Fatalf("UnroutedMemberPatch: %v", err)
+		}
+		if patch != nil {
+			t.Fatalf("patch = %v, want none: the control already has its execution route", patch)
+		}
+	})
+
 	t.Run("members member routing never touches", func(t *testing.T) {
 		cases := map[string]beads.Bead{
 			"already routed":    member(map[string]string{beadmeta.RoutedToMetadataKey: "other-agent"}),

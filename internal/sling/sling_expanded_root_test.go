@@ -27,7 +27,8 @@ func (r *recordingRouter) Route(_ context.Context, req RouteRequest) error {
 }
 
 // cookedWorkflowStore seeds the store with what `gc formula cook` leaves
-// behind: an expanded workflow root and its still-unrouted step beads.
+// behind: an expanded workflow root, its still-unrouted step beads, and a
+// control member carrying its own dispatcher route but no execution route.
 func cookedWorkflowStore(t *testing.T) *beads.MemStore {
 	t.Helper()
 	root := beads.Bead{
@@ -45,6 +46,16 @@ func cookedWorkflowStore(t *testing.T) *beads.MemStore {
 		{
 			ID: "wf-1.flip", Title: "flip the pancake", Type: "task", Status: "open",
 			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+		},
+		// A control member: cook stamps its own route (the control
+		// dispatcher) and leaves its execution route empty.
+		{
+			ID: "wf-1.finalize", Title: "finalize the run", Type: "task", Status: "open",
+			Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: root.ID,
+				beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey:   "core.control-dispatcher",
+			},
 		},
 	}
 	return beads.NewMemStoreFrom(0, append([]beads.Bead{root}, steps...), nil)
@@ -64,8 +75,8 @@ func TestSlingExpandedRootRoutesMembers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoSling: %v", err)
 	}
-	if result.RoutedMembers != 2 {
-		t.Fatalf("RoutedMembers = %d, want 2 (both unrouted steps of the cooked run)", result.RoutedMembers)
+	if result.RoutedMembers != 3 {
+		t.Fatalf("RoutedMembers = %d, want 3 (both unrouted steps and the control's execution route)", result.RoutedMembers)
 	}
 	for _, id := range []string{"wf-1", "wf-1.mix", "wf-1.flip"} {
 		bead, err := store.Get(id)
@@ -75,6 +86,18 @@ func TestSlingExpandedRootRoutesMembers(t *testing.T) {
 		if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
 			t.Errorf("%s gc.routed_to = %q, want worker", id, got)
 		}
+	}
+	// The control keeps its dispatcher route and gains the execution route a
+	// --formula launch would have stamped.
+	control, err := store.Get("wf-1.finalize")
+	if err != nil {
+		t.Fatalf("reading the control after the sling: %v", err)
+	}
+	if got := control.Metadata[beadmeta.RoutedToMetadataKey]; got != "core.control-dispatcher" {
+		t.Errorf("control gc.routed_to = %q, want core.control-dispatcher (untouched)", got)
+	}
+	if got := control.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "worker" {
+		t.Errorf("control gc.execution_routed_to = %q, want worker", got)
 	}
 	if len(router.routed) != 1 || router.routed[0] != "wf-1" {
 		t.Errorf("router routed %v, want only the root wf-1 (the plan stamps the members)", router.routed)
