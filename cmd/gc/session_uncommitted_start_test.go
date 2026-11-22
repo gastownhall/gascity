@@ -276,3 +276,56 @@ func TestPrepareStartCandidate_OwnLaunchRequired(t *testing.T) {
 		})
 	}
 }
+
+// phantomCollisionProvider refuses every Start with ErrSessionExists while
+// nothing runs under the name: a collision whose holder is gone by the time
+// the start observes it.
+type phantomCollisionProvider struct {
+	*runtime.Fake
+}
+
+func (p *phantomCollisionProvider) Start(_ context.Context, name string, _ runtime.Config) error {
+	return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+}
+
+// TestRunPreparedStartCandidate_SessionExistsNotLiveDefers is AC-3: on any
+// row, a start collision whose holder reads not live defers the start instead
+// of failing it with provider_error, so no wake failure is recorded.
+func TestRunPreparedStartCandidate_SessionExistsNotLiveDefers(t *testing.T) {
+	for name, tc := range map[string]struct {
+		extra     map[string]string
+		ownLaunch bool
+	}{
+		"committed row":   {extra: map[string]string{"started_config_hash": "hash-old"}},
+		"restart handoff": {ownLaunch: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			clk := &clock.Fake{Time: time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)}
+			city, workDir := t.TempDir(), t.TempDir()
+			bead := createUncommittedRestartRow(t, store, clk, workDir, tc.extra)
+			sp := &phantomCollisionProvider{Fake: runtime.NewFake()}
+			item, release := uncommittedStartItem(t, city, bead, tc.ownLaunch)
+			defer release()
+
+			result, committed, stderr := runUncommittedStart(t, city, store, sp, clk, item)
+
+			if result.err != nil || result.outcome != TraceOutcomeDeferred || committed {
+				t.Fatalf("result err=%v outcome=%q committed=%v, want an uncommitted deferral; stderr=%s", result.err, result.outcome, committed, stderr)
+			}
+			if !errors.Is(result.unattributedErr, runtime.ErrSessionExists) {
+				t.Errorf("unattributedErr = %v, want the collision for the lifecycle log", result.unattributedErr)
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", bead.ID, err)
+			}
+			if v := got.Metadata["wake_attempts"]; v != "" {
+				t.Errorf("wake_attempts = %q, want no wake failure recorded", v)
+			}
+			if got := countCalls(sp.Fake, "Stop"); got != 0 {
+				t.Errorf("Stop calls = %d, want none", got)
+			}
+		})
+	}
+}
