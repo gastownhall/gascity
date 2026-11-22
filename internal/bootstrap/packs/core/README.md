@@ -211,14 +211,16 @@ consecutive failures and records `order.failing` when a streak reaches three
 `order.recovered` when a run completes after such a streak.
 
 **Event contract.** Both orders run `assets/scripts/notify-order-failing.sh`,
-which reads both event types over a lookback window and mails through
-`escalate.sh` to `$GC_ESCALATION_RECIPIENT` (default `human`):
+which reads both event types over a lookback window, acts on each order's
+latest event in it, and mails through `escalate.sh` to
+`$GC_ESCALATION_RECIPIENT` (default `human`):
 
 - a failing order mails once per streak: the incident key is
   `order-failing:<order>` and its fingerprint the streak's `first_failed`, so
   the hourly re-alerts are not mailed again and a new streak mails at once;
 - a recovery resolves that incident and sends nothing; a streak already over
-  is reported by its recovery alone;
+  is reported by its recovery alone, and a re-read of the window never
+  replays an earlier streak's recovery over the streak that followed it;
 - an alert about either notify order itself is ignored, so a notifier that
   cannot send does not page about itself in a loop.
 

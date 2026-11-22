@@ -126,27 +126,16 @@ func (s *FailureStreaks) ObserveSuccess(name string, at time.Time) (OrderRecover
 	}, true
 }
 
-// Inherit takes over prev's controller start and the streaks of the orders
-// keep accepts, so a table rebuilt on a config reload neither restarts the
-// startup grace nor forgets a running streak. A streak keep rejects, an order
-// no longer configured, is dropped: no later outcome could reach it.
-func (s *FailureStreaks) Inherit(prev *FailureStreaks, keep func(name string) bool) {
-	if s == nil || prev == nil || s == prev {
-		return
-	}
-	prev.mu.Lock()
-	defer prev.mu.Unlock()
+// Prune drops the streaks of the orders keep rejects. A dispatcher rebuilt on
+// a config reload keeps recording into the same table, so a running streak
+// and the startup grace carry over; Prune forgets the orders no longer
+// configured, so one that returns starts a new streak.
+func (s *FailureStreaks) Prune(keep func(name string) bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.startedAt = prev.startedAt
-	for name, st := range prev.streaks {
+	for name := range s.streaks {
 		if !keep(name) {
-			continue
+			delete(s.streaks, name)
 		}
-		if _, ok := s.streaks[name]; ok {
-			continue
-		}
-		cp := *st
-		s.streaks[name] = &cp
 	}
 }

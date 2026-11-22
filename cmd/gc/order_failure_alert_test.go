@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -213,5 +218,155 @@ func TestReplaceOrderDispatcherCarriesOrderFailureStreaks(t *testing.T) {
 	}
 	if got := rec.eventsOfType(events.OrderFailing); len(got) != 1 {
 		t.Fatalf("a removed order's streak was carried across the rebuild: %+v", got)
+	}
+}
+
+// A run still in flight when a reload retires its dispatcher records its
+// outcome through the retired dispatcher after the swap. That outcome counts
+// in the streak the active dispatcher continues: a late success ends the
+// carried streak, so the next failure is the first of a new one, not the
+// third in a row.
+func TestReplaceOrderDispatcherCountsALateOutcomeOfTheRetiredDispatcher(t *testing.T) {
+	var rec memRecorder
+	aa := []orders.Order{{Name: "gate-sweep", Trigger: "cooldown", Interval: "1h", Exec: "true"}}
+	prev, _ := alertingOrderDispatcher(t, &rec, aa)
+	for i := 0; i < orders.FailureAlertAfter-1; i++ {
+		recordOrderFailed(prev, "gate-sweep", "boom")
+	}
+
+	next, _ := alertingOrderDispatcher(t, &rec, aa)
+	(&CityRuntime{od: prev}).replaceOrderDispatcher(next)
+	recordOrderCompleted(prev, "gate-sweep")
+
+	recordOrderFailed(next, "gate-sweep", "boom")
+	if got := rec.eventsOfType(events.OrderFailing); len(got) != 0 {
+		t.Fatalf("order.failing after a late success and one failure = %+v, want none: the success ended the streak", got)
+	}
+	for i := 1; i < orders.FailureAlertAfter; i++ {
+		recordOrderFailed(next, "gate-sweep", "boom")
+	}
+	if got := rec.eventsOfType(events.OrderFailing); len(got) != 1 {
+		t.Fatalf("order.failing after %d failures following the late success = %d, want 1", orders.FailureAlertAfter, len(got))
+	}
+}
+
+// A webhook order fires through a dispatcher the controller builds per
+// delivery, so its failures count in the controller's webhook table rather
+// than in a table each delivery starts afresh: the third failing delivery
+// alerts once, and a delivery that then succeeds records the recovery. Each
+// delivery runs the real Dispatch seam; only its store and its run are stubbed.
+func TestWebhookDeliveriesCountTowardOneFailureStreak(t *testing.T) {
+	ep := events.NewFake()
+	cs := &controllerState{
+		cityPath:  t.TempDir(),
+		cfg:       &config.City{Workspace: config.Workspace{Name: "t"}},
+		eventProv: ep,
+	}
+	hook := orders.Order{Name: "deploy-hook", Trigger: "webhook", Exec: "deploy"}
+	runs := 0
+	deliver := func(runErr error) {
+		t.Helper()
+		md := controllerWebhookDispatcher{cs: cs}.dispatcher()
+		t.Cleanup(md.dispatchCancel)
+		md.storeFn = func(execStoreTarget) (beads.Store, error) { return beads.NewMemStore(), nil }
+		md.execRun = func(context.Context, string, string, []string) ([]byte, error) {
+			runs++
+			return nil, runErr
+		}
+		res, err := md.Dispatch(context.Background(), orderdispatch.DispatchRequest{Order: hook})
+		if err != nil || !res.Fired {
+			t.Fatalf("delivery = %+v, %v; want fired", res, err)
+		}
+		md.drain(context.Background())
+	}
+	eventsOfType := func(typ string) []events.Event {
+		t.Helper()
+		got, err := ep.List(events.Filter{Type: typ})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	for i := 0; i < orders.FailureAlertAfter; i++ {
+		deliver(errors.New("exit status 3"))
+	}
+	if got := eventsOfType(events.OrderFailed); len(got) != orders.FailureAlertAfter {
+		t.Fatalf("order.failed events = %d, want %d", len(got), orders.FailureAlertAfter)
+	}
+	failing := eventsOfType(events.OrderFailing)
+	if len(failing) != 1 || failing[0].Subject != "deploy-hook" {
+		t.Fatalf("order.failing after %d failing deliveries = %+v, want exactly one for deploy-hook", orders.FailureAlertAfter, failing)
+	}
+
+	deliver(nil)
+	recovered := eventsOfType(events.OrderRecovered)
+	if len(recovered) != 1 || recovered[0].Subject != "deploy-hook" {
+		t.Fatalf("order.recovered after a succeeding delivery = %+v, want exactly one for deploy-hook", recovered)
+	}
+	if runs != orders.FailureAlertAfter+1 {
+		t.Fatalf("runs = %d, want %d: every delivery must reach the run", runs, orders.FailureAlertAfter+1)
+	}
+}
+
+// The alert recorder wraps the recorder the order dispatch projects its
+// execution facts through. It must stay an acknowledging recorder over an
+// acknowledging one, or a graph order's steps are never marked as defined
+// and every later projection emits their step_defined again.
+func TestOrderDispatcherMarksGraphStepsDefinedThroughTheAlertRecorder(t *testing.T) {
+	cityPath, cfg, a := newGraphOrderFixture(t)
+	store := beads.NewMemStore()
+	ep := events.NewFake()
+	m := newMemoryOrderDispatcher(nil, []orders.Order{a}, cityPath, cfg, ep, io.Discard)
+	t.Cleanup(m.dispatchCancel)
+	m.storeFn = func(execStoreTarget) (beads.Store, error) { return store, nil }
+
+	dispatchGraphOrder(t, m, cityPath)
+
+	defined, err := ep.List(events.Filter{Type: events.ExecutionStepDefined})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defined) == 0 {
+		t.Fatalf("events = %+v, want the steps' step_defined facts", ep.Events)
+	}
+	for _, e := range defined {
+		step, err := store.Get(e.Subject)
+		if err != nil {
+			t.Fatalf("step %s: %v", e.Subject, err)
+		}
+		if step.Metadata[beadmeta.StepDefinedEmittedMetadataKey] == "" {
+			t.Errorf("step %s emitted step_defined but is not marked %s", e.Subject, beadmeta.StepDefinedEmittedMetadataKey)
+		}
+	}
+}
+
+// RecordAck confirms an append only when the wrapped recorder can. Over a
+// bare recorder it still records the event, but reports it unconfirmed, so no
+// caller marks a fact durable on the strength of it. Either way it counts the
+// outcome.
+func TestOrderOutcomeAlertRecorderAcknowledgesOnlyThroughAnAcknowledgingRecorder(t *testing.T) {
+	failed := events.Event{Type: events.OrderFailed, Actor: "controller", Subject: "gate-sweep", Message: "boom"}
+
+	acking := events.NewFake()
+	if err := newOrderOutcomeAlertRecorder(acking, time.Time{}).RecordAck(failed); err != nil {
+		t.Fatalf("RecordAck over an acknowledging recorder = %v, want nil", err)
+	}
+	if len(acking.Events) != 1 {
+		t.Fatalf("acknowledging recorder holds %d events, want 1", len(acking.Events))
+	}
+
+	var bare memRecorder
+	alerts := newOrderOutcomeAlertRecorder(&bare, time.Time{})
+	for i := 0; i < orders.FailureAlertAfter; i++ {
+		if err := alerts.RecordAck(failed); err == nil {
+			t.Fatal("RecordAck over a bare recorder = nil, want an unconfirmed append")
+		}
+	}
+	if got := bare.eventsOfType(events.OrderFailed); len(got) != orders.FailureAlertAfter {
+		t.Fatalf("bare recorder holds %d order.failed events, want %d recorded best-effort", len(got), orders.FailureAlertAfter)
+	}
+	if got := bare.eventsOfType(events.OrderFailing); len(got) != 1 {
+		t.Fatalf("order.failing through RecordAck = %d, want 1", len(got))
 	}
 }

@@ -14,6 +14,10 @@ import (
 // before composing again (test seam).
 var bdPassthroughReadinessFallbacks atomic.Int64
 
+// bdPassthroughReadinessPass is the builtin readiness pass the passthrough
+// falls back to (test seam).
+var bdPassthroughReadinessPass = EnsureBuiltinRuntimeAssets
+
 // loadCityConfigForBdPassthrough is the gc bd passthrough's one config load.
 //
 // It composes from the builtin pack caches as they are on disk, without the
@@ -49,20 +53,22 @@ func loadCityConfigForBdPassthrough(cityPath string, warnings io.Writer) (*confi
 	cfg, prov, err := loadComposedCityConfig(fsys.OSFS{}, tomlPath, skipRevisionSnapshot)
 	if err != nil || len(cfg.QuarantinedRigs) > 0 {
 		bdPassthroughReadinessFallbacks.Add(1)
-		ensureErr := EnsureBuiltinRuntimeAssets(cityPath, warnings)
+		ensureErr := bdPassthroughReadinessPass(cityPath, warnings)
 		switch {
 		case ensureErr != nil && err != nil:
 			// What loadCityConfigFS would have returned first.
 			return nil, ensureErr
-		case ensureErr == nil:
+		case ensureErr != nil:
+			// The quarantined composition is the answer; the pass that could
+			// not heal its cache is reported, not dropped.
+			emitBuiltinRuntimeWarning(warnings, ensureErr)
+		default:
 			forgetInvocationConfig(tomlPath)
 			cfg, prov, err = loadComposedCityConfig(fsys.OSFS{}, tomlPath, skipRevisionSnapshot)
 			if err != nil {
 				return nil, err
 			}
 		}
-		// ensureErr != nil with err == nil: the quarantined composition is
-		// the answer; the readiness failure was reported to warnings.
 	} else {
 		deferBuiltinReadinessForInvocation(cityPath)
 	}

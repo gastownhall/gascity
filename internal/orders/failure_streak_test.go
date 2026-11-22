@@ -148,26 +148,25 @@ func TestFailureStreaksSuccessResetsAnUnalertedStreakSilently(t *testing.T) {
 	}
 }
 
-// A dispatcher rebuild hands the table on: a still-configured order keeps its
-// streak, a removed one's streak is dropped, and the controller start (so the
-// startup grace) is the original one, not the rebuild's.
-func TestFailureStreaksInheritKeepsConfiguredOrdersAndTheControllerStart(t *testing.T) {
-	prev := NewFailureStreaks(streakControllerStart)
+// A dispatcher rebuild keeps the table and prunes it to the orders still
+// configured: a kept order's streak continues from its first failure, and a
+// removed one's is dropped, so the order would start a new streak at 1.
+func TestFailureStreaksPruneDropsOnlyTheRejectedOrders(t *testing.T) {
+	s := NewFailureStreaks(streakControllerStart)
 	at := pastGrace()
 	for i := 0; i < FailureAlertAfter-1; i++ {
-		prev.ObserveFailure("kept", "x", at)
-		prev.ObserveFailure("removed", "x", at)
+		s.ObserveFailure("kept", "x", at)
+		s.ObserveFailure("removed", "x", at)
 	}
-	next := NewFailureStreaks(at)
-	next.Inherit(prev, func(name string) bool { return name == "kept" })
+	s.Prune(func(name string) bool { return name == "kept" })
 
-	a, ok := next.ObserveFailure("kept", "x", at.Add(time.Minute))
+	a, ok := s.ObserveFailure("kept", "x", at.Add(time.Minute))
 	if !ok || a.Consecutive != FailureAlertAfter || a.FirstFailed != at {
-		t.Fatalf("kept order's streak did not carry across the rebuild: %+v (ok=%v)", a, ok)
+		t.Fatalf("kept order's streak did not survive the prune: %+v (ok=%v)", a, ok)
 	}
 	for i := 0; i < FailureAlertAfter-1; i++ {
-		if a, ok := next.ObserveFailure("removed", "x", at.Add(time.Minute)); ok {
-			t.Fatalf("removed order's streak was carried: %+v", a)
+		if a, ok := s.ObserveFailure("removed", "x", at.Add(time.Minute)); ok {
+			t.Fatalf("removed order's streak survived the prune: %+v", a)
 		}
 	}
 }

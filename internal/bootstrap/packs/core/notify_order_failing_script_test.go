@@ -27,6 +27,11 @@ const (
 	// gateSweepRealertEvent is the same streak's hourly re-alert: same
 	// first_failed, a longer streak.
 	gateSweepRealertEvent = `{"seq":240,"type":"order.failing","subject":"gate-sweep","message":"order gate-sweep has failed 4 times in a row since 2026-11-20T08:00:00Z: exit status 1","payload":{"order_name":"gate-sweep","consecutive":4,"first_failed":"2026-11-20T08:00:00Z","failing_for_ms":3720000,"last_error":"exit status 1"}}`
+	// gateSweepNextStreakEvent is the alert of a new streak that opened after
+	// gateSweepRecoveredEvent ended the first one.
+	gateSweepNextStreakEvent = `{"seq":300,"type":"order.failing","subject":"gate-sweep","message":"order gate-sweep has failed 3 times in a row since 2026-11-20T09:10:00Z: exit status 2","payload":{"order_name":"gate-sweep","consecutive":3,"first_failed":"2026-11-20T09:10:00Z","failing_for_ms":120000,"last_error":"exit status 2"}}`
+	// doltHealthFailingEvent is another order's alert, between gate-sweep's.
+	doltHealthFailingEvent = `{"seq":270,"type":"order.failing","subject":"dolt-health","message":"order dolt-health has failed 3 times in a row since 2026-11-20T09:00:00Z: exit status 1","payload":{"order_name":"dolt-health","consecutive":3,"first_failed":"2026-11-20T09:00:00Z","failing_for_ms":60000,"last_error":"exit status 1"}}`
 )
 
 // orderFailingRun is one notify-order-failing.sh run against a fake gc that
@@ -112,10 +117,33 @@ func TestNotifyOrderFailingEscalatesTheStreakAndResolvesItOnRecovery(t *testing.
 	}
 }
 
-// TestNotifyOrderFailingMailsOncePerStreak runs one episode through the core
-// escalate.sh: the streak mails the escalation recipient once, its hourly
-// re-alert (same first_failed) and re-reads of the event window mail nothing
-// more, and the recovery resolves the incident without another mail.
+// TestNotifyOrderFailingActsOnEachOrdersLatestEvent: a window holding several
+// streaks of one order acts on the order's latest event alone, so the earlier
+// streak's recovery neither resolves the incident of the streak that followed
+// it nor stops another order's alert in between.
+func TestNotifyOrderFailingActsOnEachOrdersLatestEvent(t *testing.T) {
+	r := newOrderFailingRun(t)
+
+	calls := r.run(t,
+		[]string{gateSweepFailingEvent, gateSweepRealertEvent, doltHealthFailingEvent, gateSweepNextStreakEvent},
+		[]string{gateSweepRecoveredEvent})
+	if len(calls) != 2 {
+		t.Fatalf("escalate.sh calls = %q, want dolt-health's alert then gate-sweep's new streak, nothing else", calls)
+	}
+	if !strings.Contains(calls[0], "--incident-key order-failing:dolt-health --fingerprint 2026-11-20T09:00:00Z") {
+		t.Errorf("first escalate.sh call = %q, want dolt-health's streak", calls[0])
+	}
+	if !strings.Contains(calls[1], "--incident-key order-failing:gate-sweep --fingerprint 2026-11-20T09:10:00Z") {
+		t.Errorf("second escalate.sh call = %q, want gate-sweep's new streak, fingerprinted by its own first_failed", calls[1])
+	}
+}
+
+// TestNotifyOrderFailingMailsOncePerStreak runs two streaks of one order
+// through the core escalate.sh: the streak mails the escalation recipient
+// once, its hourly re-alert (same first_failed) and re-reads of the event
+// window mail nothing more, the recovery resolves the incident without
+// another mail, and the next streak mails once however often the window that
+// still holds the first streak's recovery is re-read.
 func TestNotifyOrderFailingMailsOncePerStreak(t *testing.T) {
 	work := t.TempDir()
 	binDir, logPath := fakeGCBin(t, `case "$1 $2 $3" in
@@ -174,5 +202,18 @@ esac
 	}
 	if states := incidentStates(); len(states) != 0 {
 		t.Fatalf("incident records after the recovery = %v, want the streak's resolved", states)
+	}
+
+	// The order's next streak mails once, however often the window that
+	// still holds the first streak's recovery is replayed.
+	for range 3 {
+		run([]string{gateSweepFailingEvent, gateSweepRealertEvent, gateSweepNextStreakEvent}, []string{gateSweepRecoveredEvent})
+	}
+	sends = claimsStallMailSends(t, logPath)
+	if len(sends) != 2 || !strings.Contains(sends[1], "since 2026-11-20T09:10:00Z") {
+		t.Fatalf("sends after three runs over the next streak = %d, want 2 (one per streak):\n%s", len(sends), strings.Join(sends, "\n"))
+	}
+	if states := incidentStates(); len(states) != 1 {
+		t.Fatalf("incident records after the next streak = %v, want its one", states)
 	}
 }

@@ -136,9 +136,10 @@ type LoadOptions struct {
 	// (see IsRigQuarantineWarning). Repo-cache lock contention
 	// (ErrRepoCacheBusy) and city-scoped pack failures still fail the load.
 	//
-	// Only one-shot commands that read config set this. A process that acts
+	// Only one-shot commands that read config set this. A caller that acts
 	// on the composed agent set — the controller, start, validators — must
-	// leave it false so it never treats a withheld rig as unconfigured.
+	// leave it false, or take City.QuarantineError as the load's failure, so
+	// it never treats a withheld rig as unconfigured.
 	IsolateRigPackFailures  bool
 	deferRigPatches         bool
 	deferredRigPatches      *[]deferredRigPatches

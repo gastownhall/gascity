@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,15 +80,9 @@ func seedDirtyBrokenCache(t *testing.T, scratch, gcHome string) string {
 		{"add", "pack.toml"},
 		{"-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed"},
 	} {
-		if out, err := exec.Command("git", append([]string{"-C", seed}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
+		runGit(t, seed, args...)
 	}
-	out, err := exec.Command("git", "-C", seed, "rev-parse", "HEAD").Output()
-	if err != nil {
-		t.Fatalf("git rev-parse: %v", err)
-	}
-	commit := strings.TrimSpace(string(out))
+	commit := strings.TrimSpace(runGit(t, seed, "rev-parse", "HEAD"))
 	cacheDir := filepath.Join(gcHome, "cache", "repos", config.RepoCacheKey(quarantineBrokenSource, commit))
 	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
 		t.Fatal(err)

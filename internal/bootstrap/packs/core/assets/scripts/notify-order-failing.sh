@@ -20,8 +20,10 @@
 # send would otherwise fail, alert about itself and fail again.
 #
 # Both orders run this one script, which reads both event types from a
-# lookback window that must exceed the controller's event-trigger cadence;
-# re-reading an event is harmless, its incident is already recorded.
+# lookback window that must exceed the controller's event-trigger cadence and
+# acts on each order's latest event in it alone. Re-reading the window is
+# harmless: that event's incident is already recorded, and an earlier
+# streak's recovery is never replayed over the streak that followed it.
 #
 # Loud-fail: an escalation that fails, an event read that fails, or output
 # that does not decode exits non-zero, which is what makes the controller log
@@ -120,23 +122,26 @@ for type in order.failing order.recovered; do
     EVENTS="$EVENTS$out"$'\n'
 done
 
-# One compact line per event, in sequence order. The typed payload sits
-# directly under .payload.
+# One compact line per order: its latest event, the order's current state.
+# Every run replays the whole window, so acting on any earlier event would
+# undo a later one: the recovery of a streak that is over would resolve the
+# incident of the streak that followed it, and that streak would mail again.
+# A streak that ended inside the window is reported by its recovery alone.
+# The rows keep sequence order; the typed payload sits directly under
+# .payload.
 if ! ROWS="$(printf '%s\n' "$EVENTS" | jq -c -s '
-    [ .[] | select(type == "object" and (.type == "order.failing" or .type == "order.recovered")) ]
-    | unique_by(.seq) | sort_by(.seq) | .[]
-    | { type: .type, message: (.message // ""),
-        order: (.payload.order_name // .subject // ""),
-        first_failed: (.payload.first_failed // ""),
-        consecutive: (.payload.consecutive // 0),
-        last_error: (.payload.last_error // "") }')"; then
+    [ .[] | select(type == "object" and (.type == "order.failing" or .type == "order.recovered"))
+      | { seq: .seq, type: .type,
+          order: (.payload.order_name // .subject // ""),
+          first_failed: (.payload.first_failed // ""),
+          consecutive: (.payload.consecutive // 0),
+          last_error: (.payload.last_error // "") }
+      | select(.order != "" and .first_failed != "") ]
+    | unique_by(.seq) | group_by(.order) | map(max_by(.seq)) | sort_by(.seq) | .[]')"; then
     echo "notify-order-failing: could not decode the events gc events printed" >&2
     exit 1
 fi
 [ -n "$ROWS" ] || exit 0
-
-# A streak that ended inside the window is reported by its recovery alone.
-RECOVERED="$(printf '%s\n' "$ROWS" | jq -r 'select(.type == "order.recovered") | "\(.order) \(.first_failed)"')"
 
 FAILED=0
 while IFS= read -r row; do
@@ -144,9 +149,6 @@ while IFS= read -r row; do
     type="$(printf '%s' "$row" | jq -r '.type')"
     order="$(printf '%s' "$row" | jq -r '.order')"
     first_failed="$(printf '%s' "$row" | jq -r '.first_failed')"
-    if [ -z "$order" ] || [ -z "$first_failed" ]; then
-        continue
-    fi
     # A rig-scoped order is named <order>:rig:<rig>.
     case "${order%%:rig:*}" in
         notify-on-order-failing|notify-on-order-recovered) continue ;;
@@ -154,9 +156,6 @@ while IFS= read -r row; do
     key="order-failing:$order"
     case "$type" in
         order.failing)
-            if printf '%s\n' "$RECOVERED" | grep -qxF -- "$order $first_failed"; then
-                continue
-            fi
             consecutive="$(printf '%s' "$row" | jq -r '.consecutive')"
             last_error="$(printf '%s' "$row" | jq -r '.last_error')"
             body="Order $order has failed $consecutive times in a row since $first_failed.

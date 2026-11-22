@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -88,8 +90,15 @@ func TestGcBdRunsAgainstEachRigsStoreWhenOneRigIsQuarantined(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("gc bd --rig %s list = %d, want 0; stderr=%q", tc.rig, code, stderr.String())
 			}
-			log := readBdParityLog(t, c.scratch)
-			for _, want := range []string{"argv=list", "GC_STORE_ROOT=" + wantRoot + "\n", "GC_BEADS_PREFIX=" + tc.prefix + "\n", "GC_RIG=" + tc.rig + "\n"} {
+			// gc reports the rig root through either spelling of the fixture
+			// root (on macOS t.TempDir sits behind /var -> /private/var), so
+			// both spellings are normalized as the parity fixture does: root
+			// first, since it contains the raw spelling.
+			norm := func(s string) string {
+				return strings.ReplaceAll(strings.ReplaceAll(s, c.root, "$ROOT"), c.rawRoot, "$ROOT")
+			}
+			log := norm(readBdParityLog(t, c.scratch))
+			for _, want := range []string{"argv=list", "GC_STORE_ROOT=" + norm(wantRoot) + "\n", "GC_BEADS_PREFIX=" + tc.prefix + "\n", "GC_RIG=" + tc.rig + "\n"} {
 				if !strings.Contains(log, want) {
 					t.Errorf("bd invocation missing %q:\n%s", want, log)
 				}
@@ -101,5 +110,31 @@ func TestGcBdRunsAgainstEachRigsStoreWhenOneRigIsQuarantined(t *testing.T) {
 				t.Errorf("quarantine warning leaked to stdout: %q", stdout.String())
 			}
 		})
+	}
+}
+
+// A quarantined rig sends gc bd through the builtin readiness pass, in case
+// the pass heals the rig's cache. A pass that fails keeps the quarantined
+// composition, and its error reaches the warnings instead of vanishing.
+func TestBdPassthroughReportsAFailedReadinessPassForAQuarantinedRig(t *testing.T) {
+	clearGCEnv(t)
+	c := newRigQuarantineCity(t)
+	passErr := errors.New("preparing builtin pack caches: cache root is read-only")
+	oldPass := bdPassthroughReadinessPass
+	bdPassthroughReadinessPass = func(string, io.Writer) error { return passErr }
+	t.Cleanup(func() { bdPassthroughReadinessPass = oldPass })
+
+	var warnings bytes.Buffer
+	endScope := beginInvocationConfigMemo()
+	cfg, err := loadCityConfigForBdPassthrough(c.cityDir, &warnings)
+	endScope()
+	if err != nil {
+		t.Fatalf("passthrough load = %v, want the quarantined composition", err)
+	}
+	if !cfg.RigQuarantined("bad") || cfg.RigQuarantined("good") {
+		t.Fatalf("quarantined rigs = %v, want rig bad alone", cfg.QuarantinedRigs)
+	}
+	if !strings.Contains(warnings.String(), passErr.Error()) {
+		t.Errorf("warnings = %q, want the failed readiness pass's error", warnings.String())
 	}
 }

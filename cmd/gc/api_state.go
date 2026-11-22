@@ -192,6 +192,17 @@ type controllerState struct {
 	// order, the only kind this seam fires, so no order is in both.
 	webhookInapplicableReports inapplicableReportSet
 
+	// webhookOrderFailureStreaks counts the consecutive failures of the orders
+	// the webhook dispatch seam fires, for this controller boot. Every
+	// per-delivery dispatcher counts in it (controllerWebhookDispatcher.dispatcher),
+	// so a webhook order that fails on every delivery is escalated as
+	// order.failing. The tick loop's dispatchers count in their own table,
+	// carried across rebuilds: they never dispatch a webhook-trigger order, the
+	// only kind this seam fires, so no order is counted in both. Created on
+	// first use (webhookOrderFailureStreaksOf).
+	webhookOrderFailureStreaks     *orders.FailureStreaks
+	webhookOrderFailureStreaksOnce sync.Once
+
 	// emergencyCh receives emergency.Record values from the gc emergency
 	// subsystem. startEmergencyEventRelay drains this channel and mirrors
 	// each record into the city event log as an emergency.signaled event.
@@ -3930,10 +3941,12 @@ func (cs *controllerState) ServiceRegistry() workspacesvc.Registry {
 // may be nil for a webhook-only city). The seam's Dispatch path consults no per-tick
 // dispatcher state (cooldown cache, open-work gate) — it validates required params,
 // refuses an order its scope's backend rules out, writes the tracking bead, and
-// launches dispatchOne — and the order's own timeout bounds the async work. The one
-// piece of state that must outlive a delivery is the set of orders already reported
-// as inapplicable, so every per-delivery instance shares the controller's
-// webhookInapplicableReports and the report stays once per controller boot.
+// launches dispatchOne — and the order's own timeout bounds the async work. Two
+// pieces of state must outlive a delivery, so every per-delivery instance shares
+// the controller's: the set of orders already reported as inapplicable
+// (webhookInapplicableReports), so the report stays once per controller boot, and
+// the orders' failure streaks (webhookOrderFailureStreaks), so consecutive failing
+// deliveries of an order are escalated as order.failing.
 func (cs *controllerState) WebhookDispatcher() orderdispatch.Dispatcher {
 	return controllerWebhookDispatcher{cs: cs}
 }
@@ -3966,6 +3979,7 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 	}
 	md := newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
 	md.inapplicableReported = &cs.webhookInapplicableReports
+	md.countOrderFailuresIn(cs.webhookOrderFailureStreaksOf())
 	return md
 }
 
