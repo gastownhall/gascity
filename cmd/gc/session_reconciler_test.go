@@ -7113,6 +7113,131 @@ func TestReconcileSessionBeads_DefersPendingCreateRecoveryWhileStartInFlight(t *
 	}
 }
 
+func TestReconcileSessionBeads_DefersPendingCreateRecoveryWhileStartInFlightAfterAwakeHeal(t *testing.T) {
+	for _, state := range []string{"awake", "creating"} {
+		t.Run(state, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			env.desiredState["worker"] = TemplateParams{
+				Command:      "new-cmd",
+				SessionName:  "worker",
+				TemplateName: "worker",
+			}
+			session := env.createSessionBead("worker", "worker")
+			// The heal pass already projected the alive runtime to awake, or
+			// the row is still creating: both are the claimed start's faces
+			// while the async provider.Start is inside its startup timeout.
+			env.setSessionMetadata(&session, map[string]string{
+				"command":              "old-cmd",
+				"state":                state,
+				"pending_create_claim": "true",
+				"last_woke_at":         env.clk.Now().Add(-45 * time.Second).UTC().Format(time.RFC3339),
+			})
+			if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "old-cmd"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", session.Metadata["instance_token"]); err != nil {
+				t.Fatal(err)
+			}
+
+			woken := env.reconcile([]beads.Bead{session})
+			if woken != 0 {
+				t.Fatalf("woken = %d, want 0 while pending create start is still in flight", woken)
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Metadata["started_config_hash"] != "" {
+				t.Fatalf("started_config_hash = %q, want empty until async start commits", got.Metadata["started_config_hash"])
+			}
+			if got.Metadata["pending_create_claim"] != "true" {
+				t.Fatalf("pending_create_claim = %q, want preserved while async start is in flight", got.Metadata["pending_create_claim"])
+			}
+			switch got.Metadata["state"] {
+			case state, "awake":
+			default:
+				t.Fatalf("state = %q, want %s or awake while async start is in flight", got.Metadata["state"], state)
+			}
+		})
+	}
+}
+
+func TestReconcileSessionBeads_AwakePendingCreateRecoveredOnceStartWindowLapses(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", StartCommand: "test-cmd", MaxActiveSessions: intPtr(1)}},
+	}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	// The heal projected the alive runtime to awake during its start, but the
+	// in-flight window has since lapsed: recovery must commit, not defer.
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "awake",
+		"pending_create_claim": "true",
+		"last_woke_at":         env.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+	})
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", session.Metadata["instance_token"]); err != nil {
+		t.Fatal(err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared once the start window lapses", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["started_config_hash"] == "" {
+		t.Fatal("started_config_hash should be recorded when recovery commits after the start window lapses")
+	}
+}
+
+func TestReconcileSessionBeads_ActivePendingCreateClaimRecoveredInsideStartWindow(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", StartCommand: "test-cmd", MaxActiveSessions: intPtr(1)}},
+	}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	// Only CommitStartedPatch writes active, so a claim on an active row is a
+	// partial commit to repair now, not an in-flight start to defer.
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pending_create_claim": "true",
+	})
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", session.Metadata["instance_token"]); err != nil {
+		t.Fatal(err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared on the tick that sees an active partial commit", got.Metadata["pending_create_claim"])
+	}
+}
+
 func TestReconcileSessionBeads_PendingCreateLeasePreventsOrphanClose(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
