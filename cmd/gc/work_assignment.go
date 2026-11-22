@@ -186,11 +186,27 @@ func excludeMailMessageBeads(items []beads.Bead) []beads.Bead {
 // takes the tiers. Under conditional_writes=require, a store without the
 // capability is refused before either tier.
 func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback string) error {
+	return w.releaseWorkBead(item, runTargetFallback, false)
+}
+
+// ReleaseDetachedWorkBead is ReleaseWorkBead for a bead carrying gc.detached:
+// the release write also clears it, so the reopened bead never carries the
+// probe into its next claim.
+func (w workAssignment) ReleaseDetachedWorkBead(item beads.Bead, runTargetFallback string) error {
+	return w.releaseWorkBead(item, runTargetFallback, true)
+}
+
+// releaseWorkBead is ReleaseWorkBead, clearing gc.detached in the same write
+// when clearDetached is set.
+func (w workAssignment) releaseWorkBead(item beads.Bead, runTargetFallback string, clearDetached bool) error {
 	store := w.unwrapped()
 	if store == nil {
 		return nil
 	}
 	metadata := clearedSessionAffinityMetadata()
+	if clearDetached {
+		metadata[beadmeta.DetachedMetadataKey] = ""
+	}
 	stampFallbackRoute := runTargetFallback != "" &&
 		strings.TrimSpace(item.Metadata[beadmeta.RunTargetMetadataKey]) == "" &&
 		strings.TrimSpace(item.Metadata[beadmeta.RoutedToMetadataKey]) == ""
@@ -209,7 +225,7 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 	}
 	// Tier 1 clears status/assignee atomically but leaves the metadata to a second
 	// write, so it is usable only when that second write is not routing-
-	// consequential. Both conditions below make it so, and in the gap between the
+	// consequential. Each condition below makes it so, and in the gap between the
 	// two writes the bead is open and unassigned:
 	//
 	//   - a fallback route to stamp: the bead carries neither run_target nor
@@ -224,11 +240,14 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 	//     caller's List but before this write still takes tier 1. Narrowing that
 	//     would need a live metadata re-read on every release, and it is the
 	//     assignee — not the group — that tier 1 verifies atomically.
+	//   - a gc.detached to clear: left behind by a failed second write, the
+	//     probe would ride into the bead's next claim, where a probe that no
+	//     longer observes its socket holds the work for good.
 	//
 	// Either way the release must land as ONE write, which is what tier 2 does:
 	// status, assignee and metadata in a single fenced write, so the bead is
 	// never claimable in a half-released state.
-	singleWriteRequired := stampFallbackRoute || beadHasActiveContinuationGroup(item)
+	singleWriteRequired := stampFallbackRoute || beadHasActiveContinuationGroup(item) || clearDetached
 	// Tier 1: the store's atomic conditional release. A release computed from a
 	// snapshot must never write over an assignee that changed after that
 	// snapshot was taken.
@@ -379,11 +398,11 @@ func releaseAssignmentFenced(store beads.Store, wb beads.Bead, opts beads.Update
 // would strand every claim on a store whose lists carry no revision.
 //
 // The live read is HandlesFor(store).Live, as releaseAssignmentFenced's is, so
-// store must be a leaf store or carry Handles of its own (a CachingStore reads
-// its backing): the unwrapped work store, not a class wrapper. Over a cache, a
-// class wrapper's live read is the cached row, and a stale 0 there fences the
+// over a cache it must read the backing row: a stale 0 there would fence the
 // release on a revision the row no longer holds, refused on every tick rather
-// than left to the tiers.
+// than left to the tiers. A leaf store, a store with Handles of its own (a
+// CachingStore reads its backing) and a typed class handle over either (which
+// forwards Handles since T7a) all read it.
 func releaseWorkAssignmentIfRevisionMatches(store beads.Store, item beads.Bead, update beads.UpdateOpts) (released, handled bool, err error) {
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {

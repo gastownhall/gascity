@@ -174,6 +174,10 @@ func TestPromptQueriesForCityScopedAgentReachRigStores(t *testing.T) {
 		if code := doInitFromDirWithOptions(src, cityPath, "", &initOut, &initErr, true); code != 0 {
 			t.Fatalf("doInitFromDirWithOptions = %d; stderr: %s", code, initErr.String())
 		}
+		// The shipped example is born split, and a split city federates every
+		// discovery read through gc ready anyway; this case pins that the rig
+		// alone does it, so the copy is made single-store.
+		dropCityStorageForTest(t, cityPath)
 		rigPath := filepath.Join(t.TempDir(), "myrig")
 		if err := os.MkdirAll(rigPath, 0o755); err != nil {
 			t.Fatalf("creating rig dir: %v", err)
@@ -321,4 +325,27 @@ func TestCityScopedPromptDiscoveryFailsLoudOnABrokenRigStore(t *testing.T) {
 			}
 		}
 	})
+}
+
+// dropCityStorageForTest removes [storage] from the city.toml at cityPath, so
+// a copied born-split example runs single-store.
+func dropCityStorageForTest(t *testing.T, cityPath string) {
+	t.Helper()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	cfg.Storage = nil
+	out, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("marshaling city.toml: %v", err)
+	}
+	if err := os.WriteFile(tomlPath, out, 0o644); err != nil {
+		t.Fatalf("writing city.toml: %v", err)
+	}
 }

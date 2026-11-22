@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2328,5 +2329,26 @@ func TestDoltliteDependencySnapshotCompletenessIsGuarded(t *testing.T) {
 	}
 	if len(cached) != 1 || cached[0].DependsOnID != "gc-parent" {
 		t.Fatalf("cached DepList = %#v, want the snapshot's gc-child -> gc-parent", cached)
+	}
+}
+
+// TestDoltliteParseMetadataIsTheBdCLIReading: the DoltLite read store reads a
+// stored metadata object exactly as the bd CLI does, reading 0 of
+// MetadataReadings, so a caller judging a row under every reading gc's stores
+// give it covers this store too.
+func TestDoltliteParseMetadataIsTheBdCLIReading(t *testing.T) {
+	for _, raw := range []string{
+		`{}`,
+		` {"gc.root_bead_id":"gc-1","note":"x"} `,
+		`{"gc.root_bead_id":null,"session_id":null,"gc.synthetic":null}`,
+		`{"n":1.50,"e":1e3,"b":true,"o":{"b":1, "a":2},"a":[1, 2],"s":" padded "}`,
+	} {
+		readings, err := MetadataReadings([]byte(raw))
+		if err != nil {
+			t.Fatalf("MetadataReadings(%s): %v", raw, err)
+		}
+		if got := parseMetadata(raw); !maps.Equal(got, readings[0]) {
+			t.Errorf("%s: DoltLite reads %q, want the bd CLI's reading %q", raw, got, readings[0])
+		}
 	}
 }

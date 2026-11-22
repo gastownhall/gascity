@@ -7,8 +7,9 @@ const (
 	PublicGastownPackSource = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
 
 	// PublicGastownPackVersion pins fresh init output to the registry release
-	// content commit from gastownhall/gascity-packs main.
-	PublicGastownPackVersion = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
+	// content commit from gastownhall/gascity-packs (main, or a gastown
+	// release branch such as release/gastown-0.1.11).
+	PublicGastownPackVersion = "sha:66897e7132c9d1160509ee47dd1b935bbd3b9664"
 
 	// PublicGascityPackSource is the concrete durable source for the
 	// gascity planning/implementation skills pack.
@@ -16,8 +17,8 @@ const (
 
 	// PublicGascityPackVersion pins fresh init output to the registry
 	// release content commit from gastownhall/gascity-packs main
-	// (gascity 0.1.6).
-	PublicGascityPackVersion = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"
+	// (gascity 0.1.7).
+	PublicGascityPackVersion = "sha:5bf643ca55bd20f080994cc31414ee4596015a0c"
 
 	// PublicGascityRolesPackSource is the concrete durable source for the
 	// gascity role-agents subpack (gc-roles): the providerless, rig-scoped
@@ -69,6 +70,13 @@ var SupersededBundledPackImportVersions = []string{
 	// predates the content those binaries embedded, so it is served from
 	// embedded content and never fetched (isSupersededEmbeddedOnlyPin).
 	"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
+	// The pins v1.5.1 shipped from hotfix/1.5.1, whose [release-only]
+	// re-pins never reached main: its first pin (274c1cfb70), its pin
+	// after #7498 (40404c6cfd), and v1.5.1's own (bae3ebb2b4). Without them
+	// a main build reads a city v1.5.1 created as deliberately pinned.
+	"sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5",
+	"sha:505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42",
+	"sha:2e643dc2eb5ff84d9853ecaa6961a87a8e4043ae",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the
@@ -80,6 +88,8 @@ var SupersededBundledPackImportVersions = []string{
 // When bumping PublicGastownPackVersion, append the old value here
 // (scripts/update-bundled-gastown-pack does this).
 var SupersededPublicGastownPackVersions = []string{
+	"sha:cb6a612882b8402569c495c90ab75bb257a51bdc",
+	"sha:66c672b5ed00af143158b4eac960523c56b977ee",
 	"sha:33d3a430a67d1782ad364556cb566bdb01d0afe3",
 	"sha:4212acb7046c11f6f633df73307006493185233a",
 	"sha:817f85e155e2b0b0c375835b076103108f8a4724",
@@ -93,6 +103,7 @@ var SupersededPublicGastownPackVersions = []string{
 // SupersededPublicGascityPackVersions is the gascity-pack counterpart of
 // SupersededPublicGastownPackVersions.
 var SupersededPublicGascityPackVersions = []string{
+	"sha:3b3b89f2011e06d84459aa7bea1552382f13930a",
 	"sha:99464ed9240b1f6e6b7ab1d351f67016e1a973ff",
 	"sha:788b6e8ec224a8951c728ef6da74dab8bc04d474",
 	"sha:5fc675b85d4ae0ebca2f17cb027a24b03f2832f8",

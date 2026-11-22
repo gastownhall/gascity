@@ -342,3 +342,73 @@ func TestLivenessFenceMiss(t *testing.T) {
 		})
 	}
 }
+
+// Kills any drift in the launch id format, a queued startup turn's binding:
+// a format change would strand every turn queued under the old one.
+func TestLaunchIDIsStableHexAndHidesTheToken(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	id := runtime.LaunchID(token)
+	if id != runtime.LaunchID(token) {
+		t.Fatalf("LaunchID is not stable")
+	}
+	if len(id) != 16 || strings.Trim(id, "0123456789abcdef") != "" {
+		t.Fatalf("LaunchID = %q, want 16 lowercase hex characters", id)
+	}
+	if id != "541056a4ebf085be" {
+		t.Errorf("LaunchID(golden token) = %q, want the frozen v1 vector", id)
+	}
+	if strings.Contains(id, token[:8]) || strings.Contains(token, id) {
+		t.Errorf("LaunchID %q reveals its token", id)
+	}
+	if id == (runtime.InputFence{Generation: 1, Epoch: 1, Token: token}).Digest() {
+		t.Errorf("LaunchID equals the fence digest: the two are not domain-separated")
+	}
+	if other := runtime.LaunchID(token + "x"); other == id {
+		t.Errorf("two tokens share launch id %q", id)
+	}
+	if got := runtime.LaunchID(""); got != "" {
+		t.Errorf("LaunchID(\"\") = %q, want \"\": no token names no launch", got)
+	}
+}
+
+func TestReadLaunchIDAndInputFenceAnswerFalseWhenTheyCannotRead(t *testing.T) {
+	const name = "s-launch"
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for key, value := range map[string]string{runtime.InstanceTokenEnv: "tok-live", runtime.RuntimeEpochEnv: "4", runtime.ContinuationEpochEnv: "2"} {
+		if err := fake.SetMeta(name, key, value); err != nil {
+			t.Fatalf("SetMeta(%s): %v", key, err)
+		}
+	}
+	if id, ok := runtime.ReadLaunchID(fake, name); !ok || id != runtime.LaunchID("tok-live") {
+		t.Fatalf("ReadLaunchID = %q, %v; want the live token's launch id", id, ok)
+	}
+	fence, ok := runtime.ReadInputFence(fake, name)
+	if want := (runtime.InputFence{Generation: 4, Epoch: 2, Token: "tok-live"}); !ok || fence != want {
+		t.Fatalf("ReadInputFence = %v, %v; want %v", fence, ok, want)
+	}
+	if _, ok := runtime.ReadLaunchID(fake, "s-unset"); ok {
+		t.Errorf("ReadLaunchID of a session with no token answered")
+	}
+	if _, ok := runtime.ReadInputFence(fake, "s-unset"); ok {
+		t.Errorf("ReadInputFence of a session with no token answered")
+	}
+	for _, cause := range []error{runtime.ErrSessionNotFound, runtime.ErrRuntimeUnavailable, runtime.ErrMetaUnsupported} {
+		fake.GetMetaErrors[name] = map[string]error{runtime.InstanceTokenEnv: cause}
+		if _, ok := runtime.ReadLaunchID(fake, name); ok {
+			t.Errorf("ReadLaunchID answered through %v", cause)
+		}
+		if _, ok := runtime.ReadInputFence(fake, name); ok {
+			t.Errorf("ReadInputFence answered through %v", cause)
+		}
+	}
+	fake.GetMetaErrors[name] = map[string]error{runtime.RuntimeEpochEnv: runtime.ErrRuntimeUnavailable}
+	if _, ok := runtime.ReadInputFence(fake, name); ok {
+		t.Errorf("ReadInputFence answered with an unreadable generation")
+	}
+	if _, ok := runtime.ReadLaunchID(nil, name); ok {
+		t.Errorf("ReadLaunchID answered with no provider")
+	}
+}

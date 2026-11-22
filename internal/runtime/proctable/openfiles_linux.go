@@ -38,3 +38,20 @@ func OpenFiles(pid int) ([]string, error) {
 	}
 	return paths, nil
 }
+
+// ProcessCwd returns pid's working directory, read from its cwd link under
+// the same procfs root as [OpenFiles]; it refuses the live /proc under go
+// test for the same reason. A process that is gone has none: an error. A
+// directory removed since the process entered it reads as the kernel shows
+// it, with " (deleted)" appended, a path that resolves nowhere, as a relative
+// path then resolves nowhere for the process itself.
+func ProcessCwd(pid int) (string, error) {
+	if err := liveScanGuard(); err != nil {
+		return "", err
+	}
+	cwd, err := os.Readlink(filepath.Join(scanRoot, strconv.Itoa(pid), "cwd"))
+	if err != nil {
+		return "", fmt.Errorf("reading the working directory of pid %d: %w", pid, err)
+	}
+	return cwd, nil
+}

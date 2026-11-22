@@ -135,7 +135,7 @@ func TestPhase0SessionTargeting_RejectsTemplateToken(t *testing.T) {
 		}},
 	}
 
-	_, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "template:worker")
+	_, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "template:worker", nil)
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDMaterializingNamed(template:worker) error = %v, want ErrSessionNotFound on session-targeting surface", err)
 	}
