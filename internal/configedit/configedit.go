@@ -52,6 +52,13 @@ var (
 	// agents/<name>/agent.toml) so that we don't churn city.toml's
 	// mtime or risk losing comments on a no-op rewrite.
 	ErrUnmodified = errors.New("configedit: raw config unmodified")
+
+	// ErrShadowed is returned when an agent suspend/resume edit cannot set
+	// the agent's composed suspension: the written value is overridden by a
+	// later config layer, or the deciding layer cannot be identified or
+	// edited safely. Every file the attempt changed is restored. Maps to
+	// HTTP 409.
+	ErrShadowed = errors.New("agent suspension is decided by another config layer")
 )
 
 // Origin describes where an agent or rig is defined in the config.
@@ -336,17 +343,166 @@ func AddOrUpdateRigPatch(cfg *config.City, name string, fn func(p *config.RigPat
 // SuspendAgent suspends an agent, using inline edit, agent.toml write,
 // or [[patches.agent]] depending on provenance. Writes desired state
 // to durable config (not ephemeral session metadata).
+//
+// Success means the reloaded composed config reports the agent suspended
+// (and no other agent's suspension changed). When it does not, every file
+// the attempt changed is restored and the error wraps [ErrShadowed].
 func (e *Editor) SuspendAgent(name string) error {
-	return e.EditExpanded(func(raw, expanded *config.City) error {
-		return mutateAgentSuspended(e.fs, e.tomlPath, raw, expanded, name, true)
-	})
+	return e.setAgentSuspended(name, true)
 }
 
 // ResumeAgent resumes a suspended agent, mirroring [Editor.SuspendAgent].
 func (e *Editor) ResumeAgent(name string) error {
-	return e.EditExpanded(func(raw, expanded *config.City) error {
-		return mutateAgentSuspended(e.fs, e.tomlPath, raw, expanded, name, false)
-	})
+	return e.setAgentSuspended(name, false)
+}
+
+// setAgentSuspended runs one agent suspension edit as a single critical
+// section: load, mutate, write, reload the composed config, verify, and on
+// any failure restore the files the attempt changed.
+func (e *Editor) setAgentSuspended(name string, suspended bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	raw, err := e.loadForEdit()
+	if err != nil {
+		return fmt.Errorf("loading raw config: %w", err)
+	}
+	expanded, _, err := config.LoadWithIncludes(e.fs, e.tomlPath)
+	if err != nil {
+		return fmt.Errorf("loading expanded config: %w", err)
+	}
+	snapshot, err := e.snapshotAgentSuspensionFiles(expanded, name)
+	if err != nil {
+		return fmt.Errorf("agent %q: snapshotting config before suspension edit: %w", name, err)
+	}
+
+	err = mutateAgentSuspended(e.fs, e.tomlPath, raw, expanded, name, suspended)
+	switch {
+	case errors.Is(err, ErrUnmodified):
+	case err != nil:
+		if errors.Is(err, config.ErrSurgicalAgentEditUnsupported) && AgentOrigin(raw, expanded, name) == OriginDerived {
+			err = fmt.Errorf("%w: %w", ErrShadowed, err)
+		}
+		return e.restoreAfterFailedEdit(snapshot, err)
+	default:
+		if err := e.validateForEdit(raw); err != nil {
+			return e.restoreAfterFailedEdit(snapshot, err)
+		}
+		if err := e.write(raw); err != nil {
+			return e.restoreAfterFailedEdit(snapshot, err)
+		}
+	}
+
+	if err := e.verifyAgentSuspended(expanded, name, suspended); err != nil {
+		return e.restoreAfterFailedEdit(snapshot, err)
+	}
+	return nil
+}
+
+// snapshotAgentSuspensionFiles snapshots every file a suspension edit of
+// name can write: city.toml, .gc/site.toml (rig
+// bindings are re-persisted by the city.toml writers), and the
+// agents/<name>/agent.toml of any matching convention-discovered agent.
+func (e *Editor) snapshotAgentSuspensionFiles(expanded *config.City, name string) (*config.EditSnapshot, error) {
+	cityRoot := e.cityRoot()
+	candidates := []string{e.tomlPath, config.SiteBindingPath(cityRoot)}
+	for _, a := range expanded.Agents {
+		if config.AgentMatchesIdentity(&a, name) && a.Dir == "" && a.BindingName == "" {
+			candidates = append(candidates, filepath.Join(cityRoot, "agents", a.Name, "agent.toml"))
+		}
+	}
+	seen := map[string]bool{}
+	var paths []string
+	for _, p := range candidates {
+		// Snapshot the physical target: the writers resolve symlinks and
+		// write there, and restoring onto the link would replace it.
+		resolved, err := fsys.ResolveSymlinks(e.fs, p)
+		if err != nil {
+			return nil, fmt.Errorf("resolving %s: %w", p, err)
+		}
+		if !seen[resolved] {
+			seen[resolved] = true
+			paths = append(paths, resolved)
+		}
+	}
+	return config.SnapshotFilesForEdit(e.fs, paths...)
+}
+
+// restoreAfterFailedEdit restores the snapshotted files and returns cause,
+// joined with any restoration failure. It only reports a rollback when the
+// restoration succeeded.
+func (e *Editor) restoreAfterFailedEdit(snapshot *config.EditSnapshot, cause error) error {
+	restored, err := snapshot.RestoreChanged(e.fs)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("restoring config files after the failed edit also failed; inspect them by hand: %w", err))
+	}
+	if restored > 0 {
+		return fmt.Errorf("%w (the attempted edit was rolled back)", cause)
+	}
+	return cause
+}
+
+// verifyAgentSuspended reloads the composed config and checks that the
+// agent identified by name now has the requested suspension and that no
+// other agent's suspension changed relative to before.
+func (e *Editor) verifyAgentSuspended(before *config.City, name string, want bool) error {
+	target, ok := findAgentByIdentity(before, name)
+	if !ok {
+		return nil
+	}
+	qualified := target.QualifiedName()
+	after, _, err := config.LoadWithIncludes(e.fs, e.tomlPath)
+	if err != nil {
+		return fmt.Errorf("agent %q: reloading config after suspension edit: %w", qualified, err)
+	}
+	afterSuspended := agentSuspensionByName(after)
+	got, ok := afterSuspended[qualified]
+	if !ok {
+		return fmt.Errorf("agent %q: missing from the composed config after the suspension edit", qualified)
+	}
+	if got != want {
+		return fmt.Errorf("%w: agent %q: the edit set suspended = %t, but the composed config still reports suspended = %t; "+
+			"a later layer overrides it (%s)",
+			ErrShadowed, qualified, want, got, describeSuspensionDecision(after, qualified))
+	}
+	for other, was := range agentSuspensionByName(before) {
+		if other == qualified {
+			continue
+		}
+		if now, ok := afterSuspended[other]; ok && now != was {
+			return fmt.Errorf("agent %q: the suspension edit also changed agent %q (suspended %t -> %t)", qualified, other, was, now)
+		}
+	}
+	return nil
+}
+
+// describeSuspensionDecision names the deciding suspension setter of the
+// agent identified by qualified when the composed config attributes it to
+// exactly one rig [[rigs.overrides]]/[[rigs.patches]] entry (including one an
+// include fragment contributed), and otherwise states the source as unknown.
+func describeSuspensionDecision(composed *config.City, qualified string) string {
+	setter, ok, err := rigSuspensionSetter(composed, composed, qualified)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("deciding source unknown: %v", err)
+	case ok:
+		return fmt.Sprintf("decided by rig %q's [[rigs.%s]] entry for agent %q", setter.rig, setter.table, setter.agent)
+	default:
+		return "deciding source unknown: check include fragments, wildcard [[patches.agent]] entries, and [[rigs.overrides]]/[[rigs.patches]] of the agent's rig"
+	}
+}
+
+// agentSuspensionByName maps each composed agent's qualified name to its
+// suspension, keeping the first agent for a repeated name.
+func agentSuspensionByName(cfg *config.City) map[string]bool {
+	out := make(map[string]bool, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		qn := a.QualifiedName()
+		if _, ok := out[qn]; !ok {
+			out[qn] = a.Suspended
+		}
+	}
+	return out
 }
 
 // mutateAgentSuspended is the shared dispatch for SuspendAgent and
