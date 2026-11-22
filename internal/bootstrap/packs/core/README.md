@@ -27,6 +27,8 @@ none requires per-city configuration.
 | **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
 | **`notify-on-claims-stalled`** | **event `agent.claims_stalled`** | **Mail the escalation recipient when an agent's seats stop claiming their work (once per stall episode)** |
 | **`notify-on-claims-resumed`** | **event `agent.claims_resumed`** | **Resolve that incident and mail a short note when the agent claims its work again** |
+| **`notify-on-order-failing`** | **event `order.failing`** | **Mail the escalation recipient when an order keeps failing (once per failure streak)** |
+| **`notify-on-order-recovered`** | **event `order.recovered`** | **Resolve that incident when the order completes again** |
 
 The **event-driven nudge orders** are documented in detail below.
 
@@ -197,6 +199,36 @@ output names the override.
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
 | `GC_NOTIFY_CLAIMS_STALL_LOOKBACK` | `15m` | Event lookback window |
+| `GC_ESCALATION_RECIPIENT` | `human` | Who is mailed |
+
+## `notify-on-order-failing` and `notify-on-order-recovered`
+
+**Why.** A failing order records `order.failed` on every run and nothing
+else: the failure reaches the event log and `gc doctor`, which nobody reads
+until something downstream breaks. The controller counts each order's
+consecutive failures and records `order.failing` when a streak reaches three
+(outside the ten-minute startup grace, re-raised at most hourly), and
+`order.recovered` when a run completes after such a streak.
+
+**Event contract.** Both orders run `assets/scripts/notify-order-failing.sh`,
+which reads both event types over a lookback window and mails through
+`escalate.sh` to `$GC_ESCALATION_RECIPIENT` (default `human`):
+
+- a failing order mails once per streak: the incident key is
+  `order-failing:<order>` and its fingerprint the streak's `first_failed`, so
+  the hourly re-alerts are not mailed again and a new streak mails at once;
+- a recovery resolves that incident and sends nothing; a streak already over
+  is reported by its recovery alone;
+- an alert about either notify order itself is ignored, so a notifier that
+  cannot send does not page about itself in a loop.
+
+**Loud-fail and overrides** are as for the claims-stall orders above.
+
+**Configuration** (all optional):
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `GC_NOTIFY_ORDER_FAILING_LOOKBACK` | `15m` | Event lookback window |
 | `GC_ESCALATION_RECIPIENT` | `human` | Who is mailed |
 
 ## Dependencies
