@@ -43,7 +43,8 @@ func TestReconcileSessionBeads_EvictsLiveUncommittedStartAfterStartupTimeout(t *
 		"state":                      "active",
 		"session_key":                "original-key",
 		// The handoff's stamp: the restart cycle that cleared the start
-		// witness committed (#6417's own path leaves this on the row).
+		// witness committed, and no start that consumed it launched the
+		// occupant planted below.
 		"reset_committed_at": env.clk.Now().Format(time.RFC3339),
 	})
 	ctx := context.Background()
@@ -66,7 +67,7 @@ func TestReconcileSessionBeads_EvictsLiveUncommittedStartAfterStartupTimeout(t *
 		)
 	}
 
-	// Tick 1 sightsthe row live and uncommitted for the first time (the fake
+	// Tick 1 sights the row live and uncommitted for the first time (the fake
 	// provider reports no creation time, so the first sighting is the age
 	// basis); the startup window has not passed yet, so nothing is stopped.
 	tick()

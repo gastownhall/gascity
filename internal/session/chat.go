@@ -948,6 +948,16 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		releaseRoute(unroute)
 		return err
 	}
+	// The restart handoff's hold is decided again on this row (#6417):
+	// legacy writes the handoff after its kill has released the lease, so it
+	// can land after the read queueForRunning decided on. Minting on this row
+	// would consume the handoff's markers and launch the resume command
+	// without the startup prompt. A handoff that lands after this read fails
+	// the mint's premise (ErrMintSuperseded).
+	if !replacing && restartHandoffHolds(b.Metadata, upAndAlive, by) {
+		releaseRoute(unroute)
+		return fmt.Errorf("%w: %s", ErrResumeHeld, id)
+	}
 
 	cfg := hints
 	cfg.Command = resumeCommand

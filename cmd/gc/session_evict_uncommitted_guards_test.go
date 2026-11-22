@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,23 @@ type evictUncommittedFixture struct {
 	// is what the stop returns instead of acting.
 	beforeStop func(t *testing.T)
 	stopErr    error
+	// created, when set, is the creation time the provider reports for the
+	// occupant, as tmux reports #{session_created}: decimal unix seconds.
+	created string
+}
+
+// createdLivenessProvider is the fake runtime reporting a creation time for
+// the session object it observes, as tmux does.
+type createdLivenessProvider struct {
+	*runtime.Fake
+	created string
+}
+
+func (p *createdLivenessProvider) ObserveLiveness(name string, _ []string) runtime.Liveness {
+	if !p.IsRunning(name) {
+		return runtime.Liveness{}
+	}
+	return runtime.Liveness{Running: true, Alive: true, ObjectID: "$1", ObjectCreated: p.created}
 }
 
 func (f *evictUncommittedFixture) sessionName() string { return f.row.Metadata["session_name"] }
@@ -92,6 +110,10 @@ func (f *evictUncommittedFixture) call(t *testing.T) {
 		release := f.holdLease(t)
 		defer release()
 	}
+	var sp runtime.Provider = f.sp
+	if f.created != "" {
+		sp = &createdLivenessProvider{Fake: f.sp, created: f.created}
+	}
 	evictUncommittedLiveStartIfDue(evictUncommittedStart{
 		ctx:      context.Background(),
 		cityPath: f.city,
@@ -99,7 +121,7 @@ func (f *evictUncommittedFixture) call(t *testing.T) {
 		name:     f.sessionName(),
 		tp:       f.tp,
 		cfg:      cfg,
-		sp:       f.sp,
+		sp:       sp,
 		dt:       f.dt,
 		clk:      f.clk,
 		startup:  60 * time.Second,
@@ -323,4 +345,80 @@ func TestEvictUncommittedLiveStart_FirstSightingBasis(t *testing.T) {
 	if f.sp.IsRunning(f.sessionName()) {
 		t.Fatalf("not evicted past the startup window from the new incarnation's first sighting\nstderr=%s", f.stderr.String())
 	}
+}
+
+// TestEvictUncommittedLiveStart_RowGuardsReadNoRuntime: a row that fails a
+// row guard, the cycle guard included, is refused before any provider call
+// (no identity read, liveness read or attach probe), so a row that can never
+// qualify costs a tick nothing, and a foreign identity under it logs no
+// warning. Kills a cycle guard ordered after the identity read.
+func TestEvictUncommittedLiveStart_RowGuardsReadNoRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		meta     map[string]string
+		noPrompt bool
+	}{
+		{name: "no reset cycle committed", meta: map[string]string{"reset_committed_at": ""}},
+		{name: "start committed", meta: map[string]string{"started_config_hash": "h-1"}},
+		{name: "pending-create claim", meta: map[string]string{"pending_create_claim": "true", "state": "creating"}},
+		{name: "operator hold", meta: map[string]string{"sleep_intent": "user-hold"}},
+		{name: "template renders no prompt", noPrompt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEvictUncommittedFixture(t, tc.meta)
+			if tc.noPrompt {
+				f.tp = TemplateParams{}
+			}
+			if err := f.sp.SetMeta(f.sessionName(), "GC_SESSION_ID", "gc-somebody-else"); err != nil {
+				t.Fatalf("restamping the occupant: %v", err)
+			}
+			probed := false
+			f.attached = func() (bool, error) {
+				probed = true
+				return false, nil
+			}
+			f.clk.Time = f.clk.Time.Add(90 * time.Second)
+			before := len(f.sp.Calls)
+			f.call(t)
+			if got := f.sp.Calls[before:]; len(got) != 0 || probed {
+				t.Fatalf("provider calls = %v (attach probed: %v), want none for a row the guards refuse", got, probed)
+			}
+			if f.stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want nothing logged", f.stderr.String())
+			}
+		})
+	}
+}
+
+// TestEvictUncommittedLiveStart_CreationTimeBasis pins the age basis when the
+// provider reports the runtime's creation time as tmux does
+// (#{session_created}, decimal unix seconds; #6417 F2): the startup window
+// runs from that time, so a runtime created past the window is evicted on the
+// first sighting (a new drain tracker, as after a controller restart, does
+// not restart the wait), and one created inside the window survives until the
+// window has passed from its creation.
+func TestEvictUncommittedLiveStart_CreationTimeBasis(t *testing.T) {
+	t.Run("created past the window", func(t *testing.T) {
+		f := newEvictUncommittedFixture(t, nil)
+		f.created = strconv.FormatInt(f.clk.Now().Add(-2*time.Hour).Unix(), 10)
+		f.call(t)
+		if f.sp.IsRunning(f.sessionName()) {
+			t.Fatalf("a runtime created two hours ago survived its first sighting: its creation time was not the age basis\nstderr=%s", f.stderr.String())
+		}
+	})
+	t.Run("created inside the window", func(t *testing.T) {
+		f := newEvictUncommittedFixture(t, nil)
+		f.created = strconv.FormatInt(f.clk.Now().Add(-10*time.Second).Unix(), 10)
+		f.call(t)
+		f.clk.Time = f.clk.Time.Add(40 * time.Second)
+		f.call(t)
+		if !f.sp.IsRunning(f.sessionName()) {
+			t.Fatalf("evicted 50s after its creation, inside the startup window\nstderr=%s", f.stderr.String())
+		}
+		f.clk.Time = f.clk.Time.Add(30 * time.Second)
+		f.call(t)
+		if f.sp.IsRunning(f.sessionName()) {
+			t.Fatalf("not evicted 80s after its creation, past the startup window\nstderr=%s", f.stderr.String())
+		}
+	})
 }

@@ -2127,7 +2127,7 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 	case worker.NudgeUndeliveredPendingInteraction:
 		return " (the session is waiting on a permission prompt; the queued dispatcher delivers it after the prompt is answered)"
 	case worker.NudgeUndeliveredHeld, worker.NudgeQueuedHeld:
-		return " (the session is held by an operator or a wait; the nudge is delivered the next time the session runs, and expires after 24h)"
+		return " (the session is held by an operator, a wait or a pending restart; the nudge is delivered the next time the session runs, and expires after 24h)"
 	case worker.NudgeQueued:
 		return " (the session cannot take it now: it is held by an operator or a wait, not running, or its agent is down; the nudge is delivered the next time the session runs, and expires after 24h)"
 	case worker.NudgeUndeliveredAgentDead:

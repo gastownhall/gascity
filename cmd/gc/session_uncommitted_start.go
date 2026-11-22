@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,16 +47,17 @@ type evictUncommittedStart struct {
 // evictUncommittedLiveStartIfDue replaces a live runtime whose row's start
 // never committed (#6417 F2): the row is desired, uncommitted
 // (started_config_hash empty — a requested restart's handoff cleared it, or a
-// commit that failed), and carries a prompt-bearing template, while a runtime
-// under its name holds GC_SESSION_ID equal to the row's ID. Such a runtime
-// never received this row's start — some other start launched it into the gap
-// the handoff opened — and adopting it left the session live with its prompt
-// stranded and nothing left to retry. It is the non-claim counterpart of
-// recoverRunningPendingCreate: once the startup window has passed with no
-// commit taking the name, the runtime is stopped (FactsLegacyUncommittedEvict,
-// so a commit, a newer incarnation or an operator hold landing in flight
-// refuses the kill), and the next tick starts the row and delivers its
-// prompt.
+// commit that failed), still carries its committed reset cycle
+// (reset_committed_at), and carries a prompt-bearing template, while a
+// runtime under its name holds GC_SESSION_ID equal to the row's ID. Such a
+// runtime never received this row's start — it came up in the gap the
+// handoff opened without a start that consumed the cycle — and adopting it
+// left the session live with its prompt stranded and nothing left to retry.
+// It is the non-claim counterpart of recoverRunningPendingCreate: once the
+// startup window has passed with no commit taking the name, the runtime is
+// stopped (FactsLegacyUncommittedEvict, so a commit, a newer incarnation or
+// an operator hold landing in flight refuses the kill), and the next tick
+// starts the row and delivers its prompt.
 //
 // Every guard but the age window is cheap to check, and the expensive ones
 // (the runtime identity read, the attachment probe, the fresh liveness read)
@@ -86,6 +88,20 @@ func evictUncommittedLiveStartIfDue(e evictUncommittedStart) {
 		return
 	}
 	if strings.TrimSpace(e.tp.Prompt) == "" {
+		return
+	}
+	// Cycle guard: the uncommitted live row must be the shape #6417 leaves —
+	// a row whose restart or reset cycle committed (reset_committed_at is the
+	// handoff's and every session reset's stamp), killed its old runtime and
+	// cleared its start witness, after which a runtime under its name came up
+	// that no start consuming the cycle launched. A start that consumes the
+	// cycle clears the stamp in its mint or its commit, and the Manager holds
+	// every start but an operator's own resume while a handoff awaits the
+	// controller's start (SESSION-START-031). A steady row that simply never
+	// committed a config hash (a timeline parity fixture's live seat, a
+	// session a Manager start brought up) is not this cycle's collateral: it
+	// is left to the wake arms that own it.
+	if strings.TrimSpace(e.info.ResetCommittedAt) == "" {
 		return
 	}
 	// Identity guard: the runtime under the name must read as this very row
@@ -135,21 +151,11 @@ func evictUncommittedLiveStartIfDue(e evictUncommittedStart) {
 	if attachErr != nil || attached {
 		return
 	}
-	// Cycle guard: the uncommitted live row must be the shape #6417 leaves —
-	// a row whose restart or reset cycle committed (reset_committed_at is the
-	// handoff's and every session reset's stamp), killed its old runtime and
-	// cleared its start witness, after which another start filled the gap.
-	// A steady row that simply never committed a config hash (a timeline
-	// parity fixture's live seat) is not this cycle's collateral: it is left
-	// to the wake arms that own it.
-	if strings.TrimSpace(e.info.ResetCommittedAt) == "" {
-		return
-	}
 	// Age guard: the startup window must have passed since the newest of the
 	// runtime's creation time, the row's last wake and its committed reset.
 	// A provider that reports no creation time gets the first sighting of the
 	// row live and uncommitted as its stand-in, kept in the drain tracker.
-	created, haveCreated := uncommittedStartBasisTime(live.ObjectCreated)
+	created, haveCreated := uncommittedStartCreatedTime(live.ObjectCreated)
 	if !haveCreated {
 		created = e.dt.firstUncommittedLiveSight(e.info.ID, e.info.Generation+"/"+e.info.InstanceToken, now)
 	}
@@ -187,9 +193,20 @@ func evictUncommittedLiveStartIfDue(e evictUncommittedStart) {
 	e.dt.clearUncommittedLiveSight(e.info.ID)
 }
 
-// uncommittedStartBasisTime parses one of the eviction basis timestamps
-// (Liveness.ObjectCreated, last_woke_at, reset_committed_at), reporting
-// whether it named a time at all.
+// uncommittedStartCreatedTime parses Liveness.ObjectCreated, the runtime
+// object's creation time in decimal unix seconds (tmux #{session_created}),
+// reporting whether it named a time at all.
+func uncommittedStartCreatedTime(raw string) (time.Time, bool) {
+	secs, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || secs <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(secs, 0), true
+}
+
+// uncommittedStartBasisTime parses one of the row's eviction basis
+// timestamps (last_woke_at, reset_committed_at; RFC3339), reporting whether
+// it named a time at all.
 func uncommittedStartBasisTime(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
