@@ -43,6 +43,10 @@ type memberRoutePlan struct {
 	stepPatches    []memberRoutePatch
 	// unroutedMembers counts members the plan routes.
 	unroutedMembers int
+	// customQuery marks a plan that routes nothing because the target routes
+	// through its own command: unroutedMembers then counts what was left
+	// alone, and apply warns instead of writing.
+	customQuery bool
 	// otherRouted collects eligible members already routed to a different
 	// agent: they get no patch, and apply reports them in one warning so the
 	// operator can see the run did not move to the sling target whole.
@@ -93,6 +97,11 @@ func (p *memberRoutePlan) apply(writer beads.Writer, result *SlingResult) error 
 			result.RoutedMembers = applied
 		}
 	}
+	if result != nil && p.customQuery && p.unroutedMembers > 0 {
+		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+			"warning: %d unrouted members of workflow %s were left unrouted: %s routes through its own sling_query, which receives only the root",
+			p.unroutedMembers, p.rootID, p.target))
+	}
 	if result != nil && len(p.otherRouted) > 0 {
 		named := make([]string, 0, len(p.otherRouted))
 		for _, m := range p.otherRouted {
@@ -130,6 +139,15 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, beadID string)
 	}
 	a := opts.Target
 	routedTo := agentutil.NormalizePoolRouteTarget(deps.Cfg, agentutil.RoutedToIdentity(&a))
+	// Member routing is a built-in feature: when the target routes through
+	// its own sling_query command, or the caller wired no typed router at
+	// all, that command receives the root alone and defines what routing
+	// means for the agent — stamping gc.routed_to on its members behind the
+	// command's back would bypass it. The plan still counts the members that
+	// would have been routed, so apply can warn instead of staying silent.
+	if deps.Router == nil || IsCustomSlingQuery(a) {
+		return countExpandedRootMembers(root, routedTo, deps)
+	}
 	binding, err := graphroute.SlingTargetBinding(a, routedTo, deps.Sessions, deps.CityName, deps.Cfg)
 	if err != nil {
 		return nil, fmt.Errorf("deriving the route for the members of %s: %w", root.ID, err)
@@ -166,6 +184,35 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, beadID string)
 			plan.stepPatches = append(plan.stepPatches, entry)
 		}
 		plan.unroutedMembers++
+	}
+	return plan, nil
+}
+
+// countExpandedRootMembers is the plan for a target member routing must not
+// touch: the target routes through its own command (a custom sling_query, or
+// no typed router at all), so no binding is derived and no patch is built —
+// the members the run still needs routed are counted so the sling can say
+// they were left alone. The probe binding is metadata-only with the target's
+// persisted identity: counting asks only "would built-in routing have
+// stamped this member", never a session name or group.
+func countExpandedRootMembers(root beads.Bead, routedTo string, deps SlingDeps) (*memberRoutePlan, error) {
+	members, err := beads.DirectMembersWithRoot(deps.Store, root)
+	if err != nil {
+		return nil, fmt.Errorf("listing the members of workflow %s: %w", root.ID, err)
+	}
+	plan := &memberRoutePlan{rootID: root.ID, target: routedTo, customQuery: true}
+	probe := graphroute.GraphRouteBinding{QualifiedName: routedTo, MetadataOnly: true}
+	for _, member := range members {
+		if member.ID == root.ID {
+			continue
+		}
+		patch, err := graphroute.UnroutedMemberPatch(member, probe)
+		if err != nil {
+			return nil, err
+		}
+		if len(patch) > 0 {
+			plan.unroutedMembers++
+		}
 	}
 	return plan, nil
 }

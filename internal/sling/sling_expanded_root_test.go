@@ -299,3 +299,59 @@ func mustMeta(t *testing.T, store *beads.MemStore, id, key string) string {
 	}
 	return b.Metadata[key]
 }
+
+// TestSlingExpandedRootCustomQueryLeavesMembersToTheCommand pins that member
+// routing is a built-in feature only: when the target routes through its own
+// sling_query command (or no typed router is wired at all), the command
+// receives the root alone and the plan stamps nothing on the members — it
+// counts them and warns, so the operator knows the run's steps did not move.
+func TestSlingExpandedRootCustomQueryLeavesMembersToTheCommand(t *testing.T) {
+	store := cookedWorkflowStore(t)
+	worker := config.Agent{
+		Name: "worker", MaxActiveSessions: intPtr(-1),
+		SlingQuery: "custom-dispatch {}",
+	}
+	cfg := &config.City{Agents: []config.Agent{worker}}
+	runner := newFakeRunner()
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps = withStore(deps, store)
+	// No typed router: the agent's own command routes the root, exactly as a
+	// caller without built-in routing wires it.
+	deps.Router = nil
+
+	result, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.Idempotent {
+		t.Fatal("sling of an unrouted run came back idempotent; the root would never be routed")
+	}
+	if result.RoutedMembers != 0 {
+		t.Fatalf("RoutedMembers = %d, want 0: the custom command owns routing", result.RoutedMembers)
+	}
+	// The command routed the root…
+	if len(runner.calls) == 0 {
+		t.Fatal("the custom sling_query never ran; the root was not routed")
+	}
+	// …and only the root: every member keeps exactly the metadata cook left.
+	for _, id := range []string{"wf-1.mix", "wf-1.flip"} {
+		if got := mustMeta(t, store, id, beadmeta.RoutedToMetadataKey); got != "" {
+			t.Errorf("%s gc.routed_to = %q, want empty: the plan must not stamp members on a custom query", id, got)
+		}
+	}
+	if got := mustMeta(t, store, "wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey); got != "" {
+		t.Errorf("control gc.execution_routed_to = %q, want empty: the plan must not stamp members on a custom query", got)
+	}
+	if got := mustMeta(t, store, "wf-1.finalize", beadmeta.RoutedToMetadataKey); got != "core.control-dispatcher" {
+		t.Errorf("control gc.routed_to = %q, want core.control-dispatcher (untouched)", got)
+	}
+	// One warning names how many members were left for the command's world.
+	if len(result.BeadWarnings) != 1 {
+		t.Fatalf("BeadWarnings = %q, want exactly one unrouted-members warning", result.BeadWarnings)
+	}
+	for _, want := range []string{"3", "wf-1"} {
+		if !strings.Contains(result.BeadWarnings[0], want) {
+			t.Errorf("warning %q does not mention %q", result.BeadWarnings[0], want)
+		}
+	}
+}
