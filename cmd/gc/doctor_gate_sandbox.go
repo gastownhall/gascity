@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // doctorGateSandboxReadTimeout bounds the single bd fork this check makes.
@@ -46,6 +49,10 @@ const doctorGateSandboxReadTimeout = 5 * time.Second
 // resolve-and-project helper order-exec environments already use; a scope
 // with no resolvable canonical config (externally bound, or none at all) is
 // left untouched by it, matching every other caller's no-op behavior there.
+// A city whose own config is legacy-minimal (the empty config.yaml
+// `gc init --beads-transport direct` writes) has no canonical target, so
+// applyGateSandboxLegacyCityManagedEnv projects the managed layout for it
+// instead. The result is sorted so the probe env has a stable order.
 func gateSandboxEnv(cityPath string) []string {
 	gateEnv := convergence.ConditionEnv{CityPath: cityPath, StorePath: cityPath}.Environ()
 	env := make(map[string]string, len(gateEnv)+1)
@@ -55,13 +62,54 @@ func gateSandboxEnv(cityPath string) []string {
 		}
 	}
 	applyOrderExecCanonicalDoltEnv(cityPath, cityPath, env)
+	applyGateSandboxLegacyCityManagedEnv(cityPath, env)
 	env["BEADS_DOLT_AUTO_START"] = "0"
 
 	result := make([]string, 0, len(env))
 	for name, value := range env {
 		result = append(result, name+"="+value)
 	}
+	slices.Sort(result)
 	return result
+}
+
+// applyGateSandboxLegacyCityManagedEnv pins the managed Dolt layout for a city
+// whose own scope config is legacy-minimal (an empty .beads/config.yaml, as
+// `gc init --beads-transport direct` writes). Such a scope has no canonical
+// target, so applyOrderExecCanonicalDoltEnv leaves the doctor shell's ambient
+// BEADS_DOLT_SERVER_*/GC_DOLT_* in place, and those can belong to a different
+// city (gastownhall/gascity#8418). The city's store is gc-managed unless it is
+// externally bound through metadata.json or city.toml [dolt] names a host or
+// port; in either of those cases env is left untouched. This is doctor-only:
+// order-exec environments keep their existing pass-through for this shape.
+func applyGateSandboxLegacyCityManagedEnv(cityPath string, env map[string]string) {
+	if scopeStoreIsExternallyBoundBestEffort(cityPath, cityPath) {
+		return
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	if err != nil || resolved.Kind != contract.ScopeConfigLegacyMinimal {
+		return
+	}
+	if _, _, ok := configuredCityDoltTarget(cityPath); ok {
+		return
+	}
+	layout, err := resolveManagedDoltOrderRuntimeLayout(cityPath, env)
+	if err != nil {
+		return
+	}
+	delete(env, "GC_DOLT_HOST")
+	if port := managedDoltPortForLayout(layout); port != "" {
+		env["GC_DOLT_PORT"] = port
+	} else {
+		delete(env, "GC_DOLT_PORT")
+	}
+	env["GC_DOLT_MANAGED_LOCAL"] = "1"
+	applyManagedDoltRuntimeLayoutEnv(env, cityPath)
+	applyCanonicalDoltAuthEnv(env, cityPath, cityPath, contract.DoltConnectionTarget{
+		User:           strings.TrimSpace(resolved.State.DoltUser),
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+	})
+	mirrorBeadsDoltEnv(env)
 }
 
 // gateSandboxReadCheck verifies that a bead read succeeds inside the gate

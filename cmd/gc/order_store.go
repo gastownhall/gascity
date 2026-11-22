@@ -280,12 +280,6 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 		return
 	}
 	if !ok {
-		// A city whose config.yaml is empty (gc init --beads-transport direct
-		// writes one) is legacy-minimal, not authoritative, so the canonical
-		// projection above has nothing to resolve. Its own store is still
-		// gc-managed, so take the managed path rather than leave ambient
-		// BEADS_DOLT_SERVER_* in place (gastownhall/gascity#8418).
-		applyOrderExecManagedDoltFallback(cityPath, scopeRoot, env, nil)
 		return
 	}
 	applyCanonicalDoltTargetEnv(env, target)
@@ -305,30 +299,18 @@ func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[strin
 		return false
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
-	if err != nil {
+	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative {
 		return false
 	}
-	origin := resolved.State.EndpointOrigin
-	// The city's own store with an empty config.yaml is gc-managed: no
-	// endpoint is tracked, so the managed runtime layout is the only target.
-	cityOwnLegacy := resolved.Kind == contract.ScopeConfigLegacyMinimal &&
-		normalizePathForCompare(scopeRoot) == normalizePathForCompare(cityPath)
-	if cityOwnLegacy {
-		origin = contract.EndpointOriginManagedCity
-	} else {
-		if resolved.Kind != contract.ScopeConfigAuthoritative {
+	switch resolved.State.EndpointOrigin {
+	case contract.EndpointOriginManagedCity:
+	case contract.EndpointOriginInheritedCity:
+		cityResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+		if err != nil || cityResolved.Kind != contract.ScopeConfigAuthoritative || cityResolved.State.EndpointOrigin != contract.EndpointOriginManagedCity {
 			return false
 		}
-		switch origin {
-		case contract.EndpointOriginManagedCity:
-		case contract.EndpointOriginInheritedCity:
-			cityResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
-			if err != nil || cityResolved.Kind != contract.ScopeConfigAuthoritative || cityResolved.State.EndpointOrigin != contract.EndpointOriginManagedCity {
-				return false
-			}
-		default:
-			return false
-		}
+	default:
+		return false
 	}
 
 	layout, err := resolveManagedDoltOrderRuntimeLayout(cityPath, env)
@@ -345,7 +327,7 @@ func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[strin
 	applyManagedDoltRuntimeLayoutEnv(env, cityPath)
 	target := contract.DoltConnectionTarget{
 		User:           strings.TrimSpace(resolved.State.DoltUser),
-		EndpointOrigin: origin,
+		EndpointOrigin: resolved.State.EndpointOrigin,
 	}
 	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
 	mirrorBeadsDoltEnv(env)

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -395,25 +397,71 @@ func TestGateSandboxBlindDetailsNameTheControllerOnlyKeys(t *testing.T) {
 // TestGateSandboxEnvPinsManagedDirectCityOverAmbientEnv is the managed-city
 // shape from gastownhall/gascity#8418: `gc init --beads-transport direct` writes
 // an EMPTY .beads/config.yaml. That scope resolves as legacy-minimal, not
-// authoritative, so the canonical projection used to skip it and the ambient
-// BEADS_DOLT_SERVER_* of another city survived into the probe. The city's own
-// store is gc-managed, so the managed path must clear the ambient port.
+// authoritative, so the canonical projection skips it and the ambient
+// BEADS_DOLT_SERVER_* of another city would survive into the probe. The city's
+// own store is gc-managed, so the probe must reach the city's managed port.
 func TestGateSandboxEnvPinsManagedDirectCityOverAmbientEnv(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(cityPath, ".beads", "config.yaml"), "")
+	port := strconv.Itoa(writeReachableManagedDoltState(t, cityPath))
 
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_HOST", "other-city-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "other-city-db.example.com")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 
 	lookup := gateSandboxEnvLookup(t, cityPath)
 
-	if got := lookup["BEADS_DOLT_SERVER_PORT"]; got == "9999" {
-		t.Errorf("BEADS_DOLT_SERVER_PORT = %q: another city's ambient port survived into the managed city's probe", got)
+	if got := lookup["BEADS_DOLT_SERVER_PORT"]; got != port {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want the city's managed port %q", got, port)
 	}
-	if got := lookup["BEADS_DOLT_SERVER_HOST"]; got == "127.0.0.1" {
+	if got := lookup["GC_DOLT_PORT"]; got != port {
+		t.Errorf("GC_DOLT_PORT = %q, want the city's managed port %q", got, port)
+	}
+	if got := lookup["BEADS_DOLT_SERVER_HOST"]; got == "other-city-db.example.com" {
 		t.Errorf("BEADS_DOLT_SERVER_HOST = %q: another city's ambient host survived into the managed city's probe", got)
+	}
+	if got, ok := lookup["GC_DOLT_HOST"]; ok {
+		t.Errorf("GC_DOLT_HOST = %q, want it cleared for a managed city", got)
+	}
+}
+
+// TestGateSandboxEnvLegacyCityWithCityTomlDoltKeepsConfiguredEndpoint pins the
+// guard on the managed projection above: a legacy-minimal city whose endpoint
+// comes from city.toml [dolt] host/port is not gc-managed, so the probe env
+// must keep that endpoint rather than be rewritten to the managed layout.
+func TestGateSandboxEnvLegacyCityWithCityTomlDoltKeepsConfiguredEndpoint(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityPath, ".beads", "config.yaml"), "")
+	registerCityDoltConfig(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { clearCityDoltConfig(cityPath) })
+
+	t.Setenv("GC_DOLT_HOST", "compat-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	lookup := gateSandboxEnvLookup(t, cityPath)
+
+	if got := lookup["GC_DOLT_HOST"]; got != "compat-db.example.com" {
+		t.Errorf("GC_DOLT_HOST = %q, want the city.toml [dolt] host %q kept", got, "compat-db.example.com")
+	}
+	if got := lookup["GC_DOLT_PORT"]; got != "4406" {
+		t.Errorf("GC_DOLT_PORT = %q, want the city.toml [dolt] port %q kept", got, "4406")
+	}
+	if got, ok := lookup["GC_DOLT_MANAGED_LOCAL"]; ok && got == "1" {
+		t.Errorf("GC_DOLT_MANAGED_LOCAL = %q, want no managed projection for a city.toml [dolt] endpoint", got)
+	}
+}
+
+// TestGateSandboxEnvIsSorted pins a stable env order for the probe.
+func TestGateSandboxEnvIsSorted(t *testing.T) {
+	env := gateSandboxEnv(t.TempDir())
+	if !slices.IsSorted(env) {
+		t.Errorf("gateSandboxEnv() = %v, want sorted entries", env)
 	}
 }
