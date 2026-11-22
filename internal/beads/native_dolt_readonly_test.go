@@ -52,13 +52,16 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"DeleteBatch":      nativeStoreMutation,
 	"DepAdd":           nativeStoreMutation,
 	"DepRemove":        nativeStoreMutation,
+	"DepRemoveBatch":   nativeStoreMutation,
 
 	// beads.Store, reads.
 	"Get":            nativeStoreRead,
+	"GetExactBatch":  nativeStoreRead,
 	"DepListBatch":   nativeStoreRead,
 	"List":           nativeStoreRead,
 	"ListOpen":       nativeStoreRead,
 	"Ready":          nativeStoreRead,
+	"ReadyOrdered":   nativeStoreRead,
 	"Children":       nativeStoreRead,
 	"ListByLabel":    nativeStoreRead,
 	"ListByAssignee": nativeStoreRead,
@@ -71,9 +74,14 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	// H4 is about: policy middleware selects the graph applier at wrap time, so
 	// an ephemeral graph create can reach a native leaf without going through
 	// Create at all.
-	"ApplyGraphPlan":              nativeStoreMutation,
-	"ApplyGraphPlanWithStorage":   nativeStoreMutation,
-	"CreateWithForeignID":         nativeStoreMutation,
+	"ApplyGraphPlan":            nativeStoreMutation,
+	"ApplyGraphPlanWithStorage": nativeStoreMutation,
+	"CreateWithForeignID":       nativeStoreMutation,
+	"CreateWithForeignIDBatch":  nativeStoreMutation,
+	"DepAddBatch":               nativeStoreMutation,
+	"AcceptsDanglingDep":        nativeStoreLifecycle,
+	// CreatedForm converts a bead; it reads the scope's types.infra once.
+	"CreatedForm":                 nativeStoreRead,
 	"CloseIfMatch":                nativeStoreMutation,
 	"CloseWithMetadataIfMatch":    nativeStoreMutation,
 	"CompareAndSetMetadataKey":    nativeStoreMutation,
@@ -88,6 +96,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"ReadEventsJournalPage":       nativeStoreRead,
 	"EventsJournalActive":         nativeStoreLifecycle,
 	"DepMetadata":                 nativeStoreRead,
+	"DepMetadataBatch":            nativeStoreRead,
 	"SawRows":                     nativeStoreRead,
 	"IDPrefix":                    nativeStoreLifecycle,
 	"AtomicTx":                    nativeStoreLifecycle,

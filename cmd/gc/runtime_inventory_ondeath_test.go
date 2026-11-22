@@ -1295,7 +1295,7 @@ func TestCityRuntimePublishesPoolDeathHandlersAtStartAndReload(t *testing.T) {
 		t.Fatalf("published handlers = %v, want the startup map", cr.publishedPoolDeathHandlers())
 	}
 
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
 	f, err := os.OpenFile(tomlPath, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)

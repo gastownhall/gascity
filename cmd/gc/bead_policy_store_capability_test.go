@@ -3,10 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -132,6 +137,136 @@ func TestBeadPolicyStoreDepListBatchAgreesWithDepList(t *testing.T) {
 	}
 }
 
+// The policy wrapper must not hide the batched children read either: without
+// it molecule.ListSubtree reads one `bd list --parent` plus one `bd query` per
+// member of the run it walks.
+func TestBeadPolicyStoreForwardsTheBatchedChildrenRead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		wrapped beads.Store
+	}{
+		{"policy store", wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})},
+		{"policy graph store", wrapStoreWithBeadPolicies(mustOpenSQLiteStoreForCapabilityTest(t), &config.City{})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := tc.wrapped.(beads.ChildrenBatchLister); !ok {
+				t.Fatalf("%T does not advertise ChildrenOfAny; a subtree walk through it reads one parent per round trip", tc.wrapped)
+			}
+		})
+	}
+}
+
+// childrenTierSpy records the options each forwarded ChildrenOfAny carries
+// and answers with rows and err.
+type childrenTierSpy struct {
+	beads.Store
+	opts [][]beads.QueryOpt
+	rows []beads.Bead
+	err  error
+}
+
+func (s *childrenTierSpy) ChildrenOfAny(_ []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.opts = append(s.opts, opts)
+	return s.rows, s.err
+}
+
+// TestBeadPolicyStoreChildrenOfAnyReadsAtThePolicyTier pins that the forwarded
+// batch asks for the tier the policy layer's own Children reads: a default
+// (issues-tier) read widens to both tiers, as Children's List does, and the
+// other options pass through.
+func TestBeadPolicyStoreChildrenOfAnyReadsAtThePolicyTier(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []beads.QueryOpt
+		want beads.TierMode
+	}{
+		{"default tier widens to both", nil, beads.TierBoth},
+		{"both tiers stay both", []beads.QueryOpt{beads.WithBothTiers}, beads.TierBoth},
+		{"wisps tier stays wisps", []beads.QueryOpt{beads.WithEphemeral}, beads.TierWisps},
+		{"other options pass through", []beads.QueryOpt{beads.IncludeClosed}, beads.TierBoth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &childrenTierSpy{Store: beads.NewMemStore()}
+			wrapped := wrapStoreWithBeadPolicies(spy, &config.City{})
+			if _, err := beads.ChildrenOfAny(wrapped, []string{"gc-1"}, tc.opts...); err != nil {
+				t.Fatalf("ChildrenOfAny: %v", err)
+			}
+			if len(spy.opts) != 1 {
+				t.Fatalf("the wrapped batch was asked %d times, want once", len(spy.opts))
+			}
+			if got := beads.TierModeFromOpts(spy.opts[0]); got != tc.want {
+				t.Errorf("forwarded tier = %v, want %v (options %v)", got, tc.want, spy.opts[0])
+			}
+			if beads.HasOpt(tc.opts, beads.IncludeClosed) && !beads.HasOpt(spy.opts[0], beads.IncludeClosed) {
+				t.Errorf("forwarded options %v dropped IncludeClosed", spy.opts[0])
+			}
+		})
+	}
+}
+
+// TestBeadPolicyStoreChildrenOfAnyAgreesWithItsChildren is the correctness
+// control over the production stack (policy over cache over bd): the batch
+// answers what the wrapper's own Children answers per parent, ephemeral
+// children included, and a wrapped store without the batch is read through
+// that Children.
+func TestBeadPolicyStoreChildrenOfAnyAgreesWithItsChildren(t *testing.T) {
+	fake := beadstest.NewFakeBd()
+	seed := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		seeded, err := fake.Seed(b)
+		if err != nil {
+			t.Fatalf("seed %q: %v", b.Title, err)
+		}
+		return seeded
+	}
+	var parents []string
+	for range 3 {
+		p := seed(beads.Bead{Title: "parent"})
+		parents = append(parents, p.ID)
+		seed(beads.Bead{Title: "durable child", ParentID: p.ID})
+		seed(beads.Bead{Title: "wisp child", ParentID: p.ID, Ephemeral: true})
+	}
+	stack := wrapWithCachingStore(context.Background(), wrapStoreWithBeadPolicies(fake.NewBdStore(), &config.City{}), nil, false)
+
+	ids := func(bs []beads.Bead) []string {
+		out := make([]string, 0, len(bs))
+		for _, b := range bs {
+			out = append(out, b.ID)
+		}
+		slices.Sort(out)
+		return out
+	}
+	var perParent []beads.Bead
+	for _, p := range parents {
+		children, err := stack.Children(p, beads.IncludeClosed)
+		if err != nil {
+			t.Fatalf("Children(%s): %v", p, err)
+		}
+		perParent = append(perParent, children...)
+	}
+	if len(perParent) != 6 {
+		t.Fatalf("the policy layer's Children returned %d rows, want 6 (durable and ephemeral children)", len(perParent))
+	}
+	batched, err := beads.ChildrenOfAny(stack, parents)
+	if err != nil {
+		t.Fatalf("ChildrenOfAny: %v", err)
+	}
+	if got, want := ids(batched), ids(perParent); !slices.Equal(got, want) {
+		t.Fatalf("batched children = %v, want the policy layer's per-parent Children %v", got, want)
+	}
+
+	mem := beads.NewMemStore()
+	p, _ := mem.Create(beads.Bead{Title: "parent"})
+	child, _ := mem.Create(beads.Bead{Title: "wisp child", ParentID: p.ID, Ephemeral: true})
+	fallback, err := beads.ChildrenOfAny(wrapStoreWithBeadPolicies(mem, &config.City{}), []string{p.ID})
+	if err != nil {
+		t.Fatalf("ChildrenOfAny without a wrapped batch: %v", err)
+	}
+	if got := ids(fallback); !slices.Equal(got, []string{child.ID}) {
+		t.Fatalf("children without a wrapped batch = %v, want the policy layer's Children answer [%s]", got, child.ID)
+	}
+}
+
 // storeWithoutBatchedDepRead hides a leaf store's batch capability, standing in
 // for a backing engine that never had one. Embedding the INTERFACE is what hides
 // it: Go promotes only the interface's own methods, which is the same mechanism
@@ -202,5 +337,75 @@ func TestBeadPolicyStoreReportsNoGuardedBatcherOverAnIncapableBacking(t *testing
 	wrapped := wrapStoreWithBeadPolicies(storeWithoutBatchedDepRead{Store: beads.NewMemStore()}, &config.City{})
 	if batcher, ok := beads.GuardedBatcherFor(wrapped); ok {
 		t.Fatalf("GuardedBatcherFor = (%T, true) over a backing with no guarded batches", batcher)
+	}
+}
+
+// TestEveryLegShapeReadsByIDThroughTheEnginesExactBatch: beads.GetMany reads
+// every cross-store verdict by id through the leg's LIVE handle, and on a
+// controller leg (the policy over a CachingStore over bd or native Dolt) that
+// handle used to reach no exact batch read, so GetMany took a listing by id,
+// which both engines can only answer by walking the whole ledger (#8360
+// review, iteration 2). Every shape a leg has — the controller's, the CLI's
+// policy over the bare engine, the controller binding's cache, the one-shot
+// emitter — must reach the engine's own batch read and answer what it holds.
+func TestEveryLegShapeReadsByIDThroughTheEnginesExactBatch(t *testing.T) {
+	bdRows := map[string]string{"gc-1": `{"id":"gc-1","title":"one","status":"open","issue_type":"task"}`}
+	var bdCalls []string
+	bd := beads.NewBdStore(t.TempDir(), func(_, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		bdCalls = append(bdCalls, call)
+		if len(args) < 2 || args[0] != "show" || args[1] != "--json" {
+			return nil, fmt.Errorf("unexpected command: %s", call)
+		}
+		var rows []string
+		for _, id := range args[2:] {
+			if row, ok := bdRows[id]; ok {
+				rows = append(rows, row)
+			}
+		}
+		return []byte("[" + strings.Join(rows, ",") + "]"), nil
+	})
+	native := splittest.NewNativeWorkStore(t, "gc")
+	held, err := native.Create(beads.Bead{Title: "held", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "gc", Prefix: "gc"}}
+	for _, engine := range []struct {
+		name  string
+		store beads.Store
+		id    string
+	}{
+		{"bd", bd, "gc-1"},
+		{"native", native, held.ID},
+	} {
+		for _, shape := range []struct {
+			name  string
+			store beads.Store
+		}{
+			{"policy over cache (controller leg)", wrapStoreWithBeadPolicies(beads.NewCachingStoreForTest(engine.store, nil), cfg)},
+			{"policy (CLI leg)", wrapStoreWithBeadPolicies(engine.store, cfg)},
+			{"cache (controller binding)", beads.NewCachingStoreForTest(engine.store, nil)},
+			{"emitter (CLI binding)", &emittingClassStore{Store: engine.store, cityPath: t.TempDir()}},
+		} {
+			getter, ok := beads.HandlesFor(shape.store).Live.(beads.ExactBatchGetter)
+			if !ok {
+				t.Errorf("%s over %s: the live handle reaches no exact batch read; GetMany reads it one Get per id", shape.name, engine.name)
+				continue
+			}
+			found, unresolved, err := getter.GetExactBatch([]string{engine.id, "gc-absent"})
+			if err != nil {
+				t.Errorf("%s over %s: GetExactBatch: %v", shape.name, engine.name, err)
+				continue
+			}
+			if _, ok := found[engine.id]; !ok || !slices.Equal(unresolved, []string{"gc-absent"}) {
+				t.Errorf("%s over %s: GetExactBatch = %v, unresolved %v; want %s found and gc-absent unresolved", shape.name, engine.name, found, unresolved, engine.id)
+			}
+		}
+	}
+	for _, call := range bdCalls {
+		if !strings.HasPrefix(call, "bd show --json ") {
+			t.Errorf("a by-id read ran %q against bd; want only bd show", call)
+		}
 	}
 }

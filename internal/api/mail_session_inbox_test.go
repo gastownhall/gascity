@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -24,7 +23,7 @@ func TestMailQueriesForASessionReadItsSessionInbox(t *testing.T) {
 	store := beads.NewMemStore()
 	state.cityBeadStore = store
 	state.stores = map[string]beads.Store{"myrig": store}
-	mp := beadmail.New(store)
+	mp := newTestBeadMail(store)
 	state.cityMailProv = mp
 	createSession := func(metadata map[string]string, closed bool) string {
 		t.Helper()
@@ -113,7 +112,7 @@ func TestMailQueriesForASessionReadItsSessionInbox(t *testing.T) {
 func TestMailQueriesForANamedSessionReadItsInboxes(t *testing.T) {
 	fs := newPhase0APINamedWorkerState(t)
 	store := fs.cityBeadStore
-	mp := beadmail.New(store)
+	mp := newTestBeadMail(store)
 	fs.cityMailProv = mp
 	named := func(metadata map[string]string, closed bool) string {
 		t.Helper()

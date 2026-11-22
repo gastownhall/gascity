@@ -21,7 +21,9 @@ import (
 //
 // Codex entries use a different schema than Claude:
 //   - session_meta: session initialization (skipped)
-//   - event_msg: user messages, agent messages, reasoning, token counts
+//   - event_msg: user messages, agent messages, reasoning, token counts,
+//     provider errors, and task_complete (shown only when it ends a turn
+//     with an error)
 //   - response_item: messages, function calls, reasoning (preferred over event_msg)
 //   - turn_context: per-turn configuration (skipped)
 //
@@ -79,6 +81,9 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	toolContexts := make(map[string]codexToolCallContext)
 	responseItemIDs := newStableSyntheticEntryIDSequence("codex")
 	eventMsgIDs := newStableSyntheticEntryIDSequence("codex-event")
+	// turnErrors holds the error messages already shown for the current
+	// turn, so a task_complete repeating one is not shown twice.
+	var turnErrors map[string]bool
 
 	for _, e := range entries {
 		ts, _ := time.Parse(time.RFC3339Nano, e.raw.Timestamp)
@@ -149,8 +154,32 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 				lastUUID = entry.UUID
 				messages = append(messages, entry)
 
-			case "error", "stream_error", "turn_aborted":
-				systemEvent := codexSystemEvent(em)
+			case "task_started":
+				turnErrors = nil
+
+			case "error", "stream_error", "turn_aborted", "task_complete":
+				source := em
+				if em.Type == "task_complete" {
+					// A turn the provider failed ends with its error on
+					// task_complete. Codex may already have reported the
+					// same failure as an error event in this turn; show it
+					// once.
+					failure, failed := codexTaskCompleteError(em.Error)
+					if !failed {
+						continue
+					}
+					source = failure
+				}
+				systemEvent := codexSystemEvent(source)
+				if systemEvent.Kind == "error" {
+					if em.Type == "task_complete" && turnErrors[systemEvent.Message] {
+						continue
+					}
+					if turnErrors == nil {
+						turnErrors = make(map[string]bool)
+					}
+					turnErrors[systemEvent.Message] = true
+				}
 				entry := &Entry{
 					UUID:        eventID.ID("event_msg:" + em.Type),
 					Type:        "system",
@@ -1501,7 +1530,7 @@ func codexNonEmptyStrings(values ...string) []string {
 func codexSystemEvent(em codexEventMsg) *SystemEvent {
 	kind := "error"
 	var category string
-	code := strings.TrimSpace(em.CodexErrorInfo)
+	code := codexErrorInfoCode(em.CodexErrorInfo)
 	message := strings.TrimSpace(em.Message)
 	switch strings.TrimSpace(em.Type) {
 	case "stream_error":
@@ -1516,6 +1545,12 @@ func codexSystemEvent(em codexEventMsg) *SystemEvent {
 			message = "Turn aborted"
 		}
 	default:
+		if apiMessage, apiCode, ok := codexAPIErrorMessage(message); ok {
+			message = apiMessage
+			if code == "" || code == "other" {
+				code = apiCode
+			}
+		}
 		category = codexErrorCategory(code)
 		if message == "" {
 			message = "Provider reported an error"
@@ -1527,6 +1562,92 @@ func codexSystemEvent(em codexEventMsg) *SystemEvent {
 		Code:     code,
 		Message:  message,
 	}
+}
+
+// codexAPIErrorMessage unwraps a provider error message that Codex recorded
+// as the model API's JSON error body, e.g. (codex-cli 0.162.1)
+//
+//	{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"..."}}
+//
+// It returns the inner message and a code naming the HTTP status and error
+// type ("http_400:invalid_request_error"; either part alone when only one is
+// present). ok is false for anything without an inner message, which the
+// caller then shows as written.
+func codexAPIErrorMessage(message string) (inner, code string, ok bool) {
+	if !strings.HasPrefix(message, "{") {
+		return "", "", false
+	}
+	var body struct {
+		Status int `json:"status"`
+		Error  struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(message), &body) != nil {
+		return "", "", false
+	}
+	inner = strings.TrimSpace(body.Error.Message)
+	if inner == "" {
+		return "", "", false
+	}
+	var parts []string
+	if body.Status > 0 {
+		parts = append(parts, "http_"+strconv.Itoa(body.Status))
+	}
+	if errType := strings.TrimSpace(body.Error.Type); errType != "" {
+		parts = append(parts, errType)
+	}
+	return inner, strings.Join(parts, ":"), true
+}
+
+// codexErrorInfoCode names a codex_error_info value. Codex serializes it as a
+// snake_case enum: a variant without data is a string ("usage_limit_exceeded",
+// "bad_request") and a variant with data is a one-key object
+// ({"http_connection_failed":{"http_status_code":400}}). Either form yields the
+// variant name; anything else yields "".
+func codexErrorInfoCode(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return ""
+	}
+	var name string
+	if json.Unmarshal(raw, &name) == nil {
+		return strings.TrimSpace(name)
+	}
+	var variant map[string]json.RawMessage
+	if json.Unmarshal(raw, &variant) == nil && len(variant) == 1 {
+		for key := range variant {
+			return strings.TrimSpace(key)
+		}
+	}
+	return ""
+}
+
+// codexTaskCompleteError reads the error a task_complete event ended its turn
+// with. Codex writes null (or omits the field) for a turn that succeeded and an
+// object {"message": ..., "codex_error_info": ...} for one that failed, for
+// example when the model provider rejects the request. A bare string is read
+// as the message. ok is false when the turn did not fail.
+func codexTaskCompleteError(raw json.RawMessage) (codexEventMsg, bool) {
+	if !codexErrorPresent(raw) {
+		return codexEventMsg{}, false
+	}
+	failure := codexEventMsg{Type: "error"}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		failure.Message = text
+		return failure, true
+	}
+	var fields struct {
+		Message        string          `json:"message"`
+		CodexErrorInfo json.RawMessage `json:"codex_error_info"`
+	}
+	if json.Unmarshal(raw, &fields) == nil {
+		failure.Message = fields.Message
+		failure.CodexErrorInfo = fields.CodexErrorInfo
+	}
+	return failure, true
 }
 
 func codexErrorCategory(code string) string {
@@ -1577,7 +1698,8 @@ type codexEventMsg struct {
 	Type           string                      `json:"type"`             // user_message, agent_message, agent_reasoning, token_count
 	Message        string                      `json:"message"`          // for user_message, agent_message, error
 	Text           string                      `json:"text"`             // for agent_reasoning
-	CodexErrorInfo string                      `json:"codex_error_info"` // for usage_limit_exceeded and related errors
+	CodexErrorInfo json.RawMessage             `json:"codex_error_info"` // error classification; see codexErrorInfoCode
+	Error          json.RawMessage             `json:"error"`            // for task_complete; see codexTaskCompleteError
 	CallID         string                      `json:"call_id,omitempty"`
 	Stdout         string                      `json:"stdout,omitempty"`
 	Stderr         string                      `json:"stderr,omitempty"`

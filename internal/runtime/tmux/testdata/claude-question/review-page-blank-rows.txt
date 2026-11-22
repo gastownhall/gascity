@@ -1,0 +1,18 @@
+⏺ I have a few questions before I plan this.
+
+────────────────────────────────────────────────────────────
+ ←  ☒ Scope  ☒ Approach  ☒ Timing  ✔ Submit  →
+
+Review your answers
+
+ ● Which scope should the change cover?
+   → Small
+ ● Which approach should the change take?
+   → Minimal patch
+ ● When should the change land?
+   → This week
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel

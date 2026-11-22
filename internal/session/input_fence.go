@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -63,26 +64,38 @@ func (m *Manager) StopTurnFenced(ctx context.Context, id string, f runtime.Input
 	if err := f.Validate(); err != nil {
 		return fmt.Errorf("stopping the turn of %s: %w", id, err)
 	}
-	return m.stopTurn(runtime.WithInputFence(ctx, f), id)
+	return m.StopTurnIf(runtime.WithInputFence(ctx, f), id, nil)
 }
 
 // stopFindsNoTurn reports whether a stop of sessName finds no turn to
 // interrupt and, if so, what the stop returns. A suspended row has no turn:
 // the stop returns nil, or under an input fence in ctx a miss finding it
-// absent. Unfenced, a runtime the provider's IsRunning reads not running has
-// no turn either, and the stop returns nil. Under a fence a fresh liveness
-// read decides instead, because the tmux state cache can read a live session
-// not running: a read that does not find the agent alive is no turn, and the
-// stop returns its runtime.LivenessFenceMiss.
-func (m *Manager) stopFindsNoTurn(ctx context.Context, b beads.Bead, sessName string) (bool, error) {
+// absent. Unfenced and not fresh, a runtime the provider's IsRunning reads
+// not running has no turn either, and the stop returns nil. Under a fence,
+// or for a fresh stop (a checked one, or one with a restart on failure or a
+// replacement: StopTurnWith), a fresh liveness read decides instead,
+// because the tmux state cache can read a live session not running: a read
+// that does not find the agent alive is no turn, and the stop returns its
+// runtime.LivenessFenceMiss under a fence, else nil. Unfenced, a read that
+// cannot answer is no turn to send to either: the stop returns an error
+// wrapping runtime.ErrRuntimeUnavailable.
+func (m *Manager) stopFindsNoTurn(ctx context.Context, b beads.Bead, sessName string, fresh bool) (bool, error) {
 	_, fenced := runtime.InputFenceFrom(ctx)
 	switch {
 	case State(b.Metadata["state"]) == StateSuspended:
 		return true, runtime.LivenessFenceMiss(ctx, sessName, runtime.Liveness{}, nil)
-	case !fenced:
+	case !fenced && !fresh:
 		return !m.sp.IsRunning(sessName), nil
 	}
 	live, err := m.freshLiveness(sessName, nil)
-	miss := runtime.LivenessFenceMiss(ctx, sessName, live, err)
-	return miss != nil, miss
+	switch {
+	case fenced:
+		miss := runtime.LivenessFenceMiss(ctx, sessName, live, err)
+		return miss != nil, miss
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		return true, fmt.Errorf("session %q: %w", sessName, err)
+	case err != nil:
+		return true, fmt.Errorf("session %q: %w: %w", sessName, runtime.ErrRuntimeUnavailable, err)
+	}
+	return !live.Running || !live.Alive, nil
 }

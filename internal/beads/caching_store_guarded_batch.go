@@ -37,13 +37,22 @@ type cachingGuardedBatcher struct {
 }
 
 func (g cachingGuardedBatcher) ApplyGuarded(ctx context.Context, b GuardedBatch) (GuardedResult, error) {
-	startSeq := g.cache.currentMutationSeq()
+	ids, closed := guardedBatchTouched(b)
+	if len(ids) == 0 {
+		// An empty batch touches no row (every backend refuses it,
+		// validateGuardedBatch); registering it in flight with no ids would
+		// fence every yielding refresh as a blind write.
+		return g.backing.ApplyGuarded(ctx, b)
+	}
+	// Registered in flight, so a refresh that yields to local writes never
+	// installs a row from between the batch's commit and its refresh.
+	startSeq, endWrite := g.cache.beginLocalWrite(ids...)
+	defer endWrite()
 	res, err := g.backing.ApplyGuarded(ctx, b)
 	if err != nil {
 		g.forgetAfterFailure(b, err)
 		return GuardedResult{}, err
 	}
-	ids, closed := guardedBatchTouched(b)
 	g.cache.refreshTxTouchedBeads(ids, closed, startSeq)
 	return res, nil
 }

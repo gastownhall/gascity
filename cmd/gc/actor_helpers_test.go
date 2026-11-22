@@ -23,7 +23,9 @@ func testOperatorIn(t testing.TB, city string) session.Actor {
 
 // leasedStart is item with the lease the planned start takes on its
 // candidate before the wave (executePlannedStartsTraced): a test that runs
-// the wave or one candidate directly holds it too. release ends it.
+// the wave or one candidate directly holds it too. release ends it. A row
+// candidate that skipped prepareStartCandidate runs under the incarnation
+// its fixture's row records, as if its PreWake wrote it.
 func leasedStart(t testing.TB, city string, item preparedStart) (preparedStart, func()) {
 	t.Helper()
 	lease, release, err := tryRuntimeLease(nil, city, startLeaseName(item.candidate), "", 0)
@@ -31,5 +33,8 @@ func leasedStart(t testing.TB, city string, item preparedStart) (preparedStart, 
 		t.Fatal(err)
 	}
 	item.candidate.lease = lease
+	if !item.candidate.inc.Valid() && item.candidate.info.ID != "" {
+		item.candidate.inc = session.RecordedIncarnationForTest(item.candidate.info)
+	}
 	return item, release
 }

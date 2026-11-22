@@ -24,3 +24,10 @@ func signalPID(pid int, signal processSignal) error {
 func isProcessSignalGoneError(err error) bool {
 	return errors.Is(err, syscall.ESRCH)
 }
+
+// isProcessSignalDeniedError reports a signal the kernel refused for want of
+// permission: the target runs as another user, such as a root-owned sudo
+// wrapper.
+func isProcessSignalDeniedError(err error) bool {
+	return errors.Is(err, syscall.EPERM)
+}

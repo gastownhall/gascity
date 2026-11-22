@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -140,6 +141,8 @@ type Formula struct {
 
 	// ContentHash is the SHA-256 hex digest of the raw formula file bytes.
 	// Set by ParseFile; empty for formulas parsed from in-memory bytes.
+	// Resolve keeps the child's hash for an extends-based formula, so it
+	// always identifies the Source file and does not cover the parents.
 	ContentHash string `json:"content_hash,omitempty"`
 
 	compilerRequirementSources []formulaCompilerConstraint
@@ -450,13 +453,13 @@ func (s *Step) normalizeCheckAlias(hasCheck bool, rawCheck interface{}, hasRalph
 
 	switch {
 	case hasCheck:
-		spec, err := decodePublicCheckSpec(rawCheck)
+		spec, err := decodePublicCheckSpec(rawCheck, true)
 		if err != nil {
 			return err
 		}
 		s.Ralph = spec
 	case hasRalph:
-		if err := validatePublicCheckSpecShape(rawRalph); err != nil {
+		if err := validatePublicCheckSpecShape(rawRalph, false); err != nil {
 			return err
 		}
 	}
@@ -529,13 +532,13 @@ func (a stepTOMLAlias) toStep() (Step, error) {
 	var ralph *RalphSpec
 	switch {
 	case hasCheck:
-		spec, err := decodePublicCheckSpec(a.Check)
+		spec, err := decodePublicCheckSpec(a.Check, true)
 		if err != nil {
 			return Step{}, err
 		}
 		ralph = spec
 	case hasRalph:
-		spec, err := decodePublicCheckSpec(a.Ralph)
+		spec, err := decodePublicCheckSpec(a.Ralph, false)
 		if err != nil {
 			return Step{}, err
 		}
@@ -601,8 +604,8 @@ func (a *loopTOMLAlias) toLoopSpec() (*LoopSpec, error) {
 	}, nil
 }
 
-func decodePublicCheckSpec(raw interface{}) (*RalphSpec, error) {
-	if err := validatePublicCheckSpecShape(raw); err != nil {
+func decodePublicCheckSpec(raw interface{}, rejectUnknown bool) (*RalphSpec, error) {
+	if err := validatePublicCheckSpecShape(raw, rejectUnknown); err != nil {
 		return nil, err
 	}
 
@@ -621,7 +624,7 @@ func decodePublicCheckSpec(raw interface{}) (*RalphSpec, error) {
 	return &spec, nil
 }
 
-func validatePublicCheckSpecShape(raw interface{}) error {
+func validatePublicCheckSpecShape(raw interface{}, rejectUnknown bool) error {
 	if raw == nil {
 		return nil
 	}
@@ -644,20 +647,22 @@ func validatePublicCheckSpecShape(raw interface{}) error {
 		case "max_attempts":
 			continue
 		case "check":
-			if err := validatePublicCheckBodyShape(value); err != nil {
+			if err := validatePublicCheckBodyShape(value, rejectUnknown); err != nil {
 				return err
 			}
 		case "exec", "inference":
 			return fmt.Errorf("step.check: unsupported key %q (expected max_attempts or check)", key)
 		default:
-			continue
+			if rejectUnknown {
+				return fmt.Errorf("step.check: unsupported key %q (expected max_attempts or check)", key)
+			}
 		}
 	}
 
 	return nil
 }
 
-func validatePublicCheckBodyShape(raw json.RawMessage) error {
+func validatePublicCheckBodyShape(raw json.RawMessage, rejectUnknown bool) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
@@ -669,10 +674,14 @@ func validatePublicCheckBodyShape(raw json.RawMessage) error {
 
 	for key := range body {
 		switch key {
+		case "mode", "path", "timeout":
+			continue
 		case "exec", "inference":
 			return fmt.Errorf("step.check.check: unsupported key %q (expected mode, path, or timeout)", key)
 		default:
-			continue
+			if rejectUnknown {
+				return fmt.Errorf("step.check.check: unsupported key %q (expected mode, path, or timeout)", key)
+			}
 		}
 	}
 
@@ -698,8 +707,71 @@ type RalphSpec struct {
 	// MaxAttempts bounds the total number of run/check attempts, including the first.
 	MaxAttempts int `json:"max_attempts,omitempty" toml:"max_attempts,omitempty"`
 
+	// MaxAttemptsVar names the formula var that supplies MaxAttempts when the
+	// formula writes max_attempts = "{{name}}". Compile resolves it to
+	// MaxAttempts and clears it before the check is expanded.
+	MaxAttemptsVar string `json:"-" toml:"-"`
+
+	// maxAttemptsVarValue is MaxAttemptsVar's value in the var scope of the
+	// expansion that defines the step, recorded when that expansion is
+	// applied; maxAttemptsVarBound reports that it was. Compile resolves an
+	// unbound var against the vars it compiles with.
+	maxAttemptsVarValue string
+	maxAttemptsVarBound bool
+
 	// Check defines how each attempt is validated.
 	Check *RalphCheckSpec `json:"check,omitempty" toml:"check,omitempty"`
+}
+
+// maxAttemptsVarPattern matches a max_attempts value that is exactly one
+// {{name}} formula-var placeholder.
+var maxAttemptsVarPattern = regexp.MustCompile(`^\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}$`)
+
+// UnmarshalJSON accepts max_attempts as an integer or as a single
+// "{{name}}" formula-var placeholder.
+func (r *RalphSpec) UnmarshalJSON(data []byte) error {
+	type ralphAlias RalphSpec
+	var decoded struct {
+		ralphAlias
+		MaxAttempts json.RawMessage `json:"max_attempts,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*r = RalphSpec(decoded.ralphAlias)
+	raw := decoded.MaxAttempts
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	if raw[0] != '"' {
+		if err := json.Unmarshal(raw, &r.MaxAttempts); err != nil {
+			return fmt.Errorf("max_attempts: expected an integer or a \"{{var}}\" placeholder: %w", err)
+		}
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return fmt.Errorf("max_attempts: %w", err)
+	}
+	match := maxAttemptsVarPattern.FindStringSubmatch(text)
+	if match == nil {
+		return fmt.Errorf("max_attempts: string value %q must be a single \"{{var}}\" placeholder; write a literal count as an integer", text)
+	}
+	r.MaxAttemptsVar = match[1]
+	return nil
+}
+
+// MarshalJSON writes an unresolved MaxAttemptsVar back as its "{{name}}"
+// placeholder so a parsed formula round-trips.
+func (r RalphSpec) MarshalJSON() ([]byte, error) {
+	type ralphAlias RalphSpec
+	if r.MaxAttemptsVar == "" {
+		return json.Marshal(ralphAlias(r))
+	}
+	return json.Marshal(struct {
+		ralphAlias
+		MaxAttempts string `json:"max_attempts"`
+	}{ralphAlias: ralphAlias(r), MaxAttempts: "{{" + r.MaxAttemptsVar + "}}"})
 }
 
 // RalphCheckSpec defines the validation step for a Ralph attempt.
@@ -1629,7 +1701,7 @@ func validateOnComplete(oc *OnCompleteSpec, errs *[]string, prefix string) {
 }
 
 func validateRalph(spec *RalphSpec, errs *[]string, prefix string, step *Step) {
-	if spec.MaxAttempts < 1 {
+	if spec.MaxAttemptsVar == "" && spec.MaxAttempts < 1 {
 		*errs = append(*errs, fmt.Sprintf("%s.check: max_attempts must be >= 1", prefix))
 	}
 	if spec.Check == nil {

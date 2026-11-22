@@ -95,7 +95,7 @@ func resolveExactSessionInfo(sessStore beads.Store, identifier string) (session.
 	if isTemplateTarget(identifier) {
 		return session.Info{}, false, nil
 	}
-	info, _, err := session.ResolveSessionRecordByExactID(sessStore, identifier)
+	info, _, err := session.ResolveSessionRecordByExactID(beads.SessionStore{Store: sessStore}, identifier)
 	switch {
 	case err == nil:
 		return info, true, nil
