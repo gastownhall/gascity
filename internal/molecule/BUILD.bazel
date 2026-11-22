@@ -4,6 +4,7 @@ go_library(
     name = "molecule",
     srcs = [
         "artifact.go",
+        "blocked_by.go",
         "claim_exact.go",
         "cleanup.go",
         "graph_apply.go",
@@ -31,6 +32,7 @@ go_test(
         "artifact_test.go",
         "attach_conditional_test.go",
         "attach_test.go",
+        "blocked_by_test.go",
         "claim_attach_target_test.go",
         "claim_exact_test.go",
         "cleanup_test.go",

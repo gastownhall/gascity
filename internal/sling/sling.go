@@ -254,6 +254,9 @@ type SlingResult struct {
 	MetadataErrors []string // non-fatal metadata write failures
 	BeadWarnings   []string // pre-flight bead state warnings
 	Deprecations   []string // deprecated formula constructs (graph.v2 issue alias)
+	// WaitingOn lists the source bead's open blockers a launched graph
+	// workflow waits for: every workflow bead carries a blocks edge on each.
+	WaitingOn []string
 
 	// Batch fields (populated by DoSlingBatch).
 	ContainerType string // "convoy", "epic", etc. (batch only)

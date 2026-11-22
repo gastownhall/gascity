@@ -746,6 +746,10 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			if err := checkLegacySourceWorkflowConflict(deps, beadID, formulaName, opts.Force); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
+			blockedBy, err := sourceBlockedBy(deps, beadID)
+			if err != nil {
+				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
+			}
 			// The replaced root is a graph.v2 workflow root, and every root
 			// this sling can find here was BORN through deps.GraphStore
 			// (InstantiateSlingFormula). Looking it up through deps.Store on a
@@ -763,12 +767,14 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				Vars:             formulaVars,
 				RootMetadata:     opts.rootMetadata(),
 				PriorityOverride: BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
+				BlockedBy:        blockedBy,
 			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
 			if err != nil {
 				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 			}
 			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
+			wfResult.WaitingOn = mResult.BlockedBy
 			if wfErr != nil {
 				// Same store the snapshot was taken from and the replacement
 				// root was created in: a rollback that closed the replacement

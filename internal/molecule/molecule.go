@@ -38,6 +38,13 @@ type Options struct {
 	// correct before the recipe becomes visible to workers.
 	ExternalDeps []ExternalDep
 
+	// BlockedBy names existing beads every bead of the molecule must wait
+	// for. Each id becomes a blocks edge from every recipe step, root
+	// included, embedded at create time like ExternalDeps, so no bead is
+	// ever Ready before its blockers are satisfied. Ids are trimmed, deduped
+	// and sorted; Result.BlockedBy reports the set that was wired.
+	BlockedBy []string
+
 	// ParentID attaches the molecule to an existing bead. When set, the
 	// root bead's ParentID is set to this value.
 	ParentID string
@@ -111,6 +118,12 @@ type FragmentOptions struct {
 	// correct before the fragment becomes visible to workers.
 	ExternalDeps []ExternalDep
 
+	// BlockedBy exists so a mechanical Options-to-FragmentOptions handoff
+	// fails loudly instead of silently dropping a launch-and-wait hold: a
+	// fragment attaches into an existing workflow, which has no new root to
+	// gate, so InstantiateFragment rejects a non-empty value.
+	BlockedBy []string
+
 	// PriorityOverride forces every created bead to use the given priority.
 	// When nil, the existing workflow root's priority is inherited.
 	PriorityOverride *int
@@ -139,6 +152,10 @@ type Result struct {
 
 	// Created is the total number of beads created.
 	Created int
+
+	// BlockedBy is the normalized Options.BlockedBy set every created bead
+	// was wired to wait for.
+	BlockedBy []string
 }
 
 // FragmentResult reports the outcome of fragment instantiation.
@@ -869,6 +886,20 @@ func Instantiate(ctx context.Context, store beads.MoleculeTarget, recipe *formul
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	blockedBy := normalizeBlockedBy(opts.BlockedBy)
+	opts.ExternalDeps = withBlockedByExternalDeps(recipe, opts.ExternalDeps, blockedBy)
+	opts.BlockedBy = nil
+	result, err := instantiateRecipe(ctx, store, recipe, opts)
+	if err != nil {
+		return nil, err
+	}
+	result.BlockedBy = blockedBy
+	return result, nil
+}
+
+// instantiateRecipe is Instantiate after Options.BlockedBy has been expanded
+// into Options.ExternalDeps.
+func instantiateRecipe(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Recipe, opts Options) (*Result, error) {
 	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
 		return nil, err // before any write: a refused recipe creates nothing
 	}
@@ -1182,6 +1213,9 @@ func InstantiateFragment(ctx context.Context, store beads.MoleculeTarget, recipe
 	}
 	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
 		return nil, err // before any write
+	}
+	if len(opts.BlockedBy) > 0 {
+		return nil, fmt.Errorf("fragment instantiation does not support BlockedBy (%d target(s)): a fragment attaches into an existing workflow with no new root to gate; wire the blockers as ExternalDeps on the steps that must wait", len(opts.BlockedBy))
 	}
 	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
 	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
