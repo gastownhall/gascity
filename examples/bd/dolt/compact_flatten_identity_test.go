@@ -332,3 +332,37 @@ func TestCompactScriptPinsVerificationReadsToFlattenCommit(t *testing.T) {
 		}
 	}
 }
+
+// A writer absorbed before the flatten's reset still defers with its proof
+// anchored on the snapshot HEAD and the flatten commit itself, even when a
+// second writer has moved HEAD past the flatten commit by verification time.
+func TestCompactScriptPreResetWriterProofUsesFlattenCommitDespiteLaterWriter(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writers_before_and_after_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("pre-reset writer defer must exit 0: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"pre_reset_HEAD=writercommit",
+		"flatten_HEAD=" + compactFakeFlattenCommit,
+		"DOLT_DIFF(headcommit.." + compactFakeFlattenCommit + ")",
+		"deferring, will retry next run",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("pre-reset writer defer must not quarantine; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if got := compactMarkerValue(t, pendingGC, "compacted_from_head"); got != "writercommit" {
+		t.Fatalf("pending-GC compacted_from_head = %q, want the pre-reset writer commit", got)
+	}
+	for _, call := range readCompactDoltCalls(t, fixture.doltLog) {
+		if strings.Contains(call.query, "DOLT_GC") {
+			t.Fatalf("pre-reset writer defer must skip GC this run: %+v", call)
+		}
+	}
+}
