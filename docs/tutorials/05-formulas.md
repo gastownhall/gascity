@@ -196,11 +196,9 @@ pancakes.workflow-finalize -> gcg-2055
 `Created: 7` is the root plus your five steps plus the finalize step, each with
 its own bead ID. A workflow's beads live in the city's infrastructure store,
 which is why their IDs start `gcg-` ([Tutorial 06](/tutorials/06-beads) covers
-the city's two stores). Cooking routes nothing; routing happens when you sling.
-Slinging a cooked root by its bead ID (`gc sling my-agent gcg-2049`) routes the
-run's still-unrouted steps to that agent — the same routes slinging the formula
-would stamp — so an on-demand pool wakes for the work. To run a formula in one
-step, sling it as shown above.
+the city's two stores). Nothing routes a cooked workflow, and `gc sling` won't
+route one by hand: it routes work beads, the tasks you and your agents reason
+about. To run a formula, sling it as shown above.
 
 ## Variables
 

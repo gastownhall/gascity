@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // cookedSlingParityFormula has both member shapes member routing must fill: a
@@ -36,21 +38,29 @@ mode = "exec"
 path = "verify.sh"
 `
 
-// writeCookedSlingParityCity prepares a one-shot CLI city with an on-demand
-// worker and the parity formula on disk in the city's formulas directory.
-func writeCookedSlingParityCity(t *testing.T) string {
+// onDemandWorkerTOML declares the on-demand pool the cooked-root tests sling
+// to: no worker session runs until demand wakes one.
+const onDemandWorkerTOML = "\n[[agent]]\nname = \"worker\"\nmax_active_sessions = -1\nmin_active_sessions = 0\n"
+
+// skipUnderSplitStrictGate skips a leg that pins single-store behavior when the
+// split-strict gate runs this binary (GC_TEST_SPLIT_STRICT=1). The gate projects
+// every city that relocates nothing as split, so no single-store city exists
+// under it; the split leg beside each such leg runs under the gate as well.
+func skipUnderSplitStrictGate(t *testing.T) {
 	t.Helper()
-	cityPath := oneShotCLICity(t, "")
-	f, err := os.OpenFile(filepath.Join(cityPath, "city.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatalf("open city.toml: %v", err)
+	if splittest.GateEnabled() {
+		t.Skip("pins single-store behavior; the split-strict gate projects every city with no [storage] as split, which the split leg covers")
 	}
-	if _, err := f.WriteString("\n[[agent]]\nname = \"worker\"\nmax_active_sessions = -1\nmin_active_sessions = 0\n"); err != nil {
-		t.Fatalf("append agent: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("close city.toml: %v", err)
-	}
+}
+
+// writeCookedSlingParityCity prepares a one-shot CLI city with formula v2
+// enabled in its own config, the on-demand worker, and the parity formula on
+// disk in the city's formulas directory. bindingRoot is the whole-split
+// binding, or "" for a city with no [storage].
+func writeCookedSlingParityCity(t *testing.T, bindingRoot string) string {
+	t.Helper()
+	cityPath := oneShotCLICity(t, bindingRoot)
+	appendCityTOML(t, cityPath, "\n[daemon]\nformula_v2 = true\n"+onDemandWorkerTOML)
 	formulaDir := filepath.Join(cityPath, "formulas")
 	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
 		t.Fatalf("mkdir formulas: %v", err)
@@ -68,6 +78,23 @@ func writeCookedSlingParityCity(t *testing.T) string {
 		t.Fatalf("gc doctor --fix (builtin core import): %v", err)
 	}
 	return cityPath
+}
+
+// cookParityFormula runs `gc formula cook wf-parity` on cityPath as a one-shot
+// invocation of its own and returns the root it reports.
+func cookParityFormula(t *testing.T, cityPath string) string {
+	t.Helper()
+	var out, errb bytes.Buffer
+	if code := run([]string{"--city", cityPath, "formula", "cook", "wf-parity"}, &out, &errb); code != 0 {
+		t.Fatalf("gc formula cook wf-parity exit = %d\nstdout:\n%s\nstderr:\n%s", code, out.String(), errb.String())
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if id, ok := strings.CutPrefix(line, "Root: "); ok {
+			return strings.TrimSpace(id)
+		}
+	}
+	t.Fatalf("cook printed no root id; stdout:\n%s\nstderr:\n%s", out.String(), errb.String())
+	return ""
 }
 
 // workflowRunMembers returns the city's expanded workflow run root — the one
@@ -130,81 +157,158 @@ func routingKeys(b beads.Bead) map[string]string {
 	return out
 }
 
-// TestCookedSlingMatchesFormulaLaunchRouting is the parity contract of #9039:
-// a workflow `gc formula cook` expands and `gc sling <target> <root>` then
-// routes must carry, per member, the same routing metadata as launching the
-// same formula at the same target with `gc sling <target> <formula>
-// --formula`. The two legs run in twin cities so each store holds exactly one
-// run to compare.
-func TestCookedSlingMatchesFormulaLaunchRouting(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
-
-	// Leg 1 — cook, then sling the cooked root by bead ID.
-	cookedCity := writeCookedSlingParityCity(t)
-	var cookOut, cookErr bytes.Buffer
-	cookCmd := newRootCmd(&cookOut, &cookErr)
-	cookCmd.SetArgs([]string{"--city", cookedCity, "formula", "cook", "wf-parity"})
-	cookCmd.SetOut(&cookOut)
-	cookCmd.SetErr(&cookErr)
-	if err := cookCmd.Execute(); err != nil {
-		t.Fatalf("gc formula cook wf-parity: %v\nstdout:\n%s\nstderr:\n%s", err, cookOut.String(), cookErr.String())
+// splitCityGraphBinding returns a split one-shot city's graph binding, where gc
+// formula cook mints a workflow on such a city.
+func splitCityGraphBinding(t *testing.T, cityPath string) beads.Store {
+	t.Helper()
+	graph, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassGraph)
+	if !relocated {
+		t.Fatal("graph class is not relocated; the fixture is not a split city")
 	}
-	var cookedRootID string
-	for _, line := range strings.Split(cookOut.String(), "\n") {
-		if id, ok := strings.CutPrefix(line, "Root: "); ok {
-			cookedRootID = strings.TrimSpace(id)
+	return graph
+}
+
+// beadsByID indexes every bead store holds, closed ones included.
+func beadsByID(t *testing.T, store beads.Store) map[string]beads.Bead {
+	t.Helper()
+	all := allBeads(t, store)
+	byID := make(map[string]beads.Bead, len(all))
+	for _, b := range all {
+		byID[b.ID] = b
+	}
+	return byID
+}
+
+// assertBeadsUnchanged fails for every bead of after that before does not hold
+// with the same status, assignee and metadata.
+func assertBeadsUnchanged(t *testing.T, storeName string, before, after map[string]beads.Bead) {
+	t.Helper()
+	for id, b := range after {
+		was, ok := before[id]
+		switch {
+		case !ok:
+			t.Errorf("the refused sling created %s (%q) in the %s store", id, b.Title, storeName)
+		case was.Status != b.Status || was.Assignee != b.Assignee || !maps.Equal(was.Metadata, b.Metadata):
+			t.Errorf("the refused sling changed %s in the %s store:\n before %s %q %v\n after  %s %q %v", id, storeName, was.Status, was.Assignee, was.Metadata, b.Status, b.Assignee, b.Metadata)
 		}
 	}
-	if cookedRootID == "" {
-		t.Fatalf("cook printed no root id; stdout:\n%s\nstderr:\n%s", cookOut.String(), cookErr.String())
-	}
-	slingOut, slingErr := runCmdSling(t, "worker", cookedRootID)
-	t.Logf("cooked leg sling stdout:\n%s\nstderr:\n%s", slingOut, slingErr)
+}
 
-	// Leg 2 — launch the same formula at the same target, in a twin city so
-	// each store holds exactly one run. The explicit --city matters: a prior
-	// command in this process may have persisted its own city as current.
-	launchCity := writeCookedSlingParityCity(t)
-	var launchOut, launchErr bytes.Buffer
-	launchCmd := newRootCmd(&launchOut, &launchErr)
-	launchCmd.SetArgs([]string{"--city", launchCity, "sling", "worker", "wf-parity", "--formula", "--no-convoy"})
-	launchCmd.SetOut(&launchOut)
-	launchCmd.SetErr(&launchErr)
-	if err := launchCmd.Execute(); err != nil {
-		t.Fatalf("gc sling worker wf-parity --formula: %v\nstdout:\n%s\nstderr:\n%s", err, launchOut.String(), launchErr.String())
+// assertSplitCityRefusesCookedRootSling runs `gc sling worker <rootID>` on a
+// split city whose graph binding holds the cooked run, and asserts the #5974
+// refusal: the sling exits non-zero naming the root and the --formula launch,
+// writes nothing to either store, and leaves the run unrouted.
+func assertSplitCityRefusesCookedRootSling(t *testing.T, cityPath, rootID string) {
+	t.Helper()
+	graph := splitCityGraphBinding(t, cityPath)
+	work, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		t.Fatalf("open the work store: %v", err)
 	}
-	t.Logf("launch leg sling stdout:\n%s\nstderr:\n%s", launchOut.String(), launchErr.String())
-
-	cookedRoot, cookedMembers := workflowRunMembers(t, cookedCity)
-	launchRoot, launchMembers := workflowRunMembers(t, launchCity)
-	if cookedRoot.ID != cookedRootID {
-		t.Fatalf("cooked leg's workflow root = %s, want the cooked root %s", cookedRoot.ID, cookedRootID)
+	graphBefore, workBefore := beadsByID(t, graph), beadsByID(t, work)
+	if _, ok := graphBefore[rootID]; !ok {
+		t.Fatalf("the graph binding does not hold the cooked root %s; the fixture is not the split shape", rootID)
+	}
+	if len(graphBefore) < 2 {
+		t.Fatalf("the graph binding holds %d bead(s), want the cooked root and its members", len(graphBefore))
 	}
 
-	// The roots themselves route to the same target.
-	if got, want := cookedRoot.Metadata[beadmeta.RoutedToMetadataKey], launchRoot.Metadata[beadmeta.RoutedToMetadataKey]; got != want || got != "worker" {
-		t.Fatalf("root gc.routed_to: cooked=%q launched=%q, want worker on both", got, want)
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"worker", rootID},
+		false, false, false, // isFormula, doNudge, force
+		"", nil, "",
+		true, false, false, "", // noConvoy, owned, reassign, onFormula
+		false, false, false, // noFormula, fromStdin, dryRun
+		"", "",
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Fatalf("gc sling worker %s on a split city exited 0, want the refusal\nstdout: %s", rootID, stdout.String())
 	}
-
-	// Per member (by step id), the routing metadata must match the launch.
-	if len(cookedMembers) == 0 {
-		t.Fatal("cooked run has no members carrying gc.step_id")
-	}
-	for stepID, cooked := range cookedMembers {
-		launched, ok := launchMembers[stepID]
-		if !ok {
-			t.Errorf("step %q exists in the cooked run but not in the launched one", stepID)
-			continue
+	for _, want := range []string{rootID, "infrastructure store", "--formula"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("refusal %q does not mention %q", stderr.String(), want)
 		}
-		delete(launchMembers, stepID)
-		got, want := routingKeys(cooked), routingKeys(launched)
-		for k := range want {
-			if got[k] != want[k] {
-				t.Errorf("step %q %s: cooked=%q launched=%q (cooked kind=%q)", stepID, k, got[k], want[k], cooked.Metadata[beadmeta.KindMetadataKey])
+	}
+
+	graphAfter := beadsByID(t, graph)
+	assertBeadsUnchanged(t, "graph", graphBefore, graphAfter)
+	assertBeadsUnchanged(t, "work", workBefore, beadsByID(t, work))
+	for id, b := range graphAfter {
+		for _, key := range []string{beadmeta.RoutedToMetadataKey, beadmeta.ExecutionRoutedToMetadataKey} {
+			if b.Metadata[key] == "worker" {
+				t.Errorf("%s %s = worker: the cooked run must stay unrouted on a split city", id, key)
 			}
 		}
 	}
-	for stepID := range launchMembers {
-		t.Errorf("step %q exists in the launched run but not in the cooked one", stepID)
-	}
+}
+
+// TestCookedSlingMatchesFormulaLaunchRouting is the parity contract of #9039 on
+// a city that keeps its workflows in the work store: a workflow `gc formula
+// cook` expands and `gc sling <target> <root>` then routes must carry, per
+// member, the same routing metadata as launching the same formula at the same
+// target with `gc sling <target> <formula> --formula`. The two legs run in
+// twin cities so each store holds exactly one run to compare.
+//
+// A split city keeps the cooked run in its infrastructure store, where gc
+// sling refuses the root (#5974) and the run stays unrouted.
+func TestCookedSlingMatchesFormulaLaunchRouting(t *testing.T) {
+	t.Run("single-store", func(t *testing.T) {
+		skipUnderSplitStrictGate(t)
+
+		// Leg 1 — cook, then sling the cooked root by bead ID.
+		cookedCity := writeCookedSlingParityCity(t, "")
+		cookedRootID := cookParityFormula(t, cookedCity)
+		slingOut, slingErr := runCmdSling(t, "worker", cookedRootID)
+		t.Logf("cooked leg sling stdout:\n%s\nstderr:\n%s", slingOut, slingErr)
+
+		// Leg 2 — launch the same formula at the same target, in a twin city
+		// so each store holds exactly one run. The explicit --city matters:
+		// leg 1's city is still the ambient one.
+		launchCity := writeCookedSlingParityCity(t, "")
+		var launchOut, launchErr bytes.Buffer
+		if code := run([]string{"--city", launchCity, "sling", "worker", "wf-parity", "--formula", "--no-convoy"}, &launchOut, &launchErr); code != 0 {
+			t.Fatalf("gc sling worker wf-parity --formula exit = %d\nstdout:\n%s\nstderr:\n%s", code, launchOut.String(), launchErr.String())
+		}
+		t.Logf("launch leg sling stdout:\n%s\nstderr:\n%s", launchOut.String(), launchErr.String())
+
+		cookedRoot, cookedMembers := workflowRunMembers(t, cookedCity)
+		launchRoot, launchMembers := workflowRunMembers(t, launchCity)
+		if cookedRoot.ID != cookedRootID {
+			t.Fatalf("cooked leg's workflow root = %s, want the cooked root %s", cookedRoot.ID, cookedRootID)
+		}
+
+		// The roots themselves route to the same target.
+		if got, want := cookedRoot.Metadata[beadmeta.RoutedToMetadataKey], launchRoot.Metadata[beadmeta.RoutedToMetadataKey]; got != want || got != "worker" {
+			t.Fatalf("root gc.routed_to: cooked=%q launched=%q, want worker on both", got, want)
+		}
+
+		// Per member (by step id), the routing metadata must match the launch.
+		if len(cookedMembers) == 0 {
+			t.Fatal("cooked run has no members carrying gc.step_id")
+		}
+		for stepID, cooked := range cookedMembers {
+			launched, ok := launchMembers[stepID]
+			if !ok {
+				t.Errorf("step %q exists in the cooked run but not in the launched one", stepID)
+				continue
+			}
+			delete(launchMembers, stepID)
+			got, want := routingKeys(cooked), routingKeys(launched)
+			for k := range want {
+				if got[k] != want[k] {
+					t.Errorf("step %q %s: cooked=%q launched=%q (cooked kind=%q)", stepID, k, got[k], want[k], cooked.Metadata[beadmeta.KindMetadataKey])
+				}
+			}
+		}
+		for stepID := range launchMembers {
+			t.Errorf("step %q exists in the launched run but not in the cooked one", stepID)
+		}
+	})
+
+	t.Run("split", func(t *testing.T) {
+		cityPath := writeCookedSlingParityCity(t, filepath.Join(t.TempDir(), "store"))
+		assertSplitCityRefusesCookedRootSling(t, cityPath, cookParityFormula(t, cityPath))
+	})
 }

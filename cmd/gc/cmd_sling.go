@@ -87,9 +87,12 @@ The target is an agent qualified name (e.g. "mayor" or "hello-world/polecat").
 The second argument is a bead ID, a formula name when --formula is set, or
 arbitrary text (which auto-creates a task bead).
 
-Slinging an expanded cooked workflow root (gc formula cook) also routes the
-run's still-unrouted steps and controls to the target, matching what a
---formula launch routes.
+Slinging a cooked workflow root (gc formula cook) by its ID also routes the
+run's still-unrouted steps and controls to the target, as a --formula launch
+routes them. This needs the root in the work store, as on a city with no
+[storage] section, and no formula attached (pass --no-formula to a target
+with a default_sling_formula). A root in the city's infrastructure store is
+refused: launch the formula with --formula instead.
 
 When target is omitted, the bead's rig prefix is used to look up the rig's
 default_sling_targets (or default_sling_target) from config and one is chosen

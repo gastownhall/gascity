@@ -3,6 +3,7 @@ package sling
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -10,13 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/graphroute"
 )
-
-// memberRoutePatch is one member's computed routing write.
-type memberRoutePatch struct {
-	beadID  string
-	control bool
-	meta    map[string]string
-}
 
 // otherRoutedMember is a member the plan left on another agent's route: the
 // member is eligible for routing but already carries a route for someone
@@ -37,10 +31,11 @@ type memberRoutePlan struct {
 	rootID  string
 	target  string
 	binding graphroute.GraphRouteBinding
-	// controlPatches and stepPatches are the members to route, applied in that
-	// order before the root's own route is stamped.
-	controlPatches []memberRoutePatch
-	stepPatches    []memberRoutePatch
+	// controls and steps are the IDs of the members to route, applied in that
+	// order before the root's own route is stamped. apply re-reads each one
+	// and writes the patch computed from that read, not from the plan's.
+	controls []string
+	steps    []string
 	// unroutedMembers counts members the plan routes.
 	unroutedMembers int
 	// customQuery marks a plan that routes nothing because the target routes
@@ -55,47 +50,66 @@ type memberRoutePlan struct {
 
 // hasPatches reports whether the plan would write any member route.
 func (p *memberRoutePlan) hasPatches() bool {
-	return p != nil && (len(p.controlPatches) > 0 || len(p.stepPatches) > 0)
+	return p != nil && (len(p.controls) > 0 || len(p.steps) > 0)
 }
 
 // hasControlPatches reports whether the plan routes any control members, so
 // the caller knows to wake the control dispatcher.
 func (p *memberRoutePlan) hasControlPatches() bool {
-	return p != nil && len(p.controlPatches) > 0
+	return p != nil && len(p.controls) > 0
 }
 
-// apply writes the plan's member patches, controls first, through the writer
-// of the store that holds the root. The caller stamps the root's own route
-// only after this returns, so a failed member write leaves the root unrouted
-// and re-running the same sling completes the run instead of short-circuiting
-// as idempotent. Members the plan found already routed to a different agent
-// are reported in one bead warning whether or not anything was written: the
-// run did not move to the target whole, and the operator should see which
-// members stayed behind.
-func (p *memberRoutePlan) apply(writer beads.Writer, result *SlingResult) error {
+// apply writes the plan's member routes, controls first, through the store
+// that holds the root. The caller stamps the root's own route only after this
+// returns, so a failed member write leaves the root unrouted and re-running
+// the same sling completes the run instead of short-circuiting as idempotent.
+//
+// The plan judged its members on one snapshot, and another sling or a claim
+// can reach a member before apply writes it. So apply re-reads each member
+// immediately before its write and writes the patch UnroutedMemberPatch
+// computes from that read, fenced on the read's revision where the store can
+// fence (routeMember): a change that lands after the re-read fails the write,
+// and the member is read and judged again. A member that no longer takes a
+// patch (a concurrent sling routed it, a session claimed or bound it, or it
+// closed) is left as it is, and one bead warning names it. On a store that
+// cannot fence, the write is unconditional, so a change that lands between a
+// member's re-read and its write is still overwritten there: the window is
+// that one read and write, not the whole plan.
+//
+// Members the plan found already routed to a different agent are reported in
+// one bead warning whether or not anything was written: the run did not move
+// to the target whole, and the operator should see which members stayed
+// behind.
+func (p *memberRoutePlan) apply(store beads.MoleculeTarget, result *SlingResult) error {
 	if p == nil {
 		return nil
 	}
+	var changed []string
 	if p.hasPatches() {
-		if writer == nil {
+		if store.Absent() {
 			return fmt.Errorf("routing members of expanded workflow %s to %s: no store holds the workflow", p.rootID, p.target)
 		}
 		applied := 0
-		for _, entry := range p.controlPatches {
-			if err := writer.SetMetadataBatch(entry.beadID, entry.meta); err != nil {
-				return fmt.Errorf("routing member %s of expanded workflow %s to %s: %w; re-run the same sling to complete routing the run", entry.beadID, p.rootID, p.target, err)
+		for _, id := range slices.Concat(p.controls, p.steps) {
+			wrote, reason, err := p.routeMember(store, id)
+			if err != nil {
+				return err
 			}
-			applied++
-		}
-		for _, entry := range p.stepPatches {
-			if err := writer.SetMetadataBatch(entry.beadID, entry.meta); err != nil {
-				return fmt.Errorf("routing member %s of expanded workflow %s to %s: %w; re-run the same sling to complete routing the run", entry.beadID, p.rootID, p.target, err)
+			switch {
+			case wrote:
+				applied++
+			case reason != "":
+				changed = append(changed, fmt.Sprintf("%s (%s)", id, reason))
 			}
-			applied++
 		}
 		if result != nil {
 			result.RoutedMembers = applied
 		}
+	}
+	if result != nil && len(changed) > 0 {
+		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+			"warning: members of workflow %s changed after this sling read them and were left as they are: %s",
+			p.rootID, strings.Join(changed, ", ")))
 	}
 	if result != nil && p.customQuery && p.unroutedMembers > 0 {
 		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
@@ -112,6 +126,87 @@ func (p *memberRoutePlan) apply(writer beads.Writer, result *SlingResult) error 
 			p.rootID, strings.Join(named, ", ")))
 	}
 	return nil
+}
+
+// memberRouteWriteAttempts bounds routeMember's writes of one member: a fenced
+// write refused because the member changed after its re-read is followed by
+// another re-read and write, at most this many writes in all.
+const memberRouteWriteAttempts = 3
+
+// routeMember re-reads one planned member through the store's live reader,
+// past any cache, so the revision its write is fenced on is the row's own, and
+// writes the patch UnroutedMemberPatch computes from that read
+// (writeMemberPatch). When
+// the member no longer takes a patch it writes nothing and returns why
+// (memberLeftReason), which is empty when a concurrent sling already routed it
+// to this sling's own target. A write the fence refuses, because the member
+// changed after the re-read, sends it back to the re-read; a member that still
+// changes under the last of memberRouteWriteAttempts writes fails the sling
+// before the root is routed, so re-running it completes the run.
+func (p *memberRoutePlan) routeMember(store beads.MoleculeTarget, id string) (wrote bool, reason string, err error) {
+	live := beads.HandlesFor(store).Live
+	var refused error
+	for range memberRouteWriteAttempts {
+		member, err := live.Get(id)
+		if err != nil {
+			return false, "", fmt.Errorf("re-reading member %s of expanded workflow %s before routing it to %s: %w; re-run the same sling to complete routing the run", id, p.rootID, p.target, err)
+		}
+		patch, err := graphroute.UnroutedMemberPatch(member, p.binding)
+		if err != nil {
+			return false, "", fmt.Errorf("routing expanded workflow %s to %s: %w", p.rootID, p.target, err)
+		}
+		if len(patch) == 0 {
+			return false, memberLeftReason(member, p.target), nil
+		}
+		err = writeMemberPatch(store, member, patch)
+		if err == nil {
+			return true, "", nil
+		}
+		if !beads.IsPreconditionFailed(err) {
+			return false, "", fmt.Errorf("routing member %s of expanded workflow %s to %s: %w; re-run the same sling to complete routing the run", id, p.rootID, p.target, err)
+		}
+		refused = err
+	}
+	return false, "", fmt.Errorf("routing member %s of expanded workflow %s to %s: it changed under each of %d writes: %w; re-run the same sling to complete routing the run", id, p.rootID, p.target, memberRouteWriteAttempts, refused)
+}
+
+// writeMemberPatch writes patch on member, which routeMember just re-read.
+// Where the store resolves a conditional writer, the write is fenced on that
+// read's revision: a route, claim, or close that lands after the read fails
+// it with *beads.PreconditionFailedError and is kept. A store that cannot
+// fence (no conditional writer, or one that answers
+// beads.ErrConditionalWriteUnsupported, such as BdStore without --if-revision)
+// takes the plain write, which leaves the window between the read and the
+// write.
+func writeMemberPatch(store beads.MoleculeTarget, member beads.Bead, patch map[string]string) error {
+	if writer, ok := beads.ConditionalWriterForTarget(store); ok {
+		err := writer.UpdateIfMatch(member.ID, member.Revision, beads.UpdateOpts{Metadata: patch})
+		if !beads.IsConditionalWriteUnsupported(err) {
+			return err
+		}
+	}
+	return store.SetMetadataBatch(member.ID, patch)
+}
+
+// memberLeftReason says why a member the plan routed took no patch when apply
+// re-read it. It is empty when the member is now routed to target, the sling's
+// own target: a concurrent sling of the same run already did this write.
+func memberLeftReason(b beads.Bead, target string) string {
+	route := memberRouteTarget(b)
+	switch {
+	case b.Status == "closed":
+		return "closed"
+	case strings.TrimSpace(b.Assignee) != "":
+		return "claimed by " + strings.TrimSpace(b.Assignee)
+	case b.Metadata[beadmeta.SessionIDMetadataKey] != "":
+		return "bound to session " + b.Metadata[beadmeta.SessionIDMetadataKey]
+	case route == target:
+		return ""
+	case route != "":
+		return "routed to " + route
+	default:
+		return "no longer routable"
+	}
 }
 
 // planExpandedRootMemberRoutes computes the member routing a plain sling of
@@ -181,20 +276,20 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, beadID string)
 		if len(patch) == 0 {
 			// No write, but an eligible member already routed to a different
 			// agent is worth reporting: the run the operator just slung did
-			// not move whole, and nothing else would say so.
-			if memberRouteEligible(member) {
+			// not move whole, and nothing else would say so. Only an eligible
+			// member counts: a closed bead that once ran on another agent is
+			// settled, not left behind.
+			if graphroute.MemberRouteEligible(member) {
 				if route := memberRouteTarget(member); route != "" && route != routedTo {
 					plan.otherRouted = append(plan.otherRouted, otherRoutedMember{beadID: member.ID, target: route})
 				}
 			}
 			continue
 		}
-		entry := memberRoutePatch{beadID: member.ID, meta: patch}
 		if graphroute.IsControlDispatcherKind(strings.TrimSpace(member.Metadata[beadmeta.KindMetadataKey])) {
-			entry.control = true
-			plan.controlPatches = append(plan.controlPatches, entry)
+			plan.controls = append(plan.controls, member.ID)
 		} else {
-			plan.stepPatches = append(plan.stepPatches, entry)
+			plan.steps = append(plan.steps, member.ID)
 		}
 		plan.unroutedMembers++
 	}
@@ -236,16 +331,4 @@ func memberRouteTarget(b beads.Bead) string {
 		key = beadmeta.ExecutionRoutedToMetadataKey
 	}
 	return strings.TrimSpace(b.Metadata[key])
-}
-
-// memberRouteEligible mirrors the members UnroutedMemberPatch considers for
-// routing at all: workflow topology beads never take a route, and closed,
-// assigned, or session-bound beads are not the sling's to move. Only eligible
-// members count as "routed elsewhere" — a closed bead that once ran on
-// another agent is settled, not left behind.
-func memberRouteEligible(b beads.Bead) bool {
-	if graphroute.IsWorkflowTopologyKind(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])) {
-		return false
-	}
-	return b.Status != "closed" && strings.TrimSpace(b.Assignee) == "" && b.Metadata[beadmeta.SessionIDMetadataKey] == ""
 }

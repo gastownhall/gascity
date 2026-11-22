@@ -2,6 +2,7 @@ package sling
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"strings"
 	"testing"
@@ -245,7 +246,7 @@ func TestSlingExpandedRootFullyRoutedStaysIdempotent(t *testing.T) {
 }
 
 // metadataWriteRecorder records the bead ID of every metadata write that
-// reaches the store.
+// reaches the store, fenced (UpdateIfMatch) or not.
 type metadataWriteRecorder struct {
 	*beads.MemStore
 	written []string
@@ -259,6 +260,11 @@ func (r *metadataWriteRecorder) SetMetadata(id, key, value string) error {
 func (r *metadataWriteRecorder) SetMetadataBatch(id string, kvs map[string]string) error {
 	r.written = append(r.written, id)
 	return r.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (r *metadataWriteRecorder) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	r.written = append(r.written, id)
+	return r.MemStore.UpdateIfMatch(id, expectedRevision, opts)
 }
 
 // TestSlingExpandedRootWarnsOtherRoutedMembers pins the never-move rule's
@@ -640,5 +646,498 @@ func TestSlingExpandedRootRoutesControlExecutionAndSkipsSettledMembers(t *testin
 	}
 	if result.RoutedMembers != 3 {
 		t.Errorf("RoutedMembers = %d, want 3 (the control and the two open steps)", result.RoutedMembers)
+	}
+}
+
+// interleavingStore lands one concurrent change on the cooked run while the
+// sling under test is writing: land runs once, just before the first metadata
+// write to the bead at, as another sling or a session claim would land after
+// this sling planned its member routes.
+type interleavingStore struct {
+	*beads.MemStore
+	at     string
+	land   func(*beads.MemStore)
+	landed bool
+}
+
+func (s *interleavingStore) before(id string) {
+	if !s.landed && id == s.at {
+		s.landed = true
+		s.land(s.MemStore)
+	}
+}
+
+func (s *interleavingStore) SetMetadata(id, key, value string) error {
+	s.before(id)
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s *interleavingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.before(id)
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (s *interleavingStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	s.before(id)
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+// TestSlingExpandedRootLeavesMembersChangedAfterThePlan pins the re-read
+// before each member write: a route, claim, or close that lands on a member
+// after the sling planned its routes is kept, never overwritten with the
+// sling's target, and the sling names the member in a warning. A member a
+// concurrent sling routed to the same target is routed as asked and needs no
+// warning.
+func TestSlingExpandedRootLeavesMembersChangedAfterThePlan(t *testing.T) {
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	other := config.Agent{Name: "other", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker, other}}
+	setMeta := func(t *testing.T, store *beads.MemStore, id, key, value string) {
+		t.Helper()
+		if err := store.SetMetadata(id, key, value); err != nil {
+			t.Fatalf("landing %s=%s on %s: %v", key, value, id, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		// initiator makes the sling stamp the root before any member write,
+		// so a change landing at the root lands before apply starts.
+		initiator string
+		at        string
+		land      func(t *testing.T, store *beads.MemStore)
+		// wantRoutedMembers counts the members this sling itself wrote.
+		wantRoutedMembers int
+		// want is each member's metadata after the sling, key by key.
+		want map[string]map[string]string
+		// wantAssignee is each member's assignee after the sling.
+		wantAssignee map[string]string
+		// wantNamed and wantUnnamed are the warning's member entries.
+		wantNamed   []string
+		wantUnnamed []string
+	}{
+		{
+			name: "between two member writes",
+			// Controls are written first: the change lands after the
+			// control's route and before either step's.
+			at: "wf-1.finalize",
+			land: func(t *testing.T, store *beads.MemStore) {
+				setMeta(t, store, "wf-1.flip", beadmeta.RoutedToMetadataKey, "other")
+				rival := "rival-session"
+				if err := store.Update("wf-1.mix", beads.UpdateOpts{Assignee: &rival}); err != nil {
+					t.Fatalf("claiming wf-1.mix: %v", err)
+				}
+			},
+			wantRoutedMembers: 1,
+			want: map[string]map[string]string{
+				"wf-1.finalize": {beadmeta.ExecutionRoutedToMetadataKey: "worker"},
+				"wf-1.flip":     {beadmeta.RoutedToMetadataKey: "other"},
+				"wf-1.mix":      {beadmeta.RoutedToMetadataKey: ""},
+			},
+			wantAssignee: map[string]string{"wf-1.mix": "rival-session"},
+			wantNamed:    []string{"wf-1.flip (routed to other)", "wf-1.mix (claimed by rival-session)"},
+		},
+		{
+			name:      "before the first member write",
+			initiator: "human",
+			at:        "wf-1",
+			land: func(t *testing.T, store *beads.MemStore) {
+				setMeta(t, store, "wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey, "other")
+				setMeta(t, store, "wf-1.flip", beadmeta.RoutedToMetadataKey, "worker")
+				if err := store.Close("wf-1.mix"); err != nil {
+					t.Fatalf("closing wf-1.mix: %v", err)
+				}
+			},
+			wantRoutedMembers: 0,
+			want: map[string]map[string]string{
+				"wf-1.finalize": {
+					beadmeta.ExecutionRoutedToMetadataKey: "other",
+					beadmeta.RoutedToMetadataKey:          "core.control-dispatcher",
+				},
+				"wf-1.flip": {beadmeta.RoutedToMetadataKey: "worker"},
+				"wf-1.mix":  {beadmeta.RoutedToMetadataKey: ""},
+			},
+			wantNamed:   []string{"wf-1.finalize (routed to other)", "wf-1.mix (closed)"},
+			wantUnnamed: []string{"wf-1.flip"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := cookedWorkflowStore(t)
+			store := &interleavingStore{MemStore: mem, at: tc.at, land: func(s *beads.MemStore) { tc.land(t, s) }}
+			deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps = withStore(deps, store)
+			deps.Router = &recordingRouter{store: store}
+			opts := testOpts(worker, "wf-1")
+			opts.Initiator = tc.initiator
+
+			result, err := DoSling(opts, deps, deps.Store)
+			if err != nil {
+				t.Fatalf("DoSling: %v", err)
+			}
+			if !store.landed {
+				t.Fatalf("the concurrent change never landed: the sling wrote nothing to %s", tc.at)
+			}
+			if got := mustMeta(t, mem, "wf-1", beadmeta.RoutedToMetadataKey); got != "worker" {
+				t.Errorf("root gc.routed_to = %q, want worker", got)
+			}
+			for id, keys := range tc.want {
+				for key, want := range keys {
+					if got := mustMeta(t, mem, id, key); got != want {
+						t.Errorf("%s %s = %q, want %q", id, key, got, want)
+					}
+				}
+			}
+			for id, want := range tc.wantAssignee {
+				b, err := mem.Get(id)
+				if err != nil {
+					t.Fatalf("reading %s: %v", id, err)
+				}
+				if b.Assignee != want {
+					t.Errorf("%s assignee = %q, want %q (the claim stands)", id, b.Assignee, want)
+				}
+			}
+			if result.RoutedMembers != tc.wantRoutedMembers {
+				t.Errorf("RoutedMembers = %d, want %d (only the members this sling wrote)", result.RoutedMembers, tc.wantRoutedMembers)
+			}
+			if len(result.BeadWarnings) != 1 {
+				t.Fatalf("BeadWarnings = %q, want exactly one changed-members warning", result.BeadWarnings)
+			}
+			warning := result.BeadWarnings[0]
+			for _, want := range append([]string{"wf-1", "changed after this sling read them"}, tc.wantNamed...) {
+				if !strings.Contains(warning, want) {
+					t.Errorf("warning %q does not name %q", warning, want)
+				}
+			}
+			for _, unwanted := range tc.wantUnnamed {
+				if strings.Contains(warning, unwanted) {
+					t.Errorf("warning %q names %s, which is routed to the sling's own target", warning, unwanted)
+				}
+			}
+		})
+	}
+}
+
+// rereadRacingStore lands a concurrent change on one member between the
+// sling's re-read of it and its write: land runs right after a read of the
+// bead at returns its snapshot (after the first read, or after every read
+// when every is set), as a claim or another sling would land after apply
+// judged the member. refused counts the fenced writes the store turned down,
+// so a test can tell the fence caught the change rather than a read seeing it.
+type rereadRacingStore struct {
+	*beads.MemStore
+	at      string
+	land    func(*beads.MemStore)
+	every   bool
+	landed  int
+	refused int
+}
+
+func (s *rereadRacingStore) Get(id string) (beads.Bead, error) {
+	b, err := s.MemStore.Get(id)
+	if err == nil && id == s.at && (s.every || s.landed == 0) {
+		s.landed++
+		s.land(s.MemStore)
+	}
+	return b, err
+}
+
+func (s *rereadRacingStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	err := s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
+	if beads.IsPreconditionFailed(err) {
+		s.refused++
+	}
+	return err
+}
+
+// TestSlingExpandedRootFencesEachMemberWriteOnItsReRead pins the fence on
+// apply's member writes: a route, claim, or unrelated write that lands on a
+// member after apply re-read it, and before the write, fails the write on the
+// store's revision fence instead of being overwritten. The member is read and
+// judged again: one another agent took keeps that route or claim and is named
+// in the warning, one routed to the sling's own target needs nothing more,
+// and one that only changed elsewhere still takes its route.
+func TestSlingExpandedRootFencesEachMemberWriteOnItsReRead(t *testing.T) {
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	other := config.Agent{Name: "other", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker, other}}
+	setMeta := func(id, key, value string) func(*testing.T, *beads.MemStore) {
+		return func(t *testing.T, store *beads.MemStore) {
+			t.Helper()
+			if err := store.SetMetadata(id, key, value); err != nil {
+				t.Fatalf("landing %s=%s on %s: %v", key, value, id, err)
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		at   string
+		land func(*testing.T, *beads.MemStore)
+		// wantRoutedMembers counts the members this sling itself wrote.
+		wantRoutedMembers int
+		// want is the raced member's metadata after the sling, key by key.
+		want map[string]string
+		// wantAssignee is the raced member's assignee after the sling.
+		wantAssignee string
+		// wantNamed is the warning's entry for the raced member; empty means
+		// the sling warns about nothing.
+		wantNamed string
+	}{
+		{
+			name:              "another sling routes a step",
+			at:                "wf-1.flip",
+			land:              setMeta("wf-1.flip", beadmeta.RoutedToMetadataKey, "other"),
+			wantRoutedMembers: 2,
+			want:              map[string]string{beadmeta.RoutedToMetadataKey: "other"},
+			wantNamed:         "wf-1.flip (routed to other)",
+		},
+		{
+			name: "a session claims a step",
+			at:   "wf-1.mix",
+			land: func(t *testing.T, store *beads.MemStore) {
+				rival := "rival-session"
+				if err := store.Update("wf-1.mix", beads.UpdateOpts{Assignee: &rival}); err != nil {
+					t.Fatalf("claiming wf-1.mix: %v", err)
+				}
+			},
+			wantRoutedMembers: 2,
+			want:              map[string]string{beadmeta.RoutedToMetadataKey: ""},
+			wantAssignee:      "rival-session",
+			wantNamed:         "wf-1.mix (claimed by rival-session)",
+		},
+		{
+			name:              "another sling execution-routes the control",
+			at:                "wf-1.finalize",
+			land:              setMeta("wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey, "other"),
+			wantRoutedMembers: 2,
+			want: map[string]string{
+				beadmeta.ExecutionRoutedToMetadataKey: "other",
+				beadmeta.RoutedToMetadataKey:          "core.control-dispatcher",
+			},
+			wantNamed: "wf-1.finalize (routed to other)",
+		},
+		{
+			name:              "a concurrent sling routes a step to the same target",
+			at:                "wf-1.flip",
+			land:              setMeta("wf-1.flip", beadmeta.RoutedToMetadataKey, "worker"),
+			wantRoutedMembers: 2,
+			want:              map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+		},
+		{
+			name:              "an unrelated write moves the step's revision",
+			at:                "wf-1.flip",
+			land:              setMeta("wf-1.flip", "note", "touched"),
+			wantRoutedMembers: 3,
+			want:              map[string]string{beadmeta.RoutedToMetadataKey: "worker", "note": "touched"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := cookedWorkflowStore(t)
+			store := &rereadRacingStore{MemStore: mem, at: tc.at, land: func(s *beads.MemStore) { tc.land(t, s) }}
+			deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps = withStore(deps, store)
+			deps.Router = &recordingRouter{store: store}
+
+			result, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+			if err != nil {
+				t.Fatalf("DoSling: %v", err)
+			}
+			for key, want := range tc.want {
+				if got := mustMeta(t, mem, tc.at, key); got != want {
+					t.Errorf("%s %s = %q, want %q", tc.at, key, got, want)
+				}
+			}
+			if store.refused != 1 {
+				t.Errorf("fenced writes refused = %d, want 1: the change must land between %s's re-read and its write", store.refused, tc.at)
+			}
+			raced, err := mem.Get(tc.at)
+			if err != nil {
+				t.Fatalf("reading %s: %v", tc.at, err)
+			}
+			if raced.Assignee != tc.wantAssignee {
+				t.Errorf("%s assignee = %q, want %q", tc.at, raced.Assignee, tc.wantAssignee)
+			}
+			// Every member the race left alone takes the sling's route.
+			for _, id := range []string{"wf-1.mix", "wf-1.flip"} {
+				if got := mustMeta(t, mem, id, beadmeta.RoutedToMetadataKey); id != tc.at && got != "worker" {
+					t.Errorf("%s gc.routed_to = %q, want worker", id, got)
+				}
+			}
+			if got := mustMeta(t, mem, "wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey); tc.at != "wf-1.finalize" && got != "worker" {
+				t.Errorf("control gc.execution_routed_to = %q, want worker", got)
+			}
+			if got := mustMeta(t, mem, "wf-1", beadmeta.RoutedToMetadataKey); got != "worker" {
+				t.Errorf("root gc.routed_to = %q, want worker", got)
+			}
+			if result.RoutedMembers != tc.wantRoutedMembers {
+				t.Errorf("RoutedMembers = %d, want %d (only the members this sling wrote)", result.RoutedMembers, tc.wantRoutedMembers)
+			}
+			if tc.wantNamed == "" {
+				if len(result.BeadWarnings) != 0 {
+					t.Fatalf("BeadWarnings = %q, want none", result.BeadWarnings)
+				}
+				return
+			}
+			if len(result.BeadWarnings) != 1 {
+				t.Fatalf("BeadWarnings = %q, want exactly one changed-members warning", result.BeadWarnings)
+			}
+			for _, want := range []string{"wf-1", "changed after this sling read them", tc.wantNamed} {
+				if !strings.Contains(result.BeadWarnings[0], want) {
+					t.Errorf("warning %q does not name %q", result.BeadWarnings[0], want)
+				}
+			}
+		})
+	}
+}
+
+// TestSlingExpandedRootFailsAMemberThatKeepsChanging pins the bound on the
+// fenced member write: a member whose revision moves after every re-read is
+// written memberRouteWriteAttempts times, and then the sling fails naming the
+// member and the re-run. The root stays unrouted, so the re-run is not
+// short-circuited as idempotent and completes the run.
+func TestSlingExpandedRootFailsAMemberThatKeepsChanging(t *testing.T) {
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker}}
+	mem := cookedWorkflowStore(t)
+	touches := 0
+	store := &rereadRacingStore{MemStore: mem, at: "wf-1.flip", every: true, land: func(s *beads.MemStore) {
+		touches++
+		if err := s.SetMetadata("wf-1.flip", "note", fmt.Sprintf("touch %d", touches)); err != nil {
+			t.Fatalf("touching wf-1.flip: %v", err)
+		}
+	}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps = withStore(deps, store)
+	router := &recordingRouter{store: store}
+	deps.Router = router
+
+	_, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+	if err == nil {
+		t.Fatal("DoSling succeeded although wf-1.flip changed under every write")
+	}
+	if !beads.IsPreconditionFailed(err) {
+		t.Errorf("error %q does not wrap the refused fence", err)
+	}
+	for _, want := range []string{"wf-1.flip", "re-run the same sling"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+	if store.refused != memberRouteWriteAttempts {
+		t.Errorf("fenced writes refused = %d, want %d", store.refused, memberRouteWriteAttempts)
+	}
+	if got := mustMeta(t, mem, "wf-1.flip", beadmeta.RoutedToMetadataKey); got != "" {
+		t.Errorf("wf-1.flip gc.routed_to = %q, want empty: no write landed", got)
+	}
+	if got := mustMeta(t, mem, "wf-1", beadmeta.RoutedToMetadataKey); got != "" {
+		t.Errorf("root gc.routed_to = %q, want empty: a failed member write leaves the root for the re-run", got)
+	}
+	if len(router.routed) != 0 {
+		t.Errorf("router routed %v, want nothing after a failed member write", router.routed)
+	}
+}
+
+// noConditionalWriterStore exposes only the beads.Store methods of the store
+// it wraps: a store with no conditional writer to fence a write on.
+type noConditionalWriterStore struct {
+	beads.Store
+}
+
+// TestSlingExpandedRootRoutesMembersOnAStoreThatCannotFence pins the
+// fallback: on a store with no conditional writer, or one that refuses
+// conditional writes as unsupported (BdStore without --if-revision), apply
+// still routes every member, with the plain write after the re-read.
+func TestSlingExpandedRootRoutesMembersOnAStoreThatCannotFence(t *testing.T) {
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker}}
+	for name, wrap := range map[string]func(*beads.MemStore) beads.Store{
+		"no conditional writer": func(mem *beads.MemStore) beads.Store {
+			return noConditionalWriterStore{Store: mem}
+		},
+		"conditional writes unsupported": func(mem *beads.MemStore) beads.Store {
+			mem.DisableConditionalWrites = true
+			return mem
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mem := cookedWorkflowStore(t)
+			store := wrap(mem)
+			deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps = withStore(deps, store)
+			deps.Router = &recordingRouter{store: store}
+
+			result, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+			if err != nil {
+				t.Fatalf("DoSling: %v", err)
+			}
+			if result.RoutedMembers != 3 {
+				t.Errorf("RoutedMembers = %d, want 3", result.RoutedMembers)
+			}
+			for _, id := range []string{"wf-1", "wf-1.mix", "wf-1.flip"} {
+				if got := mustMeta(t, mem, id, beadmeta.RoutedToMetadataKey); got != "worker" {
+					t.Errorf("%s gc.routed_to = %q, want worker", id, got)
+				}
+			}
+			if got := mustMeta(t, mem, "wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey); got != "worker" {
+				t.Errorf("control gc.execution_routed_to = %q, want worker", got)
+			}
+		})
+	}
+}
+
+// TestSlingExpandedRootLeavesCrossStoreGatesUnrouted pins that member routing
+// skips the gates a drain control mints for a blocker held in another store:
+// they carry the run's gc.root_bead_id, but no launch routes them. The sling
+// routes and counts the run's executable members only, and a gate minted
+// after the run is fully routed leaves the re-sling idempotent.
+func TestSlingExpandedRootLeavesCrossStoreGatesUnrouted(t *testing.T) {
+	store := cookedWorkflowStore(t)
+	mintGate := func(blocker string) beads.Bead {
+		t.Helper()
+		gate, err := store.Create(beads.Bead{
+			Title: "Waits for " + blocker + ", held in another store", Type: "gate", Status: "open",
+			Labels: []string{beadmeta.CrossStoreGateLabel},
+			Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey:          "wf-1",
+				beadmeta.CrossStoreGateOwnerMetadataKey: "wf-1.finalize",
+				beadmeta.CrossStoreBlockerMetadataKey:   blocker,
+			},
+		})
+		if err != nil {
+			t.Fatalf("minting the cross-store gate for %s: %v", blocker, err)
+		}
+		return gate
+	}
+	first := mintGate("rig-1")
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps = withStore(deps, store)
+	deps.Router = &recordingRouter{store: store}
+
+	result, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.RoutedMembers != 3 {
+		t.Errorf("RoutedMembers = %d, want 3 (the two steps and the control, not the gate)", result.RoutedMembers)
+	}
+	if len(result.BeadWarnings) != 0 {
+		t.Errorf("BeadWarnings = %q, want none", result.BeadWarnings)
+	}
+
+	// The drain mints another gate once the run is fully routed.
+	second := mintGate("rig-2")
+	again, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+	if err != nil {
+		t.Fatalf("re-sling: %v", err)
+	}
+	if !again.Idempotent {
+		t.Errorf("re-sling of the fully routed run is not idempotent (RoutedMembers=%d): a new gate voided the short-circuit", again.RoutedMembers)
+	}
+	for _, gate := range []beads.Bead{first, second} {
+		if got := mustMeta(t, store, gate.ID, beadmeta.RoutedToMetadataKey); got != "" {
+			t.Errorf("gate %s gc.routed_to = %q, want empty: no launch routes a cross-store gate", gate.ID, got)
+		}
 	}
 }

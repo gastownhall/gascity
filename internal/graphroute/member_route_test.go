@@ -191,6 +191,7 @@ func TestUnroutedMemberPatch(t *testing.T) {
 			"workflow topology": member(map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}),
 			"scope latch":       member(map[string]string{beadmeta.KindMetadataKey: beadmeta.KindScope}),
 			"formula spec":      member(map[string]string{beadmeta.KindMetadataKey: beadmeta.KindSpec}),
+			"cross-store gate":  crossStoreGate("g-1"),
 		}
 		for name, b := range cases {
 			patch, err := UnroutedMemberPatch(b, poolBinding)
@@ -202,6 +203,66 @@ func TestUnroutedMemberPatch(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("formula gate step is routed like any other step", func(t *testing.T) {
+		// A formula [steps.gate] bead is type gate with no cross-store label,
+		// and a launch routes it; only the drain's cross-store gate is skipped.
+		gate := beads.Bead{ID: "g-2", Title: "wait for approval", Type: "gate", Status: "open", Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: "r-1",
+		}}
+		patch, err := UnroutedMemberPatch(gate, poolBinding)
+		if err != nil {
+			t.Fatalf("UnroutedMemberPatch: %v", err)
+		}
+		want := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+		if !equalPatch(patch, want) {
+			t.Fatalf("patch = %v, want %v", patch, want)
+		}
+	})
+}
+
+// crossStoreGate is the gate bead a drain control mints for a blocker held in
+// another store (dispatch.NewCrossStoreGate): it carries the run's
+// gc.root_bead_id, so it is a member of the run, but no launch routes it.
+func crossStoreGate(id string) beads.Bead {
+	return beads.Bead{
+		ID: id, Title: "Waits for other-1, held in another store", Type: "gate", Status: "open",
+		Labels: []string{beadmeta.CrossStoreGateLabel},
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:          "r-1",
+			beadmeta.CrossStoreGateOwnerMetadataKey: "ctl-1",
+			beadmeta.CrossStoreBlockerMetadataKey:   "other-1",
+		},
+	}
+}
+
+// TestMemberRouteEligible pins the members member routing considers at all.
+// An eligible member may still take no patch (it already carries a route);
+// eligibility is what lets the sling report it as left on another agent.
+func TestMemberRouteEligible(t *testing.T) {
+	open := func(meta map[string]string) beads.Bead {
+		return beads.Bead{ID: "m-1", Title: "step", Type: "task", Status: "open", Metadata: meta}
+	}
+	for name, tc := range map[string]struct {
+		bead beads.Bead
+		want bool
+	}{
+		"unrouted step":      {open(map[string]string{beadmeta.RootBeadIDMetadataKey: "r-1"}), true},
+		"step routed away":   {open(map[string]string{beadmeta.RoutedToMetadataKey: "other-agent"}), true},
+		"control":            {open(map[string]string{beadmeta.KindMetadataKey: beadmeta.KindRalph}), true},
+		"formula gate step":  {beads.Bead{ID: "g-2", Type: "gate", Status: "open", Metadata: map[string]string{}}, true},
+		"closed":             {beads.Bead{ID: "m-2", Status: "closed", Metadata: map[string]string{}}, false},
+		"assigned":           {beads.Bead{ID: "m-3", Status: "open", Assignee: "someone", Metadata: map[string]string{}}, false},
+		"session-bound":      {open(map[string]string{beadmeta.SessionIDMetadataKey: "gc-sess-1"}), false},
+		"workflow topology":  {open(map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}), false},
+		"scope latch":        {open(map[string]string{beadmeta.KindMetadataKey: beadmeta.KindScope}), false},
+		"cross-store gate":   {crossStoreGate("g-1"), false},
+		"nil metadata, open": {beads.Bead{ID: "m-4", Status: "open"}, true},
+	} {
+		if got := MemberRouteEligible(tc.bead); got != tc.want {
+			t.Errorf("%s: MemberRouteEligible = %v, want %v", name, got, tc.want)
+		}
+	}
 }
 
 func equalPatch(got, want map[string]string) bool {

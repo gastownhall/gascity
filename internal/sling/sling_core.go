@@ -963,7 +963,7 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 	// Member routes go down before the root's own route: a failed member
 	// write then leaves the root unrouted, so the same sling re-run is not
 	// short-circuited as idempotent and completes the run.
-	if err := memberRoutes.apply(writer, &result); err != nil {
+	if err := memberRoutes.apply(beadStore, &result); err != nil {
 		telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 		return result, err
 	}
