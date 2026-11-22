@@ -330,3 +330,44 @@ func TestNativeReadRecoveryFailureIsTyped(t *testing.T) {
 		}
 	})
 }
+
+func TestNativeReadCancelDuringProbeReturnsCallerError(t *testing.T) {
+	dead, connector := newPooledStorageSpy(t, pingBlocks)
+	var reopens int32
+	store := storeWithReopen(dead, dead, &reopens)
+	store.readRetryBudgetOverride = 2 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- store.withReadRetryContext(ctx, alwaysFails(errPostConnectRead)) }()
+	var canceledAt time.Time
+	select {
+	case <-connector.started:
+		canceledAt = time.Now()
+		cancel()
+	case err := <-done:
+		t.Fatalf("read returned %v (%d reopens) before any endpoint probe started", err, atomic.LoadInt32(&reopens))
+	}
+	err := <-done
+	elapsed := time.Since(canceledAt)
+
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("read returned %s after the cancellation, want within 100ms", elapsed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("read err = %v, want context.Canceled", err)
+	}
+	for _, sentinel := range []error{ErrNativeReadDeadline, ErrNativeReadBudgetExhausted, ErrNativeReadRecoveryFailed} {
+		if errors.Is(err, sentinel) {
+			t.Errorf("read err = %v matches %v; the caller canceled, nothing else happened", err, sentinel)
+		}
+	}
+	const want = "native Dolt read retry budget exhausted (context canceled), last error: begin read tx: invalid connection"
+	if got := err.Error(); got != want {
+		t.Errorf("read err text = %q, want %q", got, want)
+	}
+	if n := atomic.LoadInt32(&reopens); n != 0 {
+		t.Errorf("reopens = %d, want 0", n)
+	}
+}
