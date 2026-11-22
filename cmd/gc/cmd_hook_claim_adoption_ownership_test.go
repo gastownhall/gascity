@@ -29,9 +29,14 @@ import (
 type staleCacheEnv struct {
 	canonicalAssignee string
 	readbackErr       error
-	reads             []string
-	stdout            bytes.Buffer
-	stderr            bytes.Buffer
+	// autoReclaim turns on the opt-in stale-lease reclaim lane
+	// (auto_reclaim_stale_claims).
+	autoReclaim bool
+	reads       []string
+	// reclaims records every bead the reclaim lane asked bd to revert.
+	reclaims []string
+	stdout   bytes.Buffer
+	stderr   bytes.Buffer
 }
 
 func (e *staleCacheEnv) run() int {
@@ -54,12 +59,19 @@ func (e *staleCacheEnv) run() int {
 		},
 		StampSessionClaim: func(string, string) error { return nil },
 		PublishRunMap:     func(string, string, ...string) error { return nil },
+		// bd answers that nothing was stale, so a reclaim attempt is recorded
+		// without reaching a claim.
+		ReclaimStale: func(_ context.Context, _ string, _ []string, beadID string) (bool, string, error) {
+			e.reclaims = append(e.reclaims, beadID)
+			return false, "", nil
+		},
 	}
 	return doHookClaim("query", "/rig", hookClaimOptions{
-		Assignee:           "worker-1",
-		IdentityCandidates: []string{"worker-1"},
-		RouteTargets:       []string{"worker"},
-		JSON:               true,
+		Assignee:               "worker-1",
+		IdentityCandidates:     []string{"worker-1"},
+		RouteTargets:           []string{"worker"},
+		JSON:                   true,
+		AutoReclaimStaleClaims: e.autoReclaim,
 	}, ops, &e.stdout, &e.stderr)
 }
 
@@ -87,6 +99,25 @@ func TestHookClaimAdoptionRefusesAStaleCachedOwnership(t *testing.T) {
 	}
 	if !strings.Contains(e.stderr.String(), "gcg-session-5a6da34c7f") {
 		t.Errorf("stderr = %q, want the canonical owner named", e.stderr.String())
+	}
+}
+
+// The opt-in stale reclaim lane does not overturn that refusal: a row the cache
+// attributes to this seat is the adoption tier's to judge, not another holder's
+// stale lease, so the seat drains without asking bd to revert the bead.
+func TestHookClaimAdoptionRefusalStandsWithAutoReclaimOn(t *testing.T) {
+	e := &staleCacheEnv{canonicalAssignee: "gcg-session-5a6da34c7f", autoReclaim: true}
+
+	code := e.run()
+
+	if len(e.reclaims) != 0 {
+		t.Fatalf("reclaims = %v, want none: the reclaim lane must skip a row held under this seat's own identity", e.reclaims)
+	}
+	if strings.Contains(e.stdout.String(), `"action":"work"`) {
+		t.Fatalf("stdout = %q, want no work receipt", e.stdout.String())
+	}
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (drained, nothing to do)", code)
 	}
 }
 

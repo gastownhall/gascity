@@ -190,13 +190,13 @@ func (f *fakeAutoReclaimBD) claimArgv() []string {
 	return out
 }
 
-// runAutoReclaimClaim runs one `gc hook --claim --json` and decodes its JSON
-// result. The code is the hook's own exit contract (a no-work drain is exit 1
-// by design), so callers assert the action they expect, not a blanket 0.
-func runAutoReclaimClaim(t *testing.T) (hookClaimJSONResult, int) {
+// runAutoReclaimClaim runs one `gc hook --claim --json [args...]` and decodes
+// its JSON result. The code is the hook's own exit contract (a no-work drain is
+// exit 1 by design), so callers assert the action they expect, not a blanket 0.
+func runAutoReclaimClaim(t *testing.T, args ...string) (hookClaimJSONResult, int) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	code := cmdHookWithOptions(args, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
 	var result hookClaimJSONResult
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
 		t.Fatalf("stdout is not a JSON claim result: %v\n%s; stderr=%s", err, stdout.String(), stderr.String())
@@ -349,8 +349,8 @@ func TestHookClaimNeverReclaimsWhenAgentLeavesKnobOff(t *testing.T) {
 
 // TestHookClaimReclaimFlagFollowsResolvedAgent is AC-4: the knob reaches the
 // claim door through config layers other than the agent's own [[agent]]
-// block — a [[patches.agent]] entry, and the GC_TEMPLATE agent a pool
-// instance with an unconfigured per-instance name resolves to.
+// block — a [[patches.agent]] entry, and the template agent a pool instance
+// with an unconfigured per-instance name falls back to when it names itself.
 func TestHookClaimReclaimFlagFollowsResolvedAgent(t *testing.T) {
 	t.Run("patch", func(t *testing.T) {
 		clearGCEnv(t)
@@ -376,9 +376,10 @@ func TestHookClaimReclaimFlagFollowsResolvedAgent(t *testing.T) {
 		disableManagedDoltRecoveryForTest(t)
 		t.Setenv("GC_BEADS", "file")
 		cityDir := writeAutoReclaimCity(t, autoReclaimWorkQuery, "auto_reclaim_stale_claims = true\n")
-		// A pool instance whose per-instance name is not a config entry: the
-		// runtime identity steps aside to worker-adhoc-1, so the hook resolves
-		// its agent through the GC_TEMPLATE fallback.
+		// A pool instance whose per-instance name is not a config entry,
+		// invoked the way a pack script runs `gc hook --claim $GC_AGENT`: the
+		// positional worker-adhoc-1 resolves to no agent, and because it is
+		// this runtime's own identity the hook retries with GC_TEMPLATE.
 		sessionID := newAutoReclaimSessionBead(t, cityDir, map[string]string{
 			"session_name":   "worker-adhoc-1",
 			"template":       "worker",
@@ -399,7 +400,7 @@ func TestHookClaimReclaimFlagFollowsResolvedAgent(t *testing.T) {
 		bd := &fakeAutoReclaimBD{reclaimReply: `{"reclaimed":[],"count":0}`}
 		bd.install(t)
 
-		result, code := runAutoReclaimClaim(t)
+		result, code := runAutoReclaimClaim(t, "worker-adhoc-1")
 		if code != 1 {
 			t.Fatalf("gc hook --claim exited %d for a no-work drain, want 1", code)
 		}
