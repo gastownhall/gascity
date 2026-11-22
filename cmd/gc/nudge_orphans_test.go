@@ -105,9 +105,9 @@ func newOrphanSeatFixture(t *testing.T) *orphanSeatFixture {
 	return f
 }
 
-// createSeat creates a session of template holding a pool seat: pool-managed
-// with agentName and slot. An empty slot creates a manual (non-pool) session.
-func (f *orphanSeatFixture) createSeat(t *testing.T, template, agentName, slot string) session.Info {
+// createSeat creates a worker session holding a pool seat: pool-managed with
+// agentName and slot. An empty slot creates a manual (non-pool) session.
+func (f *orphanSeatFixture) createSeat(t *testing.T, agentName, slot string) session.Info {
 	t.Helper()
 	meta := map[string]string{"session_origin": "manual", "agent_name": agentName}
 	if slot != "" {
@@ -115,9 +115,9 @@ func (f *orphanSeatFixture) createSeat(t *testing.T, template, agentName, slot s
 		meta["pool_managed"] = "true"
 		meta["pool_slot"] = slot
 	}
-	info, err := f.mgr.CreateSession(context.Background(), session.CreateOptions{Template: template, Title: template, Command: "codex", WorkDir: f.dir, Provider: "codex", Hints: runtime.Config{WorkDir: f.dir}, ExtraMeta: meta})
+	info, err := f.mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "worker", Command: "codex", WorkDir: f.dir, Provider: "codex", Hints: runtime.Config{WorkDir: f.dir}, ExtraMeta: meta})
 	if err != nil {
-		t.Fatalf("CreateSession %s/%s: %v", template, agentName, err)
+		t.Fatalf("CreateSession %s: %v", agentName, err)
 	}
 	return f.get(t, info.ID)
 }
@@ -202,7 +202,7 @@ func (f *orphanSeatFixture) state(t *testing.T) nudgequeue.State {
 // re-fenced onto it, and acked; the key is not counted orphaned.
 func TestDispatchAdoptsOrphanedPoolSeatNudgeForSuccessor(t *testing.T) {
 	f := newOrphanSeatFixture(t)
-	p := f.createSeat(t, "worker", "worker-2", "2")
+	p := f.createSeat(t, "worker-2", "2")
 	p = f.startIdle(t, p.ID)
 	item := f.enqueueFencedTo(t, p, "continue the claimed work", time.Now().Add(-time.Minute))
 	f.closeSession(t, p.ID)
@@ -210,7 +210,7 @@ func TestDispatchAdoptsOrphanedPoolSeatNudgeForSuccessor(t *testing.T) {
 	if !closed.Closed || closed.AgentName != "worker-2" || closed.Template != "worker" || closed.PoolSlot != "2" || !isPoolManagedSessionInfo(closed) {
 		t.Fatalf("setup: closed predecessor row = %+v, want it closed and keeping its pool seat", closed)
 	}
-	s := f.createSeat(t, "worker", "worker-2", "2")
+	s := f.createSeat(t, "worker-2", "2")
 	s = f.startIdle(t, s.ID)
 	f.fake.Calls = nil
 
@@ -238,4 +238,228 @@ func TestDispatchAdoptsOrphanedPoolSeatNudgeForSuccessor(t *testing.T) {
 	if got := state.DispatchSkips["orphaned"]; got != 0 {
 		t.Fatalf("DispatchSkips[orphaned] = %d, want 0 for an adopted key; full map %#v", got, state.DispatchSkips)
 	}
+}
+
+// An orphaned nudge whose fenced predecessor's seat has no unique holder is
+// not delivered: it stays pending, is counted orphaned, and only the TTL sweep
+// dead-letters it.
+func TestDispatchDoesNotAdoptOrphanWithoutUniqueSeatHolder(t *testing.T) {
+	cases := []struct {
+		name string
+		// predSlot is the predecessor's pool slot; empty makes it manual.
+		predSlot string
+		// holders are the slots of the running worker-2 sessions created after
+		// the predecessor closes.
+		holders []string
+		// archiveHolder archives the one holder (open, no longer holding its fence).
+		archiveHolder bool
+		unfenced      bool
+		resolution    string
+	}{
+		{name: "vacant seat", predSlot: "2", resolution: "seat-vacant"},
+		{name: "two holders", predSlot: "2", holders: []string{"2", "2"}, resolution: "seat-ambiguous"},
+		{name: "manual predecessor", predSlot: "", holders: []string{"2"}, resolution: "not-pool-seat"},
+		{name: "pool_slot mismatch", predSlot: "2", holders: []string{"3"}, resolution: "seat-vacant"},
+		{name: "only candidate archived", predSlot: "2", holders: []string{"2"}, archiveHolder: true, resolution: "seat-vacant"},
+		{name: "unfenced item", predSlot: "2", holders: []string{"2"}, unfenced: true, resolution: "unfenced"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOrphanSeatFixture(t)
+			p := f.startIdle(t, f.createSeat(t, "worker-2", tc.predSlot).ID)
+			var item queuedNudge
+			if tc.unfenced {
+				item = newQueuedNudge(p.ID, "left for the seat", time.Now().Add(-time.Minute))
+				if err := enqueueQueuedNudge(f.dir, item); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				item = f.enqueueFencedTo(t, p, "left for the seat", time.Now().Add(-time.Minute))
+			}
+			f.closeSession(t, p.ID)
+			// A running sibling on another slot keeps the city from being empty.
+			f.startIdle(t, f.createSeat(t, "worker-9", "9").ID)
+			for _, slot := range tc.holders {
+				h := f.startIdle(t, f.createSeat(t, "worker-2", slot).ID)
+				if tc.archiveHolder {
+					if err := f.store.SetMetadata(h.ID, "state", string(session.StateArchived)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			f.fake.Calls = nil
+
+			// Session setup resets the environment; enable route logging last.
+			t.Setenv("GC_DEBUG", "1")
+			var debugOut strings.Builder
+			delivered := f.dispatch(t, f.fake, &debugOut)
+			if msgs := f.nudgeCalls(); delivered != 0 || len(msgs) != 0 {
+				t.Fatalf("delivered=%d nudges=%v, want nothing delivered", delivered, msgs)
+			}
+			state := f.state(t)
+			if len(state.Pending) != 1 || state.Pending[0].ID != item.ID || state.Pending[0].SessionID != item.SessionID {
+				t.Fatalf("pending = %+v, want %s still pending with its own fence", state.Pending, item.ID)
+			}
+			if got := state.DispatchSkips["orphaned"]; got != 1 {
+				t.Fatalf("DispatchSkips[orphaned] = %d, want 1; full map %#v", got, state.DispatchSkips)
+			}
+			if want := "resolution=" + tc.resolution + " "; !strings.Contains(debugOut.String(), want) {
+				t.Fatalf("debug output missing %q:\n%s", want, debugOut.String())
+			}
+		})
+	}
+
+	t.Run("expired vacant-seat item is dead-lettered by the TTL sweep", func(t *testing.T) {
+		f := newOrphanSeatFixture(t)
+		p := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+		item := f.enqueueFencedTo(t, p, "stale", time.Now().Add(-25*time.Hour))
+		f.closeSession(t, p.ID)
+		f.startIdle(t, f.createSeat(t, "worker-9", "9").ID)
+		if delivered := f.dispatch(t, f.fake, nil); delivered != 0 {
+			t.Fatalf("delivered = %d, want 0", delivered)
+		}
+		state := f.state(t)
+		if len(state.Pending) != 0 || len(state.Dead) != 1 || state.Dead[0].ID != item.ID || state.Dead[0].LastError != "expired" {
+			t.Fatalf("pending=%+v dead=%+v, want %s dead-lettered expired", state.Pending, state.Dead, item.ID)
+		}
+	})
+}
+
+// TestResolveNudgeOrphanSeat pins the typed resolution of one orphaned item:
+// through its session fence to the predecessor's pool seat, and to the single
+// open session holding that seat once the predecessor no longer holds its
+// fence. Every resolution other than successor leaves the key queued.
+func TestResolveNudgeOrphanSeat(t *testing.T) {
+	cases := []struct {
+		name string
+		// build returns the item to resolve, the lookup budget, and the
+		// expected successor session ID ("" for none).
+		build          func(t *testing.T, f *orphanSeatFixture) (item queuedNudge, budget int, wantSuccessor string)
+		wantResolution nudgeOrphanResolution
+	}{
+		{
+			name: "closed pool predecessor with a unique successor",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				p := f.createSeat(t, "worker-2", "2")
+				f.closeSession(t, p.ID)
+				s := f.createSeat(t, "worker-2", "2")
+				return fencedOrphanItem(p), nudgeOrphanPredecessorLookupsPerPass, s.ID
+			},
+			wantResolution: nudgeOrphanSuccessor,
+		},
+		{
+			name: "closed pool predecessor whose seat is vacant",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				p := f.createSeat(t, "worker-2", "2")
+				f.closeSession(t, p.ID)
+				return fencedOrphanItem(p), nudgeOrphanPredecessorLookupsPerPass, ""
+			},
+			wantResolution: nudgeOrphanSeatVacant,
+		},
+		{
+			name: "two open sessions hold the closed predecessor's seat",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				p := f.createSeat(t, "worker-2", "2")
+				f.closeSession(t, p.ID)
+				f.createSeat(t, "worker-2", "2")
+				f.createSeat(t, "worker-2", "2")
+				return fencedOrphanItem(p), nudgeOrphanPredecessorLookupsPerPass, ""
+			},
+			wantResolution: nudgeOrphanSeatAmbiguous,
+		},
+		{
+			name: "the only open holder sits in a different pool slot",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				p := f.createSeat(t, "worker-2", "2")
+				f.closeSession(t, p.ID)
+				f.createSeat(t, "worker-2", "3")
+				return fencedOrphanItem(p), nudgeOrphanPredecessorLookupsPerPass, ""
+			},
+			wantResolution: nudgeOrphanSeatVacant,
+		},
+		{
+			name: "closed manual predecessor is not a pool seat",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				p := f.createSeat(t, "worker-2", "")
+				f.closeSession(t, p.ID)
+				f.createSeat(t, "worker-2", "2")
+				return fencedOrphanItem(p), nudgeOrphanPredecessorLookupsPerPass, ""
+			},
+			wantResolution: nudgeOrphanNotPoolSeat,
+		},
+		{
+			name: "fenced predecessor is still open and holds its fence",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				p := f.createSeat(t, "worker-2", "2")
+				f.createSeat(t, "worker-2", "2")
+				return fencedOrphanItem(p), nudgeOrphanPredecessorLookupsPerPass, ""
+			},
+			wantResolution: nudgeOrphanFencedSessionLive,
+		},
+		{
+			name: "no record answers the fenced session id",
+			build: func(_ *testing.T, _ *orphanSeatFixture) (queuedNudge, int, string) {
+				return fencedOrphanItem(session.Info{ID: "no-such-session"}), nudgeOrphanPredecessorLookupsPerPass, ""
+			},
+			wantResolution: nudgeOrphanFencedSessionUnknown,
+		},
+		{
+			name: "unfenced item keyed by the closed predecessor's bead id",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				p := f.createSeat(t, "worker-2", "2")
+				f.closeSession(t, p.ID)
+				f.createSeat(t, "worker-2", "2")
+				return newQueuedNudge(p.ID, "continuation", time.Now().Add(-time.Minute)), nudgeOrphanPredecessorLookupsPerPass, ""
+			},
+			wantResolution: nudgeOrphanUnfenced,
+		},
+		{
+			name: "unfenced item keyed by no session at all",
+			build: func(_ *testing.T, _ *orphanSeatFixture) (queuedNudge, int, string) {
+				return newQueuedNudge("ghost-lane", "wisp", time.Now().Add(-time.Minute)), nudgeOrphanPredecessorLookupsPerPass, ""
+			},
+			wantResolution: nudgeOrphanUnfenced,
+		},
+		{
+			name: "unfenced item keyed by the open seat holder",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				s := f.createSeat(t, "worker-2", "2")
+				return newQueuedNudge(s.ID, "wisp", time.Now().Add(-time.Minute)), nudgeOrphanPredecessorLookupsPerPass, ""
+			},
+			wantResolution: nudgeOrphanUnfenced,
+		},
+		{
+			name: "the lookup budget is spent before the store read",
+			build: func(t *testing.T, f *orphanSeatFixture) (queuedNudge, int, string) {
+				p := f.createSeat(t, "worker-2", "2")
+				f.closeSession(t, p.ID)
+				f.createSeat(t, "worker-2", "2")
+				return fencedOrphanItem(p), 0, ""
+			},
+			wantResolution: nudgeOrphanLookupDeferred,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOrphanSeatFixture(t)
+			item, budget, wantSuccessor := tc.build(t, f)
+			snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+			if err != nil {
+				t.Fatalf("loadSessionBeadSnapshot: %v", err)
+			}
+			seat := newNudgeOrphanSeatResolver(snapshot.OpenInfos(), sessionFrontDoor(f.store.Store).Get, budget).resolve(item)
+			if seat.Resolution != tc.wantResolution {
+				t.Fatalf("resolution = %q, want %q", seat.Resolution, tc.wantResolution)
+			}
+			if seat.Successor.ID != wantSuccessor {
+				t.Fatalf("successor = %q, want %q", seat.Successor.ID, wantSuccessor)
+			}
+		})
+	}
+}
+
+// fencedOrphanItem is a due continuation keyed by and fenced to p, as the
+// hook-claim path writes it for an unaliased pool worker.
+func fencedOrphanItem(p session.Info) queuedNudge {
+	return newQueuedNudgeWithOptions(p.ID, "continuation", "hook-claim-continuation", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: p.ID, ContinuationEpoch: p.ContinuationEpoch})
 }
