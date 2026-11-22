@@ -795,3 +795,100 @@ func TestCascadeNudgeLeavesItsOwnBlockedCloseUnrecordedBesideAnotherBlocker(t *t
 		t.Fatalf("ga-blk's passing close must nudge worker-1; gc calls:\n%s", logged)
 	}
 }
+
+// cascadeShapeClose is one bead.closed event for ga-blk in each payload shape
+// `gc events` prints: the API envelope wraps the bead under .payload.bead, and
+// the local fallback (stopped city, supervisor 404) passes the stored raw
+// snapshot through flat, so the bead fields sit directly under .payload.
+var cascadeShapeClose = map[string]string{
+	"wrapped": `{"seq":7,"type":"bead.closed","actor":"gc","subject":"ga-blk","payload":{"bead":{"id":"ga-blk","status":"closed"}}}`,
+	"flat":    `{"seq":7,"type":"bead.closed","actor":"gc","subject":"ga-blk","payload":{"id":"ga-blk","status":"closed"}}`,
+}
+
+// countBlockerReads counts the logged reads of blocker's dependents
+// (`gc bd dep list <blocker> ... --direction=up`).
+func countBlockerReads(t *testing.T, logPath, blocker string) int {
+	t.Helper()
+	logged, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read gc log: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(logged), "\n") {
+		if strings.HasPrefix(line, "gc bd dep list "+blocker+" ") && strings.Contains(line, "--direction=up") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCascadeNudgeMatchesEveryBeadClosedShape pins the order against both
+// shapes `gc events` prints a bead.closed payload in (docs/reference/events.md
+// "Filtering and Shape"). The order exits 0 without a nudge when its selector
+// finds no blocker, so a selector that reads one shape silently disables the
+// order whenever the other is printed (#5968). One close printed in both
+// shapes is still one blocker, and a close line that names no bead is
+// skipped without a dependent read.
+func TestCascadeNudgeMatchesEveryBeadClosedShape(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+
+	cases := []struct {
+		name       string
+		events     []string
+		wantNudges int
+		wantReads  int
+	}{
+		{
+			name:       "flat",
+			events:     []string{cascadeShapeClose["flat"]},
+			wantNudges: 1,
+			wantReads:  1,
+		},
+		{
+			name:       "one close printed in both shapes",
+			events:     []string{cascadeShapeClose["wrapped"], strings.Replace(cascadeShapeClose["flat"], `"seq":7`, `"seq":8`, 1)},
+			wantNudges: 1,
+			wantReads:  1,
+		},
+		{
+			name:   "no payload",
+			events: []string{`{"seq":7,"type":"bead.closed","actor":"gc","subject":"ga-blk"}`},
+		},
+		{
+			name:   "null wrapped bead",
+			events: []string{`{"seq":7,"type":"bead.closed","actor":"gc","subject":"ga-blk","payload":{"bead":null}}`},
+		},
+		{
+			name:   "empty flat id",
+			events: []string{`{"seq":7,"type":"bead.closed","actor":"gc","subject":"ga-blk","payload":{"id":""}}`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			eventsPath := filepath.Join(dir, "events.jsonl")
+			if err := os.WriteFile(eventsPath, []byte(strings.Join(tc.events, "\n")+"\n"), 0o644); err != nil {
+				t.Fatalf("write events: %v", err)
+			}
+			binDir, logPath := fakeGCBin(t, cascadeFake{
+				eventsPath: eventsPath,
+				depJSON:    `[{"id":"ga-dep","status":"open","assignee":"worker-1"}]`,
+				failDir:    dir,
+			}.body())
+
+			if out, err := runCascadeNudge(t, binDir, filepath.Join(dir, "state")); err != nil {
+				t.Fatalf("cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+			}
+			got, logged := countNudges(t, logPath)
+			if got != tc.wantNudges || countNudgesTo(t, logPath, "worker-1") != tc.wantNudges {
+				t.Fatalf("nudges = %d (to worker-1 = %d), want %d to worker-1; gc calls:\n%s",
+					got, countNudgesTo(t, logPath, "worker-1"), tc.wantNudges, logged)
+			}
+			if reads := countBlockerReads(t, logPath, "ga-blk"); reads != tc.wantReads {
+				t.Fatalf("dependent reads of ga-blk = %d, want %d; gc calls:\n%s", reads, tc.wantReads, logged)
+			}
+		})
+	}
+}
