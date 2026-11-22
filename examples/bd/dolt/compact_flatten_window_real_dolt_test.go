@@ -12,27 +12,42 @@ import (
 )
 
 // flattenWindowCity is a flatten-eligible, no-remote real-Dolt city whose
-// compact run is wrapped by a dolt shim that commits a same-count UPDATE from
-// a second client right after the flatten call returns, before compact
-// resumes (#8502).
+// compact run is wrapped by a dolt shim that commits a second client's write
+// right after the flatten call returns, before compact resumes (#8502).
 type flattenWindowCity struct {
-	doltPath  string
-	root      string
-	cityPath  string
-	dataDir   string
-	port      int
-	shimPath  string
-	fired     string
-	writerLog string
+	doltPath      string
+	root          string
+	cityPath      string
+	dataDir       string
+	port          int
+	shimPath      string
+	fired         string
+	writerLog     string
+	writerMessage string
 }
 
+// sameCountUpdateWriterMessage is the commit message of the default
+// flatten-window writer, a same-count UPDATE of an existing bead.
+const sameCountUpdateWriterMessage = "bd: update"
+
+// newFlattenWindowCity builds a flatten-window city whose writer commits a
+// same-count UPDATE of an existing bead.
 func newFlattenWindowCity(t *testing.T) *flattenWindowCity {
+	t.Helper()
+	return newFlattenWindowCityWithWriter(t,
+		"UPDATE beads SET name='x' WHERE id=1; CALL DOLT_COMMIT('-am','"+sameCountUpdateWriterMessage+"')",
+		sameCountUpdateWriterMessage)
+}
+
+// newFlattenWindowCityWithWriter builds a flatten-window city whose writer
+// runs writerSQL, which must commit with writerMessage.
+func newFlattenWindowCityWithWriter(t *testing.T, writerSQL, writerMessage string) *flattenWindowCity {
 	t.Helper()
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skipf("dolt not found: %v", err)
 	}
-	c := &flattenWindowCity{doltPath: doltPath, root: repoRoot(t), cityPath: t.TempDir()}
+	c := &flattenWindowCity{doltPath: doltPath, root: repoRoot(t), cityPath: t.TempDir(), writerMessage: writerMessage}
 	c.dataDir = filepath.Join(c.cityPath, ".beads", "dolt")
 	dbDir := filepath.Join(c.dataDir, "beads")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
@@ -57,8 +72,8 @@ func newFlattenWindowCity(t *testing.T) *flattenWindowCity {
 	waitForDoltServerQueryForCompactTest(t, doltPath, port)
 
 	// The shim runs the real dolt and forwards its output unchanged; right
-	// after the flatten call returns it commits a same-count UPDATE from a
-	// second client, once.
+	// after the flatten call returns it commits writerSQL from a second
+	// client, once.
 	shimDir := t.TempDir()
 	c.fired = filepath.Join(shimDir, "writer-fired")
 	c.writerLog = filepath.Join(shimDir, "writer.log")
@@ -71,12 +86,12 @@ case "$*" in
   if [ ! -e %q ]; then
     : > %q
     DOLT_CLI_PASSWORD= "$real" --host 127.0.0.1 --port %d --user root --no-tls --use-db beads \
-      sql -q "UPDATE beads SET name='x' WHERE id=1; CALL DOLT_COMMIT('-am','bd: update')" > %q 2>&1
+      sql -q %q > %q 2>&1
   fi
   ;;
 esac
 exit $rc
-`, doltPath, c.fired, c.fired, port, c.writerLog)
+`, doltPath, c.fired, c.fired, port, writerSQL, c.writerLog)
 	c.shimPath = filepath.Join(shimDir, "dolt")
 	if err := os.WriteFile(c.shimPath, []byte(shim), 0o755); err != nil {
 		t.Fatalf("write dolt shim: %v", err)
@@ -118,7 +133,7 @@ func (c *flattenWindowCity) runWriterRace(t *testing.T) (string, error) {
 	if _, statErr := os.Stat(c.fired); statErr != nil {
 		t.Fatalf("writer shim never fired after the flatten (%v); test did not exercise the window:\n%s", statErr, out)
 	}
-	if n := c.cell(t, "SELECT COUNT(*) FROM dolt_log WHERE message = 'bd: update'"); n != "1" {
+	if n := c.cell(t, fmt.Sprintf("SELECT COUNT(*) FROM dolt_log WHERE message = '%s'", c.writerMessage)); n != "1" {
 		writerOut, _ := os.ReadFile(c.writerLog)
 		t.Fatalf("writer commit missing from history: %q\nwriter output:\n%s", n, writerOut)
 	}
@@ -210,5 +225,58 @@ func TestCompactRealDoltPendingGCAfterLaterWriterRetriesFullGCWithoutReflatten(t
 	}
 	if _, statErr := os.Stat(c.statePath("compact-pending-gc")); !os.IsNotExist(statErr) {
 		t.Fatalf("pending-GC marker not cleared after successful retry (stat err=%v)", statErr)
+	}
+}
+
+// Post-flatten verification reads the flatten commit's own snapshot (#8502):
+// a writer that commits a brand-new table right after the flatten is
+// invisible at <db>/<flatten>, so the flatten verifies clean, full GC is
+// deferred to the next quiet run instead of quarantining, and the writer's
+// commit stays HEAD. Read live, the new table quarantined as a table-list
+// change.
+func TestCompactRealDoltPinnedVerificationReads(t *testing.T) {
+	const writerMessage = "bd: post-flatten writer"
+	c := newFlattenWindowCityWithWriter(t,
+		"CREATE TABLE post_flatten (id INT PRIMARY KEY); INSERT INTO post_flatten VALUES (1);"+
+			" CALL DOLT_COMMIT('-Am','"+writerMessage+"')",
+		writerMessage)
+	out, err := c.runWriterRace(t)
+	if err != nil {
+		t.Fatalf("a writer committing after the flatten is outside the flatten commit's snapshot; pinned verification must defer, not fail: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "deferring full GC until the next quiet run") {
+		t.Fatalf("compact output missing the later-writer GC deferral:\n%s", out)
+	}
+	if _, statErr := os.Stat(c.statePath("compact-quarantine")); !os.IsNotExist(statErr) {
+		t.Fatalf("a flatten whose only anomaly is a later writer must not quarantine (stat err=%v):\n%s", statErr, out)
+	}
+	if reason := compactMarkerValue(t, c.statePath("compact-pending-gc"), "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("pending-GC defer marker reason = %q", reason)
+	}
+
+	flatten := c.cell(t, "SELECT commit_hash FROM dolt_log WHERE message = 'compaction: flatten history'")
+	writer := c.cell(t, fmt.Sprintf("SELECT commit_hash FROM dolt_log WHERE message = '%s'", writerMessage))
+	if flatten == writer {
+		t.Fatalf("the post-flatten writer must be a distinct commit from the flatten, both are %s", writer)
+	}
+	if parent := c.cell(t, fmt.Sprintf("SELECT parent_hash FROM dolt_commit_ancestors WHERE commit_hash = '%s'", writer)); parent != flatten {
+		t.Fatalf("writer commit parent=%s, want flatten commit %s", parent, flatten)
+	}
+
+	// The writer's new table is absent at the flatten commit and present
+	// live: that split is what pinning the verification reads guarantees.
+	revDB := "beads/" + flatten
+	const postFlattenMembership = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'post_flatten'"
+	if got := doltServerQueryDBForCompactTest(t, c.doltPath, c.port, revDB, postFlattenMembership); len(got) != 1 || strings.TrimSpace(got[0]) != "0" {
+		t.Fatalf("post_flatten must be absent at the flatten commit %s, got %v", flatten, got)
+	}
+	if got := doltServerQueryDBForCompactTest(t, c.doltPath, c.port, revDB, "SELECT COUNT(*) FROM `beads`"); len(got) != 1 || strings.TrimSpace(got[0]) != "4" {
+		t.Fatalf("the flatten commit must still hold the preflight rows, got %v", got)
+	}
+	if got := c.cell(t, postFlattenMembership); got != "1" {
+		t.Fatalf("the writer's table must be present live, got %s", got)
+	}
+	if head := c.cell(t, "SELECT HASHOF('HEAD')"); head != writer {
+		t.Fatalf("HEAD=%s, want the writer's commit %s (the deferral must not reset a later writer)", head, writer)
 	}
 }

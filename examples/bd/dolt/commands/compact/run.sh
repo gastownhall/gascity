@@ -1129,14 +1129,15 @@ flatten_commit_hash() {
   ' "$1"
 }
 
-# user_tables — emit one user-table name per line (excludes dolt_*
-# system tables and information_schema views).
+# user_tables DB — emit one user-table name per line (excludes dolt_*
+# system tables and information_schema views). DB may be a revision database
+# ("db/<commit>"); DATABASE() then scopes the list to that commit's tables.
 user_tables() {
   db="$1"
   out_tmp=$(mktemp)
   err_tmp=$(mktemp)
   if ! dolt_query "$db" \
-    "SELECT table_name FROM information_schema.tables WHERE table_schema = '$db' AND table_type = 'BASE TABLE' AND table_name NOT LIKE 'dolt\\_%' ESCAPE '\\\\' ORDER BY table_name" \
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND table_name NOT LIKE 'dolt\\_%' ESCAPE '\\\\' ORDER BY table_name" \
     > "$out_tmp" 2>"$err_tmp"; then
     printf 'compact: db=%s table list probe failed\n' "$db" >&2
     emit_error_file "$db" "$err_tmp"
@@ -1686,7 +1687,8 @@ verify_counts() {
     fi
   done < "$preflight"
   post_tables_tmp=$(mktemp)
-  if ! user_tables "$db" > "$post_tables_tmp"; then
+  # Subshell: user_tables assigns the global db, which must stay the base db.
+  if ! (user_tables "$verify_read_db") > "$post_tables_tmp"; then
     verify_counts_saw_probe_failure=1
     if [ "$fail" -eq 0 ]; then
       fail=2

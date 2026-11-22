@@ -265,3 +265,70 @@ func TestCompactScriptAcceptsValidFlattenCommitHash(t *testing.T) {
 		assertCompactVerifiedAtRevision(t, fixture, "beads/"+compactFakeFlattenCommit)
 	})
 }
+
+// The four verification probes read the revision database pinned to the
+// flatten commit; preflight, HEAD, marker and GC operations keep the base
+// database — for every database in the run.
+func TestCompactScriptPinsVerificationReadsToFlattenCommit(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second dolt db: %v", err)
+	}
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	pinned := map[string]map[string]bool{}
+	flattened := map[string]bool{}
+	gcRan := map[string]bool{}
+	for _, call := range readCompactDoltCalls(t, fixture.doltLog) {
+		base, rev, isRevision := strings.Cut(call.db, "/")
+		if isRevision && rev != compactFakeFlattenCommit {
+			t.Fatalf("read pinned to %q, want the flatten commit %s: %+v", rev, compactFakeFlattenCommit, call)
+		}
+		switch {
+		case isCompactFlattenCall(call.query):
+			if isRevision {
+				t.Fatalf("flatten ran against a revision database: %+v", call)
+			}
+			flattened[base] = true
+		case isCompactVerifyRead(call.query) && flattened[base] && !gcRan[base]:
+			if !isRevision {
+				t.Fatalf("verification read on %s used the live database, not the flatten commit: %+v", base, call)
+			}
+			if pinned[base] == nil {
+				pinned[base] = map[string]bool{}
+			}
+			switch {
+			case strings.HasPrefix(call.query, "SELECT COUNT(*) FROM `"):
+				pinned[base]["row count"] = true
+			case strings.HasPrefix(call.query, "SELECT DOLT_HASHOF_TABLE("):
+				pinned[base]["table value hash"] = true
+			case strings.Contains(call.query, "information_schema.tables"):
+				if !strings.Contains(call.query, "table_schema = DATABASE()") {
+					t.Fatalf("membership probe must scope to the selected revision database: %+v", call)
+				}
+				pinned[base]["membership"] = true
+			default:
+				pinned[base]["database value hash"] = true
+			}
+		default:
+			if isRevision {
+				t.Fatalf("only verification reads may use the revision database: %+v", call)
+			}
+			if strings.Contains(call.query, "DOLT_GC") {
+				gcRan[base] = true
+			}
+		}
+	}
+	for _, db := range []string{"beads", "zed"} {
+		if !flattened[db] || !gcRan[db] {
+			t.Fatalf("db %s: flattened=%v gc=%v, want both:\n%s", db, flattened[db], gcRan[db], out)
+		}
+		for _, probe := range []string{"row count", "table value hash", "membership", "database value hash"} {
+			if !pinned[db][probe] {
+				t.Fatalf("db %s: %s probe never read the flatten commit; pinned=%v", db, probe, pinned[db])
+			}
+		}
+	}
+}
