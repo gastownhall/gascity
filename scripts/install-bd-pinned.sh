@@ -102,6 +102,14 @@ if [ ! -f "$staged" ]; then
 	exit 1
 fi
 
+# The staged binary must embed the pin before it may replace the installed
+# bd: anything else recreates the skew this script exists to remove.
+staged_pin=$(bd_beads_version "$staged")
+if [ "$staged_pin" != "$pin" ]; then
+	echo "ERROR: the staged bd embeds github.com/steveyegge/beads ${staged_pin:-<no version>}, not the go.mod pin $pin; the installed bd is left untouched" >&2
+	exit 1
+fi
+
 mkdir -p "$INSTALL_DIR"
 tmpfile="$INSTALL_DIR/.bd.tmp.$$"
 cp -f "$staged" "$tmpfile"

@@ -331,6 +331,56 @@ func TestInstallBdPinnedFastPathSkipsTheBuild(t *testing.T) {
 	}
 }
 
+// TestInstallBdPinnedFailsClosedWhenTheBuildFails is AC-4: a failed bd build
+// leaves the installed bd byte-identical and leaves no staging or tmp files,
+// so a broken toolchain cannot take the working bd away.
+func TestInstallBdPinnedFailsClosedWhenTheBuildFails(t *testing.T) {
+	stub := writeBdStubGo(t)
+	stub.installFail = true
+	if err := os.MkdirAll(stub.installDir(), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", stub.installDir(), err)
+	}
+	bd := filepath.Join(stub.installDir(), "bd")
+	writeStubBd(t, bd, "v1.2.0")
+	before := fileSHA(t, bd)
+
+	out, err := runInstallBdPinned(t, stub, "")
+	if err == nil {
+		t.Fatalf("install-bd-pinned.sh succeeded although go install failed:\n%s", out)
+	}
+	if after := fileSHA(t, bd); after != before {
+		t.Errorf("a failed build replaced the installed bd:\n%s", out)
+	}
+	assertNoLeftovers(t, stub)
+}
+
+// TestInstallBdPinnedRefusesAWrongVersionStagedBinary is AC-4: a staged build
+// whose embedded beads version is not the pin is refused — installing it
+// would recreate exactly the skew this script exists to remove. The old bd
+// stays byte-identical and no staging or tmp files remain.
+func TestInstallBdPinnedRefusesAWrongVersionStagedBinary(t *testing.T) {
+	stub := writeBdStubGo(t)
+	stub.installPin = "v9.9.9-wrong"
+	if err := os.MkdirAll(stub.installDir(), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", stub.installDir(), err)
+	}
+	bd := filepath.Join(stub.installDir(), "bd")
+	writeStubBd(t, bd, "v1.2.0")
+	before := fileSHA(t, bd)
+
+	out, err := runInstallBdPinned(t, stub, "")
+	if err == nil {
+		t.Fatalf("install-bd-pinned.sh installed a bd that does not embed the pin:\n%s", out)
+	}
+	if !strings.Contains(out, bdStubPin) {
+		t.Fatalf("the refusal does not name the pin %s:\n%s", bdStubPin, out)
+	}
+	if after := fileSHA(t, bd); after != before {
+		t.Errorf("a refused staged build still replaced the installed bd:\n%s", out)
+	}
+	assertNoLeftovers(t, stub)
+}
+
 // TestInstallBdPinnedRefusesAReplacedModule: a go.mod replace directive moves
 // beads' code elsewhere, so its Require version says nothing about the bd gc
 // agrees with; the script must refuse rather than build a meaningless pin.
