@@ -421,3 +421,53 @@ func TestSlingMemberRoutingSkipsNonExpandedRoots(t *testing.T) {
 		}
 	})
 }
+
+// TestSlingExpandedRootRefusesMidInstantiation pins the latch guard: a run
+// still carrying gc.instantiating (sequential fallback wiring its dependency
+// graph) must not be member-routed out from under the instantiation. The
+// sling fails naming the latched bead and writes nothing — not the members,
+// not even the root's own route.
+func TestSlingExpandedRootRefusesMidInstantiation(t *testing.T) {
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker}}
+	runner := newFakeRunner()
+
+	for name, latched := range map[string]string{
+		"latched root":    "wf-1",
+		"latched member":  "wf-1.flip",
+		"latched control": "wf-1.finalize",
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := cookedWorkflowStore(t)
+			if err := store.SetMetadata(latched, beadmeta.InstantiatingMetadataKey, "true"); err != nil {
+				t.Fatalf("latching %s: %v", latched, err)
+			}
+			deps := testDeps(cfg, runtime.NewFake(), runner.run)
+			deps = withStore(deps, store)
+			router := &recordingRouter{store: store}
+			deps.Router = router
+
+			_, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+			if err == nil {
+				t.Fatal("sling of a mid-instantiation run succeeded; it would race the instantiation")
+			}
+			for _, want := range []string{latched, "gc.instantiating"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err.Error(), want)
+				}
+			}
+			// Nothing was written: every bead keeps exactly what it carried.
+			for _, id := range []string{"wf-1", "wf-1.mix", "wf-1.flip"} {
+				if got := mustMeta(t, store, id, beadmeta.RoutedToMetadataKey); got != "" {
+					t.Errorf("%s gc.routed_to = %q, want empty (no writes on refusal)", id, got)
+				}
+			}
+			if got := mustMeta(t, store, "wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey); got != "" {
+				t.Errorf("control gc.execution_routed_to = %q, want empty (no writes on refusal)", got)
+			}
+			if len(router.routed) != 0 {
+				t.Errorf("router routed %v, want nothing on refusal", router.routed)
+			}
+		})
+	}
+}

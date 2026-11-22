@@ -121,6 +121,12 @@ func (p *memberRoutePlan) apply(writer beads.Writer, result *SlingResult) error 
 // gc.root_bead_id membership (closed beads included — the same membership
 // dispatch's retry and fan-out spawns carry), so nested-scope members and
 // already-spawned attempts are covered too.
+//
+// A run still carrying gc.instantiating — on the root or any member — is
+// refused: sequential fallback is wiring its dependency graph, and routing
+// its beads out from under that would race the instantiation. The refusal
+// fires before any write, so a retried sling once instantiation completes
+// starts from the run's untouched state.
 func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, beadID string) (*memberRoutePlan, error) {
 	if strings.TrimSpace(beadID) == "" || deps.Store == (beads.WorkStore{}) {
 		return nil, nil
@@ -137,6 +143,17 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, beadID string)
 	if !graphroute.IsExpandedWorkflowRoot(root.Metadata) {
 		return nil, nil
 	}
+	members, err := beads.DirectMembersWithRoot(deps.Store, root)
+	if err != nil {
+		return nil, fmt.Errorf("listing the members of workflow %s: %w", root.ID, err)
+	}
+	for _, b := range append([]beads.Bead{root}, members...) {
+		if strings.TrimSpace(b.Metadata[beadmeta.InstantiatingMetadataKey]) != "" {
+			return nil, fmt.Errorf(
+				"routing workflow %s: %s is mid-instantiation (gc.instantiating set); sling it again once instantiation completes",
+				root.ID, b.ID)
+		}
+	}
 	a := opts.Target
 	routedTo := agentutil.NormalizePoolRouteTarget(deps.Cfg, agentutil.RoutedToIdentity(&a))
 	// Member routing is a built-in feature: when the target routes through
@@ -146,15 +163,11 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, beadID string)
 	// command's back would bypass it. The plan still counts the members that
 	// would have been routed, so apply can warn instead of staying silent.
 	if deps.Router == nil || IsCustomSlingQuery(a) {
-		return countExpandedRootMembers(root, routedTo, deps)
+		return countExpandedRootMembers(root, routedTo, members)
 	}
 	binding, err := graphroute.SlingTargetBinding(a, routedTo, deps.Sessions, deps.CityName, deps.Cfg)
 	if err != nil {
 		return nil, fmt.Errorf("deriving the route for the members of %s: %w", root.ID, err)
-	}
-	members, err := beads.DirectMembersWithRoot(deps.Store, root)
-	if err != nil {
-		return nil, fmt.Errorf("listing the members of workflow %s: %w", root.ID, err)
 	}
 	plan := &memberRoutePlan{rootID: root.ID, target: routedTo, binding: binding}
 	for _, member := range members {
@@ -195,11 +208,7 @@ func planExpandedRootMemberRoutes(opts SlingOpts, deps SlingDeps, beadID string)
 // they were left alone. The probe binding is metadata-only with the target's
 // persisted identity: counting asks only "would built-in routing have
 // stamped this member", never a session name or group.
-func countExpandedRootMembers(root beads.Bead, routedTo string, deps SlingDeps) (*memberRoutePlan, error) {
-	members, err := beads.DirectMembersWithRoot(deps.Store, root)
-	if err != nil {
-		return nil, fmt.Errorf("listing the members of workflow %s: %w", root.ID, err)
-	}
+func countExpandedRootMembers(root beads.Bead, routedTo string, members []beads.Bead) (*memberRoutePlan, error) {
 	plan := &memberRoutePlan{rootID: root.ID, target: routedTo, customQuery: true}
 	probe := graphroute.GraphRouteBinding{QualifiedName: routedTo, MetadataOnly: true}
 	for _, member := range members {
