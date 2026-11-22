@@ -237,8 +237,8 @@ the tick never waits on order gates.
    subdirectory name, `Source` from the absolute file path.
 3. Higher-priority layers overwrite lower ones by name (map keyed on
    subdirectory name).
-4. Exclude disabled orders (`enabled = false`) and those in the
-   `skip` list.
+4. Exclude orders in the `skip` list. Disabled orders (`enabled = false`)
+   stay in the result so `[[orders.overrides]]` can enable them.
 5. Return the result slice preserving discovery order.
 
 ### Key Types
@@ -305,9 +305,11 @@ Violations indicate bugs.
   dispatcher entirely during build. They can only be triggered via
   `gc order run`.
 
-- **Disabled orders are excluded from scan results**: `Scan()`
-  filters out orders with `enabled = false`. They do not appear in
-  any CLI command output or dispatch evaluation.
+- **Only skip-listed orders are excluded from scan results**: `Scan()`
+  returns orders with `enabled = false` so an override can enable them.
+  `FilterEnabled` keeps disabled orders out of the active views
+  (`gc order list`, `run`, `check`, and dispatch evaluation); `gc order show`
+  and `gc order history` still find them.
 
 - **Cron trigger fires at most once per minute**: After matching the 5-field
   schedule, `checkCron()` verifies the last run was not in the same
@@ -438,7 +440,7 @@ files in the library and two in the CLI:
 |---|---|
 | `internal/orders/automation_test.go` | Parse (formula, exec, event orders), Validate (all trigger types, mutual exclusion, missing fields, timeout validation), IsEnabled default/explicit, IsExec, TimeoutOrDefault (defaults and custom), ScopedName (city and rig) |
 | `internal/orders/triggers_test.go` | CheckTrigger for all five trigger types: cooldown (never run, due, not due), cron (matched, not matched, already run this minute), condition (pass, fail), event (due, with cursor, cursor past all, not due, nil provider), rig-scoped triggers (cooldown, cron, event use ScopedName), MaxSeqFromLabels (various label configurations) |
-| `internal/orders/scanner_test.go` | Scan (basic discovery, empty layers, layer override priority, skip list, disabled filtering, source path recording) |
+| `internal/orders/scanner_test.go` | Scan (basic discovery, empty layers, layer override priority, skip list, disabled orders returned, source path recording) |
 | `cmd/gc/order_dispatch_test.go` | Dispatcher nil-guard (no orders, manual-only), cooldown dispatch (due, not due, multiple), exec dispatch (due, failure, cooldown, ORDER_DIR env, timeout), rig-scoped dispatch (rig stamping, independent cooldown, qualified pool), rigExclusiveLayers, qualifyPool, effectiveTimeout (default, custom, capped) |
 | `cmd/gc/cmd_order_test.go` | CLI commands: list (empty, with data, exec type), show (found, not found), check (due, not due), history, findOrder |
 

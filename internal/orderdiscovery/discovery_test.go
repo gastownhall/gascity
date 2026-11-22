@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 func TestScanAllNilConfigUsesDefaultCityRootsAndOSFS(t *testing.T) {
@@ -989,5 +990,72 @@ interval = "5m"
 	}
 	if aa[0].Exec != "scripts/city.sh" || aa[0].IsEnabled() {
 		t.Fatalf("order = exec %q enabled %v, want the disabled city-local copy", aa[0].Exec, aa[0].IsEnabled())
+	}
+}
+
+func TestScanAllOverrideCanEnableOrderItsFileDisables(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "nightly-bench", `[order]
+description = "Ships disabled; a city override turns it on"
+exec = "scripts/bench.sh"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+
+	enabled := true
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "nightly-bench", Enabled: &enabled},
+			},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(aa) != 1 || aa[0].Name != "nightly-bench" {
+		t.Fatalf("got %d orders (%v), want nightly-bench", len(aa), aa)
+	}
+	if !aa[0].IsEnabled() {
+		t.Fatal("nightly-bench disabled: the enabled=true override was not applied")
+	}
+	if active := orders.FilterEnabled(aa); len(active) != 1 || active[0].Name != "nightly-bench" {
+		t.Fatalf("FilterEnabled = %v, want nightly-bench kept in the active set", active)
+	}
+}
+
+func TestScanAllInvalidFileDisabledOrderReachesValidateHandler(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	// Neither formula nor exec: fails Validate even though the order is disabled.
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "broken", `[order]
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityLayer}},
+	}
+
+	var handled []string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnValidateError: func(orderName string, _ error) error {
+			handled = append(handled, orderName)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(handled) != 1 || !strings.Contains(handled[0], "broken") {
+		t.Fatalf("validate handler saw %v, want the file-disabled broken order", handled)
+	}
+	if len(aa) != 0 {
+		t.Fatalf("got %d orders (%v), want the invalid order dropped", len(aa), aa)
 	}
 }
