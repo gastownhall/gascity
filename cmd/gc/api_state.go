@@ -2848,7 +2848,11 @@ func symlinkAwareContainment(cityPath, resolved string) error {
 	if err != nil {
 		return fmt.Errorf("%w: resolving rig path %s: %w", configedit.ErrValidation, resolved, err)
 	}
-	return relWithinCity(realCity, realTarget)
+	// Both operands go through one canonicalizer: realCity is already collapsed
+	// by NormalizePathForCompare (darwin /private/var -> /var), so realTarget,
+	// a bare symlink resolution, must be collapsed the same way or every
+	// in-city rig on a /var or /tmp city reads as escaping it.
+	return relWithinCity(realCity, pathutil.NormalizePathForCompare(realTarget))
 }
 
 // relWithinCity reports the containment error if target is not lexically under
