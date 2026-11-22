@@ -180,11 +180,18 @@ func TestProxyProcessHelper(t *testing.T) {
 		// GC_SERVICE_HELPER_HEALTH_FAIL_FILE names a marker file a test
 		// writes to make this endpoint fail a probe. "hang" holds the
 		// response until the probe client's own timeout cancels the
-		// request. A missing or unreadable file means healthy, as before.
+		// request, "503" answers 503. A missing or unreadable file means
+		// healthy, as before.
 		if failFile := os.Getenv("GC_SERVICE_HELPER_HEALTH_FAIL_FILE"); failFile != "" {
-			if mode, err := os.ReadFile(failFile); err == nil && strings.TrimSpace(string(mode)) == "hang" {
-				<-r.Context().Done()
-				return
+			if mode, err := os.ReadFile(failFile); err == nil {
+				switch strings.TrimSpace(string(mode)) {
+				case "hang":
+					<-r.Context().Done()
+					return
+				case "503":
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
 			}
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -1301,9 +1308,10 @@ func containsPID(pids []int, pid int) bool {
 }
 
 // TestProxyProcessProxiesLiveProcessAfterFailedHealthProbe asserts that a
-// proxy_process service whose last health probe timed out still proxies
+// proxy_process service whose last health probe failed still proxies
 // requests to its live process, instead of refusing them with 503 until a
-// later probe passes.
+// later probe passes, and that the degraded state and its reason stay
+// visible in the service status until a probe passes again.
 func TestProxyProcessProxiesLiveProcessAfterFailedHealthProbe(t *testing.T) {
 	t.Setenv("GC_SERVICE_HELPER", "1")
 	setHelperPassthrough(t)
@@ -1365,5 +1373,39 @@ func TestProxyProcessProxiesLiveProcessAfterFailedHealthProbe(t *testing.T) {
 	}
 	if strings.TrimSpace(rec.Body.String()) != "POST /hooks/example" {
 		t.Fatalf("body = %q, want %q", strings.TrimSpace(rec.Body.String()), "POST /hooks/example")
+	}
+
+	// Requests being proxied does not hide the degraded state: Status and
+	// Manager.Get keep reporting it with the probe's failure reason, until
+	// a tick whose probe passes marks the service ready again.
+	degradedReason := status.Reason
+	status, _ = mgr.Get("bridge")
+	if status.State != "degraded" || status.LocalState != "degraded" || status.Reason != degradedReason {
+		t.Fatalf("status after a proxied request = %s/%s %q, want degraded with the same reason %q", status.State, status.LocalState, status.Reason, degradedReason)
+	}
+
+	if err := os.WriteFile(healthFailFile, []byte("503"), 0o644); err != nil {
+		t.Fatalf("writing the health-fail marker: %v", err)
+	}
+	mgr.Tick(context.Background(), time.Now().UTC())
+	status, _ = mgr.Get("bridge")
+	if status.State != "degraded" || status.LocalState != "degraded" || !strings.Contains(status.Reason, "health check returned 503") {
+		t.Fatalf("status after a 503 probe = %s/%s %q, want degraded naming the 503", status.State, status.LocalState, status.Reason)
+	}
+	rec = httptest.NewRecorder()
+	if ok := mgr.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/svc/bridge/hooks/example", strings.NewReader(`{}`))); !ok {
+		t.Fatal("ServeHTTP returned false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d while degraded after a 503 probe; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	if err := os.Remove(healthFailFile); err != nil {
+		t.Fatalf("removing the health-fail marker: %v", err)
+	}
+	mgr.Tick(context.Background(), time.Now().UTC())
+	status, _ = mgr.Get("bridge")
+	if status.State != "ready" || status.LocalState != "ready" || status.Reason != "" {
+		t.Fatalf("status after a passing probe = %s/%s %q, want ready with an empty reason", status.State, status.LocalState, status.Reason)
 	}
 }
