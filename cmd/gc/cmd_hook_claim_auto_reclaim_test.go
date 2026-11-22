@@ -50,10 +50,10 @@ func autoReclaimWorkQueryFor(candidateMetadata map[string]string) string {
 }
 
 // writeAutoReclaimCity writes a city with one city-scoped worker agent whose
-// work_query serves the AC-1 candidate. agentExtra is spliced into the
-// [[agent]] block (the knob under test); patchExtra is spliced at top level
-// (a [[patches.agent]] entry).
-func writeAutoReclaimCity(t *testing.T, workQuery, agentExtra, patchExtra string) string {
+// work_query serves the AC-1 candidate. extra is spliced after the [[agent]]
+// block: agent-level fields (the knob under test) or a [[patches.agent]]
+// entry that sets them through a config layer.
+func writeAutoReclaimCity(t *testing.T, workQuery, extra string) string {
 	t.Helper()
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -66,7 +66,7 @@ name = "test-city"
 name = "worker"
 scope = "city"
 work_query = '''` + workQuery + `'''
-` + agentExtra + patchExtra
+` + extra
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestHookClaimAttemptsStaleReclaimWhenAgentOptsIn(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
 	bd := &fakeAutoReclaimBD{reclaimReply: `{"reclaimed":[],"count":0}`}
-	arrangeAutoReclaimClaim(t, autoReclaimWorkQuery, "auto_reclaim_stale_claims = true\n", "", bd)
+	arrangeAutoReclaimClaim(t, autoReclaimWorkQuery, "auto_reclaim_stale_claims = true\n", bd)
 
 	result, code := runAutoReclaimClaim(t)
 	// The hook's own contract: a no-work drain is exit 1.
@@ -252,9 +252,9 @@ func autoReclaimSessionMetadata() map[string]string {
 // arrangeAutoReclaimClaim writes the city, creates the live session bead, sets
 // the named-session claim env, and installs the fake bd boundary. It returns
 // the city dir (whose .gc/events.jsonl carries the claim's events).
-func arrangeAutoReclaimClaim(t *testing.T, workQuery, agentExtra, patchExtra string, bd *fakeAutoReclaimBD) string {
+func arrangeAutoReclaimClaim(t *testing.T, workQuery, extra string, bd *fakeAutoReclaimBD) string {
 	t.Helper()
-	cityDir := writeAutoReclaimCity(t, workQuery, agentExtra, patchExtra)
+	cityDir := writeAutoReclaimCity(t, workQuery, extra)
 	sessionID := newAutoReclaimSessionBead(t, cityDir, autoReclaimSessionMetadata())
 	setAutoReclaimClaimEnv(t, cityDir, sessionID)
 	bd.install(t)
@@ -272,7 +272,7 @@ func TestHookClaimReclaimsStaleRouteMatchedBeadInSameInvocation(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
 	bd := &fakeAutoReclaimBD{reclaimReply: `{"reclaimed":[{"id":"work-1","previous_owner":"worker-dead"}],"count":1}`}
-	cityDir := arrangeAutoReclaimClaim(t, autoReclaimWorkQuery, "auto_reclaim_stale_claims = true\n", "", bd)
+	cityDir := arrangeAutoReclaimClaim(t, autoReclaimWorkQuery, "auto_reclaim_stale_claims = true\n", bd)
 
 	result, code := runAutoReclaimClaim(t)
 	if code != 0 {
@@ -310,6 +310,40 @@ func TestHookClaimReclaimsStaleRouteMatchedBeadInSameInvocation(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no %s event naming work-1 recovered from worker-dead in the city event log:\n%s", events.HookClaimReclaimedStale, logBytes)
+	}
+}
+
+// TestHookClaimNeverReclaimsWhenAgentLeavesKnobOff is AC-3: with
+// auto_reclaim_stale_claims unset or false, a route-matched bead held by
+// another identity is left alone — no bd reclaim, no claim mutation, and the
+// same no_work drain as at base. The flag-off path is byte-for-byte
+// unchanged (#6402 NFR4/NFR5).
+func TestHookClaimNeverReclaimsWhenAgentLeavesKnobOff(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		agentExtra string
+	}{
+		{name: "unset", agentExtra: ""},
+		{name: "false", agentExtra: "auto_reclaim_stale_claims = false\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "file")
+			bd := &fakeAutoReclaimBD{reclaimReply: `{"reclaimed":[{"id":"work-1","previous_owner":"worker-dead"}],"count":1}`}
+			arrangeAutoReclaimClaim(t, autoReclaimWorkQuery, tc.agentExtra, bd)
+
+			result, code := runAutoReclaimClaim(t)
+			if code != 1 {
+				t.Fatalf("gc hook --claim exited %d for a no-work drain, want 1", code)
+			}
+			if len(bd.argv) != 0 {
+				t.Fatalf("bd ran %q, want nothing: the reclaim lane must never fire with the knob off", bd.argv)
+			}
+			if result.Action != "drain" || result.Reason != "no_work" {
+				t.Fatalf("result = %+v, want a no_work drain", result)
+			}
+		})
 	}
 }
 
@@ -357,7 +391,7 @@ func TestHookClaimReclaimEligibilityGatesAreHonored(t *testing.T) {
 				reclaimReply: `{"reclaimed":[],"count":0}`,
 				reclaimErr:   "exit status 1: Error: no stale claims",
 			}
-			arrangeAutoReclaimClaim(t, autoReclaimWorkQueryFor(tc.metadata), "auto_reclaim_stale_claims = true\n", "", bd)
+			arrangeAutoReclaimClaim(t, autoReclaimWorkQueryFor(tc.metadata), "auto_reclaim_stale_claims = true\n", bd)
 
 			result, code := runAutoReclaimClaim(t)
 			if code != 1 {
