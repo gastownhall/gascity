@@ -550,16 +550,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// for a custom work_query, where both forms are the same string.
 	//
 	// The primary's reader serves every work leg's beads, so that branch also
-	// carries the work-leg route (claim_work_leg_route.go): a candidate the
-	// primary proves absent is claimed in the work leg that holds it.
-	var stores []hookStore
-	var legRoute *hookClaimWorkLegRoute
-	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
-		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
-		legRoute = newHookClaimWorkLegRoute(cityPath, cfg, &a, primaryHookStoreRef(cityPath, cfg, agentForQuery, workDir, queryEnv), overrides)
-	} else {
-		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
-	}
+	// carries the work-leg route (hookClaimStores): a candidate the primary
+	// proves absent is claimed in the work leg that holds it.
+	singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr)
+	stores, legRoute := hookClaimStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, workQuery, singleStore, func() map[string]bool {
+		return buildEffectiveSuspendedRigNames(cfg, st)
+	})
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as

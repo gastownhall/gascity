@@ -57,7 +57,11 @@ package main
 // it, and the leg that holds it claims it on the next turn of the same
 // invocation — at its own rank, not behind whatever else the fan-out is
 // carrying. Co-residence therefore keeps the WORK copy on any leg that holds it,
-// byte-identically to today.
+// byte-identically to today. On the primary-scoped branch the fan-out is the
+// primary alone, so there is no next turn: the work-leg route under this one
+// (claim_work_leg_route.go) reads every other work leg before the primary's
+// not-found reaches here, and a leg that holds the bead claims it in the same
+// op.
 //
 // A read rather than a second pass, because a second pass would let unrelated
 // lower-tier work in another leg be claimed first, which is the starvation this
@@ -453,7 +457,8 @@ func (r *hookClaimClassRoute) holds(id string) (bool, error) {
 // answered. from is the leg the write ran against; every OTHER leg is read for
 // the same id first, and a leg that holds it closes the escalation — the work
 // store's own answer stands, the federated loop drops this leg, and the leg that
-// holds the bead claims it on the next turn of the same invocation.
+// holds the bead claims it on the next turn of the same invocation (or, on the
+// primary-scoped branch, already did through the work-leg route below).
 func (r *hookClaimClassRoute) routes(ctx context.Context, from hookStore, id, assignee string, workErr error) (bool, error) {
 	if r == nil || !r.legProvedAbsent(ctx, from, id, assignee, workErr) {
 		return false, nil

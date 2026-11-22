@@ -131,11 +131,13 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // That is the shape of the I5 known gap — a relocated coordination class is not
 // a bd workspace, so no leg of this list can reach the binding on its own. The
 // federated `gc ready` reader (ga-bvdha) now runs AS the primary leg's command
-// and covers the binding in-process, so the hook does see class ids; what it
-// still cannot do is claim one, because the claim is a bd subprocess rooted in
-// this leg's workspace. This function is the seam that pins it
-// (conformanceClaimRouting); closing the gap makes the claim stop being a bd
-// subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
+// and covers the binding and every work leg in-process, so the hook sees class
+// ids and other legs' ids alike. The claim is still a bd subprocess rooted in
+// this leg's workspace, so two routes carry it to the store that holds the
+// bead: the class route (claim_class_route.go) to the binding, and on the
+// primary-scoped branch the work-leg route (claim_work_leg_route.go) to another
+// work leg. This function is the seam that pins the leg shape
+// (conformanceClaimRouting).
 func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
 	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs, false)
 }
@@ -145,6 +147,24 @@ func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, age
 // scopeFederatedHookStores).
 func hookWorkQueryPrimaryStore(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) hookStore {
 	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, nil, true)[0]
+}
+
+// hookClaimStores is the store list a claim reads and the work-leg route that
+// goes with it. Where the agent's federated query differs from its
+// single-store form (hookStoresScopeToPrimary) the claim reads only the
+// primary entry, whose reader serves every work leg's beads, so the route
+// claims a candidate the primary proves absent in the leg that holds it
+// (claim_work_leg_route.go). On a single-store city, and for a custom
+// work_query, the claim fans out to every store, each claiming what its own
+// query returned, and carries no route. suspendedRigs is called only for the
+// fan-out.
+func hookClaimStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, workQuery, singleStoreWorkQuery string, suspendedRigs func() map[string]bool) ([]hookStore, *hookClaimWorkLegRoute) {
+	if !hookStoresScopeToPrimary(workQuery, singleStoreWorkQuery) {
+		return hookWorkQueryStores(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs()), nil
+	}
+	primary := hookWorkQueryPrimaryStore(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides)
+	route := newHookClaimWorkLegRoute(cityPath, cfg, a, primaryHookStoreRef(cityPath, cfg, agentForQuery, workDir, queryEnv), identityOverrides)
+	return []hookStore{primary}, route
 }
 
 // hookWorkQueryStoreFanOut is hookWorkQueryStores, stopping after the first
