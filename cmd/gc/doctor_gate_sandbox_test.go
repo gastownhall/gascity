@@ -391,3 +391,29 @@ func TestGateSandboxBlindDetailsNameTheControllerOnlyKeys(t *testing.T) {
 		t.Errorf("healthy details %q must not carry the blind-result attribution line", healthy)
 	}
 }
+
+// TestGateSandboxEnvPinsManagedDirectCityOverAmbientEnv is the managed-city
+// shape from gastownhall/gascity#8418: `gc init --beads-transport direct` writes
+// an EMPTY .beads/config.yaml. That scope resolves as legacy-minimal, not
+// authoritative, so the canonical projection used to skip it and the ambient
+// BEADS_DOLT_SERVER_* of another city survived into the probe. The city's own
+// store is gc-managed, so the managed path must clear the ambient port.
+func TestGateSandboxEnvPinsManagedDirectCityOverAmbientEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityPath, ".beads", "config.yaml"), "")
+
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+
+	lookup := gateSandboxEnvLookup(t, cityPath)
+
+	if got := lookup["BEADS_DOLT_SERVER_PORT"]; got == "9999" {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q: another city's ambient port survived into the managed city's probe", got)
+	}
+	if got := lookup["BEADS_DOLT_SERVER_HOST"]; got == "127.0.0.1" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q: another city's ambient host survived into the managed city's probe", got)
+	}
+}
