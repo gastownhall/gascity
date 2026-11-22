@@ -418,3 +418,76 @@ func TestStartPreparedStartCandidate_CommittedRowWarmReuseUnchanged(t *testing.T
 func TestStartPreparedStartCandidate_FreshModePoolSlotWarmReuseUnchanged(t *testing.T) {
 	assertWarmReuseUnchanged(t, map[string]string{"started_config_hash": "hash-old", "wake_mode": "fresh"})
 }
+
+// uncommittedLiveStartEnv is a named session whose start never committed: an
+// awake row with no started_config_hash, a prompt-bearing template, and a live
+// runtime a non-controller start launched under the row's ID.
+type uncommittedLiveStartEnv struct {
+	*restartRequestTestEnv
+	session beads.Bead
+	name    string
+}
+
+func newUncommittedLiveStartEnv(t *testing.T) *uncommittedLiveStartEnv {
+	t.Helper()
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	name := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[name] = TemplateParams{Command: "true", Prompt: uncommittedStartPrompt, SessionName: name, TemplateName: "worker"}
+	session := env.createSessionBead(name)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "awake",
+		"last_woke_at":               env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	if err := env.sp.Start(context.Background(), name, runtime.Config{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	stampOccupant(t, env.sp, name, session.ID, "tok-occupant")
+	return &uncommittedLiveStartEnv{restartRequestTestEnv: env, session: session, name: name}
+}
+
+// tick runs one reconcile pass over the row's current state.
+func (e *uncommittedLiveStartEnv) tick(t *testing.T) {
+	t.Helper()
+	b, err := e.store.Get(e.session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	cfgNames := configuredSessionNames(e.cfg, "", e.store)
+	_ = reconcileSessionBeadsAtPath(
+		context.Background(), e.city, []beads.Bead{b}, e.desiredState, cfgNames, e.cfg, e.sp, e.store,
+		newDrainOps(e.sp), nil, nil, nil, e.dt, map[string]int{"worker": 1}, false, nil, "",
+		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, e.startOptions...,
+	)
+}
+
+// TestReconcileSessionBeads_EvictsLiveUncommittedStartAfterStartupTimeout is
+// AC-6: a live runtime the row never committed a start for is left alone
+// through the startup timeout, then stopped, so the controller's own start
+// can launch it with its prompt.
+func TestReconcileSessionBeads_EvictsLiveUncommittedStartAfterStartupTimeout(t *testing.T) {
+	env := newUncommittedLiveStartEnv(t)
+
+	env.tick(t)
+	if got := countCalls(env.sp, "Stop"); got != 0 || !env.sp.IsRunning(env.name) {
+		t.Fatalf("Stop calls = %d running=%v inside the startup timeout, want the runtime left alone; stderr=%s", got, env.sp.IsRunning(env.name), env.stderr.String())
+	}
+
+	env.clk.Time = env.clk.Time.Add(env.cfg.Session.StartupTimeoutDuration() + time.Second)
+	env.tick(t)
+
+	if env.sp.IsRunning(env.name) {
+		t.Fatalf("runtime still running past the startup timeout with no committed start; stdout=%s stderr=%s", env.stdout.String(), env.stderr.String())
+	}
+	if !strings.Contains(env.stderr.String(), "never committed") {
+		t.Errorf("stderr = %q, want the eviction logged", env.stderr.String())
+	}
+	assertNoStartCommitted(t, env.store, env.session.ID)
+}

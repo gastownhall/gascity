@@ -122,6 +122,15 @@ func TestDecidedMatch(t *testing.T) {
 		{site: FactsLegacyResetEvict, move: map[string]string{"reset_committed_at": "2026-02-01T00:00:00Z"}},
 		{site: FactsLegacyResetEvict, move: map[string]string{"generation": "3"}, wantMatch: true},
 
+		// #6417: a live runtime with no committed start is evicted only while
+		// the row still has none, under the same incarnation, unheld.
+		{site: FactsLegacyUncommittedEvict, wantMatch: true},
+		{site: FactsLegacyUncommittedEvict, move: map[string]string{"started_config_hash": "h-1"}},
+		{site: FactsLegacyUncommittedEvict, move: map[string]string{"generation": "3"}},
+		{site: FactsLegacyUncommittedEvict, move: map[string]string{"instance_token": "tok-2"}},
+		{site: FactsLegacyUncommittedEvict, move: map[string]string{"sleep_intent": "user-hold"}},
+		{site: FactsLegacyUncommittedEvict, move: map[string]string{"held_until": "2026-02-01T00:00:00Z"}},
+
 		// mc-uhvqj: a wake failure or churn accrues only for the wake it read.
 		{site: FactsLegacyExitAccrual, decided: map[string]string{"last_woke_at": "2026-01-01T00:00:00Z"}, wantMatch: true},
 		{site: FactsLegacyExitAccrual, closeRow: true},

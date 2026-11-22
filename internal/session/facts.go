@@ -81,6 +81,9 @@ const (
 	// FactsLegacyResetEvict is the eviction of a runtime a stalled
 	// continuation reset is waiting on.
 	FactsLegacyResetEvict FactsSite = "legacy.reset-evict"
+	// FactsLegacyUncommittedEvict is the eviction of a live runtime whose
+	// row never committed a start for it.
+	FactsLegacyUncommittedEvict FactsSite = "legacy.uncommitted-evict"
 	// FactsLegacyExitAccrual is a tick's wake-failure or churn accrual for a
 	// dead runtime.
 	FactsLegacyExitAccrual FactsSite = "legacy.exit-accrual"
@@ -183,6 +186,10 @@ var factsSites = map[FactsSite]factsSite{
 	FactsLegacyResetEvict: {
 		Only:   []string{"continuation_reset_pending", "reset_committed_at"},
 		Reason: "the eviction rests on the same continuation reset still pending; a row that moved on is not stalled",
+	},
+	FactsLegacyUncommittedEvict: {
+		Only:   []string{"generation", "instance_token", "started_config_hash", "sleep_intent", "held_until"},
+		Reason: "the eviction rests on the same incarnation with no start committed and no hold placed since; a commit, a new incarnation, or a suspend or hold leaves the runtime to its owner",
 	},
 }
 

@@ -79,6 +79,7 @@ type drainTracker struct {
 	drains           map[string]*drainState          // session bead ID -> drain state
 	idleProbes       map[string]*idleProbeState      // session bead ID -> async idle probe
 	resetStalls      map[string]bool                 // session bead ID -> reset stall event emitted
+	uncommitted      map[string]uncommittedStartMark // session bead ID -> live runtime with no committed start (#6417; session_uncommitted_start.go)
 	zombieCrashes    map[string]bool                 // session bead ID -> zombie-process session.crashed event emitted
 	suspendDeferrals map[string]int                  // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
 	liveClaimVetoes  map[string]string               // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
@@ -91,6 +92,7 @@ func newDrainTracker() *drainTracker {
 		drains:           make(map[string]*drainState),
 		idleProbes:       make(map[string]*idleProbeState),
 		resetStalls:      make(map[string]bool),
+		uncommitted:      make(map[string]uncommittedStartMark),
 		zombieCrashes:    make(map[string]bool),
 		suspendDeferrals: make(map[string]int),
 		liveClaimVetoes:  make(map[string]string),
