@@ -2422,6 +2422,7 @@ go_test(
         "session_sleep_test.go",
         "session_sleep_wake_override_test.go",
         "session_start_deferral_test.go",
+        "session_start_not_live_collision_test.go",
         "session_start_own_launch_test.go",
         "session_state_helpers_test.go",
         "session_suspend_continuity_test.go",

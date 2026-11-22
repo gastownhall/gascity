@@ -2246,7 +2246,15 @@ func runPreparedStartCandidate(
 	case errors.Is(err, runtime.ErrSessionExists):
 		switch {
 		case sessionExistsObservationErr != nil || !runtimeObservationLive(sessionExistsObservation):
-			outcome = TraceOutcomeProviderError
+			// The colliding runtime cannot be read or is already gone: the
+			// start converges on nothing and the failure accounting counts
+			// nothing. Deferring leaves the row for the next tick's decision
+			// (#6417: a terminal provider_error left the row neither
+			// started nor retrying).
+			outcome = TraceOutcomeDeferred
+			unattributedErr = unobservedCollisionStartError(err, sessionExistsObservationErr)
+			err = nil
+			rollbackPending = false
 		case item.ownLaunchRequired && (!identityRead || identity.token != runtimeTokenMatch):
 			// The runtime under the name is not one this attempt launched
 			// (an unreadable identity included, #6417): commit nothing and
@@ -4175,6 +4183,16 @@ func attributePendingCreateRuntime(info sessionpkg.Info, sessionName string, sp 
 // sets aside, annotated with the identity reads that failed.
 func unattributedStartError(err error, identity pendingCreateIdentity) error {
 	return fmt.Errorf("%w (attribution_unknown: %s)", err, strings.Join(identity.failed, "; "))
+}
+
+// unobservedCollisionStartError is the start error a deferral over a start
+// collision whose holder reads not live, or whose observation failed
+// (obsErr), carries for the lifecycle log.
+func unobservedCollisionStartError(err, obsErr error) error {
+	if obsErr != nil {
+		return fmt.Errorf("%w (collision_holder_unobserved: %w)", err, obsErr)
+	}
+	return fmt.Errorf("%w (collision_holder_not_live)", err)
 }
 
 // liveIncarnationStartError is the start error a deferral over a live
