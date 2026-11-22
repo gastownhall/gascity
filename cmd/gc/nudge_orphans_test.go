@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // A due key that no open session lists is counted orphaned once per key per
@@ -515,4 +516,95 @@ func TestDispatchOrphanAdoptionDefersToClaimCensus(t *testing.T) {
 			}
 		})
 	}
+}
+
+// snapshotCountingQueue counts whole-queue Snapshot reads.
+type snapshotCountingQueue struct {
+	storebinding.NudgeQueue
+	snapshots int
+}
+
+func (q *snapshotCountingQueue) Snapshot() (nudgequeue.State, error) {
+	q.snapshots++
+	return q.NudgeQueue.Snapshot()
+}
+
+// getRecordingStore records every single-bead Get.
+type getRecordingStore struct {
+	beads.Store
+	gets []string
+}
+
+func (s *getRecordingStore) Get(id string) (beads.Bead, error) {
+	s.gets = append(s.gets, id)
+	return s.Store.Get(id)
+}
+
+// A pass whose every due key an open session lists reads no whole-queue
+// snapshot and looks up no session outside the open snapshot (by ID or
+// session name); a pass with an
+// orphaned key reads the snapshot once and looks up its fenced predecessor.
+func TestDispatchSteadyStatePassReadsNoOrphanState(t *testing.T) {
+	pass := func(t *testing.T, f *orphanSeatFixture) (delivered int, snapshots int, foreignGets []string) {
+		t.Helper()
+		snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+		if err != nil {
+			t.Fatalf("loadSessionBeadSnapshot: %v", err)
+		}
+		open := make(map[string]bool)
+		for _, info := range snapshot.OpenInfos() {
+			open[info.ID] = true
+			open[info.SessionName] = true
+		}
+		handle := openNudgeQueue(f.dir, f.store)
+		queue := &snapshotCountingQueue{NudgeQueue: handle.Queue}
+		handle.Queue = queue
+		sessStore := &getRecordingStore{Store: f.store.Store}
+		delivered, err = dispatchQueuedNudges(handle, f.dir, supervisorCfg(), f.store.Store, sessStore, f.fake, snapshot, nil)
+		if err != nil {
+			t.Fatalf("dispatchQueuedNudges: %v", err)
+		}
+		for _, id := range sessStore.gets {
+			if !open[id] {
+				foreignGets = append(foreignGets, id)
+			}
+		}
+		return delivered, queue.snapshots, foreignGets
+	}
+
+	t.Run("every due key matched", func(t *testing.T) {
+		f := newOrphanSeatFixture(t)
+		s := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+		f.enqueueFencedTo(t, s, "keep going", time.Now().Add(-time.Minute))
+		f.startIdle(t, f.createSeat(t, "worker-9", "9").ID)
+		f.fake.Calls = nil
+
+		delivered, snapshots, foreign := pass(t, f)
+		if delivered != 1 {
+			t.Fatalf("delivered = %d, want 1", delivered)
+		}
+		if snapshots != 0 || len(foreign) != 0 {
+			t.Fatalf("snapshots=%d gets outside the open snapshot=%v, want none", snapshots, foreign)
+		}
+		if got := f.state(t).DispatchSkips["orphaned"]; got != 0 {
+			t.Fatalf("DispatchSkips[orphaned] = %d, want 0", got)
+		}
+	})
+
+	t.Run("an orphaned key", func(t *testing.T) {
+		f := newOrphanSeatFixture(t)
+		p := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+		f.enqueueFencedTo(t, p, "continue the claimed work", time.Now().Add(-time.Minute))
+		f.closeSession(t, p.ID)
+		f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+		f.fake.Calls = nil
+
+		delivered, snapshots, foreign := pass(t, f)
+		if delivered != 1 {
+			t.Fatalf("delivered = %d, want 1", delivered)
+		}
+		if snapshots != 1 || len(foreign) != 1 || foreign[0] != p.ID {
+			t.Fatalf("snapshots=%d gets outside the open snapshot=%v, want one snapshot and one lookup of %s", snapshots, foreign, p.ID)
+		}
+	})
 }
