@@ -366,3 +366,38 @@ func TestCompactScriptPreResetWriterProofUsesFlattenCommitDespiteLaterWriter(t *
 		}
 	}
 }
+
+// A quiet flatten verifies the flatten commit, runs full GC once and pushes
+// the compacted branch to the remote after GC.
+func TestCompactScriptQuietFlattenVerifiesFlattenCommitThenGCsAndPushes(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "writer race detected") {
+		t.Fatalf("quiet flatten reported a writer race:\n%s", out)
+	}
+	order := []string{}
+	for _, call := range readCompactDoltCalls(t, fixture.doltLog) {
+		switch {
+		case isCompactFlattenCall(call.query):
+			order = append(order, "flatten")
+		case strings.HasPrefix(call.query, "SELECT DOLT_HASHOF_DB(") && call.db == "beads/"+compactFakeFlattenCommit:
+			order = append(order, "verify-root")
+		case strings.Contains(call.query, "CALL DOLT_GC("):
+			order = append(order, "gc")
+		case strings.Contains(call.query, "CALL DOLT_PUSH("):
+			order = append(order, "push")
+		}
+	}
+	if got := strings.Join(order, ","); got != "flatten,verify-root,gc,push" {
+		t.Fatalf("quiet flatten sequence = %s, want flatten,verify-root,gc,push", got)
+	}
+	for _, kind := range []string{"compact-quarantine", "compact-pending-gc", "compact-pending-push"} {
+		marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", kind, "beads")
+		if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+			t.Fatalf("quiet flatten left %s marker; stat=%v", kind, statErr)
+		}
+	}
+}
