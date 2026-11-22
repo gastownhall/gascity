@@ -6879,7 +6879,10 @@ exit 0
 // TestSpawnStormDetectIgnoresEmptyRejectionReason pins that a key left set to
 // the empty string is not a rejection. jq reads "" as not null, so a cleared
 // rejection_reason written as "" used to count on every sweep and raised a
-// storm alert for a bead nothing had reset.
+// storm alert for a bead nothing had reset. A bead whose only marker is an
+// empty rejection_reason or recovered, recovered=false, or null metadata gets
+// no ledger entry and no SPAWN_STORM mail; a non-empty marker, including one
+// beside an empty key, still counts and alerts once.
 func TestSpawnStormDetectIgnoresEmptyRejectionReason(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -6900,13 +6903,22 @@ exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":                cityDir,
-		"GC_CITY_PATH":           cityDir,
-		"GC_PACK_STATE_DIR":      stateDir,
-		"GC_CALL_LOG":            gcLog,
-		"SPAWN_STORM_THRESHOLD":  "1",
-		"SPAWN_STORM_READY_JSON": `[{"id":"ga-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}},{"id":"ga-rejected","status":"open","metadata":{"rejection_reason":"tests red"}}]`,
-		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"SPAWN_STORM_READY_JSON": `[
+{"id":"ga-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}},
+{"id":"ga-rejected","status":"open","metadata":{"rejection_reason":"tests red"}},
+{"id":"ga-cleared-rr","status":"open","metadata":{"rejection_reason":""}},
+{"id":"ga-cleared-rec","status":"open","metadata":{"recovered":""}},
+{"id":"ga-recovered-false","status":"open","metadata":{"recovered":false}},
+{"id":"ga-null-metadata","status":"open","metadata":null},
+{"id":"ga-marked-rr","status":"open","metadata":{"rejection_reason":"Conflicts with main"}},
+{"id":"ga-mixed-empty-rr","status":"open","metadata":{"rejection_reason":"","recovered":"true"}}
+]`,
+		"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6932,6 +6944,25 @@ exit 0
 	}
 	if strings.Contains(string(gcData), "SPAWN_STORM: bead ga-empty") {
 		t.Fatalf("alerted on ga-empty, whose rejection_reason is empty\ngc log:\n%s", gcData)
+	}
+	for _, id := range []string{"ga-cleared-rr", "ga-cleared-rec", "ga-recovered-false", "ga-null-metadata"} {
+		if _, ok := counts[id]; ok {
+			t.Fatalf("ledger counted %s, whose reset markers are empty, false or absent\nledger: %s", id, ledgerData)
+		}
+		if strings.Contains(string(gcData), id) {
+			t.Fatalf("%s, whose reset markers are empty, false or absent, was named in a gc call\ngc log:\n%s", id, gcData)
+		}
+	}
+	if got := counts["ga-marked-rr"]; got != 1 {
+		t.Fatalf("ledger count for ga-marked-rr = %d, want 1\nledger: %s", got, ledgerData)
+	}
+	if got := counts["ga-mixed-empty-rr"]; got != 1 {
+		t.Fatalf("ledger count for ga-mixed-empty-rr = %d, want 1; an empty rejection_reason must not drop the non-empty recovered beside it\nledger: %s", got, ledgerData)
+	}
+	for _, id := range []string{"ga-marked-rr", "ga-mixed-empty-rr"} {
+		if n := strings.Count(string(gcData), "SPAWN_STORM: bead "+id+" reset 1x"); n != 1 {
+			t.Fatalf("SPAWN_STORM mail for %s sent %d times, want 1\ngc log:\n%s", id, n, gcData)
+		}
 	}
 }
 
