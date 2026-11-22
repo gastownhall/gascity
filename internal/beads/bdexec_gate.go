@@ -39,6 +39,11 @@ var ErrBDExecSlotWait = errors.New("waiting for a bd exec slot")
 // mutations such as bd update, close and create; mutations may also use idle
 // read capacity. Both semaphores are FIFO with unit weights, so callers are
 // admitted in arrival order within their lane and no lane starves.
+//
+// Every store the process serves shares the lanes, so all of a supervisor's
+// cities and rigs share one bound: reads that hang on one store can hold
+// every read slot until their per-command timeouts, and reads of every other
+// store wait for a slot meanwhile. Mutations keep their reserved slots.
 type bdExecGate struct {
 	size    int
 	readCap int

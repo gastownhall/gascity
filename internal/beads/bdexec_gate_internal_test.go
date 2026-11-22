@@ -13,13 +13,17 @@ import (
 )
 
 // aliveSampler records the peak number of live bd children, and of live read
-// children, until stopped.
+// children, until halted.
 type aliveSampler struct {
 	peakAll, peakReads atomic.Int64
 	stop               chan struct{}
+	stopOnce           sync.Once
 	done               chan struct{}
 }
 
+// sampleAlive starts sampling f's live children. The test's cleanup halts the
+// sampler too, so a test that fails before halting it never leaves it reading
+// the harness after its temp dir is gone.
 func sampleAlive(f *fakeBD) *aliveSampler {
 	s := &aliveSampler{stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
@@ -39,11 +43,14 @@ func sampleAlive(f *fakeBD) *aliveSampler {
 			}
 		}
 	}()
+	f.t.Cleanup(s.halt)
 	return s
 }
 
+// halt stops the sampler and waits for it to exit; calls after the first
+// only wait.
 func (s *aliveSampler) halt() {
-	close(s.stop)
+	s.stopOnce.Do(func() { close(s.stop) })
 	<-s.done
 }
 
@@ -98,9 +105,13 @@ func TestBDExecGate_BoundsChildren(t *testing.T) {
 	sampler := sampleAlive(f)
 	results := runConcurrently(f.root, run, argvs)
 
-	waitFor(t, "every gate slot to hold a live child", func() bool { return len(f.alive()) == gate.size })
-	// Hold the saturated state long enough for any over-admission to show.
-	time.Sleep(200 * time.Millisecond)
+	waitFor(t, "every gate slot to hold a live child", f.aliveCount, gate.size)
+	// Every slot is held while those children are alive, so no queued call
+	// can spawn before one of them is reaped.
+	if gate.total.TryAcquire(1) {
+		gate.total.Release(1)
+		t.Fatalf("the gate has a free slot while %d children are alive", gate.size)
+	}
 	if n := len(f.spawns()); n != gate.size {
 		t.Fatalf("%d children spawned while all were blocked, want %d", n, gate.size)
 	}
@@ -223,7 +234,7 @@ func TestBDExecGate_MutationProgressesWhileReadsSaturated(t *testing.T) {
 		reads = append(reads, fmt.Sprintf("list --json --label r%d", i))
 	}
 	readResults := runConcurrently(f.root, run, reads)
-	waitFor(t, "the read lane to fill", func() bool { return len(f.alive()) == gate.readCap })
+	waitFor(t, "the read lane to fill", f.aliveCount, gate.readCap)
 
 	mutations := []string{
 		"update gc-1 --status in_progress",
@@ -232,9 +243,7 @@ func TestBDExecGate_MutationProgressesWhileReadsSaturated(t *testing.T) {
 		"--dolt-auto-commit off close gc-4",
 	}
 	mutationResults := runConcurrently(f.root, run, mutations)
-	waitFor(t, "every mutation child to spawn", func() bool {
-		return len(f.spawns()) == gate.readCap+len(mutations)
-	})
+	waitFor(t, "every mutation child to spawn", f.spawnCount, gate.readCap+len(mutations))
 	alive := f.alive()
 	if n := countReads(alive); n != gate.readCap {
 		t.Fatalf("%d read children alive after the mutations spawned, want all %d still blocked", n, gate.readCap)

@@ -25,7 +25,7 @@ func saturateGate(t *testing.T, f *fakeBD, gate *bdExecGate) <-chan []gateCallRe
 		}
 	}
 	results := runConcurrently(f.root, f.runner(context.Background(), gate), argvs)
-	waitFor(t, "every gate slot to hold a live child", func() bool { return len(f.alive()) == gate.size })
+	waitFor(t, "every gate slot to hold a live child", f.aliveCount, gate.size)
 	return results
 }
 

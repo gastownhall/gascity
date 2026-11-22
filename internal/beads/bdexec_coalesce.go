@@ -3,13 +3,12 @@ package beads
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash"
 	"os/exec"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,39 +72,39 @@ func bdCommandCoalesces(args []string) bool {
 	return bdCommandIsRead(args) && args[0] != "sql"
 }
 
-// bdReadKey identifies calls whose children would be indistinguishable. It is
-// a hash, so credentials in the child env never sit in a map key.
-type bdReadKey [sha256.Size]byte
+// bdReadKey identifies calls whose children would be indistinguishable: the
+// resolved executable, the dir, every arg and the final child env, each
+// prefixed with its length so no two specs share a key by concatenation. It
+// holds the child env as is, credentials included, as the spec of the flight
+// it keys does, and never leaves the process.
+type bdReadKey string
 
-// bdReadKeyFor hashes the resolved executable, the dir, every arg and the
-// final child env, each length-prefixed so no two specs collide by
-// concatenation.
+// bdReadKeyFor returns the key of spec.
 func bdReadKeyFor(spec bdChildSpec) bdReadKey {
-	h := sha256.New()
-	writeKeyField(h, spec.path)
-	writeKeyField(h, spec.dir)
-	writeKeyCount(h, len(spec.args))
+	var b strings.Builder
+	writeKeyField(&b, spec.path)
+	writeKeyField(&b, spec.dir)
+	writeKeyCount(&b, len(spec.args))
 	for _, arg := range spec.args {
-		writeKeyField(h, arg)
+		writeKeyField(&b, arg)
 	}
-	writeKeyCount(h, len(spec.env))
+	writeKeyCount(&b, len(spec.env))
 	for _, kv := range spec.env {
-		writeKeyField(h, kv)
+		writeKeyField(&b, kv)
 	}
-	var key bdReadKey
-	h.Sum(key[:0])
-	return key
+	return bdReadKey(b.String())
 }
 
-func writeKeyCount(h hash.Hash, n int) {
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], uint64(n))
-	h.Write(buf[:]) //nolint:errcheck // hash.Hash writes never fail
+// writeKeyCount writes n in decimal, closed by a colon.
+func writeKeyCount(b *strings.Builder, n int) {
+	b.WriteString(strconv.Itoa(n))
+	b.WriteByte(':')
 }
 
-func writeKeyField(h hash.Hash, s string) {
-	writeKeyCount(h, len(s))
-	h.Write([]byte(s)) //nolint:errcheck // hash.Hash writes never fail
+// writeKeyField writes s prefixed with its length.
+func writeKeyField(b *strings.Builder, s string) {
+	writeKeyCount(b, len(s))
+	b.WriteString(s)
 }
 
 // bdReadCoalescer shares bd read children among identical concurrent calls
@@ -114,7 +113,9 @@ func writeKeyField(h hash.Hash, s string) {
 // stops accepting joiners in the same critical section that marks it running,
 // immediately before its child starts. So every caller gets the output of a
 // child that started after its call began, N overlapping identical callers
-// cost at most two children, and completed results are never cached.
+// cost at most two children, and completed results are never cached. A flight
+// has no budget of its own: each caller waits under its own budget, and the
+// flight ends when its last waiter leaves.
 type bdReadCoalescer struct {
 	gate *bdExecGate
 
@@ -122,21 +123,26 @@ type bdReadCoalescer struct {
 	keys map[bdReadKey]*bdReadKeyState
 }
 
-// bdReadKeyState is one key's entry; it is removed once the key has neither
-// a pending flight nor a running child.
+// bdReadKeyState is one key's entry. It stays in the map until every flight
+// created for the key has finished, abandoned flights included, so each
+// flight finds the entry it was created under until its own finish.
 type bdReadKeyState struct {
 	pending *bdReadFlight
 	// running is non-nil while a child for the key is alive and is closed
 	// once that child has been reaped.
 	running chan struct{}
+	// flights counts the key's flights that have not finished.
+	flights int
 }
 
 // bdReadFlight is one shared child. Fields above mu-guarded ones are set at
 // creation; result fields are written by the flight goroutine before done is
 // closed and read only after it.
 type bdReadFlight struct {
-	key     bdReadKey
-	spec    bdChildSpec
+	key  bdReadKey
+	spec bdChildSpec
+	// ctx bounds the flight's waits and its child. It has no deadline and is
+	// canceled when the last waiter leaves.
 	ctx     context.Context
 	cancel  context.CancelFunc
 	created time.Time
@@ -151,7 +157,6 @@ type bdReadFlight struct {
 
 	res      bdChildResult
 	admitErr error
-	timedOut bool
 	waited   time.Duration
 }
 
@@ -160,9 +165,21 @@ func newBDReadCoalescer(gate *bdExecGate) *bdReadCoalescer {
 }
 
 // do runs spec through a shared flight and returns this caller's view of the
-// result, classified against the caller's own parent, ctx, budget and start.
+// result (see wait).
 func (c *bdReadCoalescer) do(parent, ctx context.Context, spec bdChildSpec, timeout time.Duration, start time.Time) (out []byte, status string, traceErr, resultErr error) {
-	f := c.join(parent, spec, timeout)
+	f, created := c.join(parent, spec)
+	if created {
+		go c.fly(f)
+	}
+	return c.wait(parent, ctx, f, spec, timeout, start)
+}
+
+// wait blocks until flight f, which the caller has joined, finishes or the
+// caller's ctx ends, then drops the caller from f and returns the caller's
+// view of the result, classified against the caller's own parent, ctx, budget
+// and start. ctx must end by the caller's per-command budget: the waiters'
+// contexts are all that bounds a flight.
+func (c *bdReadCoalescer) wait(parent, ctx context.Context, f *bdReadFlight, spec bdChildSpec, timeout time.Duration, start time.Time) (out []byte, status string, traceErr, resultErr error) {
 	select {
 	case <-f.done:
 		c.leave(f)
@@ -179,12 +196,8 @@ func (c *bdReadCoalescer) do(parent, ctx context.Context, spec bdChildSpec, time
 		err := fmt.Errorf("running %s: %w", spec.name, f.res.refused)
 		return nil, "refused", err, err
 	}
-	resultCtx := ctx
-	if f.timedOut {
-		resultCtx = f.ctx
-	}
 	out = bytes.Clone(f.res.out)
-	status, traceErr, resultErr = classifyBDExecResult(parent, resultCtx, spec.name, timeout, start, out, f.res.stderr, f.res.err)
+	status, traceErr, resultErr = classifyBDExecResult(parent, ctx, spec.name, timeout, start, out, f.res.stderr, f.res.err)
 	return out, status, traceErr, resultErr
 }
 
@@ -214,10 +227,14 @@ func waiterGaveUpStatus(ctx context.Context, started bool) string {
 	}
 }
 
-// join adds the caller to the key's pending flight, or creates and launches
-// one. A new flight keeps the creator's context values but not its
-// cancellation, and runs under its own copy of the per-command budget.
-func (c *bdReadCoalescer) join(parent context.Context, spec bdChildSpec, timeout time.Duration) *bdReadFlight {
+// join adds the caller to the key's pending flight, or creates one and
+// reports created, and the caller then runs the new flight with fly. A new
+// flight keeps the creator's context values but neither its cancellation nor
+// a deadline, so no waiter is bounded by another's budget. Its context ends
+// when its last waiter leaves. Every waiter joined before the child started
+// and waits at most its own per-command budget, so the child never runs past
+// that budget counted from the child's start.
+func (c *bdReadCoalescer) join(parent context.Context, spec bdChildSpec) (f *bdReadFlight, created bool) {
 	key := bdReadKeyFor(spec)
 	callers := bdTraceCallersIfEnabled()
 	c.mu.Lock()
@@ -227,14 +244,14 @@ func (c *bdReadCoalescer) join(parent context.Context, spec bdChildSpec, timeout
 		st = &bdReadKeyState{}
 		c.keys[key] = st
 	}
-	if f := st.pending; f != nil {
-		f.waiters++
-		f.joined++
-		return f
+	if pending := st.pending; pending != nil {
+		pending.waiters++
+		pending.joined++
+		return pending, false
 	}
 	spec.args = slices.Clone(spec.args)
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
-	f := &bdReadFlight{
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	f = &bdReadFlight{
 		key:     key,
 		spec:    spec,
 		ctx:     ctx,
@@ -246,8 +263,8 @@ func (c *bdReadCoalescer) join(parent context.Context, spec bdChildSpec, timeout
 		joined:  1,
 	}
 	st.pending = f
-	go c.fly(f)
-	return f
+	st.flights++
+	return f, true
 }
 
 // fly runs a flight: it waits until the key has no running child, takes a
@@ -268,7 +285,6 @@ func (c *bdReadCoalescer) fly(f *bdReadFlight) {
 		return
 	}
 	f.res = runBDChild(f.ctx, f.spec, func() bool { return c.markRunning(f) })
-	f.timedOut = f.res.err != nil && errors.Is(f.ctx.Err(), context.DeadlineExceeded)
 	release()
 	c.finish(f)
 	if f.started {
@@ -336,7 +352,7 @@ func (c *bdReadCoalescer) markRunning(f *bdReadFlight) bool {
 }
 
 // finish clears the flight's marks once its child has been reaped (or never
-// started) and drops the key when nothing else refers to it.
+// started) and drops the key once none of its flights is left.
 func (c *bdReadCoalescer) finish(f *bdReadFlight) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -348,7 +364,8 @@ func (c *bdReadCoalescer) finish(f *bdReadFlight) {
 	if st.pending == f {
 		st.pending = nil
 	}
-	if st.pending == nil && st.running == nil {
+	st.flights--
+	if st.flights == 0 {
 		delete(c.keys, f.key)
 	}
 }

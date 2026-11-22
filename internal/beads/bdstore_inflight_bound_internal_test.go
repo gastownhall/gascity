@@ -5,7 +5,6 @@ package beads
 import (
 	"fmt"
 	"testing"
-	"time"
 )
 
 // TestExecCommandRunner_BoundsConcurrentBdChildren asserts that the process
@@ -16,7 +15,8 @@ import (
 func TestExecCommandRunner_BoundsConcurrentBdChildren(t *testing.T) {
 	const callers = 24
 	f := newFakeBD(t)
-	readCap := processBDExecGate().readCap
+	gate := processBDExecGate()
+	readCap := gate.readCap
 	if readCap >= callers {
 		t.Fatalf("process read ceiling %d must be below %d callers for this test", readCap, callers)
 	}
@@ -29,17 +29,22 @@ func TestExecCommandRunner_BoundsConcurrentBdChildren(t *testing.T) {
 	sampler := sampleAlive(f)
 	results := runConcurrently(f.root, run, argvs)
 
-	waitFor(t, "live bd children to reach the read ceiling", func() bool { return len(f.alive()) >= readCap })
-	time.Sleep(250 * time.Millisecond)
-	if n := len(f.alive()); n != readCap {
-		t.Errorf("%d bd children alive after 250ms, want the read ceiling %d", n, readCap)
+	waitFor(t, "live bd children to reach the read ceiling", f.aliveCount, readCap)
+	// Every read slot is held while those children are alive, so no other
+	// caller can spawn before one of them is reaped.
+	if gate.reads.TryAcquire(1) {
+		gate.reads.Release(1)
+		t.Fatalf("the process gate has a free read slot while %d read children are alive", readCap)
+	}
+	if n := f.spawnCount(); n != readCap {
+		t.Errorf("%d bd children spawned while the first %d were blocked, want the read ceiling %d", n, readCap, readCap)
 	}
 	f.releaseAll()
 	got := <-results
 	sampler.halt()
 
-	if peak := sampler.peakAll.Load(); peak != int64(readCap) {
-		t.Errorf("%d concurrent bd children alive for %d concurrent callers, want %d: execCommandRunner has no in-flight bound", peak, callers, readCap)
+	if peak := sampler.peakAll.Load(); peak > int64(readCap) {
+		t.Errorf("%d concurrent bd children alive for %d concurrent callers, want at most %d: execCommandRunner has no in-flight bound", peak, callers, readCap)
 	}
 	for _, r := range got {
 		if r.err != nil {
