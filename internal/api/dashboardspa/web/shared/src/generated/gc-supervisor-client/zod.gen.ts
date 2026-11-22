@@ -1219,6 +1219,14 @@ export const zOrderCheckListBody = z.object({
     checks: z.array(zOrderCheckResponse).nullable()
 });
 
+export const zOrderFailingPayload = z.object({
+    consecutive: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    failing_for_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    first_failed: z.string(),
+    last_error: z.string(),
+    order_name: z.string()
+});
+
 export const zOrderHistoryDetailResponse = z.object({
     bead_id: z.string(),
     created_at: z.string(),
@@ -4150,6 +4158,7 @@ export const zEventPayload = z.union([
     zNoPayload,
     zOpChangedPayload,
     zOpsRecordingDegradedPayload,
+    zOrderFailingPayload,
     zOrderInapplicablePayload,
     zOrderSkippedPayload,
     zOrderSuppressedPayload,
@@ -5459,6 +5468,24 @@ export const zTypedEventStreamEnvelopeOrderFailed = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope order.failing
+ */
+export const zTypedEventStreamEnvelopeOrderFailing = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zOrderFailingPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('order.failing'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope order.fired
  */
 export const zTypedEventStreamEnvelopeOrderFired = z.object({
@@ -6734,6 +6761,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeOpsRecordingDegraded.extend({ type: z.literal('ops.recording_degraded') }),
     zTypedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
+    zTypedEventStreamEnvelopeOrderFailing.extend({ type: z.literal('order.failing') }),
     zTypedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
     zTypedEventStreamEnvelopeOrderInapplicable.extend({ type: z.literal('order.inapplicable') }),
     zTypedEventStreamEnvelopeOrderSkipped.extend({ type: z.literal('order.skipped') }),
@@ -8060,6 +8088,25 @@ export const zTypedTaggedEventStreamEnvelopeOrderFailed = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('order.failed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope order.failing
+ */
+export const zTypedTaggedEventStreamEnvelopeOrderFailing = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zOrderFailingPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('order.failing'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -9406,6 +9453,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeOpsRecordingDegraded.extend({ type: z.literal('ops.recording_degraded') }),
     zTypedTaggedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedTaggedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
+    zTypedTaggedEventStreamEnvelopeOrderFailing.extend({ type: z.literal('order.failing') }),
     zTypedTaggedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
     zTypedTaggedEventStreamEnvelopeOrderInapplicable.extend({ type: z.literal('order.inapplicable') }),
     zTypedTaggedEventStreamEnvelopeOrderSkipped.extend({ type: z.literal('order.skipped') }),

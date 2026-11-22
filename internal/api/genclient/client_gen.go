@@ -4375,6 +4375,15 @@ type OrderCheckResponse struct {
 	ScopedName     string  `json:"scoped_name"`
 }
 
+// OrderFailingPayload defines model for OrderFailingPayload.
+type OrderFailingPayload struct {
+	Consecutive  int64  `json:"consecutive"`
+	FailingForMs int64  `json:"failing_for_ms"`
+	FirstFailed  string `json:"first_failed"`
+	LastError    string `json:"last_error"`
+	OrderName    string `json:"order_name"`
+}
+
 // OrderHistoryDetailResponse defines model for OrderHistoryDetailResponse.
 type OrderHistoryDetailResponse struct {
 	BeadId    string    `json:"bead_id"`
@@ -8801,6 +8810,22 @@ type TypedEventStreamEnvelopeOrderFailed struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeOrderFailing defines model for TypedEventStreamEnvelopeOrderFailing.
+type TypedEventStreamEnvelopeOrderFailing struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OrderFailingPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeOrderFired defines model for TypedEventStreamEnvelopeOrderFired.
 type TypedEventStreamEnvelopeOrderFired struct {
 	Actor            string                   `json:"actor"`
@@ -10973,6 +10998,23 @@ type TypedTaggedEventStreamEnvelopeOrderFailed struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOrderFailing defines model for TypedTaggedEventStreamEnvelopeOrderFailing.
+type TypedTaggedEventStreamEnvelopeOrderFailing struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OrderFailingPayload      `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -14779,6 +14821,32 @@ func (t *EventPayload) FromOpsRecordingDegradedPayload(v OpsRecordingDegradedPay
 
 // MergeOpsRecordingDegradedPayload performs a merge with any union data inside the EventPayload, using the provided OpsRecordingDegradedPayload
 func (t *EventPayload) MergeOpsRecordingDegradedPayload(v OpsRecordingDegradedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOrderFailingPayload returns the union data inside the EventPayload as a OrderFailingPayload
+func (t EventPayload) AsOrderFailingPayload() (OrderFailingPayload, error) {
+	var body OrderFailingPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOrderFailingPayload overwrites any union data inside the EventPayload as the provided OrderFailingPayload
+func (t *EventPayload) FromOrderFailingPayload(v OrderFailingPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOrderFailingPayload performs a merge with any union data inside the EventPayload, using the provided OrderFailingPayload
+func (t *EventPayload) MergeOrderFailingPayload(v OrderFailingPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19478,6 +19546,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderFailed(v Ty
 	return err
 }
 
+// AsTypedEventStreamEnvelopeOrderFailing returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderFailing
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderFailing() (TypedEventStreamEnvelopeOrderFailing, error) {
+	var body TypedEventStreamEnvelopeOrderFailing
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOrderFailing overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOrderFailing
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOrderFailing(v TypedEventStreamEnvelopeOrderFailing) error {
+	v.Type = "order.failing"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOrderFailing performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOrderFailing
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderFailing(v TypedEventStreamEnvelopeOrderFailing) error {
+	v.Type = "order.failing"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeOrderFired returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderFired
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderFired() (TypedEventStreamEnvelopeOrderFired, error) {
 	var body TypedEventStreamEnvelopeOrderFired
@@ -21526,6 +21622,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":
 		return t.AsTypedEventStreamEnvelopeOrderFailed()
+	case "order.failing":
+		return t.AsTypedEventStreamEnvelopeOrderFailing()
 	case "order.fired":
 		return t.AsTypedEventStreamEnvelopeOrderFired()
 	case "order.inapplicable":
@@ -23457,6 +23555,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOrder
 // MergeTypedTaggedEventStreamEnvelopeOrderFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOrderFailed
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrderFailed(v TypedTaggedEventStreamEnvelopeOrderFailed) error {
 	v.Type = "order.failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeOrderFailing returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderFailing
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderFailing() (TypedTaggedEventStreamEnvelopeOrderFailing, error) {
+	var body TypedTaggedEventStreamEnvelopeOrderFailing
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOrderFailing overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOrderFailing
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOrderFailing(v TypedTaggedEventStreamEnvelopeOrderFailing) error {
+	v.Type = "order.failing"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOrderFailing performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOrderFailing
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrderFailing(v TypedTaggedEventStreamEnvelopeOrderFailing) error {
+	v.Type = "order.failing"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -25515,6 +25641,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFailed()
+	case "order.failing":
+		return t.AsTypedTaggedEventStreamEnvelopeOrderFailing()
 	case "order.fired":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFired()
 	case "order.inapplicable":
