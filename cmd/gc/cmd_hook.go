@@ -556,7 +556,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	var legRoute *hookClaimWorkLegRoute
 	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
 		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
-		legRoute = newHookClaimWorkLegRoute(cityPath, cfg, &a, overrides)
+		legRoute = newHookClaimWorkLegRoute(cityPath, cfg, &a, primaryHookStoreRef(cityPath, cfg, agentForQuery, workDir, queryEnv), overrides)
 	} else {
 		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
 	}
