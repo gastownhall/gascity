@@ -360,7 +360,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		cfg,
 		fmt.Sprintf("tmux new-session -d -s %s", tmuxSession),
 		true,
-		suRemoteStageExports(p.cityName, ctrlCity),
+		suRemoteStageExports(name, p.cityName, ctrlCity),
 	)
 
 	// Build environment, remapping K8s-specific vars.
@@ -375,6 +375,13 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	// environment and the launch re-exports them), can run storage genesis
 	// before the on-disk record exists.
 	env = append(env, remoteStageEnv(p.cityName, controllerCityPath(cfg.Env))...)
+	// The pod's own session marker: one authoritative entry naming the
+	// logical session this pod hosts. Every process in the pod inherits the
+	// container environment — the entrypoint, the tmux server it starts (and
+	// every pane respawn out of the server's environment), the agent — so
+	// worker-side gc commands resolve the client-free pod-local provider
+	// instead of a Kubernetes client the pod holds no credentials for.
+	env = append(env, corev1.EnvVar{Name: PodSessionEnv, Value: name})
 
 	// Build volume mounts for the main container.
 	// When prebaked, skip the ws EmptyDir — it would shadow baked image content.
@@ -537,6 +544,10 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		"GC_DOLT_MANAGED_LOCAL":  true,
 		"BEADS_DOLT_SERVER_HOST": true,
 		"BEADS_DOLT_SERVER_PORT": true,
+		// The pod session marker is provider-owned: buildPod appends its own
+		// authoritative value (the logical session name the pod hosts), so any
+		// config-supplied copy — empty or not — is dropped here.
+		PodSessionEnv: true,
 	}
 
 	ctrlCity := controllerCityPath(cfgEnv)
@@ -668,11 +679,17 @@ func buildResources(p *Provider) (corev1.ResourceRequirements, error) {
 
 func boolPtr(b bool) *bool { return &b }
 
-// suRemoteStageExports returns shell statements that restore the remote-stage
-// variables inside the login-shell command passed to `su - <user> -c`. Values
-// are quoted as shell data so spaces and metacharacters remain unchanged.
-func suRemoteStageExports(cityName, ctrlCity string) string {
+// suRemoteStageExports returns shell statements that restore the pod's
+// session marker and the remote-stage variables inside the login-shell
+// command passed to `su - <user> -c`. su - clears the pod environment, so
+// without these exports the tmux server it starts — and every pane respawn
+// out of the server's environment — would run without the pod's session
+// identity. The marker is exported even without a controller city: it is the
+// pod's own identity, not a remote-stage fact. Values are quoted as shell
+// data so spaces and metacharacters remain unchanged.
+func suRemoteStageExports(sessionName, cityName, ctrlCity string) string {
 	var out strings.Builder
+	fmt.Fprintf(&out, "export %s=%s; ", PodSessionEnv, shellquote.Quote(sessionName))
 	for _, e := range remoteStageEnv(cityName, ctrlCity) {
 		fmt.Fprintf(&out, "export %s=%s; ", e.Name, shellquote.Quote(e.Value))
 	}

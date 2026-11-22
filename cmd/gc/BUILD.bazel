@@ -2574,6 +2574,7 @@ go_test(
         "template_resolve_mcp_test.go",
         "template_resolve_missing_prompt_test.go",
         "template_resolve_phase2_test.go",
+        "template_resolve_podlocal_marker_test.go",
         "template_resolve_prompt_test.go",
         "template_resolve_skills_test.go",
         "template_resolve_startup_envelope_test.go",

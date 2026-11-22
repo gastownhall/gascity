@@ -41,6 +41,7 @@ go_test(
         "exec_provider_test.go",
         "name_test.go",
         "pod_prompt_test.go",
+        "pod_session_marker_test.go",
         "pod_test.go",
         "podlocal_test.go",
         "provider_stale_probe_test.go",
