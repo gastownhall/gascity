@@ -4610,6 +4610,139 @@ func TestOrderTrackingRetentionFallsBackWithoutBatchDeleter(t *testing.T) {
 	}
 }
 
+// orderTrackingRetentionReadCountStore counts the strand guards' reads per
+// bead id: each List by gc.root_bead_id or ParentID, each Get and each DepList.
+// The prune's own read of the closed runs filters by label and isn't counted.
+type orderTrackingRetentionReadCountStore struct {
+	*orderTrackingRetentionBatchStore
+	strandReads map[string]int
+}
+
+func (s *orderTrackingRetentionReadCountStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if id := q.Metadata[beadmeta.RootBeadIDMetadataKey]; id != "" {
+		s.strandReads[id]++
+	}
+	if q.ParentID != "" {
+		s.strandReads[q.ParentID]++
+	}
+	return s.MemStore.List(q)
+}
+
+func (s *orderTrackingRetentionReadCountStore) Get(id string) (beads.Bead, error) {
+	s.strandReads[id]++
+	return s.MemStore.Get(id)
+}
+
+func (s *orderTrackingRetentionReadCountStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.strandReads[id]++
+	return s.MemStore.DepList(id, direction)
+}
+
+// newOrderTrackingRetentionOutcomeStore seeds closed runs alpha-00 (oldest)
+// upward, run i stamped with outcomes[i] (none past the list's end), and an
+// open step under openRoot when it isn't empty.
+func newOrderTrackingRetentionOutcomeStore(now time.Time, count int, outcomes []string, openRoot string) *orderTrackingRetentionReadCountStore {
+	var seed []beads.Bead
+	for i := range count {
+		labels := []string{"order-run:alpha", labelOrderTracking}
+		if i < len(outcomes) {
+			labels = append(labels, outcomes[i])
+		}
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-48*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    labels,
+			Ephemeral: i%2 == 0,
+		})
+	}
+	if openRoot != "" {
+		seed = append(seed, beads.Bead{
+			ID: "open-step", Title: "live step", Status: "open", Type: "task",
+			CreatedAt: now.Add(-48 * time.Hour), Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: openRoot},
+		})
+	}
+	return &orderTrackingRetentionReadCountStore{
+		orderTrackingRetentionBatchStore: &orderTrackingRetentionBatchStore{
+			orderTrackingRetentionDeleteStore: &orderTrackingRetentionDeleteStore{MemStore: beads.NewMemStoreFrom(100, seed, nil)},
+		},
+		strandReads: map[string]int{},
+	}
+}
+
+// An exec run owns no workflow, so the prune deletes expired exec runs without
+// the strand guards' reads, which cost about six bd calls a run.
+func TestOrderTrackingRetentionClearsExecRunsWithoutStrandReads(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	for _, bounded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
+			outcomes := []string{"exec", "exec-failed", "exec-env-failed", "exec", "exec-failed", "exec"}
+			store := newOrderTrackingRetentionOutcomeStore(now, minClosedOrderTrackingRetained+len(outcomes), outcomes, "")
+			policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+			var deleted int
+			var err error
+			if bounded {
+				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 100)
+			} else {
+				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
+			}
+			if err != nil || deleted != len(outcomes) {
+				t.Fatalf("sweep = (%d, %v), want (%d, nil)", deleted, err, len(outcomes))
+			}
+			if len(store.strandReads) != 0 {
+				t.Fatalf("strand-guard reads = %v, want none for exec runs", store.strandReads)
+			}
+			if len(store.batches) != 1 || len(store.batches[0]) != len(outcomes) {
+				t.Fatalf("DeleteBatch calls = %v, want one of %d", store.batches, len(outcomes))
+			}
+		})
+	}
+}
+
+// Every other run keeps both guards: a wisp run that still owns an open step
+// stays, and one that owns none is deleted with the exec runs.
+func TestOrderTrackingRetentionStillGuardsNonExecRuns(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	for _, bounded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
+			outcomes := []string{"exec", "wisp", "wisp", "exec-failed"}
+			store := newOrderTrackingRetentionOutcomeStore(now, minClosedOrderTrackingRetained+len(outcomes), outcomes, "alpha-02")
+			policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+			var deleted int
+			var err error
+			if bounded {
+				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 100)
+			} else {
+				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
+			}
+			if err != nil || deleted != 3 {
+				t.Fatalf("sweep = (%d, %v), want (3, nil)", deleted, err)
+			}
+			for id := range store.strandReads {
+				if id != "alpha-01" && id != "alpha-02" {
+					t.Fatalf("strand-guard reads = %v, want reads only for the wisp runs", store.strandReads)
+				}
+			}
+			if store.strandReads["alpha-01"] == 0 || store.strandReads["alpha-02"] == 0 {
+				t.Fatalf("strand-guard reads = %v, want both wisp runs checked", store.strandReads)
+			}
+			for _, id := range []string{"alpha-02", "open-step"} {
+				if _, err := store.MemStore.Get(id); err != nil {
+					t.Fatalf("Get(%q): %v, want it kept", id, err)
+				}
+			}
+			for _, id := range []string{"alpha-00", "alpha-01", "alpha-03"} {
+				if _, err := store.MemStore.Get(id); !errors.Is(err, beads.ErrNotFound) {
+					t.Fatalf("Get(%q) = %v, want ErrNotFound", id, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	beadTime := now.Add(-48 * time.Hour)

@@ -3811,7 +3811,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	byOrder := bucketClosedRetentionRuns(runs, onlyOrders)
 
 	cutoff := now.Add(-policy.deleteAfterClose)
-	var cleared []string
+	var cleared, guarded []string
 	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
@@ -3830,6 +3830,18 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
+			// An exec run (exec, exec-failed, exec-env-failed) is cleared with
+			// neither strand guard: an exec order's command runs inside the
+			// dispatch and is never told its tracking bead's id, and the
+			// dispatcher files nothing under it, so no step or molecule can hang
+			// from one. Proving that for each run read the store about six times
+			// (the gc.root_bead_id membership list, then the ParentID and
+			// graph-dependent walk), and exec runs are most of a city's runs, so
+			// those reads were most of the prune's cost.
+			if run.Outcome.IsExec() {
+				cleared = append(cleared, run.ID)
+				continue
+			}
 			if err := assertWorkflowDeleteLeavesNothingStranded(store, run.ID, nil); err != nil {
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
@@ -3839,10 +3851,15 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 				continue
 			}
 			cleared = append(cleared, run.ID)
+			guarded = append(guarded, run.ID)
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
+	// The set-level guard re-checks only the runs that kept the per-run one.
+	if err := assertWorkflowDeleteSetLeavesNothingStrandedFor(store, cleared, guarded); err != nil {
+		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	}
+	if err := deleteWorkflowBeadsBatchGuarded(store, cleared); err != nil {
 		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
 	}
 	return len(cleared), deleteErr
@@ -3889,7 +3906,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	byOrder := bucketClosedRetentionRuns(runs, onlyOrders)
 
 	cutoff := now.Add(-policy.deleteAfterClose)
-	var cleared []string
+	var cleared, guarded []string
 	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
@@ -3914,6 +3931,11 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
+			// An exec run owns no workflow; see sweepClosedOrderTrackingRetention.
+			if run.Outcome.IsExec() {
+				cleared = append(cleared, run.ID)
+				continue
+			}
 			if err := assertWorkflowDeleteLeavesNothingStranded(store, run.ID, nil); err != nil {
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
@@ -3923,10 +3945,15 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 				continue
 			}
 			cleared = append(cleared, run.ID)
+			guarded = append(guarded, run.ID)
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
+	// The set-level guard re-checks only the runs that kept the per-run one.
+	if err := assertWorkflowDeleteSetLeavesNothingStrandedFor(store, cleared, guarded); err != nil {
+		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	}
+	if err := deleteWorkflowBeadsBatchGuarded(store, cleared); err != nil {
 		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
 	}
 	return len(cleared), deleteErr
