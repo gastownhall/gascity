@@ -1129,3 +1129,52 @@ enabled = false
 		t.Fatalf("ScanAll error = %q, want the city-scope miss with a rig = \"alpha\" hint", err)
 	}
 }
+
+func TestScanAllSkipListStillBeatsEnablingOverride(t *testing.T) {
+	tests := []struct {
+		name        string
+		skipAliases string
+		skip        string
+	}{
+		{name: "skip by name", skip: "nightly-bench"},
+		{name: "skip by alias", skipAliases: "skip_aliases = [\"old-bench\"]\n", skip: "old-bench"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, cityLayer := orderDiscoveryCity(t)
+			writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "nightly-bench", `[order]
+exec = "scripts/bench.sh"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`+tt.skipAliases)
+			enabled := true
+			cfg := &config.City{
+				FormulaLayers: config.FormulaLayers{
+					City: []string{cityLayer},
+				},
+				Orders: config.OrdersConfig{
+					Skip:      []string{tt.skip},
+					Overrides: []config.OrderOverride{{Name: "nightly-bench", Enabled: &enabled}},
+				},
+			}
+
+			var overrideErr error
+			aa, err := ScanAll(cityPath, cfg, ScanOptions{
+				OnOverrideError: func(err error) error {
+					overrideErr = err
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("ScanAll returned error: %v", err)
+			}
+			if len(aa) != 0 {
+				t.Fatalf("got %d orders, want the skipped order excluded: %#v", len(aa), aa)
+			}
+			if overrideErr == nil || overrideErr.Error() != `orders.overrides[0]: order "nightly-bench" not found` {
+				t.Fatalf("override error = %v, want orders.overrides[0]: order \"nightly-bench\" not found", overrideErr)
+			}
+		})
+	}
+}
