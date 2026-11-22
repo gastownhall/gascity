@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -72,4 +73,58 @@ func TestK8sMarkedWorkerPodSessionProviderNeedsNoKubeClient(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Outside a generated pod, or when the city or an override explicitly
+// selects another runtime, provider selection and construction stay as they
+// were: the marker changes only a k8s or hybrid selection.
+func TestK8sPodSessionMarkerLeavesOtherSelectionsUnchanged(t *testing.T) {
+	t.Run("unmarked k8s and hybrid still need credentials", func(t *testing.T) {
+		for _, marker := range []string{"", "  \t"} {
+			for provider, wantErr := range map[string]string{
+				"k8s":    "building K8s config",
+				"hybrid": "hybrid: k8s backend: building K8s config",
+			} {
+				withoutKubeCredentials(t)
+				t.Setenv(sessionk8s.PodSessionEnv, marker)
+				cfg := &config.City{Session: config.SessionConfig{Provider: provider}}
+				cfg.Workspace.Name = "pod-city"
+				_, err := newSessionProviderForCity(cfg, t.TempDir())
+				if err == nil || !strings.Contains(err.Error(), wantErr) {
+					t.Fatalf("%s with marker %q: err = %v; want the credential error %q", provider, marker, err, wantErr)
+				}
+			}
+		}
+	})
+	t.Run("marked process selecting another runtime constructs it", func(t *testing.T) {
+		withoutKubeCredentials(t)
+		t.Setenv(sessionk8s.PodSessionEnv, "pod-city--worker-1")
+		reg, err := runtimeRegistryForCity(&config.City{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"fake", "tmux", "subprocess"} {
+			sp, err := reg.New(name, config.SessionConfig{}, "pod-city", t.TempDir())
+			if err != nil {
+				t.Fatalf("registry %q: %v", name, err)
+			}
+			if _, ok := sp.(*sessionk8s.PodLocal); ok {
+				t.Fatalf("registry %q constructed the pod-local provider; want its own runtime", name)
+			}
+		}
+	})
+	t.Run("marked process with an explicit override constructs the override", func(t *testing.T) {
+		withoutKubeCredentials(t)
+		t.Setenv(sessionk8s.PodSessionEnv, "pod-city--worker-1")
+		t.Setenv("GC_SESSION", "fake")
+		cfg := &config.City{Session: config.SessionConfig{Provider: "k8s"}}
+		cfg.Workspace.Name = "pod-city"
+		sp, err := newSessionProviderForCity(cfg, t.TempDir())
+		if err != nil {
+			t.Fatalf("newSessionProviderForCity with GC_SESSION=fake: %v", err)
+		}
+		if err := sp.Stop("main"); errors.Is(err, guard.ErrControllerOwnedRuntime) {
+			t.Fatalf("GC_SESSION=fake override served the pod-local provider (Stop = %v)", err)
+		}
+	})
 }
