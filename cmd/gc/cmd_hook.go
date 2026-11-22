@@ -950,7 +950,8 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// binding is still consulted last.
 	base := city.claimOps()
 	base.ProvisionWorktree = provisionWorktree
-	ops, proceed := routedHookClaimOps(workLegRoutedHookClaimOps(withHookClaimBeadEvents(base, city.path), legRoute), opened, err, city.recorder, stderr)
+	work := workLegRoutedHookClaimOps(withHookClaimBeadEvents(base, city.path), legRoute, hookClaimClassesRelocated(opened, err))
+	ops, proceed := routedHookClaimOps(work, opened, err, city.recorder, stderr)
 	if !proceed {
 		return 1
 	}

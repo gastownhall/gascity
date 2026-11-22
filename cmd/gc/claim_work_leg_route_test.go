@@ -194,7 +194,7 @@ func (f *workLegFixture) claim(primary hookStore, route *hookClaimWorkLegRoute, 
 		DrainAck:           true,
 		JSON:               true,
 	}
-	ops := workLegRoutedHookClaimOps(f.ops(), route)
+	ops := workLegRoutedHookClaimOps(f.ops(), route, false)
 	var stdout, stderr bytes.Buffer
 	code := claimHookWorkWithRunner("gc ready --json", primary.dir, primary.env, []hookStore{primary}, opts, ops, run, func(string, error) {}, &stdout, &stderr)
 	var result hookClaimJSONResult
@@ -306,7 +306,7 @@ func TestHookClaimWorkLegRouteFollowOnOpsUseTheHomeLeg(t *testing.T) {
 	f := newWorkLegFixture(t, "alpha")
 	bead := f.mint("alpha")
 	primary := f.primary("")
-	ops := workLegRoutedHookClaimOps(f.ops(), f.route(""))
+	ops := workLegRoutedHookClaimOps(f.ops(), f.route(""), true)
 	ops.ClassesRelocated = true
 
 	if _, ok, err := ops.Claim(ctx, primary.dir, primary.env, bead, "worker"); !ok || err != nil {
@@ -349,4 +349,54 @@ func TestHookClaimWorkLegRouteFollowOnOpsUseTheHomeLeg(t *testing.T) {
 			t.Fatalf("hookStartedKeyFor(verdict %d) = %+v, want rig:alpha %s resident", verdict, key, bead)
 		}
 	}
+}
+
+// TestHookClaimWorkLegRoutePrimaryHitBuildsNoOtherLeg pins AC-4: a candidate
+// the primary leg holds, or one in a relocated class's reserved namespace,
+// costs no other work leg's env build or read; and a probe builds legs only up
+// to the one that holds the bead.
+func TestHookClaimWorkLegRoutePrimaryHitBuildsNoOtherLeg(t *testing.T) {
+	ctx := context.Background()
+	t.Run("primary holds it", func(t *testing.T) {
+		f := newWorkLegFixture(t, "alpha", "beta")
+		bead := f.mint("")
+
+		code, result, stderr := f.claim(f.primary(""), f.route(""), f.routedRow(bead))
+		if code != 0 || result.Action != "work" || result.BeadID != bead {
+			t.Fatalf("claim = exit %d %+v, want exit 0 action=work for %s; stderr=%q", code, result, bead, stderr)
+		}
+		f.assertClaimedIn("", bead)
+		if len(f.envBuilds) != 0 || len(f.callsIn("alpha")) != 0 || len(f.callsIn("beta")) != 0 {
+			t.Fatalf("env builds %v, alpha ops %v, beta ops %v; want none: the primary answered", f.envBuilds, f.callsIn("alpha"), f.callsIn("beta"))
+		}
+	})
+	t.Run("reserved namespace id reaches the class route alone", func(t *testing.T) {
+		f := newWorkLegFixture(t, "alpha")
+		binding := newClaimRouteClassStore(t)
+		mintClaimRouteBead(t, binding, "gcg-100", nil)
+		primary := f.primary("")
+		ops := classRoutedHookClaimOps(workLegRoutedHookClaimOps(f.ops(), f.route(""), true), newClaimRouteFor(t, binding))
+
+		if _, ok, err := ops.Claim(ctx, primary.dir, primary.env, "gcg-100", "worker"); !ok || err != nil {
+			t.Fatalf("Claim(gcg-100) = ok %v err %v, want the class route to land it in the binding", ok, err)
+		}
+		if held, err := binding.Get("gcg-100"); err != nil || held.Assignee != "worker" {
+			t.Fatalf("binding holds gcg-100 as %+v (err %v), want it claimed by worker", held, err)
+		}
+		if len(f.envBuilds) != 0 || len(f.callsIn("alpha")) != 0 {
+			t.Fatalf("env builds %v, alpha ops %v; want none for a reserved-namespace id", f.envBuilds, f.callsIn("alpha"))
+		}
+	})
+	t.Run("a probe builds legs up to the holder", func(t *testing.T) {
+		f := newWorkLegFixture(t, "alpha", "beta")
+		bead := f.mint("alpha")
+
+		code, result, stderr := f.claim(f.primary(""), f.route(""), f.routedRow(bead))
+		if code != 0 || result.Action != "work" || result.BeadID != bead {
+			t.Fatalf("claim = exit %d %+v, want exit 0 action=work for %s; stderr=%q", code, result, bead, stderr)
+		}
+		if len(f.envBuilds) != 1 || f.envBuilds[0] != "alpha" || len(f.callsIn("beta")) != 0 {
+			t.Fatalf("env builds %v, beta ops %v; want only alpha built and beta untouched", f.envBuilds, f.callsIn("beta"))
+		}
+	})
 }

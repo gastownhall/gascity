@@ -40,8 +40,19 @@ type hookClaimWorkLeg struct {
 // `gc hook --claim` is one process, and the claim path is sequential.
 type hookClaimWorkLegRoute struct {
 	// frame lists the work legs other than the primary, in the reader's order.
-	frame func() ([]hookClaimWorkLeg, error)
-	legs  []hookStore
+	// It is resolved once, on the first probe; each leg's bd context is built
+	// on the first probe that reaches it (built), so a probe pays only for the
+	// legs up to the holder.
+	frame    func() ([]hookClaimWorkLeg, error)
+	legs     []hookClaimWorkLeg
+	framed   bool
+	built    map[string]hookStore
+	unusable map[string]bool
+
+	// reserved reports an id inside a relocated class's reserved namespace,
+	// which the class route answers for and this route never probes; nil
+	// when the city relocates no class.
+	reserved func(id string) bool
 
 	// home is the leg proved to hold each id.
 	home map[string]hookStore
@@ -65,8 +76,10 @@ func newHookClaimWorkLegRoute(cityPath string, cfg *config.City, a *config.Agent
 // memos live.
 func newHookClaimWorkLegRouteOver(frame func() ([]hookClaimWorkLeg, error)) *hookClaimWorkLegRoute {
 	return &hookClaimWorkLegRoute{
-		frame: frame,
-		home:  map[string]hookStore{},
+		frame:    frame,
+		built:    map[string]hookStore{},
+		unusable: map[string]bool{},
+		home:     map[string]hookStore{},
 	}
 }
 
@@ -113,26 +126,41 @@ func (r *hookClaimWorkLegRoute) probe(ctx context.Context, id, assignee string) 
 	if home, ok := r.home[id]; ok {
 		return home, true
 	}
-	if r.legs == nil {
+	if !r.framed {
 		frame, err := r.frame()
 		if err != nil {
 			return hookStore{}, false
 		}
-		for _, leg := range frame {
-			store, err := leg.build()
-			if err != nil {
-				continue
-			}
-			r.legs = append(r.legs, store)
-		}
+		r.legs, r.framed = frame, true
 	}
 	for _, leg := range r.legs {
-		if _, err := r.readLeg(ctx, leg.dir, leg.env, id, assignee); err == nil {
-			r.home[id] = leg
-			return leg, true
+		store, ok := r.leg(leg)
+		if !ok {
+			continue
+		}
+		if _, err := r.readLeg(ctx, store.dir, store.env, id, assignee); err == nil {
+			r.home[id] = store
+			return store, true
 		}
 	}
 	return hookStore{}, false
+}
+
+// leg is the bd context that reaches leg, built on first use.
+func (r *hookClaimWorkLegRoute) leg(leg hookClaimWorkLeg) (hookStore, bool) {
+	if store, ok := r.built[leg.ref]; ok {
+		return store, true
+	}
+	if r.unusable[leg.ref] {
+		return hookStore{}, false
+	}
+	store, err := leg.build()
+	if err != nil {
+		r.unusable[leg.ref] = true
+		return hookStore{}, false
+	}
+	r.built[leg.ref] = store
+	return store, true
 }
 
 // homeOf is the leg the route proved holds id, if it did.
@@ -156,9 +184,13 @@ func (r *hookClaimWorkLegRoute) at(dir string, env []string, id string) (string,
 // elsewhere is the leg to re-run an op on id in after the primary answered it
 // with err: the work leg that holds id, when err proves the primary lacks it
 // and a probe finds it. Once a home is known the op already ran there, so it
-// is never re-run.
+// is never re-run. An id in a relocated class's reserved namespace is the
+// class route's to find, so it is never probed.
 func (r *hookClaimWorkLegRoute) elsewhere(ctx context.Context, id, assignee string, err error) (hookStore, bool) {
 	if _, known := r.homeOf(id); known || !hookClaimBeadIsElsewhere(err) {
+		return hookStore{}, false
+	}
+	if r.reserved != nil && r.reserved(strings.TrimSpace(id)) {
 		return hookStore{}, false
 	}
 	return r.probe(ctx, id, assignee)
@@ -167,15 +199,21 @@ func (r *hookClaimWorkLegRoute) elsewhere(ctx context.Context, id, assignee stri
 // workLegRoutedHookClaimOps returns ops whose claim-time ops fall back to the
 // work leg that holds a bead the primary leg proved absent.
 //
+// classesRelocated says the city relocates a class (hookClaimClassesRelocated),
+// so ids in the reserved class namespaces are left to the class route.
+//
 // A nil route returns ops UNCHANGED, so a claim off the primary-scoped branch
 // runs the identical function values.
-func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute) hookClaimOps {
+func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute, classesRelocated bool) hookClaimOps {
 	if route == nil {
 		return ops
 	}
 	ops.applyDefaults()
 	base := ops
 	route.readLeg = base.ReadWorkMeta
+	if classesRelocated {
+		route.reserved = bdIDIsClassReserved
+	}
 	ops.WorkLegRoute = route
 
 	// The ops that resolve a bead by id: the home leg once known, else the
