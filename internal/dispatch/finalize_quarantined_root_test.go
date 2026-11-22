@@ -219,7 +219,7 @@ func TestCloseWorkflowRootNeverPassesOverQuarantine(t *testing.T) {
 				Status:   "closed",
 				Metadata: meta,
 			})
-			if err := closeWorkflowRoot(beadstest.Graph(store), b.ID, "pass"); !errors.Is(err, errRootQuarantined) {
+			if err := closeWorkflowRoot(beadstest.Graph(store), b.ID, "pass", nil); !errors.Is(err, errRootQuarantined) {
 				t.Fatalf("closeWorkflowRoot err = %v, want errRootQuarantined", err)
 			}
 			after, err := store.Get(b.ID)
@@ -246,7 +246,7 @@ func TestCloseWorkflowRootRefusesPassWhenTheQuarantineReadFails(t *testing.T) {
 		Metadata: map[string]string{"gc.kind": "workflow"},
 	})
 	readErr := errors.New("injected root read failure")
-	err := closeWorkflowRoot(beadstest.Graph(getErrorStore{Store: mem, failID: b.ID, err: readErr}), b.ID, "pass")
+	err := closeWorkflowRoot(beadstest.Graph(getErrorStore{Store: mem, failID: b.ID, err: readErr}), b.ID, "pass", nil)
 	if !errors.Is(err, readErr) {
 		t.Fatalf("closeWorkflowRoot err = %v, want the read error", err)
 	}

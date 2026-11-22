@@ -330,14 +330,21 @@ const (
 	// SessionNameCamelMetadataKey is the camelCase variant of SessionNameMetadataKey,
 	// mirroring SessionIDCamelMetadataKey.
 	SessionNameCamelMetadataKey = "gc.sessionName"
-	SourceBeadIDMetadataKey     = "gc.source_bead_id"
-	SourceStepSpecMetadataKey   = "gc.source_step_spec"
-	SourceStoreRefMetadataKey   = "gc.source_store_ref"
-	SpawnedCountMetadataKey     = "gc.spawned_count"
-	SpecForMetadataKey          = "gc.spec_for"
-	SpecForRefMetadataKey       = "gc.spec_for_ref"
-	StderrMetadataKey           = "gc.stderr"
-	StdoutMetadataKey           = "gc.stdout"
+	// SkippedBlockersMetadataKey is written by workflow-finalize on a root it
+	// closes gc.outcome=pass, and only when one or more of the finalizer's
+	// direct blocks blockers closed gc.outcome=skipped. The value is those
+	// blockers' IDs, sorted and comma-joined. It is absent on every other
+	// close, so a pass with skipped work reads apart from one where every
+	// blocker ran.
+	SkippedBlockersMetadataKey = "gc.skipped_blockers"
+	SourceBeadIDMetadataKey    = "gc.source_bead_id"
+	SourceStepSpecMetadataKey  = "gc.source_step_spec"
+	SourceStoreRefMetadataKey  = "gc.source_store_ref"
+	SpawnedCountMetadataKey    = "gc.spawned_count"
+	SpecForMetadataKey         = "gc.spec_for"
+	SpecForRefMetadataKey      = "gc.spec_for_ref"
+	StderrMetadataKey          = "gc.stderr"
+	StdoutMetadataKey          = "gc.stdout"
 	// StepDefinedEmittedMetadataKey records, on a graph.v2 physical step bead,
 	// that its execution.step_defined fact has already been emitted AND
 	// acknowledged durable. The level-triggered projector restates the full
@@ -772,6 +779,7 @@ var KnownMetadataKeys = []string{
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
+	SkippedBlockersMetadataKey,
 	SourceBeadIDMetadataKey,
 	SourceStepSpecMetadataKey,
 	SourceStoreRefMetadataKey,

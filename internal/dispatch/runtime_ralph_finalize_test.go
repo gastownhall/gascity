@@ -599,7 +599,7 @@ func TestFinalizeCulpritSkipsExemptRalphMemberToNonRalphFailure(t *testing.T) {
 			}
 			t.Logf("rootViewMembers order: %q (M=%s X=%s)", order, m.ID, x.ID)
 
-			outcome, err := resolveFinalizeOutcome(beadstest.Graph(s.store), s.finalizer, ProcessOptions{})
+			outcome, _, err := resolveFinalizeOutcome(beadstest.Graph(s.store), s.finalizer, ProcessOptions{})
 			if err != nil {
 				t.Fatalf("resolveFinalizeOutcome: %v", err)
 			}
