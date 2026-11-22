@@ -26,6 +26,7 @@ type workflowFinalizeFixture struct {
 	root      beads.Bead
 	finalizer beads.Bead
 	blockers  []beads.Bead
+	members   []beads.Bead
 }
 
 // finalizeSpec names a workflow-finalize fixture's moving parts: extra root
@@ -94,7 +95,7 @@ func newWorkflowFinalizeFixture(t *testing.T, spec finalizeSpec) *workflowFinali
 	}
 	mustDepAdd(t, store, root.ID, f.finalizer.ID, "blocks")
 	for _, m := range spec.members {
-		create(m)
+		f.members = append(f.members, create(m))
 	}
 	return f
 }
@@ -177,6 +178,41 @@ func TestProcessWorkflowFinalizeRecordsSkippedBlockersSorted(t *testing.T) {
 	}
 	if strings.Contains(root.Metadata["gc.skipped_blockers"], f.blockers[2].ID) {
 		t.Fatalf("root gc.skipped_blockers = %q, must not contain the passed blocker's ID %q", root.Metadata["gc.skipped_blockers"], f.blockers[2].ID)
+	}
+}
+
+// TestProcessWorkflowFinalizeAllPassLeavesSkippedBlockersAbsent guards the
+// marker's absence: with every direct blocker closed pass, the root closes
+// pass with no gc.skipped_blockers key, even though the finalize sweep then
+// closes a never-reached member gc.outcome=skipped.
+func TestProcessWorkflowFinalizeAllPassLeavesSkippedBlockersAbsent(t *testing.T) {
+	t.Parallel()
+
+	f := newWorkflowFinalizeFixture(t, finalizeSpec{
+		blockers: []beads.Bead{
+			{Title: "shipped", Status: "closed", Metadata: map[string]string{"gc.outcome": "pass"}},
+		},
+		members: []beads.Bead{
+			{Title: "never reached", Status: "open"},
+		},
+	})
+
+	result := f.drive(t)
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", result)
+	}
+	root := f.closedRoot(t)
+	if got := root.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("root gc.outcome = %q, want pass", got)
+	}
+	if _, ok := root.Metadata["gc.skipped_blockers"]; ok {
+		t.Fatalf("root carries gc.skipped_blockers = %q, want the key absent when every blocker passed", root.Metadata["gc.skipped_blockers"])
+	}
+	// The sweep really did close the never-reached member skipped; those
+	// closes must not reach the marker.
+	member := mustGetBead(t, f.store, f.members[0].ID)
+	if member.Status != "closed" || member.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("never-reached member = status %q outcome %q, want closed/skipped by the finalize sweep", member.Status, member.Metadata["gc.outcome"])
 	}
 }
 
