@@ -1771,6 +1771,7 @@ go_test(
         "fast_loop_helpers_test.go",
         "fingerprint_change_policy_test.go",
         "formula_attribution_test.go",
+        "formula_cook_attach_blocked_test.go",
         "formula_cook_attach_class_test.go",
         "formula_resolve_test.go",
         "fresh_wake_blocked_demand_test.go",
