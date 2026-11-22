@@ -359,3 +359,62 @@ func TestRunPreparedStartCandidate_SessionExistsUncommittedOursConverges(t *test
 		t.Errorf("Stop calls = %d, want none", got)
 	}
 }
+
+// assertWarmReuseUnchanged runs the prepared start of a row whose runtime is up, stamped
+// as the row's own incarnation, and asserts AC-5: the start reuses it warm
+// (no launch, no stop) and commits.
+func assertWarmReuseUnchanged(t *testing.T, extra map[string]string) {
+	t.Helper()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)}
+	city, workDir := t.TempDir(), t.TempDir()
+	bead := createUncommittedRestartRow(t, store, clk, workDir, extra)
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	stampOccupant(t, sp, "worker", bead.ID, "tok-row")
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, bead),
+		tp:   TemplateParams{Command: "claude", Prompt: uncommittedStartPrompt, SessionName: "worker", TemplateName: "worker"},
+	}, &config.City{}, store, clk)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.ownLaunchRequired {
+		t.Fatal("ownLaunchRequired = true on a row committed before its PreWake")
+	}
+	item, release := leasedStart(t, city, *prepared)
+	defer release()
+
+	result, committed, stderr := runUncommittedStart(t, city, store, sp, clk, item)
+
+	if result.err != nil || result.outcome != TraceOutcomeSuccess || !committed {
+		t.Fatalf("result err=%v outcome=%q committed=%v, want a committed warm reuse; stderr=%s", result.err, result.outcome, committed, stderr)
+	}
+	if got := countCalls(sp, "Start"); got != 1 {
+		t.Errorf("Start calls = %d, want only the existing runtime's (warm reuse)", got)
+	}
+	if got := countCalls(sp, "Stop"); got != 0 {
+		t.Errorf("Stop calls = %d, want none", got)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if v := got.Metadata["started_config_hash"]; v == "" {
+		t.Error("started_config_hash empty, want the warm reuse committed")
+	}
+}
+
+// TestStartPreparedStartCandidate_CommittedRowWarmReuseUnchanged is AC-5 for a
+// committed row.
+func TestStartPreparedStartCandidate_CommittedRowWarmReuseUnchanged(t *testing.T) {
+	assertWarmReuseUnchanged(t, map[string]string{"started_config_hash": "hash-old"})
+}
+
+// TestStartPreparedStartCandidate_FreshModePoolSlotWarmReuseUnchanged is AC-5
+// for a wake_mode = "fresh" slot, whose PreWake clears started_config_hash.
+func TestStartPreparedStartCandidate_FreshModePoolSlotWarmReuseUnchanged(t *testing.T) {
+	assertWarmReuseUnchanged(t, map[string]string{"started_config_hash": "hash-old", "wake_mode": "fresh"})
+}
