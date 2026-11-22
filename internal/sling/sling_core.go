@@ -218,6 +218,22 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 			result.BeadWarnings = append(result.BeadWarnings, skippedForClaimWarning(opts, a, decision.Assignee))
 		}
 	}
+	// An expanded workflow root slung plain can be idempotent on its own route
+	// while its members are still unrouted (#9039: a pre-fix sling routed the
+	// root and minted the auto-convoy but stamped no member). Idempotency
+	// would drop the re-sling and the run would never wake a worker, so the
+	// member routing plan decides: pending patches keep the sling alive to
+	// complete them. Formula-backed routes are excluded — they never take the
+	// plain path this refinement guards.
+	if check.Idempotent && !usesFormulaBackedRoute(opts) {
+		plan, err := planExpandedRootMemberRoutes(opts, deps, opts.BeadOrFormula)
+		if err != nil {
+			return false, err
+		}
+		if plan.hasPatches() {
+			check.Idempotent = false
+		}
+	}
 	// --reassign clears the claim before routing (reopenForReassign), so the
 	// bead is no longer claimed work and takes the ordinary formula path.
 	// opts.Reassign, not shouldReopenForReassign, so a dry run previews what
