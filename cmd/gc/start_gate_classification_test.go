@@ -537,7 +537,7 @@ func startOutcomeSources(t *testing.T) map[string]string {
 	}
 	dir := gcCallerDir(currentFile)
 	sources := map[string]string{}
-	for _, name := range []string{"session_lifecycle_parallel.go", "session_lifecycle_post_start_bound.go", "session_reconciler_trace_types.go"} {
+	for _, name := range []string{"session_lifecycle_parallel.go", "session_lifecycle_post_start_bound.go", "session_reconciler_trace_types.go", "session_uncommitted_start.go"} {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("reading %s: %v", name, err)

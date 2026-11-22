@@ -306,6 +306,14 @@ type preparedStart struct {
 	// the session in, read once the start succeeded (startedRuntimeBinding);
 	// the start commit applies it.
 	runtimeBinding sessionpkg.MetadataPatch
+	// ownLaunchRequired reports that this start commits only a runtime it
+	// launched itself (#6417): the row had no started_config_hash before its
+	// PreWake, holds no pending-create claim (those keep their own
+	// attribution arms) and renders a startup prompt. A runtime found under
+	// the name was launched by someone else, without that prompt, so the
+	// start neither reuses it warm nor converges on it unless it carries this
+	// attempt's instance token (ownLaunchCollisionOutcome).
+	ownLaunchRequired bool
 }
 
 type startResult struct {
@@ -1103,6 +1111,10 @@ func prepareStartCandidateForCity(
 	dispatchSources dispatchOptionSources,
 ) (*preparedStart, error) {
 	var undo preWakeUndo
+	// uncommittedBeforeWake is read before the PreWake, which clears the hash
+	// of a fresh wake: a wake_mode = "fresh" slot that committed keeps its
+	// warm reuse.
+	uncommittedBeforeWake := false
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
 			sessFront := sessionFrontDoor(store)
@@ -1124,6 +1136,7 @@ func prepareStartCandidateForCity(
 			if sessionpkg.DispositionOfInfo(current).KeepsSlot() {
 				return errStartUserHeld
 			}
+			uncommittedBeforeWake = startUncommitted(current)
 			// preWakeCommit persists its PreWakePatch through the front door and returns
 			// the batch; folding it onto the freshly re-read Info keeps the twin
 			// byte-coherent with the persisted state without a second Get. It shares
@@ -1158,7 +1171,17 @@ func prepareStartCandidateForCity(
 		undo.token = prepared.candidate.info.InstanceToken
 		prepared.preWakeUndo = undo
 	}
+	if prepared != nil {
+		prepared.ownLaunchRequired = uncommittedBeforeWake && strings.TrimSpace(prepared.candidate.tp.Prompt) != ""
+	}
 	return prepared, err
+}
+
+// startUncommitted reports a row no start has committed a runtime for: no
+// started_config_hash (a restart handoff clears it) and no pending-create
+// claim, whose own attribution arms decide a create's collisions.
+func startUncommitted(info sessionpkg.Info) bool {
+	return strings.TrimSpace(info.StartedConfigHash) == "" && !shouldRollbackPendingCreateInfo(info)
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -2212,6 +2235,9 @@ func runPreparedStartCandidate(
 			outcome = TraceOutcomeProviderError
 		case rollbackPending:
 			outcome = TraceOutcomeSessionExists
+		case item.ownLaunchRequired:
+			outcome, unattributedErr = ownLaunchCollisionOutcome(err, item.candidate.info, readPendingCreateIdentityBounded(probeCtx, cityPath, item.candidate.info, item.candidate.name(), sp))
+			err = nil
 		default:
 			outcome = TraceOutcomeSessionExists
 			err = nil
@@ -2778,6 +2804,12 @@ func startPreparedStartCandidate(
 		if running {
 			if alive {
 				if shouldRollbackPendingCreateInfo(item.candidate.info) && attributePendingCreateRuntime(item.candidate.info, name, sp) != pendingCreateRuntimeOurs {
+					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+				}
+				// A start that must launch its own runtime finds one it did
+				// not launch: it never got this start's prompt. The
+				// collision arm decides from its identity.
+				if item.ownLaunchRequired {
 					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 				}
 				// Warm reuse: the slot is already up, so cold Start's startup nudge
