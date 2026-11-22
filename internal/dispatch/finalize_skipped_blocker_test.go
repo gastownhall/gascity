@@ -398,3 +398,36 @@ func TestProcessFanoutSkippedChildCarriesNoSkippedBlockers(t *testing.T) {
 		t.Fatalf("fanout gc.skipped_blockers = %q, want the key absent", got)
 	}
 }
+
+// TestProcessWorkflowFinalizeSkippedBlockerAddsNoStoreCalls pins that the
+// marker costs nothing: the skipped IDs come from the blocker rows the scan
+// already read, and the key rides on the root's existing pass close, so a
+// finalize with a skipped blocker makes exactly the store calls an all-pass
+// one does.
+func TestProcessWorkflowFinalizeSkippedBlockerAddsNoStoreCalls(t *testing.T) {
+	t.Parallel()
+
+	count := func(secondOutcome string) *callCountingStore {
+		t.Helper()
+		f := newSkippedBlockerFixture(t, beads.NewMemStore(), []map[string]string{
+			outcomeMeta("pass"),
+			outcomeMeta(secondOutcome),
+		}, nil)
+		counting := &callCountingStore{Store: f.store}
+		result, err := ProcessControl(beadstest.Graph(counting), f.finalizer, ProcessOptions{Work: beadstest.Work(counting)})
+		if err != nil {
+			t.Fatalf("ProcessControl(workflow-finalize, %s blocker): %v", secondOutcome, err)
+		}
+		if result.Action != "workflow-pass" {
+			t.Fatalf("action with a %s blocker = %q, want workflow-pass", secondOutcome, result.Action)
+		}
+		return counting
+	}
+	allPass := count("pass")
+	withSkip := count("skipped")
+
+	if withSkip.reads != allPass.reads || withSkip.writes != allPass.writes {
+		t.Fatalf("finalize with a skipped blocker made %d reads/%d writes, all-pass made %d/%d; want equal\nskipped: %v\nall-pass: %v",
+			withSkip.reads, withSkip.writes, allPass.reads, allPass.writes, withSkip.ops, allPass.ops)
+	}
+}
