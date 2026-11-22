@@ -6995,6 +6995,77 @@ exit 0
 	}
 }
 
+// TestSpawnStormDetectSkipsAssignedOpenBeads pins the sweep end to end for a
+// pool that holds an assigned bead: a bead that is open but assigned and
+// carries a rejection_reason is being worked, not reset to pool, so it gets
+// no ledger entry and no SPAWN_STORM mail, while an unassigned bead with
+// recovered set reaches count 1 and is alerted once.
+func TestSpawnStormDetectSkipsAssignedOpenBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "${1:-}" = "ready" ]; then
+  case " $* " in
+    *" --unassigned "*)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}}]\n'
+      ;;
+    *)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}},{"id":"ga-held","status":"open","assignee":"worker-1","metadata":{"rejection_reason":"tests red"}}]\n'
+      ;;
+  esac
+fi
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	counts := readSpawnStormLedger(t, filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if _, ok := counts["ga-held"]; ok {
+		t.Fatalf("ledger counted ga-held, which is assigned; the read must filter with --unassigned\nledger: %v", counts)
+	}
+	if got := counts["ga-pool"]; got != 1 {
+		t.Fatalf("ledger count for ga-pool = %d, want 1\nledger: %v", got, counts)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if n := strings.Count(string(gcData), "SPAWN_STORM: bead ga-pool reset 1x"); n != 1 {
+		t.Fatalf("SPAWN_STORM mail for ga-pool sent %d times, want 1\ngc log:\n%s", n, gcData)
+	}
+	if strings.Contains(string(gcData), "ga-held") {
+		t.Fatalf("ga-held, which is assigned, was named in a gc call\ngc log:\n%s", gcData)
+	}
+	if !strings.Contains(string(gcData), "ready --unassigned") {
+		t.Fatalf("the sweep did not read the pool with --unassigned\ngc log:\n%s", gcData)
+	}
+	if strings.Contains(string(gcData), "--assignee") {
+		t.Fatalf("the sweep filtered assignees in the gc layer instead of reading the pool with --unassigned\ngc log:\n%s", gcData)
+	}
+}
+
 // TestSpawnStormDetectCountsResetBeadsInEveryStore pins where the sweep reads.
 // gc bd list answers from one store, the city store for this city-scoped order,
 // and bd leaves the wisp plane out of a plain list. A bead reset in a rig
