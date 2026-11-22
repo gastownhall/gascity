@@ -81,6 +81,11 @@ const (
 	// FactsLegacyResetEvict is the eviction of a runtime a stalled
 	// continuation reset is waiting on.
 	FactsLegacyResetEvict FactsSite = "legacy.reset-evict"
+	// FactsLegacyUncommittedEvict is the eviction of a live runtime whose
+	// row never committed the start that would own it: the replacement of
+	// an uncommitted, prompt-bearing row's occupant once the startup window
+	// has passed (gastownhall/gascity#6417).
+	FactsLegacyUncommittedEvict FactsSite = "legacy.uncommitted-evict"
 	// FactsLegacyExitAccrual is a tick's wake-failure or churn accrual for a
 	// dead runtime.
 	FactsLegacyExitAccrual FactsSite = "legacy.exit-accrual"
@@ -183,6 +188,10 @@ var factsSites = map[FactsSite]factsSite{
 	FactsLegacyResetEvict: {
 		Only:   []string{"continuation_reset_pending", "reset_committed_at"},
 		Reason: "the eviction rests on the same continuation reset still pending; a row that moved on is not stalled",
+	},
+	FactsLegacyUncommittedEvict: {
+		Only:   []string{"generation", "instance_token", "started_config_hash", "sleep_intent", "held_until"},
+		Reason: "the eviction rests on the row still being the uncommitted start's own uncommitted incarnation: a start that committed (started_config_hash), a newer incarnation, or an operator hold or heartbeat that landed after the decision refuses the kill, and the next tick re-decides and owns the runtime instead",
 	},
 }
 
