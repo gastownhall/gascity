@@ -813,6 +813,8 @@ type asyncPreparedStart struct {
 	// prepare runs under the reserved slot and runtime lease, before Start.
 	// Nil means item was already prepared by the caller.
 	prepare func() (*preparedStart, error)
+	// release gives back the start's async slot. It does no store I/O, so the
+	// start goroutine can run it whatever state the store is in.
 	release func()
 	done    func()
 	tracker *asyncStartTracker // counts the start's goroutine; nil counts nothing
@@ -2430,33 +2432,56 @@ func enqueuePreparedStartWaveForCity(
 				}
 			}
 			defer releaseStart()
+			// The start holds the item's runtime lease (nil when it holds none)
+			// until the commit phase takes it over; a panic before then
+			// abandons it, a flock-only drop that makes no store call.
+			lease := item.candidate.lease
+			leaseHandedOff := false
+			defer func() {
+				if !leaseHandedOff {
+					lease.Abandon()
+				}
+			}()
 			watched, unwatch := watchStartLease(ctx, item)
-			defer unwatch()
+			defer func() {
+				if !leaseHandedOff {
+					unwatch()
+				}
+			}()
 			if reserved.prepare != nil {
 				prepared, err := reserved.prepare()
 				if err != nil {
-					return // prepare records the failure; deferred calls release the reservations
+					lease.Release()
+					return // prepare records the failure; deferred calls release the slot
 				}
 				item = *prepared
 			}
+			var result startResult
 			if watched.Err() != nil {
 				// Nothing reached the provider. Use the wave's store-only
 				// abandonment path, retaining the pending create for a later tick.
 				abandonCapacityTicket(item.capacityTicket, rec, stderr)
-				result := startResult{prepared: item, outcome: TraceOutcomeDeferred, abandoned: true, started: now, finished: time.Now()}
-				recordStartExecution(trace, result)
-				commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
-				return
+				result = startResult{prepared: item, outcome: TraceOutcomeDeferred, abandoned: true, started: now, finished: time.Now()}
+			} else {
+				result = runPreparedStartCandidate(watched, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
+				// Resolve before the commit so a stale, refused, or panicking
+				// commit cannot lose the endpoint verdict.
+				result = resolveStartCapacity(result, rec, stderr)
 			}
-			result := runPreparedStartCandidate(watched, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
-			unwatch()
-			// Resolve before the commit so a stale, refused, or panicking
-			// commit cannot lose the endpoint verdict.
-			result = resolveStartCapacity(result, rec, stderr)
 			recordStartExecution(trace, result)
-			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
-			// The commit is done: release the lease and the slot before the
-			// follow-up, so the pass it wakes finds the name free.
+			// Bounded: a commit that wedges on the store or the runtime must not
+			// hold the slot (SESSION-RUNTIME-035). Resolving the endpoint
+			// verdict above stays outside the bound. The lease and the watch
+			// move to the commit: it releases the lease when it returns, and
+			// the wait abandons it only if the commit never claimed it.
+			leaseHandedOff = true
+			commitAsyncStartBounded(ctx, cityPath, result, wave, stderr, lease, unwatch,
+				func() bool {
+					return commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
+				})
+			// The commit is done or abandoned: the lease is released, or its
+			// flock abandoned, or held by the commit that is still running, so
+			// give the slot back before the follow-up.
 			releaseStart()
 			if asyncFollowUp != nil {
 				asyncFollowUp()
@@ -5069,6 +5094,7 @@ func executePlannedStartsTraced(
 					continue
 				}
 				var release func()
+				var slotRelease func()
 				var done func()
 				if startOpts.async {
 					var tracking bool
@@ -5080,6 +5106,7 @@ func executePlannedStartsTraced(
 					var reserved bool
 					var outcome string
 					release, reserved, outcome = reserveAsyncStartSlot(ctx, asyncLimiter)
+					slotRelease = release
 					if !reserved {
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
@@ -5238,7 +5265,7 @@ func executePlannedStartsTraced(
 					return prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.dispatchOptionSources, &timings)
 				}
 				if startOpts.async {
-					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: preparedStart{candidate: candidate}, prepare: prepare, release: release, done: done, tracker: startOpts.asyncTracker})
+					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: preparedStart{candidate: candidate}, prepare: prepare, release: slotRelease, done: done, tracker: startOpts.asyncTracker})
 				} else {
 					item, err := prepare()
 					if err != nil {

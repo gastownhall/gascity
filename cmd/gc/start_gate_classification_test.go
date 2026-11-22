@@ -72,6 +72,7 @@ var startOutcomeClassification = map[string]startOutcomeClass{
 	"async_start_drift_rolled_back": {reason: "post-attempt: an async start that ran and was rolled back on drift"},
 	"async_start_refresh_failed":    {reason: "post-attempt: an async start whose result refresh failed"},
 	"stale_async_start":             {reason: "post-attempt: an async start whose prepared state went stale"},
+	"commit_unavailable":            {reason: "post-attempt: the async start's commit phase passed its bound or was refused (SESSION-RUNTIME-035)"},
 	"capacity_refused":              {reason: "post-attempt: the endpoint refused a start that was attempted"},
 	"circuit_metadata_failed":       {reason: "post-attempt: the breaker's restart accounting failed (clause c: it writes)"},
 	"failed":                        {reason: "post-attempt: the start or its runtime record failed"},
@@ -536,7 +537,7 @@ func startOutcomeSources(t *testing.T) map[string]string {
 	}
 	dir := gcCallerDir(currentFile)
 	sources := map[string]string{}
-	for _, name := range []string{"session_lifecycle_parallel.go", "session_reconciler_trace_types.go"} {
+	for _, name := range []string{"session_lifecycle_parallel.go", "session_lifecycle_post_start_bound.go", "session_reconciler_trace_types.go"} {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("reading %s: %v", name, err)

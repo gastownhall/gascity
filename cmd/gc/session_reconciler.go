@@ -3918,8 +3918,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			tick.set(id, clearChurn(infoByID[id], sessFront))
 		}
 		if alive && shouldRollbackPendingCreateInfo(infoByID[id]) {
+			// The heal projects a claimed live row to awake, so awake is a
+			// start's post-heal face and is deferred like creating. Active is
+			// not: the heal keeps an active row with a claim active, so
+			// recovery repairs that partial commit now.
 			switch stateBeforeHeal {
-			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+			case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAwake:
 				if pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout) {
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryInFlight, TraceOutcomeDeferred, tp.TemplateName, name, nil)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -424,7 +425,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 
 		// Re-print the Supervisor: line so the operator's last memory
 		// is of the post-restart state, not the drift report.
-		newPID := supervisorAliveHook()
+		newPID, newStatus, identityErr := awaitRestartedSupervisorIdentity(baseURL, driftReadyTimeout)
 		if newPID != 0 {
 			// Record the just-restarted PID so the downstream
 			// registerCityWithSupervisorNamed → ensureNoStandaloneController
@@ -432,18 +433,17 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			// competing standalone during the brief window before the
 			// registry catches up.
 			justRestartedSupervisorPID = newPID
+		}
+		if identityErr != nil {
+			fmt.Fprintf(stderr, "gc start: warning: restarted supervisor not confirmed within %s: %v; skipping the post-restart Supervisor: line\n", driftReadyTimeout, identityErr) //nolint:errcheck // best-effort stderr
+		} else {
 			newExe, _ := readSupervisorExePathHook(newPID)
-			ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel2()
-			newStatus, statusErr2 := newHTTPSupervisorClient(baseURL).Status(ctx2)
-			if statusErr2 == nil {
-				printSupervisorIdentity(stdout, supervisorIdentity{
-					PID:     newPID,
-					ExePath: newExe,
-					BuildID: newStatus.BuildID,
-					Started: time.Now().Add(-time.Duration(newStatus.UptimeSec) * time.Second),
-				}, time.Now())
-			}
+			printSupervisorIdentity(stdout, supervisorIdentity{
+				PID:     newPID,
+				ExePath: newExe,
+				BuildID: newStatus.BuildID,
+				Started: time.Now().Add(-time.Duration(newStatus.UptimeSec) * time.Second),
+			}, time.Now())
 		}
 		// Successful auto-restart is non-terminal: the caller continues
 		// into normal supervisor registration / start so the requested
@@ -495,6 +495,42 @@ func pollDelegatedRestartVerified(baseURL string, oldPID int, oldBuildID, localB
 		}
 		if !time.Now().Before(deadline) {
 			return lastMsg
+		}
+		time.Sleep(supervisorReadyPollInterval)
+	}
+}
+
+// awaitRestartedSupervisorIdentity waits up to timeout for a just-restarted
+// supervisor to answer on its control socket and serve a decodable /health,
+// and returns its PID and status for the post-restart Supervisor: line.
+//
+// PollReady's 2xx is not enough: runSupervisor starts serving /health before
+// it binds its control socket, so the first socket probe after that 2xx can
+// find nothing listening yet (ga-ai1gn9p5). The returned PID is non-zero
+// whenever the socket answered, even when /health could not then be read
+// within timeout; the error names the last obstacle.
+func awaitRestartedSupervisorIdentity(baseURL string, timeout time.Duration) (int, SupervisorStatus, error) {
+	client := newHTTPSupervisorClient(baseURL)
+	deadline := time.Now().Add(timeout)
+	pid := 0
+	for {
+		var lastErr error
+		if pid == 0 {
+			pid = supervisorAliveHook()
+		}
+		if pid == 0 {
+			lastErr = errors.New("its control socket did not answer")
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), driftVerifyProbeTimeout)
+			status, err := client.Status(ctx)
+			cancel()
+			if err == nil {
+				return pid, status, nil
+			}
+			lastErr = fmt.Errorf("reading its /health: %w", err)
+		}
+		if !time.Now().Before(deadline) {
+			return pid, SupervisorStatus{}, lastErr
 		}
 		time.Sleep(supervisorReadyPollInterval)
 	}
