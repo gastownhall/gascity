@@ -39,6 +39,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processgroup"
+
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
@@ -146,7 +148,8 @@ func startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configFile, logFile
 	if err != nil {
 		return managedDoltStartedProcess{}, err
 	}
-	cmd := exec.Command(watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
+	// The watchdog's dolt child inherits the watchdog's infrastructure scope.
+	cmd, infraScopeUnit := infraCommand(managedDoltInfraDescription(cityPath), watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
@@ -180,6 +183,7 @@ func startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configFile, logFile
 		StartIdentity:          startIdentity,
 		WatchdogStartTimeTicks: watchdogTicks,
 		WatchdogStartIdentity:  watchdogIdentity,
+		InfraScope:             infraScopeUnit,
 	}, nil
 }
 
@@ -222,7 +226,7 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	// cmd_dolt_config.go), so descendant helpers are rare by construction,
 	// and a SIGTERM'd dolt winds down its own children; only the SIGKILL
 	// escalation of an unresponsive server could strand descendants.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck

@@ -47,10 +47,12 @@ type ConversationOpOutcome struct {
 
 // ConversationOpResult is what a succeeded (or coalesced) operation produced:
 // the session and turn it ran in and, for a conversation-lane delivery, the
-// delivery record and the turn link with its confidence (DES-O1 §4.8).
+// delivery record and the turn link with its confidence (DES-O1 §4.8). An
+// operation the lane fenced off unrun, skipped{stale} because its session
+// had moved on, records the generation and epoch that fenced it off.
 type ConversationOpResult struct {
-	Generation    int64                   `json:"generation,omitempty" doc:"Session generation the operation ran in."`
-	ContextEpoch  int64                   `json:"context_epoch,omitempty" doc:"Context epoch the operation ran in."`
+	Generation    int64                   `json:"generation,omitempty" doc:"Session generation the operation ran in, or, for one skipped{stale} unrun because its session moved on, the generation that fenced it off."`
+	ContextEpoch  int64                   `json:"context_epoch,omitempty" doc:"Context epoch the operation ran in, or, for one skipped{stale} unrun, the epoch that fenced it off."`
 	Turn          string                  `json:"turn,omitempty" doc:"The turn the operation ran in or was linked to; empty when the link is none."`
 	TurnLink      string                  `json:"turn_link,omitempty" enum:"exact,correlated,ambiguous,none" doc:"Confidence of the turn link: exact when the runtime named the turn, correlated or ambiguous from observed turns, none when no turn could be linked."`
 	TurnBasis     string                  `json:"turn_basis,omitempty" doc:"The rule that decided the turn link (open vocabulary, e.g. runtime_turn, history_diff, no_source)."`

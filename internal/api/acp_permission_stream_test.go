@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/acp"
 	"github.com/gastownhall/gascity/internal/session"
@@ -67,7 +69,7 @@ func TestACPPermissionThroughPendingRespondAndStream(t *testing.T) {
 	srv.structuredPeekPoll = peekPoll
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), sp, session.WithCityPath(fs.cityPath))
 	replyFile := filepath.Join(t.TempDir(), "replies.jsonl")
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template:  "helper",

@@ -22,11 +22,13 @@ func restartReq(key, namespace string) Request {
 
 // ValidateKey refuses what Admit refuses of a client's key: an invalid key,
 // one its namespace makes too long, named by its own length and the
-// namespace's limit, and a restart key kept as given that starts with a
-// restart request's namespace. A namespaced request's key, and another
+// namespace's limit, a restart key kept as given that starts with a restart
+// request's namespace, and a respond key in respond:, where a lane respond op
+// is keyed by the raising it answers. A namespaced request's key, and another
 // kind's, may start with anything.
 func TestValidateKey(t *testing.T) {
 	restart, k := opjournal.KindRestart, func(n int) string { return strings.Repeat("k", n) }
+	respond := opjournal.KindRespond
 	for _, tc := range []struct {
 		name      string
 		kind      opjournal.Kind
@@ -43,6 +45,12 @@ func TestValidateKey(t *testing.T) {
 		{name: "handoff key spelling another namespace", kind: restart, namespace: KeyNamespaceHandoff, key: "request-restart:k1"},
 		{name: "handoff key spelling its own", kind: restart, namespace: KeyNamespaceHandoff, key: "handoff:k1"},
 		{name: "another kind's key", kind: opjournal.KindClose, key: "handoff:k1"},
+		{name: "respond key in the lane's respond: namespace", kind: respond, key: "respond:gc-fact-1", want: ErrReservedKey, message: `"respond:gc-fact-1" starts with "respond:", which keys a lane respond op by the raising it answers`},
+		{name: "respond key in a namespace that is not respond:", kind: respond, key: "Respond:k1"},
+		{name: "respond key with respond: past the start", kind: respond, key: "k1:respond:k2"},
+		{name: "respond key in a restart namespace", kind: respond, key: "handoff:k1"},
+		{name: "restart key in respond:", kind: restart, key: "respond:k1"},
+		{name: "another kind's key in respond:", kind: opjournal.KindClose, key: "respond:k1"},
 		{name: "invalid in a namespace", kind: restart, namespace: KeyNamespaceHandoff, key: " k1", want: opjournal.ErrInvalidRequest, message: "leading or trailing space"},
 		{name: "longest handoff key", kind: restart, namespace: KeyNamespaceHandoff, key: k(opjournal.MaxClientKeyLen - len(KeyNamespaceHandoff))},
 		{name: "handoff key a byte too long", kind: restart, namespace: KeyNamespaceHandoff, key: k(505), want: opjournal.ErrInvalidRequest, message: `client key is 505 bytes, max 504 in the "handoff:" key namespace`},

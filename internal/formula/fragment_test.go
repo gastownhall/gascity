@@ -612,3 +612,62 @@ func TestApplyFragmentRecipeGraphControlsSkipsDrainAndTally(t *testing.T) {
 		}
 	}
 }
+
+func TestCompileExpansionFragmentResolvesCheckMaxAttemptsVar(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	expansion := `
+formula = "check-var-fragment"
+type = "expansion"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.attempts]
+default = "2"
+
+[[template]]
+id = "{target}.verify"
+title = "Verify"
+
+[template.check]
+max_attempts = "{{attempts}}"
+
+[template.check.check]
+mode = "exec"
+path = ".gascity/checks/widget.sh"
+`
+	if err := os.WriteFile(filepath.Join(dir, "check-var-fragment.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	for _, tc := range []struct {
+		vars map[string]string
+		want string
+	}{
+		{vars: nil, want: "2"},
+		{vars: map[string]string{"attempts": "3"}, want: "3"},
+	} {
+		target := &Step{ID: "demo.item", Title: "Item"}
+		fragment, err := CompileExpansionFragment(context.Background(), "check-var-fragment", []string{dir}, target, tc.vars)
+		if err != nil {
+			t.Fatalf("CompileExpansionFragment(%v): %v", tc.vars, err)
+		}
+		var got []string
+		for _, step := range fragment.Steps {
+			if step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRalph {
+				got = append(got, step.Metadata[beadmeta.MaxAttemptsMetadataKey])
+			}
+		}
+		if len(got) != 1 || got[0] != tc.want {
+			t.Fatalf("CompileExpansionFragment(%v): check controls' gc.max_attempts = %v, want [%s]", tc.vars, got, tc.want)
+		}
+	}
+
+	target := &Step{ID: "demo.item", Title: "Item"}
+	if _, err := CompileExpansionFragment(context.Background(), "check-var-fragment", []string{dir}, target, map[string]string{"attempts": "0"}); err == nil || !strings.Contains(err.Error(), "max_attempts") {
+		t.Fatalf("CompileExpansionFragment(attempts=0) error = %v, want a max_attempts error", err)
+	}
+}

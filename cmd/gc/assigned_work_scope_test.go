@@ -230,7 +230,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsDirectAssigneeAfterTemplateFal
 		Metadata: map[string]string{},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, sessionInfosFromBeads(sessions), work, []string{""})
+	got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, sessionInfosFromBeads(sessions), work, []string{""})
 
 	if len(got) != 1 || got[0].ID != "direct-assigned" {
 		t.Fatalf("filtered work = %#v, want direct-assigned work preserved through template fallback", got)
@@ -253,7 +253,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsLegacyWorkflowRunTarget(t *tes
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
+	got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
 
 	if len(got) != 1 || got[0].ID != "legacy-workflow-root" {
 		t.Fatalf("filtered work = %#v, want legacy workflow root preserved through run_target fallback", got)
@@ -289,7 +289,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsPersistedBoundRoute(t *testing
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, []string{"gascity-packs"})
+	got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, []string{"gascity-packs"})
 
 	if len(got) != 1 || got[0].ID != "gp-qx0o" {
 		t.Fatalf("filtered work = %#v, want persisted bound route preserved", got)
@@ -313,7 +313,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandNormalizesInstanceSuffixedRouteTarg
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
+	got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
 
 	if len(got) != 1 || got[0].ID != "instance-routed" {
 		t.Fatalf("filtered work = %#v, want instance-suffixed route target normalized to the base template and kept", got)
@@ -337,7 +337,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandLeavesUnmatchedInstanceSuffixAlone(
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
+	got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
 
 	if len(got) != 0 {
 		t.Fatalf("filtered work = %#v, want out-of-range instance suffix left unmatched and dropped", got)
@@ -375,7 +375,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDeferredRoutedBead(t *testing.
 		},
 	}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{"", ""})
+	got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{"", ""})
 
 	if len(got) != 1 || got[0].ID != "live-routed-work" {
 		t.Fatalf("filtered work = %#v, want only live-routed-work (deferred anchor dropped)", got)
@@ -401,10 +401,58 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsElapsedDeferRoutedBead(t *test
 		DeferUntil: &past,
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
+	got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
 
 	if len(got) != 1 || got[0].ID != "elapsed-defer-work" {
 		t.Fatalf("filtered work = %#v, want elapsed-defer bead preserved as demand", got)
+	}
+}
+
+// TestFilterAssignedWorkBeadsForPoolDemandDropsElapsedBdDeferredRoutedBead
+// pins issue #6207: bd records the routed bead deferred with a defer_until that
+// has passed, and its assignee resolves to no session. bd ready (the pool claim
+// query) keeps hiding the row until the store itself wakes it, so pool demand
+// must not request a worker for it. The row is decoded from the store's wire
+// shape, as every production read builds it.
+func TestFilterAssignedWorkBeadsForPoolDemandDropsElapsedBdDeferredRoutedBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	decode := func(t *testing.T, payload string) beads.Bead {
+		t.Helper()
+		b, ok := beads.DecodeBeadEventPayload([]byte(payload))
+		if !ok {
+			t.Fatalf("DecodeBeadEventPayload(%s) returned ok=false", payload)
+		}
+		return b
+	}
+	demandRequests := func(work []beads.Bead) []SessionRequest {
+		filtered, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, make([]string, len(work)))
+		var requests []SessionRequest
+		for _, ds := range ComputePoolDesiredStates(cfg, filtered, nil, nil) {
+			requests = append(requests, ds.Requests...)
+		}
+		return requests
+	}
+
+	// Control: the same routed row once the store has woken it (open, date
+	// cleared) is demand the template-identity wake serves.
+	woken := decode(t, `{"id":"routed-work","status":"open","issue_type":"task","assignee":"worker","metadata":{"gc.routed_to":"worker"}}`)
+	if got := demandRequests([]beads.Bead{woken}); len(got) != 1 || got[0].Tier != "wake-known-identity" {
+		t.Fatalf("woken row requests = %#v, want one wake-known-identity (control)", got)
+	}
+
+	parked := decode(t, `{"id":"routed-work","status":"deferred","defer_until":"2020-01-01T00:00:00Z","issue_type":"task","assignee":"worker","metadata":{"gc.routed_to":"worker"}}`)
+	if got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, []beads.Bead{parked}, []string{""}); len(got) != 0 {
+		t.Fatalf("filtered work = %#v, want the store-deferred row with an elapsed date dropped from pool demand", got)
+	}
+	if got := demandRequests([]beads.Bead{parked}); len(got) != 0 {
+		t.Fatalf("parked row requests = %#v, want none: no worker can claim a row bd ready hides", got)
+	}
+	if got := classifyDemandRowClaimability(parked, time.Now()); got != demandRowDeferred {
+		t.Fatalf("classifyDemandRowClaimability = %q, want %q", got, demandRowDeferred)
 	}
 }
 
@@ -433,7 +481,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableS
 		Metadata: map[string]string{},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, []string{"riga"})
+	got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, []string{"riga"})
 
 	if len(got) != 0 {
 		t.Fatalf("filtered work = %#v, want unreachable rig-store direct assignment dropped", got)
@@ -1033,5 +1081,126 @@ func TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical(t *testing.
 
 	if got := resolveTaskWorkDir("", store, "worker-session"); got != creatorDir {
 		t.Fatalf("resolveTaskWorkDir = %q, want creator work_dir %q (not stamped %q)", got, creatorDir, observedDir)
+	}
+}
+
+// TestFilterAssignedWorkBeadsForPoolDemandReturnsAlignedStoreRefs pins that
+// the pool-demand filter returns each kept row's own store ref, in kept order,
+// so readiness resolves per (store ref, bead ID). Dropped deferred and
+// unroutable rows take their refs with them; a row beyond a short ref slice is
+// unreachable and dropped; no input refs pass the rows through unresolved.
+func TestFilterAssignedWorkBeadsForPoolDemandReturnsAlignedStoreRefs(t *testing.T) {
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Scope: "city"}}}
+	routed := func(id string) beads.Bead {
+		return beads.Bead{ID: id, Status: "open", Assignee: "worker", Metadata: map[string]string{"gc.routed_to": "worker"}}
+	}
+	deferred := routed("deferred")
+	deferred.DeferUntil = &future
+	unroutable := beads.Bead{ID: "unroutable", Status: "open", Assignee: "nobody", Metadata: map[string]string{}}
+
+	t.Run("interleaved kept and dropped rows", func(t *testing.T) {
+		work := []beads.Bead{routed("a"), deferred, routed("b"), unroutable, routed("c")}
+		refs := []string{"", "riga", "riga", "rigb", "rigb"}
+		got, gotRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, work, refs, now)
+		if ids := beadIDs(got); !slices.Equal(ids, []string{"a", "b", "c"}) {
+			t.Fatalf("kept IDs = %v, want [a b c]", ids)
+		}
+		if !slices.Equal(gotRefs, []string{"", "riga", "rigb"}) {
+			t.Fatalf("kept refs = %q, want [\"\" riga rigb]", gotRefs)
+		}
+	})
+	t.Run("short refs drop the uncovered row", func(t *testing.T) {
+		got, gotRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, []beads.Bead{routed("a"), routed("b")}, []string{"riga"}, now)
+		if ids := beadIDs(got); !slices.Equal(ids, []string{"a"}) || !slices.Equal(gotRefs, []string{"riga"}) {
+			t.Fatalf("kept = %v refs %q, want [a] [riga]", ids, gotRefs)
+		}
+	})
+	t.Run("no refs pass rows through unresolved", func(t *testing.T) {
+		work := []beads.Bead{routed("a")}
+		got, gotRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, work, nil, now)
+		if len(got) != 1 || len(gotRefs) != 0 {
+			t.Fatalf("kept = %v refs %q, want the row with no refs", beadIDs(got), gotRefs)
+		}
+		ready := map[storeScopedBeadKey]bool{{StoreRef: "", ID: "a"}: true}
+		if flags := readyAssignedFlagsForBeads(ready, got, gotRefs); !slices.Equal(flags, []bool{false}) {
+			t.Fatalf("flags = %v, want [false]: a missing ref is never the city store", flags)
+		}
+	})
+}
+
+// TestFreshWakeDemandUsesEachRowsOwnStoreReadiness pins store-scoped readiness
+// through the filter and the fresh-wake planner: the same bead ID in the city
+// store and a rig store is two rows, and only the row whose own store proved it
+// ready may plan a clean session for a wake_mode="fresh" agent's asleep
+// assignee. A ready row in one store never makes its namesake in another
+// eligible.
+func TestFreshWakeDemandUsesEachRowsOwnStoreReadiness(t *testing.T) {
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	agent := poolAgent("claude", "", intPtr(5), 0)
+	agent.WakeMode = "fresh"
+	agent.Scope = "city"
+	cfg := &config.City{Agents: []config.Agent{agent}}
+	sessions := sessionInfosFromBeads([]beads.Bead{poolSessionBeadWithState("sess-1", "asleep", "")})
+	row := func(title string) beads.Bead {
+		b := workBead("step-1", "claude", "sess-1", "open", 2)
+		b.Title = title
+		return b
+	}
+	cases := []struct {
+		name      string
+		work      []beads.Bead
+		refs      []string
+		readyRef  string
+		wantFlags []bool
+		wantTitle string
+	}{
+		{
+			name:      "rig row ready, city row blocked",
+			work:      []beads.Bead{row("city"), row("rig")},
+			refs:      []string{"", "riga"},
+			readyRef:  "riga",
+			wantFlags: []bool{false, true},
+			wantTitle: "rig",
+		},
+		{
+			name:      "city row ready, rig row blocked",
+			work:      []beads.Bead{row("rig"), row("city")},
+			refs:      []string{"riga", ""},
+			readyRef:  "",
+			wantFlags: []bool{false, true},
+			wantTitle: "city",
+		},
+		{
+			name:      "readiness in an absent store makes nothing eligible",
+			work:      []beads.Bead{row("city")},
+			refs:      []string{""},
+			readyRef:  "riga",
+			wantFlags: []bool{false},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			readyAssigned := map[storeScopedBeadKey]bool{{StoreRef: tc.readyRef, ID: "step-1"}: true}
+			kept, keptRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, sessions, tc.work, tc.refs, now)
+			flags := readyAssignedFlagsForBeads(readyAssigned, kept, keptRefs)
+			if !slices.Equal(flags, tc.wantFlags) {
+				t.Fatalf("flags = %v, want %v", flags, tc.wantFlags)
+			}
+			var reqs []SessionRequest
+			for _, ds := range computePoolDesiredStatesParkedAt(cfg, kept, flags, sessions, nil, nil, now, nil, nil) {
+				reqs = append(reqs, ds.Requests...)
+			}
+			if tc.wantTitle == "" {
+				if len(reqs) != 0 {
+					t.Fatalf("requests = %+v, want none", reqs)
+				}
+				return
+			}
+			if len(reqs) != 1 || reqs[0].Tier != "wake-known-identity" || reqs[0].SessionBeadID != "" || reqs[0].WorkBeadTitle != tc.wantTitle {
+				t.Fatalf("requests = %+v, want one clean wake-known-identity for the %s row", reqs, tc.wantTitle)
+			}
+		})
 	}
 }

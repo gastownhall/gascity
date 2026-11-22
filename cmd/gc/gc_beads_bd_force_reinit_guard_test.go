@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -42,12 +44,9 @@ const (
 func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 	t.Parallel()
 
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
-
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	doltClient := extractShellFunction(t, src, "dolt_client")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
 	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
 	migrationCount := extractShellFunction(t, src, "bd_runtime_schema_migration_count")
@@ -106,6 +105,7 @@ func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 			// safety decision, not host resolution.
 			script := "connect_host() { printf '127.0.0.1'; }\n" +
 				validSQLName + "\n" +
+				doltClient + "\n" +
 				tableCount + "\n" +
 				schemaCursor + "\n" +
 				migrationCount + "\n" +
@@ -128,12 +128,9 @@ func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 func TestBdRuntimeBdTableCountRejectsUnsafeDatabaseNames(t *testing.T) {
 	t.Parallel()
 
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
-
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	doltClient := extractShellFunction(t, src, "dolt_client")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
 
 	cases := []struct {
@@ -156,6 +153,7 @@ func TestBdRuntimeBdTableCountRejectsUnsafeDatabaseNames(t *testing.T) {
 
 			script := "connect_host() { printf '127.0.0.1'; }\n" +
 				validSQLName + "\n" +
+				doltClient + "\n" +
 				tableCount + "\n" +
 				"bd_runtime_bd_table_count \"$1\"\n"
 
@@ -368,6 +366,7 @@ func TestStoreHoldsBdTablesConsidersMigrationCursor(t *testing.T) {
 
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	doltClient := extractShellFunction(t, src, "dolt_client")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
 	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
 	migrationCount := extractShellFunction(t, src, "bd_runtime_schema_migration_count")
@@ -462,6 +461,7 @@ func TestStoreHoldsBdTablesConsidersMigrationCursor(t *testing.T) {
 
 			script := "connect_host() { printf '127.0.0.1'; }\n" +
 				validSQLName + "\n" +
+				doltClient + "\n" +
 				tableCount + "\n" +
 				schemaCursor + "\n" +
 				migrationCount + "\n" +
@@ -566,6 +566,7 @@ func TestStoreHoldsBdTablesConsidersParkedMigrationHistory(t *testing.T) {
 
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	doltClient := extractShellFunction(t, src, "dolt_client")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
 	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
 	migrationCount := extractShellFunction(t, src, "bd_runtime_schema_migration_count")
@@ -642,6 +643,7 @@ func TestStoreHoldsBdTablesConsidersParkedMigrationHistory(t *testing.T) {
 
 			script := "connect_host() { printf '127.0.0.1'; }\n" +
 				validSQLName + "\n" +
+				doltClient + "\n" +
 				tableCount + "\n" +
 				schemaCursor + "\n" +
 				migrationCount + "\n" +
@@ -754,6 +756,7 @@ func TestForceReinitGuardWaitOutlastsCursorAdvancing(t *testing.T) {
 
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	doltClient := extractShellFunction(t, src, "dolt_client")
 	serverSQL := extractShellFunction(t, src, "server_sql")
 	schemaReady := extractShellFunction(t, src, "bd_runtime_schema_ready")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
@@ -808,6 +811,7 @@ esac
 
 	script := "connect_host() { printf '127.0.0.1'; }\n" +
 		validSQLName + "\n" +
+		doltClient + "\n" +
 		serverSQL + "\n" +
 		schemaReady + "\n" +
 		tableCount + "\n" +
@@ -834,6 +838,7 @@ func TestForceReinitGuardWaitGivesUpOnStalledCursor(t *testing.T) {
 
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	doltClient := extractShellFunction(t, src, "dolt_client")
 	serverSQL := extractShellFunction(t, src, "server_sql")
 	schemaReady := extractShellFunction(t, src, "bd_runtime_schema_ready")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
@@ -885,6 +890,7 @@ esac
 
 	script := "connect_host() { printf '127.0.0.1'; }\n" +
 		validSQLName + "\n" +
+		doltClient + "\n" +
 		serverSQL + "\n" +
 		schemaReady + "\n" +
 		tableCount + "\n" +
@@ -941,6 +947,7 @@ func TestForceReinitGuardWaitOutlastsSettleTimeoutWhileCursorAdvances(t *testing
 
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	doltClient := extractShellFunction(t, src, "dolt_client")
 	serverSQL := extractShellFunction(t, src, "server_sql")
 	schemaReady := extractShellFunction(t, src, "bd_runtime_schema_ready")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
@@ -996,6 +1003,7 @@ esac
 	script := "connect_host() { printf '127.0.0.1'; }\n" +
 		"GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS=0\n" +
 		validSQLName + "\n" +
+		doltClient + "\n" +
 		serverSQL + "\n" +
 		schemaReady + "\n" +
 		tableCount + "\n" +

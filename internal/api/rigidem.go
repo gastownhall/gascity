@@ -346,7 +346,7 @@ func (x *rigIdemIndex) lookupByName(city, rig string) (*liveProvision, bool) {
 // ready-excluded label), so the record is closed at birth to stay out of
 // every open/ready view. All machine lookups use IncludeClosed:true. Returns
 // the new record's ID.
-func createIdemRecord(store beads.Store, city, requestID, digest, cursor, rigName, state string) (string, error) {
+func createIdemRecord(store beads.WorkStore, city, requestID, digest, cursor, rigName, state string) (string, error) {
 	var id string
 	err := store.Tx("gc: idem reserve rig-create "+requestID, func(tx beads.Tx) error {
 		rec, err := tx.Create(beads.Bead{
@@ -393,7 +393,7 @@ func createIdemRecord(store beads.Store, city, requestID, digest, cursor, rigNam
 // between two createIdemRecord calls); rather than erroring forever, it
 // SELF-HEALS — keeps the oldest record and neutralizes the duplicates — so the
 // (city, request_id) axis converges instead of returning a permanent 500.
-func lookupIdemRecord(store beads.Store, city, requestID string) (*beads.Bead, error) {
+func lookupIdemRecord(store beads.WorkStore, city, requestID string) (*beads.Bead, error) {
 	matches, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			metaIdemKind:      idemKindRigCreate,
@@ -422,7 +422,7 @@ func lookupIdemRecord(store beads.Store, city, requestID string) (*beads.Bead, e
 // drops it out of the (kind == rig-create) lookup / rig-name scan / boot sweep.
 // It returns the survivor; a neutralization write failure is surfaced so the
 // caller does not proceed on a still-poisoned axis.
-func healDuplicateIdemRecords(store beads.Store, city, requestID string, matches []beads.Bead) (*beads.Bead, error) {
+func healDuplicateIdemRecords(store beads.WorkStore, city, requestID string, matches []beads.Bead) (*beads.Bead, error) {
 	survivor := 0
 	for i := 1; i < len(matches); i++ {
 		older := matches[i].CreatedAt.Before(matches[survivor].CreatedAt)
@@ -457,7 +457,7 @@ func healDuplicateIdemRecords(store beads.Store, city, requestID string, matches
 // but the succeeded idem record lingers, so cross-checking rigInConfig lets the
 // name be re-added instead of being wedged forever. rigInConfig may be nil (in
 // which case a succeeded record blocks, the pre-fix behavior).
-func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig func(name string) bool) (bool, error) {
+func durableRigNameScan(store beads.WorkStore, city, rigName string, rigInConfig func(name string) bool) (bool, error) {
 	matches, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			metaIdemKind:    idemKindRigCreate,
@@ -485,7 +485,7 @@ func durableRigNameScan(store beads.Store, city, rigName string, rigInConfig fun
 // markIdemSucceeded transitions a record to succeeded and merges the result
 // fields (G13 §5.3). C4b calls it from the provision goroutine ONLY after the
 // G17 visibility barrier is satisfied, and before removing the live entry.
-func markIdemSucceeded(store beads.Store, beadID, rigName, prefix, defaultBranch string) error {
+func markIdemSucceeded(store beads.WorkStore, beadID, rigName, prefix, defaultBranch string) error {
 	if err := store.SetMetadataBatch(beadID, map[string]string{
 		metaIdemState:        idemStateSucceeded,
 		metaIdemResultRig:    rigName,
@@ -512,7 +512,7 @@ const (
 // markIdemSucceededWithRetry writes the succeeded transition, retrying a few
 // times so a transient ledger write failure does not strand the record in
 // in_flight while the rig is already live.
-func markIdemSucceededWithRetry(store beads.Store, beadID, rigName, prefix, defaultBranch string) error {
+func markIdemSucceededWithRetry(store beads.WorkStore, beadID, rigName, prefix, defaultBranch string) error {
 	var err error
 	for attempt := 0; attempt < markIdemSucceededRetries; attempt++ {
 		if err = markIdemSucceeded(store, beadID, rigName, prefix, defaultBranch); err == nil {
@@ -527,7 +527,7 @@ func markIdemSucceededWithRetry(store beads.Store, beadID, rigName, prefix, defa
 // terminal (G13 §5.3/§6). C4b calls it from the goroutine ONLY after the
 // partial dir/DB/config for the rig has been fully removed (drop-then-mark),
 // and before removing the live entry.
-func markIdemRolledBack(store beads.Store, beadID string) error {
+func markIdemRolledBack(store beads.WorkStore, beadID string) error {
 	if err := store.SetMetadataBatch(beadID, map[string]string{
 		metaIdemState: idemStateRolledBack,
 	}); err != nil {
@@ -612,7 +612,7 @@ type rigAdmitResult struct {
 // when present — has passed validateRequestID.
 //
 // Collaborators are passed explicitly so the core is unit-testable without a
-// Server. In production (C4b) store is s.state.CityBeadStore(), cursor is
+// Server. In production (C4b) store is s.state.Stores().Work(), cursor is
 // s.currentCityEventCursor, rigInConfig reports whether s.state.Config() already
 // holds the rig, and rigComplete is the boot-sweep completeness probe
 // (s.rigComplete) reporting whether a rig is fully provisioned. Both predicates
@@ -630,7 +630,7 @@ type rigAdmitResult struct {
 // lookup-then-Create would suffer within the lag window.
 func admitRigCreate(
 	idx *rigIdemIndex,
-	store beads.Store,
+	store beads.WorkStore,
 	cursor func() (string, error),
 	rigInConfig func(name string) bool,
 	rigComplete func(name string) (complete bool, prefix, defaultBranch string),
@@ -684,7 +684,7 @@ func admitRigCreate(
 // of admitRigCreate; the caller still holds both G13 §7 locks.
 func admitByRequestID(
 	idx *rigIdemIndex,
-	store beads.Store,
+	store beads.WorkStore,
 	cursor func() (string, error),
 	rigInConfig func(name string) bool,
 	rigComplete func(name string) (complete bool, prefix, defaultBranch string),
@@ -816,7 +816,7 @@ func admitByRequestID(
 // nil (a read-only projection), in which case the config guard is skipped.
 func admitFreshLocked(
 	idx *rigIdemIndex,
-	store beads.Store,
+	store beads.WorkStore,
 	cursor func() (string, error),
 	rigInConfig func(name string) bool,
 	city string,
