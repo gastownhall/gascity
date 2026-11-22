@@ -29,6 +29,19 @@ func graphHeldBlockedBy(deps SlingDeps, sourceID string, blockedBy []string) ([]
 	return graphv2.GraphHeldBlockers(deps.GraphStore, sourceID, blockedBy)
 }
 
+// GraphWorkflowBlockers returns the open blockers of sourceID a graph
+// workflow attached to it waits for; it only reads. It applies the same
+// split-city holdability check as a launch (graphHeldBlockedBy), so a
+// blocker a relocated graph store cannot hold fails with a
+// *graphv2.CrossStoreBlockersError.
+func GraphWorkflowBlockers(deps SlingDeps, sourceID string) ([]string, error) {
+	blockers, err := sourceBlockedBy(deps, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	return graphHeldBlockedBy(deps, sourceID, blockers)
+}
+
 // reportWaitingOn makes launch report waitingOn, the source bead's open
 // blockers the workflow was created waiting for (molecule.Result.BlockedBy),
 // as SlingResult.WaitingOn once it starts.

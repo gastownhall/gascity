@@ -1021,6 +1021,17 @@ func printSlingResult(result sling.SlingResult, stdout, _ io.Writer) {
 	}
 }
 
+// printSlingWaitingOn names the open blockers of sourceID, the bead slung, that
+// the launched workflow waits for (SlingResult.WaitingOn), and how to hold it
+// on a blocker added later: the blocker set is a snapshot taken at launch.
+func printSlingWaitingOn(result sling.SlingResult, sourceID string, stdout io.Writer) {
+	if result.DryRun || len(result.WaitingOn) == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "Workflow %s waits for %s (open blockers of %s); add a later blocker with: bd dep add <step> <blocker>\n", //nolint:errcheck
+		result.WorkflowID, strings.Join(result.WaitingOn, ", "), sourceID)
+}
+
 // printBatchSlingResult formats a batch SlingResult for CLI display.
 func printBatchSlingResult(result sling.SlingResult, stdout, stderr io.Writer) {
 	// Warnings.
@@ -1124,6 +1135,7 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 		return 1
 	}
 	printSlingResult(result, stdout, stderr)
+	printSlingWaitingOn(result, opts.BeadOrFormula, stdout)
 	// Dry-run: display the CLI preview using the domain result.
 	if result.DryRun {
 		return dryRunSingle(opts, deps, querier, stdout, stderr)
@@ -1170,6 +1182,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 			printBatchSlingResult(result, humanStdout, stderr)
 		} else if err == nil {
 			printSlingResult(result, humanStdout, stderr)
+			printSlingWaitingOn(result, opts.BeadOrFormula, humanStdout)
 		}
 	}
 	if err != nil {
@@ -1201,6 +1214,14 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 	}
 	if result.DryRun {
 		if jsonOutput {
+			if result.ContainerType == "" && dryRunAttachesGraphWorkflow(opts, deps, querier) {
+				waitingOn, err := sling.GraphWorkflowBlockers(deps, opts.BeadOrFormula)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck
+					return 1
+				}
+				result.WaitingOn = waitingOn
+			}
 			return writeSlingJSONResult(result, "", jsonStdout, stderr)
 		}
 		// For batch dry-run, look up the container bead for display.
@@ -1271,6 +1292,7 @@ type slingJSONResult struct {
 	DryRun        bool                   `json:"dry_run"`
 	DashboardURL  string                 `json:"dashboard_url,omitempty"`
 	Warnings      []string               `json:"warnings,omitempty"`
+	WaitingOn     []string               `json:"waiting_on,omitempty"`
 	Batch         *slingJSONBatchSummary `json:"batch,omitempty"`
 }
 
@@ -1308,6 +1330,7 @@ func slingJSONFromResult(result sling.SlingResult) slingJSONResult {
 		Queued:        result.NudgeAgent != nil,
 		DryRun:        result.DryRun,
 		Warnings:      slingJSONWarnings(result),
+		WaitingOn:     result.WaitingOn,
 	}
 	if len(result.Children) > 0 || result.ContainerType != "" {
 		payload.Batch = &slingJSONBatchSummary{
@@ -2180,6 +2203,11 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			if preCheck && preCheckConclusive {
 				w("  Pre-check: " + opts.BeadOrFormula + preCheckClaim(opts, opts.OnFormula))
 			}
+			if preCheck && dryRunFormulaAttachIsGraphV2(opts, deps, a) {
+				if rc := dryRunReportWaitingOn(w, deps, opts.BeadOrFormula, stderr); rc != 0 {
+					return rc
+				}
+			}
 			w("")
 		} else if !routeOnly && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
 			defaultFormula := a.EffectiveDefaultSlingFormula()
@@ -2216,6 +2244,11 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 					w(fmt.Sprintf("  Pre-check: %s already has attached %s %s — the default formula will be skipped and the bead routed plainly.", opts.BeadOrFormula, blockingLabel, blockingID))
 				} else if preCheckConclusive {
 					w("  Pre-check: " + opts.BeadOrFormula + preCheckClaim(opts, defaultFormula))
+				}
+			}
+			if preCheck && blockingLabel == "" && dryRunFormulaAttachIsGraphV2(opts, deps, a) {
+				if rc := dryRunReportWaitingOn(w, deps, opts.BeadOrFormula, stderr); rc != 0 {
+					return rc
 				}
 			}
 			w("")
@@ -2274,6 +2307,40 @@ func dryRunFormulaAttachIsGraphV2(opts slingOpts, deps slingDeps, a config.Agent
 	}
 	isGraph, _, err := graphv2.IsGraphV2Formula(formulaName, sling.SlingFormulaSearchPaths(deps, a))
 	return err == nil && isGraph
+}
+
+// dryRunReportWaitingOn prints the open blockers of beadID a graph workflow
+// attached to it would wait for. It reads the same blockers the live launch
+// wires and writes nothing. When the live launch would fail on them (a
+// *graphv2.CrossStoreBlockersError on a split city) or they cannot be read,
+// it reports the error on stderr and returns 1, as the other dry-run
+// pre-checks do.
+func dryRunReportWaitingOn(w func(string), deps slingDeps, beadID string, stderr io.Writer) int {
+	waitingOn, err := sling.GraphWorkflowBlockers(deps, beadID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if len(waitingOn) > 0 {
+		w(fmt.Sprintf("  Would wait for: %s (open blockers of %s)", strings.Join(waitingOn, ", "), beadID))
+	}
+	return 0
+}
+
+// dryRunAttachesGraphWorkflow reports whether a single-bead sling would
+// attach a graph workflow to an existing bead: the attached formula is
+// graph.v2, and the bead is not only re-routed (BeadCheckResult.RouteOnly).
+func dryRunAttachesGraphWorkflow(opts slingOpts, deps slingDeps, querier BeadQuerier) bool {
+	if opts.IsFormula || opts.InlineText || !dryRunFormulaAttachIsGraphV2(opts, deps, opts.Target) {
+		return false
+	}
+	if opts.Force || opts.Reassign {
+		return true
+	}
+	check := sling.CheckBeadStateWithOptions(querier, opts.BeadOrFormula, opts.Target, deps, sling.BeadCheckOptions{
+		NoConvoy: opts.NoConvoy,
+	})
+	return !check.RouteOnly
 }
 
 // dryRunBatch prints a step-by-step preview of what gc sling would do for a
