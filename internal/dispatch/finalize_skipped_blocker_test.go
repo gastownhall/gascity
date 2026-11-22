@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -192,5 +193,157 @@ func TestProcessWorkflowFinalizeAllPassLeavesSkippedBlockersAbsent(t *testing.T)
 	member := mustGetBead(t, store, unreached.ID)
 	if member.Status != "closed" || member.Metadata["gc.outcome"] != "skipped" {
 		t.Fatalf("never-reached member status=%q gc.outcome=%q, want the sweep's closed/skipped", member.Status, member.Metadata["gc.outcome"])
+	}
+}
+
+// TestProcessWorkflowFinalizeFailOmitsSkippedBlockers pins that only a pass
+// close writes gc.skipped_blockers: a failed, canceled or scope-aborted
+// workflow with a skipped blocker closes its root with gc.outcome alone.
+func TestProcessWorkflowFinalizeFailOmitsSkippedBlockers(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		rootMeta    map[string]string
+		blockerMeta []map[string]string
+		// members adds non-blocker workflow members once the fixture exists.
+		members     func(t *testing.T, f skippedBlockerFixture)
+		wantAction  string
+		wantOutcome string
+	}{{
+		name:        "failed blocker",
+		blockerMeta: []map[string]string{outcomeMeta("fail"), outcomeMeta("skipped")},
+		wantAction:  "workflow-fail",
+		wantOutcome: "fail",
+	}, {
+		name:        "canceled run",
+		rootMeta:    map[string]string{"gc.cancel_requested": "2026-11-22T00:00:00Z"},
+		blockerMeta: []map[string]string{outcomeMeta("pass"), outcomeMeta("skipped")},
+		wantAction:  "workflow-canceled",
+		wantOutcome: "canceled",
+	}, {
+		name: "scope-abort-skipped sink in a failed abort_scope scope",
+		blockerMeta: []map[string]string{{
+			"gc.outcome":    "skipped",
+			"gc.scope_ref":  "body",
+			"gc.scope_role": "member",
+		}},
+		members: func(t *testing.T, f skippedBlockerFixture) {
+			t.Helper()
+			mustCreateWorkflowBead(t, f.store, beads.Bead{
+				Title:  "body",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.kind":         "scope",
+					"gc.scope_role":   "body",
+					"gc.root_bead_id": f.root.ID,
+					"gc.step_ref":     "demo.body",
+					"gc.outcome":      "fail",
+				},
+			})
+			mustCreateWorkflowBead(t, f.store, beads.Bead{
+				Title:  "preflight",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.root_bead_id":  f.root.ID,
+					"gc.scope_ref":     "body",
+					"gc.scope_role":    "member",
+					"gc.outcome":       "fail",
+					"gc.failure_class": "hard",
+					"gc.on_fail":       "abort_scope",
+				},
+			})
+		},
+		wantAction:  "workflow-fail",
+		wantOutcome: "fail",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			f := newSkippedBlockerFixture(t, store, tc.blockerMeta, nil)
+			for k, v := range tc.rootMeta {
+				if err := store.SetMetadata(f.root.ID, k, v); err != nil {
+					t.Fatalf("set root %s: %v", k, err)
+				}
+			}
+			if tc.members != nil {
+				tc.members(t, f)
+			}
+			result, root := f.finalize(t)
+
+			if result.Action != tc.wantAction {
+				t.Fatalf("action = %q, want %q", result.Action, tc.wantAction)
+			}
+			if root.Status != "closed" || root.Metadata["gc.outcome"] != tc.wantOutcome {
+				t.Fatalf("root status=%q gc.outcome=%q, want closed/%s", root.Status, root.Metadata["gc.outcome"], tc.wantOutcome)
+			}
+			if got, ok := root.Metadata["gc.skipped_blockers"]; ok {
+				t.Fatalf("root gc.skipped_blockers = %q, want the key absent on a %s close", got, tc.wantOutcome)
+			}
+		})
+	}
+}
+
+// TestCloseWorkflowRootQuarantineRefusalWritesNoSkippedBlockers pins that a
+// root quarantined after the outcome resolved refuses the pass close whole:
+// the marker rides on that close, so it is not written either.
+func TestCloseWorkflowRootQuarantineRefusalWritesNoSkippedBlockers(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	f := newSkippedBlockerFixture(t, store, []map[string]string{outcomeMeta("skipped")}, nil)
+	quarantineWorkflowRoot(t, store, f.root.ID)
+
+	err := closeWorkflowRoot(beadstest.Graph(store), f.root.ID, "pass", []string{f.blockers[0].ID})
+	if !errors.Is(err, errRootQuarantined) {
+		t.Fatalf("closeWorkflowRoot err = %v, want errRootQuarantined", err)
+	}
+	root := mustGetBead(t, store, f.root.ID)
+	if got, ok := root.Metadata["gc.skipped_blockers"]; ok {
+		t.Fatalf("quarantined root gc.skipped_blockers = %q, want the key absent", got)
+	}
+}
+
+// TestProcessWorkflowFinalizeMissingRootWritesNoSkippedBlockers pins that a
+// finalizer whose root is gone settles as missing_root and records its
+// skipped blockers nowhere.
+func TestProcessWorkflowFinalizeMissingRootWritesNoSkippedBlockers(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	blocker := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "step",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.root_bead_id": "gc-missing", "gc.outcome": "skipped"},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": "gc-missing",
+		},
+	})
+	mustDepAdd(t, store, finalizer.ID, blocker.ID, "blocks")
+
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if result.Action != "workflow-missing_root" {
+		t.Fatalf("action = %q, want workflow-missing_root", result.Action)
+	}
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+	for _, b := range all {
+		if got, ok := b.Metadata["gc.skipped_blockers"]; ok {
+			t.Fatalf("bead %s gc.skipped_blockers = %q, want the key nowhere", b.ID, got)
+		}
 	}
 }
