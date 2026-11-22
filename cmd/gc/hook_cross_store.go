@@ -221,9 +221,20 @@ func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, 
 // agent's own store first) and the rig-scoped hook path (which puts the rig
 // store first, as the agent's primary store).
 func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, rigName string, identityOverrides map[string]string) []hookStore {
+	store, err := rigHookStore(cityPath, cfg, a, rigName, identityOverrides)
+	if err != nil {
+		return stores
+	}
+	return append(stores, store)
+}
+
+// rigHookStore builds the hookStore for a single named rig, as
+// appendOneRigHookStore appends it, and reports why it could not: an unknown
+// rig, or a rig whose env cannot be built.
+func rigHookStore(cityPath string, cfg *config.City, a *config.Agent, rigName string, identityOverrides map[string]string) (hookStore, error) {
 	rigName = strings.TrimSpace(rigName)
 	if cfg == nil || a == nil || rigName == "" {
-		return stores
+		return hookStore{}, fmt.Errorf("building the store of rig %q: no city config, agent or rig name", rigName)
 	}
 	known := false
 	for i := range cfg.Rigs {
@@ -233,25 +244,28 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 		}
 	}
 	if !known {
-		return stores
+		return hookStore{}, fmt.Errorf("building the store of rig %q: no such rig", rigName)
 	}
 	view := *a
 	view.Dir = rigName
 	rigEnv, err := hookStoreQueryEnv(cityPath, cfg, &view)
-	if err != nil || rigEnv == nil {
-		return stores
+	if err != nil {
+		return hookStore{}, fmt.Errorf("building the env of rig %q: %w", rigName, err)
+	}
+	if rigEnv == nil {
+		return hookStore{}, fmt.Errorf("building the env of rig %q: no env", rigName)
 	}
 	for _, k := range hookIdentityEnvKeys {
 		if v, ok := identityOverrides[k]; ok {
 			rigEnv[k] = v
 		}
 	}
-	return append(stores, hookStore{
+	return hookStore{
 		dir:      agentCommandDir(cityPath, &view, cfg.Rigs),
 		env:      mergeRuntimeEnv(os.Environ(), rigEnv),
 		rig:      rigName,
 		storeRef: "rig:" + rigName,
-	})
+	}, nil
 }
 
 // appendCityHookStore appends the CITY store as a best-effort federated entry
@@ -268,25 +282,38 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 // entry is appended LAST so the rig store keeps bestStoreWithWork's
 // emit-on-timeout contract as the primary entry.
 func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) []hookStore {
-	if cfg == nil || a == nil {
+	store, err := cityHookStore(cityPath, cfg, a, identityOverrides)
+	if err != nil {
 		return stores
+	}
+	return append(stores, store)
+}
+
+// cityHookStore builds the CITY store's hookStore, as appendCityHookStore
+// appends it, and reports why it could not.
+func cityHookStore(cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) (hookStore, error) {
+	if cfg == nil || a == nil {
+		return hookStore{}, errors.New("building the city store: no city config or agent")
 	}
 	view := *a
 	view.Dir = ""
 	cityEnv, err := hookStoreQueryEnv(cityPath, cfg, &view)
-	if err != nil || cityEnv == nil {
-		return stores
+	if err != nil {
+		return hookStore{}, fmt.Errorf("building the city env: %w", err)
+	}
+	if cityEnv == nil {
+		return hookStore{}, errors.New("building the city env: no env")
 	}
 	for _, k := range hookIdentityEnvKeys {
 		if v, ok := identityOverrides[k]; ok {
 			cityEnv[k] = v
 		}
 	}
-	return append(stores, hookStore{
+	return hookStore{
 		dir:      cityPath,
 		env:      mergeRuntimeEnv(os.Environ(), cityEnv),
 		storeRef: "city:" + hookStoreCityName(cityPath, loadedCityName(cfg, cityPath)),
-	})
+	}, nil
 }
 
 // primaryHookStoreRef names the store the agent's own work-query env reads.

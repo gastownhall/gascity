@@ -354,6 +354,12 @@ type hookClaimOps struct {
 	// not-found from ONE leg be checked against the others before it opens the
 	// escalation. See claim_class_route.go.
 	ClassRoute *hookClaimClassRoute
+	// WorkLegRoute is the route to the work leg that holds a bead the primary
+	// leg proved absent, or nil off the primary-scoped claim branch. Like
+	// ClassRoute it is not a seam: the started key reads its memo to key a
+	// claim by the leg it landed in (hookStartedKeyFor). See
+	// claim_work_leg_route.go.
+	WorkLegRoute *hookClaimWorkLegRoute
 	// ClassesRelocated reports that the city relocates its coordination
 	// classes even when ClassRoute is nil because the route degraded (a
 	// binding with no claim CAS): a bead its leg serves may then reside in the
