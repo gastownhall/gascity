@@ -1,11 +1,14 @@
 package core
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // nudgeOnRouteScriptPath is the on-disk copy of the nudge-on-route order's
@@ -15,14 +18,15 @@ const nudgeOnRouteScriptPath = "assets/scripts/nudge-on-route.sh"
 // nudgeOnRouteEnvKeys are the settings that would point the script at a live
 // session's city, state, or trace file. The test supplies its own state dir.
 var nudgeOnRouteEnvKeys = map[string]struct{}{
-	"GC_CITY":                     {},
-	"GC_CITY_RUNTIME_DIR":         {},
-	"GC_PACK_STATE_DIR":           {},
-	"GC_BD_TRACE_JSON":            {},
-	"GC_NUDGE_ON_ROUTE_WINDOW":    {},
-	"GC_NUDGE_ON_ROUTE_LOOKBACK":  {},
-	"GC_NUDGE_ON_ROUTE_RETENTION": {},
-	"GC_NUDGE_ON_ROUTE_MESSAGE":   {},
+	"GC_CITY":                        {},
+	"GC_CITY_RUNTIME_DIR":            {},
+	"GC_PACK_STATE_DIR":              {},
+	"GC_BD_TRACE_JSON":               {},
+	"GC_NUDGE_ON_ROUTE_WINDOW":       {},
+	"GC_NUDGE_ON_ROUTE_LOOKBACK":     {},
+	"GC_NUDGE_ON_ROUTE_MAX_LOOKBACK": {},
+	"GC_NUDGE_ON_ROUTE_RETENTION":    {},
+	"GC_NUDGE_ON_ROUTE_MESSAGE":      {},
 }
 
 // TestNudgeOnRouteMatchesEveryBeadUpdatedShape pins the order against both
@@ -217,6 +221,218 @@ func TestNudgeOnRouteSeqCutAndCreatedEvents(t *testing.T) {
 		}
 		if got := readSeq(t, stateDir); got != "3" {
 			t.Fatalf("seq mark = %q, want 3 after reset", got)
+		}
+	})
+}
+
+// nudgeEvent describes one fixture event for the nudge-on-route script. An
+// empty routedTo leaves the bead unrouted; flat emits the bead fields directly
+// under .payload, as events.jsonl stores them, instead of the API's
+// {"bead": …} envelope. age sets ts that far before now.
+type nudgeEvent struct {
+	seq      int
+	typ      string
+	bead     string
+	routedTo string
+	age      time.Duration
+	flat     bool
+}
+
+// line renders the event as one JSON line.
+func (e nudgeEvent) line(t *testing.T) string {
+	t.Helper()
+	meta := map[string]string{}
+	if e.routedTo != "" {
+		meta["gc.routed_to"] = e.routedTo
+	}
+	bead := map[string]any{"id": e.bead, "status": "open", "metadata": meta}
+	var payload any = map[string]any{"bead": bead}
+	if e.flat {
+		payload = bead
+	}
+	data, err := json.Marshal(map[string]any{
+		"seq":     e.seq,
+		"type":    e.typ,
+		"actor":   "gc",
+		"subject": e.bead,
+		"ts":      time.Now().UTC().Add(-e.age).Format(time.RFC3339),
+		"payload": payload,
+	})
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	return string(data)
+}
+
+// nudgeOnRouteRig is one city's worth of fixture for the nudge-on-route
+// script: an events file served by a fake gc that honors --type and --since,
+// the pack state dir, and a dir whose marker files fail a nudge.
+type nudgeOnRouteRig struct {
+	t          *testing.T
+	dir        string
+	eventsPath string
+	stateDir   string
+	binDir     string
+	logPath    string
+}
+
+// newNudgeOnRouteRig builds a rig. filter selects the filtering events read;
+// off, `gc events` answers the whole file.
+func newNudgeOnRouteRig(t *testing.T, filter bool) *nudgeOnRouteRig {
+	t.Helper()
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; nudge-on-route.sh requires it")
+	}
+	dir := t.TempDir()
+	r := &nudgeOnRouteRig{
+		t:          t,
+		dir:        dir,
+		eventsPath: filepath.Join(dir, "events.jsonl"),
+		stateDir:   filepath.Join(dir, "state"),
+	}
+	r.binDir, r.logPath = fakeGCBin(t, cascadeFake{
+		eventsPath:   r.eventsPath,
+		failDir:      filepath.Join(dir, "fail"),
+		filterEvents: filter,
+	}.body())
+	return r
+}
+
+// writeLines replaces the events file with the given raw lines.
+func (r *nudgeOnRouteRig) writeLines(lines ...string) {
+	r.t.Helper()
+	if err := os.WriteFile(r.eventsPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		r.t.Fatalf("write events: %v", err)
+	}
+}
+
+// writeEvents replaces the events file with the given events.
+func (r *nudgeOnRouteRig) writeEvents(events ...nudgeEvent) {
+	r.t.Helper()
+	lines := make([]string, 0, len(events))
+	for _, e := range events {
+		lines = append(lines, e.line(r.t))
+	}
+	r.writeLines(lines...)
+}
+
+// run executes the script once and returns its combined output.
+func (r *nudgeOnRouteRig) run() string {
+	r.t.Helper()
+	out, err := runPackScript(r.t, nudgeOnRouteScriptPath, r.binDir, nudgeOnRouteEnvKeys,
+		[]string{"GC_PACK_STATE_DIR=" + r.stateDir})
+	if err != nil {
+		r.t.Fatalf("nudge-on-route.sh failed: %v\n%s", err, out)
+	}
+	return out
+}
+
+// seq returns the persisted seq mark, or "" when the file is absent.
+func (r *nudgeOnRouteRig) seq() string {
+	r.t.Helper()
+	data, err := os.ReadFile(filepath.Join(r.stateDir, "nudge-on-route-seq"))
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		r.t.Fatalf("read seq mark: %v", err)
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// hasKey reports whether the dedup state records the "<bead>|<target>" pair.
+func (r *nudgeOnRouteRig) hasKey(key string) bool {
+	r.t.Helper()
+	data, err := os.ReadFile(filepath.Join(r.stateDir, "nudge-on-route-state.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		r.t.Fatalf("read dedup state: %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		r.t.Fatalf("parse dedup state: %v\n%s", err, data)
+	}
+	_, ok := state[key]
+	return ok
+}
+
+// nudges returns how many nudges reached target and the full gc call log.
+func (r *nudgeOnRouteRig) nudges(target string) (int, string) {
+	r.t.Helper()
+	_, logged := countNudges(r.t, r.logPath)
+	return countNudgesTo(r.t, r.logPath, target), logged
+}
+
+// TestNudgeOnRouteNudgesRoutingStampedAtCreation pins #4382: a bead whose
+// gc.routed_to is stamped in its create payload (gc order run, formula pours,
+// poured step beads) emits bead.created and no bead.updated before it is
+// claimed, so the order must read creations too, in both payload shapes. The
+// fake gc honors --type exactly, so a bead.updated-only read sees nothing.
+func TestNudgeOnRouteNudgesRoutingStampedAtCreation(t *testing.T) {
+	const target = "gascity/builder"
+	for _, tc := range []struct {
+		name string
+		flat bool
+	}{
+		{name: "nested payload.bead", flat: false},
+		{name: "flat payload", flat: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newNudgeOnRouteRig(t, true)
+			r.writeEvents(nudgeEvent{seq: 1, typ: "bead.created", bead: "ga-born", routedTo: target, age: 30 * time.Second, flat: tc.flat})
+			r.run()
+			if got, logged := r.nudges(target); got != 1 {
+				t.Fatalf("nudges to %s = %d, want exactly 1; gc calls:\n%s", target, got, logged)
+			}
+			if total, logged := countNudges(t, r.logPath); total != 1 {
+				t.Fatalf("nudges = %d, want exactly 1; gc calls:\n%s", total, logged)
+			}
+			if !r.hasKey("ga-born|" + target) {
+				t.Fatalf("dedup state lacks ga-born|%s after the nudge", target)
+			}
+		})
+	}
+
+	t.Run("creation and update of one routing nudge once", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.writeEvents(
+			nudgeEvent{seq: 1, typ: "bead.created", bead: "ga-born", routedTo: target, age: 40 * time.Second},
+			nudgeEvent{seq: 2, typ: "bead.updated", bead: "ga-born", routedTo: target, age: 30 * time.Second, flat: true},
+		)
+		r.run()
+		if total, logged := countNudges(t, r.logPath); total != 1 {
+			t.Fatalf("nudges = %d, want exactly 1 for one routing seen twice; gc calls:\n%s", total, logged)
+		}
+	})
+
+	t.Run("a routed bead.closed is not a routing", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.writeEvents(nudgeEvent{seq: 1, typ: "bead.closed", bead: "ga-done", routedTo: target, age: 30 * time.Second})
+		r.run()
+		if total, logged := countNudges(t, r.logPath); total != 0 {
+			t.Fatalf("nudges = %d, want 0 for bead.closed; gc calls:\n%s", total, logged)
+		}
+	})
+
+	t.Run("a malformed line does not drop the batch", func(t *testing.T) {
+		// The local fallback reads events.jsonl, which can hold a torn line;
+		// each line is parsed on its own so the routing after it survives.
+		r := newNudgeOnRouteRig(t, false)
+		r.writeLines(
+			`{"seq":1,"type":"bead.updated","payload":{"bead":{"id":"ga-torn"`,
+			nudgeEvent{seq: 2, typ: "bead.created", bead: "ga-born", routedTo: target, age: 30 * time.Second}.line(t),
+		)
+		r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudges to %s = %d, want exactly 1 past a malformed line; gc calls:\n%s", target, got, logged)
+		}
+		if !r.hasKey("ga-born|" + target) {
+			t.Fatalf("dedup state lacks ga-born|%s after the nudge", target)
+		}
+		if got := r.seq(); got != "2" {
+			t.Fatalf("seq mark = %q, want 2", got)
 		}
 	})
 }
