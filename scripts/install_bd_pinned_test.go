@@ -109,8 +109,8 @@ func (e *installBdEnv) run(t *testing.T, target string) (string, error) {
 	return string(out), err
 }
 
-// goCalls returns the logged stub-go invocations whose argv starts with verb.
-func (e *installBdEnv) goCalls(t *testing.T, verb string) []string {
+// goInstalls returns the logged stub `go install` invocations.
+func (e *installBdEnv) goInstalls(t *testing.T) []string {
 	t.Helper()
 	data, err := os.ReadFile(e.goLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -118,7 +118,7 @@ func (e *installBdEnv) goCalls(t *testing.T, verb string) []string {
 	}
 	var calls []string
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if strings.HasPrefix(line, verb+" ") {
+		if strings.HasPrefix(line, "install ") {
 			calls = append(calls, line)
 		}
 	}
@@ -189,7 +189,7 @@ func TestInstallBdPinnedFreshInstall(t *testing.T) {
 		t.Fatal("make install-bd changed go.mod or go.sum")
 	}
 
-	installs := e.goCalls(t, "install")
+	installs := e.goInstalls(t)
 	if len(installs) != 1 {
 		t.Fatalf("go install calls = %q, want exactly one", installs)
 	}
@@ -253,7 +253,7 @@ func TestInstallBdPinnedFastPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("make install-bd: %v\n%s", err, out)
 	}
-	if installs := e.goCalls(t, "install"); len(installs) != 0 {
+	if installs := e.goInstalls(t); len(installs) != 0 {
 		t.Fatalf("go install ran although bd already embeds the pin: %q\n%s", installs, out)
 	}
 	if fileSum(t, e.dest()) != before {
@@ -262,4 +262,74 @@ func TestInstallBdPinnedFastPath(t *testing.T) {
 	if !strings.Contains(out, "already") || !strings.Contains(out, installBdPin) {
 		t.Fatalf("make install-bd output does not say bd is already at %s:\n%s", installBdPin, out)
 	}
+}
+
+// installBdSkewed is a beads version other than the pin.
+const installBdSkewed = "v1.2.0"
+
+// assertNoInstallBdLeftovers fails when a staging directory or an install
+// temp file survived the run.
+func assertNoInstallBdLeftovers(t *testing.T, e *installBdEnv, out string) {
+	t.Helper()
+	staging, err := os.ReadDir(e.tmpDir)
+	if err != nil {
+		t.Fatalf("read TMPDIR: %v", err)
+	}
+	for _, entry := range staging {
+		t.Errorf("staging left behind in TMPDIR: %s", entry.Name())
+	}
+	installed, err := os.ReadDir(e.installDir)
+	if err != nil {
+		t.Fatalf("read install dir: %v", err)
+	}
+	for _, entry := range installed {
+		if strings.HasPrefix(entry.Name(), ".bd.tmp.") {
+			t.Errorf("install temp file left behind: %s", entry.Name())
+		}
+	}
+	if t.Failed() {
+		t.Logf("make output:\n%s", out)
+	}
+}
+
+// TestInstallBdPinnedReplacesSkewedBd: a bd from another beads version is
+// replaced by a rename, never rewritten in place, so a process running the
+// old binary (or a hard link to it) keeps a complete file.
+func TestInstallBdPinnedReplacesSkewedBd(t *testing.T) {
+	e := newInstallBdEnv(t)
+	writeFakeBd(t, e.dest(), installBdSkewed)
+	oldContent, err := os.ReadFile(e.dest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLink := filepath.Join(t.TempDir(), "old-bd")
+	if err := os.Link(e.dest(), oldLink); err != nil {
+		t.Fatalf("hard-link the old bd: %v", err)
+	}
+
+	out, err := e.run(t, "install-bd")
+	if err != nil {
+		t.Fatalf("make install-bd: %v\n%s", err, out)
+	}
+	if got := embeddedVersion(t, e, e.dest()); got != installBdPin {
+		t.Fatalf("installed bd embeds beads %s, want %s\n%s", got, installBdPin, out)
+	}
+	if len(e.goInstalls(t)) != 1 {
+		t.Fatalf("go install calls = %q, want one", e.goInstalls(t))
+	}
+	oldInfo, err := os.Stat(oldLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newInfo, err := os.Stat(e.dest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(oldInfo, newInfo) {
+		t.Fatalf("bd was rewritten in place, not replaced by a rename\n%s", out)
+	}
+	if kept, _ := os.ReadFile(oldLink); string(kept) != string(oldContent) {
+		t.Fatalf("the old bd's inode was modified: %q\n%s", kept, out)
+	}
+	assertNoInstallBdLeftovers(t, e, out)
 }
