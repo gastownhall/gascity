@@ -162,12 +162,20 @@ func (p *proxyProcessInstance) Status() Status {
 
 func (p *proxyProcessInstance) HandleHTTP(w http.ResponseWriter, r *http.Request, subpath string) bool {
 	p.mu.Lock()
-	ready := !p.closed && p.cmd != nil && p.status.LocalState == "ready"
+	// A generation that has finished starting is proxied whatever its last
+	// health probe reported: the probe result is a health signal published
+	// through Status, not process liveness, so one slow probe must not
+	// turn a live, serving process into an outage. Instances that are
+	// closed, whose process has exited (p.cmd is cleared by the reaper or
+	// Close) or that are still in their readiness window keep answering
+	// 503, and a process that cannot answer is reported by the reverse
+	// proxy itself (502).
+	routable := !p.closed && p.cmd != nil && p.status.LocalState != "starting"
 	reason := p.status.Reason
 	transport := p.transport
 	p.mu.Unlock()
 
-	if !ready {
+	if !routable {
 		http.Error(w, serviceUnavailableMessage(reason), http.StatusServiceUnavailable)
 		return true
 	}

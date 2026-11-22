@@ -176,7 +176,17 @@ func TestProxyProcessHelper(t *testing.T) {
 	defer ln.Close() //nolint:errcheck // best-effort cleanup
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		// GC_SERVICE_HELPER_HEALTH_FAIL_FILE names a marker file a test
+		// writes to make this endpoint fail a probe. "hang" holds the
+		// response until the probe client's own timeout cancels the
+		// request. A missing or unreadable file means healthy, as before.
+		if failFile := os.Getenv("GC_SERVICE_HELPER_HEALTH_FAIL_FILE"); failFile != "" {
+			if mode, err := os.ReadFile(failFile); err == nil && strings.TrimSpace(string(mode)) == "hang" {
+				<-r.Context().Done()
+				return
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/env", func(w http.ResponseWriter, _ *http.Request) {
@@ -1288,4 +1298,72 @@ func containsPID(pids []int, pid int) bool {
 		}
 	}
 	return false
+}
+
+// TestProxyProcessProxiesLiveProcessAfterFailedHealthProbe asserts that a
+// proxy_process service whose last health probe timed out still proxies
+// requests to its live process, instead of refusing them with 503 until a
+// later probe passes.
+func TestProxyProcessProxiesLiveProcessAfterFailedHealthProbe(t *testing.T) {
+	t.Setenv("GC_SERVICE_HELPER", "1")
+	setHelperPassthrough(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	// The marker file the helper's /healthz consults; absent means healthy.
+	healthFailFile := filepath.Join(t.TempDir(), "health-fail")
+	t.Setenv("GC_SERVICE_HELPER_HEALTH_FAIL_FILE", healthFailFile)
+
+	rt := &testRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{
+			Services: []config.Service{{
+				Name: "bridge",
+				Kind: "proxy_process",
+				Process: config.ServiceProcessConfig{
+					Command:    []string{exe, "-test.run=^TestProxyProcessHelper$", "--"},
+					HealthPath: "/healthz",
+				},
+			}},
+		},
+		sp:    runtime.NewFake(),
+		store: beads.NewMemStore(),
+	}
+	mgr := NewManager(rt)
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	defer mgr.Close() //nolint:errcheck // best-effort cleanup
+
+	status, ok := mgr.Get("bridge")
+	if !ok {
+		t.Fatal("service status missing")
+	}
+	if status.LocalState != "ready" {
+		logData, _ := os.ReadFile(filepath.Join(rt.cityPath, ".gc", "services", "bridge", "logs", "service.log"))
+		t.Fatalf("LocalState = %q, want ready (reason=%q, log=%q)", status.LocalState, status.Reason, string(logData))
+	}
+
+	if err := os.WriteFile(healthFailFile, []byte("hang"), 0o644); err != nil {
+		t.Fatalf("writing the health-fail marker: %v", err)
+	}
+	mgr.Tick(context.Background(), time.Now().UTC())
+	status, _ = mgr.Get("bridge")
+	if status.State != "degraded" || status.LocalState != "degraded" || !strings.Contains(status.Reason, "health check failed") {
+		t.Fatalf("status after the hung probe = %s/%s %q, want degraded naming the failed health check", status.State, status.LocalState, status.Reason)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/svc/bridge/hooks/example", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	if ok := mgr.ServeHTTP(rec, req); !ok {
+		t.Fatal("ServeHTTP returned false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d while degraded with a live process; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "POST /hooks/example" {
+		t.Fatalf("body = %q, want %q", strings.TrimSpace(rec.Body.String()), "POST /hooks/example")
+	}
 }
