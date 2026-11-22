@@ -56,6 +56,7 @@ go_test(
         "batchfile_windows_test.go",
         "bdexec_fakebd_internal_test.go",
         "bdexec_gate_internal_test.go",
+        "bdexec_slotwait_internal_test.go",
         "bdsql_relocation_internal_test.go",
         "bdstore_assignee_fanout_test.go",
         "bdstore_batch_test.go",

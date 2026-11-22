@@ -2,6 +2,8 @@ package beads
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +14,12 @@ import (
 // defaultBDMaxChildren is the process-wide bound on concurrently running bd
 // children.
 const defaultBDMaxChildren = 16
+
+// ErrBDExecSlotWait marks a bd call that never ran because its budget ended
+// while it waited for a bd exec slot. A deadline-form error also reads as a
+// timeout (IsTimeoutError), so callers retry or give up exactly as they do for
+// a bd child that timed out.
+var ErrBDExecSlotWait = errors.New("waiting for a bd exec slot")
 
 // bdExecGate bounds how many bd children one gc process runs at once (#9092).
 // Every exec runner shares the process gate, because runners and stores are
@@ -78,6 +86,17 @@ func (g *bdExecGate) acquire(ctx context.Context, read bool) (release func(), er
 			}
 		})
 	}, nil
+}
+
+// slotWaitError is the error for a call whose slot wait ended with admitErr.
+// A deadline names the budget that expired, the same way a timed-out child
+// does; anything else wraps the context error.
+func (g *bdExecGate) slotWaitError(parent context.Context, admitErr error, timeout time.Duration, start time.Time) error {
+	if errors.Is(admitErr, context.DeadlineExceeded) {
+		return fmt.Errorf("%w (%d/%d bd children running): %w",
+			ErrBDExecSlotWait, g.running.Load(), g.size, bdExecTimeoutError(parent, timeout, start))
+	}
+	return fmt.Errorf("%w: %w", ErrBDExecSlotWait, admitErr)
 }
 
 // bdVerb describes a bd subcommand gc issues: whether it only reads, and the

@@ -173,7 +173,7 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 			release, admitErr = gate.acquire(ctx, bdCommandIsRead(args))
 			waited = time.Since(admitStart)
 			if admitErr != nil {
-				slotErr := fmt.Errorf("waiting for a bd exec slot: %w", admitErr)
+				slotErr := gate.slotWaitError(parent, admitErr, timeout, start)
 				recordBDExecTelemetry(name, dir, args, start, waited, nil, "", slotErr)
 				trace("slot-wait", slotErr)
 				return nil, slotErr
