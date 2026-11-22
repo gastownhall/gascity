@@ -133,6 +133,11 @@ type cascadeFake struct {
 	members  map[string][]string
 	rigJSON  string
 	failDir  string
+	// filterEvents makes `gc events` behave like the real list read: an
+	// absent events file exits 1, --type keeps one exact type, and --since
+	// (Ns/Nm/Nh) keeps events whose ts falls inside the window. Unset, the
+	// events file is answered whole, whatever the flags.
+	filterEvents bool
 }
 
 // body renders the fake into the shell fragment fakeGCBin runs after logging
@@ -141,7 +146,11 @@ type cascadeFake struct {
 func (f cascadeFake) body() string {
 	var b strings.Builder
 	b.WriteString("case \"$1\" in\n")
-	b.WriteString("events) cat '" + f.eventsPath + "' ;;\n")
+	if f.filterEvents {
+		b.WriteString(filteredEventsBranch(f.eventsPath))
+	} else {
+		b.WriteString("events) cat '" + f.eventsPath + "' ;;\n")
+	}
 	down := f.downJSON
 	if down == "" {
 		down = "[]"
@@ -180,6 +189,32 @@ func (f cascadeFake) body() string {
 	b.WriteString("esac\n")
 	b.WriteString("exit 0\n")
 	return b.String()
+}
+
+// filteredEventsBranch renders the `gc events` case arm of a fake that honors
+// --type and --since the way the list read does.
+func filteredEventsBranch(eventsPath string) string {
+	return `events)
+  [ -e '` + eventsPath + `' ] || exit 1
+  typ=''
+  since=''
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --type) [ $# -ge 2 ] && { typ="$2"; shift; } ;;
+      --since) [ $# -ge 2 ] && { since="$2"; shift; } ;;
+    esac
+    shift
+  done
+  secs=0
+  case "$since" in
+    *h) secs=$(( ${since%h} * 3600 )) ;;
+    *m) secs=$(( ${since%m} * 60 )) ;;
+    *s) secs=${since%s} ;;
+  esac
+  jq -c --arg t "$typ" --argjson s "$secs" 'select(($t == "" or .type == $t) and ($s == 0 or .ts == null or (now - (.ts | fromdateiso8601)) <= $s))' '` + eventsPath + `'
+  ;;
+`
 }
 
 // writeCascadeCloseEvent writes one bead.closed event for blocker and
