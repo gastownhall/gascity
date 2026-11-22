@@ -746,7 +746,9 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			if err := checkLegacySourceWorkflowConflict(deps, beadID, formulaName, opts.Force); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
-			blockedBy, err := sourceBlockedBy(deps, beadID)
+			// This launch passes no source id to InstantiateSlingFormula, so the
+			// split-city holdability check runs here, where beadID is known.
+			blockedBy, err := GraphWorkflowBlockers(deps, beadID)
 			if err != nil {
 				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 			}
