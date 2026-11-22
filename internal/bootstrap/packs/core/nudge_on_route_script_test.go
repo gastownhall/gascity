@@ -316,11 +316,43 @@ func (r *nudgeOnRouteRig) writeEvents(events ...nudgeEvent) {
 	r.writeLines(lines...)
 }
 
-// run executes the script once and returns its combined output.
-func (r *nudgeOnRouteRig) run() string {
+// seedSeq writes the persisted seq mark as it would be left by a prior run.
+func (r *nudgeOnRouteRig) seedSeq(mark string) {
 	r.t.Helper()
-	out, err := runPackScript(r.t, nudgeOnRouteScriptPath, r.binDir, nudgeOnRouteEnvKeys,
-		[]string{"GC_PACK_STATE_DIR=" + r.stateDir})
+	if err := os.MkdirAll(r.stateDir, 0o755); err != nil {
+		r.t.Fatalf("mkdir state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(r.stateDir, "nudge-on-route-seq"), []byte(mark+"\n"), 0o644); err != nil {
+		r.t.Fatalf("seed seq: %v", err)
+	}
+}
+
+// seedState records the given "<bead>|<target>" pairs in the dedup state as
+// nudged just now.
+func (r *nudgeOnRouteRig) seedState(keys ...string) {
+	r.t.Helper()
+	state := make(map[string]string, len(keys))
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, k := range keys {
+		state[k] = now
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		r.t.Fatalf("marshal dedup state: %v", err)
+	}
+	if err := os.MkdirAll(r.stateDir, 0o755); err != nil {
+		r.t.Fatalf("mkdir state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(r.stateDir, "nudge-on-route-state.json"), data, 0o644); err != nil {
+		r.t.Fatalf("seed dedup state: %v", err)
+	}
+}
+
+// run executes the script once and returns its combined output.
+func (r *nudgeOnRouteRig) run(extraEnv ...string) string {
+	r.t.Helper()
+	env := append([]string{"GC_PACK_STATE_DIR=" + r.stateDir}, extraEnv...)
+	out, err := runPackScript(r.t, nudgeOnRouteScriptPath, r.binDir, nudgeOnRouteEnvKeys, env)
 	if err != nil {
 		r.t.Fatalf("nudge-on-route.sh failed: %v\n%s", err, out)
 	}
@@ -356,6 +388,34 @@ func (r *nudgeOnRouteRig) hasKey(key string) bool {
 	}
 	_, ok := state[key]
 	return ok
+}
+
+// sinceReads lists the --since argument of each logged `gc events` call, in
+// call order.
+func (r *nudgeOnRouteRig) sinceReads() []string {
+	r.t.Helper()
+	logged, err := os.ReadFile(r.logPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		r.t.Fatalf("read gc log: %v", err)
+	}
+	var reads []string
+	for _, line := range strings.Split(string(logged), "\n") {
+		if !strings.HasPrefix(line, "gc events ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		since := ""
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "--since" {
+				since = fields[i+1]
+			}
+		}
+		reads = append(reads, since)
+	}
+	return reads
 }
 
 // nudges returns how many nudges reached target and the full gc call log.
@@ -430,6 +490,74 @@ func TestNudgeOnRouteNudgesRoutingStampedAtCreation(t *testing.T) {
 		}
 		if !r.hasKey("ga-born|" + target) {
 			t.Fatalf("dedup state lacks ga-born|%s after the nudge", target)
+		}
+		if got := r.seq(); got != "2" {
+			t.Fatalf("seq mark = %q, want 2", got)
+		}
+	})
+}
+
+// TestNudgeOnRouteFirstRunReadsMaxLookback pins the read used when there is
+// no usable mark (no seq file, a non-numeric one, or one above every seq the
+// log holds, as after a log reset): the whole GC_NUDGE_ON_ROUTE_MAX_LOOKBACK
+// window, nudging every routed pair in it not already in the dedup state and
+// recording the highest seq read as the mark.
+func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
+	const target = "gascity/builder"
+	for _, tc := range []struct {
+		name string
+		seed string
+	}{
+		{name: "no seq file"},
+		{name: "non-numeric seq file", seed: "garbage"},
+		{name: "seq file above every seq", seed: "1000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newNudgeOnRouteRig(t, true)
+			if tc.seed != "" {
+				r.seedSeq(tc.seed)
+			}
+			r.seedState("ga-known|gascity/known")
+			r.writeEvents(
+				nudgeEvent{seq: 5, typ: "bead.updated", bead: "ga-known", routedTo: "gascity/known", age: 50 * time.Minute},
+				nudgeEvent{seq: 6, typ: "bead.created", bead: "ga-old", routedTo: target, age: 40 * time.Minute},
+				nudgeEvent{seq: 7, typ: "bead.updated", bead: "ga-plain", age: 35 * time.Minute},
+			)
+			r.run()
+			if got, logged := r.nudges(target); got != 1 {
+				t.Fatalf("nudges to %s = %d, want 1 for a 40m-old routing; gc calls:\n%s", target, got, logged)
+			}
+			if got, logged := r.nudges("gascity/known"); got != 0 {
+				t.Fatalf("nudges to gascity/known = %d, want 0 for a pair already in the dedup state; gc calls:\n%s", got, logged)
+			}
+			if !r.hasKey("ga-old|" + target) {
+				t.Fatalf("dedup state lacks ga-old|%s", target)
+			}
+			if got := r.seq(); got != "7" {
+				t.Fatalf("seq mark = %q, want 7, the highest seq read", got)
+			}
+			reads := r.sinceReads()
+			if len(reads) == 0 || reads[len(reads)-1] != "1h" {
+				t.Fatalf("events reads = %q, want the last to be --since 1h", reads)
+			}
+		})
+	}
+
+	t.Run("GC_NUDGE_ON_ROUTE_MAX_LOOKBACK bounds the read", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.writeEvents(
+			nudgeEvent{seq: 1, typ: "bead.created", bead: "ga-stale", routedTo: target, age: 10 * time.Minute},
+			nudgeEvent{seq: 2, typ: "bead.created", bead: "ga-fresh", routedTo: "gascity/fresh", age: time.Minute},
+		)
+		r.run("GC_NUDGE_ON_ROUTE_MAX_LOOKBACK=5m")
+		if got, logged := r.nudges(target); got != 0 {
+			t.Fatalf("nudges to %s = %d, want 0 for a routing older than the 5m window; gc calls:\n%s", target, got, logged)
+		}
+		if got, logged := r.nudges("gascity/fresh"); got != 1 {
+			t.Fatalf("nudges to gascity/fresh = %d, want 1; gc calls:\n%s", got, logged)
+		}
+		if reads := r.sinceReads(); len(reads) != 1 || reads[0] != "5m" {
+			t.Fatalf("events reads = %q, want exactly [5m]", reads)
 		}
 		if got := r.seq(); got != "2" {
 			t.Fatalf("seq mark = %q, want 2", got)
