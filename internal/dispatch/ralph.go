@@ -1259,23 +1259,44 @@ func copyRetryDeps(store beads.GraphStore, oldID, newID string, mapping map[stri
 		if dep.Type != "blocks" && dep.Type != "waits-for" && dep.Type != "conditional-blocks" {
 			continue
 		}
-		targetID := dep.DependsOnID
-		if mapped, ok := mapping[targetID]; ok {
-			targetID = mapped
-		} else {
-			target, err := store.Get(dep.DependsOnID)
-			if err != nil {
-				return err
-			}
-			if target.Metadata[beadmeta.DynamicFragmentMetadataKey] == "true" {
-				continue
-			}
+		targetID, copied, err := retryCopyTarget(store, dep.DependsOnID, mapping)
+		if err != nil {
+			return err
+		}
+		if !copied {
+			continue
 		}
 		if err := store.DepAdd(newID, targetID, dep.Type); err != nil {
 			return fmt.Errorf("copying dep %s->%s (%s): %w", newID, targetID, dep.Type, err)
 		}
 	}
 	return nil
+}
+
+// retryCopyTarget returns the target a retry clone's copy of an edge onto
+// targetID names, and whether the edge is copied at all. A target inside the
+// retried attempt (mapping) names its clone. A dynamic fragment bead is not
+// copied: a retry does not carry over the children the attempt spawned. Any
+// other target is copied as written. An "external:" ref or an id the store
+// does not hold names no fragment, so it is copied without a read, as the
+// graph-apply retry path copies every edge (appendRalphRetryGraphEdges): the
+// beads of a workflow held on its source bead's blockers carry such edges as
+// written (molecule.Options.BlockedBy).
+func retryCopyTarget(store beads.GraphStore, targetID string, mapping map[string]string) (string, bool, error) {
+	if mapped, ok := mapping[targetID]; ok {
+		return mapped, true, nil
+	}
+	if isExternalDependencyRef(targetID) {
+		return targetID, true, nil
+	}
+	target, err := store.Get(targetID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return targetID, true, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return targetID, target.Metadata[beadmeta.DynamicFragmentMetadataKey] != "true", nil
 }
 
 func resolveLogicalBeadID(store beads.GraphStore, bead beads.Bead) string {
@@ -1753,17 +1774,12 @@ func copiedDepsPresent(store beads.GraphStore, oldID, newID string, mapping map[
 		if oldDep.Type != "blocks" && oldDep.Type != "waits-for" && oldDep.Type != "conditional-blocks" {
 			continue
 		}
-		targetID := oldDep.DependsOnID
-		if mapped, ok := mapping[targetID]; ok {
-			targetID = mapped
-		} else {
-			target, err := store.Get(oldDep.DependsOnID)
-			if err != nil {
-				return false, err
-			}
-			if target.Metadata[beadmeta.DynamicFragmentMetadataKey] == "true" {
-				continue
-			}
+		targetID, copied, err := retryCopyTarget(store, oldDep.DependsOnID, mapping)
+		if err != nil {
+			return false, err
+		}
+		if !copied {
+			continue
 		}
 		found := false
 		for _, newDep := range newDeps {

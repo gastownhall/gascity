@@ -2,6 +2,8 @@ package molecule
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -32,9 +34,6 @@ func blockedByTestRecipe() *formula.Recipe {
 // reports the normalized set.
 func TestInstantiateBlockedByWiresEveryStep(t *testing.T) {
 	store := beads.NewMemStore()
-	prev := IsGraphApplyEnabled()
-	SetGraphApplyEnabled(false)
-	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 	first, err := store.Create(beads.Bead{Title: "first blocker", Type: "task"})
 	if err != nil {
 		t.Fatal(err)
@@ -46,13 +45,12 @@ func TestInstantiateBlockedByWiresEveryStep(t *testing.T) {
 
 	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), blockedByTestRecipe(), Options{
 		ExternalDeps: []ExternalDep{{StepID: "wf.a", DependsOnID: first.ID, Type: "blocks"}},
-		BlockedBy:    []string{" " + second.ID, first.ID, second.ID, ""},
+		BlockedBy:    []Blocker{{ID: " " + second.ID}, {ID: first.ID}, {ID: second.ID}, {ID: ""}},
 	})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
-	want := []string{first.ID, second.ID}
-	slices.Sort(want)
+	want := []Blocker{{ID: first.ID, Type: "blocks"}, {ID: second.ID, Type: "blocks"}}
 	if !slices.Equal(result.BlockedBy, want) {
 		t.Errorf("Result.BlockedBy = %v, want %v", result.BlockedBy, want)
 	}
@@ -68,41 +66,57 @@ func TestInstantiateBlockedByWiresEveryStep(t *testing.T) {
 		for _, blocker := range want {
 			n := 0
 			for _, d := range deps {
-				if d.DependsOnID == blocker && d.Type == "blocks" {
+				if d.DependsOnID == blocker.ID && d.Type == "blocks" {
 					n++
 				}
 			}
 			if n != 1 {
-				t.Errorf("step %s (%s) has %d blocks edges on %s, want 1", stepID, beadID, n, blocker)
+				t.Errorf("step %s (%s) has %d blocks edges on %s, want 1", stepID, beadID, n, blocker.ID)
 			}
 		}
 	}
 }
 
-// TestInstantiateGraphApplyIncludesBlockedBy pins Options.BlockedBy on the
-// graph-apply path: the plan carries one blocks edge per step and blocker.
-func TestInstantiateGraphApplyIncludesBlockedBy(t *testing.T) {
-	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-	blocker, err := store.Create(beads.Bead{Title: "Blocker", Type: "task"})
-	if err != nil {
-		t.Fatal(err)
+// blockedByTypedBlockers creates one open bead per ready-blocking edge type
+// and returns them as blockers of that type.
+func blockedByTypedBlockers(t *testing.T, store beads.Store) []Blocker {
+	t.Helper()
+	var blockers []Blocker
+	for _, depType := range []string{"blocks", "conditional-blocks", "waits-for"} {
+		b, err := store.Create(beads.Bead{Title: depType + " target", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		blockers = append(blockers, Blocker{ID: b.ID, Type: depType})
 	}
-	prev := IsGraphApplyEnabled()
-	SetGraphApplyEnabled(true)
-	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+	return blockers
+}
 
-	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), blockedByTestRecipe(), Options{BlockedBy: []string{blocker.ID}})
+// TestInstantiateBlockedByKeepsEachBlockersEdgeType pins that each blocker is
+// wired with its own edge type, not retyped to blocks: a store judges a
+// waits-for edge by its target's children, so only the source's own type holds
+// the workflow by the rule that holds the source bead.
+func TestInstantiateBlockedByKeepsEachBlockersEdgeType(t *testing.T) {
+	store := beads.NewMemStore()
+	blockers := blockedByTypedBlockers(t, store)
+
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), blockedByTestRecipe(), Options{BlockedBy: blockers})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
-	if store.plan == nil {
-		t.Fatal("ApplyGraphPlan was not called")
+	if !slices.Equal(result.BlockedBy, blockers) {
+		t.Errorf("Result.BlockedBy = %v, want %v", result.BlockedBy, blockers)
 	}
-	for _, stepID := range []string{"wf", "wf.a", "wf.b"} {
-		assertGraphPlanEdgeCount(t, store.plan, stepID, "", blocker.ID, "blocks", 1)
-	}
-	if !slices.Equal(result.BlockedBy, []string{blocker.ID}) {
-		t.Errorf("Result.BlockedBy = %v, want [%s]", result.BlockedBy, blocker.ID)
+	for _, beadID := range []string{result.RootID, result.IDMapping["wf.a"], result.IDMapping["wf.b"]} {
+		deps, err := store.DepList(beadID, "down")
+		if err != nil {
+			t.Fatalf("DepList(%s): %v", beadID, err)
+		}
+		for _, blocker := range blockers {
+			if !slices.Contains(deps, beads.Dep{IssueID: beadID, DependsOnID: blocker.ID, Type: blocker.Type}) {
+				t.Errorf("bead %s has no %s edge on %s; deps=%v", beadID, blocker.Type, blocker.ID, deps)
+			}
+		}
 	}
 }
 
@@ -110,9 +124,6 @@ func TestInstantiateGraphApplyIncludesBlockedBy(t *testing.T) {
 // leaves the molecule's dependencies to the recipe alone.
 func TestInstantiateWithoutBlockedByAddsNoEdges(t *testing.T) {
 	store := beads.NewMemStore()
-	prev := IsGraphApplyEnabled()
-	SetGraphApplyEnabled(false)
-	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
 	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), blockedByTestRecipe(), Options{})
 	if err != nil {
@@ -151,9 +162,6 @@ func assertBlockedByBlocksEdge(t *testing.T, store *beads.MemStore, beadID, targ
 // expansion wins: no duplicate edge is minted and its type is kept.
 func TestInstantiateBlockedByMergesAndDedupesWithExternalDeps(t *testing.T) {
 	store := beads.NewMemStore()
-	prev := IsGraphApplyEnabled()
-	SetGraphApplyEnabled(false)
-	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 	blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task"})
 	if err != nil {
 		t.Fatal(err)
@@ -164,7 +172,7 @@ func TestInstantiateBlockedByMergesAndDedupesWithExternalDeps(t *testing.T) {
 	}
 
 	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), blockedByTestRecipe(), Options{
-		BlockedBy:    []string{blocker.ID, other.ID},
+		BlockedBy:    []Blocker{{ID: blocker.ID}, {ID: other.ID}},
 		ExternalDeps: []ExternalDep{{StepID: "wf.a", DependsOnID: blocker.ID, Type: "waits-for"}},
 	})
 	if err != nil {
@@ -197,9 +205,6 @@ func TestInstantiateBlockedByMergesAndDedupesWithExternalDeps(t *testing.T) {
 // recipe wires the blocker onto the one bead it creates.
 func TestInstantiateBlockedByRootOnlyCoversCreatedRootOnly(t *testing.T) {
 	store := beads.NewMemStore()
-	prev := IsGraphApplyEnabled()
-	SetGraphApplyEnabled(false)
-	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 	blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task"})
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +212,7 @@ func TestInstantiateBlockedByRootOnlyCoversCreatedRootOnly(t *testing.T) {
 	recipe := blockedByTestRecipe()
 	recipe.RootOnly = true
 
-	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{BlockedBy: []string{blocker.ID}})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{BlockedBy: []Blocker{{ID: blocker.ID}}})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -228,8 +233,100 @@ func TestInstantiateFragmentRejectsBlockedBy(t *testing.T) {
 	_, err = InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), &formula.FragmentRecipe{
 		Name:  "fragment",
 		Steps: []formula.RecipeStep{{ID: "fragment.item", Title: "Item", Type: "task"}},
-	}, FragmentOptions{RootID: root.ID, BlockedBy: []string{"gc-1"}})
+	}, FragmentOptions{RootID: root.ID, BlockedBy: []Blocker{{ID: "gc-1"}}})
 	if err == nil {
 		t.Fatal("InstantiateFragment accepted BlockedBy; a fragment attaches into an existing workflow and must reject a launch-and-wait hold")
+	}
+}
+
+// blockedByTeardownFormula is a scoped graph.v2 workflow whose cleanup is
+// teardown work run after the body settles, retry-managed so its first
+// attempt carries no gc.scope_role, only the step's gc.step_id.
+const blockedByTeardownFormula = `
+formula = "held-teardown"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "body"
+title = "Body"
+needs = ["work"]
+metadata = { "gc.kind" = "scope", "gc.scope_role" = "body", "gc.scope_name" = "work" }
+
+[[steps]]
+id = "work"
+title = "Work"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[[steps]]
+id = "cleanup"
+title = "Cleanup"
+needs = ["body"]
+metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
+
+[steps.retry]
+max_attempts = 3
+`
+
+// TestInstantiateBlockedBySparesTheTeardownTail pins that a held workflow's
+// teardown tail carries no blocker edge, so a run canceled while it waits
+// (which closes everything but the tail, as the run cancel does) leaves its
+// teardown free to run although the blocker is still open. The tail is the
+// rule the cancel spares it by: the teardown step and every attempt of it.
+func TestInstantiateBlockedBySparesTheTeardownTail(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "held-teardown.toml"), []byte(blockedByTeardownFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := beadstest.GraphMolecule(store)
+
+	result, err := Cook(context.Background(), target, "held-teardown", []string{dir}, Options{BlockedBy: []Blocker{{ID: blocker.ID}}})
+	if err != nil {
+		t.Fatalf("Cook: %v", err)
+	}
+	tail := map[string]bool{
+		result.IDMapping["held-teardown.cleanup"]:           true,
+		result.IDMapping["held-teardown.cleanup.attempt.1"]: true,
+	}
+	for stepID, beadID := range result.IDMapping {
+		bead, err := store.Get(beadID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", beadID, err)
+		}
+		if bead.Metadata["gc.kind"] == "spec" {
+			continue
+		}
+		deps, err := store.DepList(beadID, "down")
+		if err != nil {
+			t.Fatalf("DepList(%s): %v", beadID, err)
+		}
+		held := slices.ContainsFunc(deps, func(d beads.Dep) bool { return d.DependsOnID == blocker.ID })
+		if tail[beadID] && held {
+			t.Errorf("teardown tail step %s (%s) waits on blocker %s", stepID, beadID, blocker.ID)
+		}
+		if !tail[beadID] && !held {
+			t.Errorf("step %s (%s) does not wait on blocker %s", stepID, beadID, blocker.ID)
+		}
+	}
+
+	exclude, err := TeardownTailExclusion(target, result.RootID)
+	if err != nil {
+		t.Fatalf("TeardownTailExclusion: %v", err)
+	}
+	if _, err := CloseSubtreeWithMetadataExcept(target, result.RootID, map[string]string{"gc.outcome": "canceled"}, exclude); err != nil {
+		t.Fatalf("canceling the held workflow: %v", err)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	attempt := result.IDMapping["held-teardown.cleanup.attempt.1"]
+	if !slices.ContainsFunc(ready, func(b beads.Bead) bool { return b.ID == attempt }) {
+		t.Errorf("teardown attempt %s is not Ready after the held workflow was canceled while %s is open", attempt, blocker.ID)
 	}
 }

@@ -1900,51 +1900,82 @@ func resolveScopeCheckSubjectID(store beads.GraphStore, control beads.Bead) (str
 }
 
 // controlSubjectBlockers returns the beads a control blocks on that can be its
-// subject, in dependency order. A control's subject is a step of its own
-// workflow, but a control can also block on beads of another workflow: a drain
-// item instantiated behind a predecessor member blocks every one of its steps
-// on that member's item root (drainWorkflowExternalDeps). Such an edge is a
-// readiness gate only; taking it as the subject would finalize the control
-// against another workflow's outcome. So when the control names its root and
-// more than one blocker exists, only blockers stamped with that same root
-// qualify. A single blocker is the subject without a read, and a control whose
-// blockers carry no same-root stamp keeps every blocker, as before.
+// subject: the blockers of its own workflow (ownWorkflowBlockers), in
+// dependency order. A single blocks target is the subject without a read.
 func controlSubjectBlockers(store beads.GraphStore, control beads.Bead) ([]beads.Bead, error) {
-	deps, err := store.DepList(control.ID, "down")
+	ids, err := blocksTargetIDs(store, control.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 1 {
+		return []beads.Bead{{ID: ids[0]}}, nil
+	}
+	return ownWorkflowBlockers(store, control, ids)
+}
+
+// blocksTargetIDs returns the targets of controlID's blocks edges, in
+// dependency order, less "external:" refs: such a ref names no bead, so it is
+// never a step of the control's workflow.
+func blocksTargetIDs(store beads.GraphStore, controlID string) ([]string, error) {
+	deps, err := store.DepList(controlID, "down")
 	if err != nil {
 		return nil, err
 	}
 	var ids []string
 	for _, dep := range deps {
-		if dep.Type == "blocks" {
+		if dep.Type == "blocks" && !isExternalDependencyRef(dep.DependsOnID) {
 			ids = append(ids, dep.DependsOnID)
 		}
 	}
-	if len(ids) == 1 {
-		return []beads.Bead{{ID: ids[0]}}, nil
+	return ids, nil
+}
+
+// ownWorkflowBlockers reads ids, targets of control's blocks edges
+// (blocksTargetIDs), and returns, in order, those that are beads of the
+// control's own workflow. A control can also block on beads outside its
+// workflow: a launch for a blocked bead holds every bead of its workflow,
+// controls included, on that bead's blockers, and a drain holds an item's
+// beads on a predecessor item's root (molecule.Options.BlockedBy). Such an
+// edge is a readiness gate only. Read as the control's own, it would settle
+// the control by another bead's outcome, or fail it on every pass for a
+// target no bead stands behind. So a target the store does not hold is
+// skipped, and when the control names its root, only blockers stamped with
+// that root are kept. A control none of whose blockers carries the stamp keeps
+// every blocker it read, which a workflow minted before steps were
+// root-stamped needs.
+func ownWorkflowBlockers(store beads.GraphStore, control beads.Bead, ids []string) ([]beads.Bead, error) {
+	prefetched, err := beads.PrefetchExact(store, ids)
+	if err != nil {
+		return nil, err
 	}
-	all := make([]beads.Bead, 0, len(ids))
+	read := make([]beads.Bead, 0, len(ids))
 	for _, id := range ids {
-		blocker, err := store.Get(id)
-		if err != nil {
-			return nil, fmt.Errorf("loading blocker %s: %w", id, err)
+		blocker, ok := prefetched[id]
+		if !ok {
+			blocker, err = store.Get(id)
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("loading blocker %s: %w", id, err)
+			}
 		}
-		all = append(all, blocker)
+		read = append(read, blocker)
 	}
 	rootID := strings.TrimSpace(control.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" {
-		return all, nil
+		return read, nil
 	}
-	sameRoot := make([]beads.Bead, 0, len(all))
-	for _, blocker := range all {
+	own := make([]beads.Bead, 0, len(read))
+	for _, blocker := range read {
 		if strings.TrimSpace(blocker.Metadata[beadmeta.RootBeadIDMetadataKey]) == rootID {
-			sameRoot = append(sameRoot, blocker)
+			own = append(own, blocker)
 		}
 	}
-	if len(sameRoot) == 0 {
-		return all, nil
+	if len(own) == 0 {
+		return read, nil
 	}
-	return sameRoot, nil
+	return own, nil
 }
 
 func resolveScopeBody(store beads.GraphStore, rootID, scopeRef, traceID string, opts ProcessOptions) (beads.Bead, error) {
@@ -2240,7 +2271,7 @@ func matchesScopeRef(bead beads.Bead, scopeRef string) bool {
 }
 
 func resolveFinalizeOutcome(store beads.GraphStore, finalizer beads.Bead, opts ProcessOptions) (string, error) {
-	outcome, err := resolveBlockedOutcome(store, finalizer.ID)
+	outcome, err := resolveBlockedOutcome(store, finalizer)
 	if err != nil {
 		return "", err
 	}
@@ -2285,8 +2316,8 @@ func isControlQuarantined(b beads.Bead) bool {
 // the domain parent when a workflow finalizes FAILED. Three routes reach a
 // failed finalize and each names its own culprit:
 //
-//   - a failed direct blocker (resolveBlockedOutcome) — the root itself only
-//     carries gc.outcome=fail, the reason lives on the blocker;
+//   - a failed direct blocker in the workflow (resolveBlockedOutcome) — the
+//     root itself only carries gc.outcome=fail, the reason lives on the blocker;
 //   - a terminal abort-scope member (terminalAbortScopeFailureMember) — every
 //     blocker passed, and the failing member is elsewhere in the DAG;
 //   - a control-quarantined root (isControlQuarantined) — every blocker
@@ -2318,20 +2349,22 @@ func resolveFinalizeFailureDiagnostics(store beads.GraphStore, finalizer beads.B
 	return failureStamp(workflowFailedReason, "", "")
 }
 
+// firstFailedFinalizeBlocker returns the first blocker of the finalizer's own
+// workflow (ownWorkflowBlockers) that failed. Best-effort: a failed read
+// reports none.
 func firstFailedFinalizeBlocker(store beads.GraphStore, finalizer beads.Bead) (beads.Bead, bool) {
-	deps, err := store.DepList(finalizer.ID, "down")
+	ids, err := blocksTargetIDs(store, finalizer.ID)
 	if err != nil {
 		return beads.Bead{}, false
 	}
-	for _, dep := range deps {
-		if dep.Type != "blocks" {
-			continue
+	blockers, err := ownWorkflowBlockers(store, finalizer, ids)
+	if err != nil {
+		return beads.Bead{}, false
+	}
+	for _, blocker := range blockers {
+		if beadOutcomeFailed(blocker) {
+			return blocker, true
 		}
-		blocker, err := store.Get(dep.DependsOnID)
-		if err != nil || !beadOutcomeFailed(blocker) {
-			continue
-		}
-		return blocker, true
 	}
 	return beads.Bead{}, false
 }
@@ -2376,29 +2409,20 @@ func hasFailureStamp(bead beads.Bead) bool {
 		strings.TrimSpace(bead.Metadata[beadmeta.FailureSubjectMetadataKey]) != ""
 }
 
-func resolveBlockedOutcome(store beads.GraphStore, beadID string) (string, error) {
-	deps, err := store.DepList(beadID, "down")
+// resolveBlockedOutcome folds the outcomes of control's blockers in its own
+// workflow (ownWorkflowBlockers) into the control's: fail when one failed,
+// else pass, and errFinalizePending while one is still open.
+func resolveBlockedOutcome(store beads.GraphStore, control beads.Bead) (string, error) {
+	ids, err := blocksTargetIDs(store, control.ID)
 	if err != nil {
 		return "", err
 	}
-	var blockerIDs []string
-	for _, dep := range deps {
-		if dep.Type == "blocks" {
-			blockerIDs = append(blockerIDs, dep.DependsOnID)
-		}
-	}
-	prefetched, err := beads.PrefetchExact(store, blockerIDs)
+	blockers, err := ownWorkflowBlockers(store, control, ids)
 	if err != nil {
 		return "", err
 	}
 	outcome := beadmeta.OutcomePass
-	for _, id := range blockerIDs {
-		blocker, ok := prefetched[id]
-		if !ok {
-			if blocker, err = store.Get(id); err != nil {
-				return "", err
-			}
-		}
+	for _, blocker := range blockers {
 		if blocker.Status != "closed" {
 			return "", fmt.Errorf("%w: blocker %s is still open", errFinalizePending, blocker.ID)
 		}

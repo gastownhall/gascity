@@ -8,60 +8,95 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
-// SourceBlockers returns the beads a workflow launched from sourceID must wait
-// for: the targets of sourceID's ready-blocking dependencies, read from work,
-// the store that holds sourceID. The ids are deduped and sorted.
-//
-// A graph workflow routes its own steps rather than the source bead, so the
-// source bead's edges hold nothing once the workflow is launched. Copying
-// these ids onto every workflow bead (molecule.Options.BlockedBy) holds the
-// workflow by the same readiness rule that holds the source bead.
-//
-// A target the store's readiness rule already judges satisfied
-// (beads.DependencySatisfied) is dropped, and so is one of sourceID's own
-// workflow roots: a replacement workflow never waits on the one it replaces.
-// Every other target is kept as written, including an external ref and a
-// target work does not hold, so the store judges it as it judges sourceID's
-// own edge.
-func SourceBlockers(work beads.WorkStore, sourceID string) ([]string, error) {
-	sourceID = strings.TrimSpace(sourceID)
-	if sourceID == "" {
-		return nil, nil
-	}
-	deps, err := work.DepList(sourceID, "down")
+// ReadyBlockingEdges returns beadID's ready-blocking dependency edges in store
+// (beads.IsReadyBlockingDependencyType), each as a blocker of its own edge
+// type: the target trimmed, an empty target or beadID itself skipped, and one
+// blocker per target, in the order the store lists the edges. It is the one
+// reader of the blockers a workflow launched for a work bead inherits, for a
+// sling launch (SourceBlockers) and a convoy drain's item workflow alike.
+func ReadyBlockingEdges(store beads.StoreReader, beadID string) ([]molecule.Blocker, error) {
+	deps, err := store.DepList(beadID, "down")
 	if err != nil {
-		return nil, fmt.Errorf("listing dependencies of %s: %w", sourceID, err)
+		return nil, fmt.Errorf("listing dependencies of %s: %w", beadID, err)
 	}
-	var targets []string
+	var edges []molecule.Blocker
 	for _, dep := range deps {
 		if !beads.IsReadyBlockingDependencyType(dep.Type) {
 			continue
 		}
 		target := strings.TrimSpace(dep.DependsOnID)
-		if target == "" || target == sourceID || slices.Contains(targets, target) {
+		if target == "" || target == beadID || slices.ContainsFunc(edges, func(b molecule.Blocker) bool { return b.ID == target }) {
 			continue
 		}
-		targets = append(targets, target)
+		edges = append(edges, molecule.Blocker{ID: target, Type: dep.Type})
 	}
-	if len(targets) == 0 {
+	return edges, nil
+}
+
+// EdgeSatisfied reports whether target's own state already satisfies
+// blocker's edge onto it, so a launched workflow need not carry the edge. A
+// blocks or conditional-blocks edge is judged by the rule every store applies
+// to it (beads.DependencySatisfied). A waits-for edge never is: bd and native
+// Dolt judge it by the target's open children, not the target's status, so the
+// edge is kept for the store to judge by those children.
+func EdgeSatisfied(blocker molecule.Blocker, target beads.Bead) bool {
+	if blocker.Type == waitsForDepType {
+		return false
+	}
+	return beads.DependencySatisfied(target.Status, beads.ReadinessWorkOutcome(target.Metadata))
+}
+
+// waitsForDepType is the fanout-gate dependency type, which a store judges by
+// its target's children rather than by the target itself.
+const waitsForDepType = "waits-for"
+
+// SourceBlockers returns the blockers a workflow launched from sourceID must
+// wait for: sourceID's ready-blocking edges (ReadyBlockingEdges), read from
+// work, the store that holds sourceID, sorted by id. Each keeps its edge's
+// type.
+//
+// A graph workflow routes its own steps rather than the source bead, so the
+// source bead's edges hold nothing once the workflow is launched. Copying
+// these edges onto the workflow's beads (molecule.Options.BlockedBy) holds the
+// workflow on the source bead's own edges. A copy keeps its edge's type but
+// not its payload. bd reads a waits-for edge's gate from the payload, so it
+// reads the copy as a plain all-children gate, and a source edge carrying
+// gate = "any-children" or also_blocks holds the source differently from its
+// copy. A hold the source bead takes from a blocked parent, which bd
+// propagates down parent-child edges, is not one of its own edges and is not
+// copied.
+//
+// An edge its target already satisfies (EdgeSatisfied) is dropped, and so is
+// one onto sourceID's own workflow root: a replacement workflow never waits on
+// the one it replaces. Every other edge is kept as written, including one onto
+// an external ref or a target work does not hold, so the store judges its
+// target as it judges the target of sourceID's own edge.
+func SourceBlockers(work beads.WorkStore, sourceID string) ([]molecule.Blocker, error) {
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" {
 		return nil, nil
 	}
-	held, err := beads.GetMany(work, targets)
+	edges, err := ReadyBlockingEdges(work, sourceID)
+	if err != nil || len(edges) == 0 {
+		return nil, err
+	}
+	held, err := beads.GetMany(work, molecule.BlockerIDs(edges))
 	if err != nil {
 		return nil, fmt.Errorf("reading blockers of %s: %w", sourceID, err)
 	}
 	own := ownWorkflowRoots{work: work, sourceID: sourceID}
-	blockers := make([]string, 0, len(targets))
-	for _, target := range targets {
-		b, ok := held[target]
-		if ok && beads.DependencySatisfied(b.Status, beads.ReadinessWorkOutcome(b.Metadata)) {
+	blockers := make([]molecule.Blocker, 0, len(edges))
+	for _, edge := range edges {
+		target, ok := held[edge.ID]
+		if ok && EdgeSatisfied(edge, target) {
 			continue
 		}
 		if ok {
-			isOwn, err := own.contains(b)
+			isOwn, err := own.contains(target)
 			if err != nil {
 				return nil, err
 			}
@@ -69,13 +104,46 @@ func SourceBlockers(work beads.WorkStore, sourceID string) ([]string, error) {
 				continue
 			}
 		}
-		blockers = append(blockers, target)
+		blockers = append(blockers, edge)
 	}
-	slices.Sort(blockers)
+	return sortedBlockers(blockers), nil
+}
+
+// WorkflowBlockers returns the blockers the workflow rooted at rootID still
+// waits for: the edges its launch wired onto every bead it created, root
+// included (molecule.Options.BlockedBy), read back from the root in store,
+// less those whose target now satisfies them (EdgeSatisfied) and the root's
+// edges onto its own steps. It only reads, so a launch that reuses an existing
+// workflow reports what that workflow holds on, not what its source bead's
+// edges say now.
+func WorkflowBlockers(store beads.StoreReader, rootID string) ([]molecule.Blocker, error) {
+	edges, err := ReadyBlockingEdges(store, rootID)
+	if err != nil || len(edges) == 0 {
+		return nil, err
+	}
+	held, err := beads.GetMany(store, molecule.BlockerIDs(edges))
+	if err != nil {
+		return nil, fmt.Errorf("reading blockers of workflow %s: %w", rootID, err)
+	}
+	blockers := make([]molecule.Blocker, 0, len(edges))
+	for _, edge := range edges {
+		target, ok := held[edge.ID]
+		if ok && (EdgeSatisfied(edge, target) || target.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID) {
+			continue
+		}
+		blockers = append(blockers, edge)
+	}
+	return sortedBlockers(blockers), nil
+}
+
+// sortedBlockers sorts blockers by id in place and returns them, or nil when
+// there are none.
+func sortedBlockers(blockers []molecule.Blocker) []molecule.Blocker {
 	if len(blockers) == 0 {
-		return nil, nil
+		return nil
 	}
-	return blockers, nil
+	slices.SortFunc(blockers, func(a, b molecule.Blocker) int { return strings.Compare(a.ID, b.ID) })
+	return blockers
 }
 
 // ownWorkflowRoots recognizes the workflow roots launched from sourceID: a
@@ -119,6 +187,14 @@ func (o *ownWorkflowRoots) contains(b beads.Bead) (bool, error) {
 // source bead's blockers: the workflow is created in a graph store relocated
 // away from the store holding the source bead, and that graph store does not
 // hold BlockerIDs, so no edge on a workflow bead could hold them.
+//
+// The refusal stands in for a hold. A convoy drain holds its item workflow on
+// such a blocker through a cross-store gate the controller releases
+// (dispatch's cross_store_gate.go), but a gate is owned by its drain control,
+// and a launch outside a drain has no control to own one, so the launch is
+// refused rather than started unheld. A launch the caller never asked for (a
+// target's default_sling_formula) routes the source bead plainly instead,
+// which its own edges hold.
 type CrossStoreBlockersError struct {
 	SourceID   string
 	BlockerIDs []string
@@ -141,34 +217,34 @@ func pluralThem(n int) string {
 // workflow created in graph can hold, for a graph store relocated away from
 // the store holding sourceID. An "external:<id>" ref names <id>, and an
 // external capability names no bead and is dropped (beads.ExternalBlockerTarget,
-// as the drain reads it). A blocker graph does not hold fails the launch with
-// a *CrossStoreBlockersError rather than leaving the workflow free to run.
-func GraphHeldBlockers(graph beads.StoreReader, sourceID string, blockers []string) ([]string, error) {
-	targets := make([]string, 0, len(blockers))
+// as the drain reads it); each edge keeps its type. A blocker graph does not
+// hold fails the launch with a *CrossStoreBlockersError rather than leaving the
+// workflow free to run.
+func GraphHeldBlockers(graph beads.StoreReader, sourceID string, blockers []molecule.Blocker) ([]molecule.Blocker, error) {
+	targets := make([]molecule.Blocker, 0, len(blockers))
 	for _, blocker := range blockers {
-		target, capability := beads.ExternalBlockerTarget(blocker)
-		if capability || target == "" || slices.Contains(targets, target) {
+		target, capability := beads.ExternalBlockerTarget(blocker.ID)
+		if capability || target == "" || slices.ContainsFunc(targets, func(b molecule.Blocker) bool { return b.ID == target }) {
 			continue
 		}
-		targets = append(targets, target)
+		targets = append(targets, molecule.Blocker{ID: target, Type: blocker.Type})
 	}
 	if len(targets) == 0 {
 		return nil, nil
 	}
-	held, err := beads.GetMany(graph, targets)
+	held, err := beads.GetMany(graph, molecule.BlockerIDs(targets))
 	if err != nil {
 		return nil, fmt.Errorf("reading blockers of %s in the workflow's store: %w", sourceID, err)
 	}
 	var missing []string
 	for _, target := range targets {
-		if _, ok := held[target]; !ok {
-			missing = append(missing, target)
+		if _, ok := held[target.ID]; !ok {
+			missing = append(missing, target.ID)
 		}
 	}
 	if len(missing) > 0 {
 		slices.Sort(missing)
 		return nil, &CrossStoreBlockersError{SourceID: sourceID, BlockerIDs: missing}
 	}
-	slices.Sort(targets)
-	return targets, nil
+	return sortedBlockers(targets), nil
 }

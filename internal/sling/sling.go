@@ -254,8 +254,9 @@ type SlingResult struct {
 	MetadataErrors []string // non-fatal metadata write failures
 	BeadWarnings   []string // pre-flight bead state warnings
 	Deprecations   []string // deprecated formula constructs (graph.v2 issue alias)
-	// WaitingOn lists the source bead's open blockers a launched graph
-	// workflow waits for: every workflow bead carries a blocks edge on each.
+	// WaitingOn lists the source bead's blockers a launched graph workflow
+	// waits for: each of its beads but the teardown tail carries the source
+	// bead's own edge onto each (molecule.Options.BlockedBy).
 	WaitingOn []string
 
 	// Batch fields (populated by DoSlingBatch).
@@ -283,6 +284,9 @@ type SlingChildResult struct {
 	WorkflowID  string // if graph workflow attached
 	WispRootID  string // if formula attached
 	FormulaName string // formula used
+	// WaitingOn lists the child's blockers its graph workflow waits for
+	// (SlingResult.WaitingOn).
+	WaitingOn []string
 	// Conflict is the live source workflow that refused the child's launch,
 	// when that is why it failed.
 	Conflict *sourceworkflow.ConflictError
@@ -1465,7 +1469,7 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	graphWorkflow := graphroute.IsCompiledGraphWorkflow(recipe)
 	rootKey := ""
 	if graphWorkflow {
-		blockedBy, err := graphHeldBlockedBy(deps, sourceBeadID, opts.BlockedBy)
+		blockedBy, err := graphLaunchBlockedBy(deps, sourceBeadID, opts.BlockedBy)
 		if err != nil {
 			return nil, err
 		}

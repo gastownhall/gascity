@@ -20,7 +20,7 @@ import (
 // This file pins #7163: a graph workflow launched from a source bead with open
 // ready-blocking dependencies waits for them. The workflow routes its own
 // steps, not the source bead, so every workflow bead carries the source
-// bead's open blockers as blocks edges from the moment it is created.
+// bead's blocking edges, each of its own type, from the moment it is created.
 
 const blockedSourceChainFormula = `
 formula = "graph-chain"
@@ -107,13 +107,29 @@ func readyWorkflowBeads(t *testing.T, store beads.Store, rootID string) []beads.
 // dependsOn reports whether id has a blocks dependency on target.
 func dependsOn(t *testing.T, store beads.Store, id, target string) bool {
 	t.Helper()
+	return dependsOnAs(t, store, id, target, "blocks")
+}
+
+// dependsOnAs reports whether id has a dependency of depType on target.
+func dependsOnAs(t *testing.T, store beads.Store, id, target, depType string) bool {
+	t.Helper()
 	deps, err := store.DepList(id, "down")
 	if err != nil {
 		t.Fatalf("DepList(%s): %v", id, err)
 	}
 	return slices.ContainsFunc(deps, func(d beads.Dep) bool {
-		return d.DependsOnID == target && d.Type == "blocks"
+		return d.DependsOnID == target && d.Type == depType
 	})
+}
+
+// isReady reports whether id is among store's Ready beads.
+func isReady(t *testing.T, store beads.Store, id string) bool {
+	t.Helper()
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	return slices.ContainsFunc(ready, func(b beads.Bead) bool { return b.ID == id })
 }
 
 func beadTitles(bs []beads.Bead) []string {
@@ -304,7 +320,7 @@ func TestFormulaOnBeadWithOnlySatisfiedBlockersStartsReady(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.DepAdd(source.ID, waited.ID, "waits-for"); err != nil {
+		if err := store.DepAdd(source.ID, waited.ID, "conditional-blocks"); err != nil {
 			t.Fatal(err)
 		}
 		for _, id := range []string{blocker.ID, waited.ID} {
@@ -322,13 +338,62 @@ func TestFormulaOnBeadWithOnlySatisfiedBlockersStartsReady(t *testing.T) {
 		}
 		for _, b := range workflowBeads(t, store, result.WorkflowID) {
 			for _, id := range []string{blocker.ID, waited.ID} {
-				if dependsOn(t, store, b.ID, id) {
+				if dependsOn(t, store, b.ID, id) || dependsOnAs(t, store, b.ID, id, "conditional-blocks") {
 					t.Errorf("workflow bead %s (%q) depends on satisfied %s", b.ID, b.Title, id)
 				}
 			}
 		}
 		if len(result.WaitingOn) != 0 {
 			t.Errorf("WaitingOn = %v, want none", result.WaitingOn)
+		}
+	})
+	t.Run("a waits-for edge is the store's to judge", func(t *testing.T) {
+		// bd and native Dolt hold the source while the closed spawner's child
+		// is open; the in-memory store judges the spawner's own status. The
+		// workflow carries the source's own waits-for edge, so either store
+		// holds it exactly when it holds the source.
+		deps := blockedSourceSlingDeps(t)
+		store := deps.Store
+		spawner, err := store.Create(beads.Bead{Title: "spawner", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		child, err := store.Create(beads.Bead{Title: "spawned child", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(child.ID, spawner.ID, "parent-child"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(source.ID, spawner.ID, "waits-for"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(spawner.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := DoSling(SlingOpts{Target: config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}, BeadOrFormula: source.ID, OnFormula: "graph-chain"}, deps, store)
+		if err != nil {
+			t.Fatalf("DoSling: %v", err)
+		}
+		if !slices.Equal(result.WaitingOn, []string{spawner.ID}) {
+			t.Errorf("WaitingOn = %v, want [%s]: a closed spawner may still have open children", result.WaitingOn, spawner.ID)
+		}
+		var entry beads.Bead
+		for _, b := range workflowBeads(t, store, result.WorkflowID) {
+			if !dependsOnAs(t, store, b.ID, spawner.ID, "waits-for") {
+				t.Errorf("workflow bead %s (%q) has no waits-for edge on %s", b.ID, b.Title, spawner.ID)
+			}
+			if b.Title == "First step" {
+				entry = b
+			}
+		}
+		if got, want := isReady(t, store, entry.ID), isReady(t, store, source.ID); got != want {
+			t.Errorf("entry step Ready = %v, source Ready = %v: the store must judge the workflow's waits-for edge as it judges the source's", got, want)
 		}
 	})
 	t.Run("closed blocked still holds", func(t *testing.T) {
@@ -550,4 +615,56 @@ func TestFormulaOnBlockedBeadSplitCityRefuses(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestDefaultFormulaOnSplitCityRoutesBlockedBeadPlainly pins the split-city
+// stopgap for a launch the caller never asked for: a target's
+// default_sling_formula whose workflow's store cannot hold the bead's blocker
+// is skipped with a warning and the bead routed plainly, as its own edges hold
+// it. An explicit --on still refuses (TestFormulaOnBlockedBeadSplitCityRefuses).
+func TestDefaultFormulaOnSplitCityRoutesBlockedBeadPlainly(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	deps, work, graph := splitSlingDeps(t, graphV2SlingTestConfig(t, formulaDir))
+	deps.CityPath = t.TempDir()
+	blocker, source := newBlockedSource(t, work)
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("graph-work")}
+
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID}, deps, work)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.WorkflowID != "" || result.Method != "bead" {
+		t.Errorf("WorkflowID = %q, Method = %q, want the plain bead route", result.WorkflowID, result.Method)
+	}
+	if !slices.ContainsFunc(result.BeadWarnings, func(w string) bool {
+		return strings.Contains(w, "routed as a plain bead instead") && strings.Contains(w, blocker.ID)
+	}) {
+		t.Errorf("BeadWarnings = %v, want the skipped default formula named with blocker %s", result.BeadWarnings, blocker.ID)
+	}
+	roots, err := graph.ListByMetadata(map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 0 {
+		t.Errorf("the skipped default formula created %d workflow roots in the graph store, want none", len(roots))
+	}
+	// The launch minted a synthetic input convoy before the blockers were
+	// read; the plain route must not leave it open.
+	up, err := work.DepList(source.ID, "up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dep := range up {
+		if dep.Type != "tracks" {
+			continue
+		}
+		convoy, err := work.Get(dep.IssueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if convoy.Metadata[beadmeta.SyntheticMetadataKey] == "true" && convoy.Status != "closed" {
+			t.Errorf("synthetic input convoy %s is %q after the plain route, want closed", convoy.ID, convoy.Status)
+		}
+	}
 }

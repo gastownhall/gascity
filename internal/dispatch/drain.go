@@ -196,7 +196,7 @@ func expandDrain(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) (
 			if err != nil {
 				return ControlResult{}, fmt.Errorf("%s: listing source dependencies for member %s: %w", bead.ID, member.ID, err)
 			}
-			rootID, created, err := ensureDrainItemRoot(store, bead, unit, member, len(members), row, itemFormula, parentVars, projection.BlockerIDs, opts)
+			rootID, created, err := ensureDrainItemRoot(store, bead, unit, member, len(members), row, itemFormula, parentVars, projection.Blockers, opts)
 			if err != nil {
 				if errors.Is(err, errDrainInvalidItemFormula) {
 					return closeDrainItemFormulaFailure(store, bead, manifest, err, opts)
@@ -730,7 +730,7 @@ func materializeDrainRow(store beads.GraphStore, control beads.Bead, manifest dr
 		if err != nil {
 			return 0, fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, member.ID, err)
 		}
-		rootID, created, err := ensureDrainItemRoot(store, control, unit, member, len(members), row, itemFormula, parentVars, projection.BlockerIDs, opts)
+		rootID, created, err := ensureDrainItemRoot(store, control, unit, member, len(members), row, itemFormula, parentVars, projection.Blockers, opts)
 		if err != nil {
 			return 0, err
 		}
@@ -775,12 +775,12 @@ func ensureDrainRowDependencyProjection(store beads.GraphStore, control beads.Be
 	if err != nil {
 		return fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, memberID, err)
 	}
-	for _, blockerID := range projection.BlockerIDs {
-		if blockerID == rootID {
+	for _, blocker := range projection.Blockers {
+		if blocker.ID == rootID {
 			continue
 		}
-		if err := ensureDrainWorkflowBlocksOn(store, rootID, blockerID); err != nil {
-			return fmt.Errorf("%s: wiring item workflow %s for member %s to blocker %s: %w", control.ID, rootID, memberID, blockerID, err)
+		if err := ensureDrainWorkflowBlocksOn(store, rootID, blocker); err != nil {
+			return fmt.Errorf("%s: wiring item workflow %s for member %s to blocker %s: %w", control.ID, rootID, memberID, blocker.ID, err)
 		}
 	}
 	if err := repairDrainWorkflowSourceMemberDeps(store, manifest, memberID, rootID); err != nil {
@@ -817,11 +817,14 @@ func drainManifestMemberIDs(manifest drainManifest) map[string]bool {
 // drainBlockerProjection is the result of projecting one drain member's
 // ready-blocking dependencies onto its item workflow.
 type drainBlockerProjection struct {
-	// BlockerIDs are the ids the item workflow's beads can actually depend on:
+	// Blockers are what the item workflow's beads can actually depend on:
 	// another manifest row's item root, an out-of-manifest blocker the item
 	// workflow's own store can resolve, or the cross-store gate that stands in
-	// for one it cannot (cross_store_gate.go).
-	BlockerIDs []string
+	// for one it cannot (cross_store_gate.go). A blocker the item's store
+	// resolves keeps the type, though not the payload, of the member's edge
+	// onto it (graphv2.SourceBlockers); an item root or a gate is a blocks
+	// edge.
+	Blockers []molecule.Blocker
 
 	// Gated are the out-of-manifest blockers, held in another store and still
 	// holding their dependents (open, or closed blocked), that the item waits
@@ -912,7 +915,11 @@ func classifyDrainBlocker(store beads.GraphStore, blockerID string, opts Process
 	}
 	// Judged by the rule the release pass releases a gate by (blockerReleased)
 	// and readiness releases an edge by, so a blocker closed blocked holds the
-	// item whether it closed before the drain expanded or after. The frame reads
+	// item whether it closed before the drain expanded or after. A gate mirrors
+	// only its blocker's status, so a waits-for edge is judged here by its
+	// spawner's status too, where a store holding the edge would also wait on
+	// the spawner's children (graphv2.EdgeSatisfied): judged any other way, the
+	// drain would reopen every gate the release pass releases. The frame reads
 	// two stores, and the item's own store, asked first, does not hold the
 	// blocker: the copy resolved here is the only one the frame can judge. A copy
 	// in a store outside it (another rig) is the release pass's to judge, which
@@ -934,17 +941,17 @@ func drainProjectedBlockerIDs(store beads.GraphStore, control beads.Bead, member
 	if err != nil {
 		return drainBlockerProjection{}, err
 	}
-	deps, err := memberStore.DepList(memberID, "down")
+	// The member's blockers are read as a sling launch reads its source
+	// bead's (graphv2.ReadyBlockingEdges): its ready-blocking edges, each with
+	// its own type.
+	edges, err := graphv2.ReadyBlockingEdges(memberStore, memberID)
 	if err != nil {
 		return drainBlockerProjection{}, err
 	}
-	seen := make(map[string]bool, len(deps))
-	projection := drainBlockerProjection{BlockerIDs: make([]string, 0, len(deps))}
-	for _, dep := range deps {
-		if !beads.IsReadyBlockingDependencyType(dep.Type) {
-			continue
-		}
-		dependsOnID := strings.TrimSpace(dep.DependsOnID)
+	seen := make(map[string]bool, len(edges))
+	projection := drainBlockerProjection{Blockers: make([]molecule.Blocker, 0, len(edges))}
+	for _, edge := range edges {
+		dependsOnID := edge.ID
 		if opts.MemberTail {
 			// A split city judges what an edge names (owner decision):
 			// "external:<id>" is the bead <id>, and an external capability
@@ -979,8 +986,9 @@ func drainProjectedBlockerIDs(store beads.GraphStore, control beads.Bead, member
 		seen[blockerID] = true
 		if onItemRoot {
 			// Item roots are minted in store, so this one is co-resident by
-			// construction and needs no probe.
-			projection.BlockerIDs = append(projection.BlockerIDs, blockerID)
+			// construction and needs no probe. It closes when the blocking
+			// member's item workflow does, whatever the member's edge type.
+			projection.Blockers = append(projection.Blockers, molecule.Blocker{ID: blockerID, Type: drainBlockerEdgeType})
 			continue
 		}
 		residence, err := classifyDrainBlocker(store, blockerID, opts)
@@ -989,7 +997,7 @@ func drainProjectedBlockerIDs(store beads.GraphStore, control beads.Bead, member
 		}
 		switch residence {
 		case drainBlockerProjectable:
-			projection.BlockerIDs = append(projection.BlockerIDs, blockerID)
+			projection.Blockers = append(projection.Blockers, molecule.Blocker{ID: blockerID, Type: edge.Type})
 		case drainBlockerSatisfied:
 			opts.tracef("drain: member %s blocker %s is already closed and lives outside the item workflow's store; not projecting an edge that would constrain nothing", memberID, blockerID)
 		case drainBlockerUnprojectable, drainBlockerUnresolved:
@@ -1007,7 +1015,7 @@ func drainProjectedBlockerIDs(store beads.GraphStore, control beads.Bead, member
 			}
 			seen[gateID] = true
 			opts.tracef("drain %s: member %s is blocked by %s, held in another store; its item waits behind cross-store gate %s", control.ID, memberID, blockerID, gateID)
-			projection.BlockerIDs = append(projection.BlockerIDs, gateID)
+			projection.Blockers = append(projection.Blockers, molecule.Blocker{ID: gateID, Type: drainBlockerEdgeType})
 			projection.Gated = append(projection.Gated, blockerID)
 		default:
 			return drainBlockerProjection{}, fmt.Errorf("classifying blocker %s for member %s: unclassified residence %d", blockerID, memberID, residence)
@@ -1017,9 +1025,17 @@ func drainProjectedBlockerIDs(store beads.GraphStore, control beads.Bead, member
 	return projection, nil
 }
 
-func ensureDrainWorkflowBlocksOn(store beads.GraphStore, rootID, blockerID string) error {
+// drainBlockerEdgeType is the edge type an item workflow waits on another
+// item's root or on a cross-store gate through: either closes when what it
+// stands for is done.
+const drainBlockerEdgeType = "blocks"
+
+// ensureDrainWorkflowBlocksOn wires blocker onto every member of the item
+// workflow rooted at rootID that molecule.Options.BlockedBy would wire it onto
+// at launch: all but the teardown tail (molecule.TeardownTailExclusionFromMembers).
+func ensureDrainWorkflowBlocksOn(store beads.GraphStore, rootID string, blocker molecule.Blocker) error {
 	rootID = strings.TrimSpace(rootID)
-	blockerID = strings.TrimSpace(blockerID)
+	blockerID := strings.TrimSpace(blocker.ID)
 	if rootID == "" || blockerID == "" || rootID == blockerID {
 		return nil
 	}
@@ -1027,15 +1043,37 @@ func ensureDrainWorkflowBlocksOn(store beads.GraphStore, rootID, blockerID strin
 	if err != nil {
 		return err
 	}
+	inTeardownTail := molecule.TeardownTailExclusionFromMembers(workflowBeads)
 	for _, bead := range workflowBeads {
-		if strings.TrimSpace(bead.ID) == "" || bead.ID == blockerID {
+		if strings.TrimSpace(bead.ID) == "" || bead.ID == blockerID || inTeardownTail(bead) {
 			continue
 		}
-		if err := ensureBlockingDependency(store, bead.ID, blockerID); err != nil {
+		if err := ensureReadyBlockingDependency(store, bead.ID, molecule.Blocker{ID: blockerID, Type: blocker.Type}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ensureReadyBlockingDependency adds an edge of blocker's type from issueID
+// onto blocker.ID unless issueID already has a ready-blocking edge onto it.
+// An edge already there is kept as it is, never retyped: a store holds one
+// edge between two beads, and the launch or an earlier pass wired it.
+func ensureReadyBlockingDependency(store beads.GraphStore, issueID string, blocker molecule.Blocker) error {
+	deps, err := store.DepList(issueID, "down")
+	if err != nil {
+		return err
+	}
+	for _, dep := range deps {
+		if dep.DependsOnID == blocker.ID && beads.IsReadyBlockingDependencyType(dep.Type) {
+			return nil
+		}
+	}
+	depType := blocker.Type
+	if depType == "" {
+		depType = drainBlockerEdgeType
+	}
+	return store.DepAdd(issueID, blocker.ID, depType)
 }
 
 // repairDrainWorkflowSourceMemberDeps removes ready-blocking dependencies
@@ -1698,7 +1736,7 @@ func trackDrainMember(store beads.WorkStore, unitConvoyID string, member beads.B
 	return convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: store}, unitConvoyID, member.ID)
 }
 
-func ensureDrainItemRoot(store beads.GraphStore, control, unit, member beads.Bead, count int, row *drainManifestRow, itemFormula string, parentVars map[string]string, blockerIDs []string, opts ProcessOptions) (string, bool, error) {
+func ensureDrainItemRoot(store beads.GraphStore, control, unit, member beads.Bead, count int, row *drainManifestRow, itemFormula string, parentVars map[string]string, blockers []molecule.Blocker, opts ProcessOptions) (string, bool, error) {
 	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
 	storeMolecule := beads.GraphMolecule(store)
 	unlock := graphv2.LockKey(row.ItemRootKey)
@@ -1755,7 +1793,7 @@ func ensureDrainItemRoot(store beads.GraphStore, control, unit, member beads.Bea
 	}
 	result, err := molecule.Instantiate(context.Background(), storeMolecule, recipe, molecule.Options{
 		Vars:             runtimeVars,
-		ExternalDeps:     drainWorkflowExternalDeps(recipe, blockerIDs),
+		BlockedBy:        blockers,
 		PriorityOverride: member.Priority,
 		RootMetadata:     drainItemRootMetadata(runRoot),
 	})
@@ -1783,37 +1821,6 @@ func drainItemRootMetadata(runRoot beads.Bead) map[string]string {
 		return nil
 	}
 	return map[string]string{beadmeta.InitiatorMetadataKey: initiator}
-}
-
-func drainWorkflowExternalDeps(recipe *formula.Recipe, blockerIDs []string) []molecule.ExternalDep {
-	if recipe == nil || len(recipe.Steps) == 0 || len(blockerIDs) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool)
-	var deps []molecule.ExternalDep
-	for _, step := range recipe.Steps {
-		stepID := strings.TrimSpace(step.ID)
-		if stepID == "" {
-			continue
-		}
-		for _, blockerID := range blockerIDs {
-			blockerID = strings.TrimSpace(blockerID)
-			if blockerID == "" {
-				continue
-			}
-			key := stepID + "\x00" + blockerID
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			deps = append(deps, molecule.ExternalDep{
-				StepID:      stepID,
-				DependsOnID: blockerID,
-				Type:        "blocks",
-			})
-		}
-	}
-	return deps
 }
 
 func drainItemRuntimeVars(recipe *formula.Recipe, vars map[string]string) map[string]string {

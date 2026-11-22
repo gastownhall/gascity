@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // blockedSlingFixture is a city whose work bead BL-42 is blocked by the open
@@ -65,7 +67,7 @@ func decodeSlingJSON(t *testing.T, out string) slingJSONResult {
 }
 
 func TestSlingOnBlockedBeadNamesWhatTheWorkflowWaitsFor(t *testing.T) {
-	waitsLine := regexp.MustCompile(`(?m)^Workflow (\S+) waits for BL-41 \(open blockers of BL-42\); add a later blocker with: bd dep add <step> <blocker>$`)
+	waitsLine := regexp.MustCompile(`(?m)^Workflow (\S+) waits for BL-41 \(blockers of BL-42\); add a later blocker with: bd dep add <step> <blocker>$`)
 
 	t.Run("text", func(t *testing.T) {
 		store, deps, opts := blockedSlingFixture(t)
@@ -105,7 +107,7 @@ func TestSlingOnBlockedBeadNamesWhatTheWorkflowWaitsFor(t *testing.T) {
 		if code := doSlingBatch(opts, deps, deps.Store, &stdout, &stderr); code != 0 {
 			t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
 		}
-		if !strings.Contains(stdout.String(), "  Would wait for: BL-41 (open blockers of BL-42)\n") {
+		if !strings.Contains(stdout.String(), "  Would wait for: BL-41 (blockers of BL-42)\n") {
 			t.Fatalf("dry run does not name the waiting blocker:\n%s", stdout.String())
 		}
 		if after := countAllBeads(t, store); after != before {
@@ -144,4 +146,55 @@ func TestSlingOnBlockedBeadNamesWhatTheWorkflowWaitsFor(t *testing.T) {
 			t.Fatalf("dry run left %d beads in the work store, want 2", got)
 		}
 	})
+
+	t.Run("dry run of a default formula on a split city previews the plain route", func(t *testing.T) {
+		_, deps, opts := blockedSlingFixture(t)
+		deps.GraphStore = beadstest.Graph(beads.NewMemStore())
+		opts.OnFormula = ""
+		opts.Target.DefaultSlingFormula = strPtr("graph-work")
+		opts.DryRun = true
+		var stdout, stderr bytes.Buffer
+		if code := doSlingBatch(opts, deps, deps.Store, &stdout, &stderr); code != 0 {
+			t.Fatalf("dry run returned %d, want 0 as the live sling routes the bead plainly; stderr: %s", code, stderr.String())
+		}
+		for _, want := range []string{"BL-42 is blocked by BL-41, which the workflow's store does not hold", "the default formula will be skipped and the bead routed plainly"} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Fatalf("dry run does not preview the plain route (%q):\n%s", want, stdout.String())
+			}
+		}
+	})
+}
+
+// TestBatchSlingNamesWhatEachChildsWorkflowWaitsFor pins that a batch
+// result reports, per child, the blockers its graph workflow waits for
+// (sling.SlingChildResult.WaitingOn), in text and in the JSON batch summary.
+func TestBatchSlingNamesWhatEachChildsWorkflowWaitsFor(t *testing.T) {
+	result := sling.SlingResult{
+		Target:        "mayor",
+		BeadID:        "BL-40",
+		ContainerType: "convoy",
+		Total:         2,
+		Routed:        2,
+		Children: []sling.SlingChildResult{
+			{BeadID: "BL-41", Routed: true, WorkflowID: "BL-50", FormulaName: "graph-work"},
+			{BeadID: "BL-42", Routed: true, WorkflowID: "BL-51", FormulaName: "graph-work", WaitingOn: []string{"BL-41"}},
+		},
+	}
+
+	var stdout bytes.Buffer
+	printBatchSlingResult(result, &stdout, io.Discard)
+	if want := "  Attached workflow BL-51 (formula \"graph-work\") to BL-42\n    waits for BL-41 (blockers of BL-42)\n"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("batch output does not name what BL-42's workflow waits for (%q):\n%s", want, stdout.String())
+	}
+	if strings.Count(stdout.String(), "waits for") != 1 {
+		t.Errorf("batch output names a wait for a child that has none:\n%s", stdout.String())
+	}
+
+	payload := slingJSONFromResult(result)
+	if payload.Batch == nil {
+		t.Fatal("payload has no batch summary")
+	}
+	if want := map[string][]string{"BL-42": {"BL-41"}}; !reflect.DeepEqual(payload.Batch.WaitingOn, want) {
+		t.Errorf("batch waiting_on = %v, want %v", payload.Batch.WaitingOn, want)
+	}
 }

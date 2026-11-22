@@ -65,6 +65,38 @@ func TestFormulaCookAttachGraphV2WaitsForSourceBlockers(t *testing.T) {
 			t.Errorf("waiting_on = %v, want [%s]", res.WaitingOn, blocker.ID)
 		}
 	})
+	t.Run("a repeated cook reports what the reused workflow waits for", func(t *testing.T) {
+		// A convoy is its own input convoy, so cooking onto it again finds
+		// the workflow the first cook launched and reuses it.
+		work, blocker, item := cookAttachBlockedSource(t)
+		source, err := work.Create(beads.Bead{Title: "attach convoy", Type: "convoy"})
+		if err != nil {
+			t.Fatalf("create convoy: %v", err)
+		}
+		if err := work.DepAdd(source.ID, item.ID, "tracks"); err != nil {
+			t.Fatalf("track item: %v", err)
+		}
+		if err := work.DepAdd(source.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+		first := cookFormula(t, "graph-work", "--attach", source.ID)
+
+		again := cookFormula(t, "graph-work", "--attach", source.ID)
+		if again.RootID != first.RootID {
+			t.Fatalf("repeated cook root = %s, want the reused %s", again.RootID, first.RootID)
+		}
+		if !slices.Equal(again.WaitingOn, []string{blocker.ID}) {
+			t.Errorf("repeated cook waiting_on = %v, want [%s]: the reused workflow still waits", again.WaitingOn, blocker.ID)
+		}
+
+		if err := work.Close(blocker.ID); err != nil {
+			t.Fatalf("Close(blocker): %v", err)
+		}
+		released := cookFormula(t, "graph-work", "--attach", source.ID)
+		if released.RootID != first.RootID || len(released.WaitingOn) != 0 {
+			t.Errorf("cook after %s closed = root %s waiting_on %v, want root %s waiting on nothing", blocker.ID, released.RootID, released.WaitingOn, first.RootID)
+		}
+	})
 	t.Run("text", func(t *testing.T) {
 		work, blocker, source := cookAttachBlockedSource(t)
 

@@ -4601,3 +4601,35 @@ func TestInstantiateWithoutRootMetadataStampsNothing(t *testing.T) {
 		t.Fatalf("root carries %s=%q without RootMetadata", testRootMetaKey, got)
 	}
 }
+
+// TestInstantiateGraphApplyIncludesBlockedBy pins Options.BlockedBy on the
+// graph-apply path: the plan carries one blocks edge per step and blocker.
+func TestInstantiateGraphApplyIncludesBlockedBy(t *testing.T) {
+	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+	blocker, err := store.Create(beads.Bead{Title: "Blocker", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	blockers := append([]Blocker{{ID: blocker.ID}}, blockedByTypedBlockers(t, store)[1:]...)
+
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), blockedByTestRecipe(), Options{BlockedBy: blockers})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if store.plan == nil {
+		t.Fatal("ApplyGraphPlan was not called")
+	}
+	blockers[0].Type = "blocks"
+	for _, stepID := range []string{"wf", "wf.a", "wf.b"} {
+		for _, b := range blockers {
+			assertGraphPlanEdgeCount(t, store.plan, stepID, "", b.ID, b.Type, 1)
+		}
+	}
+	if len(result.BlockedBy) != len(blockers) {
+		t.Errorf("Result.BlockedBy = %v, want %v", result.BlockedBy, blockers)
+	}
+}

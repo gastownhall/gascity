@@ -991,7 +991,7 @@ city's work store, copy them into the binding with
 							WorkflowRootID: result.RootID,
 							Created:        result.Created,
 							IDMapping:      result.IDMapping,
-							WaitingOn:      result.BlockedBy,
+							WaitingOn:      molecule.BlockerIDs(result.BlockedBy),
 						}); err != nil {
 							return err
 						}
@@ -1002,7 +1002,7 @@ city's work store, copy them into the binding with
 					_, _ = fmt.Fprintf(stdout, "Root: %s\n", result.RootID)
 					_, _ = fmt.Fprintf(stdout, "Created: %d\n", result.Created)
 					if len(result.BlockedBy) > 0 {
-						_, _ = fmt.Fprintf(stdout, "Waits for: %s\n", strings.Join(result.BlockedBy, ", "))
+						_, _ = fmt.Fprintf(stdout, "Waits for: %s\n", strings.Join(molecule.BlockerIDs(result.BlockedBy), ", "))
 					}
 					_ = pokeControlDispatch(cityPath)
 					return nil
@@ -1414,10 +1414,17 @@ func existingFormulaCookGraphV2Root(store beads.Store, recipe *formula.Recipe) (
 	if rootStep != nil {
 		idMapping[rootStep.ID] = matches[0].ID
 	}
+	// A reused workflow waits on what its launch wired, not on what its
+	// source bead's edges say now.
+	blockedBy, err := graphv2.WorkflowBlockers(store, matches[0].ID)
+	if err != nil {
+		return nil, fmt.Errorf("reading what workflow %s waits for: %w", matches[0].ID, err)
+	}
 	return &molecule.Result{
 		RootID:        matches[0].ID,
 		GraphWorkflow: true,
 		IDMapping:     idMapping,
+		BlockedBy:     blockedBy,
 	}, nil
 }
 

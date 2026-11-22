@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 func createSourceBlockersBead(t *testing.T, store beads.Store, title string) beads.Bead {
@@ -20,19 +21,28 @@ func createSourceBlockersBead(t *testing.T, store beads.Store, title string) bea
 	return b
 }
 
+// blocksOn returns ids as blocks-typed blockers, sorted by id.
+func blocksOn(ids ...string) []molecule.Blocker {
+	out := make([]molecule.Blocker, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, molecule.Blocker{ID: id, Type: "blocks"})
+	}
+	return sortedBlockers(out)
+}
+
 // TestSourceBlockersReadsReadyBlockingDeps pins which of a source bead's
-// dependencies a launched workflow inherits: every ready-blocking type, once
-// each, sorted, and nothing else.
+// dependencies a launched workflow inherits: every ready-blocking edge, once
+// each, with its own type, sorted, and nothing else.
 func TestSourceBlockersReadsReadyBlockingDeps(t *testing.T) {
 	store := beads.NewMemStore()
 	source := createSourceBlockersBead(t, store, "source")
-	want := make([]string, 0, 3)
+	want := make([]molecule.Blocker, 0, 3)
 	for _, depType := range []string{"waits-for", "blocks", "conditional-blocks"} {
 		target := createSourceBlockersBead(t, store, depType)
 		if err := store.DepAdd(source.ID, target.ID, depType); err != nil {
 			t.Fatalf("DepAdd %s: %v", depType, err)
 		}
-		want = append(want, target.ID)
+		want = append(want, molecule.Blocker{ID: target.ID, Type: depType})
 	}
 	for _, depType := range []string{"parent-child", "tracks", "related"} {
 		target := createSourceBlockersBead(t, store, depType)
@@ -40,7 +50,7 @@ func TestSourceBlockersReadsReadyBlockingDeps(t *testing.T) {
 			t.Fatalf("DepAdd %s: %v", depType, err)
 		}
 	}
-	slices.Sort(want)
+	want = sortedBlockers(want)
 
 	got, err := SourceBlockers(beadstest.Work(store), source.ID)
 	if err != nil {
@@ -94,8 +104,7 @@ func TestSourceBlockersDropsSatisfiedBlockers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SourceBlockers: %v", err)
 	}
-	want := []string{closedBlocked.ID, open.ID, "external:other:gc-99", "gc-404"}
-	slices.Sort(want)
+	want := blocksOn(closedBlocked.ID, open.ID, "external:other:gc-99", "gc-404")
 	if !slices.Equal(got, want) {
 		t.Errorf("SourceBlockers = %v, want %v", got, want)
 	}
@@ -140,7 +149,7 @@ func TestSourceBlockersSkipsOwnWorkflowRoots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SourceBlockers: %v", err)
 	}
-	if want := []string{foreign.ID}; !slices.Equal(got, want) {
+	if want := blocksOn(foreign.ID); !slices.Equal(got, want) {
 		t.Errorf("SourceBlockers = %v, want %v", got, want)
 	}
 }
@@ -190,10 +199,93 @@ func TestSourceBlockersHonorsWaitsForAndConditionalBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SourceBlockers: %v", err)
 	}
-	want := []string{waiter.ID, conditional.ID}
-	slices.Sort(want)
+	want := sortedBlockers([]molecule.Blocker{{ID: waiter.ID, Type: "waits-for"}, {ID: conditional.ID, Type: "conditional-blocks"}})
 	if !slices.Equal(got, want) {
 		t.Fatalf("SourceBlockers = %v, want sorted %v", got, want)
+	}
+}
+
+// TestSourceBlockersKeepsWaitsForWhateverItsSpawnersStatus pins that a
+// waits-for edge is inherited whatever its spawner's own status: bd and native
+// Dolt judge it by the spawner's open children, so a closed spawner whose
+// child is still open holds the source bead, and only an edge the store judges
+// can hold the workflow by that rule. A closed blocks target, which every
+// store judges by its status, is dropped.
+func TestSourceBlockersKeepsWaitsForWhateverItsSpawnersStatus(t *testing.T) {
+	store := beads.NewMemStore()
+	source := createSourceBlockersBead(t, store, "work")
+	closedSpawner := createSourceBlockersBead(t, store, "closed spawner")
+	openChild := createSourceBlockersBead(t, store, "open child")
+	openSpawner := createSourceBlockersBead(t, store, "open spawner")
+	closedChild := createSourceBlockersBead(t, store, "closed child")
+	closedBlocker := createSourceBlockersBead(t, store, "closed blocker")
+	for _, edge := range []beads.Dep{
+		{IssueID: openChild.ID, DependsOnID: closedSpawner.ID, Type: "parent-child"},
+		{IssueID: closedChild.ID, DependsOnID: openSpawner.ID, Type: "parent-child"},
+		{IssueID: source.ID, DependsOnID: closedSpawner.ID, Type: "waits-for"},
+		{IssueID: source.ID, DependsOnID: openSpawner.ID, Type: "waits-for"},
+		{IssueID: source.ID, DependsOnID: closedBlocker.ID, Type: "blocks"},
+	} {
+		if err := store.DepAdd(edge.IssueID, edge.DependsOnID, edge.Type); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{closedSpawner.ID, closedChild.ID, closedBlocker.ID} {
+		if err := store.Close(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := SourceBlockers(beadstest.Work(store), source.ID)
+	if err != nil {
+		t.Fatalf("SourceBlockers: %v", err)
+	}
+	want := sortedBlockers([]molecule.Blocker{{ID: closedSpawner.ID, Type: "waits-for"}, {ID: openSpawner.ID, Type: "waits-for"}})
+	if !slices.Equal(got, want) {
+		t.Fatalf("SourceBlockers = %v, want %v: a waits-for edge is the store's to judge, a closed blocks target is satisfied", got, want)
+	}
+}
+
+// TestWorkflowBlockersReadsWhatTheLaunchWired pins that a reused workflow
+// reports the blockers its launch wired onto its root and still waits on: a
+// blocks target that has closed since is dropped, a waits-for edge is kept for
+// the store to judge, and the root's other edges, including one onto its own
+// step, are not blockers.
+func TestWorkflowBlockersReadsWhatTheLaunchWired(t *testing.T) {
+	store := beads.NewMemStore()
+	root := createSourceBlockersBead(t, store, "root")
+	open := createSourceBlockersBead(t, store, "open blocker")
+	closed := createSourceBlockersBead(t, store, "closed blocker")
+	spawner := createSourceBlockersBead(t, store, "spawner")
+	convoy := createSourceBlockersBead(t, store, "convoy")
+	step, err := store.Create(beads.Bead{Title: "own step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range []beads.Dep{
+		{IssueID: root.ID, DependsOnID: open.ID, Type: "blocks"},
+		{IssueID: root.ID, DependsOnID: closed.ID, Type: "blocks"},
+		{IssueID: root.ID, DependsOnID: spawner.ID, Type: "waits-for"},
+		{IssueID: root.ID, DependsOnID: convoy.ID, Type: "tracks"},
+		{IssueID: root.ID, DependsOnID: step.ID, Type: "blocks"},
+	} {
+		if err := store.DepAdd(edge.IssueID, edge.DependsOnID, edge.Type); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{closed.ID, spawner.ID} {
+		if err := store.Close(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := WorkflowBlockers(store, root.ID)
+	if err != nil {
+		t.Fatalf("WorkflowBlockers: %v", err)
+	}
+	want := sortedBlockers([]molecule.Blocker{{ID: open.ID, Type: "blocks"}, {ID: spawner.ID, Type: "waits-for"}})
+	if !slices.Equal(got, want) {
+		t.Fatalf("WorkflowBlockers = %v, want %v", got, want)
 	}
 }
 
@@ -217,7 +309,7 @@ func TestSourceBlockersKeepsBlockerClosedWithBlockedOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SourceBlockers: %v", err)
 	}
-	if !slices.Equal(got, []string{blocker.ID}) {
+	if !slices.Equal(got, blocksOn(blocker.ID)) {
 		t.Fatalf("SourceBlockers = %v, want [%s]: a blocker closed with gc.work_outcome=blocked is not satisfied", got, blocker.ID)
 	}
 }
@@ -251,31 +343,34 @@ func TestSourceBlockersKeepsForeignWorkflowRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SourceBlockers: %v", err)
 	}
-	if !slices.Equal(got, []string{foreign.ID}) {
+	if !slices.Equal(got, blocksOn(foreign.ID)) {
 		t.Fatalf("SourceBlockers = %v, want [%s]: a foreign workflow root keeps holding", got, foreign.ID)
 	}
 }
 
 // TestGraphHeldBlockersNormalizesAndRefusesUnheld pins the split-city
 // holdability check: an external:<id> ref names <id>, an external capability
-// is dropped, a held blocker is wired, and an unheld one refuses the launch
-// with an error naming the source bead and the blocker.
+// is dropped, a held blocker is wired with its edge type, and an unheld one
+// refuses the launch with an error naming the source bead and the blocker.
 func TestGraphHeldBlockersNormalizesAndRefusesUnheld(t *testing.T) {
 	graph := beads.NewMemStore()
 	held := createSourceBlockersBead(t, graph, "held")
 	other := createSourceBlockersBead(t, graph, "other")
 
-	got, err := GraphHeldBlockers(graph, "src-1", []string{"external:" + held.ID, other.ID, "external:rig:capability"})
+	got, err := GraphHeldBlockers(graph, "src-1", []molecule.Blocker{
+		{ID: "external:" + held.ID, Type: "blocks"},
+		{ID: other.ID, Type: "waits-for"},
+		{ID: "external:rig:capability", Type: "blocks"},
+	})
 	if err != nil {
 		t.Fatalf("GraphHeldBlockers: %v", err)
 	}
-	want := []string{held.ID, other.ID}
-	slices.Sort(want)
+	want := sortedBlockers([]molecule.Blocker{{ID: held.ID, Type: "blocks"}, {ID: other.ID, Type: "waits-for"}})
 	if !slices.Equal(got, want) {
 		t.Errorf("GraphHeldBlockers = %v, want %v", got, want)
 	}
 
-	_, err = GraphHeldBlockers(graph, "src-1", []string{held.ID, "wk-7"})
+	_, err = GraphHeldBlockers(graph, "src-1", blocksOn(held.ID, "wk-7"))
 	var crossErr *CrossStoreBlockersError
 	if !errors.As(err, &crossErr) {
 		t.Fatalf("GraphHeldBlockers error = %v, want a *CrossStoreBlockersError", err)
