@@ -497,6 +497,35 @@ describe('workflow topology beads are exempt from the stalled rule (#7232)', () 
     expect(inProgressCardNote(workflowRoot(), [session({})], NOW)).toBeNull();
   });
 
+  const topologyShapes: ReadonlyArray<{
+    name: string;
+    assignee?: string;
+    sessions: readonly BeadAttentionSession[];
+  }> = [
+    { name: 'no assignee', sessions: [session({})] },
+    {
+      name: 'assignee on a drained session',
+      assignee: 'worker-ci-1',
+      sessions: [session({ state: 'drained' })],
+    },
+    { name: 'assignee with no session', assignee: 'worker-ci-1', sessions: [] },
+  ];
+  const topologyCases = ['workflow', 'scope', 'spec'].flatMap((kind) =>
+    topologyShapes.map((shape) => ({ kind, ...shape })),
+  );
+
+  it.each(topologyCases)(
+    'does not flag an in-progress gc.kind=$kind bead with $name (AC-3)',
+    ({ kind, assignee, sessions }) => {
+      const topology = workflowRoot({
+        ...(assignee === undefined ? {} : { assignee }),
+        metadata: { 'gc.kind': kind },
+      });
+      expect(select({ beads: [topology], sessions })).toEqual([]);
+      expect(inProgressCardNote(topology, sessions, NOW) ?? '').not.toContain('stalled');
+    },
+  );
+
   it('exempts a padded mixed-case gc.kind workflow root', () => {
     expect(select({ beads: [workflowRoot({ metadata: { 'gc.kind': ' Workflow ' } })] })).toEqual(
       [],
