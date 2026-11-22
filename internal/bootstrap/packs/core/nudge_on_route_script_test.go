@@ -3,12 +3,16 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // nudgeOnRouteScriptPath is the on-disk copy of the nudge-on-route order's
@@ -16,12 +20,14 @@ import (
 const nudgeOnRouteScriptPath = "assets/scripts/nudge-on-route.sh"
 
 // nudgeOnRouteEnvKeys are the settings that would point the script at a live
-// session's city, state, or trace file. The test supplies its own state dir.
+// session's city, state, trace or outcome file. The test supplies its own
+// state dir and outcome file.
 var nudgeOnRouteEnvKeys = map[string]struct{}{
 	"GC_CITY":                        {},
 	"GC_CITY_RUNTIME_DIR":            {},
 	"GC_PACK_STATE_DIR":              {},
 	"GC_BD_TRACE_JSON":               {},
+	"GC_ORDER_OUTCOME_FILE":          {},
 	"GC_NUDGE_ON_ROUTE_WINDOW":       {},
 	"GC_NUDGE_ON_ROUTE_LOOKBACK":     {},
 	"GC_NUDGE_ON_ROUTE_MAX_LOOKBACK": {},
@@ -266,14 +272,16 @@ func (e nudgeEvent) line(t *testing.T) string {
 
 // nudgeOnRouteRig is one city's worth of fixture for the nudge-on-route
 // script: an events file served by a fake gc that honors --type and --since,
-// the pack state dir, and a dir whose marker files fail a nudge.
+// the pack state dir, the outcome file each run may declare a partial run
+// in, and a dir whose marker files fail a nudge.
 type nudgeOnRouteRig struct {
-	t          *testing.T
-	dir        string
-	eventsPath string
-	stateDir   string
-	binDir     string
-	logPath    string
+	t           *testing.T
+	dir         string
+	eventsPath  string
+	stateDir    string
+	outcomePath string
+	binDir      string
+	logPath     string
 }
 
 // newNudgeOnRouteRig builds a rig whose fake gc reports members as each pool
@@ -286,10 +294,11 @@ func newNudgeOnRouteRig(t *testing.T, filter bool, members map[string][]string) 
 	}
 	dir := t.TempDir()
 	r := &nudgeOnRouteRig{
-		t:          t,
-		dir:        dir,
-		eventsPath: filepath.Join(dir, "events.jsonl"),
-		stateDir:   filepath.Join(dir, "state"),
+		t:           t,
+		dir:         dir,
+		eventsPath:  filepath.Join(dir, "events.jsonl"),
+		stateDir:    filepath.Join(dir, "state"),
+		outcomePath: filepath.Join(dir, "outcome.json"),
 	}
 	r.binDir, r.logPath = fakeGCBin(t, cascadeFake{
 		eventsPath:   r.eventsPath,
@@ -370,15 +379,43 @@ func (r *nudgeOnRouteRig) unfailNudgesTo(target string) {
 	}
 }
 
-// run executes the script once and returns its combined output.
+// run executes the script once and returns its combined output. Like the
+// controller, it hands each run an empty GC_ORDER_OUTCOME_FILE.
 func (r *nudgeOnRouteRig) run(extraEnv ...string) string {
 	r.t.Helper()
-	env := append([]string{"GC_PACK_STATE_DIR=" + r.stateDir}, extraEnv...)
+	if err := os.WriteFile(r.outcomePath, nil, 0o644); err != nil {
+		r.t.Fatalf("reset outcome file: %v", err)
+	}
+	env := append([]string{"GC_PACK_STATE_DIR=" + r.stateDir, "GC_ORDER_OUTCOME_FILE=" + r.outcomePath}, extraEnv...)
 	out, err := runPackScript(r.t, nudgeOnRouteScriptPath, r.binDir, nudgeOnRouteEnvKeys, env)
 	if err != nil {
 		r.t.Fatalf("nudge-on-route.sh failed: %v\n%s", err, out)
 	}
 	return out
+}
+
+// wantOutcome checks the last run's declaration, decoded as the controller
+// decodes it: a partial outcome with exactly reason, or, when reason is
+// empty, no declaration at all.
+func (r *nudgeOnRouteRig) wantOutcome(reason string) {
+	r.t.Helper()
+	data, err := os.ReadFile(r.outcomePath)
+	if err != nil {
+		r.t.Fatalf("read outcome file: %v", err)
+	}
+	out, declared, err := orders.DecodeExecOutcome(data)
+	if err != nil {
+		r.t.Fatalf("decode outcome declaration %q: %v", data, err)
+	}
+	if reason == "" {
+		if declared {
+			r.t.Fatalf("outcome = %+v, want no declaration", out)
+		}
+		return
+	}
+	if !declared || out.Outcome != orders.ExecOutcomePartial || out.Reason != reason {
+		r.t.Fatalf("outcome = %+v (declared %t), want partial: %s", out, declared, reason)
+	}
 }
 
 // seq returns the persisted seq mark, or "" when the file is absent.
@@ -523,16 +560,18 @@ func TestNudgeOnRouteNudgesRoutingStampedAtCreation(t *testing.T) {
 // no usable mark (no seq file, a non-numeric one, or one above every seq the
 // log holds, as after a log reset): the whole GC_NUDGE_ON_ROUTE_MAX_LOOKBACK
 // window, nudging every routed pair in it not already in the dedup state and
-// recording the highest seq read as the mark.
+// recording the highest seq read as the mark. A reset is declared as a
+// partial run, so the controller records it; a first run declares nothing.
 func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
 	const target = "gascity/builder"
 	for _, tc := range []struct {
-		name string
-		seed string
+		name        string
+		seed        string
+		wantOutcome string
 	}{
 		{name: "no seq file"},
 		{name: "non-numeric seq file", seed: "garbage"},
-		{name: "seq file above every seq", seed: "1000"},
+		{name: "seq file above every seq", seed: "1000", wantOutcome: "event seq went backwards (7 < 1000); resetting mark"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newNudgeOnRouteRig(t, true, nil)
@@ -561,6 +600,37 @@ func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
 			reads := r.sinceReads()
 			if len(reads) == 0 || reads[len(reads)-1] != "1h" {
 				t.Fatalf("events reads = %q, want the last to be --since 1h", reads)
+			}
+			r.wantOutcome(tc.wantOutcome)
+		})
+	}
+
+	// The catch-up window only reaches `gc events --since`, which takes any
+	// Go duration, so a compound or fractional value must not stop the run.
+	for _, tc := range []struct {
+		env   string
+		since string
+	}{
+		{env: "GC_NUDGE_ON_ROUTE_WINDOW=1h30m", since: "1h30m"},
+		{env: "GC_NUDGE_ON_ROUTE_MAX_LOOKBACK=1.5h", since: "1.5h"},
+	} {
+		t.Run("catch-up window "+tc.env, func(t *testing.T) {
+			// The filtering fake parses only single-term durations, so this
+			// one answers the whole file whatever --since says.
+			r := newNudgeOnRouteRig(t, false, nil)
+			r.writeEvents(nudgeEvent{seq: 1, typ: "bead.created", bead: "ga-new", routedTo: target, age: 30 * time.Second})
+			out := r.run(tc.env)
+			if got, logged := r.nudges(target); got != 1 {
+				t.Fatalf("nudges to %s = %d, want 1; gc calls:\n%s", target, got, logged)
+			}
+			if reads := r.sinceReads(); len(reads) != 1 || reads[0] != tc.since {
+				t.Fatalf("events reads = %q, want exactly [%s]", reads, tc.since)
+			}
+			if strings.Contains(out, "is shorter than GC_NUDGE_ON_ROUTE_MAX_LOOKBACK") {
+				t.Fatalf("want no retention warning; output:\n%s", out)
+			}
+			if got := r.seq(); got != "1" {
+				t.Fatalf("seq mark = %q, want 1", got)
 			}
 		})
 	}
@@ -591,7 +661,8 @@ func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
 // reads the GC_NUDGE_ON_ROUTE_LOOKBACK fast window; when its seqs do not
 // reach back to the mark, events were missed (the controller fired late), so
 // the script re-reads the catch-up window instead of dropping them. A
-// catch-up read that still starts above the mark names the span it skipped.
+// catch-up read that still starts above the mark names the span it skipped,
+// on stderr and as a partial outcome the controller records.
 func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	const target = "gascity/builder"
 	const gapLine = "nudge-on-route: catch-up read starts at seq "
@@ -617,6 +688,49 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 		if strings.Contains(out, gapLine) {
 			t.Fatalf("catch-up reached the mark, want no gap line; output:\n%s", out)
 		}
+		r.wantOutcome("")
+	})
+
+	t.Run("a catch-up read of thousands of events is evaluated", func(t *testing.T) {
+		// A busy city logs thousands of events an hour. 10,000 8-digit seqs
+		// are 90 KB of seq text, more than a pipe holds (64 KiB) plus one
+		// read, so a reader that stops at the first line always leaves the
+		// writer blocked on a pipe it then closes: under pipefail the script
+		// dies and the mark never advances. A read that fits in the pipe
+		// fails only when the reader wins the race.
+		const mark = 75000000
+		const n = 10000
+		r := newNudgeOnRouteRig(t, true, nil)
+		r.seedSeq(strconv.Itoa(mark))
+		events := make([]nudgeEvent, 0, n)
+		for i := 1; i <= n; i++ {
+			// Spread over the last 50 minutes, all inside the 1h catch-up
+			// window: the 2m fast read holds only the newest ~400 and misses
+			// the mark, so the run catches up.
+			e := nudgeEvent{seq: mark + i, typ: "bead.updated", bead: fmt.Sprintf("ga-%d", i), age: time.Duration(n-i) * 300 * time.Millisecond}
+			if i == 1 {
+				e.routedTo = target
+			}
+			events = append(events, e)
+		}
+		r.writeEvents(events...)
+		out := r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudges to %s = %d, want 1 for the routing only the catch-up read holds; gc calls:\n%s", target, got, logged)
+		}
+		if total, logged := countNudges(t, r.logPath); total != 1 {
+			t.Fatalf("nudges = %d, want exactly 1; gc calls:\n%s", total, logged)
+		}
+		if reads := r.sinceReads(); strings.Join(reads, ",") != "2m,1h" {
+			t.Fatalf("events reads = %q, want [2m 1h]", reads)
+		}
+		if got, want := r.seq(), strconv.Itoa(mark+n); got != want {
+			t.Fatalf("seq mark = %q, want %s, the highest seq read", got, want)
+		}
+		if strings.Contains(out, gapLine) {
+			t.Fatalf("catch-up reached the mark, want no gap line; output:\n%s", out)
+		}
+		r.wantOutcome("")
 	})
 
 	t.Run("an empty fast read is caught up", func(t *testing.T) {
@@ -655,6 +769,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 		if strings.Contains(out, gapLine) || strings.Contains(out, retentionLine) {
 			t.Fatalf("steady state wants no warning; output:\n%s", out)
 		}
+		r.wantOutcome("")
 	})
 
 	t.Run("an incomplete catch-up names the skipped span", func(t *testing.T) {
@@ -673,10 +788,11 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 		if reads := r.sinceReads(); strings.Join(reads, ",") != "2m,1h" {
 			t.Fatalf("events reads = %q, want [2m 1h]", reads)
 		}
-		want := gapLine + "20 above mark 10; 9 older event(s) not evaluated"
-		if !strings.Contains(out, want) {
+		const span = "catch-up read starts at seq 20 above mark 10; 9 older event(s) not evaluated"
+		if want := "nudge-on-route: " + span; !strings.Contains(out, want) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
 		}
+		r.wantOutcome(span)
 		if got := r.seq(); got != "21" {
 			t.Fatalf("seq mark = %q, want 21: the mark advances past the gap", got)
 		}
@@ -705,6 +821,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 		if got, logged := r.nudges(target); got != 1 {
 			t.Fatalf("nudges to %s = %d, want 1; gc calls:\n%s", target, got, logged)
 		}
+		r.wantOutcome("")
 	})
 }
 

@@ -68,11 +68,13 @@ that read's lowest seq is above `mark + 1` events were missed, and the run
 re-reads the catch-up window (`GC_NUDGE_ON_ROUTE_MAX_LOOKBACK`). That is also
 the read when there is no usable mark (first run, unreadable file, or a mark
 above the log head after a reset). If even the catch-up read starts above the
-mark, the run writes `catch-up read starts at seq <low> above mark <mark>`
-to stderr and carries on. The mark advances after every successful read,
-including runs where a nudge failed: a failed pair has no dedup entry, so the
-next `bead.updated` for that bead retries it. A failed `gc events` read leaves
-the mark untouched.
+mark, the run carries on and declares a `partial` outcome that names the
+events it skipped (`catch-up read starts at seq <low> above mark <mark>`),
+and the controller records it as an `order.skipped` event. A seq that went
+backwards (a log reset) is declared the same way. The mark advances after
+every successful read, including runs where a nudge failed: a failed pair
+has no dedup entry, so the next `bead.updated` for that bead retries it. A
+failed `gc events` read leaves the mark untouched.
 
 **Idempotence.** A `(bead, routed_to)` pair is nudged at most once. The
 reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup
@@ -80,7 +82,9 @@ state's last-seen timestamp is refreshed on every sighting and the pair is
 never pruned-then-renudged while the routing is live. New pairs are grouped
 by target, and each target is nudged once per run: a formula pour that routes
 N steps to one session interrupts it once, not N times. On success every new
-pair for that target is recorded; on failure none is.
+pair for that target is recorded; on failure none is. Nudges are best-effort:
+a pool target counts as nudged once any member took the nudge, and a member
+whose nudge failed is not retried for those pairs.
 
 **State.** Both files live in `$GC_PACK_STATE_DIR`, which resolves per
 city + pack, so multi-city installs never cross-pollinate:
@@ -89,7 +93,8 @@ city + pack, so multi-city installs never cross-pollinate:
 - `nudge-on-route-state.json` — a JSON object mapping `"<bead>|<routed_to>"`
   to an ISO timestamp. Entries older than the retention window are pruned on
   each run. The retention must be at least the catch-up window, or a catch-up
-  read can re-nudge a pruned pair; the script warns on stderr when it is not.
+  read can re-nudge a pruned pair; the script warns on stderr when it is not
+  (checked when the catch-up window is a single Ns/Nm/Nh term).
 
 **Configuration** (all optional, via `[order.env]` or the controller env):
 

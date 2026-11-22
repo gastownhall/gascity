@@ -31,7 +31,9 @@
 # (GC_NUDGE_ON_ROUTE_LOOKBACK, 2m); when its seqs do not reach back to the
 # mark, the run re-reads the catch-up window (GC_NUDGE_ON_ROUTE_MAX_LOOKBACK,
 # 1h), which is also the first run's read. A span that even the catch-up
-# read misses is named on stderr rather than dropped silently.
+# read misses, or a seq that went backwards, is declared as a partial run
+# (order_outcome.sh), which the controller records as order.skipped, rather
+# than dropped silently.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -39,6 +41,8 @@ set -euo pipefail
 __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "nudge-on-route"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/order_outcome.sh"
 
 # jq is a hard dependency: without it the event stream cannot be decoded
 # and every nudge would be silently skipped. Fail loud at startup.
@@ -83,9 +87,12 @@ duration_to_seconds() {
 }
 
 RETENTION_S="$(duration_to_seconds "$RETENTION")"
-MAX_LOOKBACK_S="$(duration_to_seconds "$MAX_LOOKBACK")"
-# A short retention costs at most a duplicate nudge, so warn and run.
-if [ "$RETENTION_S" -lt "$MAX_LOOKBACK_S" ]; then
+# A short retention costs at most a duplicate nudge, so warn and run. The
+# catch-up window itself only goes to `gc events --since`, which takes any Go
+# duration (1h30m, 1.5h), so the check is skipped, never fatal, when it is
+# not a single Ns / Nm / Nh term.
+if [[ "$MAX_LOOKBACK" =~ ^[0-9]+[smh]?$ ]] \
+    && [ "$RETENTION_S" -lt "$(duration_to_seconds "$MAX_LOOKBACK")" ]; then
     echo "nudge-on-route: GC_NUDGE_ON_ROUTE_RETENTION ($RETENTION) is shorter than GC_NUDGE_ON_ROUTE_MAX_LOOKBACK ($MAX_LOOKBACK); a catch-up read can re-nudge pruned pairs" >&2
 fi
 
@@ -126,8 +133,20 @@ MEMBERS
 read_events() {
     EVENTS="$(gc events --since "$1" 2>/dev/null)" || exit 0
     _seqs="$(printf '%s\n' "$EVENTS" | jq -R -r 'fromjson? | .seq? | numbers | floor' 2>/dev/null | sort -n)" || _seqs=""
-    LOW_SEQ="$(printf '%s\n' "$_seqs" | head -1)"
-    HEAD_SEQ="$(printf '%s\n' "$_seqs" | tail -1)"
+    # First and last line by parameter expansion, never a reader that exits
+    # early: once the list outgrows the pipe, `| head -1` kills its writer
+    # with SIGPIPE, and under pipefail the whole run with it.
+    LOW_SEQ="${_seqs%%$'\n'*}"
+    HEAD_SEQ="${_seqs##*$'\n'}"
+}
+
+# report_partial says why this run could not evaluate every event since the
+# mark: on stderr, and as a partial outcome that the controller records as
+# order.skipped instead of a bare order.completed.
+report_partial() {
+    echo "nudge-on-route: $1" >&2
+    order_outcome_set partial "$1"
+    order_outcome_write
 }
 
 # Highest seq the previous run evaluated; anything but digits is no mark.
@@ -150,7 +169,7 @@ if [ "$FAST_OK" -eq 0 ]; then
     [ -n "$HEAD_SEQ" ] || exit 0
     # Event log reset/rebuilt below our mark: start over rather than wedge.
     if [ "$HEAD_SEQ" -lt "$LAST_SEQ" ]; then
-        echo "nudge-on-route: event seq went backwards ($HEAD_SEQ < $LAST_SEQ); resetting mark" >&2
+        report_partial "event seq went backwards ($HEAD_SEQ < $LAST_SEQ); resetting mark"
         LAST_SEQ=0
     fi
     # The catch-up read has no wider fallback: when it starts above the mark
@@ -159,7 +178,7 @@ if [ "$FAST_OK" -eq 0 ]; then
     # read and advance as usual; holding the mark would livelock under
     # sustained load, since every run would hit the same limit.
     if [ "$LAST_SEQ" -gt 0 ] && [ "$LOW_SEQ" -gt $((LAST_SEQ + 1)) ]; then
-        echo "nudge-on-route: catch-up read starts at seq $LOW_SEQ above mark $LAST_SEQ; $((LOW_SEQ - LAST_SEQ - 1)) older event(s) not evaluated" >&2
+        report_partial "catch-up read starts at seq $LOW_SEQ above mark $LAST_SEQ; $((LOW_SEQ - LAST_SEQ - 1)) older event(s) not evaluated"
     fi
 fi
 
@@ -228,7 +247,9 @@ EOF
 # N new pairs for one target in one batch, and each `gc session nudge`
 # interrupts the session to tell it the same thing: check for assigned work.
 # On success every new pair for the target is recorded; on failure none is,
-# so the next event that re-emits one of them retries it.
+# so the next event that re-emits one of them retries it. Nudges are
+# best-effort: a pool target succeeds once any member took the nudge, and a
+# member whose nudge failed is not retried for these pairs.
 TARGETS="$(printf '%s' "$NEW_PAIRS" | cut -f1 | sort -u)"
 while IFS= read -r target; do
     [ -n "$target" ] || continue
