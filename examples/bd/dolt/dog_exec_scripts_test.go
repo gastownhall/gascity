@@ -264,6 +264,8 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_COMPACT_ALERT_TO",
 		"GC_DOLT_CONFIG_FILE",
 		"GC_FAKE_DOLT_COMPACT_MODE",
+		"GC_FAKE_DOLT_FLATTEN_STDOUT_FILE",
+		"GC_FAKE_DOLT_FLATTEN_COMMIT",
 		"GC_FAKE_DOLT_COUNT_FILE",
 		"GC_FAKE_DOLT_STATE_FILE",
 		"GC_FAKE_DOLT_HASH_STATE_FILE",
@@ -582,7 +584,7 @@ while [ "$#" -gt 0 ]; do
 done
 printf 'db=%%s query=%%s\n' "$db" "$query" >> "$log"
 # The flatten's DOLT_COMMIT reports this commit; it is a valid Dolt hash.
-flatten_commit=%s
+flatten_commit="${GC_FAKE_DOLT_FLATTEN_COMMIT:-%s}"
 # --use-db <db>/<rev> selects the read-only revision database pinned to <rev>.
 # Only the flatten commit exists as a revision here; anything else is unknown,
 # exactly as Dolt rejects it. Reads through it see the state at that commit
@@ -1592,6 +1594,11 @@ case "$query" in
     fi
     if [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "same_count_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "writer_race_db_hash_during_verify" ]; then
       set_hash hash-after-writer
+    fi
+    # GC_FAKE_DOLT_FLATTEN_STDOUT_FILE replaces the flatten's result output.
+    if [ -n "${GC_FAKE_DOLT_FLATTEN_STDOUT_FILE:-}" ]; then
+      cat "$GC_FAKE_DOLT_FLATTEN_STDOUT_FILE"
+      exit 0
     fi
     # Real Dolt prints one result set per CALL: DOLT_RESET's status, then
     # DOLT_COMMIT's hash.

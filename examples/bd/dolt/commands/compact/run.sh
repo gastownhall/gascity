@@ -1085,9 +1085,12 @@ head_commit() {
 }
 
 # flatten_commit_hash FILE — print the commit hash DOLT_COMMIT reported in the
-# flatten call's tabular output FILE: the value of its `hash` result set.
-# DOLT_RESET's status set is ignored. Output with no hash value prints nothing
-# and returns 1.
+# flatten call's tabular output FILE. The output holds one result set per CALL;
+# exactly one of them must be a single-column `hash` set with exactly one data
+# row, and that value must be a Dolt commit hash: 32 characters of 0-9 and
+# a-v. Other result sets (DOLT_RESET's status) are ignored. Anything else — no
+# hash set, several hash sets, several or empty rows, a malformed value, or a
+# line outside the table layout — prints nothing and returns 1.
 flatten_commit_hash() {
   LC_ALL=C awk '
     function cell(line) {
@@ -1095,17 +1098,32 @@ flatten_commit_hash() {
       sub(/ *\|$/, "", line)
       return line
     }
-    BEGIN { state = 0; in_hash = 0; value = "" }
+    BEGIN { state = 0; hash_sets = 0; hash_rows = 0; in_hash = 0; bad = 0; value = "" }
     /^\+[-+]*\+$/ {
-      if (state == 0) { state = 1 } else if (state == 2) { state = 3 } else if (state == 3) { state = 0; in_hash = 0 }
+      if (state == 0) { state = 1 }
+      else if (state == 2) { state = 3 }
+      else if (state == 3) { state = 0; in_hash = 0 }
+      else { bad = 1 }
       next
     }
     /^\|.*\|$/ {
-      if (state == 1) { in_hash = (cell($0) == "hash"); state = 2 } else if (state == 3 && in_hash) { value = cell($0) }
+      if (state == 1) {
+        header = cell($0)
+        in_hash = (header == "hash")
+        if (in_hash) { hash_sets++ }
+        state = 2
+      } else if (state == 3) {
+        if (in_hash) { hash_rows++; value = cell($0) }
+      } else {
+        bad = 1
+      }
       next
     }
+    /^[ \t]*$/ { if (state != 0) { bad = 1 } next }
+    { bad = 1 }
     END {
-      if (value == "") { exit 1 }
+      if (bad || state != 0 || hash_sets != 1 || hash_rows != 1) { exit 1 }
+      if (length(value) != 32 || value !~ /^[0-9a-v]+$/) { exit 1 }
       print value
     }
   ' "$1"
