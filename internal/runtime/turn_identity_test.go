@@ -135,7 +135,9 @@ func TestTurnFenceUnavailableIsRuntimeUnavailable(t *testing.T) {
 	}
 	fenceErr := runtime.ErrTurnFenceUnavailable
 	for _, other := range []error{runtime.ErrSessionNotFound, runtime.ErrTurnNotCurrent, runtime.ErrTurnIdentityUnsupported} {
-		if errors.Is(fenceErr, other) {
+		// The order is right: fenceErr is the error under test, other the
+		// target. SA1032 sees two sentinels and guesses they are swapped.
+		if errors.Is(fenceErr, other) { //nolint:staticcheck // SA1032 false positive, see above.
 			t.Errorf("ErrTurnFenceUnavailable matches %v", other)
 		}
 	}

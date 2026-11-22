@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The step reminder through the controller (GET /work/active-step).
@@ -41,14 +42,20 @@ var _ api.ActiveWorkStepReader = (*controllerState)(nil)
 // scope this controller holds no store for is refused
 // (api.ErrActiveWorkStepScopeNotHeld), and the hook opens it itself.
 //
-// It answers only under a config it can show is current, exactly as
-// ReadyWork does (configFreshness), since the config decides which store a
-// scope names. Ambiguities the hook would log to its stderr are not logged
-// here: the hook that asked is the one that would have seen them.
+// It answers from the config this controller has published, read under cs.mu
+// with the stores published alongside it, and refuses with
+// api.ErrReadyWorkConfigNotCurrent exactly when ReadyWork does
+// (configFreshness): while a reload or API config write is in progress, after
+// a failed reload until one applies or finds no change, and when a change
+// began during the read, since the config decides which store a scope names.
+// The dirty flag is not a reason to refuse: it records only that a reload is
+// due, and a scope added or rebound on disk reaches the answer at that reload.
+// Ambiguities the hook would log to its stderr are not logged here: the hook
+// that asked is the one that would have seen them.
 func (cs *controllerState) ActiveWorkStep(ctx context.Context, assignees []string, scopeRoot string) (*api.ActiveWorkStep, error) {
 	var step *beads.Bead
 	var err error
-	if !cs.freshness.read(cs.configDirty, func() {
+	if !cs.freshness.read(func() {
 		step, err = cs.activeWorkStep(ctx, assignees, scopeRoot)
 	}) {
 		return nil, api.ErrReadyWorkConfigNotCurrent
@@ -62,8 +69,9 @@ func (cs *controllerState) ActiveWorkStep(ctx context.Context, assignees []strin
 	return &api.ActiveWorkStep{ID: step.ID, Title: step.Title, Description: step.Description}, nil
 }
 
-// activeWorkStep resolves the step over the stores scopeRoot names, each bound
-// to ctx where its store allows (activeWorkStepReader).
+// activeWorkStep resolves the step over the stores scopeRoot names, the
+// Molecule{Active} plan's legs bound to ctx where their store allows
+// (storeref.BindLegs over scopedStoreLike).
 func (cs *controllerState) activeWorkStep(ctx context.Context, assignees []string, scopeRoot string) (*beads.Bead, error) {
 	cs.mu.RLock()
 	cfg := cs.cfg
@@ -77,19 +85,41 @@ func (cs *controllerState) activeWorkStep(ctx context.Context, assignees []strin
 	if work == nil {
 		return nil, fmt.Errorf("%w: %q", api.ErrActiveWorkStepScopeNotHeld, scopeRoot)
 	}
-	graph := resolveGraphStore(routes, work, cfg, cityPath, nil)
-	// The one-listing question is decided on the stores, before any is bound:
-	// a binding is a clone, and a clone is never the same handle as another.
-	oneStore := sameStoreHandle(work, graph)
-	workReader, err := activeWorkStepReader(ctx, cityPath, cfg, work)
+	// The molecule readers are the Molecule{Active} plan over the frame the
+	// hook's own resolution reads (scopeStores: the graph placement over
+	// work, then work itself when it is another store), Near the raw scope
+	// store rather than a work handle, so the work reads stay as they are.
+	plan, err := scopeStores(cityPath, routes, work).Plan(storeref.Molecule{Kind: storeref.MoleculeActive, Scope: storeref.WorkRef, Near: work, NearRef: stepWorkStoreRef})
+	if err != nil {
+		return nil, fmt.Errorf("planning the step reminder's molecule readers: %w", err)
+	}
+	// The one-listing question is decided on the plan, before any leg is
+	// bound: a binding is a clone, and a clone is never the same handle as
+	// another.
+	oneStore := len(plan.Legs) == 1
+	// Each store is bound to ctx when it runs subprocesses (scopedStoreLike),
+	// so a request the hook gave up on stops its bd children.
+	bound, err := storeref.BindLegs(plan, func(store beads.Store) (beads.Store, error) {
+		scoped, err := scopedStoreLike(ctx, cityPath, cfg, store)
+		if err != nil {
+			return nil, fmt.Errorf("binding the store to the request: %w", err)
+		}
+		if scoped != nil {
+			return scoped, nil
+		}
+		return store, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	graphReader, err := activeWorkStepReader(ctx, cityPath, cfg, graph)
-	if err != nil {
-		return nil, err
-	}
-	r := stepResolution{work: workReader, graph: graphReader, logf: func(string, ...any) {}}
+	// Each leg is read live through its clone: the molecule listing through
+	// the leg, every other read through its strict reader, which is the
+	// work and graph readers' too (the graph leg leads; a one-leg plan is one
+	// store for both).
+	r := stepResolution{logf: func(string, ...any) {}}
+	storeref.EachTypedLeg(bound, func(leg storeref.TypedLeg) { r.molecules = append(r.molecules, stepMoleculeLegOf(leg, true)) })
+	r.graph = r.molecules[0].strict
+	r.work = r.molecules[len(r.molecules)-1].strict
 	return r.activeStep(oneStore, assignees)
 }
 
@@ -114,20 +144,6 @@ func activeWorkStepScopeStore(cfg *config.City, cityPath string, cityStore beads
 		}
 	}
 	return nil
-}
-
-// activeWorkStepReader is store's live read handle, bound to ctx when the
-// store runs subprocesses (scopedStoreLike), so a request the hook gave up on
-// stops its bd children.
-func activeWorkStepReader(ctx context.Context, cityPath string, cfg *config.City, store beads.Store) (activeStepReader, error) {
-	scoped, err := scopedStoreLike(ctx, cityPath, cfg, store)
-	if err != nil {
-		return nil, fmt.Errorf("binding the store to the request: %w", err)
-	}
-	if scoped != nil {
-		store = scoped
-	}
-	return beads.HandlesFor(store).Live, nil
 }
 
 // activeWorkStepAPITimeout bounds how long a hook waits for the controller's
@@ -272,11 +288,22 @@ func (l *wispStepLookup) take() wispStepAnswer {
 	if l.taken != nil {
 		return *l.taken
 	}
+	// An answer already in hand wins over an expired bound: a caller that takes
+	// the answer late finds both ready, and a random pick would discard it.
 	var answer wispStepAnswer
 	select {
 	case answer = <-l.answer:
-	case <-l.expired.C:
-		answer = wispStepAnswer{route: "fallback", reason: "timeout"}
+	default:
+		select {
+		case answer = <-l.answer:
+		case <-l.expired.C:
+			// The answer may have landed in the same instant the bound fired.
+			select {
+			case answer = <-l.answer:
+			default:
+				answer = wispStepAnswer{route: "fallback", reason: "timeout"}
+			}
+		}
 	}
 	l.expired.Stop()
 	l.cancel()

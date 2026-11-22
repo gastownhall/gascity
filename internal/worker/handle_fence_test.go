@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -25,7 +26,7 @@ func fencedSessionHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string, r
 // runtime over sp, and the agent's processNames hinted.
 func fencedSessionHandleOn(t *testing.T, rt runtime.Provider, sp *runtime.Fake, processNames []string) (*SessionHandle, string, runtime.InputFence) {
 	t.Helper()
-	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), rt, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), rt, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager: manager,
 		Session: SessionSpec{Template: "probe", Title: "Probe", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{ProcessNames: processNames}},

@@ -7,7 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// TestLoadWithIncludesDefaultsConditionalWrites: omitted → default "off".
+// TestLoadWithIncludesDefaultsConditionalWrites: omitted → default "auto" (mc-dpo2b).
 func TestLoadWithIncludesDefaultsConditionalWrites(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -18,8 +18,8 @@ name = "test"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if got := cfg.Beads.NormalizedConditionalWrites(); got != "off" {
-		t.Fatalf("NormalizedConditionalWrites = %q, want off when omitted", got)
+	if got := cfg.Beads.NormalizedConditionalWrites(); got != "auto" {
+		t.Fatalf("NormalizedConditionalWrites = %q, want auto when omitted", got)
 	}
 }
 
@@ -104,9 +104,13 @@ conditional_writes = "auto"
 
 // TestConditionalWritesParseAndDefault covers decode and the accessor default.
 func TestConditionalWritesParseAndDefault(t *testing.T) {
-	// zero value / omitted → default "off".
-	if (BeadsConfig{}).NormalizedConditionalWrites() != "off" {
-		t.Fatalf("zero-value accessor = %q, want off", (BeadsConfig{}).NormalizedConditionalWrites())
+	// zero value / omitted → default "auto".
+	if (BeadsConfig{}).NormalizedConditionalWrites() != "auto" {
+		t.Fatalf("zero-value accessor = %q, want auto", (BeadsConfig{}).NormalizedConditionalWrites())
+	}
+	// an explicit "off" stays off.
+	if got := (BeadsConfig{ConditionalWrites: "off"}).NormalizedConditionalWrites(); got != "off" {
+		t.Fatalf("explicit off accessor = %q, want off", got)
 	}
 	// an explicit value decodes.
 	out, err := Parse([]byte("[beads]\nconditional_writes = \"auto\"\n"))
@@ -121,8 +125,8 @@ func TestConditionalWritesParseAndDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if out2.Beads.ConditionalWrites != "" || out2.Beads.NormalizedConditionalWrites() != "off" {
-		t.Fatalf("unset conditional_writes = %q (norm %q), want empty→off", out2.Beads.ConditionalWrites, out2.Beads.NormalizedConditionalWrites())
+	if out2.Beads.ConditionalWrites != "" || out2.Beads.NormalizedConditionalWrites() != "auto" {
+		t.Fatalf("unset conditional_writes = %q (norm %q), want empty→auto", out2.Beads.ConditionalWrites, out2.Beads.NormalizedConditionalWrites())
 	}
 }
 

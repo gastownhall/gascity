@@ -321,3 +321,23 @@ func TestCachingStoreOwnsBeadIDMatchesTheEventFilter(t *testing.T) {
 		t.Fatal("an event-prefixed cache must own exactly its namespaces")
 	}
 }
+
+// Stats reports whether the reconcile gate is closed, so a reader of the
+// cache's age can tell paused re-scans from late ones.
+func TestStatsReportsTheReconcileGate(t *testing.T) {
+	var allowed atomic.Bool
+	cs := NewCachingStoreForTest(NewMemStore(), nil)
+	WithReconcileGate(allowed.Load)(cs)
+	if !cs.Stats().ReconcilePaused {
+		t.Fatal("closed gate: Stats().ReconcilePaused = false, want true")
+	}
+	allowed.Store(true)
+	if cs.Stats().ReconcilePaused {
+		t.Fatal("open gate: Stats().ReconcilePaused = true, want false")
+	}
+
+	ungated := NewCachingStoreForTest(NewMemStore(), nil)
+	if ungated.Stats().ReconcilePaused {
+		t.Fatal("no gate: Stats().ReconcilePaused = true, want false")
+	}
+}

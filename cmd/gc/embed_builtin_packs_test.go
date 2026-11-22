@@ -188,7 +188,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 		name string
 		body string
 	}{
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.1.0\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.6.0\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -204,7 +204,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 	if err != nil {
 		t.Fatalf("check-dolt unexpectedly rejected Dolt probe at minimum: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "dolt available (dolt version 2.1.0)") {
+	if !strings.Contains(string(out), "dolt available (dolt version 2.6.0)") {
 		t.Fatalf("check-dolt output = %s, want successful version probe", out)
 	}
 }
@@ -224,7 +224,7 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 			name: "gtimeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.1.10\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.6.10\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -362,7 +362,10 @@ func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
 	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/omp/.omp/hooks/gc-hook.ts")
 	for _, want := range []string{
 		`import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent"`,
-		`const GC_OMP_HOOK_VERSION = 2`,
+		`const GC_OMP_HOOK_VERSION = 3`,
+		`pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
+		`GC_MANAGED_SESSION_HOOK`,
+		`GC_HOOK_EVENT_NAME`,
 		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
@@ -386,6 +389,67 @@ func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
 		if strings.Contains(data, legacy) {
 			t.Errorf("bundled OMP hook still contains legacy API marker %q:\n%s", legacy, data)
 		}
+	}
+	// Only session_start may carry the managed-hook markers: OMP's compaction
+	// output reaches the model, and the markers must never ride a non-SessionStart
+	// invocation (they would route PreCompact as a fenced SessionStart callback).
+	if !strings.Contains(data, `run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`) {
+		t.Errorf("bundled OMP session_compact must keep the marker-free providerSessionEnv(ctx) call:\n%s", data)
+	}
+	if got := strings.Count(data, `hookEnv(ctx, "`); got != 1 { // session_start only
+		t.Errorf("bundled OMP hook has %d hookEnv(ctx, ...) call sites, want exactly 1 (session_start):\n%s", got, data)
+	}
+	if strings.Contains(data, "process.env.GC_MANAGED_SESSION_HOOK") || strings.Contains(data, "process.env.GC_HOOK_EVENT_NAME") {
+		t.Errorf("bundled OMP hook must pass the markers per-invocation, never via process.env:\n%s", data)
+	}
+}
+
+// TestBundledOmpHookDrainsParkedPrimeContextOnce pins the delivery half of the
+// session_start parking that TestBundledOmpHookPublishesProviderSessionID
+// asserts. OMP's session_start cannot inject into the model's context, so the
+// output of `gc prime --hook` is parked in pendingPrimeContext and has to reach
+// the system prompt through before_agent_start: read before it is cleared, and
+// cleared so later turns do not repeat the startup prompt. Parking without that
+// drain is the bug this hook version fixes: gc archives auto-handoff mail once
+// its stdout write succeeds, so output that is parked and never injected
+// consumes the mail unseen.
+func TestBundledOmpHookDrainsParkedPrimeContextOnce(t *testing.T) {
+	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/omp/.omp/hooks/gc-hook.ts")
+
+	start := strings.Index(data, `pi.on("before_agent_start"`)
+	if start < 0 {
+		t.Fatalf("bundled OMP hook has no before_agent_start handler:\n%s", data)
+	}
+	handler := data[start:]
+	if next := strings.Index(handler[1:], "pi.on("); next >= 0 { // a later handler is not this one's body
+		handler = handler[:next+1]
+	}
+
+	const (
+		readParked  = "const prime = pendingPrimeContext;"
+		clearParked = `pendingPrimeContext = "";`
+		injectCall  = "appendSystemPrompt(event.systemPrompt, ["
+	)
+	readAt, clearAt := strings.Index(handler, readParked), strings.Index(handler, clearParked)
+	switch {
+	case readAt < 0:
+		t.Errorf("bundled OMP before_agent_start does not read the parked output with %q:\n%s", readParked, handler)
+	case clearAt < 0:
+		t.Errorf("bundled OMP before_agent_start does not clear it with %q, so every later turn repeats the startup prompt:\n%s", clearParked, handler)
+	case clearAt < readAt:
+		t.Errorf("bundled OMP before_agent_start clears pendingPrimeContext before reading it, which drops the parked output:\n%s", handler)
+	}
+
+	injectAt := strings.Index(handler, injectCall)
+	if injectAt < 0 {
+		t.Fatalf("bundled OMP before_agent_start does not build the system prompt with %q:\n%s", injectCall, handler)
+	}
+	additions := handler[injectAt+len(injectCall):]
+	if end := strings.Index(additions, "]"); end >= 0 {
+		additions = additions[:end]
+	}
+	if !strings.Contains(additions, "prime") {
+		t.Errorf("bundled OMP before_agent_start does not inject the parked output (additions: %q), so the startup prompt is parked and never delivered:\n%s", additions, handler)
 	}
 }
 
@@ -651,7 +715,7 @@ func TestNoMaintenanceBuiltinPack(t *testing.T) {
 	for _, rel := range []string{
 		"orders/gate-sweep.toml",
 		"orders/orphan-sweep.toml",
-		"orders/wisp-compact.toml",
+		"orders/prune-branches.toml",
 		"assets/scripts/gate-sweep.sh",
 		"doctor/check-binaries/run.sh",
 	} {

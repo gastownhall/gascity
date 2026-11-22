@@ -4,13 +4,20 @@ package packman
 
 import "os/exec"
 
-// configureNetworkGitDeadline does nothing on Windows, which has no POSIX
-// process group — internal/processgroup has no Windows files at all.
+// configureNetworkGitDeadline does nothing on Windows, so the deadline reaches
+// git alone and the bound rests on WaitDelay closing the pipes rather than on
+// the helpers writing into them being stopped.
 //
-// Leaving cmd.Cancel unset keeps exec's default, which kills git alone; the
-// bound then rests on WaitDelay closing the pipes rather than on the writers
-// being stopped. This is deliberately a no-op rather than a hand-rolled
-// cmd.Process.Kill, which would be byte-for-byte what exec already does and so
-// dead code claiming to be a fallback. Reaching descendants here needs a job
-// object in internal/processgroup, which is where that work belongs.
+// The Unix side reaches those helpers by signalling git's process group.
+// Windows has no group with that meaning; the equivalent is a Job Object, and
+// internal/processgroup does own trees that way — but only through
+// StartCommand, which starts the process itself so it can assign the job before
+// the first instruction runs. This hook only configures a command someone else
+// starts, so it cannot use that path, and assigning a job after the fact loses
+// whatever the process spawned in between: precisely the helpers this would be
+// for.
+//
+// Left as a no-op rather than a hand-rolled cmd.Process.Kill, which would be
+// byte-for-byte what exec already does and so dead code claiming to be a
+// fallback.
 func configureNetworkGitDeadline(*exec.Cmd) {}

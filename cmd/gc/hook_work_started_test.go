@@ -79,7 +79,7 @@ func newStartedRow(t *testing.T, meta map[string]string) *startedRow {
 	t.Helper()
 	m := beads.NewMemStore()
 	m.HonorExplicitIDs = true
-	if err := beads.StampOpenedStore(m, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(m, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	b, err := m.Create(sessionRow(startedSessionID, "session_name", "worker-1", "state", "active", "generation", "7", "instance_token", startedToken))
@@ -828,8 +828,8 @@ func TestForgetWorkStartedLeavesAClosedRow(t *testing.T) {
 // TestHookDiscoveryOptionsCarryIdentities (E1): plain `gc hook` hands the
 // drain-ack fence the seat's identities, as --claim does.
 func TestHookDiscoveryOptionsCarryIdentities(t *testing.T) {
-	got := hookDiscoveryOptions("worker-1", []string{"worker-1", "sess-1"}, []string{"GC_SESSION_ID=sess-1"}, hookCommandOptions{DrainAck: true, JSON: true}, true)
-	if got.Assignee != "worker-1" || !slices.Equal(got.IdentityCandidates, []string{"worker-1", "sess-1"}) || !got.DrainAck || !got.JSON || !got.StrictDrainAck || len(got.Env) != 1 {
+	got := hookDiscoveryOptions("worker-1", []string{"worker-1", "sess-1"}, []string{"GC_SESSION_ID=sess-1"}, hookCommandOptions{DrainAck: true, JSON: true}, func() bool { return true })
+	if got.Assignee != "worker-1" || !slices.Equal(got.IdentityCandidates, []string{"worker-1", "sess-1"}) || !got.DrainAck || !got.JSON || got.StrictDrainAck == nil || !got.StrictDrainAck() || len(got.Env) != 1 {
 		t.Fatalf("discovery options %+v", got)
 	}
 }

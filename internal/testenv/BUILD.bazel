@@ -17,6 +17,7 @@ go_test(
     name = "testenv_test",
     srcs = [
         "bazel_tools_internal_test.go",
+        "dolt_config_test.go",
         "gc_env_baseline_test.go",
         "gittemplate_contract_test.go",
         "gittemplate_internal_test.go",
