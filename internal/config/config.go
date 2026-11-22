@@ -3950,6 +3950,11 @@ type Agent struct {
 	// a scoped stale-lease reclaim (via `bd reclaim --id`) when a
 	// route-matched candidate's only claim blocker is an existing assignee.
 	// Off by default; staleness is decided entirely by bd's own lease TTL.
+	// Candidates come from this agent's work_query. The default work_query's
+	// routed tier serves only unassigned beads, so the reclaim acts only when
+	// a custom work_query also serves route-matched beads held by another
+	// assignee. Cities on the default work_query recover beads held by dead
+	// sessions through the controller's per-tick dead-assignee release.
 	AutoReclaimStaleClaims bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.

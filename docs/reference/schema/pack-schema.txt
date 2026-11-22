@@ -200,7 +200,7 @@
         },
         "auto_reclaim_stale_claims": {
           "type": "boolean",
-          "description": "AutoReclaimStaleClaims opts this agent into gc hook --claim attempting\na scoped stale-lease reclaim (via `bd reclaim --id`) when a\nroute-matched candidate's only claim blocker is an existing assignee.\nOff by default; staleness is decided entirely by bd's own lease TTL."
+          "description": "AutoReclaimStaleClaims opts this agent into gc hook --claim attempting\na scoped stale-lease reclaim (via `bd reclaim --id`) when a\nroute-matched candidate's only claim blocker is an existing assignee.\nOff by default; staleness is decided entirely by bd's own lease TTL.\nCandidates come from this agent's work_query. The default work_query's\nrouted tier serves only unassigned beads, so the reclaim acts only when\na custom work_query also serves route-matched beads held by another\nassignee. Cities on the default work_query recover beads held by dead\nsessions through the controller's per-tick dead-assignee release."
         },
         "install_agent_hooks": {
           "items": {
