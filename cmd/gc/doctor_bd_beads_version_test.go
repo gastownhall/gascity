@@ -373,3 +373,20 @@ func TestBdBeadsVersionCheckOKWithoutCityConfig(t *testing.T) {
 		t.Fatalf("result = %+v, want OK naming the missing city config", r)
 	}
 }
+
+// TestStartWarmupStderrNamesBdBeadsVersionSkew: gc start's warm-up runs the
+// check, and its stderr names bd-beads-version when bd is skewed. The
+// warm-up stays fail-open: it returns normally and start carries on.
+func TestStartWarmupStderrNamesBdBeadsVersionSkew(t *testing.T) {
+	f := newBdBeadsVersionFixture(t)
+	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_MAIL", "fake")
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+
+	var stderr strings.Builder
+	runStartWarmup(f.city, cfg, nil, &stderr)
+	if !strings.Contains(stderr.String(), "bd-beads-version") {
+		t.Fatalf("warm-up stderr does not name bd-beads-version:\n%s", stderr.String())
+	}
+}

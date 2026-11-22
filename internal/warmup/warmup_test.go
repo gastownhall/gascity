@@ -486,7 +486,7 @@ func TestRunWarmupChecks_StderrSummaryLineFormat(t *testing.T) {
 
 	_, _, stderr := runWarmupTest(t, checks, WarmupOpts{})
 
-	want := "gc start: warmup: 2 check(s) failed (Error); see mail to mayor and `gc doctor` for details\n"
+	want := "gc start: warmup: 2 check(s) failed (Error): a, b; see mail to mayor and `gc doctor` for details\n"
 	if stderr != want {
 		t.Fatalf("stderr = %q, want %q", stderr, want)
 	}

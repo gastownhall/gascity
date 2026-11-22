@@ -433,10 +433,20 @@ func writeWarmupStderr(stderr io.Writer, mailTo string, report *WarmupReport) {
 		return
 	}
 	if report.MailSendError != nil {
-		fmt.Fprintf(stderr, "gc start: warmup: %d check(s) failed (%s); mail send error: %v\n", len(report.Failures), warmupStatusString(report.HighestSeverity), report.MailSendError) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc start: warmup: %d check(s) failed (%s): %s; mail send error: %v\n", len(report.Failures), warmupStatusString(report.HighestSeverity), warmupFailedCheckNames(report.Failures), report.MailSendError) //nolint:errcheck // best-effort stderr
 		return
 	}
-	fmt.Fprintf(stderr, "gc start: warmup: %d check(s) failed (%s); see mail to %s and `gc doctor` for details\n", len(report.Failures), warmupStatusString(report.HighestSeverity), mailTo) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc start: warmup: %d check(s) failed (%s): %s; see mail to %s and `gc doctor` for details\n", len(report.Failures), warmupStatusString(report.HighestSeverity), warmupFailedCheckNames(report.Failures), mailTo) //nolint:errcheck // best-effort stderr
+}
+
+// warmupFailedCheckNames lists the failed checks' names in the failures'
+// order, so stderr says which checks to read in `gc doctor`.
+func warmupFailedCheckNames(failures []WarmupCheckResult) string {
+	names := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		names = append(names, failure.Check)
+	}
+	return strings.Join(names, ", ")
 }
 
 func warmupStatusString(status doctor.CheckStatus) string {
