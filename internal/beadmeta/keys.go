@@ -332,11 +332,11 @@ const (
 	SessionNameCamelMetadataKey = "gc.sessionName"
 	// SkippedBlockersMetadataKey records, on a workflow root that
 	// workflow-finalize closes gc.outcome=pass, the IDs of the finalizer's
-	// direct blocks blockers that closed gc.outcome=skipped, comma-joined. It
-	// is written in the root's pass close itself, only when at least one
-	// direct blocker closed skipped, and is absent from every other close: a
-	// pass root without the key is one whose every sink ran
-	// (gastownhall/gascity#6096).
+	// direct blocks blockers that closed gc.outcome=skipped — sorted
+	// ascending, comma-joined. It is written in the root's pass close itself,
+	// only when at least one direct blocker closed skipped, and is absent from
+	// every other close: a pass root without the key is one whose every sink
+	// ran (gastownhall/gascity#6096).
 	SkippedBlockersMetadataKey = "gc.skipped_blockers"
 	SourceBeadIDMetadataKey    = "gc.source_bead_id"
 	SourceStepSpecMetadataKey  = "gc.source_step_spec"

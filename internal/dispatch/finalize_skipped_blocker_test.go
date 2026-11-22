@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -34,6 +35,10 @@ type finalizeSpec struct {
 	rootMeta map[string]string
 	blockers []beads.Bead
 	members  []beads.Bead
+	// edgeOrder optionally lists blocker indices in the order their blocks
+	// edges are added (default: slice order). Tests use it to add edges out
+	// of ID order, since blocker IDs ascend with creation order.
+	edgeOrder []int
 }
 
 // newWorkflowFinalizeFixture builds the fixture. Blocker and member metadata
@@ -78,8 +83,14 @@ func newWorkflowFinalizeFixture(t *testing.T, spec finalizeSpec) *workflowFinali
 			"gc.root_bead_id": root.ID,
 		},
 	})
-	for _, b := range f.blockers {
-		mustDepAdd(t, store, f.finalizer.ID, b.ID, "blocks")
+	edgeOrder := spec.edgeOrder
+	if edgeOrder == nil {
+		for i := range f.blockers {
+			edgeOrder = append(edgeOrder, i)
+		}
+	}
+	for _, i := range edgeOrder {
+		mustDepAdd(t, store, f.finalizer.ID, f.blockers[i].ID, "blocks")
 	}
 	mustDepAdd(t, store, root.ID, f.finalizer.ID, "blocks")
 	for _, m := range spec.members {
@@ -130,6 +141,42 @@ func TestProcessWorkflowFinalizeRecordsSkippedBlockerOnPass(t *testing.T) {
 	}
 	if got := root.Metadata["gc.skipped_blockers"]; got != f.blockers[0].ID {
 		t.Fatalf("root gc.skipped_blockers = %q, want the skipped blocker's ID %q", got, f.blockers[0].ID)
+	}
+}
+
+// TestProcessWorkflowFinalizeRecordsSkippedBlockersSorted pins the value
+// shape of gc.skipped_blockers: with several skipped direct blockers whose
+// blocks edges were added out of ID order, the root records exactly the
+// skipped IDs, sorted ascending and joined with ",", and no passed blocker's
+// ID.
+func TestProcessWorkflowFinalizeRecordsSkippedBlockersSorted(t *testing.T) {
+	t.Parallel()
+
+	// Blocker IDs ascend with creation (slice) order. edgeOrder adds the
+	// blocks edges out of ID order, so a scan that records blockers in edge
+	// order instead of sorted order fails the exact-value assertion.
+	f := newWorkflowFinalizeFixture(t, finalizeSpec{
+		blockers: []beads.Bead{
+			{Title: "skipped-a", Status: "closed", Metadata: map[string]string{"gc.outcome": "skipped"}},
+			{Title: "skipped-b", Status: "closed", Metadata: map[string]string{"gc.outcome": "skipped"}},
+			{Title: "passed", Status: "closed", Metadata: map[string]string{"gc.outcome": "pass"}},
+			{Title: "skipped-c", Status: "closed", Metadata: map[string]string{"gc.outcome": "skipped"}},
+		},
+		edgeOrder: []int{3, 1, 0, 2},
+	})
+
+	result := f.drive(t)
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", result)
+	}
+	root := f.closedRoot(t)
+	want := []string{f.blockers[0].ID, f.blockers[1].ID, f.blockers[3].ID}
+	slices.Sort(want)
+	if got := root.Metadata["gc.skipped_blockers"]; got != strings.Join(want, ",") {
+		t.Fatalf("root gc.skipped_blockers = %q, want the skipped IDs sorted and comma-joined %q", got, strings.Join(want, ","))
+	}
+	if strings.Contains(root.Metadata["gc.skipped_blockers"], f.blockers[2].ID) {
+		t.Fatalf("root gc.skipped_blockers = %q, must not contain the passed blocker's ID %q", root.Metadata["gc.skipped_blockers"], f.blockers[2].ID)
 	}
 }
 

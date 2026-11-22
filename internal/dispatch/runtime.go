@@ -2181,10 +2181,11 @@ func setOutcomeAndClose(store beads.GraphStore, beadID, outcome string) error {
 
 // workflowRootCloseMetadata is the metadata closeWorkflowRoot writes on a
 // workflow root: the resolved outcome, plus gc.skipped_blockers — the IDs of
-// the finalizer's direct blockers that closed gc.outcome=skipped, joined with
-// "," — on a pass close that has at least one. Every other close (fail,
-// canceled, missing root, quarantine refusal) writes gc.outcome alone, so the
-// key's presence on a pass root is the record of a skipped sink.
+// the finalizer's direct blockers that closed gc.outcome=skipped, sorted
+// ascending and joined with "," — on a pass close that has at least one.
+// Every other close (fail, canceled, missing root, quarantine refusal)
+// writes gc.outcome alone, so the key's presence on a pass root is the record
+// of a skipped sink.
 func workflowRootCloseMetadata(outcome string, skipped []string) map[string]string {
 	metadata := map[string]string{beadmeta.OutcomeMetadataKey: outcome}
 	if outcome == beadmeta.OutcomePass && len(skipped) > 0 {
@@ -2397,11 +2398,11 @@ func hasFailureStamp(bead beads.Bead) bool {
 }
 
 // resolveBlockedOutcomeAndSkips resolves a control bead's blocks blockers to
-// one pass/fail outcome and, alongside it, the IDs of the blockers that closed
-// gc.outcome=skipped. A skipped blocker is not a failure, but it is not a
-// completed step either, so workflow-finalize records the IDs on the root it
-// closes pass (gc.skipped_blockers) rather than letting the skip vanish into
-// the verdict.
+// one pass/fail outcome and, alongside it, the sorted IDs of the blockers
+// that closed gc.outcome=skipped. A skipped blocker is not a failure, but it
+// is not a completed step either, so workflow-finalize records the IDs on the
+// root it closes pass (gc.skipped_blockers) rather than letting the skip
+// vanish into the verdict.
 func resolveBlockedOutcomeAndSkips(store beads.GraphStore, beadID string) (string, []string, error) {
 	deps, err := store.DepList(beadID, "down")
 	if err != nil {
@@ -2436,6 +2437,7 @@ func resolveBlockedOutcomeAndSkips(store beads.GraphStore, beadID string) (strin
 			skipped = append(skipped, blocker.ID)
 		}
 	}
+	sort.Strings(skipped)
 	return outcome, skipped, nil
 }
 
