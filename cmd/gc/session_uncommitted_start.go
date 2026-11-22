@@ -71,12 +71,13 @@ func evictUncommittedLiveStartIfDue(e evictUncommittedStart) {
 		stderr = io.Discard
 	}
 	// Row guards: pending-create rows keep their own repair arms (#2081), a
-	// row an operator holds is never the controller's to restart, and a
-	// template that renders no prompt has nothing stranded to recover.
+	// row an operator holds or suspends is never the controller's to
+	// restart (the typed Disposition projection covers the sleep intent),
+	// and a template that renders no prompt has nothing stranded to recover.
 	if shouldRollbackPendingCreateInfo(e.info) {
 		return
 	}
-	if sessionpkg.DispositionOfInfo(e.info).KeepsSlot() || strings.TrimSpace(e.info.SleepIntent) != "" {
+	if sessionpkg.DispositionOfInfo(e.info).KeepsSlot() {
 		return
 	}
 	if strings.TrimSpace(e.tp.Prompt) == "" {
@@ -127,6 +128,16 @@ func evictUncommittedLiveStartIfDue(e evictUncommittedStart) {
 	}
 	attached, attachErr := e.attached()
 	if attachErr != nil || attached {
+		return
+	}
+	// Cycle guard: the uncommitted live row must be the shape #6417 leaves —
+	// a row whose restart or reset cycle committed (reset_committed_at is the
+	// handoff's and every session reset's stamp), killed its old runtime and
+	// cleared its start witness, after which another start filled the gap.
+	// A steady row that simply never committed a config hash (a timeline
+	// parity fixture's live seat) is not this cycle's collateral: it is left
+	// to the wake arms that own it.
+	if strings.TrimSpace(e.info.ResetCommittedAt) == "" {
 		return
 	}
 	// Age guard: the startup window must have passed since the newest of the

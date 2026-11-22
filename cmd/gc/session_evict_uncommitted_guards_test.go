@@ -49,6 +49,10 @@ func newEvictUncommittedFixture(t *testing.T, meta map[string]string) *evictUnco
 	base := map[string]string{
 		// The row last woke two hours ago, well past the startup window.
 		"last_woke_at": f.clk.Now().Add(-2 * time.Hour).Format(time.RFC3339),
+		// The #6417 handoff's stamp: the restart cycle that cleared the start
+		// witness committed, so the row sits inside an interrupted start cycle
+		// and is the eviction's to complete.
+		"reset_committed_at": f.clk.Now().Add(-2 * time.Hour).Format(time.RFC3339),
 	}
 	for k, v := range meta {
 		base[k] = v
@@ -190,6 +194,14 @@ func TestEvictUncommittedLiveStart_Guards(t *testing.T) {
 		{
 			name:    "operator hold",
 			meta:    map[string]string{"sleep_intent": "user-hold"},
+			advance: 90 * time.Second,
+		},
+		{
+			// A steady row that simply never committed a config hash (a live
+			// seat outside any restart cycle) is not the eviction's to
+			// replace: the wake arms own it.
+			name:    "no reset cycle committed",
+			meta:    map[string]string{"reset_committed_at": ""},
 			advance: 90 * time.Second,
 		},
 		{

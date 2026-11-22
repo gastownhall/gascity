@@ -42,6 +42,9 @@ func TestReconcileSessionBeads_EvictsLiveUncommittedStartAfterStartupTimeout(t *
 		namedSessionModeMetadata:     "always",
 		"state":                      "active",
 		"session_key":                "original-key",
+		// The handoff's stamp: the restart cycle that cleared the start
+		// witness committed (#6417's own path leaves this on the row).
+		"reset_committed_at": env.clk.Now().Format(time.RFC3339),
 	})
 	ctx := context.Background()
 	if err := env.sp.Start(ctx, sessionName, runtime.Config{Command: "true"}); err != nil {
