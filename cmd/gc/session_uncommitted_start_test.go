@@ -491,3 +491,158 @@ func TestReconcileSessionBeads_EvictsLiveUncommittedStartAfterStartupTimeout(t *
 	}
 	assertNoStartCommitted(t, env.store, env.session.ID)
 }
+
+// uncommittedEvictCall is one evictUncommittedLiveStartIfDue call's stubbed
+// acts and what they saw.
+type uncommittedEvictCall struct {
+	attached    bool
+	attachedErr error
+	stopErr     error
+	stops       []sessionpkg.Decided
+}
+
+func (c *uncommittedEvictCall) acts() uncommittedStartActs {
+	return uncommittedStartActs{
+		attached: func() (bool, error) { return c.attached, c.attachedErr },
+		stop: func(d sessionpkg.Decided) error {
+			c.stops = append(c.stops, d)
+			return c.stopErr
+		},
+	}
+}
+
+// TestEvictUncommittedLiveStart_Guards is AC-7: the AC-6 row with exactly one
+// condition broken stops nothing, and an unattributed holder is reported once
+// per episode.
+func TestEvictUncommittedLiveStart_Guards(t *testing.T) {
+	const name = "worker"
+	t0 := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	timeout := time.Minute
+	due := t0.Add(timeout + time.Second)
+	row := sessionpkg.Info{ID: "gc-worker", Generation: "3", InstanceToken: "tok-row", LastWokeAt: t0.Format(time.RFC3339)}
+	tp := TemplateParams{Prompt: uncommittedStartPrompt, SessionName: name, TemplateName: "worker"}
+
+	for _, c := range []struct {
+		name     string
+		info     func(*sessionpkg.Info)
+		tp       func(*TemplateParams)
+		occupant func(*testing.T, *runtime.Fake)
+		call     uncommittedEvictCall
+		now      time.Time
+		wantStop bool
+		wantLog  string
+	}{
+		{name: "due", now: due, wantStop: true, wantLog: "never committed a start"},
+		{name: "inside the startup timeout", now: t0.Add(timeout)},
+		{name: "a newer reset commit restarts the wait", now: due, info: func(i *sessionpkg.Info) { i.ResetCommittedAt = t0.Add(30 * time.Second).Format(time.RFC3339) }},
+		{name: "attached", now: due, call: uncommittedEvictCall{attached: true}},
+		{name: "attach probe fails", now: due, call: uncommittedEvictCall{attached: true, attachedErr: errors.New("probe failed")}},
+		{name: "no prompt", now: due, tp: func(p *TemplateParams) { p.Prompt = "  " }},
+		{name: "start committed", now: due, info: func(i *sessionpkg.Info) { i.StartedConfigHash = "h-1" }},
+		{name: "pending-create claim", now: due, info: func(i *sessionpkg.Info) { i.PendingCreateClaim = true }},
+		{name: "operator suspend", now: due, info: func(i *sessionpkg.Info) { i.SleepIntent = "user-hold" }},
+		{name: "live hold", now: due, info: func(i *sessionpkg.Info) { i.HeldUntil = due.Add(time.Hour).Format(time.RFC3339) }},
+		{name: "foreign identity", now: due, wantLog: "not attributed", occupant: func(t *testing.T, sp *runtime.Fake) {
+			stampOccupant(t, sp, name, "gc-other", "tok-other")
+		}},
+		{name: "unstamped identity", now: due, wantLog: "not attributed", occupant: func(*testing.T, *runtime.Fake) {}},
+		{name: "unreadable identity", now: due, wantLog: "not attributed", occupant: func(_ *testing.T, sp *runtime.Fake) {
+			sp.GetMetaErrors[name] = map[string]error{"GC_SESSION_ID": errors.New("tmux unreachable")}
+		}},
+		{name: "lease held by a start", now: due, call: uncommittedEvictCall{stopErr: fmt.Errorf("killing: %w", sessionpkg.ErrRuntimeLeaseBusy)}},
+		{name: "start in flight", now: due, call: uncommittedEvictCall{stopErr: sessionpkg.ErrSessionStarting}},
+		{name: "premise moved after the decision", now: due, call: uncommittedEvictCall{stopErr: sessionpkg.ErrKillPremiseMoved}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			info, params := row, tp
+			if c.info != nil {
+				c.info(&info)
+			}
+			if c.tp != nil {
+				c.tp(&params)
+			}
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), name, runtime.Config{Command: "true"}); err != nil {
+				t.Fatal(err)
+			}
+			if c.occupant != nil {
+				c.occupant(t, sp)
+			} else {
+				stampOccupant(t, sp, name, row.ID, "tok-occupant")
+			}
+			dt := newDrainTracker()
+			dt.uncommittedStartSeen(info, t0)
+			var stderr strings.Builder
+			call := c.call
+
+			got := evictUncommittedLiveStartIfDue(t.TempDir(), sp, call.acts(), info, params, name, timeout, c.now, dt, &stderr, nil)
+
+			wantStops := 0
+			if c.wantStop || c.call.stopErr != nil {
+				wantStops = 1
+			}
+			if got != c.wantStop || len(call.stops) != wantStops {
+				t.Fatalf("evicted = %v with %d stops, want %v with %d; stderr=%s", got, len(call.stops), c.wantStop, wantStops, stderr.String())
+			}
+			if wantStops == 1 {
+				committed := info
+				committed.StartedConfigHash = "h-1"
+				if call.stops[0].Match(committed) {
+					t.Error("stop decided on facts a committed start still matches, want FactsLegacyUncommittedEvict's")
+				}
+			}
+			if c.wantLog == "" {
+				if stderr.Len() != 0 {
+					t.Errorf("stderr = %q, want nothing logged", stderr.String())
+				}
+				return
+			}
+			if n := strings.Count(stderr.String(), c.wantLog); n != 1 {
+				t.Fatalf("stderr = %q, want %q logged once", stderr.String(), c.wantLog)
+			}
+			if c.wantStop {
+				return
+			}
+			// The same episode reports an unattributed holder only once.
+			evictUncommittedLiveStartIfDue(t.TempDir(), sp, call.acts(), info, params, name, timeout, c.now.Add(time.Second), dt, &stderr, nil)
+			if n := strings.Count(stderr.String(), c.wantLog); n != 1 {
+				t.Errorf("stderr = %q after a second tick, want %q logged once per episode", stderr.String(), c.wantLog)
+			}
+		})
+	}
+}
+
+// TestEvictUncommittedLiveStart_FirstSightingBasis pins the age basis when
+// neither the provider nor the row dates the runtime: the startup timeout runs
+// from the first tick that saw it, and a new tracker starts it again.
+func TestEvictUncommittedLiveStart_FirstSightingBasis(t *testing.T) {
+	const name = "worker"
+	t0 := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	info := sessionpkg.Info{ID: "gc-worker", Generation: "3", InstanceToken: "tok-row"}
+	tp := TemplateParams{Prompt: uncommittedStartPrompt, SessionName: name, TemplateName: "worker"}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), name, runtime.Config{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	stampOccupant(t, sp, name, info.ID, "tok-occupant")
+	var call uncommittedEvictCall
+	later := t0.Add(time.Minute + time.Second)
+
+	dt := newDrainTracker()
+	if evictUncommittedLiveStartIfDue(t.TempDir(), sp, call.acts(), info, tp, name, time.Minute, t0, dt, nil, nil) {
+		t.Fatal("evicted on first sighting")
+	}
+	if evictUncommittedLiveStartIfDue(t.TempDir(), sp, call.acts(), info, tp, name, time.Minute, later, newDrainTracker(), nil, nil) {
+		t.Fatal("evicted under a new tracker, want its first sighting to restart the wait")
+	}
+	moved := info
+	moved.Generation = "4"
+	if evictUncommittedLiveStartIfDue(t.TempDir(), sp, call.acts(), moved, tp, name, time.Minute, later, dt, nil, nil) {
+		t.Fatal("evicted a new incarnation on the old incarnation's sighting")
+	}
+	dt = newDrainTracker()
+	dt.uncommittedStartSeen(info, t0)
+	if !evictUncommittedLiveStartIfDue(t.TempDir(), sp, call.acts(), info, tp, name, time.Minute, later, dt, nil, nil) {
+		t.Fatal("not evicted past the startup timeout from its first sighting")
+	}
+}
