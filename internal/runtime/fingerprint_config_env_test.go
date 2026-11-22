@@ -5,30 +5,14 @@ import (
 	"testing"
 )
 
-var stringMapType = reflect.TypeOf(map[string]string{})
-
-// configWithOperatorAuthoredEnv sets the dedicated config-authored environment
-// identity field without choosing its production name. The architecture owns
-// the field's behavior and deliberately leaves its exact name to the builder.
+// configWithOperatorAuthoredEnv sets Config.OperatorEnv, the dedicated
+// config-authored environment identity field. It names the field directly, so a
+// rename fails to compile and another map[string]string field added to Config
+// cannot be mistaken for it (a new field must be classified by
+// TestFingerprintPartitionAccountsForEveryConfigField).
 func configWithOperatorAuthoredEnv(t *testing.T, cfg Config, env map[string]string) Config {
 	t.Helper()
-
-	typ := reflect.TypeOf(cfg)
-	var candidates []int
-	var names []string
-	for i := 0; i < typ.NumField(); i++ {
-		field := typ.Field(i)
-		if field.Type != stringMapType || field.Name == "Env" || field.Name == "FingerprintExtra" {
-			continue
-		}
-		candidates = append(candidates, i)
-		names = append(names, field.Name)
-	}
-	if len(candidates) != 1 {
-		t.Fatalf("runtime.Config has config-authored environment identity candidates %v, want exactly one dedicated map[string]string field besides Env and FingerprintExtra", names)
-	}
-
-	reflect.ValueOf(&cfg).Elem().Field(candidates[0]).Set(reflect.ValueOf(env))
+	cfg.OperatorEnv = env
 	return cfg
 }
 

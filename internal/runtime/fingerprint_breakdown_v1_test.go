@@ -445,3 +445,21 @@ func lineContaining(out, substr string) string {
 	}
 	return ""
 }
+
+// TestCoreFingerprintBreakdownOmitsUnsetOperatorEnvAndUpstream keeps the
+// breakdown of a config without them identical to what older binaries stored,
+// as the core hash does: nil and empty OperatorEnv are the same identity, and
+// no stored breakdown reads as drifted on a field it never had.
+func TestCoreFingerprintBreakdownOmitsUnsetOperatorEnvAndUpstream(t *testing.T) {
+	for name, cfg := range map[string]Config{
+		"zero":               {Command: "agent"},
+		"empty operator env": {Command: "agent", OperatorEnv: map[string]string{}},
+	} {
+		fields := CoreFingerprintBreakdown(cfg).Fields
+		for _, field := range []string{"OperatorEnv", "Upstream"} {
+			if v, ok := fields[field]; ok {
+				t.Errorf("%s: breakdown has %s=%q for a config that sets none; fields: %v", name, field, v, fields)
+			}
+		}
+	}
+}
