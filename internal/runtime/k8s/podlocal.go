@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -48,7 +49,23 @@ func NewPodLocal() (runtime.Provider, error) {
 	if !ok {
 		return nil, fmt.Errorf("constructing pod-local session provider: %s is not set to a session name", PodSessionEnv)
 	}
-	return &podLocalProvider{self: self}, nil
+	return &podLocalProvider{self: self, run: runPodLocalTmux}, nil
+}
+
+// podLocalRunner executes one tmux argv and returns its combined output
+// with whatever error it failed under, so command diagnostics classify
+// without a shell. Production runs exec.Command argument arrays; tests
+// inject answers.
+type podLocalRunner func(argv []string) (string, error)
+
+// runPodLocalTmux is the production runner: the tmux binary on the default
+// pod-local server, addressed through plain argument arrays. No -L or -S
+// socket name is supplied — city-derived sockets are the controller's
+// naming, and the pod-local server is the one the controller reaches
+// through pod exec.
+func runPodLocalTmux(argv []string) (string, error) {
+	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+	return string(out), err
 }
 
 // podLocalProvider is the in-pod provider behind NewPodLocal: the same
@@ -58,6 +75,7 @@ func NewPodLocal() (runtime.Provider, error) {
 // because the controller owns them (guard.ErrControllerOwnedRuntime).
 type podLocalProvider struct {
 	self string
+	run  podLocalRunner
 }
 
 var _ runtime.Provider = (*podLocalProvider)(nil)
@@ -65,6 +83,71 @@ var _ runtime.Provider = (*podLocalProvider)(nil)
 // refusal is the typed refusal for every operation the controller owns.
 func podLocalRefusal(op, name string) error {
 	return fmt.Errorf("pod-local runtime %s %q: %w", op, name, guard.ErrControllerOwnedRuntime)
+}
+
+// servesOwnSession reports whether name addresses this pod's one tmux
+// session: its logical name (the marker) or the container-local "main".
+// Only that session's metadata and liveness are served at all.
+func (p *podLocalProvider) servesOwnSession(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == "main" || name == strings.TrimSpace(p.self)
+}
+
+// tmuxTarget is the exact own-session target every served operation uses:
+// "=main" pins the name so a same-prefix session can never shadow it.
+const podLocalTarget = "=main"
+
+// metaCommand runs argv as a metadata operation on the own session and
+// classifies its failure. A session or server that is not there answers
+// runtime.ErrSessionNotFound — the answer existing drain-ack and read-back
+// handling keys on — and any other failure keeps the command's own error
+// and output as context.
+func (p *podLocalProvider) metaCommand(op, name string, argv []string) error {
+	out, err := p.run(argv)
+	if err == nil {
+		return nil
+	}
+	return podLocalClassify(op, name, out, err, false)
+}
+
+// podLocalClassify turns one command failure into the caller-visible one.
+// missingVariableIsNoop reports whether tmux's missing-variable diagnostic
+// is a benign no-op (a removal of a key that already holds nothing); with
+// it false the diagnostic is a foreign failure and keeps its context.
+func podLocalClassify(op, name, out string, err error, missingVariableIsNoop bool) error {
+	switch {
+	case missingVariableIsNoop && podLocalSays(out, "no such variable"):
+		return nil
+	case podLocalSessionGone(out):
+		return fmt.Errorf("pod-local runtime %s %q: %w: %s", op, name, runtime.ErrSessionNotFound, podLocalFirstLine(out))
+	default:
+		return fmt.Errorf("pod-local runtime %s %q: %w: %s", op, name, err, podLocalFirstLine(out))
+	}
+}
+
+// podLocalSays reports whether the command output carries needle.
+func podLocalSays(out, needle string) bool {
+	return strings.Contains(out, needle)
+}
+
+// podLocalSessionGone reports whether the command output is tmux saying the
+// session or its server is missing — the definitive absence answers, not an
+// error that merely mentions it.
+func podLocalSessionGone(out string) bool {
+	return podLocalSays(out, "no such session") || podLocalSays(out, "no server running") || podLocalSays(out, "error connecting to")
+}
+
+// podLocalFirstLine truncates a command's output to its first non-empty
+// line, so an error's context stays one readable clause.
+func podLocalFirstLine(out string) string {
+	out = strings.TrimSpace(out)
+	if i := strings.IndexByte(out, '\n'); i >= 0 {
+		out = out[:i]
+	}
+	if len(out) > 160 {
+		out = out[:160]
+	}
+	return out
 }
 
 // Start refuses with ErrControllerOwnedRuntime for every name.
@@ -83,10 +166,17 @@ func (*podLocalProvider) Interrupt(name string) error {
 	return podLocalRefusal("interrupt", name)
 }
 
-// IsRunning reports whether the pod's own tmux session exists; false for any
-// other name.
-func (*podLocalProvider) IsRunning(string) bool {
-	return false
+// IsRunning reports whether the pod's own tmux session exists, probed with a
+// local has-session against the exact "=main" target; false for any other
+// name, without executing anything. The probe cannot answer with an error:
+// a failed probe stays false rather than acquiring absence semantics the
+// caller does not expect from a bool.
+func (p *podLocalProvider) IsRunning(name string) bool {
+	if !p.servesOwnSession(name) {
+		return false
+	}
+	_, err := p.run([]string{"tmux", "has-session", "-t", podLocalTarget})
+	return err == nil
 }
 
 // IsAttached reports false: the worker's own terminal is not the runtime.
@@ -105,22 +195,59 @@ func (*podLocalProvider) Nudge(name string, _ []runtime.ContentBlock) error {
 	return podLocalRefusal("nudge", name)
 }
 
-// SetMeta refuses with ErrControllerOwnedRuntime: the controller owns the
-// session metadata writes.
-func (*podLocalProvider) SetMeta(name, _, _ string) error {
-	return podLocalRefusal("set-meta", name)
+// SetMeta stores a key-value pair in the pod's own tmux session
+// environment — the same store the controller reads through pod exec, so a
+// drain ack written here reaches the controller. Any other session is a
+// refusal that executes nothing.
+func (p *podLocalProvider) SetMeta(name, key, value string) error {
+	if !p.servesOwnSession(name) {
+		return podLocalRefusal("set-meta", name)
+	}
+	return p.metaCommand("set-meta", name,
+		[]string{"tmux", "set-environment", "-t", podLocalTarget, key, value})
 }
 
-// GetMeta refuses with ErrControllerOwnedRuntime: a worker site observes no
-// session metadata.
-func (*podLocalProvider) GetMeta(name, _ string) (string, error) {
-	return "", podLocalRefusal("get-meta", name)
+// GetMeta retrieves a metadata value from the pod's own tmux session
+// environment. A missing variable reads as an empty value: tmux's
+// explicitly-unset "-KEY" line and its missing-variable diagnostic both
+// mean the key holds nothing. A missing session or server is
+// runtime.ErrSessionNotFound; any other failure reaches the caller with
+// context. The value keeps embedded "=" and whitespace: only tmux's
+// trailing newline is stripped.
+func (p *podLocalProvider) GetMeta(name, key string) (string, error) {
+	if !p.servesOwnSession(name) {
+		return "", podLocalRefusal("get-meta", name)
+	}
+	out, err := p.run([]string{"tmux", "show-environment", "-t", podLocalTarget, key})
+	if err != nil {
+		if podLocalSays(out, "no such variable") {
+			return "", nil
+		}
+		return "", podLocalClassify("get-meta", name, out, err, false)
+	}
+	out = strings.TrimSuffix(out, "\n")
+	if strings.HasPrefix(out, "-") {
+		return "", nil // explicitly unset
+	}
+	_, val, ok := strings.Cut(out, "=")
+	if !ok {
+		return "", fmt.Errorf("pod-local runtime get-meta %q: tmux show-environment %q answered %q, not KEY=value", name, key, out)
+	}
+	return val, nil
 }
 
-// RemoveMeta refuses with ErrControllerOwnedRuntime: the controller owns the
-// session metadata writes.
-func (*podLocalProvider) RemoveMeta(name, _ string) error {
-	return podLocalRefusal("remove-meta", name)
+// RemoveMeta removes a metadata key from the pod's own tmux session
+// environment; a key that already holds nothing is a no-op so callers can
+// clear unconditionally.
+func (p *podLocalProvider) RemoveMeta(name, key string) error {
+	if !p.servesOwnSession(name) {
+		return podLocalRefusal("remove-meta", name)
+	}
+	out, err := p.run([]string{"tmux", "set-environment", "-t", podLocalTarget, "-u", key})
+	if err == nil {
+		return nil
+	}
+	return podLocalClassify("remove-meta", name, out, err, true)
 }
 
 // Peek refuses with ErrControllerOwnedRuntime.
