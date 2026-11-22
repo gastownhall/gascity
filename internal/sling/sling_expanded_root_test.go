@@ -211,6 +211,11 @@ func TestSlingExpandedRootFullyRoutedStaysIdempotent(t *testing.T) {
 	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: deps.Store}, convoy.ID, "wf-1"); err != nil {
 		t.Fatalf("track the root in the auto-convoy: %v", err)
 	}
+	// Record every metadata write from here on, so the idempotent return is
+	// proven to write nothing on the members.
+	recorder := &metadataWriteRecorder{MemStore: store}
+	deps = withStore(deps, recorder)
+	router.store = recorder
 
 	result, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
 	if err != nil {
@@ -218,6 +223,11 @@ func TestSlingExpandedRootFullyRoutedStaysIdempotent(t *testing.T) {
 	}
 	if !result.Idempotent {
 		t.Fatal("a fully routed run is not idempotent: the sling would rewrite settled routes")
+	}
+	for _, id := range recorder.written {
+		if id != "wf-1" {
+			t.Errorf("idempotent re-sling wrote metadata on member %s", id)
+		}
 	}
 	if result.RoutedMembers != 0 {
 		t.Fatalf("RoutedMembers = %d, want 0 on the settled run", result.RoutedMembers)
@@ -232,6 +242,23 @@ func TestSlingExpandedRootFullyRoutedStaysIdempotent(t *testing.T) {
 	if len(live) != 1 || live[0].ID != convoy.ID {
 		t.Fatalf("auto-convoy roots = %+v, want exactly the existing %s", live, convoy.ID)
 	}
+}
+
+// metadataWriteRecorder records the bead ID of every metadata write that
+// reaches the store.
+type metadataWriteRecorder struct {
+	*beads.MemStore
+	written []string
+}
+
+func (r *metadataWriteRecorder) SetMetadata(id, key, value string) error {
+	r.written = append(r.written, id)
+	return r.MemStore.SetMetadata(id, key, value)
+}
+
+func (r *metadataWriteRecorder) SetMetadataBatch(id string, kvs map[string]string) error {
+	r.written = append(r.written, id)
+	return r.MemStore.SetMetadataBatch(id, kvs)
 }
 
 // TestSlingExpandedRootWarnsOtherRoutedMembers pins the never-move rule's
