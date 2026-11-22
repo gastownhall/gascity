@@ -58,7 +58,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"StartupNudgeHandbackProvider": {"deliberate", "as auto's", ""},
 		"TurnRunningProvider":          {"deliberate", "as auto's", ""},
 		"V2ReadinessReporter":          {"deliberate", "as auto's", ""},
-		"FreshLivenessObserver":        {"deliberate", "hybrid's read is its leaves' cached one, so a hop through it proves absence only by its attested listing (cmd/gc/reconcile_effect_runtime.go unlistedElsewhere)", ""},
+		"FreshLivenessObserver":        {"deliberate", "hybrid's read is its leaves' cached one, so a hop through it proves absence only by its attested listing (cmd/gc/reconcile_effect_runtime.go unlistedElsewhere); the per-name fresh read is resolved on the routed leaf by internal/session Manager.freshLiveness", ""},
 		"TransportCapabilityProvider":  {"deliberate", "production's hybrid is tmux over k8s (cmd/gc/providers.go newHybridProvider), and neither has it", ""},
 		"TmuxSubtreeFence":             {"deliberate", "hybrid scans its local leaf alone, whose own scan applies the leaf's fence", ""},
 	},
@@ -107,7 +107,8 @@ func TestCompositesForwardEveryLeafCapability(t *testing.T) {
 // leaf. Hybrid stays unforwarded on purpose (ruling ga-f6y5q8n): the per-name
 // fresh read is resolved by the consumer on the routed leaf, in internal/session
 // Manager.freshLiveness, and cmd/gc's unlistedElsewhere judges a hop through
-// hybrid. The reason names both, so a rename of either is a change to this entry.
+// hybrid. The reason names both readers; this pins that text, not that the
+// named code still exists.
 func TestHybridFreshLivenessEntryNamesWhatReadsTheLeaf(t *testing.T) {
 	e, ok := unforwarded["hybrid"]["FreshLivenessObserver"]
 	if !ok {
