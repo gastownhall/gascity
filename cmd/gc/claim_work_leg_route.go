@@ -19,12 +19,22 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+// errHookClaimWorkLegUnreadable marks a probe that could not read a work leg
+// for a bead the primary leg proved absent: the leg's read failed, its bd
+// context could not be built, or the frame could not be resolved. It is never
+// a not-found: the unread leg may hold the copy the reader served, so the
+// candidate is skipped with nothing written, and the class route does not
+// escalate it to the binding (hookClaimLegProvedAbsent).
+var errHookClaimWorkLegUnreadable = errors.New("work leg unreadable")
 
 // hookClaimWorkLeg is one work leg of the route's frame: the store it names
 // and how to build the bd context that reaches it.
@@ -44,11 +54,11 @@ type hookClaimWorkLegRoute struct {
 	// It is resolved once, on the first probe; each leg's bd context is built
 	// on the first probe that reaches it (built), so a probe pays only for the
 	// legs up to the holder.
-	frame    func() ([]hookClaimWorkLeg, error)
-	legs     []hookClaimWorkLeg
-	framed   bool
-	built    map[string]hookStore
-	unusable map[string]bool
+	frame  func() ([]hookClaimWorkLeg, error)
+	legs   []hookClaimWorkLeg
+	framed bool
+	built  map[string]hookStore
+	broken map[string]error
 
 	// reserved reports an id inside a relocated class's reserved namespace,
 	// which the class route answers for and this route never probes; nil
@@ -77,10 +87,10 @@ func newHookClaimWorkLegRoute(cityPath string, cfg *config.City, a *config.Agent
 // memos live.
 func newHookClaimWorkLegRouteOver(frame func() ([]hookClaimWorkLeg, error)) *hookClaimWorkLegRoute {
 	return &hookClaimWorkLegRoute{
-		frame:    frame,
-		built:    map[string]hookStore{},
-		unusable: map[string]bool{},
-		home:     map[string]hookStore{},
+		frame:  frame,
+		built:  map[string]hookStore{},
+		broken: map[string]error{},
+		home:   map[string]hookStore{},
 	}
 }
 
@@ -127,48 +137,56 @@ func hookClaimWorkLegFrame(cityPath string, cfg *config.City, a *config.Agent, p
 }
 
 // probe reads id through each work leg of the frame in order and returns the
-// first that holds it, memoized in home. found=false means no leg could be
-// shown to hold it.
-func (r *hookClaimWorkLegRoute) probe(ctx context.Context, id, assignee string) (hookStore, bool) {
+// first that holds it, memoized in home. found=false with a nil error means
+// every leg proved it absent. A leg that cannot be read stops the probe with
+// an errHookClaimWorkLegUnreadable naming it: a later leg's copy is not the
+// one the reader served if the unread leg holds it.
+func (r *hookClaimWorkLegRoute) probe(ctx context.Context, id, assignee string) (hookStore, bool, error) {
 	id = strings.TrimSpace(id)
 	if home, ok := r.home[id]; ok {
-		return home, true
+		return home, true, nil
 	}
 	if !r.framed {
 		frame, err := r.frame()
 		if err != nil {
-			return hookStore{}, false
+			return hookStore{}, false, fmt.Errorf("bead %q: resolving the work legs: %w: %w", id, errHookClaimWorkLegUnreadable, err)
 		}
 		r.legs, r.framed = frame, true
 	}
 	for _, leg := range r.legs {
-		store, ok := r.leg(leg)
-		if !ok {
-			continue
+		store, err := r.leg(leg)
+		if err == nil {
+			_, err = r.readLeg(ctx, store.dir, store.env, id, assignee)
 		}
-		if _, err := r.readLeg(ctx, store.dir, store.env, id, assignee); err == nil {
+		switch {
+		case err == nil:
 			r.home[id] = store
-			return store, true
+			return store, true, nil
+		case hookClaimBeadIsElsewhere(err):
+			continue
+		default:
+			return hookStore{}, false, fmt.Errorf("bead %q: work leg %s: %w: %w", id, leg.ref, errHookClaimWorkLegUnreadable, err)
 		}
 	}
-	return hookStore{}, false
+	return hookStore{}, false, nil
 }
 
-// leg is the bd context that reaches leg, built on first use.
-func (r *hookClaimWorkLegRoute) leg(leg hookClaimWorkLeg) (hookStore, bool) {
+// leg is the bd context that reaches leg, built on first use. A leg whose
+// context cannot be built answers every probe with that error.
+func (r *hookClaimWorkLegRoute) leg(leg hookClaimWorkLeg) (hookStore, error) {
 	if store, ok := r.built[leg.ref]; ok {
-		return store, true
+		return store, nil
 	}
-	if r.unusable[leg.ref] {
-		return hookStore{}, false
+	if err := r.broken[leg.ref]; err != nil {
+		return hookStore{}, err
 	}
 	store, err := leg.build()
 	if err != nil {
-		r.unusable[leg.ref] = true
-		return hookStore{}, false
+		r.broken[leg.ref] = err
+		return hookStore{}, err
 	}
 	r.built[leg.ref] = store
-	return store, true
+	return store, nil
 }
 
 // homeOf is the leg the route proved holds id, if it did.
@@ -193,13 +211,15 @@ func (r *hookClaimWorkLegRoute) at(dir string, env []string, id string) (string,
 // with err: the work leg that holds id, when err proves the primary lacks it
 // and a probe finds it. Once a home is known the op already ran there, so it
 // is never re-run. An id in a relocated class's reserved namespace is the
-// class route's to find, so it is never probed.
-func (r *hookClaimWorkLegRoute) elsewhere(ctx context.Context, id, assignee string, err error) (hookStore, bool) {
+// class route's to find, so it is never probed. A probe that could not read a
+// leg returns its errHookClaimWorkLegUnreadable, which the op answers with in
+// place of the primary's not-found.
+func (r *hookClaimWorkLegRoute) elsewhere(ctx context.Context, id, assignee string, err error) (hookStore, bool, error) {
 	if _, known := r.homeOf(id); known || !hookClaimBeadIsElsewhere(err) {
-		return hookStore{}, false
+		return hookStore{}, false, nil
 	}
 	if r.reserved != nil && r.reserved(strings.TrimSpace(id)) {
-		return hookStore{}, false
+		return hookStore{}, false, nil
 	}
 	return r.probe(ctx, id, assignee)
 }
@@ -233,7 +253,11 @@ func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute, c
 		if ok {
 			return claimed, ok, err
 		}
-		if home, found := route.elsewhere(ctx, beadID, assignee, err); found {
+		home, found, probeErr := route.elsewhere(ctx, beadID, assignee, err)
+		switch {
+		case probeErr != nil:
+			return claimed, ok, fmt.Errorf("claiming %w", probeErr)
+		case found:
 			return base.Claim(ctx, home.dir, home.env, beadID, assignee)
 		}
 		return claimed, ok, err
@@ -242,7 +266,11 @@ func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute, c
 	ops.ReadWorkMeta = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
 		dir, env = route.at(dir, env, beadID)
 		bead, err := base.ReadWorkMeta(ctx, dir, env, beadID, assignee)
-		if home, found := route.elsewhere(ctx, beadID, assignee, err); found {
+		home, found, probeErr := route.elsewhere(ctx, beadID, assignee, err)
+		switch {
+		case probeErr != nil:
+			return bead, fmt.Errorf("reading %w", probeErr)
+		case found:
 			return base.ReadWorkMeta(ctx, home.dir, home.env, beadID, assignee)
 		}
 		return bead, err
@@ -251,7 +279,11 @@ func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute, c
 	ops.StampWorkMeta = func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 		dir, env = route.at(dir, env, beadID)
 		err := base.StampWorkMeta(ctx, dir, env, beadID, assignee, patch)
-		if home, found := route.elsewhere(ctx, beadID, assignee, err); found {
+		home, found, probeErr := route.elsewhere(ctx, beadID, assignee, err)
+		switch {
+		case probeErr != nil:
+			return fmt.Errorf("stamping %w", probeErr)
+		case found:
 			return base.StampWorkMeta(ctx, home.dir, home.env, beadID, assignee, patch)
 		}
 		return err
@@ -260,7 +292,11 @@ func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute, c
 	ops.AssignContinuation = func(ctx context.Context, dir string, env []string, beadID, assignee string) error {
 		dir, env = route.at(dir, env, beadID)
 		err := base.AssignContinuation(ctx, dir, env, beadID, assignee)
-		if home, found := route.elsewhere(ctx, beadID, "", err); found {
+		home, found, probeErr := route.elsewhere(ctx, beadID, "", err)
+		switch {
+		case probeErr != nil:
+			return fmt.Errorf("assigning %w", probeErr)
+		case found:
 			return base.AssignContinuation(ctx, home.dir, home.env, beadID, assignee)
 		}
 		return err
@@ -269,7 +305,11 @@ func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute, c
 	ops.ReclaimStale = func(ctx context.Context, dir string, env []string, beadID string) (bool, string, error) {
 		dir, env = route.at(dir, env, beadID)
 		reclaimed, previousOwner, err := base.ReclaimStale(ctx, dir, env, beadID)
-		if home, found := route.elsewhere(ctx, beadID, "", err); found {
+		home, found, probeErr := route.elsewhere(ctx, beadID, "", err)
+		switch {
+		case probeErr != nil:
+			return reclaimed, previousOwner, fmt.Errorf("reclaiming %w", probeErr)
+		case found:
 			return base.ReclaimStale(ctx, home.dir, home.env, beadID)
 		}
 		return reclaimed, previousOwner, err

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +30,8 @@ type workLegFixture struct {
 	// envBuilds is the agent dir of each leg env the route built ("" for the
 	// city leg), in build order.
 	envBuilds []string
+	// unreadable fails every read and claim against a dir with its error.
+	unreadable map[string]error
 	// calls is each op the fixture served, as "<op> <dir> <leg>", leg being
 	// the GC_TEST_LEG its env carried.
 	calls []string
@@ -102,6 +105,9 @@ func (f *workLegFixture) primary(rig string) hookStore {
 // leg is the store a bd context rooted in dir reaches, or an error wrapping
 // beads.ErrNotFound, as a bd subprocess reports an id its workspace lacks.
 func (f *workLegFixture) get(dir, beadID string) (*beads.MemStore, beads.Bead, error) {
+	if err := f.unreadable[filepath.Clean(dir)]; err != nil {
+		return nil, beads.Bead{}, err
+	}
 	store := f.stores[filepath.Clean(dir)]
 	if store == nil {
 		return nil, beads.Bead{}, fmt.Errorf("bead %q in %s: %w", beadID, dir, beads.ErrNotFound)
@@ -535,5 +541,67 @@ func TestHookClaimWorkLegRouteFirstHolderInReaderOrder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHookClaimWorkLegRouteUnreadableLegSkipsWithoutWriting pins AC-7: when a
+// work leg the probe reaches cannot be read, no store is written for that
+// candidate — not even a later leg that holds a copy, since the unread leg may
+// hold the copy the reader served — the class route does not escalate, stderr
+// names the leg and the read error, and the hook goes on to the next
+// candidate on either tier, draining claims_errored if nothing is claimed.
+func TestHookClaimWorkLegRouteUnreadableLegSkipsWithoutWriting(t *testing.T) {
+	readErr := errors.New("bd show: database is locked")
+	for _, tier := range []struct {
+		name string
+		row  func(id string, priority int) string
+	}{
+		{name: "routed", row: func(id string, priority int) string {
+			return fmt.Sprintf(`{"id":%q,"status":"open","priority":%d,"metadata":{"gc.routed_to":"worker"}}`, id, priority)
+		}},
+		{name: "assigned", row: func(id string, priority int) string {
+			return fmt.Sprintf(`{"id":%q,"status":"open","assignee":"worker","priority":%d}`, id, priority)
+		}},
+	} {
+		for _, next := range []bool{false, true} {
+			name := tier.name + ", alone"
+			if next {
+				name = tier.name + ", then a claimable candidate"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newWorkLegFixture(t, "alpha", "beta")
+				f.unreadable = map[string]error{f.dirOf("alpha"): readErr}
+				f.mintAs("wk-1", "beta")
+				rows := "[" + tier.row("wk-1", 0)
+				if next {
+					f.mintAs("wk-2", "")
+					rows += "," + tier.row("wk-2", 1)
+				}
+				rows += "]"
+				stored := newClaimRouteClassStore(t)
+				ops := classRoutedHookClaimOps(workLegRoutedHookClaimOps(f.ops(), f.route(""), true), newClaimRouteFor(t, workLegRecordingBinding{Store: stored, f: f}))
+
+				code, result, stderr := f.claimWith(f.primary(""), ops, rows)
+				switch {
+				case code != 0:
+					t.Fatalf("claim exit = %d, want 0 (skip, not fail); stderr=%q", code, stderr)
+				case next && (result.Action != "work" || result.BeadID != "wk-2"):
+					t.Fatalf("claim = %+v, want action=work for wk-2, the next candidate; stderr=%q", result, stderr)
+				case !next && (result.Action != "drain" || result.Reason != "claims_errored"):
+					t.Fatalf("claim = %+v, want drain claims_errored; stderr=%q", result, stderr)
+				}
+				if !strings.Contains(stderr, "wk-1") || !strings.Contains(stderr, "rig:alpha") || !strings.Contains(stderr, readErr.Error()) {
+					t.Fatalf("stderr = %q, want it to name wk-1, leg rig:alpha and the read error", stderr)
+				}
+				if b, _ := f.stores[f.dirOf("beta")].Get("wk-1"); b.Status != "open" || b.Assignee != "" {
+					t.Fatalf("rig beta's wk-1 = %q/%q, want it untouched while rig alpha is unread", b.Status, b.Assignee)
+				}
+				for _, call := range f.calls {
+					if strings.HasPrefix(call, "binding-claim") {
+						t.Fatalf("calls = %v: the class route escalated an id a work leg could not be read for", f.calls)
+					}
+				}
+			})
+		}
 	}
 }

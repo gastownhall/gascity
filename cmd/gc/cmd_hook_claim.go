@@ -990,7 +990,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// re-stamp and the workflow re-check below spend any more store time.
 		landedAt := ops.nowOrWallClock()
 		if err != nil {
-			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
+			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err) || errors.Is(err, errHookClaimWorkLegUnreadable)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
 				// arrives here while the claim runs against this store's bd
@@ -1011,6 +1011,11 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				// the same reason (hookClaimBeadIsAWisp): the refusal lands before
 				// any write, so nothing is outstanding, and retrying against the
 				// same binding cannot change the answer.
+				//
+				// A work leg the work-leg route could not read while it looked
+				// for the bead the primary lacks (errHookClaimWorkLegUnreadable)
+				// stops the claim before any write, so nothing is outstanding
+				// either; the next tick reads that leg again.
 				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
 				claimsErrored = true
 				continue
