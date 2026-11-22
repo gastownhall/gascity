@@ -347,3 +347,54 @@ func TestProcessWorkflowFinalizeMissingRootWritesNoSkippedBlockers(t *testing.T)
 		}
 	}
 }
+
+// TestProcessFanoutSkippedChildCarriesNoSkippedBlockers pins that the shared
+// blocker scan writes gc.skipped_blockers only from workflow finalize: a
+// spawned fanout control with a skipped child still closes fanout-pass with
+// gc.outcome alone.
+func TestProcessFanoutSkippedChildCarriesNoSkippedBlockers(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "fanout",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.fanout_state": "spawned",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	for _, outcome := range []string{"pass", "skipped"} {
+		child := mustCreateWorkflowBead(t, store, beads.Bead{
+			Title:    "fanout child",
+			Type:     "task",
+			Status:   "closed",
+			Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.outcome": outcome},
+		})
+		mustDepAdd(t, store, fanout.ID, child.ID, "blocks")
+	}
+
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("ProcessControl(fanout): %v", err)
+	}
+	if result.Action != "fanout-pass" {
+		t.Fatalf("action = %q, want fanout-pass", result.Action)
+	}
+	after := mustGetBead(t, store, fanout.ID)
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("fanout status=%q gc.outcome=%q, want closed/pass", after.Status, after.Metadata["gc.outcome"])
+	}
+	if got, ok := after.Metadata["gc.skipped_blockers"]; ok {
+		t.Fatalf("fanout gc.skipped_blockers = %q, want the key absent", got)
+	}
+}
