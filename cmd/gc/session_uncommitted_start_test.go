@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -644,5 +645,113 @@ func TestEvictUncommittedLiveStart_FirstSightingBasis(t *testing.T) {
 	dt.uncommittedStartSeen(info, t0)
 	if !evictUncommittedLiveStartIfDue(t.TempDir(), sp, call.acts(), info, tp, name, time.Minute, later, dt, nil, nil) {
 		t.Fatal("not evicted past the startup timeout from its first sighting")
+	}
+}
+
+// lastStartIndex is the index of the last provider Start of name in calls, or
+// -1 when there is none.
+func lastStartIndex(calls []runtime.Call, name string) int {
+	last := -1
+	for i, c := range calls {
+		if c.Method == "Start" && c.Name == name {
+			last = i
+		}
+	}
+	return last
+}
+
+// startCarriesPrompt reports whether a provider Start delivers a startup
+// prompt: the launch is marked delivered and carries the prompt in argv or as
+// its post-launch nudge.
+func startCarriesPrompt(cfg runtime.Config) bool {
+	return cfg.Env[startupPromptDeliveredEnv] == "1" && (cfg.PromptSuffix != "" || cfg.Nudge != "")
+}
+
+// TestRestartHandoff_ManagerStartRaceEndsPrimed is AC-8, the end-to-end
+// regression for #6417: after a requested restart's handoff, a Manager send
+// launches the runtime before the controller's start does. That runtime never
+// gets the startup prompt, so the controller must not commit it; once it has
+// waited past the startup timeout the reconciler replaces it, and the row ends
+// on a runtime the controller launched and primed, with its start committed.
+func TestRestartHandoff_ManagerStartRaceEndsPrimed(t *testing.T) {
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	name := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[name] = TemplateParams{Command: "true", Prompt: uncommittedStartPrompt, SessionName: name, TemplateName: "worker"}
+	session := env.createSessionBead(name)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"started_config_hash":        "hash-before-restart",
+	})
+	ctx := context.Background()
+	if err := env.sp.Start(ctx, name, runtime.Config{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	stampOccupant(t, env.sp, name, session.ID, "test-token")
+	if err := env.sp.SetMeta(name, "GC_RESTART_REQUESTED", "1"); err != nil {
+		t.Fatal(err)
+	}
+	tick := func(step string) {
+		t.Helper()
+		b, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("%s: Get(session): %v", step, err)
+		}
+		cfgNames := configuredSessionNames(env.cfg, "", env.store)
+		_ = reconcileSessionBeadsAtPath(
+			ctx, env.city, []beads.Bead{b}, env.desiredState, cfgNames, env.cfg, env.sp, env.store,
+			newDrainOps(env.sp), nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+			nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...,
+		)
+	}
+
+	// The handoff stops the restart-requested runtime and clears the start.
+	tick("handoff")
+	if env.sp.IsRunning(name) {
+		t.Fatalf("the handoff did not stop the runtime; stderr=%s", env.stderr.String())
+	}
+
+	// A Manager send launches the runtime before the controller's start.
+	mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(env.store), env.sp, sessionpkg.WithCityPath(env.city), sessionpkg.WithClock(env.clk))
+	if _, err := mgr.Send(ctx, sessionActor(sessionpkg.ActorAgent, env.city), session.ID, "hello", "true", runtime.Config{}); err != nil {
+		t.Logf("Manager send: %v", err)
+	}
+	managerStart := lastStartIndex(env.sp.Calls, name)
+	if managerStart < 0 || !env.sp.IsRunning(name) {
+		t.Fatalf("fixture did not race: the Manager send launched no runtime; stderr=%s", env.stderr.String())
+	}
+	if startCarriesPrompt(env.sp.Calls[managerStart].Config) {
+		t.Fatal("fixture did not race: the Manager's launch carried the startup prompt")
+	}
+
+	// The controller ticks through and past the startup timeout.
+	for i := 0; i < 6; i++ {
+		tick(fmt.Sprintf("tick %d", i+1))
+		env.clk.Time = env.clk.Time.Add(env.cfg.Session.StartupTimeoutDuration() / 2)
+	}
+
+	last := lastStartIndex(env.sp.Calls, name)
+	if last <= managerStart {
+		t.Fatalf("the row's runtime is still the Manager's launch (no later Start); stderr=%s", env.stderr.String())
+	}
+	if final := env.sp.Calls[last].Config; !startCarriesPrompt(final) {
+		t.Errorf("the final launch carries no startup prompt: suffix=%q nudge=%q %s=%q", final.PromptSuffix, final.Nudge, startupPromptDeliveredEnv, final.Env[startupPromptDeliveredEnv])
+	}
+	if !env.sp.IsRunning(name) {
+		t.Errorf("no runtime is running at the end")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["started_config_hash"] == "" {
+		t.Errorf("started_config_hash not committed; state=%q stderr=%s", b.Metadata["state"], env.stderr.String())
 	}
 }
