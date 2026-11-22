@@ -230,6 +230,7 @@ go_test(
         "startup_health_backoff_test.go",
         "startup_health_test.go",
         "startup_nudge_handback_test.go",
+        "start_runtime_only_test.go",
         "state_machine_test.go",
         "steer_test.go",
         "stop_background_work_test.go",

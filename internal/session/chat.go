@@ -1289,9 +1289,10 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		return err
 	}
 	// It starts under the incarnation its caller's PreWake minted, while the
-	// row still records it. A runtime already up starts nothing and is left
-	// to the caller's start commit, which refuses a row that no longer
-	// records inc (CommitStartedIfCurrentUnder).
+	// row still records it. A runtime already up starts nothing and reports
+	// the collision; it is left to the caller's start classification, while
+	// the start commit refuses a row that no longer records inc
+	// (CommitStartedIfCurrentUnder).
 	if !inc.Valid() || inc.ID != id {
 		return fmt.Errorf("%w: session %q (%s)", ErrIncarnationNotMinted, id, inc)
 	}
@@ -1302,7 +1303,13 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		return runErr
 	}
 	if running {
-		return nil
+		// The runtime is already up, as a Start that refused with
+		// ErrSessionExists finds it: report the collision, keep the route
+		// and start nothing. The caller is the controller's start
+		// (StartResolved, gastownhall/gascity#6417), whose classification
+		// decides convergence on a committed row and defers otherwise; a
+		// nil here would let its commit record a launch that never happened.
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, sessName)
 	}
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)

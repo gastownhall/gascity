@@ -165,7 +165,7 @@ func TestEnsureRunning_CachedRunningTakesNoFreshReadAndStartsNothing(t *testing.
 	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			mgr, sp, _, id, _ := seedUnconfirmedSession(t, StateAsleep, false, true, freshUnknown)
-			if err := newStart(t, mgr, id)(); err != nil {
+			if err := newStart(t, mgr, id)(); !converged(entry, err) {
 				t.Fatalf("%s: %v", entry, err)
 			}
 			if sp.observed != 0 {
@@ -184,7 +184,7 @@ func TestEnsureRunning_StaleAbsentSnapshotOverLiveRuntimeConverges(t *testing.T)
 	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			mgr, sp, _, id, _ := seedUnconfirmedSession(t, StateAsleep, false, false, freshRunning)
-			if err := newStart(t, mgr, id)(); err != nil {
+			if err := newStart(t, mgr, id)(); !converged(entry, err) {
 				t.Fatalf("%s: %v", entry, err)
 			}
 			if sp.observed != 1 {
@@ -349,7 +349,7 @@ func TestEnsureRunning_CompositeInFrontOfCachingProviderReadsTheLeafFresh(t *tes
 		for entry, newStart := range startEntry {
 			t.Run(chain+"/"+entry+"/running", func(t *testing.T) {
 				mgr, sp, _, id, _ := seedUnconfirmedSessionVia(t, wrap, StateAsleep, false, false, freshRunning)
-				if err := newStart(t, mgr, id)(); err != nil {
+				if err := newStart(t, mgr, id)(); !converged(entry, err) {
 					t.Fatalf("%s: %v", entry, err)
 				}
 				if got := callCount(sp.Fake, "Start"); got != 0 {
@@ -542,7 +542,7 @@ func TestEnsureRunning_FreshCompositeOverALeafWithoutFreshReadConfirmsTheGate(t 
 			if answer.err != nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 				t.Errorf("StartRuntimeOnly error = %v, want runtime unavailable", err)
 			}
-			if answer.err == nil && err != nil {
+			if answer.err == nil && !converged("StartRuntimeOnly", err) {
 				t.Errorf("StartRuntimeOnly: %v, want convergence on the runtime that is up", err)
 			}
 			if got := callCount(leaf.Fake, "Start"); got != 0 {
