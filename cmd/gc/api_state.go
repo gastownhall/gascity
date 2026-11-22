@@ -2843,10 +2843,7 @@ func lexicalContainment(cityPath, resolved string) error {
 // first pass accepts; this pass refuses. TestSymlinkAwareContainmentIsLoadBearing
 // pins exactly those inputs.
 func symlinkAwareContainment(cityPath, resolved string) error {
-	realCity, err := filepath.EvalSymlinks(cityPath)
-	if err != nil {
-		realCity = filepath.Clean(cityPath)
-	}
+	realCity := pathutil.NormalizePathForCompare(cityPath)
 	realTarget, err := realPathForContainment(resolved)
 	if err != nil {
 		return fmt.Errorf("%w: resolving rig path %s: %w", configedit.ErrValidation, resolved, err)

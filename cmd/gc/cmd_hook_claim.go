@@ -2995,13 +2995,7 @@ func hookClaimPathOutside(child, parent string) bool {
 	if hookClaimPathFoldsDotDot(child) || hookClaimPathFoldsDotDot(parent) {
 		return false
 	}
-	resolve := func(path string) string {
-		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			return resolved
-		}
-		return filepath.Clean(path)
-	}
-	childPath, parentPath := resolve(child), resolve(parent)
+	childPath, parentPath := pathutil.NormalizePathForCompare(child), pathutil.NormalizePathForCompare(parent)
 	if childPath == parentPath {
 		return false
 	}
