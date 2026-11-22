@@ -617,3 +617,69 @@ func TestNudgeOnRouteEvaluatesEachEventOnce(t *testing.T) {
 		t.Fatalf("run 4: seq mark = %q, want 6 (nothing routed still advances the mark)", got)
 	}
 }
+
+// TestNudgeOnRouteFirstRunReadsMaxLookback pins the first-run contract:
+// with no usable mark (seq file absent, non-numeric, or above every seq
+// read), the run reads GC_NUDGE_ON_ROUTE_MAX_LOOKBACK — the only lookback
+// it has — nudges every routed pair inside that window that is not already
+// in the dedup state, and writes the highest seq read as the mark.
+func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; nudge-on-route.sh requires it")
+	}
+
+	for name, tc := range map[string]struct {
+		seed       string
+		wantWindow []string
+	}{
+		"no seq file":            {seed: "", wantWindow: []string{"1h"}},
+		"garbage seq file":       {seed: "garbage", wantWindow: []string{"1h"}},
+		"seq file above the log": {seed: "1000", wantWindow: []string{"2m", "1h"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			binDir, logPath, stateDir := nudgeFixture(t, tc.seed,
+				nudgeEvent(5, "bead.created", nudgeAgo(40*time.Minute), "ga-first", "gascity/builder", false))
+			out, err := runNudgeOnRoute(t, binDir, stateDir)
+			if err != nil {
+				t.Fatalf("nudge-on-route.sh failed: %v\n%s", err, out)
+			}
+			if got, logged := countNudges(t, logPath); got != 1 || countNudgesTo(t, logPath, "gascity/builder") != 1 {
+				t.Fatalf("nudges = %d, want exactly 1 to gascity/builder for a routed event 40m old; gc calls:\n%s", got, logged)
+			}
+			if got := nudgeReadSeq(t, stateDir); got != "5" {
+				t.Fatalf("seq mark = %q, want 5 (the highest seq read)", got)
+			}
+			// With no usable mark the catch-up window is the only read; a
+			// mark above the log head still gets its fast read first, then
+			// the catch-up re-read that replaces it.
+			if got := nudgeSinceArgs(t, logPath); !reflect.DeepEqual(got, tc.wantWindow) {
+				t.Fatalf("gc events windows = %v, want %v", got, tc.wantWindow)
+			}
+		})
+	}
+
+	t.Run("a smaller MAX_LOOKBACK bounds the first run", func(t *testing.T) {
+		binDir, logPath, stateDir := nudgeFixture(t, "",
+			nudgeEvent(5, "bead.created", nudgeAgo(40*time.Minute), "ga-deep", "gascity/builder", false),
+			nudgeEvent(6, "bead.created", nudgeAgo(3*time.Minute), "ga-fresh", "gascity/builder", false))
+		out, err := runNudgeOnRoute(t, binDir, stateDir, "GC_NUDGE_ON_ROUTE_MAX_LOOKBACK=5m")
+		if err != nil {
+			t.Fatalf("nudge-on-route.sh failed: %v\n%s", err, out)
+		}
+		if got, logged := countNudges(t, logPath); got != 1 || countNudgesTo(t, logPath, "gascity/builder") != 1 {
+			t.Fatalf("nudges = %d, want exactly 1 to gascity/builder: only the 3m-old pair is inside a 5m catch-up window; gc calls:\n%s", got, logged)
+		}
+		if !nudgeStateHasKey(t, stateDir, "ga-fresh|gascity/builder") {
+			t.Fatal("the pair inside the window must be recorded")
+		}
+		if nudgeStateHasKey(t, stateDir, "ga-deep|gascity/builder") {
+			t.Fatal("the 40m-old pair is outside the 5m catch-up window and must not be nudged or recorded")
+		}
+		if got := nudgeReadSeq(t, stateDir); got != "6" {
+			t.Fatalf("seq mark = %q, want 6", got)
+		}
+		if got := nudgeSinceArgs(t, logPath); !reflect.DeepEqual(got, []string{"5m"}) {
+			t.Fatalf("gc events windows = %v, want one read of the configured 5m catch-up window", got)
+		}
+	})
+}
