@@ -144,7 +144,7 @@ func (f *hookWorkflowStopFixture) ops() hookClaimOps {
 		PublishRunMap:            func(string, string, ...string) error { return nil },
 		EmitExecutionStepStarted: func(beads.Bead, string, []string, string) {},
 		EmitClaimRejected:        func(string, string, string) {},
-		EnqueueContinuationNudge: func(string) {},
+		EnqueueContinuationNudge: func(string, string, io.Writer) {},
 		ResolveWorkBranch:        func(hookClaimWorkTree) string { return "" },
 		ResolveSessionWorkDir:    func(string) string { return "" },
 		DrainAck:                 func(io.Writer) error { return nil },

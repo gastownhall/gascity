@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -63,12 +64,9 @@ type NudgeQueue interface {
 // State provides read access to controller-managed state.
 // The controller implements this with RWMutex-protected hot-reload.
 //
-// The per-coordination-class store seam is exposed as named accessors
-// (GraphBeadStore / SessionsBeadStore / NudgesBeadStore) so a future per-class
-// backend becomes a change in the implementation rather than at every call
-// site. Callers that need the store for a specific bead class route through
-// those accessors; on a single-store city every one collapses to the same
-// concrete store CityBeadStore() returns, so they are byte-identical today.
+// A handler reaches the store of a coordination class only through Stores():
+// the class's handle, minted by the controller's router. On a single-store
+// city every handle wraps the concrete store CityBeadStore() returns.
 type State interface {
 	// Config returns the current city config snapshot. A changed config is
 	// served as a new snapshot; a served one is never mutated in place
@@ -78,8 +76,22 @@ type State interface {
 	// SessionProvider returns the current session provider.
 	SessionProvider() runtime.Provider
 
+	// Stores is the city's class handles for the current store epoch, minted
+	// by the controller's router (storeref.Stores): Work, Graph, Sessions,
+	// Mail, Orders, Nudges, Rig(name), Rigs and GraphFor(scope). Read it once
+	// per request and take every class from that value; a stream re-reads it
+	// per iteration. A held value keeps its epoch: the stores a reload
+	// replaces close within controllerStateStoreCloseDelay, so never cache it
+	// on the Server.
+	Stores() storeref.Stores
+
 	// BeadStore returns the bead store for a rig (by name).
-	// Returns nil if the rig doesn't exist.
+	// Returns nil if the rig doesn't exist. BeadStore, BeadStores and
+	// CityBeadStore stay raw until their last readers convert: the order
+	// readers (T7f), the orders-class workflow ref (T7d) and sling's source
+	// workflow stores (T7i), the T7 residue reviewedResidueCallers lists. The
+	// binding census the API plans by-id reads against crosses as
+	// Stores().Topology(), not here.
 	BeadStore(rig string) beads.Store
 
 	// BeadStores returns all rig names and their stores.
@@ -123,87 +135,27 @@ type State interface {
 	// Returns nil if no store is available.
 	CityBeadStore() beads.Store
 
-	// ScopedStoreLike returns a throwaway, ctx-bound clone of existing when
-	// existing is (or wraps) a bd-CLI-shell-backed store: cancellation kills
-	// the backend bd subprocess instead of abandoning it to run past ctx's
-	// deadline, unlike existing's own long-lived runner (fixed to
-	// context.Background() at construction). Returns (nil, nil) when
-	// existing is not bd-CLI backed (e.g. a native, file, or in-memory
-	// store) — those have no subprocess to leak, so callers should keep
-	// reading through existing directly in that case.
+	// ScopedStoreLike returns leg bound to a throwaway, ctx-bound clone of
+	// its store, and true, when that store is (or wraps) a bd-CLI-shell-backed
+	// store: cancellation kills the backend bd subprocess instead of
+	// abandoning it to run past ctx's deadline, unlike the store's own
+	// long-lived runner (fixed to context.Background() at construction). The
+	// bound leg keeps leg's ref, role and gate role (storeref.BindLeg). It
+	// returns leg unchanged and false when the store is not bd-CLI backed
+	// (e.g. a native, file, or in-memory store) — those have no subprocess to
+	// leak, so callers keep reading through leg in that case. A failed
+	// resolution returns its error and a zero leg.
 	//
 	// Read paths with their own short request budget (e.g. GET /status) use
 	// this instead of reading through the shared store so a slow bd command
 	// cannot pin a Dolt connection past the caller's own deadline
 	// (gascity ga-cdmx6x). Implementations must observe ctx during resolution
 	// and finish any work they start before returning after cancellation.
-	ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error)
-
-	// NudgesBeadStore returns the store backing the nudge-queue shadow beads
-	// (gc:nudge). At the default backend this is the same store as
-	// CityBeadStore; when [beads.classes.nudges] is relocated it is the
-	// per-class store, so nudge-shadow ops (e.g. withdrawing wait nudges on
-	// session close/wake) reach the relocated beads instead of orphaning them
-	// on the work store. The strongly-typed beads.NudgesStore return makes the
-	// nudges class statically visible at the call site; its embedded .Store is
-	// nil when no store is available.
-	NudgesBeadStore() beads.NudgesStore
+	ScopedStoreLike(ctx context.Context, leg storeref.TypedLeg) (storeref.TypedLeg, bool, error)
 
 	// NudgeQueue returns the city's nudge queue, through which the API queues
 	// deferred submits and withdraws wait nudges.
 	NudgeQueue() NudgeQueue
-
-	// SessionsBeadStore returns the store backing session-class beads — session
-	// lifecycle (type=session/gc:session) and durable session waits
-	// (type=gate/gc:wait). At the default backend this is the same store as
-	// CityBeadStore; when [beads.classes.sessions] is relocated it is the
-	// per-class store, so session/wait reads and writes reach the relocated
-	// beads instead of the work store. Session handlers source their store from
-	// here (not CityBeadStore); cross-class WORK-bead reads stay on
-	// CityBeadStore. The strongly-typed beads.SessionStore return makes the
-	// session class statically visible at the call site; its embedded .Store is
-	// nil when no store is available.
-	SessionsBeadStore() beads.SessionStore
-
-	// GraphBeadStore returns the store backing graph-class beads — the formula-v2
-	// execution topology and control lane (molecules, wisps, convoys, control
-	// steps). At the default backend this is the same store as CityBeadStore;
-	// when [beads.classes.graph] is relocated it is the dedicated graph store at
-	// the legacy <cityPath>/.gc/beads.sqlite (SQLite) or the gcg Postgres schema,
-	// so graph reads and writes reach the relocated beads instead of the work
-	// store. This is the class-aware graph leg; cross-class WORK-bead reads stay
-	// on CityBeadStore. The strongly-typed beads.GraphStore return makes the graph
-	// class statically visible at the call site; its embedded .Store is nil when no
-	// store is available.
-	GraphBeadStore() beads.GraphStore
-
-	// OrdersBeadStore returns the store backing orders-class beads — the
-	// order-tracking / order-run records that gate repeat order firing. At the
-	// default backend this is the same store as CityBeadStore; when
-	// [beads.classes.orders] is relocated it is the per-class store, which is
-	// where the controller now creates every tracking bead. Without this
-	// accessor the API layer is structurally unable to route orders: the order
-	// feed and the check/history reads would scan the work store and report a
-	// split city's orders as never having run. The strongly-typed
-	// beads.OrdersStore return makes the orders class statically visible at the
-	// call site; its embedded .Store is nil when no store is available.
-	OrdersBeadStore() beads.OrdersStore
-
-	// ClassBindingHasLegacyResidents reports whether store — one of the
-	// per-class stores above — still holds a bead, open or closed, under an id
-	// outside the namespaces its classes declare: a row `gc storage migrate`
-	// carried across under its original work-shaped id, reachable only by
-	// probing the binding.
-	//
-	// The API never opens a binding and cannot take that census itself, so the
-	// verdict crosses this surface from the boot that did. It exists because
-	// both planes plan by-id reads against the same bindings, and a plane that
-	// kept probing after the other retired would resolve one id to two stores.
-	//
-	// TRUE is the answer for every store this State cannot speak for —
-	// unknown included. An unread binding has said nothing about its residents,
-	// and "nothing" is not the claim that retires a probe.
-	ClassBindingHasLegacyResidents(store beads.Store) bool
 
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.
@@ -241,6 +193,19 @@ type State interface {
 	// Handlers treat nil as "feature disabled" and respond with a typed
 	// 503 so the CLI can print a useful message.
 	MaintenanceLoop() MaintenanceProvider
+
+	// ApplyStartupPrompt returns hints with the startup prompt of the session
+	// described by info delivered for a launch that resumes it: the prompt rides
+	// the post-start nudge and the launch env carries the delivered marker, so
+	// the SessionStart hook adds context without repeating a prompt the provider
+	// cannot inline in full. resolved and transport are the provider and
+	// transport the caller resolved for the launch. Prompt rendering and the
+	// delivery policy live in the controller, not the API, so the hints a worker
+	// factory resumes with cannot drift from the ones the reconciler launches
+	// with. Hints are returned unchanged for a session that is closed, has no
+	// prompt, or runs on a runtime that cannot carry a nudge. A non-nil error
+	// means the prompt cannot be delivered and the launch must not proceed.
+	ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
 }
 
 // AgentUpdate holds optional fields for a partial agent update. Pointer fields
@@ -295,14 +260,35 @@ type RawConfigProvider interface {
 }
 
 // WakeStartRefuser is an optional State capability: the controller names
-// why it will not start a session whose wake was just recorded (an
-// idle-latched row, a suspended rig or agent, no runnable template, a
-// dependency-only row, a startup-health quarantine), or "" when it will.
+// why it will not start a session whose wake was just recorded (a state the
+// controller skips, an idle-latched row, a suspended rig or agent, no
+// runnable template, a dependency-only row, a startup-health quarantine), or
+// "" when it will.
 // certain is false when it does not refuse but cannot tell (a pool seat that
 // starts only for demand). info is the row after the wake was recorded.
 // Optional for the same reason as WebhookDispatchProvider.
 type WakeStartRefuser interface {
 	WakeStartRefusal(info session.Info) (why string, certain bool)
+}
+
+// SessionListWakeReasoner is an optional State capability: the reasons the
+// controller keeps each listed session awake (session, config, attached,
+// pin, ...), as the CLI's local `gc session list` computes them for its
+// REASON column. listed is one page of sessions after the runtime overlay;
+// persisted maps each listed id to the session's persisted Info. A session
+// with no wake reasons has no entry. The classifiers live in cmd/gc, which
+// internal/api cannot import, hence the capability.
+type SessionListWakeReasoner interface {
+	SessionListWakeReasons(listed []session.Info, persisted map[string]session.Info) map[string][]string
+}
+
+// UnknownStateRefuser is an optional State capability: the controller names
+// why it will not act on a wake or a fresh-restart request for a session in a
+// state it skips, or "" when it does not skip the row. info is the stored row
+// before the wake or reset writes anything. Optional for the same reason as
+// WebhookDispatchProvider.
+type UnknownStateRefuser interface {
+	UnknownStateRefusal(info session.Info) string
 }
 
 // WebhookDispatchProvider is optionally implemented by State to expose the live

@@ -75,7 +75,7 @@ func (l *ConversationLane) newLease(conv ConversationView, ttl time.Duration, no
 // known (I5).
 func (l *ConversationLane) take(ctx context.Context, snap laneSnapshot, spec *takeSpec, conv ConversationView) (*takenBatch, takeOutcome, error) {
 	now := l.now()
-	lease, err := l.newLease(conv, spec.probe.Caps.leaseTTL(), now)
+	lease, err := l.newLease(conv, takeLeaseTTL(spec.probe.Caps, spec.ops), now)
 	if err != nil {
 		return nil, takeFailed, err
 	}

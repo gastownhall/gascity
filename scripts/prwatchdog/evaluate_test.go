@@ -360,3 +360,76 @@ func TestEvaluate_HumanReadableSummaryStates(t *testing.T) {
 		}
 	})
 }
+
+// A fork PR's pull_request workflows sit at conclusion=action_required (zero
+// jobs) until a maintainer approves them, so Check never appears. That must
+// not read as "tests never ran": the contributor cannot act on that, and a
+// maintainer reading it blames the contributor.
+func TestEvaluate_CheckAbsentAwaitingApprovalNamesMaintainerApproval(t *testing.T) {
+	eval := Evaluate(Input{
+		HeadSHA:          testHeadSHA,
+		Elapsed:          ObservationDeadline,
+		Deadline:         ObservationDeadline,
+		AwaitingApproval: true,
+	})
+	if eval.Pass || !eval.Terminal {
+		t.Fatalf("expected a terminal failure, got %+v", eval)
+	}
+	if !strings.Contains(eval.Reason, "maintainer approval") {
+		t.Fatalf("Reason = %q, want it to name maintainer approval", eval.Reason)
+	}
+	if strings.Contains(eval.Reason, "never ran") {
+		t.Fatalf("Reason = %q must not say the tests never ran", eval.Reason)
+	}
+	if eval.Summary.Check != "awaiting maintainer approval" {
+		t.Fatalf("Summary.Check = %q, want %q", eval.Summary.Check, "awaiting maintainer approval")
+	}
+}
+
+// Without evidence of a pending approval the existing message stands, so the
+// two causes stay distinguishable.
+func TestEvaluate_CheckAbsentWithoutPendingApprovalKeepsTestsNeverRan(t *testing.T) {
+	eval := Evaluate(Input{HeadSHA: testHeadSHA, Elapsed: ObservationDeadline, Deadline: ObservationDeadline})
+	if eval.Reason != "tests never ran" || eval.Summary.Check != "never ran" {
+		t.Fatalf("got Reason %q, Summary.Check %q; want the unchanged tests-never-ran result", eval.Reason, eval.Summary.Check)
+	}
+}
+
+// A pending approval only explains an ABSENT Check. If Check exists the
+// workflow was approved and ran, whatever else is still waiting.
+func TestEvaluate_AwaitingApprovalDoesNotRewriteOtherFailures(t *testing.T) {
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+
+	t.Run("check still in progress at deadline", func(t *testing.T) {
+		eval := Evaluate(Input{
+			HeadSHA:          testHeadSHA,
+			CheckRuns:        []CheckRun{{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusInProgress, StartedAt: base}},
+			Elapsed:          ObservationDeadline,
+			Deadline:         ObservationDeadline,
+			AwaitingApproval: true,
+		})
+		if eval.Reason != "tests never ran" || eval.Summary.Check != "in progress" {
+			t.Fatalf("got Reason %q, Summary.Check %q; want the unchanged in-progress result", eval.Reason, eval.Summary.Check)
+		}
+	})
+
+	t.Run("check passed, CI / required absent at deadline", func(t *testing.T) {
+		eval := Evaluate(Input{
+			HeadSHA:          testHeadSHA,
+			CheckRuns:        []CheckRun{{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base}},
+			Elapsed:          ObservationDeadline,
+			Deadline:         ObservationDeadline,
+			AwaitingApproval: true,
+		})
+		if eval.Reason != "incomplete comprehensive evidence" {
+			t.Fatalf("Reason = %q, want the unchanged incomplete-evidence result", eval.Reason)
+		}
+	})
+
+	t.Run("before the deadline it keeps observing", func(t *testing.T) {
+		eval := Evaluate(Input{HeadSHA: testHeadSHA, Elapsed: time.Minute, Deadline: ObservationDeadline, AwaitingApproval: true})
+		if eval.Terminal {
+			t.Fatalf("expected to keep observing (a maintainer may still approve), got %+v", eval)
+		}
+	})
+}

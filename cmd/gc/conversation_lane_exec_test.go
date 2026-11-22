@@ -56,15 +56,19 @@ func newLaneTestStore() laneTestStore {
 // laneFixture is one session row over a fake runtime, the stores a lane
 // needs, and a fake clock.
 type laneFixture struct {
-	dir     string
-	cfg     *config.City
-	store   beads.Store
-	sp      *runtime.Fake
-	clk     *laneTestClock
-	id      string
-	name    string
-	token   string
-	started bool
+	dir   string
+	cfg   *config.City
+	store beads.Store
+	sp    *runtime.Fake
+	// provider, when set, is the runtime the fixture's lane host and
+	// producers see instead of sp (a profiled fake over sp, so sp still
+	// records its calls).
+	provider runtime.Provider
+	clk      *laneTestClock
+	id       string
+	name     string
+	token    string
+	started  bool
 }
 
 // laneFixtureOpt adjusts a fixture's session row metadata before it is
@@ -187,6 +191,23 @@ func (f *laneFixture) get(t *testing.T, st *opjournal.Store, id string) opjourna
 		t.Fatalf("Get(%s): %v", id, err)
 	}
 	return op
+}
+
+// runtime is the provider the fixture's host and producers see: provider
+// when set, else sp.
+func (f *laneFixture) runtime() runtime.Provider {
+	if f.provider != nil {
+		return f.provider
+	}
+	return f.sp
+}
+
+// asT3Bridge makes the fixture's host and producers see sp as t3bridge: a
+// protocol-mode runtime whose turns, starts included, its own protocol
+// records.
+func (f *laneFixture) asT3Bridge() runtime.Provider {
+	f.provider = runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f.sp})
+	return f.provider
 }
 
 // deps are the executor's dependencies over the fixture.

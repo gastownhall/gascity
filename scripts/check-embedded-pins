@@ -11,12 +11,14 @@ Checks:
   stale     No example or doc carries a superseded bundled, gastown or
             gascity pin (internal/config/public_packs.go Superseded* lists).
   releases  deps.env BD_VERSION is the latest published (non-prerelease)
-            gastownhall/beads release, and DOLT_VERSION is the Dolt version
-            that beads release qualifies (scripts/ci/install-dolt.sh at the
-            tag). --bd-advisory (RC Gate) turns a newer beads release into a
-            warning and checks Dolt against the pinned bd instead. beads measures each Dolt release before raising its pin
-            (Dolt 2.3.x regressed DOLT_RESET('--hard')), so the qualified pin,
-            not upstream "latest", is the newest safe Dolt.
+            gastownhall/beads release, and DOLT_VERSION is at least the Dolt
+            version that beads release qualifies (scripts/ci/install-dolt.sh
+            at the tag). --bd-advisory (RC Gate) turns a newer beads release
+            into a warning and checks Dolt against the pinned bd instead.
+            beads measures each Dolt release before raising its pin (Dolt
+            2.3.x regressed DOLT_RESET('--hard')), so DOLT_VERSION never falls
+            below the qualified pin. It can sit above it: Gas City keeps its
+            own Dolt floor (TestDoltVersionPins), and CI runs that version.
 
 The public gastown/gascity pack pins are checked against the registry by
 scripts/update-bundled-gastown-pack --check.
@@ -134,7 +136,8 @@ def check_bundled(root: Path) -> list[str]:
         errors.append(
             f"bundled core/bd/dolt content changed since BundledPackImportVersion {commit[:12]} "
             f"({len(changed)} file(s), e.g. {changed[0]}); bump the pin to a commit with this "
-            "content and append the old pin to SupersededBundledPackImportVersions"
+            "content and append the old pin to SupersededBundledPackImportVersions "
+            "(on a release branch: RELEASING.md, \"Re-pin the bundled packs\")"
         )
     return errors
 
@@ -195,6 +198,15 @@ def beads_qualified_dolt(tag: str) -> str:
     return match.group(1)
 
 
+def release_version(value: str) -> tuple[int, ...] | None:
+    """(2, 6, 0) for "2.6.0" or "v2.6"; None for anything that is not a release version."""
+    match = re.fullmatch(r"v?(\d+(?:\.\d+){0,2})", value)
+    if not match:
+        return None
+    parts = tuple(int(part) for part in match.group(1).split("."))
+    return parts + (0,) * (3 - len(parts))
+
+
 def check_releases(root: Path, latest_bd: str | None, qualified_dolt: str | None, bd_advisory: bool) -> list[str]:
     env = deps_env(root)
     bd = env.get("BD_VERSION", "")
@@ -211,8 +223,15 @@ def check_releases(root: Path, latest_bd: str | None, qualified_dolt: str | None
         else:
             errors.append(message)
     qualified_dolt = qualified_dolt or beads_qualified_dolt(qualifying_bd)
-    if dolt != qualified_dolt:
-        errors.append(f"deps.env DOLT_VERSION={dolt}, beads {qualifying_bd} qualifies Dolt {qualified_dolt}")
+    have, floor = release_version(dolt), release_version(qualified_dolt)
+    if have is None:
+        errors.append(f"deps.env DOLT_VERSION={dolt} is not a release version")
+    elif floor is None:
+        errors.append(f"beads {qualifying_bd} qualifies Dolt {qualified_dolt!r}, which is not a release version")
+    elif have < floor:
+        errors.append(
+            f"deps.env DOLT_VERSION={dolt} is older than Dolt {qualified_dolt}, which beads {qualifying_bd} qualifies"
+        )
     if online:
         upstream = latest_release_tag(DOLT_REPO).lstrip("v")
         print(f"bd {bd} (latest {latest_bd}); dolt {dolt} (beads {qualifying_bd} qualifies {qualified_dolt}; upstream latest {upstream})")

@@ -14,6 +14,12 @@
 // Usage:
 //
 //	grant_command = "gc-write-mint --kid k1 --key ~/.gc/keys/city.ed25519 --city example-city"
+//
+// The keygen subcommand generates a signing key for that use: it writes the
+// ed25519 private key as PEM PKCS#8 (mode 0600) and prints the
+// "<kid>:<base64 public key>" entry the server's write-auth verify key lists.
+//
+//	gc-write-mint keygen --kid k1 --out ~/.gc/keys/city.ed25519 [--force]
 package main
 
 import (
@@ -68,6 +74,9 @@ type mintParams struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "keygen" {
+		os.Exit(runKeygen(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	kid := flag.String("kid", "", "key id (kid) stamped into the grant; must match a server verifying key")
 	keyPath := flag.String("key", "", "path to the ed25519 private key (PEM PKCS#8, or a raw/hex/base64 32-byte seed or 64-byte private key)")
 	epoch := flag.Int64("epoch", 0, "epoch counter stamped into the grant (must be >= the server's floor)")

@@ -46,7 +46,7 @@ func TestControllerStopClientAcceptsOnlyExactAcknowledgement(t *testing.T) {
 			conn := &scriptedControllerStopConn{reply: tt.reply, readErr: tt.readErr}
 			client := controllerStopClient{
 				stat:         func(string) (os.FileInfo, error) { return info, nil },
-				dial:         func(string, string, time.Duration) (net.Conn, error) { return conn, nil },
+				dial:         func(string, time.Duration) (net.Conn, error) { return conn, nil },
 				dialTimeout:  time.Second,
 				writeTimeout: time.Second,
 				readTimeout:  time.Second,
@@ -163,7 +163,7 @@ func TestControllerStopClientClassifiesEntryBoundary(t *testing.T) {
 					statIndex++
 					return result.info, result.err
 				},
-				dial: func(string, string, time.Duration) (net.Conn, error) {
+				dial: func(string, time.Duration) (net.Conn, error) {
 					dials++
 					return tt.conn, tt.dialErr
 				},

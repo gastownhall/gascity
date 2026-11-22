@@ -143,14 +143,15 @@ jobs:
       # Remote execution on rbe-west only for code this repository trusts
       # (a push, a same-repo PR or a dispatch of a same-repo head) while
       # rbe-west is on; otherwise mode cache. A fork repository's own CI
-      # (github.repository's owner is not gastownhall) is mode local: no
-      # rbe-cache, which would otherwise serve every fork push at the farm's
-      # cost (bazel.yml's rbe job, FORK_REPO). Fork PRs into gascity run with
+      # (github.repository's owner is not gastownhall, by its id 255961667,
+      # which an org rename keeps) is mode local: no rbe-cache, which would
+      # otherwise serve every fork push at the farm's cost (bazel.yml's rbe
+      # job, FORK_REPO). Fork PRs into gascity run with
       # github.repository gastownhall/gascity and are unaffected.
       - name: Decide Bazel execution mode
         id: mode
         env:
-          FORK_REPO: ${{ github.repository_owner != 'gastownhall' }}
+          FORK_REPO: ${{ github.repository_owner_id != '255961667' }}
           RBE_VAR_ON: ${{ vars.RBE_WEST_WORKERS == 'true' }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
           EVENT_NAME: ${{ github.event_name }}
