@@ -329,3 +329,33 @@ func TestRunPreparedStartCandidate_SessionExistsNotLiveDefers(t *testing.T) {
 		})
 	}
 }
+
+// TestRunPreparedStartCandidate_SessionExistsUncommittedOursConverges is
+// AC-4: on an uncommitted, prompt-bearing row the colliding runtime carries
+// this attempt's instance token, so it is this start's launch and the start
+// converges and commits as any collision does.
+func TestRunPreparedStartCandidate_SessionExistsUncommittedOursConverges(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)}
+	city, workDir := t.TempDir(), t.TempDir()
+	bead := createUncommittedRestartRow(t, store, clk, workDir, nil)
+	item, release := uncommittedStartItem(t, city, bead, true)
+	defer release()
+	sp := &collidingOccupantProvider{Fake: runtime.NewFake(), id: bead.ID, token: item.candidate.info.InstanceToken}
+
+	result, committed, stderr := runUncommittedStart(t, city, store, sp, clk, item)
+
+	if result.err != nil || result.outcome != TraceOutcomeSessionExists || !committed {
+		t.Fatalf("result err=%v outcome=%q committed=%v, want a converged commit; stderr=%s", result.err, result.outcome, committed, stderr)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if v := got.Metadata["started_config_hash"]; v != "hash-new" {
+		t.Errorf("started_config_hash = %q, want hash-new committed", v)
+	}
+	if got := countCalls(sp.Fake, "Stop"); got != 0 {
+		t.Errorf("Stop calls = %d, want none", got)
+	}
+}
