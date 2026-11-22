@@ -1289,9 +1289,10 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		return err
 	}
 	// It starts under the incarnation its caller's PreWake minted, while the
-	// row still records it. A runtime already up starts nothing and is left
-	// to the caller's start commit, which refuses a row that no longer
-	// records inc (CommitStartedIfCurrentUnder).
+	// row still records it. A runtime already up starts nothing and reports
+	// the collision (runtime.ErrSessionExists), as a Start that found it
+	// would: this start launched nothing, so its caller decides from the
+	// runtime's identity whether the start converged on it.
 	if !inc.Valid() || inc.ID != id {
 		return fmt.Errorf("%w: session %q (%s)", ErrIncarnationNotMinted, id, inc)
 	}
@@ -1302,7 +1303,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		return runErr
 	}
 	if running {
-		return nil
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, sessName)
 	}
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)

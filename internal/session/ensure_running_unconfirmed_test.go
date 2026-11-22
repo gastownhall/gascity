@@ -165,7 +165,7 @@ func TestEnsureRunning_CachedRunningTakesNoFreshReadAndStartsNothing(t *testing.
 	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			mgr, sp, _, id, _ := seedUnconfirmedSession(t, StateAsleep, false, true, freshUnknown)
-			if err := newStart(t, mgr, id)(); err != nil {
+			if err := newStart(t, mgr, id)(); !converged(entry, err) {
 				t.Fatalf("%s: %v", entry, err)
 			}
 			if sp.observed != 0 {
@@ -184,7 +184,7 @@ func TestEnsureRunning_StaleAbsentSnapshotOverLiveRuntimeConverges(t *testing.T)
 	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			mgr, sp, _, id, _ := seedUnconfirmedSession(t, StateAsleep, false, false, freshRunning)
-			if err := newStart(t, mgr, id)(); err != nil {
+			if err := newStart(t, mgr, id)(); !converged(entry, err) {
 				t.Fatalf("%s: %v", entry, err)
 			}
 			if sp.observed != 1 {
@@ -349,7 +349,7 @@ func TestEnsureRunning_CompositeInFrontOfCachingProviderReadsTheLeafFresh(t *tes
 		for entry, newStart := range startEntry {
 			t.Run(chain+"/"+entry+"/running", func(t *testing.T) {
 				mgr, sp, _, id, _ := seedUnconfirmedSessionVia(t, wrap, StateAsleep, false, false, freshRunning)
-				if err := newStart(t, mgr, id)(); err != nil {
+				if err := newStart(t, mgr, id)(); !converged(entry, err) {
 					t.Fatalf("%s: %v", entry, err)
 				}
 				if got := callCount(sp.Fake, "Start"); got != 0 {
@@ -542,7 +542,7 @@ func TestEnsureRunning_FreshCompositeOverALeafWithoutFreshReadConfirmsTheGate(t 
 			if answer.err != nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 				t.Errorf("StartRuntimeOnly error = %v, want runtime unavailable", err)
 			}
-			if answer.err == nil && err != nil {
+			if answer.err == nil && !converged("StartRuntimeOnly", err) {
 				t.Errorf("StartRuntimeOnly: %v, want convergence on the runtime that is up", err)
 			}
 			if got := callCount(leaf.Fake, "Start"); got != 0 {
@@ -610,5 +610,34 @@ func TestFreshLiveness_NonStartCallerReadsTheLeafFreshBehindHybrid(t *testing.T)
 	}
 	if sp.observed != 1 {
 		t.Errorf("fresh leaf reads = %d, want 1", sp.observed)
+	}
+}
+
+// TestManagerStartRuntimeOnly_RunningRuntimeReportsSessionExists pins the
+// controller's runtime-only bridge on a runtime that is already up: it starts
+// nothing and reports the collision (runtime.ErrSessionExists) instead of a
+// success, so the caller never commits a launch that did not happen (#6417).
+func TestManagerStartRuntimeOnly_RunningRuntimeReportsSessionExists(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cached  bool
+		answers []freshAnswer
+	}{
+		{name: "cached running", cached: true, answers: []freshAnswer{freshUnknown}},
+		{name: "fresh read running", cached: false, answers: []freshAnswer{freshRunning}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, _, id, _ := seedUnconfirmedSession(t, StateAsleep, false, tc.cached, tc.answers...)
+			err := startEntry["StartRuntimeOnly"](t, mgr, id)()
+			if !errors.Is(err, runtime.ErrSessionExists) {
+				t.Fatalf("StartRuntimeOnly over a running runtime = %v, want an error wrapping runtime.ErrSessionExists", err)
+			}
+			if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Errorf("StartRuntimeOnly = %v, want a collision, not an unreadable runtime", err)
+			}
+			if got := callCount(sp.Fake, "Start"); got != 0 {
+				t.Errorf("Start called %d times, want 0", got)
+			}
+		})
 	}
 }
