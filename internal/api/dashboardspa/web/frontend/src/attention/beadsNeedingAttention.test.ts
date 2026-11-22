@@ -551,6 +551,17 @@ describe('workflow topology beads are exempt from the stalled rule (#7232)', () 
     },
   );
 
+  it('surfaces a stuck workflow through its step, not its root (AC-5)', () => {
+    const step = bead({
+      id: 'S-impl',
+      status: 'in_progress',
+      assignee: 'worker-ci-1',
+      metadata: { 'gc.root_bead_id': 'R-wf' },
+    });
+    const rows = select({ beads: [workflowRoot(), step], sessions: [session({ state: 'dead' })] });
+    expect(rows.map((row) => `${row.beadId}:${row.reason}`)).toEqual(['S-impl:stalled']);
+  });
+
   it('exempts a padded mixed-case gc.kind workflow root', () => {
     expect(select({ beads: [workflowRoot({ metadata: { 'gc.kind': ' Workflow ' } })] })).toEqual(
       [],
@@ -563,5 +574,14 @@ describe('workflow topology beads are exempt from the stalled rule (#7232)', () 
       sessions: [session({})],
     });
     expect(rows.map((row) => `${row.beadId}:${row.reason}`)).toEqual(['R-wf:waiting-human']);
+  });
+
+  it('leaves an open workflow root to the ready-unclaimed rule', () => {
+    const rows = select({
+      beads: [workflowRoot({ status: 'open', created_at: '2026-06-01T11:00:00.000Z' })],
+    });
+    expect(rows).toEqual([
+      expect.objectContaining({ beadId: 'R-wf', reason: 'ready-unclaimed' }),
+    ]);
   });
 });
