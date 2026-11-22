@@ -55,10 +55,12 @@ exit 1
 	}
 	testMakefile := filepath.Join(tmp, "Makefile")
 	makefileText := string(makefile)
-	if !strings.Contains(makefileText, "\ninstall: check-self-contained\n") {
-		t.Fatal("Makefile install target no longer depends on check-self-contained as expected")
+	// Drop the prerequisites: the build and the pinned-bd install (which
+	// would reach the module proxy) are not what this test exercises.
+	if !strings.Contains(makefileText, "\ninstall: check-self-contained install-bd\n") {
+		t.Fatal("Makefile install target no longer depends on check-self-contained and install-bd as expected")
 	}
-	makefileContent := strings.Replace(makefileText, "\ninstall: check-self-contained\n", "\ninstall:\n", 1)
+	makefileContent := strings.Replace(makefileText, "\ninstall: check-self-contained install-bd\n", "\ninstall:\n", 1)
 	if err := os.WriteFile(testMakefile, []byte(makefileContent), 0o644); err != nil {
 		t.Fatalf("write test Makefile: %v", err)
 	}
