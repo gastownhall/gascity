@@ -1744,6 +1744,7 @@ go_test(
         "drain_ack_escalation_auto_test.go",
         "drain_ack_escalation_exec_test.go",
         "drain_ack_escalation_test.go",
+        "drain_ack_pod_identity_test.go",
         "drain_ack_release_test.go",
         "drain_ack_row_test.go",
         "drain_reminder_ack_binding_test.go",
