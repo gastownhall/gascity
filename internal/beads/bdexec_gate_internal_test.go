@@ -85,7 +85,7 @@ func TestBDExecGate_BoundsChildren(t *testing.T) {
 	if gate.size != 4 || gate.readCap != 3 {
 		t.Fatalf("gate size/readCap = %d/%d, want 4/3", gate.size, gate.readCap)
 	}
-	run := f.runner(context.Background(), gate, nil)
+	run := f.runner(context.Background(), gate)
 
 	var argvs []string
 	for i := 0; i < 10; i++ {
@@ -200,6 +200,53 @@ func TestBDExecGate_TimeoutTableUnchanged(t *testing.T) {
 	for _, verb := range []string{"count", "list", "ready", "show", "sql", "stats", "version"} {
 		if bdCommandTimeoutFor("bd", []string{verb}) == bdReadCommandTimeout && !bdCommandIsRead([]string{verb}) {
 			t.Errorf("bd %s: read timeout but mutation lane", verb)
+		}
+	}
+}
+
+// TestBDExecGate_MutationProgressesWhileReadsSaturated covers AC-2: with the
+// read lane full and more reads queued, bd update and bd close (also behind
+// the doltlite "--dolt-auto-commit off" prefix) spawn at once while every read
+// child stays blocked and no queued read spawns.
+func TestBDExecGate_MutationProgressesWhileReadsSaturated(t *testing.T) {
+	t.Parallel()
+	f := newFakeBD(t)
+	// Size 16 reserves 4 slots, one for each mutation below.
+	gate := newBDExecGate(16)
+	if gate.readCap != 12 {
+		t.Fatalf("gate readCap = %d, want 12", gate.readCap)
+	}
+	run := f.runner(context.Background(), gate)
+
+	var reads []string
+	for i := 0; i < gate.readCap+3; i++ {
+		reads = append(reads, fmt.Sprintf("list --json --label r%d", i))
+	}
+	readResults := runConcurrently(f.root, run, reads)
+	waitFor(t, "the read lane to fill", func() bool { return len(f.alive()) == gate.readCap })
+
+	mutations := []string{
+		"update gc-1 --status in_progress",
+		"close gc-2",
+		"--dolt-auto-commit off update gc-3 --status closed",
+		"--dolt-auto-commit off close gc-4",
+	}
+	mutationResults := runConcurrently(f.root, run, mutations)
+	waitFor(t, "every mutation child to spawn", func() bool {
+		return len(f.spawns()) == gate.readCap+len(mutations)
+	})
+	alive := f.alive()
+	if n := countReads(alive); n != gate.readCap {
+		t.Fatalf("%d read children alive after the mutations spawned, want all %d still blocked", n, gate.readCap)
+	}
+	if n := countReads(f.spawns()); n != gate.readCap {
+		t.Fatalf("%d reads spawned, want %d: a queued read spawned before or with the mutations", n, gate.readCap)
+	}
+
+	f.releaseAll()
+	for _, r := range append(<-mutationResults, <-readResults...) {
+		if r.err != nil {
+			t.Errorf("%q: %v", r.argv, r.err)
 		}
 	}
 }

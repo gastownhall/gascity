@@ -75,14 +75,9 @@ func (f *fakeBD) env() map[string]string {
 	}
 }
 
-// runner returns an exec runner bound to ctx and gate, with extra env
-// overrides layered over the harness env.
-func (f *fakeBD) runner(ctx context.Context, gate *bdExecGate, extra map[string]string) CommandRunner {
-	env := f.env()
-	for k, v := range extra {
-		env[k] = v
-	}
-	return execCommandRunner(ctx, env, false, processEnvSnapshotExcludingNativeDoltOpen, gate)
+// runner returns an exec runner bound to ctx and gate.
+func (f *fakeBD) runner(ctx context.Context, gate *bdExecGate) CommandRunner {
+	return execCommandRunner(ctx, f.env(), false, processEnvSnapshotExcludingNativeDoltOpen, gate)
 }
 
 func (f *fakeBD) releaseAll() {
