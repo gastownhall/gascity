@@ -353,6 +353,53 @@ func TestProcessWorkflowFinalizeSkippedBlockerNonPassEdgeCases(t *testing.T) {
 	})
 }
 
+// TestProcessFanoutSkippedChildCarriesNoSkippedBlockers guards the fanout
+// caller of the shared blocker scan: a spawned fanout control with one passed
+// and one skipped child closes fanout-pass and carries no
+// gc.skipped_blockers — the marker is a workflow-root close record only.
+func TestProcessFanoutSkippedChildCarriesNoSkippedBlockers(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	passedChild := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "child-pass",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.outcome": "pass"},
+	})
+	skippedChild := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "child-skipped",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.outcome": "skipped"},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "fanout",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.fanout_state": "spawned",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, passedChild.ID, "blocks")
+	mustDepAdd(t, store, fanout.ID, skippedChild.ID, "blocks")
+
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("ProcessControl(fanout spawned): %v", err)
+	}
+	if !result.Processed || result.Action != "fanout-pass" {
+		t.Fatalf("result = %+v, want processed fanout-pass", result)
+	}
+	control := mustGetBead(t, store, fanout.ID)
+	if control.Status != "closed" || control.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("fanout control = status %q outcome %q, want closed/pass", control.Status, control.Metadata["gc.outcome"])
+	}
+	if _, ok := control.Metadata["gc.skipped_blockers"]; ok {
+		t.Fatalf("fanout control carries gc.skipped_blockers = %q, want the key absent: the marker is a workflow-root close record", control.Metadata["gc.skipped_blockers"])
+	}
+}
+
 // TestProcessWorkflowFinalizeSkippedBlockerPassEdgeCases covers the pass-arm
 // edges of the gc.skipped_blockers contract.
 func TestProcessWorkflowFinalizeSkippedBlockerPassEdgeCases(t *testing.T) {
