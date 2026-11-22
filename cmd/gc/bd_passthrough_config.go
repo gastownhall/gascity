@@ -30,9 +30,12 @@ var bdPassthroughReadinessFallbacks atomic.Int64
 //
 // The one case where the pass changes the outcome is a cache composition
 // rejects. Then this runs the pass and composes again, so the answer and the
-// error text are exactly loadCityConfig's. Only a composition error falls
-// back: a validation error after a successful composition is returned as is,
-// without a pointless pass or a second round of warnings.
+// error text are exactly loadCityConfig's. Only a composition error or a
+// quarantined rig (a rig whose packs did not compose) falls back: a cache the
+// pass heals must not leave its rig quarantined, but a pass that fails keeps
+// the quarantined composition rather than failing every rig. A validation
+// error after a successful composition is returned as is, without a
+// pointless pass or a second round of warnings.
 //
 // On success without a pass it records the deferral in the invocation scope,
 // so the rest of the invocation (the write guard's store open, any further
@@ -44,16 +47,22 @@ var bdPassthroughReadinessFallbacks atomic.Int64
 func loadCityConfigForBdPassthrough(cityPath string, warnings io.Writer) (*config.City, error) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, prov, err := loadComposedCityConfig(fsys.OSFS{}, tomlPath, skipRevisionSnapshot)
-	if err != nil {
+	if err != nil || len(cfg.QuarantinedRigs) > 0 {
 		bdPassthroughReadinessFallbacks.Add(1)
-		if ensureErr := EnsureBuiltinRuntimeAssets(cityPath, warnings); ensureErr != nil {
+		ensureErr := EnsureBuiltinRuntimeAssets(cityPath, warnings)
+		switch {
+		case ensureErr != nil && err != nil:
 			// What loadCityConfigFS would have returned first.
 			return nil, ensureErr
+		case ensureErr == nil:
+			forgetInvocationConfig(tomlPath)
+			cfg, prov, err = loadComposedCityConfig(fsys.OSFS{}, tomlPath, skipRevisionSnapshot)
+			if err != nil {
+				return nil, err
+			}
 		}
-		cfg, prov, err = loadComposedCityConfig(fsys.OSFS{}, tomlPath, skipRevisionSnapshot)
-		if err != nil {
-			return nil, err
-		}
+		// ensureErr != nil with err == nil: the quarantined composition is
+		// the answer; the readiness failure was reported to warnings.
 	} else {
 		deferBuiltinReadinessForInvocation(cityPath)
 	}

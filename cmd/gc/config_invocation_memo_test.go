@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -134,5 +135,26 @@ func TestInvocationConfigMemoHandsEachCallerItsOwnRigs(t *testing.T) {
 	}
 	if second.Workspace.Name != "demo" {
 		t.Fatalf("second caller saw workspace %q, want demo", second.Workspace.Name)
+	}
+}
+
+// TestOneShotLoadOptionsStayMemoShaped pins that every one-shot loader's
+// options stay equal to invocationMemoLoadOptions. The source guards
+// (TestCLIStorageRoutesDeclineTheRevisionSnapshot,
+// TestHostedCredentialProbeDeclinesTheRevisionSnapshot,
+// TestCityConfigLoadersDeclineTheRevisionSnapshot) pin the literal form of
+// each declaration, which is why these are literals rather than aliases of
+// skipRevisionSnapshot; this test is the other half of the contract — a value
+// that drifts from the memo's shape silently stops being answered by it and
+// goes back to composing the whole city on every call.
+func TestOneShotLoadOptionsStayMemoShaped(t *testing.T) {
+	for name, opts := range map[string]config.LoadOptions{
+		"skipRevisionSnapshot":      skipRevisionSnapshot,
+		"cliStorageRoutesLoad":      cliStorageRoutesLoad,
+		"hostedCredentialProbeLoad": hostedCredentialProbeLoad,
+	} {
+		if opts != invocationMemoLoadOptions {
+			t.Errorf("%s = %+v, want the memo's one-shot shape %+v", name, opts, invocationMemoLoadOptions)
+		}
 	}
 }

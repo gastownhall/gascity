@@ -2227,6 +2227,8 @@ go_test(
         "rig_pool_scale_hook_4189_test.go",
         "rig_provision_boundary_import_test.go",
         "rig_provision_parity_test.go",
+        "rig_quarantine_cli_test.go",
+        "rig_quarantine_fixture_test.go",
         "rig_relic_legs_test.go",
         "rig_remote_test.go",
         "rig_scope_resolution_test.go",

@@ -784,7 +784,7 @@ func projectCredentialProviderEnv(env map[string]string) {
 // (TestCityConfigLoadersDeclineTheRevisionSnapshot) deliberately scoped itself
 // to that file and left the other Provenance-discarding call sites — this one
 // among them — for later.
-var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
+var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true, IsolateRigPackFailures: true}
 
 // hostedCredentialProbeCache memoizes citySelectsHostedBeadsCredentialProvider
 // per city.

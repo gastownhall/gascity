@@ -115,9 +115,11 @@ var (
 )
 
 // invocationMemoLoadOptions is the only option set the memo answers: the
-// one-shot load (skipRevisionSnapshot, cliStorageRoutesLoad and
-// hostedCredentialProbeLoad are all exactly this).
-var invocationMemoLoadOptions = config.LoadOptions{SkipRevisionSnapshot: true}
+// one-shot load. cliStorageRoutesLoad and hostedCredentialProbeLoad stay
+// literal (their source guards scan for the literal) but equal to this value,
+// so the memo answers them; TestOneShotLoadOptionsStayMemoShaped pins the
+// equality.
+var invocationMemoLoadOptions = skipRevisionSnapshot
 
 // beginInvocationConfigMemo opens a memo scope for the rest of a one-shot
 // command and returns the function that closes it. Scopes do not nest: an inner
@@ -191,6 +193,21 @@ func loadComposedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions
 	return cfg, prov, nil
 }
 
+// forgetInvocationConfig drops the open scope's composed config for tomlPath,
+// so the next load composes again. A caller that changed what composition
+// reads (a builtin readiness pass that healed a cache) uses it to replace an
+// answer that predates the change.
+func forgetInvocationConfig(tomlPath string) {
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		return
+	}
+	key := normalizePathForCompare(filepath.Clean(tomlPath))
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	delete(memo.entries, key)
+}
+
 // callerCopyOfCityConfig gives one caller its own view of a memoized config:
 // a fresh top-level City with its own Rigs and Agents slices. The memo keeps
 // the copy it stores untouched and hands every caller, the first included, an
@@ -209,6 +226,9 @@ func callerCopyOfCityConfig(cfg *config.City) *config.City {
 	}
 	if cfg.Agents != nil {
 		out.Agents = append([]config.Agent(nil), cfg.Agents...)
+	}
+	if cfg.QuarantinedRigs != nil {
+		out.QuarantinedRigs = append([]config.RigQuarantine(nil), cfg.QuarantinedRigs...)
 	}
 	return &out
 }
