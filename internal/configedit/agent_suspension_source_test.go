@@ -202,3 +202,58 @@ suspended = true # held for the migration
 		})
 	}
 }
+
+func TestSuspendAgent_RigOverrideDecidesPackAgent(t *testing.T) {
+	path := rigImportCity(t, false, `
+[[rigs.overrides]]
+agent = "worker"
+nudge = "keep me"
+suspended = false
+`, "")
+	before := string(mustReadFile(t, path))
+
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	if err := ed.SuspendAgent("proj/base.worker"); err != nil {
+		t.Fatalf("SuspendAgent: %v", err)
+	}
+
+	if !effectiveSuspended(t, path, "proj/base.worker") {
+		t.Fatal("worker not suspended after suspend: the rig override decides and was not edited")
+	}
+	after := string(mustReadFile(t, path))
+	assertOnlyLinesChanged(t, before, after, []string{"suspended = false"}, []string{"suspended = true"})
+}
+
+// TestSuspendAgent_RigPatchWinsOverOverride pins composition's last-wins
+// order within a rig: overrides apply before patches, so when both a
+// [[rigs.overrides]] and a [[rigs.patches]] entry set suspended for the
+// agent, the patches entry decides and is the one suspend edits.
+func TestSuspendAgent_RigPatchWinsOverOverride(t *testing.T) {
+	path := rigImportCity(t, false, `
+[[rigs.overrides]]
+agent = "worker"
+suspended = false # override entry stays false
+
+[[rigs.patches]]
+agent = "worker"
+suspended = false # deciding patch entry
+`, "")
+	before := string(mustReadFile(t, path))
+
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	if err := ed.SuspendAgent("proj/base.worker"); err != nil {
+		t.Fatalf("SuspendAgent: %v", err)
+	}
+
+	if !effectiveSuspended(t, path, "proj/base.worker") {
+		t.Fatal("worker not suspended after suspend: the deciding rig patch was not edited")
+	}
+	after := string(mustReadFile(t, path))
+	if !strings.Contains(after, "suspended = false # override entry stays false") {
+		t.Errorf("the shadowed [[rigs.overrides]] entry must stay false; city.toml now:\n%s", after)
+	}
+	if !strings.Contains(after, "suspended = true # deciding patch entry") {
+		t.Errorf("the deciding [[rigs.patches]] entry must flip to true; city.toml now:\n%s", after)
+	}
+	assertOnlyLinesChanged(t, before, after, []string{"suspended = false"}, []string{"suspended = true"})
+}
