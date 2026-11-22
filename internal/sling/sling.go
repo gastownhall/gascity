@@ -1501,6 +1501,12 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 		return nil, err
 	}
 	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID, deps.StoreRef)
+	if !graphWorkflow {
+		// A v1 molecule routes its source bead, whose own edges already hold
+		// it; only a graph workflow, which routes its own steps, carries the
+		// source bead's blockers.
+		opts.BlockedBy = nil
+	}
 	var replacedRootID string
 	if graphWorkflow {
 		if err := closeFailedGraphV2Roots(graphStore, recipe); err != nil {

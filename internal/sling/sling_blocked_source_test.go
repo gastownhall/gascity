@@ -50,8 +50,9 @@ func blockedSourceSlingDeps(t *testing.T) SlingDeps {
 	return deps
 }
 
-// newBlockedSource creates an open blocker and a source bead blocked by it.
-func newBlockedSource(t *testing.T, store beads.Store, depType string) (blocker, source beads.Bead) {
+// newBlockedSource creates an open blocker and a source bead with a blocks
+// dependency on it.
+func newBlockedSource(t *testing.T, store beads.Store) (blocker, source beads.Bead) {
 	t.Helper()
 	blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task", Status: "open"})
 	if err != nil {
@@ -61,7 +62,7 @@ func newBlockedSource(t *testing.T, store beads.Store, depType string) (blocker,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DepAdd(source.ID, blocker.ID, depType); err != nil {
+	if err := store.DepAdd(source.ID, blocker.ID, "blocks"); err != nil {
 		t.Fatal(err)
 	}
 	return blocker, source
@@ -126,7 +127,7 @@ func beadTitles(bs []beads.Bead) []string {
 func TestFormulaOnBlockedBeadWaitsForBlocker(t *testing.T) {
 	deps := blockedSourceSlingDeps(t)
 	store := deps.Store
-	blocker, source := newBlockedSource(t, store, "blocks")
+	blocker, source := newBlockedSource(t, store)
 
 	result, err := DoSling(SlingOpts{Target: config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}, BeadOrFormula: source.ID, OnFormula: "graph-work"}, deps, store)
 	if err != nil {
@@ -154,7 +155,7 @@ func TestFormulaOnBlockedBeadWaitsForBlocker(t *testing.T) {
 func TestFormulaOnBlockedBeadReleasesWhenBlockerCloses(t *testing.T) {
 	deps := blockedSourceSlingDeps(t)
 	store := deps.Store
-	blocker, source := newBlockedSource(t, store, "blocks")
+	blocker, source := newBlockedSource(t, store)
 
 	result, err := DoSling(SlingOpts{Target: config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}, BeadOrFormula: source.ID, OnFormula: "graph-chain"}, deps, store)
 	if err != nil {
@@ -190,7 +191,7 @@ func TestFormulaOnBlockedBeadReleasesWhenBlockerCloses(t *testing.T) {
 func TestBatchFormulaMemberWaitsForPredecessorMember(t *testing.T) {
 	deps := blockedSourceSlingDeps(t)
 	store := deps.Store
-	first, second := newBlockedSource(t, store, "blocks")
+	first, second := newBlockedSource(t, store)
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	opts := SlingOpts{Target: a, OnFormula: "graph-chain"}
 
@@ -221,5 +222,68 @@ func TestBatchFormulaMemberWaitsForPredecessorMember(t *testing.T) {
 	}
 	if got := beadTitles(readyWorkflowBeads(t, store, secondResult.WorkflowID)); !slices.ContainsFunc(got, func(s string) bool { return strings.HasSuffix(s, " First step") }) {
 		t.Errorf("dependent %s workflow Ready beads after %s closed = %v, want its First step", second.ID, first.ID, got)
+	}
+}
+
+// TestDefaultFormulaOnBlockedBeadWaitsForBlocker is AC-4: a graph workflow
+// launched on a blocked bead through the target's default_sling_formula waits
+// for the blocker.
+func TestDefaultFormulaOnBlockedBeadWaitsForBlocker(t *testing.T) {
+	deps := blockedSourceSlingDeps(t)
+	store := deps.Store
+	blocker, source := newBlockedSource(t, store)
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("graph-chain")}
+
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.WorkflowID == "" {
+		t.Fatalf("WorkflowID is empty, want the default formula's graph workflow (method %q)", result.Method)
+	}
+	if ready := readyWorkflowBeads(t, store, result.WorkflowID); len(ready) > 0 {
+		t.Errorf("workflow beads Ready while %s is blocked by open %s: %v", source.ID, blocker.ID, beadTitles(ready))
+	}
+	if !slices.Equal(result.WaitingOn, []string{blocker.ID}) {
+		t.Errorf("WaitingOn = %v, want [%s]", result.WaitingOn, blocker.ID)
+	}
+}
+
+// TestV1FormulaOnBlockedBeadAddsNoBlockerEdges pins the v1 side of the
+// default-formula path: a v1 molecule routes the source bead itself, whose own
+// edges already hold it, so its beads get no copy of the blockers.
+func TestV1FormulaOnBlockedBeadAddsNoBlockerEdges(t *testing.T) {
+	deps := blockedSourceSlingDeps(t)
+	if err := os.WriteFile(filepath.Join(deps.Cfg.FormulaLayers.City[0], "plain-work.formula.toml"), []byte(`
+formula = "plain-work"
+
+[[steps]]
+id = "do"
+title = "Plain step"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := deps.Store
+	blocker, source := newBlockedSource(t, store)
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("plain-work")}
+
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.WispRootID == "" || result.WorkflowID != "" {
+		t.Fatalf("WispRootID = %q, WorkflowID = %q, want a v1 molecule", result.WispRootID, result.WorkflowID)
+	}
+	if len(result.WaitingOn) != 0 {
+		t.Errorf("WaitingOn = %v, want none for a v1 molecule", result.WaitingOn)
+	}
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range all {
+		if b.ID != source.ID && dependsOn(t, store, b.ID, blocker.ID, "blocks") {
+			t.Errorf("v1 molecule bead %s (%q) got a blocks edge on %s", b.ID, b.Title, blocker.ID)
+		}
 	}
 }

@@ -838,11 +838,16 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		return result, fmt.Errorf("%w", err)
 	}
 	run := func() (SlingResult, error) {
+		blockedBy, err := sourceBlockedBy(deps, beadID)
+		if err != nil {
+			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
+		}
 		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,
 			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
+			BlockedBy:        blockedBy,
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
@@ -851,6 +856,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		if mResult.GraphWorkflow || graphWorkflowAttachmentInGraphStore(deps.GraphStore, wispRootID) {
 			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
+			wfResult.WaitingOn = mResult.BlockedBy
 			return wfResult, wfErr
 		}
 		if err := deps.Store.SetMetadata(beadID, beadmeta.MoleculeIDMetadataKey, wispRootID); err != nil {
@@ -872,16 +878,21 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		return finalize(opts, deps, beadID, method, result)
 	}
 	runGraph := func() (pendingSourceWorkflowLaunch, error) {
+		blockedBy, err := sourceBlockedBy(deps, beadID)
+		if err != nil {
+			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
+		}
 		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,
 			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
+			BlockedBy:        blockedBy,
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
-		return pendingGraphWorkflowLaunch(mResult.RootID, beadID, beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, formulaName, deps), nil
+		return reportWaitingOn(pendingGraphWorkflowLaunch(mResult.RootID, beadID, beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, formulaName, deps), mResult.BlockedBy), nil
 	}
 	if !isGraph {
 		return run()
