@@ -103,10 +103,19 @@ type PackRigDefaults struct {
 // (Layer 3). cityRoot is the city directory (parent of city.toml), used
 // for path resolution.
 func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[string][]string) error {
-	return expandPacks(cfg, fs, cityRoot, rigFormulaDirs, LoadOptions{})
+	return expandPacks(cfg, fs, cityRoot, rigFormulaDirs, LoadOptions{}, nil)
 }
 
-func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[string][]string, opts LoadOptions) error {
+// expandPacks expands every rig's packs into cfg. Rigs in excluded keep
+// their declaration but contribute no pack content. A failure while
+// expanding one rig is returned as a *RigPackError naming that rig.
+func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[string][]string, opts LoadOptions, excluded map[string]bool) (err error) {
+	failingRig := ""
+	defer func() {
+		if err != nil && failingRig != "" {
+			err = &RigPackError{Rig: failingRig, Err: err}
+		}
+	}()
 	var expanded []Agent
 	// City-scoped agents and named sessions encountered through a rig-scope
 	// include/import are hoisted to city scope (deduped) rather than dropped,
@@ -117,6 +126,10 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 	var hoistedNamedSessions []NamedSession
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
+		if excluded[rig.Name] {
+			continue
+		}
+		failingRig = rig.Name
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 		topoRefs := rig.Includes
 		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
@@ -547,6 +560,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		expanded = append(expanded, rigAgents...)
 		cfg.NamedSessions = append(cfg.NamedSessions, rigNamedSessions...)
 	}
+	failingRig = ""
 	cfg.Agents = append(cfg.Agents, expanded...)
 	// Merge hoisted city-scoped agents/sessions (from rig includes/imports)
 	// into the city set, deduped by qualified name. The same pack is commonly
@@ -2811,7 +2825,7 @@ func applyDeferredRigPatches(cfg *City, deferred []deferredRigPatches) error {
 			}
 		}
 		if err := applyOverrides(cfg.Agents[d.agentStart:d.agentEnd], d.overrides, d.rigName); err != nil {
-			return fmt.Errorf("rig %q: %w", d.rigName, err)
+			return &RigPackError{Rig: d.rigName, Err: fmt.Errorf("rig %q: %w", d.rigName, err)}
 		}
 	}
 	return nil

@@ -128,7 +128,18 @@ type LoadOptions struct {
 	// discovery, shell completion — set this and degrade to "no pack state
 	// right now"; a load whose result the caller acts on must leave it false
 	// and wait, because a busy cache would otherwise read as an empty one.
-	RepoCacheNonBlocking    bool
+	RepoCacheNonBlocking bool
+	// IsolateRigPackFailures confines a rig's pack-load failure to that rig.
+	// Instead of failing the whole load, the failing rig is quarantined: its
+	// [[rigs]] declaration stays routable, its pack content is withheld, and
+	// the load reports it in City.QuarantinedRigs and one LoadWarnings entry
+	// (see IsRigQuarantineWarning). Repo-cache lock contention
+	// (ErrRepoCacheBusy) and city-scoped pack failures still fail the load.
+	//
+	// Only one-shot commands that read config set this. A process that acts
+	// on the composed agent set — the controller, start, validators — must
+	// leave it false so it never treats a withheld rig as unconfigured.
+	IsolateRigPackFailures  bool
 	deferRigPatches         bool
 	deferredRigPatches      *[]deferredRigPatches
 	allowLegacyOrderLayouts bool
@@ -145,6 +156,15 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
 func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
+	if opts.IsolateRigPackFailures {
+		return loadIsolatingRigPackFailures(fs, path, opts, extraIncludes)
+	}
+	return loadWithIncludes(fs, path, opts, nil, extraIncludes...)
+}
+
+// loadWithIncludes composes the city. Rigs named in quarantine are composed
+// without their packs; a nil quarantine composes every rig.
+func loadWithIncludes(fs fsys.FS, path string, opts LoadOptions, quarantine *rigQuarantineState, extraIncludes ...string) (*City, *Provenance, error) {
 	// Convention trees are hashed before the load reads them so an edit that
 	// lands mid-load cannot be stamped with a revision newer than the
 	// content loaded (see conventionRevisionInputs).
@@ -547,7 +567,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		rigPackOpts := opts
 		rigPackOpts.deferRigPatches = true
 		rigPackOpts.deferredRigPatches = &deferredRigPatches
-		if err := expandPacks(root, fs, cityRoot, rigFormulaDirs, rigPackOpts); err != nil {
+		if err := expandPacks(root, fs, cityRoot, rigFormulaDirs, rigPackOpts, quarantine.excludedRigs()); err != nil {
 			return nil, nil, fmt.Errorf("expanding packs: %w", err)
 		}
 		if len(root.LoadWarnings) > 0 {
@@ -603,6 +623,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				if targetDir, err := agentPatchTargetDir(&p); err == nil {
 					deferPatch = implicitIDs[agentKey{targetDir, p.Name}]
 				}
+			}
+			// A patch an implicit agent will satisfy is deferred, not
+			// withheld, even when its rig is quarantined.
+			if !deferPatch && quarantine.withholdPatch(root, &p) {
+				continue
 			}
 			if deferPatch {
 				deferredAgentPatches = append(deferredAgentPatches, p)

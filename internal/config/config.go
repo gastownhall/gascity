@@ -327,6 +327,10 @@ type City struct {
 	// imported packs so LoadWithIncludes can surface them through provenance.
 	// Runtime-only — not persisted to TOML or JSON.
 	LoadWarnings []string `toml:"-" json:"-"`
+	// QuarantinedRigs lists the rigs whose pack content a load composed with
+	// LoadOptions.IsolateRigPackFailures withheld because it failed to load.
+	// Their [[rigs]] declarations stay in Rigs. Runtime-only.
+	QuarantinedRigs []RigQuarantine `toml:"-" json:"-"`
 	// ResolvedWorkspaceName is the effective city name derived from the
 	// config file path when workspace.name is omitted. Runtime-only.
 	ResolvedWorkspaceName string `toml:"-" json:"-"`
