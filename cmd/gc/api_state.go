@@ -2843,15 +2843,16 @@ func lexicalContainment(cityPath, resolved string) error {
 // first pass accepts; this pass refuses. TestSymlinkAwareContainmentIsLoadBearing
 // pins exactly those inputs.
 func symlinkAwareContainment(cityPath, resolved string) error {
-	realCity, err := filepath.EvalSymlinks(cityPath)
-	if err != nil {
-		realCity = filepath.Clean(cityPath)
-	}
+	realCity := pathutil.NormalizePathForCompare(cityPath)
 	realTarget, err := realPathForContainment(resolved)
 	if err != nil {
 		return fmt.Errorf("%w: resolving rig path %s: %w", configedit.ErrValidation, resolved, err)
 	}
-	return relWithinCity(realCity, realTarget)
+	// Both operands go through one canonicalizer: realCity is already collapsed
+	// by NormalizePathForCompare (darwin /private/var -> /var), so realTarget,
+	// a bare symlink resolution, must be collapsed the same way or every
+	// in-city rig on a /var or /tmp city reads as escaping it.
+	return relWithinCity(realCity, pathutil.NormalizePathForCompare(realTarget))
 }
 
 // relWithinCity reports the containment error if target is not lexically under
