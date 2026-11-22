@@ -69,3 +69,26 @@ func TestBDReadCoalesce_IdenticalWaitersShareOneChild(t *testing.T) {
 		t.Fatalf("%d children spawned for 1+%d identical calls, want 2", n, joiners)
 	}
 }
+
+// TestBDReadCoalesce_JoinsOnlyBeforeSpawn covers AC-6: a call that arrives
+// after an identical child has started never takes that child's output; it
+// gets a child spawned after the first exits.
+func TestBDReadCoalesce_JoinsOnlyBeforeSpawn(t *testing.T) {
+	t.Parallel()
+	f := newFakeBD(t)
+	gate := newBDExecGate(8)
+	run := f.runner(context.Background(), gate)
+
+	first := runConcurrently(f.root, run, []string{"list --json"})
+	waitFor(t, "the first child to spawn", func() bool { return len(f.spawns()) == 1 })
+	second := runConcurrently(f.root, run, []string{"list --json"})
+	waitFor(t, "the late caller to wait on a flight of its own", func() bool {
+		return gate.coalescer.pendingWaiters() == 1
+	})
+
+	f.releaseSeq(1)
+	wantOutput(t, (<-first)[0], "1 list --json")
+	waitFor(t, "the late caller's child to spawn", func() bool { return len(f.spawns()) == 2 })
+	f.releaseAll()
+	wantOutput(t, (<-second)[0], "2 list --json")
+}
