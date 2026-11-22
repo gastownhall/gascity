@@ -194,8 +194,10 @@ func enqueueCommitPhaseStartShaped(ctx context.Context, t *testing.T, city strin
 	t.Cleanup(run.releaseLease)
 	enqueuePreparedStartWaveForCity(
 		ctx,
-		[]asyncPreparedStart{{
-			item: item,
+		[]asyncAdmittedStart{{
+			candidate:    item.candidate,
+			undoPrepared: func(error, ...startPhaseTimings) {},
+			drop:         func(string, error, ...startPhaseTimings) {},
 			release: func() {
 				run.released.Add(1)
 				slot()
@@ -205,7 +207,9 @@ func enqueueCommitPhaseStartShaped(ctx context.Context, t *testing.T, city strin
 				close(run.finishedC)
 			},
 		}},
-		city, sp, store, nil, clk, run.rec, postStartTimeout, 1, ioDiscard{}, run.stderr, nil,
+		city, sp, store, nil, clk, run.rec,
+		func(startCandidate) (*preparedStart, prepareTimings, error) { return &item, prepareTimings{}, nil },
+		postStartTimeout, 1, ioDiscard{}, run.stderr, nil,
 		func() { run.followUps.Add(1) },
 		waiter, immediateSessionStaleKeyDetectionWaiter, nil,
 	)

@@ -64,7 +64,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
 	clk := &clock.Fake{Time: time.Date(2026, 5, 13, 16, 23, 30, 0, time.UTC)}
 
-	prepared, err := prepareStartCandidateForCity(
+	prepared, _, err := prepareStartCandidateForCity(
 		startCandidate{info: env.sessionInfo(got.ID), tp: tp, order: 0},
 		"", "", cfg, env.sp, env.store, clk, io.Discard, nil, dispatchOptionSources{},
 	)
@@ -472,7 +472,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderStartsBare(
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
 	clk := &clock.Fake{Time: time.Date(2026, 8, 24, 12, 46, 13, 0, time.UTC)}
-	prepared, err := prepareStartCandidateForCity(
+	prepared, _, err := prepareStartCandidateForCity(
 		startCandidate{info: env.sessionInfo(session.ID), tp: tp, order: 0},
 		"", "", cfg, env.sp, env.store, clk, io.Discard, nil, dispatchOptionSources{},
 	)

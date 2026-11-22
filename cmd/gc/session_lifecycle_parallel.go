@@ -40,9 +40,10 @@ const (
 	// preparation stays chunked so flapping dependencies are observed between batches.
 	defaultStartDependencyRecheckBatchSize = 3
 
-	// defaultStartPrepareBudget bounds the time one planner call spends in
-	// prepareStartCandidateForCity, summed over its candidates. The controller
-	// reconcile sites opt in with withPrepareBudget.
+	// defaultStartPrepareBudget bounds the time the control dispatcher's
+	// synchronous planner call spends in prepareStartCandidateForCity, summed
+	// over its candidates. The main tick's async pass prepares on its start
+	// goroutines and opts out with withPrepareBudget unset.
 	defaultStartPrepareBudget = 60 * time.Second
 
 	// Stops and interrupts are teardown paths, so their parallelism is not
@@ -302,11 +303,113 @@ type preparedStart struct {
 	// manual conversation, which the caller records as
 	// session.conversation_reset (staleKeyConversationResetEvent).
 	conversationReset bool
-	prepareTimings    startPrepareTimings
 	// runtimeBinding is the patch recording the thread the runtime hosts
 	// the session in, read once the start succeeded (startedRuntimeBinding);
 	// the start commit applies it.
 	runtimeBinding sessionpkg.MetadataPatch
+	// prepare times the preparation that built this start, phase by phase.
+	prepare prepareTimings
+}
+
+// prepareTimings breaks a start's preparation (prepareStartCandidateForCity)
+// into its phases, on the reconciler clock, through a failure as well as a
+// success. ran records which phases ran (record), so a phase that ran in
+// under a millisecond is still reported, and one that did not run is absent.
+// Total is the whole preparation up to its result or error.
+type prepareTimings struct {
+	LockGet       time.Duration // mutation lock and session row re-read
+	PreWake       time.Duration // PreWake commit on the re-read row
+	NamedSnapshot time.Duration // configured named session's template refresh
+	Build         time.Duration // launch environment and config hash build
+	Total         time.Duration
+	ran           preparePhase
+}
+
+// preparePhase is one measured phase of prepareStartCandidateForCity, as a
+// bit of prepareTimings.ran.
+type preparePhase uint8
+
+const (
+	preparePhaseLockGet preparePhase = 1 << iota
+	preparePhasePreWake
+	preparePhaseNamedSnapshot
+	preparePhaseBuild
+)
+
+// record sets phase's duration and marks it as run.
+func (t *prepareTimings) record(phase preparePhase, d time.Duration) {
+	switch phase {
+	case preparePhaseLockGet:
+		t.LockGet = d
+	case preparePhasePreWake:
+		t.PreWake = d
+	case preparePhaseNamedSnapshot:
+		t.NamedSnapshot = d
+	case preparePhaseBuild:
+		t.Build = d
+	}
+	t.ran |= phase
+}
+
+// addPrepareTimingFields puts a preparation's timings on fields, the payload
+// of a record of the start's final outcome. A phase that ran is on the
+// record, as 0 when it took under half a millisecond; a phase that did not
+// run stays off it. prepare_ms is the whole preparation. spent, when a
+// prepare budget is configured, is the pass's cumulative charge, as on the
+// budget's deferral record.
+func addPrepareTimingFields(fields traceRecordPayload, timings prepareTimings, spent *time.Duration) {
+	for _, phase := range []struct {
+		field    string
+		phase    preparePhase
+		duration time.Duration
+	}{
+		{traceFieldLockGetMS, preparePhaseLockGet, timings.LockGet},
+		{traceFieldPreWakeMS, preparePhasePreWake, timings.PreWake},
+		{traceFieldNamedSnapshotMS, preparePhaseNamedSnapshot, timings.NamedSnapshot},
+		{traceFieldBuildMS, preparePhaseBuild, timings.Build},
+	} {
+		if timings.ran&phase.phase != 0 {
+			fields[phase.field] = phase.duration.Round(time.Millisecond).Milliseconds()
+		}
+	}
+	fields[traceFieldPrepareMS] = timings.Total.Round(time.Millisecond).Milliseconds()
+	if spent != nil {
+		fields[traceFieldSpentMS] = spent.Milliseconds()
+	}
+}
+
+// withPrepareTimings returns fields carrying the start's preparation timings.
+func (r startResult) withPrepareTimings(fields traceRecordPayload) traceRecordPayload {
+	addPrepareTimingFields(fields, r.phases.Prepare, nil)
+	return fields
+}
+
+// recordStartOutcome traces a start's final outcome at
+// reconciler.start.execute with its preparation's timings and, when a prepare
+// budget is configured, the pass's cumulative charge.
+func recordStartOutcome(trace *sessionReconcilerTraceCycle, result startResult, spent *time.Duration) {
+	if trace == nil {
+		return
+	}
+	elapsed := result.finished.Sub(result.started)
+	fields := traceRecordPayload{
+		"rollback_pending": result.rollbackPending,
+		"duration_ms":      elapsed.Milliseconds(),
+	}
+	addPrepareTimingFields(fields, result.phases.Prepare, spent)
+	trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), elapsed, fields)
+}
+
+// recordStartPrepareFailure traces a start whose preparation failed at
+// reconciler.start.execute: its outcome and error, the preparation's timings
+// and, when a prepare budget is configured, the pass's cumulative charge.
+func recordStartPrepareFailure(trace *sessionReconcilerTraceCycle, outcome TraceOutcomeCode, err error, template, session string, duration time.Duration, timings prepareTimings, spent *time.Duration) {
+	if trace == nil {
+		return
+	}
+	fields := traceRecordPayload{"error": formatLifecycleError(err)}
+	addPrepareTimingFields(fields, timings, spent)
+	trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, outcome, "", template, session, duration, fields)
 }
 
 type startResult struct {
@@ -375,39 +478,15 @@ type startResult struct {
 // sub-phases visible from runPreparedStartCandidate +
 // commitAsyncStartResultWithContext. Each duration is wall-clock; zero
 // means the phase did not execute (e.g. PostStartObserve only runs when
-// session_key is set, CommitRefresh only on the async path).
+// session_key is set, CommitRefresh only on the async path). Prepare holds
+// the preparation that ran before the start, on the reconciler clock.
 type startPhaseTimings struct {
+	Prepare           prepareTimings
 	StartCall         time.Duration // startPreparedStartCandidate total (provider Start + any ErrStateSync recovery)
 	ZombieRecycle     time.Duration // provider Stop of a running session whose agent process died (subset of StartCall; ga-yms)
 	StateSyncRecovery time.Duration // workerSessionTargetRunningWithConfig branch when provider Start returned ErrStateSync (subset of StartCall; gc-9ha)
 	PostStartObserve  time.Duration // stability wait + workerObserveSessionTarget when session_key present
 	CommitRefresh     time.Duration // refreshAsyncStartResult bead reload (async path only)
-}
-
-// startPrepareTimings accounts only for preparation, before provider Start.
-// Spent is the planner call's cumulative charge when this prepare finishes.
-type startPrepareTimings struct {
-	LockGet       time.Duration
-	PreWake       time.Duration
-	NamedSnapshot time.Duration
-	Build         time.Duration
-	Spent         time.Duration
-}
-
-func recordStartExecution(trace *sessionReconcilerTraceCycle, result startResult) {
-	if trace == nil {
-		return
-	}
-	p := result.prepared.prepareTimings
-	trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
-		"rollback_pending":  result.rollbackPending,
-		"duration_ms":       result.finished.Sub(result.started).Milliseconds(),
-		"lock_get_ms":       p.LockGet.Milliseconds(),
-		"prewake_ms":        p.PreWake.Milliseconds(),
-		"named_snapshot_ms": p.NamedSnapshot.Milliseconds(),
-		"build_ms":          p.Build.Milliseconds(),
-		"spent_ms":          p.Spent.Milliseconds(),
-	})
 }
 
 // formatLog returns the trailing segment to append to a lifecycle log
@@ -421,24 +500,25 @@ func recordStartExecution(trace *sessionReconcilerTraceCycle, result startResult
 // 0.5ms doesn't print as "...=0s" (which would be misleading and
 // defeat the elision intent). Sub-ms durations are dropped entirely.
 func (p startPhaseTimings) formatLog() string {
-	if p.StartCall == 0 && p.ZombieRecycle == 0 && p.StateSyncRecovery == 0 && p.PostStartObserve == 0 && p.CommitRefresh == 0 {
-		return ""
+	phases := []struct {
+		name     string
+		duration time.Duration
+	}{
+		{"lock_get", p.Prepare.LockGet},
+		{"prewake", p.Prepare.PreWake},
+		{"named_snapshot", p.Prepare.NamedSnapshot},
+		{"build", p.Prepare.Build},
+		{"start_call", p.StartCall},
+		{"zombie_recycle", p.ZombieRecycle},
+		{"state_sync_recovery", p.StateSyncRecovery},
+		{"post_start_observe", p.PostStartObserve},
+		{"commit_refresh", p.CommitRefresh},
 	}
 	var parts []string
-	if r := p.StartCall.Round(time.Millisecond); r > 0 {
-		parts = append(parts, fmt.Sprintf("start_call=%s", r))
-	}
-	if r := p.ZombieRecycle.Round(time.Millisecond); r > 0 {
-		parts = append(parts, fmt.Sprintf("zombie_recycle=%s", r))
-	}
-	if r := p.StateSyncRecovery.Round(time.Millisecond); r > 0 {
-		parts = append(parts, fmt.Sprintf("state_sync_recovery=%s", r))
-	}
-	if r := p.PostStartObserve.Round(time.Millisecond); r > 0 {
-		parts = append(parts, fmt.Sprintf("post_start_observe=%s", r))
-	}
-	if r := p.CommitRefresh.Round(time.Millisecond); r > 0 {
-		parts = append(parts, fmt.Sprintf("commit_refresh=%s", r))
+	for _, phase := range phases {
+		if r := phase.duration.Round(time.Millisecond); r > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%s", phase.name, r))
+		}
 	}
 	if len(parts) == 0 {
 		return ""
@@ -503,6 +583,10 @@ type startExecutionOptions struct {
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
+	// admittedStartLookup reads the in-process admitted-start registry for
+	// dependency liveness (a synchronous caller passes it read-only). Nil on
+	// an async pass derives it from asyncTracker.
+	admittedStartLookup admittedStartLookup
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -530,6 +614,16 @@ func withAsyncStartLimiter(limiter *asyncStartLimiter) startExecutionOption {
 func withAsyncStartTracker(tracker *asyncStartTracker) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.asyncTracker = tracker
+	}
+}
+
+// withAdmittedStartLookup passes the in-process admitted-start registry to a
+// synchronous pass, whose own prepares run on its tick: its dependency checks
+// still see the async starts the controller's tracker admitted. An async pass
+// derives the lookup from its tracker when this is not given.
+func withAdmittedStartLookup(lookup admittedStartLookup) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.admittedStartLookup = lookup
 	}
 }
 
@@ -625,8 +719,10 @@ func withOnDeathGate(gate *onDeathGate) startExecutionOption {
 }
 
 // withPrepareBudget caps the cumulative time one planner call spends in
-// prepareStartCandidateForCity. Zero or negative (or the option omitted)
-// leaves prepare unbounded.
+// prepareStartCandidateForCity on the planner goroutine itself: its
+// synchronous preparation. An async pass prepares on its start goroutines and
+// neither charges nor consults the budget. Zero or negative (or the option
+// omitted) leaves prepare unbounded.
 func withPrepareBudget(d time.Duration) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.prepareBudget = d
@@ -686,6 +782,11 @@ type asyncStartTracker struct {
 	// a provider swap's wait (waitLaunchedStarts).
 	launched         int
 	drainAckStopKeys sync.Map
+	// startNames maps the runtime name of each admitted start that has not
+	// finished to its admission's token (markStartInFlight): an admitted
+	// async start may not have PreWoken yet, so dependency liveness reads
+	// this registry until its in-flight marker exists (startInFlight).
+	startNames sync.Map
 	// admitted counts the starts handed out by start and not yet finished, for
 	// busy. It is read without mu, from the controller's tick.
 	admitted atomic.Int64
@@ -715,6 +816,46 @@ func (t *asyncStartTracker) start() (func(), bool) {
 // or drain-ack stop) has not finished. It is a non-blocking read, unlike wait.
 func (t *asyncStartTracker) busy() bool {
 	return t != nil && t.admitted.Load() > 0
+}
+
+// markStartInFlight records that an admitted start is preparing or running
+// under name, so dependency liveness (startInFlight) can see a start that has
+// not PreWoken yet — its in-flight marker does not exist until PreWake. The
+// returned func removes this admission's record and nothing else: a start
+// unmarks when it counts done, after its runtime lease is released, so a
+// later admission of the same name may already have replaced the record, and
+// that admission's record must survive the earlier start's unmark. The
+// returned func is idempotent.
+func (t *asyncStartTracker) markStartInFlight(name string) func() {
+	if t == nil {
+		return func() {}
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return func() {}
+	}
+	token := new(admittedStartToken)
+	t.startNames.Store(name, token)
+	return func() { t.startNames.CompareAndDelete(name, token) }
+}
+
+// admittedStartToken identifies one admission's record in
+// asyncStartTracker.startNames. Each admission allocates its own, so pointer
+// identity tells the admissions of one name apart.
+type admittedStartToken struct{ _ byte }
+
+// startInFlight reports whether an admitted start is preparing or running
+// under name. A nil tracker holds nothing.
+func (t *asyncStartTracker) startInFlight(name string) bool {
+	if t == nil {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	_, ok := t.startNames.Load(name)
+	return ok
 }
 
 func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
@@ -808,11 +949,44 @@ func (t *asyncStartTracker) waitUntil(timeout time.Duration, shouldStop func() b
 	}
 }
 
-type asyncPreparedStart struct {
-	item preparedStart
-	// prepare runs under the reserved slot and runtime lease, before Start.
-	// Nil means item was already prepared by the caller.
-	prepare func() (*preparedStart, error)
+// asyncAdmittedStart is one async start the pass has admitted — slot
+// reserved, runtime lease taken, capacity ticket held, restart recorded — and
+// handed to its own goroutine before preparation: the goroutine prepares it
+// off the reconciler tick and runs it to its commit.
+// admittedStartLookup reports whether an admitted async start is preparing or
+// running under the session name. Dependency liveness consults it before the
+// runtime liveness probe, so a dependent waits for a dependency whose start
+// was admitted but has not PreWoken yet (its in-flight marker does not exist
+// until PreWake). The registry is in-process: a start another host admitted
+// stays visible only through its marker.
+type admittedStartLookup func(sessionName string) bool
+
+// inFlight is admittedStartLookup's nil-safe read.
+func (l admittedStartLookup) inFlight(name string) bool {
+	return l != nil && l(name)
+}
+
+type asyncAdmittedStart struct {
+	// candidate carries the admission's runtime lease (candidate.lease) and
+	// the row identity preparation re-reads.
+	candidate startCandidate
+	// ticket is the endpoint capacity admission; preparation hands it to the
+	// prepared start, and undoPrepared returns it when preparation fails.
+	ticket *capacityTicket
+	// undoPrepared rolls back an admission whose preparation failed with err:
+	// a superseded PreWake restores the breaker snapshot (no restart
+	// happened), anything else clears the row's in-flight marker, then the
+	// admission's ticket, lease and slot are released, the start counted
+	// done, and the failed outcome logged with the preparation's phases.
+	// Call it at most once.
+	undoPrepared func(err error, phases ...startPhaseTimings)
+	// drop releases the admission — ticket, lease, slot, done count — logging
+	// outcome ("" logs nothing) with the phases it is given, and writing
+	// nothing else. undoPrepared ends by calling it; the pass calls it for
+	// starts whose goroutine never launched. The slot release is shared with
+	// the goroutine's own release through a once, so no path can double-free
+	// the slot.
+	drop func(outcome string, err error, phases ...startPhaseTimings)
 	// release gives back the start's async slot. It does no store I/O, so the
 	// start goroutine can run it whatever state the store is in.
 	release func()
@@ -975,7 +1149,7 @@ func dependencyTemplateAlive(
 	cityName string,
 	store beads.Store,
 	clk clock.Clock,
-	cityPaths ...string,
+	admitted admittedStartLookup,
 ) bool {
 	if cfg == nil || template == "" {
 		return false
@@ -989,7 +1163,7 @@ func dependencyTemplateAlive(
 			if tp.TemplateName != template {
 				continue
 			}
-			if dependencySessionStartInFlight(store, name, cfg, clk, cityPaths...) {
+			if dependencySessionStartInFlight(store, name, cfg, clk) || admitted.inFlight(name) {
 				continue
 			}
 			if alive, err := workerSessionTargetAliveWithConfig(store, sp, cfg, name, tp.Hints.ProcessNames); err == nil && alive {
@@ -998,7 +1172,7 @@ func dependencyTemplateAlive(
 		}
 	}
 	sessionName := lookupSessionNameOrLegacy(store, cityName, template, cfg.Workspace.SessionTemplate)
-	if dependencySessionStartInFlight(store, sessionName, cfg, clk, cityPaths...) {
+	if dependencySessionStartInFlight(store, sessionName, cfg, clk) || admitted.inFlight(sessionName) {
 		return false
 	}
 	depTP := desiredState[sessionName]
@@ -1006,7 +1180,7 @@ func dependencyTemplateAlive(
 	return err == nil && alive
 }
 
-func dependencySessionStartInFlight(store beads.Store, sessionName string, cfg *config.City, clk clock.Clock, cityPaths ...string) bool {
+func dependencySessionStartInFlight(store beads.Store, sessionName string, cfg *config.City, clk clock.Clock) bool {
 	sessionName = strings.TrimSpace(sessionName)
 	if store == nil || sessionName == "" {
 		return false
@@ -1033,12 +1207,6 @@ func dependencySessionStartInFlight(store beads.Store, sessionName string, cfg *
 		if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
 			return true
 		}
-		// Async preparation owns the runtime lease before PreWake publishes
-		// last_woke_at. An old live runtime is not a ready dependency while
-		// that lease is held; an unreadable lease also leaves it waiting.
-		if len(cityPaths) > 0 && cityPaths[0] != "" && startHolderLive(store, cityPaths[0], info) {
-			return true
-		}
 	}
 	return false
 }
@@ -1063,6 +1231,7 @@ func candidateWaveOrder(
 	cityName string,
 	store beads.Store,
 	clk clock.Clock,
+	admitted admittedStartLookup,
 ) (map[int]int, bool) {
 	if len(candidates) == 0 {
 		return map[int]int{}, true
@@ -1087,7 +1256,7 @@ func candidateWaveOrder(
 			continue
 		}
 		for _, dep := range cfgAgent.DependsOn {
-			if dependencyTemplateAlive(dep, cfg, desiredState, sp, cityName, store, clk) {
+			if dependencyTemplateAlive(dep, cfg, desiredState, sp, cityName, store, clk, admitted) {
 				continue
 			}
 			if candidateTemplates[dep] {
@@ -1116,11 +1285,13 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
-	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil, dispatchOptionSources{})
+	prepared, _, err := prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil, dispatchOptionSources{})
+	return prepared, err
 }
 
 // prepareStartCandidateForCity prepares a start for candidate within the city at
-// cityPath. workDirResolver resolves the task work dir; dispatchSources read the
+// cityPath, timing its phases on clk for the start's trace record and lifecycle
+// line. workDirResolver resolves the task work dir; dispatchSources read the
 // session's trigger bead for opt_* pins when it holds no claimed work, and the
 // zero value reads the session store only, for a same-store trigger stamp.
 // errStartUserHeld refuses a legacy start whose locked re-read shows an
@@ -1138,18 +1309,16 @@ func prepareStartCandidateForCity(
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
 	dispatchSources dispatchOptionSources,
-	timingOutput ...*startPrepareTimings,
-) (*preparedStart, error) {
-	timings := &startPrepareTimings{}
-	if len(timingOutput) > 0 && timingOutput[0] != nil {
-		timings = timingOutput[0]
-	}
-	if clk == nil {
-		clk = clock.Real{}
-	}
+) (prepared *preparedStart, timings prepareTimings, err error) {
+	entered := prepareClockNow(clk)
+	defer func() {
+		timings.Total = prepareElapsed(clk, entered)
+		if prepared != nil {
+			prepared.prepare = timings
+		}
+	}()
 	var undo preWakeUndo
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
-		lockBegan := clk.Now()
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
 			sessFront := sessionFrontDoor(store)
 			// GENUINE store re-Get (WI-6 R4): the whole bead is reloaded through the
@@ -1162,7 +1331,8 @@ func prepareStartCandidateForCity(
 			// documented front-door-Get delta from the former raw store.Get. This is
 			// the SANCTIONED cross-goroutine freshness re-read, not a per-patch re-Get.
 			current, persisted, err := sessFront.GetPersistedResponse(id)
-			timings.LockGet = max(0, clk.Now().Sub(lockBegan))
+			// The lock's wait is part of the re-read's cost.
+			timings.record(preparePhaseLockGet, prepareElapsed(clk, entered))
 			if err != nil {
 				return err
 			}
@@ -1176,9 +1346,9 @@ func prepareStartCandidateForCity(
 			// byte-coherent with the persisted state without a second Get. It shares
 			// preWakeCommit's error contract: a failed re-read already returned above,
 			// so the twin is never folded from a stale/rejected bead.
-			preWakeBegan := clk.Now()
+			preWakeBegin := prepareClockNow(clk)
 			inc, fold, err := preWakeCommitUnder(current, sessFront, clk, candidate.lease)
-			timings.PreWake = max(0, clk.Now().Sub(preWakeBegan))
+			timings.record(preparePhasePreWake, prepareElapsed(clk, preWakeBegin))
 			if err != nil {
 				return err
 			}
@@ -1187,20 +1357,22 @@ func prepareStartCandidateForCity(
 			candidate.info = current.ApplyPatch(fold)
 			return nil
 		}); err != nil {
-			return nil, err
+			return nil, timings, err
 		}
 	} else {
-		preWakeBegan := clk.Now()
+		preWakeBegin := prepareClockNow(clk)
 		_, _, fold, err := preWakeCommit(candidate.info, sessionFrontDoor(store), clk)
-		timings.PreWake = max(0, clk.Now().Sub(preWakeBegan))
+		timings.record(preparePhasePreWake, prepareElapsed(clk, preWakeBegin))
 		if err != nil {
-			return nil, err
+			return nil, timings, err
 		}
 		candidate.info = candidate.info.ApplyPatch(fold)
 	}
-	namedBegan := clk.Now()
-	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
-	timings.NamedSnapshot = max(0, clk.Now().Sub(namedBegan))
+	if store != nil && refreshesNamedStartCandidate(candidate, cfg) {
+		namedSnapshotBegin := prepareClockNow(clk)
+		candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+		timings.record(preparePhaseNamedSnapshot, prepareElapsed(clk, namedSnapshotBegin))
+	}
 	// buildPreparedStart folds its own post-append mutations (stale-resume clears,
 	// session_key / instance_token mints) onto candidate.info at their write sites, so
 	// the returned prepared.candidate.info stays coherent with the store WITHOUT a
@@ -1208,14 +1380,36 @@ func prepareStartCandidateForCity(
 	// recordWakeFailure's session_key/started_config_hash) read that folded twin. The
 	// partial-Info second return is only load-bearing for recoverRunningPendingCreate's
 	// abort residue; here the prepared already carries it, so it is discarded.
-	buildBegan := clk.Now()
-	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver, dispatchSources)
-	timings.Build = max(0, clk.Now().Sub(buildBegan))
+	buildBegin := prepareClockNow(clk)
+	prepared, _, err = buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver, dispatchSources)
+	timings.record(preparePhaseBuild, prepareElapsed(clk, buildBegin))
 	if prepared != nil && undo.written != nil {
 		undo.token = prepared.candidate.info.InstanceToken
 		prepared.preWakeUndo = undo
 	}
-	return prepared, err
+	return prepared, timings, err
+}
+
+// prepareElapsed is the time since from on the preparation clock. A clock
+// that moved backwards reads as no time.
+func prepareElapsed(clk clock.Clock, from time.Time) time.Duration {
+	return max(0, prepareClockNow(clk).Sub(from))
+}
+
+// prepareClockNow reads the clock a preparation is timed and charged on: the
+// reconciler clock, or the wall clock when none is configured.
+func prepareClockNow(clk clock.Clock) time.Time {
+	if clk == nil {
+		return time.Now()
+	}
+	return clk.Now()
+}
+
+// refreshesNamedStartCandidate reports whether
+// refreshConfiguredNamedStartCandidate, given a store, re-resolves candidate
+// from a session snapshot: a persisted configured named session with a config.
+func refreshesNamedStartCandidate(candidate startCandidate, cfg *config.City) bool {
+	return strings.TrimSpace(candidate.info.ID) != "" && cfg != nil && isNamedSessionInfo(candidate.info)
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -1228,7 +1422,7 @@ func refreshConfiguredNamedStartCandidate(
 	clk clock.Clock,
 	stderr io.Writer,
 ) startCandidate {
-	if strings.TrimSpace(candidate.info.ID) == "" || cfg == nil || store == nil || !isNamedSessionInfo(candidate.info) {
+	if store == nil || !refreshesNamedStartCandidate(candidate, cfg) {
 		return candidate
 	}
 	if cityName == "" {
@@ -2033,6 +2227,8 @@ collect:
 			started:   waveStarted,
 			finished:  abandonedAt,
 			abandoned: true,
+			// The wave gave up before this start ran; its preparation did.
+			phases: startPhaseTimings{Prepare: prepared[i].prepare},
 		}
 	}
 	return out
@@ -2075,12 +2271,15 @@ func runPreparedStartCandidate(
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			stack := debug.Stack()
+			// The preparation's phases are known before the start runs, so
+			// they survive a panic that loses the start's own.
 			result = startResult{
 				prepared: item,
 				err:      fmt.Errorf("panic during start: %v\n%s", recovered, stack),
 				outcome:  TraceOutcomePanicRecovered,
 				started:  started,
 				finished: time.Now(),
+				phases:   startPhaseTimings{Prepare: item.prepare},
 			}
 		}
 	}()
@@ -2091,7 +2290,7 @@ func runPreparedStartCandidate(
 		startCtx, cancel = context.WithTimeout(ctx, startupTimeout)
 	}
 	defer cancel()
-	var phases startPhaseTimings
+	phases := startPhaseTimings{Prepare: item.prepare}
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
@@ -2382,15 +2581,39 @@ func postStartDeathPane(
 	return runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(item.cfg.Env))
 }
 
+// errPreparePanicked wraps a panic recovered from an admitted async start's
+// preparation.
+var errPreparePanicked = errors.New("panic during async start preparation")
+
+// prepareAsyncStart runs an admitted async start's preparation and turns a
+// panic inside it into an error wrapping errPreparePanicked. The start
+// goroutine has no tick-level recover, so an unrecovered panic there would
+// take the controller down instead of failing one start. A panicking
+// preparation reports no phase: it stopped between its own writes.
+func prepareAsyncStart(prepare func(startCandidate) (*preparedStart, prepareTimings, error), candidate startCandidate) (item *preparedStart, timings prepareTimings, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			item = nil
+			timings = prepareTimings{}
+			err = fmt.Errorf("%w: %v\n%s", errPreparePanicked, recovered, debug.Stack())
+		}
+	}()
+	return prepare(candidate)
+}
+
 func enqueuePreparedStartWaveForCity(
 	ctx context.Context,
-	prepared []asyncPreparedStart,
+	admitted []asyncAdmittedStart,
 	cityPath string,
 	sp runtime.Provider,
 	store beads.Store,
 	cfg *config.City,
 	clk clock.Clock,
 	rec events.Recorder,
+	// prepare builds the admitted candidate's prepared start. It runs on the
+	// start goroutine, off the reconciler tick, so one slow prepare holds
+	// only this start's slot and lease, never the tick.
+	prepare func(startCandidate) (*preparedStart, prepareTimings, error),
 	startupTimeout time.Duration,
 	wave int,
 	stdout, stderr io.Writer,
@@ -2400,17 +2623,15 @@ func enqueuePreparedStartWaveForCity(
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
 	warmClaim warmClaimTriggerProbe,
 ) []startResult {
-	if len(prepared) == 0 {
+	if len(admitted) == 0 {
 		return nil
 	}
 	stabilityWaiter = resolveStartStabilityWaiter(stabilityWaiter)
-	results := make([]startResult, len(prepared))
-	for i, reserved := range prepared {
-		item := clonePreparedStartForAsync(reserved.item)
-		release := reserved.release
+	results := make([]startResult, len(admitted))
+	for i, reserved := range admitted {
 		now := time.Now()
 		results[i] = startResult{
-			prepared: item,
+			prepared: preparedStart{candidate: reserved.candidate},
 			outcome:  TraceOutcomeStartEnqueued,
 			started:  now,
 			finished: now,
@@ -2420,55 +2641,94 @@ func enqueuePreparedStartWaveForCity(
 			if done != nil {
 				defer done()
 			}
-			defer func() {
-				if trace != nil {
-					_ = trace.flushCurrentBatch(TraceDurabilityDurable)
-				}
-			}()
 			var releaseOnce sync.Once
 			releaseStart := func() {
-				if release != nil {
-					releaseOnce.Do(release)
+				if reserved.release != nil {
+					releaseOnce.Do(reserved.release)
 				}
 			}
 			defer releaseStart()
-			// The start holds the item's runtime lease (nil when it holds none)
-			// until the commit phase takes it over; a panic before then
+			// The start holds the candidate's runtime lease (nil when it holds
+			// none) until the commit phase takes it over; a panic before then
 			// abandons it, a flock-only drop that makes no store call.
-			lease := item.candidate.lease
+			lease := reserved.candidate.lease
 			leaseHandedOff := false
 			defer func() {
 				if !leaseHandedOff {
 					lease.Abandon()
 				}
 			}()
-			watched, unwatch := watchStartLease(ctx, item)
-			defer func() {
-				if !leaseHandedOff {
-					unwatch()
+			// Preparation runs here, off the tick. Its failures run the same
+			// undo the pass once ran inline: restore or clear, then release.
+			// Every failure exit also leaves one reconciler.start.execute
+			// record — the planner already reported start_enqueued, so the
+			// final outcome must be traced here — flushed durably like the
+			// commit does.
+			begin := time.Now()
+			recordFailure := func(outcome TraceOutcomeCode, err error, phases startPhaseTimings) {
+				recordStartPrepareFailure(trace, outcome, err, reserved.candidate.tp.TemplateName, reserved.candidate.name(), time.Since(begin), phases.Prepare, nil)
+				if trace != nil {
+					_ = trace.flushCurrentBatch(TraceDurabilityDurable)
 				}
-			}()
-			if reserved.prepare != nil {
-				prepared, err := reserved.prepare()
-				if err != nil {
-					lease.Release()
-					return // prepare records the failure; deferred calls release the slot
-				}
-				item = *prepared
 			}
-			var result startResult
-			if watched.Err() != nil {
-				// Nothing reached the provider. Use the wave's store-only
-				// abandonment path, retaining the pending create for a later tick.
-				abandonCapacityTicket(item.capacityTicket, rec, stderr)
-				result = startResult{prepared: item, outcome: TraceOutcomeDeferred, abandoned: true, started: now, finished: time.Now()}
+			var sessFront *sessionpkg.Store
+			if store != nil {
+				sessFront = sessionFrontDoor(store)
+			}
+			var item *preparedStart
+			if ctx != nil && ctx.Err() != nil {
+				// The record and its durable flush precede the undo: the
+				// undo's done count is what waits on this start, so every
+				// failure exit leaves the record observable before it
+				// releases.
+				recordFailure(TraceOutcomeContextCanceled, ctx.Err(), startPhaseTimings{})
+				reserved.drop("context_canceled", ctx.Err())
+			} else if prepared, timings, err := prepareAsyncStart(prepare, reserved.candidate); err != nil {
+				if errors.Is(err, errPreparePanicked) {
+					// Preparation stopped between its own writes, so its
+					// row gets the marker clear a failed prepare gets (a
+					// no-op when PreWake never ran) and the start counts as
+					// panic_recovered, as a panicking commit does.
+					recordFailure(TraceOutcomePanicRecovered, err, startPhaseTimings{})
+					clearPendingStartInFlightLease(reserved.candidate.info.ID, sessFront, stderr)
+					reserved.drop("panic_recovered", err)
+				} else {
+					phases := startPhaseTimings{Prepare: timings}
+					recordFailure(TraceOutcomeFailed, err, phases)
+					reserved.undoPrepared(err, phases)
+				}
+			} else if ctx != nil && ctx.Err() != nil {
+				// Canceled between a successful prepare and provider Start:
+				// nothing launched, so undo PreWake while the lease is still
+				// held (the restore also clears the in-flight marker), then
+				// release with context_canceled.
+				phases := startPhaseTimings{Prepare: timings}
+				recordFailure(TraceOutcomeContextCanceled, ctx.Err(), phases)
+				restorePreWakeState(*prepared, sessFront, stderr)
+				reserved.drop("context_canceled", ctx.Err(), phases)
 			} else {
-				result = runPreparedStartCandidate(watched, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
-				// Resolve before the commit so a stale, refused, or panicking
-				// commit cannot lose the endpoint verdict.
-				result = resolveStartCapacity(result, rec, stderr)
+				item = prepared
 			}
-			recordStartExecution(trace, result)
+			if item == nil {
+				if asyncFollowUp != nil {
+					asyncFollowUp()
+				}
+				return
+			}
+			if item.conversationReset && rec != nil {
+				rec.Record(staleKeyConversationResetEvent(item.candidate.info, item.candidate.tp))
+			}
+			item.capacityTicket = reserved.ticket
+			watched, unwatch := watchStartLease(ctx, *item)
+			result := runPreparedStartCandidate(watched, *item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
+			// Resolve before the commit so a stale, refused, or panicking
+			// commit cannot lose the endpoint verdict.
+			result = resolveStartCapacity(result, rec, stderr)
+			// The start's outcome as it ran: the same record the synchronous
+			// pass writes for its starts, so an async start that reached
+			// provider Start leaves one whatever its commit then decides. An
+			// async preparation charges no prepare budget.
+			recordStartOutcome(trace, result, nil)
 			// Bounded: a commit that wedges on the store or the runtime must not
 			// hold the slot (SESSION-RUNTIME-035). Resolving the endpoint
 			// verdict above stays outside the bound. The lease and the watch
@@ -2828,18 +3088,6 @@ func asyncStartStaleRuntimeCleanupAllowedInfo(prepared, current sessionpkg.Info)
 // fallback.
 func asyncStartIdentityMatchesInfo(prepared, current sessionpkg.Info) bool {
 	return sessionpkg.LeaseFromInfo(prepared).SameIdentity(sessionpkg.LeaseFromInfo(current))
-}
-
-// clonePreparedStartForAsync returns an independent copy of the prepared start so
-// a concurrent async enqueue works against its own value. Since WI-6 R4 deleted the
-// raw session bead pointer, the only session state is item.candidate.info, a value
-// type: passing item by value already copies it. Its Labels/AliasHistory slices
-// share backing with the original, but the async start path never mutates them
-// (Info.ApplyPatch returns a fresh Info without touching the receiver's slices —
-// TestInfoApplyPatchDoesNotMutateReceiver), so the value copy is sufficient and the
-// former raw-bead deep copy collapses away.
-func clonePreparedStartForAsync(item preparedStart) preparedStart {
-	return item
 }
 
 func startPreparedStartCandidate(
@@ -3662,10 +3910,10 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
 		}
 		if trace != nil {
-			trace.RecordOperation(TraceSiteLifecycleStartTerminalProviderError, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartTerminalProviderError, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, result.withPrepareTimings(traceRecordPayload{
 				"error":  formatLifecycleError(result.err),
 				"reason": reason,
-			})
+			}))
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
@@ -3676,18 +3924,18 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		if _, rlErr := recordRateLimitQuarantine(result.prepared.candidate.info, sessFront, clk); rlErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, rlErr) //nolint:errcheck
 			if trace != nil {
-				trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHoldDeferred, "", tp.TemplateName, name, 0, traceRecordPayload{
+				trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHoldDeferred, "", tp.TemplateName, name, 0, result.withPrepareTimings(traceRecordPayload{
 					"error": formatLifecycleError(result.err),
 					"cause": rlErr.Error(),
-				})
+				}))
 			}
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 			return
 		}
 		if trace != nil {
-			trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHeld, "", tp.TemplateName, name, 0, traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHeld, "", tp.TemplateName, name, 0, result.withPrepareTimings(traceRecordPayload{
 				"error": formatLifecycleError(result.err),
-			})
+			}))
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
@@ -3712,9 +3960,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// pending-create bead's replacement so a session name that never
 		// gets past pending-create still quarantines (ga-o04bfr.1.1).
 		if trace != nil {
-			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, result.withPrepareTimings(traceRecordPayload{
 				"error": formatLifecycleError(result.err),
-			})
+			}))
 		}
 		recordStartupHealthFailure(info, name, tp.TemplateName, result.err, sessFront, clk, rec, stderr)
 		if !result.prepared.candidate.configured || result.diedDuringStartup {
@@ -3779,9 +4027,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	rf := startResumeFailure(result.prepared.resumed, result.diedDuringStartup, result.prepared.candidate.info.SessionKey, result.err, result.diedPane)
 	_ = recordWakeFailure(result.prepared.candidate.info, result.prepared.transcriptRoots, sessFront, clk, tp.DisplayName(), rf, rec)
 	if trace != nil {
-		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
+		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, result.withPrepareTimings(traceRecordPayload{
 			"error": formatLifecycleError(result.err),
-		})
+		}))
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 }
@@ -4865,37 +5113,45 @@ func rollbackPendingCreateClearingClaim(info sessionpkg.Info, sessFront *session
 }
 
 // prepareMeter charges the time one planner call spends in
-// prepareStartCandidateForCity against the call's prepare budget. A limit of
-// zero or less never defers.
+// prepareStartCandidateForCity on its own goroutine, its synchronous
+// preparation, against the call's prepare budget. Starts prepared on their
+// own goroutines are not charged. A limit of zero or less never defers.
 type prepareMeter struct {
-	mu      sync.Mutex
 	limit   time.Duration
 	clk     clock.Clock
 	spent   time.Duration
+	began   time.Time
 	summary bool
 }
 
 // now reads the meter's clock, falling back to the wall clock when it has none.
 func (m *prepareMeter) now() time.Time {
-	if m.clk == nil {
-		return time.Now()
+	return prepareClockNow(m.clk)
+}
+
+// charge reports the pass's cumulative prepare time when a budget is
+// configured, and nil otherwise: without a budget nothing is charged.
+func (m *prepareMeter) charge() *time.Duration {
+	if m == nil || m.limit <= 0 {
+		return nil
 	}
-	return m.clk.Now()
+	spent := m.spent
+	return &spent
 }
 
 // begin starts timing one prepare.
-func (m *prepareMeter) begin() time.Time {
-	return m.now()
+func (m *prepareMeter) begin() {
+	if m.limit > 0 {
+		m.began = m.now()
+	}
 }
 
 // end charges the prepare begin started, a failed one included. A clock that
 // moved backwards charges nothing.
-func (m *prepareMeter) end(began time.Time) time.Duration {
-	elapsed := max(0, m.now().Sub(began))
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.spent += elapsed
-	return m.spent
+func (m *prepareMeter) end() {
+	if m.limit > 0 {
+		m.spent += max(0, m.now().Sub(m.began))
+	}
 }
 
 // deferIfSpent reports whether the budget is spent and, if so, defers the
@@ -4903,8 +5159,6 @@ func (m *prepareMeter) end(began time.Time) time.Duration {
 // first time in a planner call. The deferral happens before any slot, lease,
 // ticket, breaker accounting or write.
 func (m *prepareMeter) deferIfSpent(stderr io.Writer, trace *sessionReconcilerTraceCycle, wave int, candidate startCandidate, cfg *config.City) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.limit <= 0 || m.spent < m.limit {
 		return false
 	}
@@ -4915,8 +5169,8 @@ func (m *prepareMeter) deferIfSpent(stderr io.Writer, trace *sessionReconcilerTr
 	logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByPrepareBudget), time.Time{}, time.Time{}, nil)
 	if trace != nil {
 		trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonPrepareBudgetSpent, TraceOutcomeDeferredByPrepareBudget, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
-			"spent_ms":  m.spent.Milliseconds(),
-			"budget_ms": m.limit.Milliseconds(),
+			traceFieldSpentMS:  m.spent.Milliseconds(),
+			traceFieldBudgetMS: m.limit.Milliseconds(),
 		})
 	}
 	return true
@@ -4976,7 +5230,16 @@ func executePlannedStartsTraced(
 	if startOpts.async && asyncLimiter == nil {
 		asyncLimiter = newAsyncStartLimiter(maxWakes)
 	}
-	waveByCandidate, ok := candidateWaveOrder(candidates, cfg, desiredState, sp, cityName, store, clk)
+	// Dependency liveness consults the async tracker's admitted-start
+	// registry: an admitted start may not have PreWoken yet, so its marker is
+	// the only other witness, and it does not exist until PreWake. A
+	// caller's explicit lookup (a synchronous pass holding the registry
+	// read-only) wins; a synchronous caller without one sees none.
+	admittedLookup := startOpts.admittedStartLookup
+	if admittedLookup == nil && startOpts.async {
+		admittedLookup = startOpts.asyncTracker.startInFlight
+	}
+	waveByCandidate, ok := candidateWaveOrder(candidates, cfg, desiredState, sp, cityName, store, clk, admittedLookup)
 	if !ok {
 		fmt.Fprintln(stderr, "session reconciler: dependency graph fallback to serial start order") //nolint:errcheck
 	}
@@ -5011,6 +5274,17 @@ func executePlannedStartsTraced(
 			release()
 		}
 	}()
+	// asyncAdmitted holds this batch's async admissions whose start
+	// goroutines have not launched yet (cleared once the enqueue launched
+	// them). Their slot and tracker count are owned by the entry, so every
+	// early return between admission and enqueue drops them: the ticket and
+	// lease defers above release those two, but not the slot or the count.
+	var asyncAdmitted []asyncAdmittedStart
+	defer func() {
+		for i := range asyncAdmitted {
+			asyncAdmitted[i].drop("", nil)
+		}
+	}()
 	wakeCount := 0
 	prepareSpend := &prepareMeter{limit: startOpts.prepareBudget, clk: clk}
 	for wave := 0; wave <= maxWave; wave++ {
@@ -5040,7 +5314,7 @@ func executePlannedStartsTraced(
 			if ctx != nil && ctx.Err() != nil {
 				return wakeCount
 			}
-			if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk, cityPath) {
+			if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk, admittedLookup) {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 				continue
 			}
@@ -5068,12 +5342,11 @@ func executePlannedStartsTraced(
 			end := min(offset+batchSize, len(ready))
 			batchCandidates := ready[offset:end]
 			var prepared []preparedStart
-			var asyncPrepared []asyncPreparedStart
 			for _, candidate := range batchCandidates {
 				if ctx != nil && ctx.Err() != nil {
 					return wakeCount
 				}
-				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk, cityPath) {
+				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk, admittedLookup) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 					continue
 				}
@@ -5105,14 +5378,20 @@ func executePlannedStartsTraced(
 					}
 					var reserved bool
 					var outcome string
-					release, reserved, outcome = reserveAsyncStartSlot(ctx, asyncLimiter)
-					slotRelease = release
+					slot, reserved, outcome := reserveAsyncStartSlot(ctx, asyncLimiter)
 					if !reserved {
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
 						deferrals.noteStartOutcome(outcome, candidate.info.ID)
 						continue
 					}
+					// The slot release is not idempotent — a second call frees
+					// a slot another start reserved — and the admission's drop
+					// shares it with the start goroutine's own release, so
+					// guard it with a once.
+					var slotOnce sync.Once
+					slotRelease = func() { slotOnce.Do(slot) }
+					release = slotRelease
 				}
 				// The start holds the runtime name's flock from here through its
 				// commit (I-LEASE), and takes the row's record just before PreWake,
@@ -5139,6 +5418,20 @@ func executePlannedStartsTraced(
 						release = func() { dropLease(); slot() }
 					} else {
 						release = dropLease
+					}
+				}
+				if startOpts.async && leased {
+					// The admission is visible to dependency liveness from
+					// here until the start counts done: a dependent must wait
+					// for a dependency whose start was admitted but has not
+					// PreWoken (its marker does not exist until PreWake).
+					unmark := startOpts.asyncTracker.markStartInFlight(startLeaseName(candidate))
+					countDone := done
+					done = func() {
+						unmark()
+						if countDone != nil {
+							countDone()
+						}
 					}
 				}
 				// Endpoint capacity admission comes before the identity
@@ -5172,16 +5465,19 @@ func executePlannedStartsTraced(
 				if ticket != nil {
 					admitted = append(admitted, ticket)
 				}
-				drop := func(outcome string, err error) {
+				drop := func(outcome string, err error, phases ...startPhaseTimings) {
 					abandonCapacityTicket(ticket, rec, stderr)
 					if release != nil {
 						release()
 					}
+					if outcome != "" {
+						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, err, phases...)
+					}
+					// Last, so the tracker's done count (which the tick's
+					// async-drain wait gates on) means the whole drop — the
+					// releases and the lifecycle log line — has finished.
 					if done != nil {
 						done()
-					}
-					if outcome != "" {
-						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, err)
 					}
 				}
 				identity, cbNow := "", clk.Now().UTC()
@@ -5214,6 +5510,7 @@ func executePlannedStartsTraced(
 					}
 				}
 				var cbBefore sessionCircuitBreakerEntrySnapshot
+				var cbAfter sessionCircuitBreakerEntrySnapshot
 				if identity != "" {
 					cbBefore = cb.entrySnapshot(identity)
 					state, err := recordSessionCircuitBreakerRestart(sessFront, candidate.info.ID, cb, identity, cbNow)
@@ -5232,51 +5529,72 @@ func executePlannedStartsTraced(
 						}
 						continue
 					}
-				}
-				prepare := func() (item *preparedStart, err error) {
-					started := time.Now()
-					began := prepareSpend.begin()
-					var timings startPrepareTimings
-					defer func() {
-						timings.Spent = prepareSpend.end(began)
-						if recovered := recover(); recovered != nil {
-							err = fmt.Errorf("panic during start prepare: %v\n%s", recovered, debug.Stack())
-						}
-						if err != nil {
-							// A superseded PreWake is no restart and leaves the
-							// in-flight marker to whoever moved the row.
-							if errors.Is(err, errPreWakeSuperseded) {
-								cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
-							} else {
-								clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
-							}
-							fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
-							abandonCapacityTicket(ticket, rec, stderr)
-							logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", started, time.Now(), err)
-							recordStartExecution(trace, startResult{prepared: preparedStart{candidate: candidate, prepareTimings: timings}, outcome: TraceOutcomeFailed, started: started, finished: time.Now(), err: err})
-							return
-						}
-						item.prepareTimings = timings
-						item.capacityTicket = ticket
-						if item.conversationReset && rec != nil {
-							rec.Record(staleKeyConversationResetEvent(item.candidate.info, item.candidate.tp))
-						}
-					}()
-					return prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.dispatchOptionSources, &timings)
+					// An async start's prepare failure undoes the restart a
+					// whole prepare later: the undo is conditional on the
+					// entry still matching this post-record snapshot, so a
+					// progress observation or Reset landing in between wins.
+					cbAfter = cb.entrySnapshot(identity)
 				}
 				if startOpts.async {
-					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: preparedStart{candidate: candidate}, prepare: prepare, release: slotRelease, done: done, tracker: startOpts.asyncTracker})
-				} else {
-					item, err := prepare()
-					if err != nil {
-						drop("", nil)
-						continue
+					// An async start prepares on its own goroutine, under its
+					// slot and runtime lease, off this tick. Its failures run
+					// the same undo this pass once ran inline.
+					undoPrepared := func(err error, phases ...startPhaseTimings) {
+						// A PreWake refused because the row moved (or the lease
+						// was taken over) is no restart and leaves the row's
+						// in-flight marker to whoever moved it; the next pass
+						// decides again. The restore is conditional: the
+						// refusal lands a whole prepare after the record.
+						if errors.Is(err, errPreWakeSuperseded) {
+							cb.restoreEntrySnapshotIfUnchanged(sessFront, candidate.info.ID, identity, cbBefore, cbAfter, cbNow, stderr)
+						} else {
+							clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+						}
+						fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
+						drop("failed", err, phases...)
 					}
-					prepared = append(prepared, *item)
+					// The probe is handed to the start goroutine here, at
+					// admission: it owns the ticket from now on.
+					if ticket != nil && ticket.probe {
+						probed[endpoint] = true
+					}
+					asyncAdmitted = append(asyncAdmitted, asyncAdmittedStart{
+						candidate:    candidate,
+						ticket:       ticket,
+						undoPrepared: undoPrepared,
+						drop:         drop,
+						release:      slotRelease,
+						done:         done,
+						tracker:      startOpts.asyncTracker,
+					})
+					continue
 				}
+				prepareSpend.begin()
+				item, timings, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.dispatchOptionSources)
+				prepareSpend.end()
+				if err != nil {
+					phases := startPhaseTimings{Prepare: timings}
+					recordStartPrepareFailure(trace, TraceOutcomeFailed, err, candidate.tp.TemplateName, candidate.name(), timings.Total, timings, prepareSpend.charge())
+					// A PreWake refused because the row moved (or the lease was
+					// taken over) is no restart and leaves the row's in-flight
+					// marker to whoever moved it; the next pass decides again.
+					if errors.Is(err, errPreWakeSuperseded) {
+						cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
+					} else {
+						clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+					}
+					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
+					drop("failed", err, phases)
+					continue
+				}
+				if item.conversationReset && rec != nil {
+					rec.Record(staleKeyConversationResetEvent(item.candidate.info, item.candidate.tp))
+				}
+				item.capacityTicket = ticket
 				if ticket != nil && ticket.probe {
 					probed[endpoint] = true
 				}
+				prepared = append(prepared, *item)
 			}
 			offset = end
 			var results []startResult
@@ -5284,10 +5602,15 @@ func executePlannedStartsTraced(
 				return wakeCount
 			}
 			if startOpts.async {
-				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
-				// The start goroutines own these tickets and leases now.
+				results = enqueuePreparedStartWaveForCity(ctx, asyncAdmitted, cityPath, sp, store, cfg, clk, rec,
+					func(candidate startCandidate) (*preparedStart, prepareTimings, error) {
+						return prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.dispatchOptionSources)
+					},
+					startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
+				// The start goroutines own these tickets, leases and drops now.
 				admitted = admitted[:0]
 				leases = leases[:0]
+				asyncAdmitted = nil
 				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {
 					asyncFollowUpRequired = true
 				}
@@ -5310,7 +5633,16 @@ func executePlannedStartsTraced(
 				if !startOpts.async {
 					result = resolveStartCapacity(result, rec, stderr)
 				}
-				recordStartExecution(trace, result)
+				if trace != nil && result.outcome != TraceOutcomeStartEnqueued {
+					recordStartOutcome(trace, result, prepareSpend.charge())
+				} else if trace != nil {
+					// An enqueued start has not prepared: its goroutine traces
+					// the final outcome, with the preparation's timings.
+					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
+						"rollback_pending": result.rollbackPending,
+						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
+					})
+				}
 				if result.outcome == TraceOutcomeStartEnqueued {
 					logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.logicalTemplate(cfg), string(result.outcome), result.started, result.finished, nil)
 					wakeCount++

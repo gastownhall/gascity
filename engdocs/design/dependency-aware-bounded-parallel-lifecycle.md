@@ -129,6 +129,13 @@ The start pipeline is:
 7. Before dispatching a later wave, dependency liveness is revalidated at
    the wave boundary. A dependency template counts as satisfied only if
    it still has a currently alive instance at dispatch time.
+8. A dependency template also counts as unsatisfied while one of its
+   starts is admitted but still preparing (async starts prepare off the
+   reconciler tick, holding their slot and runtime lease from admission):
+   in-flight admitted starts block dependents ahead of liveness, so a
+   dependent never starts against an older incarnation of a dependency
+   whose replacement start is still preparing
+   (SESSION-RUNTIME-036).
 
 This matches current semantics for both singleton and pool dependencies:
 dependents only need “an alive instance” of the dependency template.

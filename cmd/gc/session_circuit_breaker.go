@@ -701,6 +701,10 @@ func recordSessionCircuitBreakerRestart(
 type sessionCircuitBreakerEntrySnapshot struct {
 	entry   *circuitBreakerEntry
 	existed bool
+	// resetGeneration is identity's reset generation when the snapshot was
+	// taken; a manual Reset between two snapshots invalidates a restore that
+	// compares them.
+	resetGeneration uint64
 }
 
 // entrySnapshot captures identity's entry, to undo a restart that turned out
@@ -708,7 +712,11 @@ type sessionCircuitBreakerEntrySnapshot struct {
 func (b *sessionCircuitBreaker) entrySnapshot(identity string) sessionCircuitBreakerEntrySnapshot {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return sessionCircuitBreakerEntrySnapshot{entry: cloneCircuitBreakerEntry(b.entries[identity]), existed: b.entries[identity] != nil}
+	return sessionCircuitBreakerEntrySnapshot{
+		entry:           cloneCircuitBreakerEntry(b.entries[identity]),
+		existed:         b.entries[identity] != nil,
+		resetGeneration: b.resetGenerations[identity],
+	}
 }
 
 // restoreEntrySnapshot undoes a restart recorded for a start that never ran
@@ -724,6 +732,66 @@ func (b *sessionCircuitBreaker) restoreEntrySnapshot(sessFront *session.Store, i
 	if err := persistSessionCircuitBreakerMetadata(sessFront, id, b, identity, now); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// circuitBreakerEntriesEqual reports whether two entries hold the same state.
+func circuitBreakerEntriesEqual(a, b *circuitBreakerEntry) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if !a.lastRestart.Equal(b.lastRestart) || !a.lastProgress.Equal(b.lastProgress) ||
+		!a.lastObserved.Equal(b.lastObserved) || a.progressSig != b.progressSig ||
+		a.observedSig != b.observedSig || a.state != b.state || !a.openedAt.Equal(b.openedAt) ||
+		a.openRestartCnt != b.openRestartCnt || a.loggedOpenOnce != b.loggedOpenOnce ||
+		len(a.restarts) != len(b.restarts) {
+		return false
+	}
+	for i := range a.restarts {
+		if !a.restarts[i].Equal(b.restarts[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// entryUnchangedSince reports whether identity's entry and reset generation
+// still equal after's: nothing has touched the identity's breaker state since
+// that snapshot was taken.
+func (b *sessionCircuitBreaker) entryUnchangedSince(identity string, after sessionCircuitBreakerEntrySnapshot) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.resetGenerations[identity] != after.resetGeneration {
+		return false
+	}
+	current := b.entries[identity]
+	if after.existed != (current != nil) {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	return circuitBreakerEntriesEqual(cloneCircuitBreakerEntry(current), after.entry)
+}
+
+// restoreEntrySnapshotIfUnchanged undoes a restart recorded for a start that
+// never ran, but only while nothing else has touched identity's breaker since
+// after was taken: a later tick's progress observation or a manual Reset wins,
+// and the current entry and its persisted metadata are kept, so a phantom
+// restart may stay counted, which only errs toward tripping. Use this (not
+// restoreEntrySnapshot) whenever the undo runs later than the same admission:
+// an async start's prepare failure lands a whole prepare after the record. No
+// identity is a no-op.
+func (b *sessionCircuitBreaker) restoreEntrySnapshotIfUnchanged(sessFront *session.Store, id, identity string, before, after sessionCircuitBreakerEntrySnapshot, now time.Time, stderr io.Writer) {
+	if b == nil || identity == "" {
+		return
+	}
+	if !b.entryUnchangedSince(identity, after) {
+		if err := persistSessionCircuitBreakerMetadata(sessFront, id, b, identity, now); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	b.restoreEntrySnapshot(sessFront, id, identity, before, now, stderr)
 }
 
 func cloneCircuitBreakerEntry(e *circuitBreakerEntry) *circuitBreakerEntry {

@@ -638,7 +638,7 @@ func TestBuildPreparedStart_TriggerBeadOptionsDoNotChangeCoreHash(t *testing.T) 
 
 func TestPrepareStartCandidateForCityThreadsTriggerBeadResolver(t *testing.T) {
 	sessionStore, rigStore, candidate := rigResidentTrigger(t)
-	prepared, err := prepareStartCandidateForCity(candidate, "", "", &config.City{}, nil, sessionStore,
+	prepared, _, err := prepareStartCandidateForCity(candidate, "", "", &config.City{}, nil, sessionStore,
 		&clock.Fake{Time: time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{trigger: rigStore.Get})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)

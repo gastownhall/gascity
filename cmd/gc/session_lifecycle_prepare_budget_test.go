@@ -2,26 +2,29 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"maps"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/resilience"
-	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
 
-// The cumulative prepare-time budget (ga-r7s62t, Refs #7170): one planner call
-// stops preparing new candidates once the calls to prepareStartCandidateForCity
-// have together spent the budget, and defers the rest to the next tick before
-// any slot, lease, ticket, breaker accounting or write.
+// The cumulative prepare-time budget (ga-r7s62t, Refs #7170): one synchronous
+// planner call stops preparing new candidates once the calls to
+// prepareStartCandidateForCity have together spent the budget, and defers the
+// rest to the next tick before any slot, lease, ticket, breaker accounting or
+// write. An async pass prepares on its start goroutines, off the planner, and
+// the budget does not apply to it.
 
 const (
 	prepareBudgetOutcome = "deferred_by_prepare_budget"
@@ -74,7 +77,7 @@ func inPrepare() bool {
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
 	for {
 		f, more := frames.Next()
-		if strings.HasSuffix(f.Function, ".prepareStartCandidateForCity") || strings.HasSuffix(f.Function, ".prepareStartCandidateForCityTimed") {
+		if strings.HasSuffix(f.Function, ".prepareStartCandidateForCity") {
 			return true
 		}
 		if !more {
@@ -195,19 +198,10 @@ func (e *prepareBudgetEnv) deferredByBudget() []string {
 }
 
 // requireDeferred asserts the named candidates were deferred by the budget:
-// logged on stderr and recorded as trace decisions. An async pass flushes the
-// cycle's records after enqueueing its starts, so there the decisions are
-// counted instead of read back.
-func (e *prepareBudgetEnv) requireDeferred(t *testing.T, async bool, want ...string) {
+// logged on stderr and recorded as trace decisions.
+func (e *prepareBudgetEnv) requireDeferred(t *testing.T, want ...string) {
 	t.Helper()
-	if async {
-		e.trace.mu.Lock()
-		got := e.trace.decisionCounts[string(TraceSiteLifecycleStartRun)]
-		e.trace.mu.Unlock()
-		if got != len(want) {
-			t.Fatalf("lifecycle_start_run trace decisions = %d, want %d\n%s", got, len(want), e.log.String())
-		}
-	} else if got := e.deferredByBudget(); strings.Join(got, ",") != strings.Join(want, ",") {
+	if got := e.deferredByBudget(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("trace deferred_by_prepare_budget = %v, want %v\n%s", got, want, e.log.String())
 	}
 	for _, name := range want {
@@ -251,7 +245,7 @@ func TestExecutePlannedStarts_PrepareBudgetDefersRestOnceSpent(t *testing.T) {
 	if n := e.sp.CountCalls("Start", "a"); n != 1 {
 		t.Fatalf("a Start calls = %d, want 1", n)
 	}
-	e.requireDeferred(t, false, "b", "c")
+	e.requireDeferred(t, "b", "c")
 	e.requireUntouched(t, b, bBefore)
 	e.requireUntouched(t, c, cBefore)
 	if n := strings.Count(e.log.String(), "prepare budget exhausted"); n != 1 {
@@ -259,40 +253,66 @@ func TestExecutePlannedStarts_PrepareBudgetDefersRestOnceSpent(t *testing.T) {
 	}
 }
 
-// An async batch admits candidates before preparation charges its meter.
-// A slow prepare cannot make its peers wait for that charge.
-func TestExecutePlannedStarts_AsyncPrepareBudgetDoesNotSerialize(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		e := newPrepareBudgetEnv(t, "a", "b")
-		a := e.candidate(t, "a", testPrepareBudget+time.Second)
-		b := e.candidate(t, "b", 0)
-		store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
-		var tracker asyncStartTracker
-		defer func() {
-			close(store.release)
-			if !tracker.wait(hangBudget) {
-				t.Error("async starts did not finish")
+// The budget bounds the planner goroutine's own preparation. An async pass
+// prepares on its start goroutines, so with a budget configured and every
+// preparation outlasting it, one planner call admits all three candidates.
+func TestExecutePlannedStarts_AsyncPreparesIgnorePrepareBudget(t *testing.T) {
+	e := newPrepareBudgetEnv(t, "a", "b", "c")
+	a := e.candidate(t, "a", testPrepareBudget+time.Second)
+	b := e.candidate(t, "b", testPrepareBudget+time.Second)
+	c := e.candidate(t, "c", testPrepareBudget+time.Second)
+
+	if woken := e.run(testPrepareBudget, true, nil, a, b, c); woken != 3 {
+		t.Fatalf("woken = %d, want 3: an async pass defers nothing by the prepare budget\n%s", woken, e.log.String())
+	}
+	enqueued := map[string]int{}
+	for _, line := range strings.Split(e.log.String(), "\n") {
+		for _, name := range []string{"a", "b", "c"} {
+			if strings.Contains(line, "session="+name+" ") && strings.Contains(line, "outcome="+string(TraceOutcomeStartEnqueued)) {
+				enqueued[name]++
 			}
-		}()
-		opts := append([]startExecutionOption(nil), e.startOptions...)
-		opts = append(opts, withPrepareBudget(testPrepareBudget), withAsyncStartExecution(), withAsyncStartTracker(&tracker))
-		done := make(chan int, 1)
-		go func() {
-			done <- executePlannedStartsTraced(context.Background(), []startCandidate{a, b}, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
-		}()
-		synctest.Wait()
-		select {
-		case n := <-done:
-			if n != 2 {
-				t.Fatalf("enqueued = %d, want 2", n)
+		}
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		if enqueued[name] != 1 {
+			t.Fatalf("%s start_enqueued lines = %d, want 1\n%s", name, enqueued[name], e.log.String())
+		}
+		if n := e.sp.CountCalls("Start", name); n != 1 {
+			t.Fatalf("%s Start calls = %d, want 1\n%s", name, n, e.log.String())
+		}
+	}
+	e.trace.mu.Lock()
+	deferred := e.trace.outcomeCounts[string(TraceOutcomeDeferredByPrepareBudget)]
+	e.trace.mu.Unlock()
+	if deferred != 0 {
+		t.Fatalf("trace records with outcome %s = %d, want 0\n%s", TraceOutcomeDeferredByPrepareBudget, deferred, e.log.String())
+	}
+	if n := strings.Count(e.log.String(), "prepare budget exhausted"); n != 0 {
+		t.Fatalf("summary lines = %d, want none:\n%s", n, e.log.String())
+	}
+}
+
+// The runtime lease of a start is taken after the gate, so a candidate the
+// budget defers holds none of it.
+func TestExecutePlannedStarts_PrepareBudgetDeferralTakesNoLease(t *testing.T) {
+	e := newPrepareBudgetEnv(t, "a", "b")
+	a := e.candidate(t, "a", testPrepareBudget)
+	b := e.candidate(t, "b", time.Second)
+
+	e.run(testPrepareBudget, false, nil, a, b)
+
+	e.requireDeferred(t, "b")
+	if rec := e.sessionInfo(b.info.ID); rec.SessionName != "b" {
+		t.Fatalf("b row unreadable: %+v", rec)
+	}
+	if _, err := os.Stat(e.city + "/.gc/runtime-leases"); err == nil {
+		entries, _ := os.ReadDir(e.city + "/.gc/runtime-leases")
+		for _, ent := range entries {
+			if strings.Contains(ent.Name(), "b") && !strings.Contains(ent.Name(), "a") {
+				t.Fatalf("b took a runtime lease: %s", ent.Name())
 			}
-		default:
-			t.Fatal("budget serialized async prepares")
 		}
-		if aStarts, bStarts := e.sp.CountCalls("Start", "a"), e.sp.CountCalls("Start", "b"); aStarts != 0 || bStarts != 1 {
-			t.Fatalf("Start calls while a prepares: a=%d b=%d, want 0,1", aStarts, bStarts)
-		}
-	})
+	}
 }
 
 // The first candidate of a planner call is always prepared, even when the
@@ -365,7 +385,7 @@ func TestExecutePlannedStarts_PrepareBudgetCarriesAcrossWaves(t *testing.T) {
 	if woken := e.run(testPrepareBudget, false, nil, a, b); woken != 1 {
 		t.Fatalf("woken = %d, want 1", woken)
 	}
-	e.requireDeferred(t, false, "b")
+	e.requireDeferred(t, "b")
 	e.requireUntouched(t, b, bBefore)
 }
 
@@ -383,7 +403,7 @@ func TestExecutePlannedStarts_PrepareBudgetCountsSlowFailingPrepare(t *testing.T
 	if !strings.Contains(e.log.String(), "session=a template=a outcome=failed") {
 		t.Fatalf("a's failed prepare not logged:\n%s", e.log.String())
 	}
-	e.requireDeferred(t, false, "b")
+	e.requireDeferred(t, "b")
 	e.requireUntouched(t, b, bBefore)
 }
 
@@ -600,7 +620,7 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralTakesNoCapacityTicket(t *test
 		if n := e.sp.CountCalls("Start", "a"); n != 1 {
 			t.Fatalf("Start calls for the probe taker a = %d, want 1\n%s", n, e.log.String())
 		}
-		e.requireDeferred(t, false, "b")
+		e.requireDeferred(t, "b")
 		if got := capacityDeferred(e); len(got) != 0 {
 			t.Fatalf("deferred_by_endpoint_capacity for %v, want none (the budget gate precedes admission)\n%s", got, e.log.String())
 		}
@@ -627,7 +647,7 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralLeavesDueProbeUntaken(t *test
 
 	e.run(testPrepareBudget, false, nil, a, b)
 
-	e.requireDeferred(t, false, "b")
+	e.requireDeferred(t, "b")
 	if st := e.breakerStatus(capacityTestEndpoint); st.State != resilience.StateOpen {
 		t.Fatalf("endpoint state after the deferral = %v, want open (b must not have been admitted as the probe)\n%s", st.State, e.log.String())
 	}
@@ -647,7 +667,7 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralPayload(t *testing.T) {
 
 	e.run(testPrepareBudget, false, nil, a, b)
 
-	e.requireDeferred(t, false, "b")
+	e.requireDeferred(t, "b")
 	var found int
 	for _, r := range e.records(TraceSiteLifecycleStartRun) {
 		if string(r.OutcomeCode) != prepareBudgetOutcome {
@@ -669,16 +689,12 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralPayload(t *testing.T) {
 	}
 }
 
-// The option is wired at the two controller reconcile sites and not at the
-// one-shot `gc start`.
+// The option is wired into the control dispatcher's synchronous planner call
+// only. The main tick's pass is async, prepares on its start goroutines and
+// is bounded by its start slots, and the one-shot `gc start` does not opt in.
 func TestPrepareBudgetWiring(t *testing.T) {
-	const wiring = "withPrepareBudget(defaultStartPrepareBudget)"
-	rt, err := os.ReadFile("city_runtime.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := strings.Count(string(rt), wiring); n != 2 {
-		t.Fatalf("city_runtime.go wires the prepare budget %d times, want 2 (reconcileStartOptions, controlDispatcherTick)", n)
+	if sites := startOptionCallers(t, "city_runtime.go", "withPrepareBudget"); len(sites) != 1 || sites[0] != "controlDispatcherTick" {
+		t.Fatalf("city_runtime.go calls withPrepareBudget from %v, want exactly [controlDispatcherTick]", sites)
 	}
 	start, err := os.ReadFile("cmd_start.go")
 	if err != nil {
@@ -689,6 +705,50 @@ func TestPrepareBudgetWiring(t *testing.T) {
 	}
 }
 
+// Async start execution is wired into the main tick's pass only: the control
+// dispatcher's synchronous planner call and the one-shot `gc start` keep
+// preparing inline on the planner goroutine (AC-8).
+func TestAsyncStartExecutionWiring(t *testing.T) {
+	if sites := startOptionCallers(t, "city_runtime.go", "withAsyncStartExecution"); len(sites) != 1 || sites[0] != "beadReconcileTick" {
+		t.Fatalf("city_runtime.go calls withAsyncStartExecution from %v, want exactly [beadReconcileTick]", sites)
+	}
+	start, err := os.ReadFile("cmd_start.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(start), "withAsyncStartExecution") {
+		t.Fatal("cmd_start.go (one-shot gc start) must not use async start execution")
+	}
+}
+
+// startOptionCallers names, in source order, the functions in file that call
+// the named start execution option.
+func startOptionCallers(t *testing.T, file, option string) []string {
+	t.Helper()
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	var callers []string
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == option {
+				callers = append(callers, fn.Name.Name)
+			}
+			return true
+		})
+	}
+	return callers
+}
+
 // The harness charges the clock inside prepare itself, which is what the
 // budget tests rely on.
 func TestPrepareLatencyStore_ChargesInsidePrepare(t *testing.T) {
@@ -696,7 +756,7 @@ func TestPrepareLatencyStore_ChargesInsidePrepare(t *testing.T) {
 	a := e.candidate(t, "a", 7*time.Second)
 	before := e.clk.Now()
 
-	if _, err := prepareStartCandidateForCity(a, e.city, "", e.cfg, e.sp, e.lat, e.clk, &e.log, nil, dispatchOptionSources{}); err != nil {
+	if _, _, err := prepareStartCandidateForCity(a, e.city, "", e.cfg, e.sp, e.lat, e.clk, &e.log, nil, dispatchOptionSources{}); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	if got := e.clk.Now().Sub(before); got != 7*time.Second {
@@ -706,24 +766,24 @@ func TestPrepareLatencyStore_ChargesInsidePrepare(t *testing.T) {
 
 // The meter's own edges, beside the behavior tests: a nil clock falls back to
 // the wall clock, a backwards clock charges nothing, a limit of zero or less
-// never defers, and spent exactly at the limit defers.
+// never defers or reads the clock, and spent exactly at the limit defers.
 func TestPrepareMeter(t *testing.T) {
 	cand := startCandidate{tp: TemplateParams{TemplateName: "w", SessionName: "w"}}
 	f := &clock.Fake{Time: time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)}
 
 	t.Run("nil clock falls back to the wall clock", func(t *testing.T) {
 		m := &prepareMeter{limit: time.Hour}
-		began := m.begin()
-		m.end(began)
+		m.begin()
+		m.end()
 		if m.spent < 0 || m.spent >= time.Hour {
 			t.Fatalf("spent = %s, want a small non-negative wall-clock charge", m.spent)
 		}
 	})
 	t.Run("backwards clock charges nothing", func(t *testing.T) {
 		m := &prepareMeter{limit: time.Second, clk: f}
-		began := m.begin()
+		m.begin()
 		f.Advance(-time.Minute)
-		m.end(began)
+		m.end()
 		if m.spent != 0 {
 			t.Fatalf("spent = %s, want 0", m.spent)
 		}
@@ -746,278 +806,4 @@ func TestPrepareMeter(t *testing.T) {
 			t.Fatal("did not defer exactly at the limit")
 		}
 	})
-}
-
-// prepareBarrierStore holds the first prepare read before PreWake writes.
-// Reads made by the tick (dependency checks and runtime-lease admission) pass.
-type prepareBarrierStore struct {
-	beads.Store
-	id      string
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
-}
-
-func (s *prepareBarrierStore) Get(id string) (beads.Bead, error) {
-	if id == s.id && inPrepare() {
-		s.once.Do(func() {
-			close(s.entered)
-			<-s.release
-		})
-	}
-	return s.Store.Get(id)
-}
-
-// Preparation must not hold the tick, and its slot and lease must exclude a
-// second attempt even before PreWake has published the in-flight marker.
-func TestExecutePlannedStarts_AsyncPrepareOffTick(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		e := newPrepareBudgetEnv(t, "a")
-		a := e.candidate(t, "a", 0)
-		store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
-		var tracker asyncStartTracker
-		defer func() {
-			close(store.release)
-			if !tracker.wait(hangBudget) {
-				t.Error("async starts did not finish")
-			}
-		}()
-		limiter := newAsyncStartLimiter(2)
-		opts := append([]startExecutionOption(nil), e.startOptions...)
-		opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker), withAsyncStartLimiter(limiter))
-		run := func() int {
-			return executePlannedStartsTraced(context.Background(), []startCandidate{a}, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
-		}
-		done := make(chan int, 1)
-		go func() { done <- run() }()
-		synctest.Wait()
-		select {
-		case <-store.entered:
-		default:
-			t.Fatal("prepare did not reach the barrier")
-		}
-		select {
-		case n := <-done:
-			if n != 1 {
-				t.Fatalf("enqueued = %d, want 1", n)
-			}
-		default:
-			t.Fatal("tick is waiting for prepare before enqueueing")
-		}
-		if got := e.bead(t, a.info.ID).Metadata["last_woke_at"]; got != "" {
-			t.Fatalf("PreWake landed while prepare was blocked: %q", got)
-		}
-		limiter.mu.Lock()
-		inFlight := limiter.inFlight
-		limiter.mu.Unlock()
-		if inFlight != 1 || !tracker.busy() {
-			t.Fatalf("prepare lost its slot or tracker: slots=%d busy=%v", inFlight, tracker.busy())
-		}
-		// A second free slot cannot admit the same runtime name on another tick.
-		if n := run(); n != 0 {
-			t.Fatalf("duplicate enqueued = %d, want 0", n)
-		}
-		if got := e.sp.CountCalls("Start", "a"); got != 0 {
-			t.Fatalf("Start calls = %d before PreWake", got)
-		}
-	})
-}
-
-// A dependent waits in this pass and the next while its prerequisite is still
-// preparing. Once that preparation commits it remains eligible to start.
-func TestExecutePlannedStarts_AsyncPrepareDependencyWaits(t *testing.T) {
-	for _, live := range []bool{false, true} {
-		name := "absent runtime"
-		if live {
-			name = "existing runtime"
-		}
-		t.Run(name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				e := newPrepareBudgetEnv(t, "a", "b")
-				e.cfg.Agents[1].DependsOn = []string{"a"}
-				a, b := e.candidate(t, "a", 0), e.candidate(t, "b", 0)
-				if live {
-					if err := e.sp.Start(context.Background(), "a", gcruntime.Config{}); err != nil {
-						t.Fatal(err)
-					}
-				}
-				store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
-				var once sync.Once
-				release := func() { once.Do(func() { close(store.release) }) }
-				var tracker asyncStartTracker
-				defer func() {
-					release()
-					if !tracker.wait(hangBudget) {
-						t.Error("async starts did not finish")
-					}
-				}()
-				opts := append([]startExecutionOption(nil), e.startOptions...)
-				opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker))
-				run := func(cs ...startCandidate) int {
-					return executePlannedStartsTraced(context.Background(), cs, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
-				}
-				done := make(chan int, 1)
-				go func() { done <- run(a, b) }()
-				synctest.Wait()
-				select {
-				case n := <-done:
-					if n != 1 {
-						t.Fatalf("enqueued = %d, want prerequisite only", n)
-					}
-				default:
-					t.Fatal("tick waited for dependency prepare")
-				}
-				if n := run(b); n != 0 {
-					t.Fatalf("dependent enqueued = %d while prepare is blocked", n)
-				}
-				if row := e.bead(t, b.info.ID); row.Status == "closed" || row.Metadata["last_woke_at"] != "" {
-					t.Fatalf("waiting dependency was closed or prepared: %+v", row)
-				}
-				release()
-				synctest.Wait()
-				if tracker.busy() {
-					t.Fatal("prerequisite prepare did not finish")
-				}
-				if n := run(b); n != 1 {
-					t.Fatalf("dependent enqueued = %d after prerequisite committed", n)
-				}
-				synctest.Wait()
-				if got := e.sp.CountCalls("Start", "b"); got != 1 {
-					t.Fatalf("dependent starts = %d, want 1", got)
-				}
-			})
-		})
-	}
-}
-
-func TestExecutePlannedStarts_AsyncPrepareFailureReleasesReservations(t *testing.T) {
-	for _, cancelPrepare := range []bool{false, true} {
-		name := "error"
-		if cancelPrepare {
-			name = "canceled"
-		}
-		t.Run(name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				e := newPrepareBudgetEnv(t, "a")
-				a := e.candidate(t, "a", 7*time.Millisecond)
-				if !cancelPrepare {
-					e.lat.failGet[a.info.ID] = os.ErrDeadlineExceeded
-				}
-				store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
-				var once sync.Once
-				release := func() { once.Do(func() { close(store.release) }) }
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				var tracker asyncStartTracker
-				defer func() {
-					release()
-					if !tracker.wait(hangBudget) {
-						t.Error("async starts did not finish")
-					}
-				}()
-				limiter := newAsyncStartLimiter(1)
-				opts := append([]startExecutionOption(nil), e.startOptions...)
-				opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker), withAsyncStartLimiter(limiter))
-				done := make(chan int, 1)
-				go func() {
-					done <- executePlannedStartsTraced(ctx, []startCandidate{a}, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, e.trace, opts...)
-				}()
-				synctest.Wait()
-				select {
-				case n := <-done:
-					if n != 1 {
-						t.Fatalf("enqueued = %d, want 1", n)
-					}
-				default:
-					t.Fatal("tick waited for prepare")
-				}
-				if cancelPrepare {
-					cancel()
-				}
-				release()
-				synctest.Wait()
-				if tracker.busy() || limiter.inFlight != 0 {
-					t.Fatalf("prepare leaked reservations: busy=%v slots=%d", tracker.busy(), limiter.inFlight)
-				}
-				if got := e.sp.CountCalls("Start", "a"); got != 0 {
-					t.Fatalf("Start calls = %d after failed or canceled prepare", got)
-				}
-				lease, drop, err := tryRuntimeLease(store, e.city, "a", "", 0)
-				if err != nil {
-					t.Fatalf("prepare leaked its name lease: %v", err)
-				}
-				drop()
-				if lease == nil {
-					t.Fatal("lease reacquisition returned no lease")
-				}
-				if row := e.bead(t, a.info.ID); row.Status == "closed" || row.Metadata["last_woke_at"] != "" || row.Metadata["pending_create_claim"] != "true" {
-					t.Fatalf("prepare failure lost the pending create or left it in flight: %+v", row)
-				}
-				if !cancelPrepare && !strings.Contains(e.log.String(), "session=a template=a outcome=failed") {
-					t.Fatalf("prepare failure lost its outcome: %s", e.log.String())
-				}
-			})
-		})
-	}
-}
-
-func TestExecutePlannedStarts_FastPrepareTraceTimings(t *testing.T) {
-	for _, async := range []bool{false, true} {
-		name := "sync"
-		if async {
-			name = "async"
-		}
-		t.Run(name, func(t *testing.T) {
-			e := newPrepareBudgetEnv(t, "a")
-			a := e.candidate(t, "a", 7*time.Millisecond)
-			// Async completion flushes the cycle. Read the persisted typed
-			// records so the proof also covers timings surviving that flush.
-			var traceStore *SessionReconcilerTraceStore
-			if async {
-				var err error
-				traceStore, err = newSessionReconcilerTraceStore(e.city, ioDiscard{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() {
-					if err := traceStore.Close(); err != nil {
-						t.Error(err)
-					}
-				})
-				e.trace.tracer.store = traceStore
-			}
-			if n := e.run(testPrepareBudget, async, nil, a); n != 1 {
-				t.Fatalf("starts = %d, want 1", n)
-			}
-			records := e.records(TraceSiteLifecycleStartRun)
-			if async {
-				var err error
-				records, err = ReadTraceRecords(traceStore.rootDir, TraceFilter{})
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			var found bool
-			for _, r := range records {
-				if r.SiteCode != TraceSiteLifecycleStartRun || r.RecordType != TraceRecordOperation || r.OutcomeCode == TraceOutcomeStartEnqueued {
-					continue
-				}
-				found = true
-				for _, field := range []string{"lock_get_ms", "prewake_ms", "named_snapshot_ms", "build_ms", "spent_ms"} {
-					if _, ok := r.Fields[field]; !ok {
-						t.Errorf("fast prepare missing trace field %s: %v", field, r.Fields)
-					}
-				}
-				if got := r.Fields["lock_get_ms"]; got != int64(7) && got != float64(7) {
-					t.Errorf("lock_get_ms = %v, want 7", got)
-				}
-				if got := r.Fields["spent_ms"]; got != int64(7) && got != float64(7) {
-					t.Errorf("spent_ms = %v, want 7", got)
-				}
-			}
-			if !found {
-				t.Fatal("no start execution trace result")
-			}
-		})
-	}
 }

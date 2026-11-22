@@ -2317,6 +2317,8 @@ go_test(
         "session_keys_test.go",
         "session_kill_fence_reconcile_test.go",
         "session_level_converge_test.go",
+        "session_lifecycle_async_prepare_repro_test.go",
+        "session_lifecycle_async_prepare_test.go",
         "session_lifecycle_chaos_test.go",
         "session_lifecycle_commit_bound_handoff_test.go",
         "session_lifecycle_commit_bound_pass_test.go",

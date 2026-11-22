@@ -3611,7 +3611,6 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withStartDeferralMemo(cr.ensureStartDeferralMemo()),
 		withOnDeathGate(cr.onDeathGate()),
-		withPrepareBudget(defaultStartPrepareBudget),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		// The park verdicts over the build's whole assigned-work read (not the
 		// wake-filtered view), as the pool counts above decide them.
@@ -4506,6 +4505,10 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// control-dispatcher create waiting on a start gate is not kept past
 		// its lease; it rolls back as it did before the memo.
 		withOnDeathGate(cr.onDeathGate()),
+		// Read-only view of the async lane's admitted-start registry: the
+		// dispatcher's synchronous dependency checks still see starts the
+		// main tick admitted but has not PreWoken yet.
+		withAdmittedStartLookup(cr.asyncStarts.startInFlight),
 		withPrepareBudget(defaultStartPrepareBudget),
 		withParkedSeats(parked),
 	)

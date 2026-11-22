@@ -715,8 +715,10 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t
 
 		enqueuePreparedStartWaveForCity(
 			context.Background(),
-			[]asyncPreparedStart{{
-				item: item,
+			[]asyncAdmittedStart{{
+				candidate:    item.candidate,
+				undoPrepared: func(error, ...startPhaseTimings) {},
+				drop:         func(string, error, ...startPhaseTimings) {},
 				release: func() {
 					released.Add(1)
 					release()
@@ -726,7 +728,9 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t
 					close(finishedC)
 				},
 			}},
-			testCity, sp, store, nil, clk, rec, postStartTimeout, 1, ioDiscard{}, ioDiscard{}, nil, nil,
+			testCity, sp, store, nil, clk, rec,
+			func(startCandidate) (*preparedStart, prepareTimings, error) { return &item, prepareTimings{}, nil },
+			postStartTimeout, 1, ioDiscard{}, ioDiscard{}, nil, nil,
 			immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil,
 		)
 		select {

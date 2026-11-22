@@ -290,7 +290,7 @@ func TestPrepareStartPreWakesUnderTheCandidatesLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	clk := &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
-	if _, err := prepareStartCandidateForCity(f.cand, f.city, "test-city", f.cfg, f.sp, f.store, clk, io.Discard, nil, dispatchOptionSources{}); !errors.Is(err, errPreWakeSuperseded) {
+	if _, _, err := prepareStartCandidateForCity(f.cand, f.city, "test-city", f.cfg, f.sp, f.store, clk, io.Discard, nil, dispatchOptionSources{}); !errors.Is(err, errPreWakeSuperseded) {
 		t.Fatalf("prepare under a taken-over lease = %v, want errPreWakeSuperseded", err)
 	}
 	if gen := mustGetBead(t, f.store, f.cand.info.ID).Metadata["generation"]; gen != "1" {

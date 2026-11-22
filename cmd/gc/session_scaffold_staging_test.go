@@ -66,7 +66,7 @@ func TestPrepareStartCandidateStagesScaffoldInResolvedTaskWorkDirWhenCWDIsShared
 		t.Fatal(err)
 	}
 
-	prepared, err := prepareStartCandidateForCity(startCandidate{
+	prepared, _, err := prepareStartCandidateForCity(startCandidate{
 		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "gascity/builder",

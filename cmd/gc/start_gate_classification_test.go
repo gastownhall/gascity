@@ -788,39 +788,23 @@ func driveAsyncLimitRecords(t *testing.T) {
 	requireCommitted(t, memo, a.info.ID)
 }
 
-// A spent prepare budget defers the rest of the planner call before any slot,
-// lease, ticket or write: shared throughput, nothing refused, nothing written.
-// The candidate that spent the budget was admitted and is not recorded.
+// A spent prepare budget defers the rest of a synchronous planner call before
+// any slot, lease, ticket or write: shared throughput, nothing refused,
+// nothing written. The candidate that spent the budget was admitted and is not
+// recorded. The budget does not apply to an async pass, which prepares on its
+// start goroutines.
 func drivePrepareBudgetRecords(t *testing.T) {
-	for _, async := range []bool{false, true} {
-		name := "sync"
-		if async {
-			name = "async"
-		}
-		t.Run(name, func(t *testing.T) {
-			e := newPrepareBudgetEnv(t, "a", "b", "c")
-			memo := newStartDeferralMemo()
-			a := e.candidate(t, "a", testPrepareBudget+time.Second)
-			b := e.candidate(t, "b", time.Second)
-			c := e.candidate(t, "c", time.Second)
+	t.Run("sync", func(t *testing.T) {
+		e := newPrepareBudgetEnv(t, "a", "b", "c")
+		memo := newStartDeferralMemo()
+		a := e.candidate(t, "a", testPrepareBudget+time.Second)
+		b := e.candidate(t, "b", time.Second)
+		c := e.candidate(t, "c", time.Second)
 
-			e.run(testPrepareBudget, async, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b, c)
-			if async {
-				// All three reservations fit in the first batch, before any
-				// prepare charges the meter. Admitted starts are not deferrals.
-				e.requireDeferred(t, true)
-				requireCommitted(t, memo)
-				for _, name := range []string{"a", "b", "c"} {
-					if n := e.sp.CountCalls("Start", name); n != 1 {
-						t.Fatalf("%s Start calls = %d, want 1", name, n)
-					}
-				}
-				return
-			}
-			e.requireDeferred(t, async, "b", "c")
-			requireCommitted(t, memo, b.info.ID, c.info.ID)
-		})
-	}
+		e.run(testPrepareBudget, false, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b, c)
+		e.requireDeferred(t, "b", "c")
+		requireCommitted(t, memo, b.info.ID, c.info.ID)
+	})
 	t.Run("a budget that is not spent records nothing", func(t *testing.T) {
 		e := newPrepareBudgetEnv(t, "a", "b")
 		memo := newStartDeferralMemo()
@@ -842,7 +826,7 @@ func drivePrepareBudgetRecords(t *testing.T) {
 		e.capacityEnv.clk.Time = time.Now().UTC().Add(time.Minute)
 
 		e.run(testPrepareBudget, false, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b)
-		e.requireDeferred(t, false, "b")
+		e.requireDeferred(t, "b")
 		info := e.sessionInfo(b.info.ID)
 		anchor := pendingCreateLeaseAnchor(info)
 		if anchor.IsZero() {
