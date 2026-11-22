@@ -911,6 +911,16 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 			if reopen == nil {
 				return opErr
 			}
+			// Reconnect only without evidence the endpoint is fine: a pool
+			// that still answers a ping did not lose its server, and a fresh
+			// pool with the same read deadline would replay the same failure.
+			answered := s.endpointAnswers(ctx)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, opErr))
+			}
+			if answered {
+				return newNativeReadDeadlineError(opErr)
+			}
 			if rcErr := s.reconnect(ctx, gen); rcErr != nil {
 				reconnectErr := fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr)
 				// A verdict the reopen hook produced is already the answer: the
