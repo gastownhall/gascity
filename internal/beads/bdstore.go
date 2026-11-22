@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
-	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -139,17 +138,6 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 			defer slowTimer.Stop()
 		}
 
-		cmd := exec.CommandContext(ctx, execName, args...)
-		if err := execenv.CheckBatchFileArgs(cmd); err != nil {
-			trace("refused", err)
-			return nil, fmt.Errorf("running %s: %w", name, err)
-		}
-		cmd.WaitDelay = 2 * time.Second
-		prepareCommandForTimeout(cmd)
-		cmd.Dir = dir
-		cmd.Cancel = func() error {
-			return killCommandTree(cmd)
-		}
 		overrides := env
 		if withoutAmbientBeads {
 			baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
@@ -160,11 +148,22 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 				}
 			}
 		}
-		cmd.Env = execEnvFor(name, baseEnv, overrides, func() bool {
-			return bdReadsStandardOTELEnv(ctx, execName)
-		})
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
+		spec := bdChildSpec{
+			name: name,
+			path: execName,
+			dir:  dir,
+			args: args,
+			env: execEnvFor(name, baseEnv, overrides, func() bool {
+				return bdReadsStandardOTELEnv(ctx, execName)
+			}),
+		}
+
+		if name == "bd" && bdCommandCoalesces(args) {
+			out, status, traceErr, resultErr := gate.coalescer.do(parent, ctx, spec, timeout, start)
+			trace(status, traceErr)
+			return out, resultErr
+		}
+
 		var waited time.Duration
 		release := func() {}
 		if name == "bd" {
@@ -174,20 +173,24 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 			waited = time.Since(admitStart)
 			if admitErr != nil {
 				slotErr := gate.slotWaitError(parent, admitErr, timeout, start)
-				recordBDExecTelemetry(name, dir, args, start, waited, nil, "", slotErr)
+				recordBDExecTelemetry(name, dir, args, start, nil, "", slotErr, bdTraceExtra{waitMs: waited.Milliseconds()})
 				trace("slot-wait", slotErr)
 				return nil, slotErr
 			}
 		}
-		out, err := cmd.Output()
+		res := runBDChild(ctx, spec, nil)
 		release()
+		if res.refused != nil {
+			trace("refused", res.refused)
+			return nil, fmt.Errorf("running %s: %w", name, res.refused)
+		}
 
-		recordBDExecTelemetry(name, dir, args, start, waited, out, stderr.String(), err)
+		recordBDExecTelemetry(name, dir, args, start, res.out, res.stderr, res.err, bdTraceExtra{waitMs: waited.Milliseconds()})
 
 		status, traceErr, resultErr := classifyBDExecResult(
-			parent, ctx, name, timeout, start, out, stderr.String(), err)
+			parent, ctx, name, timeout, start, res.out, res.stderr, res.err)
 		trace(status, traceErr)
-		return out, resultErr
+		return res.out, resultErr
 	}
 }
 
@@ -243,7 +246,7 @@ func newBDExecTrace(start time.Time, dir, name string, args []string) func(statu
 // failure was not an *exec.ExitError (for example a context kill or a spawn
 // failure). It is independent of the legacy line-format trace (gated by
 // GC_BD_TRACE_JSON, not GC_BD_TRACE).
-func recordBDExecTelemetry(name, dir string, args []string, start time.Time, waited time.Duration, out []byte, stderr string, err error) {
+func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out []byte, stderr string, err error, extra bdTraceExtra) {
 	if name != "bd" {
 		return
 	}
@@ -256,7 +259,7 @@ func recordBDExecTelemetry(name, dir string, args []string, start time.Time, wai
 			traceExit = -1
 		}
 	}
-	traceBDCall("go:bdstore.runner", dir, args, start, traceExit, err, bdTraceExtra{waitMs: waited.Milliseconds()})
+	traceBDCall("go:bdstore.runner", dir, args, start, traceExit, err, extra)
 	telemetry.RecordBDCall(context.Background(),
 		args, float64(time.Since(start).Milliseconds()),
 		err, out, stderr)

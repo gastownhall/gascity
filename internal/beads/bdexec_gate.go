@@ -45,18 +45,23 @@ type bdExecGate struct {
 	total   *semaphore.Weighted
 	reads   *semaphore.Weighted
 	running atomic.Int64
+	// coalescer shares children among identical concurrent reads admitted
+	// through this gate.
+	coalescer *bdReadCoalescer
 }
 
 // newBDExecGate returns a gate of size slots whose read ceiling is
 // size - max(1, size/4). size must be at least minBDMaxChildren.
 func newBDExecGate(size int) *bdExecGate {
 	readCap := size - max(1, size/4)
-	return &bdExecGate{
+	g := &bdExecGate{
 		size:    size,
 		readCap: readCap,
 		total:   semaphore.NewWeighted(int64(size)),
 		reads:   semaphore.NewWeighted(int64(readCap)),
 	}
+	g.coalescer = newBDReadCoalescer(g)
+	return g
 }
 
 // processBDExecGate is the gate every exported exec runner constructor uses.

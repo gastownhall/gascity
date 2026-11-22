@@ -248,6 +248,15 @@ func captureBDTraceCallers() []string {
 	return out
 }
 
+// bdTraceCallersIfEnabled captures the current goroutine's caller frames when
+// the JSON trace is enabled, for a record written later on another goroutine.
+func bdTraceCallersIfEnabled() []string {
+	if strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON")) == "" {
+		return nil
+	}
+	return captureBDTraceCallers()
+}
+
 // TraceBDCall appends a JSONL record describing one bd subprocess
 // invocation to the file pointed to by the GC_BD_TRACE_JSON env var. When
 // GC_BD_TRACE_JSON is unset the call is a no-op.

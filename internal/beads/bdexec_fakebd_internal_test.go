@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,14 @@ func (f *fakeBD) runner(ctx context.Context, gate *bdExecGate) CommandRunner {
 func (f *fakeBD) releaseAll() {
 	if err := os.WriteFile(f.release, nil, 0o600); err != nil {
 		f.t.Errorf("writing release file: %v", err)
+	}
+}
+
+// releaseSeq unblocks only the child with spawn sequence seq.
+func (f *fakeBD) releaseSeq(seq int) {
+	f.t.Helper()
+	if err := os.WriteFile(f.release+"."+strconv.Itoa(seq), nil, 0o600); err != nil {
+		f.t.Fatalf("writing release file for child %d: %v", seq, err)
 	}
 }
 

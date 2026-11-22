@@ -54,6 +54,7 @@ go_test(
         "absent_blocked_test.go",
         "atomic_close_memstore_test.go",
         "batchfile_windows_test.go",
+        "bdexec_coalesce_internal_test.go",
         "bdexec_fakebd_internal_test.go",
         "bdexec_gate_internal_test.go",
         "bdexec_slotwait_internal_test.go",
