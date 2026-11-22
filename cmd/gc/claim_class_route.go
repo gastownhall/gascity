@@ -452,8 +452,12 @@ func (r *hookClaimClassRoute) holds(id string) (bool, error) {
 // The absence must hold for the whole WORK fan-out, not for the one leg that
 // answered. from is the leg the write ran against; every OTHER leg is read for
 // the same id first, and a leg that holds it closes the escalation — the work
-// store's own answer stands, the federated loop drops this leg, and the leg that
-// holds the bead claims it on the next turn of the same invocation.
+// store's own answer stands. Which store then claims the bead depends on the
+// invocation's shape: a claim scoped to its primary leg runs the work-leg route
+// (claim_work_leg_route.go), which re-runs the write through that holding leg
+// before this route is ever consulted; a full fan-out lets the federated loop
+// drop the exhausted leg and the holder claims it on the next turn of the same
+// invocation.
 func (r *hookClaimClassRoute) routes(ctx context.Context, from hookStore, id, assignee string, workErr error) (bool, error) {
 	if r == nil || !r.legProvedAbsent(ctx, from, id, assignee, workErr) {
 		return false, nil

@@ -133,9 +133,11 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // federated `gc ready` reader (ga-bvdha) now runs AS the primary leg's command
 // and covers the binding in-process, so the hook does see class ids; what it
 // still cannot do is claim one, because the claim is a bd subprocess rooted in
-// this leg's workspace. This function is the seam that pins it
-// (conformanceClaimRouting); closing the gap makes the claim stop being a bd
-// subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
+// this leg's workspace. The class route (claim_class_route.go) closes that half
+// by re-running the write against the binding once the leg proves the id absent
+// there, and the work-leg route (claim_work_leg_route.go) closes the WORK-axis
+// half the same way — a bead another work leg holds is claimed through that
+// leg, built by the same per-leg machinery this fan-out reads through.
 func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
 	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs, false)
 }

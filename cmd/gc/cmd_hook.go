@@ -999,7 +999,10 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 // says nothing about the work legs behind it. observeWorkLegs hands the route
 // the whole fan-out so it can prove "no WORK store holds this bead" before it
 // writes ownership into the binding (claim_class_route.go). Nil on a city that
-// relocates nothing.
+// relocates nothing. A claim scoped to a single primary store — the shape this
+// loop runs on a federated query — additionally carries the work-leg route
+// (claim_work_leg_route.go), which re-runs a proven-absent write through the
+// other work leg that holds the bead before the binding is ever consulted.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
 	ops.ClassRoute.observeWorkLegs(stores)

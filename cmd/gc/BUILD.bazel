@@ -1294,6 +1294,7 @@ go_test(
         "claim_stall_guard_replay_test.go",
         "claim_stall_guard_test.go",
         "claim_store_ref_test.go",
+        "claim_work_leg_route_test.go",
         "class_flip_guard_bd_test.go",
         "class_flip_guard_cas_test.go",
         "class_flip_guard_cook_test.go",

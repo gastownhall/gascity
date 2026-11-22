@@ -997,7 +997,10 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				// arrives here while the claim runs against this store's bd
 				// context, which cannot resolve it. That is not an unresolved
 				// mutation on a bead we own here — this store holds no such bead —
-				// so skip it and let the federated caller try the store that does.
+				// so skip it: the class route or the work-leg route
+				// (claim_work_leg_route.go) has either already re-run the write
+				// through the store that does hold it, or proved none does; what
+				// reaches here is the residue no store answered for.
 				//
 				// A binding that refuses the claim CAS outright carries the same
 				// proof and is skipped for the same reason: the escalation only
