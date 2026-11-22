@@ -98,3 +98,14 @@ func nativeReadRetryBudgetOutcome(parent context.Context, ctxErr, lastErr error)
 	}
 	return &nativeReadOutcomeError{kind: ErrNativeReadBudgetExhausted, err: err}
 }
+
+// ErrNativeReadRecoveryFailed marks a native read whose reconnect failed: the
+// reopen after a transient read error, or the re-pin of a pool a proxy
+// generation change made stale.
+var ErrNativeReadRecoveryFailed = errors.New("native Dolt read endpoint recovery failed")
+
+// newNativeReadRecoveryError tags a failed reconnect with
+// ErrNativeReadRecoveryFailed; the text is unchanged.
+func newNativeReadRecoveryError(err error) error {
+	return &nativeReadOutcomeError{kind: ErrNativeReadRecoveryFailed, err: err}
+}

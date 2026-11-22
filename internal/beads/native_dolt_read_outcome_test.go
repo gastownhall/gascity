@@ -271,3 +271,62 @@ func TestNativeReadBudgetExhaustionIsTyped(t *testing.T) {
 		t.Error("reopens = 0, want the unanswered endpoint to reconnect until the budget ran out")
 	}
 }
+
+func TestNativeReadRecoveryFailureIsTyped(t *testing.T) {
+	shortenEndpointProbeBudget(t, 50*time.Millisecond)
+	errReopen := errors.New("open managed dolt: permission denied")
+
+	t.Run("reconnect after a transient read error", func(t *testing.T) {
+		dead, _ := newPooledStorageSpy(t, pingRefused)
+		store := newNativeDoltStoreForTest(dead)
+		var reopens int32
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			atomic.AddInt32(&reopens, 1)
+			return nil, errReopen
+		}
+		store.readRetryBudgetOverride = 5 * time.Second
+
+		err := store.withReadRetry(alwaysFails(errPostConnectRead))
+
+		if !errors.Is(err, ErrNativeReadRecoveryFailed) {
+			t.Fatalf("read err = %v, want ErrNativeReadRecoveryFailed", err)
+		}
+		if !errors.Is(err, errReopen) {
+			t.Errorf("read err = %v, want the reopen hook's error in the chain", err)
+		}
+		if errors.Is(err, ErrNativeReadDeadline) || errors.Is(err, ErrNativeReadBudgetExhausted) {
+			t.Errorf("read err = %v matches another read outcome", err)
+		}
+		const want = "native Dolt reconnect after transient read error (begin read tx: invalid connection): open managed dolt: permission denied"
+		if got := err.Error(); got != want {
+			t.Errorf("read err text = %q, want it unchanged: %q", got, want)
+		}
+		if n := atomic.LoadInt32(&reopens); n != 1 {
+			t.Errorf("reopens = %d, want 1", n)
+		}
+	})
+
+	t.Run("re-pin of a stale pool before the read", func(t *testing.T) {
+		live, _ := newPooledStorageSpy(t, pingAnswers)
+		store := newNativeDoltStoreForTest(live)
+		store.reopen = func(context.Context) (beadslib.Storage, error) { return nil, errReopen }
+		store.readRetryBudgetOverride = 5 * time.Second
+		if !store.markPoolStale() {
+			t.Fatal("markPoolStale refused a store with a reopen hook")
+		}
+
+		var calls int32
+		err := store.withReadRetry(failOn(nil, nil, &calls))
+
+		if !errors.Is(err, ErrNativeReadRecoveryFailed) || !errors.Is(err, errReopen) {
+			t.Fatalf("read err = %v, want ErrNativeReadRecoveryFailed wrapping the reopen hook's error", err)
+		}
+		const want = "native Dolt re-pin after a proxy generation change: open managed dolt: permission denied"
+		if got := err.Error(); got != want {
+			t.Errorf("read err text = %q, want it unchanged: %q", got, want)
+		}
+		if n := atomic.LoadInt32(&calls); n != 0 {
+			t.Errorf("read ran %d times, want 0: the pool was stale", n)
+		}
+	})
+}

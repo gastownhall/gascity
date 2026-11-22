@@ -926,7 +926,7 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 				}
 			}
 			if rcErr := s.reconnect(ctx, gen); rcErr != nil {
-				reconnectErr := fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr)
+				reconnectErr := newNativeReadRecoveryError(fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr))
 				// A verdict the reopen hook produced is already the answer: the
 				// proxied ladder has been walked inside the hook, and looping
 				// here would bury a typed refusal under the budget error the
@@ -1029,7 +1029,7 @@ func (s *NativeDoltStore) repinStalePool(ctx context.Context, observedGen, servi
 		return nil
 	}
 	if err := s.reconnect(ctx, observedGen); err != nil {
-		return fmt.Errorf("native Dolt re-pin after a proxy generation change: %w", err)
+		return newNativeReadRecoveryError(fmt.Errorf("native Dolt re-pin after a proxy generation change: %w", err))
 	}
 	return nil
 }
