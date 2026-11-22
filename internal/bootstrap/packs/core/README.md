@@ -77,7 +77,10 @@ the mark untouched.
 **Idempotence.** A `(bead, routed_to)` pair is nudged at most once. The
 reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup
 state's last-seen timestamp is refreshed on every sighting and the pair is
-never pruned-then-renudged while the routing is live.
+never pruned-then-renudged while the routing is live. New pairs are grouped
+by target, and each target is nudged once per run: a formula pour that routes
+N steps to one session interrupts it once, not N times. On success every new
+pair for that target is recorded; on failure none is.
 
 **State.** Both files live in `$GC_PACK_STATE_DIR`, which resolves per
 city + pack, so multi-city installs never cross-pollinate:

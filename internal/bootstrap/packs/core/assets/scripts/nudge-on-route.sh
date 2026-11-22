@@ -24,6 +24,7 @@
 #     Each run selects only events above it and advances it after every
 #     successful read, nudge failures included.
 #   - nudge-on-route-state.json: the (bead, routed_to) pairs already nudged.
+# New pairs are grouped by target, so each target is nudged once per run.
 #
 # Two windows. The controller fires this order on its own cadence, with no
 # promise about the gap between fires. Each run reads the fast window
@@ -205,7 +206,10 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
-while IFS="$(printf '\t')" read -r bead_id routed_to; do
+TAB="$(printf '\t')"
+# Pairs not yet in the dedup state, one "<routed_to>\t<bead_id>" per line.
+NEW_PAIRS=""
+while IFS="$TAB" read -r bead_id routed_to; do
     if [ -z "$bead_id" ] || [ -z "$routed_to" ]; then continue; fi
     key="$bead_id|$routed_to"
     if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
@@ -214,14 +218,31 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         continue
     fi
-    if nudge_routed_target "$routed_to"; then
-        STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
-        NUDGED=$((NUDGED + 1))
-    fi
+    NEW_PAIRS="$NEW_PAIRS$routed_to$TAB$bead_id
+"
 done <<EOF
 $PAIRS
 EOF
-advance_seq
+
+# One nudge per target per run. A pour that stamps routing on N steps yields
+# N new pairs for one target in one batch, and each `gc session nudge`
+# interrupts the session to tell it the same thing: check for assigned work.
+# On success every new pair for the target is recorded; on failure none is,
+# so the next event that re-emits one of them retries it.
+TARGETS="$(printf '%s' "$NEW_PAIRS" | cut -f1 | sort -u)"
+while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    nudge_routed_target "$target" </dev/null || continue
+    while IFS="$TAB" read -r routed_to bead_id; do
+        [ "$routed_to" = "$target" ] || continue
+        STATE="$(echo "$STATE" | jq --arg k "$bead_id|$routed_to" --arg now "$NOW" '.[$k] = $now')"
+        NUDGED=$((NUDGED + 1))
+    done <<NEW
+$NEW_PAIRS
+NEW
+done <<TARGETS
+$TARGETS
+TARGETS
 
 # Prune entries older than RETENTION so the state file stays bounded.
 STATE="$(echo "$STATE" | jq --argjson keep "$RETENTION_S" \
@@ -231,6 +252,9 @@ STATE="$(echo "$STATE" | jq --argjson keep "$RETENTION_S" \
 TMP="$(mktemp "$PACK_STATE_DIR/.nudge-on-route-state.XXXXXX")"
 printf '%s\n' "$STATE" > "$TMP"
 mv -f "$TMP" "$STATE_FILE"
+# The mark is written after the dedup state, so a crash between the two
+# re-evaluates the batch and the dedup state absorbs the repeats.
+advance_seq
 
 if [ "$NUDGED" -gt 0 ]; then
     echo "nudge-on-route: nudged $NUDGED newly-routed bead(s)"

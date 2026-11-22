@@ -276,9 +276,10 @@ type nudgeOnRouteRig struct {
 	logPath    string
 }
 
-// newNudgeOnRouteRig builds a rig. filter selects the filtering events read;
-// off, `gc events` answers the whole file.
-func newNudgeOnRouteRig(t *testing.T, filter bool) *nudgeOnRouteRig {
+// newNudgeOnRouteRig builds a rig whose fake gc reports members as each pool
+// template's active sessions. filter selects the filtering events read; off,
+// `gc events` answers the whole file.
+func newNudgeOnRouteRig(t *testing.T, filter bool, members map[string][]string) *nudgeOnRouteRig {
 	t.Helper()
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; nudge-on-route.sh requires it")
@@ -292,6 +293,7 @@ func newNudgeOnRouteRig(t *testing.T, filter bool) *nudgeOnRouteRig {
 	}
 	r.binDir, r.logPath = fakeGCBin(t, cascadeFake{
 		eventsPath:   r.eventsPath,
+		members:      members,
 		failDir:      filepath.Join(dir, "fail"),
 		filterEvents: filter,
 	}.body())
@@ -460,7 +462,7 @@ func TestNudgeOnRouteNudgesRoutingStampedAtCreation(t *testing.T) {
 		{name: "flat payload", flat: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newNudgeOnRouteRig(t, true)
+			r := newNudgeOnRouteRig(t, true, nil)
 			r.writeEvents(nudgeEvent{seq: 1, typ: "bead.created", bead: "ga-born", routedTo: target, age: 30 * time.Second, flat: tc.flat})
 			r.run()
 			if got, logged := r.nudges(target); got != 1 {
@@ -476,7 +478,7 @@ func TestNudgeOnRouteNudgesRoutingStampedAtCreation(t *testing.T) {
 	}
 
 	t.Run("creation and update of one routing nudge once", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.writeEvents(
 			nudgeEvent{seq: 1, typ: "bead.created", bead: "ga-born", routedTo: target, age: 40 * time.Second},
 			nudgeEvent{seq: 2, typ: "bead.updated", bead: "ga-born", routedTo: target, age: 30 * time.Second, flat: true},
@@ -488,7 +490,7 @@ func TestNudgeOnRouteNudgesRoutingStampedAtCreation(t *testing.T) {
 	})
 
 	t.Run("a routed bead.closed is not a routing", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.writeEvents(nudgeEvent{seq: 1, typ: "bead.closed", bead: "ga-done", routedTo: target, age: 30 * time.Second})
 		r.run()
 		if total, logged := countNudges(t, r.logPath); total != 0 {
@@ -499,7 +501,7 @@ func TestNudgeOnRouteNudgesRoutingStampedAtCreation(t *testing.T) {
 	t.Run("a malformed line does not drop the batch", func(t *testing.T) {
 		// The local fallback reads events.jsonl, which can hold a torn line;
 		// each line is parsed on its own so the routing after it survives.
-		r := newNudgeOnRouteRig(t, false)
+		r := newNudgeOnRouteRig(t, false, nil)
 		r.writeLines(
 			`{"seq":1,"type":"bead.updated","payload":{"bead":{"id":"ga-torn"`,
 			nudgeEvent{seq: 2, typ: "bead.created", bead: "ga-born", routedTo: target, age: 30 * time.Second}.line(t),
@@ -533,7 +535,7 @@ func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
 		{name: "seq file above every seq", seed: "1000"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newNudgeOnRouteRig(t, true)
+			r := newNudgeOnRouteRig(t, true, nil)
 			if tc.seed != "" {
 				r.seedSeq(tc.seed)
 			}
@@ -564,7 +566,7 @@ func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
 	}
 
 	t.Run("GC_NUDGE_ON_ROUTE_MAX_LOOKBACK bounds the read", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.writeEvents(
 			nudgeEvent{seq: 1, typ: "bead.created", bead: "ga-stale", routedTo: target, age: 10 * time.Minute},
 			nudgeEvent{seq: 2, typ: "bead.created", bead: "ga-fresh", routedTo: "gascity/fresh", age: time.Minute},
@@ -596,7 +598,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	const retentionLine = "is shorter than GC_NUDGE_ON_ROUTE_MAX_LOOKBACK"
 
 	t.Run("a routing older than the fast window is caught up", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.seedSeq("10")
 		r.writeEvents(
 			nudgeEvent{seq: 11, typ: "bead.updated", bead: "ga-late", routedTo: target, age: 10 * time.Minute},
@@ -618,7 +620,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	})
 
 	t.Run("an empty fast read is caught up", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.seedSeq("10")
 		r.writeEvents(
 			nudgeEvent{seq: 11, typ: "bead.updated", bead: "ga-late", routedTo: target, age: 10 * time.Minute},
@@ -637,7 +639,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	})
 
 	t.Run("steady state reads only the fast window", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.seedSeq("10")
 		r.writeEvents(nudgeEvent{seq: 11, typ: "bead.created", bead: "ga-new", routedTo: target, age: 30 * time.Second})
 		out := r.run()
@@ -658,7 +660,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	t.Run("an incomplete catch-up names the skipped span", func(t *testing.T) {
 		// Seqs 11-19 stand for events that aged past the catch-up window or
 		// were cut by the events walk budget.
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.seedSeq("10")
 		r.writeEvents(
 			nudgeEvent{seq: 20, typ: "bead.updated", bead: "ga-after", routedTo: target, age: 30 * time.Second},
@@ -681,7 +683,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	})
 
 	t.Run("retention shorter than the catch-up window warns and still runs", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.writeEvents(nudgeEvent{seq: 1, typ: "bead.created", bead: "ga-new", routedTo: target, age: 30 * time.Second})
 		out := r.run("GC_NUDGE_ON_ROUTE_RETENTION=30m")
 		want := "nudge-on-route: GC_NUDGE_ON_ROUTE_RETENTION (30m) is shorter than GC_NUDGE_ON_ROUTE_MAX_LOOKBACK (1h); a catch-up read can re-nudge pruned pairs"
@@ -694,7 +696,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	})
 
 	t.Run("defaults and a first run warn about nothing", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.writeEvents(nudgeEvent{seq: 40, typ: "bead.created", bead: "ga-new", routedTo: target, age: 30 * time.Second})
 		out := r.run()
 		if strings.Contains(out, retentionLine) || strings.Contains(out, gapLine) {
@@ -714,7 +716,7 @@ func TestNudgeOnRouteEvaluatesEachEventOnce(t *testing.T) {
 	const target = "lane-a"
 
 	t.Run("a failed nudge is not retried from the same events", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		events := []nudgeEvent{
 			{seq: 1, typ: "bead.updated", bead: "ga-x", age: 50 * time.Second},
 			{seq: 2, typ: "bead.updated", bead: "ga-y", age: 40 * time.Second},
@@ -757,7 +759,7 @@ func TestNudgeOnRouteEvaluatesEachEventOnce(t *testing.T) {
 	})
 
 	t.Run("a batch with nothing routed advances the mark", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.seedSeq("5")
 		r.writeEvents(
 			nudgeEvent{seq: 6, typ: "bead.updated", bead: "ga-x", age: 40 * time.Second},
@@ -773,11 +775,87 @@ func TestNudgeOnRouteEvaluatesEachEventOnce(t *testing.T) {
 	})
 
 	t.Run("a failed events read leaves the mark", func(t *testing.T) {
-		r := newNudgeOnRouteRig(t, true)
+		r := newNudgeOnRouteRig(t, true, nil)
 		r.seedSeq("7")
 		r.run()
 		if got := r.seq(); got != "7" {
 			t.Fatalf("seq mark = %q, want 7 after a failed read", got)
+		}
+	})
+}
+
+// TestNudgeOnRouteNudgesEachTargetOncePerBatch pins per-target coalescing.
+// Once creations are read, a pour that stamps routing on N steps yields N new
+// pairs for one target in one batch; each `gc session nudge` interrupts the
+// session, so the target is nudged once and every pair is recorded with it.
+// A pool base still fans out to each active member.
+func TestNudgeOnRouteNudgesEachTargetOncePerBatch(t *testing.T) {
+	const target = "gascity/builder"
+	const pool = "gascity/pool"
+	members := map[string][]string{pool: {"pool-1", "pool-2"}}
+	batch := []nudgeEvent{
+		{seq: 1, typ: "bead.created", bead: "ga-1", routedTo: target, age: 40 * time.Second},
+		{seq: 2, typ: "bead.created", bead: "ga-2", routedTo: target, age: 30 * time.Second},
+		{seq: 3, typ: "bead.created", bead: "ga-3", routedTo: target, age: 20 * time.Second},
+		{seq: 4, typ: "bead.created", bead: "ga-4", routedTo: pool, age: 10 * time.Second},
+	}
+
+	t.Run("one nudge per target and one per pool member", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true, members)
+		r.writeEvents(batch...)
+		out := r.run()
+		for _, want := range []struct {
+			to string
+			n  int
+		}{{target, 1}, {"pool-1", 1}, {"pool-2", 1}, {pool, 0}} {
+			if got, logged := r.nudges(want.to); got != want.n {
+				t.Fatalf("nudges to %s = %d, want %d; gc calls:\n%s", want.to, got, want.n, logged)
+			}
+		}
+		if total, logged := countNudges(t, r.logPath); total != 3 {
+			t.Fatalf("nudges = %d, want 3; gc calls:\n%s", total, logged)
+		}
+		for _, key := range []string{"ga-1|" + target, "ga-2|" + target, "ga-3|" + target, "ga-4|" + pool} {
+			if !r.hasKey(key) {
+				t.Fatalf("dedup state lacks %s", key)
+			}
+		}
+		if !strings.Contains(out, "nudge-on-route: nudged 4 newly-routed bead(s)") {
+			t.Fatalf("summary should count the 4 recorded pairs; output:\n%s", out)
+		}
+	})
+
+	t.Run("a failed target records none of its pairs", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true, members)
+		r.writeEvents(batch...)
+		r.failNudgesTo(target)
+		r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudge attempts to %s = %d, want 1; gc calls:\n%s", target, got, logged)
+		}
+		for _, bead := range []string{"ga-1", "ga-2", "ga-3"} {
+			if r.hasKey(bead + "|" + target) {
+				t.Fatalf("dedup state records %s|%s after its target's nudge failed", bead, target)
+			}
+		}
+		if !r.hasKey("ga-4|" + pool) {
+			t.Fatalf("dedup state lacks ga-4|%s", pool)
+		}
+		if got := r.seq(); got != "4" {
+			t.Fatalf("seq mark = %q, want 4", got)
+		}
+	})
+
+	t.Run("a known pair does not hold back a new pair for its target", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true, nil)
+		r.seedState("ga-1|" + target)
+		r.writeEvents(batch[:2]...)
+		r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("nudges to %s = %d, want 1 for the new pair; gc calls:\n%s", target, got, logged)
+		}
+		if !r.hasKey("ga-1|"+target) || !r.hasKey("ga-2|"+target) {
+			t.Fatalf("dedup state should hold both ga-1 and ga-2 for %s", target)
 		}
 	})
 }
