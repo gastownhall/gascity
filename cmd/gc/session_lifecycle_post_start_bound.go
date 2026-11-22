@@ -247,18 +247,44 @@ func commitAsyncStartBounded(
 }
 
 // commitSyncStartBounded runs commit, the per-result writes of the synchronous
-// start path, held to commitPhaseBound under the per-session key the post-start
-// observations and the async commit share. It returns the commit's verdict and
-// whether the commit answered. When it did not (the bound lapsed, or an
-// observation of the session is outstanding and the commit is refused without
-// running) it logs commit_unavailable and makes no store or runtime call.
+// start path (the drain-ack clear, commitStartResultTraced and the stale stop),
+// held to commitPhaseBound under the per-session key the post-start
+// observations and the async commit share (SESSION-RUNTIME-035). It returns the
+// commit's verdict and whether the commit answered. When it did not (the bound
+// lapsed, or an observation of the session is outstanding and the commit is
+// refused without running) it logs commit_unavailable and returns false with
+// startCommitFailed: the waiter makes no store or runtime call, so the caller
+// counts no wake, rolls nothing back and leaves the pending-start lease alone.
+//
+// commit receives its own copy of result and the waiter keeps only its own
+// copies of what it logs, so a commit that finishes after expiry shares no
+// writable state with the caller. The wait ends on the bound only, never on
+// ctx (a nil ctx reads as Background): the commit runs on whatever context its
+// closure captured, and cancellation of the pass must not abandon it.
 func commitSyncStartBounded(
-	_ context.Context,
-	_ string,
+	ctx context.Context,
+	cityPath string,
 	result startResult,
-	_ int,
-	_ io.Writer,
+	wave int,
+	stderr io.Writer,
 	commit func(startResult) startCommitVerdict,
 ) (verdict startCommitVerdict, answered bool) {
-	return commit(result), true
+	name := result.prepared.candidate.name()
+	template := result.prepared.candidate.tp.TemplateName
+	started := result.started
+	phases := result.phases
+	base := ctx
+	if base == nil {
+		base = context.Background()
+	}
+	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(base), commitPhaseBound)
+	defer cancel()
+	verdict, err := observeSessionBounded(waitCtx, cityPath, name, func() (startCommitVerdict, error) {
+		return commit(result), nil
+	})
+	if err != nil {
+		logLifecycleOutcome(stderr, "start", wave, name, template, "commit_unavailable", started, time.Now(), err, phases)
+		return startCommitFailed, false
+	}
+	return verdict, true
 }

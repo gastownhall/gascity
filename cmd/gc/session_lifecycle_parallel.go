@@ -5227,17 +5227,26 @@ func executePlannedStartsTraced(
 						fmt.Fprintf(stderr, "session lifecycle: op=start wave=%d session=%s bead=%s outcome=abandoned_at_wave_deadline waited=%s\n", //nolint:errcheck // best-effort diagnostics
 							wave, result.prepared.candidate.name(), result.prepared.candidate.info.ID, result.finished.Sub(result.started).Round(time.Millisecond))
 					}
-					commitStartResultTraced(result, sessFront, clk, rec, wave, stdout, stderr, trace)
+					commitSyncStartBounded(ctx, cityPath, result, wave, stderr, func(r startResult) startCommitVerdict {
+						return commitStartResultTraced(r, sessFront, clk, rec, wave, stdout, stderr, trace)
+					})
 					continue
 				}
-				if result.err == nil && result.outcome != TraceOutcomeSessionInitializing {
-					_ = clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
-				}
-				switch commitStartResultTraced(result, sessFront, clk, rec, wave, stdout, stderr, trace) {
-				case startCommitSucceeded:
+				// The per-result writes run under one bounded observation: a
+				// commit that does not answer is logged commit_unavailable and
+				// skipped, counting no wake (SESSION-RUNTIME-035).
+				verdict, answered := commitSyncStartBounded(ctx, cityPath, result, wave, stderr, func(r startResult) startCommitVerdict {
+					if r.err == nil && r.outcome != TraceOutcomeSessionInitializing {
+						_ = clearReconcilerDrainAckMetadata(sp, r.prepared.candidate.name())
+					}
+					v := commitStartResultTraced(r, sessFront, clk, rec, wave, stdout, stderr, trace)
+					if v == startCommitStale {
+						stopStaleAsyncStartRuntime(r, sp, stderr)
+					}
+					return v
+				})
+				if answered && verdict == startCommitSucceeded {
 					wakeCount++
-				case startCommitStale:
-					stopStaleAsyncStartRuntime(result, sp, stderr)
 				}
 			}
 			// The synchronous starts are committed: their leases end here.
