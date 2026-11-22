@@ -267,8 +267,13 @@ func TestExecutePlannedStarts_AsyncPrepareBudgetDoesNotSerialize(t *testing.T) {
 		a := e.candidate(t, "a", testPrepareBudget+time.Second)
 		b := e.candidate(t, "b", 0)
 		store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
-		defer close(store.release)
 		var tracker asyncStartTracker
+		defer func() {
+			close(store.release)
+			if !tracker.wait(hangBudget) {
+				t.Error("async starts did not finish")
+			}
+		}()
 		opts := append([]startExecutionOption(nil), e.startOptions...)
 		opts = append(opts, withPrepareBudget(testPrepareBudget), withAsyncStartExecution(), withAsyncStartTracker(&tracker))
 		done := make(chan int, 1)
@@ -770,8 +775,13 @@ func TestExecutePlannedStarts_AsyncPrepareOffTick(t *testing.T) {
 		e := newPrepareBudgetEnv(t, "a")
 		a := e.candidate(t, "a", 0)
 		store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
-		defer close(store.release)
 		var tracker asyncStartTracker
+		defer func() {
+			close(store.release)
+			if !tracker.wait(hangBudget) {
+				t.Error("async starts did not finish")
+			}
+		}()
 		limiter := newAsyncStartLimiter(2)
 		opts := append([]startExecutionOption(nil), e.startOptions...)
 		opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker), withAsyncStartLimiter(limiter))
@@ -834,8 +844,13 @@ func TestExecutePlannedStarts_AsyncPrepareDependencyWaits(t *testing.T) {
 				store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
 				var once sync.Once
 				release := func() { once.Do(func() { close(store.release) }) }
-				defer release()
 				var tracker asyncStartTracker
+				defer func() {
+					release()
+					if !tracker.wait(hangBudget) {
+						t.Error("async starts did not finish")
+					}
+				}()
 				opts := append([]startExecutionOption(nil), e.startOptions...)
 				opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker))
 				run := func(cs ...startCandidate) int {
@@ -891,10 +906,15 @@ func TestExecutePlannedStarts_AsyncPrepareFailureReleasesReservations(t *testing
 				store := &prepareBarrierStore{Store: e.lat, id: a.info.ID, entered: make(chan struct{}), release: make(chan struct{})}
 				var once sync.Once
 				release := func() { once.Do(func() { close(store.release) }) }
-				defer release()
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				var tracker asyncStartTracker
+				defer func() {
+					release()
+					if !tracker.wait(hangBudget) {
+						t.Error("async starts did not finish")
+					}
+				}()
 				limiter := newAsyncStartLimiter(1)
 				opts := append([]startExecutionOption(nil), e.startOptions...)
 				opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker), withAsyncStartLimiter(limiter))
