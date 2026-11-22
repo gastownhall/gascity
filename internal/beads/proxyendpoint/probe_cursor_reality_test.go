@@ -183,10 +183,12 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 		},
 		{
 			// A cursor of zero has nothing to contradict, so the library
-			// returns before it consults the floor — and so does the probe,
-			// which keeps the sentinel reads off the path of a database that
-			// has never run the lane.
-			name:          "an empty ignored lane is not probed for sentinels",
+			// returns before it consults the floor — and so does the probe:
+			// the plane statement still names every sentinel table (they ride
+			// the one statement whatever the cursor is), but its answer is
+			// not applied and SHOW COLUMNS is not issued for a lane that has
+			// never run.
+			name:          "an empty ignored lane is not floored by its sentinels",
 			absentTables:  map[string]bool{"wisps": true, "wisp_dependencies": true},
 			absentColumns: map[string]bool{"leases.granted_node": true},
 			ignored:       0,
@@ -237,9 +239,22 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 					report.Cursors.Ignored, got, tc.wantEffective)
 			}
 
-			// The evidence, not just the conclusion.
+			// The evidence, not just the conclusion: every table — both
+			// cursor tables, every sentinel and floored sentinel table and the
+			// sentinel column's table — is asked about in the ONE plane
+			// statement, first; the column itself by SHOW COLUMNS, and only
+			// when there is a cursor to contradict and a table to ask.
+			statements := fake.statements()
+			if len(statements) == 0 || !isSchemaPlaneQuery(statements[0]) {
+				t.Fatalf("the session's first statement is not the plane statement: %v", statements)
+			}
+			for _, table := range schemaPlaneTables() {
+				if !strings.Contains(statements[0], " | "+table) {
+					t.Fatalf("the plane statement does not ask about %s: %v", table, statements[0])
+				}
+			}
 			probedColumn := false
-			for _, statement := range fake.statements() {
+			for _, statement := range statements {
 				if strings.HasPrefix(statement, sentinelColumnQuery) {
 					probedColumn = true
 				}
@@ -249,12 +264,23 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 				if strings.Contains(strings.ToLower(statement), "information_schema.columns") {
 					t.Fatalf("the session asked information_schema.columns: %q", statement)
 				}
+				// One catalog scan for every table question, not one each.
+				if n := strings.Count(statement, "information_schema.tables"); n > 1 || (n == 1 && !isSchemaPlaneQuery(statement)) {
+					t.Fatalf("the session scanned information_schema.tables outside the plane statement: %q", statement)
+				}
 			}
 			wantColumnProbe := tc.ignored > 0 && !tc.absentTables["wisps"] && !tc.absentTables["wisp_dependencies"] &&
 				!tc.absentTables[IgnoredSentinelColumnTable]
 			if probedColumn != wantColumnProbe {
 				t.Fatalf("the session probed the sentinel column = %v, want %v; statements: %v",
 					probedColumn, wantColumnProbe, fake.statements())
+			}
+			want := 3
+			if wantColumnProbe {
+				want = 4
+			}
+			if n := len(statements); n != want {
+				t.Fatalf("the session issued %d statements, want %d (the plane, the two MAX reads, SHOW COLUMNS when owed): %v", n, want, statements)
 			}
 		})
 	}
@@ -282,8 +308,8 @@ func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
 		t.Fatalf("report.Head = %q, want the session's HEAD", report.Head)
 	}
 	statements := fake.statements()
-	if len(statements) == 0 || !strings.HasPrefix(statements[0], cursorExistsWithHeadQuery) {
-		t.Fatalf("the session's first statement is not the main-lane existence check carrying HEAD: %v", statements)
+	if len(statements) == 0 || !isSchemaPlaneQuery(statements[0]) {
+		t.Fatalf("the session's first statement is not the plane statement carrying HEAD: %v", statements)
 	}
 	headReads := 0
 	for _, statement := range statements {
@@ -294,16 +320,41 @@ func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
 	if headReads != 1 {
 		t.Fatalf("the session asked for HEAD in %d statement(s), want exactly 1: %v", headReads, statements)
 	}
-	// A healthy database at 66/26 with every sentinel present: two cursor
-	// existence checks, two MAX reads, two sentinel tables, three floored
-	// sentinel tables, and the sentinel column (its table's existence, then
-	// SHOW COLUMNS). HEAD adds none of them.
-	if want := 4 + len(ignoredSentinelTables) + len(ignoredSentinelFlooredTables) + 2; len(statements) != want {
+	// A healthy database at 66/26: the plane statement (both cursor tables,
+	// every sentinel and floored sentinel table, the sentinel column's table,
+	// and HEAD), the two MAX reads, and SHOW COLUMNS for the sentinel column.
+	// HEAD adds none of them.
+	if want := 4; len(statements) != want {
 		t.Fatalf("the session issued %d statements, want the %d it issues without a HEAD read of its own: %v", len(statements), want, statements)
 	}
 	if opened := fake.opened.Load(); opened != 1 {
 		t.Fatalf("the session opened %d connection(s), want 1", opened)
 	}
+
+	t.Run("a truncated GROUP_CONCAT fails the session and admits nothing", func(t *testing.T) {
+		// group_concat_max_len below the list's length cuts the last name
+		// short. Read as "absent" that would floor the ignored lane from a
+		// server setting; it must be an error, and the error is a server
+		// answer, not a verdict about the proxy.
+		fake := &fakeProbeConnector{
+			cursors:         map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26},
+			truncatePresent: 20,
+		}
+		dials := 0
+		got := Probe(context.Background(), ProbeIO{
+			Session: func(ctx context.Context) (CursorReport, error) { return readCursorsOver(ctx, fake) },
+			Dial:    func(context.Context) error { dials++; return nil },
+		})
+		if got.Outcome != ProbeUnknown {
+			t.Fatalf("outcome = %v, want ProbeUnknown for a truncated plane answer (err %v)", got.Outcome, got.Err)
+		}
+		if got.Err == nil || !strings.Contains(got.Err.Error(), "not asked for") {
+			t.Fatalf("err = %v, want the truncated-list error", got.Err)
+		}
+		if dials != 0 {
+			t.Fatalf("a server error spent %d confirming dial(s)", dials)
+		}
+	})
 
 	t.Run("a HEAD the server cannot answer fails the session and admits nothing", func(t *testing.T) {
 		fake := &fakeProbeConnector{

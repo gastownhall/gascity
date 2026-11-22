@@ -601,12 +601,15 @@ type fakeProbeConnector struct {
 	// server whose LIKE folds case, as MySQL's does.
 	recasedColumns map[string]string
 	likeFoldsCase  bool
-	// head is what DOLT_HASHOF('HEAD') answers on the main-lane existence
-	// statement; "" means the fixture default, fakeProbeHead.
+	// head is what DOLT_HASHOF('HEAD') answers on the plane statement; ""
+	// means the fixture default, fakeProbeHead.
 	head string
-	// headErr is what the main-lane existence statement fails with when the
-	// server cannot answer DOLT_HASHOF('HEAD').
+	// headErr is what the plane statement fails with when the server cannot
+	// answer DOLT_HASHOF('HEAD').
 	headErr error
+	// truncatePresent, when positive, cuts the GROUP_CONCAT answer to that
+	// many bytes, the way a server with a small group_concat_max_len does.
+	truncatePresent int
 	// dials counts every Connect call, failed ones included.
 	dials  atomic.Int64
 	opened atomic.Int64
@@ -674,22 +677,11 @@ func (c *fakeProbeConn) Begin() (driver.Tx, error) {
 // Ping answers the probe's handshake check.
 func (c *fakeProbeConn) Ping(context.Context) error { return c.connector.pingErr }
 
-// QueryContext answers the existence probe and both cursor reads, which is the
-// whole statement surface readCursors uses.
+// QueryContext answers the plane statement, SHOW COLUMNS and both cursor
+// reads, which is the whole statement surface readCursors uses.
 func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.connector.record(query, args)
-	if c.connector.queryErr != nil && query != cursorExistsQuery && query != cursorExistsWithHeadQuery {
-		return nil, c.connector.queryErr
-	}
-	if query == cursorExistsQuery || query == cursorExistsWithHeadQuery {
-		table := namedArg(args, 0)
-		exists := int64(1)
-		if c.connector.absentTables[table] {
-			exists = 0
-		}
-		if query == cursorExistsQuery {
-			return &fakeProbeRows{value: exists}, nil
-		}
+	if isSchemaPlaneQuery(query) {
 		if c.connector.headErr != nil {
 			return nil, c.connector.headErr
 		}
@@ -697,7 +689,16 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 		if head == "" {
 			head = fakeProbeHead
 		}
-		return &fakeProbeRows{value: exists, extra: []driver.Value{head}}, nil
+		values := schemaPlaneAnswer(head, args, c.connector.absentTables)
+		if n := c.connector.truncatePresent; n > 0 {
+			if concat, ok := values[1].(string); ok && len(concat) > n {
+				values[1] = concat[:n]
+			}
+		}
+		return &fakeProbeRows{values: values}, nil
+	}
+	if c.connector.queryErr != nil {
+		return nil, c.connector.queryErr
 	}
 	if strings.HasPrefix(strings.ToUpper(query), "SHOW COLUMNS FROM ") {
 		// SHOW COLUMNS names its table in the statement and fails on an absent
@@ -728,15 +729,30 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 	if !ok {
 		return nil, errors.New("proxyendpoint: the probe fixture has no answer for " + query)
 	}
-	return &fakeProbeRows{value: value}, nil
+	return &fakeProbeRows{values: []driver.Value{value}}, nil
 }
 
-// namedArg renders the nth bound argument, or "" when it is absent.
-func namedArg(args []driver.NamedValue, n int) string {
-	if n >= len(args) {
-		return ""
+// isSchemaPlaneQuery reports whether query is the plane statement.
+func isSchemaPlaneQuery(query string) bool {
+	return strings.Contains(query, schemaPlaneTablesSubselect)
+}
+
+// schemaPlaneAnswer is the plane statement's row for a database that has every
+// table except the absent ones: HEAD, then the present tables GROUP_CONCAT'd
+// (NULL when none). The arguments are one name per plane table, which is the
+// shape schemaPlaneQuery binds.
+func schemaPlaneAnswer(head string, args []driver.NamedValue, absentTables map[string]bool) []driver.Value {
+	var present []string
+	for _, arg := range args {
+		if table := fmt.Sprint(arg.Value); !absentTables[table] {
+			present = append(present, table)
+		}
 	}
-	return fmt.Sprint(args[n].Value)
+	var concat driver.Value
+	if len(present) > 0 {
+		concat = strings.Join(present, ",")
+	}
+	return []driver.Value{head, concat}
 }
 
 // showColumnsTarget parses "SHOW COLUMNS FROM <table> LIKE '<column>'".
@@ -803,19 +819,17 @@ func (r *fakeShowColumnsRows) Next(dest []driver.Value) error {
 // fakeProbeHead is the HEAD hash the fixture answers when a test names none.
 const fakeProbeHead = "fakehead0000000000000000000000000"
 
-// fakeProbeRows is one row: an integer column, which is the shape of every
-// answer the probe reads, plus whatever extra columns the statement carries
-// (the main-lane existence statement carries HEAD).
+// fakeProbeRows is one row of whatever columns the statement carries: the
+// plane statement's two, or a cursor read's one.
 type fakeProbeRows struct {
-	value int64
-	extra []driver.Value
-	done  bool
+	values []driver.Value
+	done   bool
 }
 
 func (r *fakeProbeRows) Columns() []string {
-	columns := []string{"value"}
-	for i := range r.extra {
-		columns = append(columns, fmt.Sprintf("extra%d", i))
+	columns := make([]string, len(r.values))
+	for i := range columns {
+		columns[i] = fmt.Sprintf("c%d", i)
 	}
 	return columns
 }
@@ -827,7 +841,6 @@ func (r *fakeProbeRows) Next(dest []driver.Value) error {
 		return io.EOF
 	}
 	r.done = true
-	dest[0] = r.value
-	copy(dest[1:], r.extra)
+	copy(dest, r.values)
 	return nil
 }
