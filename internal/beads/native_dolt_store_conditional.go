@@ -209,6 +209,12 @@ func (s *NativeDoltStore) conditionalLabelsGuarded() bool { return true }
 // UpdateIfMatch applies row-backed opts only while id still has
 // expectedRevision.
 //
+// An assignee edit waives the assignee-transfer guard, and a status edit the
+// close policy, closing edits included, as Update does. BdStore.UpdateIfMatch
+// waives less, deliberately: bd's one --force flag waives both, so a fenced
+// edit that closes carries neither waiver there, and one that reassigns a
+// live claim or closes over open children lands here but is refused there.
+//
 // Both doors below send opts.Metadata to the role as a patch, so the role
 // checks each of its keys against the metadata-key rule it applies to
 // standalone Update, which beadmeta.ValidKeyPattern mirrors, and a

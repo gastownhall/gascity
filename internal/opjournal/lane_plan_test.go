@@ -36,13 +36,29 @@ func (p *planner) op(req Request, mods ...func(*Op)) Op {
 	return op
 }
 
+// snapOf is a snapshot of ops in namespace gc, read over a store that holds
+// nothing else: every deliver-now partner that is not among ops reads
+// missing (readNow).
 func snapOf(ops ...Op) laneSnapshot {
-	s := laneSnapshot{openIDs: map[string]bool{}, after: map[string]afterTarget{}}
+	s := laneSnapshot{openIDs: map[string]bool{}, after: map[string]afterTarget{}, prefix: "gc", nowRows: map[string]nowRow{}}
 	for _, op := range ops {
 		s.ops = append(s.ops, op)
 		s.openIDs[op.ID] = true
 	}
 	slices.SortFunc(s.ops, CompareOrder)
+	for _, op := range s.ops {
+		ids := []string{op.Causation}
+		if isNowMessage(op) {
+			ids, _ = nowInterruptIDs(s.prefix, op)
+		} else if !hasNowShape(op) {
+			continue
+		}
+		for _, id := range ids {
+			if !s.openIDs[id] {
+				s.nowRows[id] = nowRow{state: afterMissing}
+			}
+		}
+	}
 	return s
 }
 
@@ -94,9 +110,14 @@ func TestPlanRulesRows(t *testing.T) {
 		conv  func(*ConversationView)
 		after *afterTarget
 		close string
-		wait  WaitReason
-		cand  bool
-		retry bool
+		// fenced: the close is the scope rule's, which records the
+		// incarnation that fenced the op off unrun (FencedOff).
+		fenced bool
+		wait   WaitReason
+		cand   bool
+		retry  bool
+		// lower: the op is lowered (a deliver-now message).
+		lower bool
 	}{
 		{name: "R1 closed", req: laneMsg("a", RolePrompt, "x"), conv: func(v *ConversationView) { v.Closed = true }, close: "skipped{conversation_closed}"},
 		{name: "R1 closed in flight", req: laneMsg("a", RolePrompt, "x"), mods: []func(*Op){live}, conv: func(v *ConversationView) { v.Closed = true }, wait: WaitInFlight},
@@ -108,12 +129,13 @@ func TestPlanRulesRows(t *testing.T) {
 		{name: "R6 expired past start_by", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.StartBy = t0.Add(time.Minute) }), mods: []func(*Op){expired}, close: "failed{deadline_in_flight}"},
 		{name: "R7 poison", req: laneMsg("a", RolePrompt, "x"), mods: []func(*Op){expired, func(op *Op) { op.Failures = 4 }}, close: "failed{poison}"},
 		{name: "R8 retake", req: laneMsg("a", RolePrompt, "x"), mods: []func(*Op){expired}, cand: true, retry: true},
-		{name: "R8 retake still checks scope", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.Scope = Scope{Kind: ScopeSession, Generation: 1} }), mods: []func(*Op){expired}, conv: func(v *ConversationView) { v.Generation = 2 }, close: "skipped{stale}"},
+		{name: "R8 retake still checks scope", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.Scope = Scope{Kind: ScopeSession, Generation: 1} }), mods: []func(*Op){expired}, conv: func(v *ConversationView) { v.Generation = 2 }, close: "skipped{stale}", fenced: true},
 		{name: "R9 cancel", req: laneMsg("a", RolePrompt, "x"), mods: []func(*Op){canceled}, close: "canceled{}"},
 		{name: "R10 expired before start", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.StartBy = t0.Add(time.Minute) }), close: "failed{expired_before_start}"},
 		{name: "R10 maybe delivered", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.StartBy = t0.Add(time.Minute) }), mods: []func(*Op){func(op *Op) { op.Status, op.Attempt, op.MaybeDelivered = StatusAccepted, 1, 1 }}, close: "failed{deadline_in_flight}"},
-		{name: "R11 stale session", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.Scope = Scope{Kind: ScopeSession, Generation: 1} }), conv: func(v *ConversationView) { v.Generation = 2 }, close: "skipped{stale}"},
-		{name: "R11 stale context", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.Scope = Scope{Kind: ScopeContext, Epoch: 1} }), conv: func(v *ConversationView) { v.Epoch = 2 }, close: "skipped{stale}"},
+		{name: "R11 stale session", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.Scope = Scope{Kind: ScopeSession, Generation: 1} }), conv: func(v *ConversationView) { v.Generation = 2 }, close: "skipped{stale}", fenced: true},
+		{name: "R11 stale context", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.Scope = Scope{Kind: ScopeContext, Epoch: 1} }), conv: func(v *ConversationView) { v.Epoch = 2 }, close: "skipped{stale}", fenced: true},
+		{name: "R11 stale interrupt", req: interruptReq(), conv: func(v *ConversationView) { v.Generation = 2 }, close: "skipped{stale}", fenced: true},
 		{name: "R12 control dormant", req: interruptReq(), conv: func(v *ConversationView) { v.Dormant = true }, close: "skipped{stale}"},
 		{name: "R13 future scope", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.Scope = Scope{Kind: ScopeSession, Generation: 5} }), wait: WaitScopeFuture},
 		{name: "R14 after failed", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.After = "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa" }), after: &afterTarget{state: afterClosed, arm: ArmFailed, conversation: "gc-1"}, close: "skipped{dependency_failed}"},
@@ -124,8 +146,9 @@ func TestPlanRulesRows(t *testing.T) {
 		{name: "R16 after undecodable", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.After = "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa" }), after: &afterTarget{state: afterUnreadable, err: ErrUnsupportedSchema, undecodable: true}, wait: WaitAfterUnreadable},
 		{name: "R17 not before", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.NotBefore = now.Add(time.Minute) }), wait: WaitNotBefore},
 		{name: "R18 retry at", req: laneMsg("a", RolePrompt, "x"), mods: []func(*Op){func(op *Op) { op.Status, op.Attempt, op.RetryAt = StatusAccepted, 1, now.Add(time.Second) }}, wait: WaitRetryBackoff},
-		{name: "R19 now", req: laneMsg("a", RolePrompt, "x", withWhen(WhenNow)), wait: WaitNowUnlowered},
-		{name: "R19 legacy interrupt", req: laneMsg("a", RolePrompt, "x", withWhen(WhenInterrupt)), wait: WaitNowUnlowered},
+		{name: "R19 now", req: laneMsg("a", RolePrompt, "x", withWhen(WhenNow)), lower: true},
+		{name: "R19 legacy interrupt", req: laneMsg("a", RolePrompt, "x", withWhen(WhenInterrupt)), lower: true},
+		{name: "R19 now waits its not_before", req: laneMsg("a", RolePrompt, "x", withWhen(WhenNow), func(r *Request) { r.NotBefore = now.Add(time.Minute) }), wait: WaitNotBefore},
 		{name: "R20 content hold", req: laneMsg("a", RolePrompt, "x"), conv: func(v *ConversationView) { v.ContentHold = true }, wait: WaitContentHold},
 		{name: "R20 steer bypasses the hold", req: laneMsg("a", RolePrompt, "x", withWhen(WhenSteer)), conv: func(v *ConversationView) { v.ContentHold = true }, cand: true},
 		{name: "settling", req: laneMsg("a", RolePrompt, "x"), mods: []func(*Op){func(op *Op) { op.Status = StatusSettling }}, wait: WaitSettling},
@@ -149,6 +172,12 @@ func TestPlanRulesRows(t *testing.T) {
 			if got := waitsOf(rp.waits)[op.ID]; got != tc.wait {
 				t.Fatalf("wait %q, want %q", got, tc.wait)
 			}
+			if lowered := len(rp.lowerings) == 1 && rp.lowerings[0].m.ID == op.ID; lowered != tc.lower || len(rp.lowerings) > 1 {
+				t.Fatalf("lowerings %+v, want lowered=%v", rp.lowerings, tc.lower)
+			}
+			if tc.lower && rp.takePossible {
+				t.Fatal("a pass that lowers takes nothing before it reads again")
+			}
 			all := append(candidatesOf(rp.control), candidatesOf(rp.content)...)
 			if (len(all) == 1) != tc.cand {
 				t.Fatalf("candidates %v, want candidate=%v", all, tc.cand)
@@ -168,9 +197,47 @@ func TestPlanRulesRows(t *testing.T) {
 				if c.cur.Status == StatusExecuting && c.next.MaybeDelivered != c.cur.Attempt {
 					t.Fatalf("an expired op closed without maybe_delivered: %+v", c.next)
 				}
+				if got := FencedOff(c.next); got != tc.fenced {
+					t.Fatalf("FencedOff = %v, want %v (outcome %+v)", got, tc.fenced, c.next.Outcome)
+				}
+				if want := (Result{Generation: v.Generation, ContextEpoch: v.Epoch}); tc.fenced && !c.next.Outcome.Result.Equal(want) {
+					t.Fatalf("fenced close result %+v, want the incarnation that fenced it, %+v", c.next.Outcome.Result, want)
+				}
 				if _, err := EncodeOp(c.next); err != nil {
 					t.Fatalf("close does not encode: %v", err)
 				}
+			}
+		})
+	}
+}
+
+// FencedOff reads the scope rule's close back: an op closed skipped{stale}
+// whose result records an incarnation past its own scope's. Any other close
+// (the executor's, finding nothing to do, or the dormant rule's, which
+// record none) and an open op are not fenced off.
+func TestFencedOff(t *testing.T) {
+	session := Scope{Kind: ScopeSession, Generation: 3}
+	context := Scope{Kind: ScopeContext, Epoch: 2}
+	stale := func(scope Scope, r Result) Op {
+		return Op{Status: StatusClosed, Scope: scope, Outcome: Outcome{Arm: ArmSkipped, Reason: ReasonStale, Result: r}}
+	}
+	for _, tc := range []struct {
+		name string
+		op   Op
+		want bool
+	}{
+		{"session, a later generation", stale(session, Result{Generation: 4, ContextEpoch: 1}), true},
+		{"context, a later epoch", stale(context, Result{Generation: 3, ContextEpoch: 3}), true},
+		{"nothing recorded", stale(session, Result{}), false},
+		{"session, its own generation", stale(session, Result{Generation: 3, ContextEpoch: 5}), false},
+		{"context, its own epoch", stale(context, Result{Generation: 9, ContextEpoch: 2}), false},
+		{"conversation scope", stale(Scope{Kind: ScopeConversation}, Result{Generation: 4, ContextEpoch: 4}), false},
+		{"another reason", Op{Status: StatusClosed, Scope: session, Outcome: Outcome{Arm: ArmSkipped, Reason: ReasonNotNeeded, Result: Result{Generation: 4}}}, false},
+		{"open", Op{Status: StatusSubmitted, Scope: session, Outcome: Outcome{Arm: ArmSkipped, Reason: ReasonStale, Result: Result{Generation: 4}}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FencedOff(tc.op); got != tc.want {
+				t.Fatalf("FencedOff = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -193,11 +260,11 @@ func TestPlanRulesBlockingWaiters(t *testing.T) {
 	if w := waitsOf(tp.waits)[later.ID]; w != WaitBlocked {
 		t.Fatalf("later op wait %q", w)
 	}
-	// now_unlowered does not block.
+	// A pass that lowers a deliver-now message takes nothing: it reads
+	// again first, so no content goes ahead of the unit.
 	rp = planRules(snapOf(nowOp, later), view(), now, "lane:ctl")
-	tp, _ = planTake(rp, idleProbe(), view(), now)
-	if tp.take == nil || tp.take.ops[0].op.ID != later.ID {
-		t.Fatalf("now_unlowered blocked: %+v", tp)
+	if rp.takePossible || len(rp.lowerings) != 1 || rp.lowerings[0].m.ID != nowOp.ID {
+		t.Fatalf("lowering pass: takePossible %v lowerings %+v", rp.takePossible, rp.lowerings)
 	}
 	if !rp.next.IsZero() && rp.next.Before(now) {
 		t.Fatalf("next %s", rp.next)
@@ -302,11 +369,66 @@ func TestPlanRulesTakePossible(t *testing.T) {
 	}
 }
 
-// takeFor runs both planners over ops with probe.
+// The scope rule fences a session-scoped interrupt against the effective
+// incarnation, the runtime row's when that leads the conversation view: one
+// scoped at the lagging view's generation closes skipped{stale} recording the
+// row's generation (FencedOff), while one scoped at that recorded generation
+// passes the rule and waits WaitIncarnation, as conversation-scoped work
+// does, until the view catches up and it is taken. So a follow-up of a fenced
+// interrupt is scoped at the recorded generation, not the view's.
+func TestPlanRulesStaleViewHoldsAnInterruptAtTheRowsGeneration(t *testing.T) {
+	now := t0.Add(time.Hour)
+	p := newPlanner(t)
+	behind := p.op(interruptReq())
+	ahead := interruptReq()
+	ahead.ClientKey, ahead.Scope.Generation = "j", 2
+	atRow := p.op(ahead)
+	b, err := EncodeRuntimeRow("gc", RuntimeRow{Conversation: "gc-1", Generation: 2, Epoch: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := DecodeRuntimeRow(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapAt := func(ops ...Op) laneSnapshot {
+		snap := snapOf(ops...)
+		snap.rt = runtimeSnap{read: true, found: true, bead: b, row: row}
+		return snap
+	}
+	v := view()
+	rp := planRules(snapAt(behind, atRow), v, now, "lane:ctl")
+	if got := closesOf(rp); got[behind.ID] != "skipped{stale}" || got[atRow.ID] != "" {
+		t.Fatalf("closes %v, want only the op behind the row's generation closed stale", got)
+	}
+	for _, c := range rp.closes {
+		if !FencedOff(c.next) || c.next.Outcome.Result.Generation != 2 {
+			t.Fatalf("close %+v, want it fenced off recording the row's generation 2", c.next.Outcome)
+		}
+	}
+	if w := waitsOf(rp.waits)[atRow.ID]; w != WaitIncarnation || rp.takePossible {
+		t.Fatalf("op at the row's generation waits %q (takePossible %v), want %q", w, rp.takePossible, WaitIncarnation)
+	}
+	v.Generation = 2
+	rp = planRules(snapAt(atRow), v, now, "lane:ctl")
+	if len(rp.closes) != 0 || !rp.takePossible || !slices.Equal(candidatesOf(rp.control), []string{atRow.ID}) {
+		t.Fatalf("once the view caught up: closes %v, takePossible %v, control candidates %v; want op %s taken", closesOf(rp), rp.takePossible, candidatesOf(rp.control), atRow.ID)
+	}
+}
+
+// takeFor plans a Take of ops under probe. Every respond op's occurrence
+// reads raised and unresolved.
 func takeFor(t *testing.T, ops []Op, probe Probe) takePlan {
 	t.Helper()
 	now := t0.Add(time.Hour)
 	rp := planRules(snapOf(ops...), view(), now, "lane:ctl")
+	rp.raisings = map[string]raisingState{}
+	for _, op := range ops {
+		if op.Kind == KindRespond {
+			req, _, err := ParseInteractionOccurrence(op.Scope.Interaction)
+			rp.raisings[op.ID] = raisingState{request: req, raised: err == nil, err: err}
+		}
+	}
 	tp, err := planTake(rp, probe, view(), now)
 	if err != nil {
 		t.Fatal(err)
@@ -399,12 +521,6 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 		r.Policy.Message.When = WhenSteer
 		r.Policy.Message.OnUnsupported = FallbackFail
 	}
-	respond := Request{
-		Conversation: "gc-1", Kind: KindRespond, Executor: ExecutorLane, ClientKey: "r",
-		Producer: Producer{Principal: "operator", Actor: ActorOperator}, Payload: "allow",
-		Scope:   Scope{Kind: ScopeSession, Generation: 1, Interaction: "perm-1"},
-		StartBy: t0.Add(2 * time.Hour), FinishBy: t0.Add(3 * time.Hour),
-	}
 	kinds := []struct {
 		name  string
 		req   Request
@@ -414,7 +530,6 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 	}{
 		{"if_idle", laneMsg("a", RoleNotice, "x", withWhen(WhenIfIdle)), func(p *Probe) { p.Boundary = TriNo }, "skipped{busy}", WaitBusy},
 		{"steer fallback_fail", laneMsg("a", RoleNotice, "x", steerFail), func(p *Probe) { p.Boundary = TriNo }, "failed{unsupported}", WaitBusy},
-		{"respond", respond, func(p *Probe) { p.Caps.Respond = false }, "failed{unsupported}", WaitUnsupported},
 	}
 	states := []struct {
 		name  string
@@ -436,13 +551,8 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 		for _, s := range states {
 			t.Run(k.name+"/"+s.name, func(t *testing.T) {
 				p := newPlanner(t)
-				op := p.op(k.req, s.mod, func(op *Op) {
-					if op.Kind == KindRespond {
-						op.DeliveryKey = "" // a control op carries no key
-					}
-				})
+				op := p.op(k.req, s.mod)
 				allow := idleProbe()
-				allow.Caps.Respond = true
 				deny := allow
 				k.deny(&deny)
 				tp := takeFor(t, []Op{op}, deny)
@@ -465,11 +575,8 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 					t.Fatalf("the probe that allows it took %v (waits %v, closes %v)", takenOf(tp), tp.waits, tp.closes)
 				}
 				// A maybe-delivered message goes as a replay, under its stored
-				// key or, when it has none, a new one; a control op has neither.
+				// key or, when it has none, a new one.
 				wantKey, wantRedelivery := op.ID+":1", !s.fresh
-				if op.Kind == KindRespond {
-					wantKey, wantRedelivery = "", false
-				}
 				if tp.take.key != wantKey || tp.take.redelivery != wantRedelivery {
 					t.Fatalf("took it under key %q, redelivery %v; want %q, %v", tp.take.key, tp.take.redelivery, wantKey, wantRedelivery)
 				}
@@ -580,6 +687,66 @@ func TestPlanTakeContentBlocks(t *testing.T) {
 	}
 }
 
+// TestPlanTakeContentAdmitPassesOnlyItsClass pins a host's narrow I7
+// exemption: under a content block, only content of an admitted class
+// (role, when and principal, all three) is taken; every neighbor waits on
+// the block, and the admitted class still waits on a pending interaction.
+func TestPlanTakeContentAdmitPassesOnlyItsClass(t *testing.T) {
+	p := newPlanner(t)
+	const admitted = "gc:planner/drain-reminder"
+	from := func(principal string) func(*Request) {
+		return func(r *Request) { r.Producer.Principal = principal }
+	}
+	notice := p.op(laneMsg("notice", RoleNotice, "x", withWhen(WhenBoundary), from(admitted)))
+	probe := idleProbe()
+	probe.ContentBlock = "draining"
+	probe.ContentAdmit = []ContentClass{{Role: RoleNotice, When: WhenBoundary, Principal: admitted}}
+	if tp := takeFor(t, []Op{notice}, probe); !slices.Equal(takenOf(tp), []string{notice.ID}) {
+		t.Fatalf("admitted notice: taken %v, waits %+v", takenOf(tp), tp.waits)
+	}
+	for name, op := range map[string]Op{
+		"other principal": p.op(laneMsg("other", RoleNotice, "x", withWhen(WhenBoundary), from("gc:planner/idle-claim-nudge"))),
+		"prompt":          p.op(laneMsg("prompt", RolePrompt, "x", withWhen(WhenBoundary), from(admitted))),
+		"steer":           p.op(laneMsg("steer", RoleNotice, "x", withWhen(WhenSteer), from(admitted))),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tp := takeFor(t, []Op{op}, probe)
+			if tp.take != nil || len(tp.waits) != 1 || tp.waits[0].Reason != WaitContentBlock || tp.waits[0].Detail != "draining" {
+				t.Fatalf("taken %v, waits %+v; want a content_block wait", takenOf(tp), tp.waits)
+			}
+			tp = takeFor(t, []Op{op, notice}, probe)
+			if got := takenOf(tp); !slices.Equal(got, []string{notice.ID}) {
+				t.Fatalf("beside the admitted notice: taken %v, want only it", got)
+			}
+		})
+	}
+	t.Run("pending interaction", func(t *testing.T) {
+		pending := probe
+		pending.Pending = "?"
+		tp := takeFor(t, []Op{notice}, pending)
+		if tp.take != nil || len(tp.waits) != 1 || tp.waits[0].Reason != WaitPendingInteraction {
+			t.Fatalf("taken %v, waits %+v; want a pending_interaction wait", takenOf(tp), tp.waits)
+		}
+	})
+	t.Run("admitted op raises no wake", func(t *testing.T) {
+		stopped := probe
+		stopped.Running = false
+		wake := p.op(laneMsg("wake", RoleNotice, "x", withWhen(WhenBoundary), from(admitted)))
+		tp := takeFor(t, []Op{wake}, stopped)
+		if tp.take != nil || tp.wake || len(tp.waits) != 1 || tp.waits[0].Reason != WaitNotRunning {
+			t.Fatalf("taken %v, wake %v, waits %+v; want a not_running wait and no wake past the block", takenOf(tp), tp.wake, tp.waits)
+		}
+	})
+	t.Run("no block", func(t *testing.T) {
+		open := idleProbe()
+		open.ContentAdmit = probe.ContentAdmit
+		other := p.op(laneMsg("free", RoleNotice, "x", withWhen(WhenBoundary)))
+		if tp := takeFor(t, []Op{other}, open); tp.take == nil {
+			t.Fatalf("an admit list without a block held content: waits %+v", tp.waits)
+		}
+	})
+}
+
 func TestPlanTakeWake(t *testing.T) {
 	p := newPlanner(t)
 	need := p.op(laneMsg("a", RoleNotice, "x"))
@@ -629,6 +796,78 @@ func TestPlanTakeLimits(t *testing.T) {
 		tp := takeFor(t, ops, idleProbe())
 		if n := len(takenOf(tp)); n != 4 || !tp.more {
 			t.Fatalf("took %d ops of 15 KiB", n)
+		}
+	})
+}
+
+// inBandProbe is an in-band executor's probe whose text may run to maxText
+// bytes.
+func inBandProbe(maxText int) Probe {
+	p := idleProbe()
+	p.Caps = Caps{InBand: true, Input: FenceNone, MaxText: maxText}
+	return p
+}
+
+// renderedLen is the length of ops' delivery text in the reminder style.
+func renderedLen(t *testing.T, note bool, ops ...Op) int {
+	t.Helper()
+	text, err := RenderDelivery(ops, TextReminder, note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(text)
+}
+
+// TestPlanTakeTextBudget pins Caps.MaxText: a batch takes notices only while
+// its rendered text fits, to the byte; the rest wait batch_full for the next
+// pass; and a head whose text alone does not fit, the redelivery note
+// counted, waits text_too_long and holds the content behind it.
+func TestPlanTakeTextBudget(t *testing.T) {
+	p := newPlanner(t)
+	a := p.op(laneMsg("a", RoleNotice, strings.Repeat("a", 300)))
+	b := p.op(laneMsg("b", RoleNotice, strings.Repeat("b", 300)))
+	c := p.op(laneMsg("c", RoleNotice, strings.Repeat("c", 300)))
+	two := renderedLen(t, false, a, b)
+	t.Run("a backlog goes out in batches that fit", func(t *testing.T) {
+		tp := takeFor(t, []Op{a, b, c}, inBandProbe(two))
+		if got := takenOf(tp); !slices.Equal(got, []string{a.ID, b.ID}) || !tp.more {
+			t.Fatalf("taken %v more %v, want the two notices that fit and another pass", got, tp.more)
+		}
+		if len(tp.take.text) != two {
+			t.Fatalf("text is %d bytes, want the %d of the two notices", len(tp.take.text), two)
+		}
+		if w := waitsOf(tp.waits)[c.ID]; w != WaitBatchFull {
+			t.Fatalf("third notice wait %q, want %q", w, WaitBatchFull)
+		}
+	})
+	t.Run("a byte short of two takes one", func(t *testing.T) {
+		tp := takeFor(t, []Op{a, b, c}, inBandProbe(two-1))
+		if got := takenOf(tp); !slices.Equal(got, []string{a.ID}) || !tp.more {
+			t.Fatalf("taken %v more %v, want the first notice alone", got, tp.more)
+		}
+	})
+	t.Run("a head too long alone holds the rest", func(t *testing.T) {
+		tp := takeFor(t, []Op{a, b}, inBandProbe(renderedLen(t, false, a)-1))
+		if tp.take != nil {
+			t.Fatalf("took %v, want nothing", takenOf(tp))
+		}
+		if w := waitsOf(tp.waits); w[a.ID] != WaitTextTooLong || w[b.ID] != WaitBlocked {
+			t.Fatalf("waits %v, want the head %q and the notice behind it %q", w, WaitTextTooLong, WaitBlocked)
+		}
+		if tp.more {
+			t.Fatal("more set with nothing taken")
+		}
+	})
+	t.Run("a replay counts the redelivery note", func(t *testing.T) {
+		replay := p.op(laneMsg("r", RoleNotice, strings.Repeat("r", 300)), func(op *Op) {
+			op.Status, op.Attempt, op.MaybeDelivered, op.DeliveryKey = StatusAccepted, 1, 1, op.ID+":1"
+		})
+		if tp := takeFor(t, []Op{replay}, inBandProbe(renderedLen(t, true, replay))); !slices.Equal(takenOf(tp), []string{replay.ID}) || !tp.take.redelivery {
+			t.Fatalf("taken %v, want the replay within a budget that fits its note", takenOf(tp))
+		}
+		tp := takeFor(t, []Op{replay}, inBandProbe(renderedLen(t, true, replay)-1))
+		if tp.take != nil || waitsOf(tp.waits)[replay.ID] != WaitTextTooLong {
+			t.Fatalf("taken %v waits %v, want the replay to wait %q: its note does not fit", takenOf(tp), waitsOf(tp.waits), WaitTextTooLong)
 		}
 	})
 }
@@ -743,6 +982,7 @@ func TestPlanTakeRefusesBadCaps(t *testing.T) {
 		"fence":     {Live: true, Input: "maybe"},
 		"text":      {Live: true, Input: FenceAtomic, Text: "html"},
 		"short ttl": {Live: true, Input: FenceAtomic, LeaseTTL: time.Second},
+		"max text":  {Live: true, Input: FenceAtomic, MaxText: -1},
 	} {
 		probe := idleProbe()
 		probe.Caps = c
@@ -782,5 +1022,69 @@ func interruptReq() Request {
 		Producer: Producer{Principal: "operator", Actor: "operator"},
 		Scope:    Scope{Kind: ScopeSession, Generation: 1},
 		StartBy:  t0.Add(2 * time.Hour), FinishBy: t0.Add(3 * time.Hour),
+	}
+}
+
+// TestPlanTakeBoundaryHint proves a busy boundary's known deadline
+// (Probe.BoundaryAt) schedules the wait: it folds into Next only while the
+// content waits for the boundary alone and the deadline is still ahead.
+func TestPlanTakeBoundaryHint(t *testing.T) {
+	now := t0.Add(time.Hour)
+	cases := []struct {
+		name  string
+		probe func(*Probe)
+		want  time.Time
+		busy  bool
+	}{
+		{name: "future deadline", probe: func(p *Probe) { p.BoundaryAt = now.Add(1500 * time.Millisecond) }, want: now.Add(1500 * time.Millisecond), busy: true},
+		{name: "no hint", probe: func(*Probe) {}, busy: true},
+		{name: "deadline now", probe: func(p *Probe) { p.BoundaryAt = now }, busy: true},
+		{name: "deadline passed", probe: func(p *Probe) { p.BoundaryAt = now.Add(-time.Second) }, busy: true},
+		{name: "boundary unknown", probe: func(p *Probe) { p.Boundary = TriUnknown; p.BoundaryAt = now.Add(time.Second) }, busy: true},
+		{name: "content block", probe: func(p *Probe) { p.ContentBlock = "restart_pending"; p.BoundaryAt = now.Add(time.Second) }},
+		{name: "pending interaction", probe: func(p *Probe) { p.Pending = "req-1"; p.BoundaryAt = now.Add(time.Second) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlanner(t)
+			op := p.op(laneMsg("a", RoleNotice, "x"))
+			probe := idleProbe()
+			probe.Boundary = TriNo
+			tc.probe(&probe)
+			rp := planRules(snapOf(op), view(), now, "lane:ctl")
+			tp, err := planTake(rp, probe, view(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tp.take != nil {
+				t.Fatalf("took %v with the boundary %v", takenOf(tp), probe.Boundary)
+			}
+			if !tp.next.Equal(tc.want) {
+				t.Fatalf("next %s, want %s (waits %v)", tp.next, tc.want, tp.waits)
+			}
+			if tp.busy != tc.busy {
+				t.Fatalf("busy %v, want %v", tp.busy, tc.busy)
+			}
+		})
+	}
+}
+
+// TestPlanTakeBoundaryHintIgnoredOnceTaken proves a hint schedules nothing
+// when the batch forms anyway (a steer joins a busy turn): the content does
+// not wait for the boundary, so its deadline is no wake.
+func TestPlanTakeBoundaryHintIgnoredOnceTaken(t *testing.T) {
+	now := t0.Add(time.Hour)
+	p := newPlanner(t)
+	op := p.op(laneMsg("a", RoleNotice, "x", withWhen(WhenSteer)))
+	probe := idleProbe()
+	probe.Boundary, probe.BoundaryAt = TriNo, now.Add(time.Second)
+	probe.Caps.Steer = true
+	rp := planRules(snapOf(op), view(), now, "lane:ctl")
+	tp, err := planTake(rp, probe, view(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(takenOf(tp), []string{op.ID}) || !tp.next.IsZero() || tp.busy {
+		t.Fatalf("plan %+v, want a steer take with no deadline", tp)
 	}
 }

@@ -4,12 +4,11 @@ package guard
 // runtimetest.RunProviderTests. That suite proves a successful lifecycle
 // (start, observe, stop), and a provider that refuses every operation by
 // design cannot have one, the same reason the checked runtime provider
-// ledger marks NewFailFake "not applicable". The guard has no production
-// construction path yet, and the ledger binds an entry to one (a registry
-// key or a source function), so its ledger row lands with the slice that
-// wires guard.New into cmd/gc's resolveWorkerSpec (DES-CN CN-1b).
-// providerledger's TestRuntimeGuardIsLedgeredOnceWired fails as soon as a
-// production cmd/gc file imports this package without that row. The test
+// ledger marks NewFailFake "not applicable". The ledger records the guard
+// "not applicable" too, bound to its production construction path, cmd/gc's
+// resolveWorkerSpec (runtime.worker-site.guard); providerledger's
+// TestRuntimeGuardIsLedgeredOnceWired fails if a production cmd/gc file
+// imports this package without that row. The test
 // below is the guard's contract: every Provider method, by reflection, so a
 // method added to runtime.Provider fails here until the guard covers it.
 

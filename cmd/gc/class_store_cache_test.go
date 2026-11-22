@@ -5,17 +5,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // openBindingEngineForTest opens a SQLite engine the way the built-in binding
@@ -64,9 +68,9 @@ func newCachedSplitControllerState(ctx context.Context, t *testing.T, routes *st
 // class from, failing the test when the binding is not cached.
 func bindingCacheOf(t *testing.T, cs *controllerState) *beads.CachingStore {
 	t.Helper()
-	cache, ok := cs.SessionsBeadStore().Store.(*beads.CachingStore)
+	cache, ok := cs.Stores().Sessions().Store.(*beads.CachingStore)
 	if !ok {
-		t.Fatalf("the sessions class resolves to %T, want the controller's CachingStore over the binding", cs.SessionsBeadStore().Store)
+		t.Fatalf("the sessions class resolves to %T, want the controller's CachingStore over the binding", cs.Stores().Sessions().Store)
 	}
 	return cache
 }
@@ -115,10 +119,28 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 		_, ephemeral := applier.(beads.EphemeralGraphApplyStore)
 		return ok && ephemeral
 	},
+	// Handle-only: the cache's LIVE handle forwards its backing's exact batch
+	// read, which is the read beads.GetMany takes by id. The cache itself does
+	// not carry it, so a caller reading by id through the cache (PrefetchExact)
+	// keeps reading the cache.
+	"GetExactBatch": func(store beads.Store) bool {
+		_, ok := beads.HandlesFor(store).Live.(beads.ExactBatchGetter)
+		return ok
+	},
 	// Engine-only (see above). CloseStore is also lifecycle: the storage
 	// routes stop the cache and close the engine once (storageRoutes.close).
-	"CloseStore":           nil,
-	"CreateWithForeignID":  nil,
+	"CloseStore":          nil,
+	"CreateWithForeignID": nil,
+	// The batch copy capabilities (S5-C), engine-only like the single-row
+	// forms above: the migration's copy opens the binding engine itself.
+	"CreateWithForeignIDBatch": nil,
+	// The reverse migration's created form (S5-G), engine-only: the reverse
+	// opens the store it copies into itself.
+	"CreatedForm":          nil,
+	"AcceptsDanglingDep":   nil,
+	"DepAddBatch":          nil,
+	"DepMetadataBatch":     nil,
+	"DepRemoveBatch":       nil,
 	"DepAddWithMetadata":   nil,
 	"HasResidentOutside":   nil,
 	"SequenceFloor":        nil,
@@ -126,14 +148,13 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	"AdvanceSequenceFloor": nil,
 	"StoreHealthPath":      nil,
 	"ReadOnly":             nil,
-	// Engine-only (see above): the batch dep-edge read exists for
-	// `gc storage recover-stranded`, which opens the engine itself. A live
-	// cache answers per-anchor down-dep reads from memory, and the scope-skip
-	// dispatch path falls back to them when the assertion misses, so
-	// forwarding DepListBatch on every CachingStore would advertise a batch
-	// capability over backings (e.g. a cached bd store) that do not actually
-	// have it.
-	"DepListBatch": nil,
+	// (DepListBatch is carried, not omitted: a cached bd store paid one
+	// `bd dep list` per member of every close order behind a failed
+	// assertion. The cache answers the anchors it holds from memory as
+	// DepList does, batches the rest to the backing, and reports
+	// ErrDepListBatchUnsupported over a backing without the batch, which
+	// every caller treats as the cue to read per anchor.)
+
 	// A declaration about what a cache over the engine holds: the v2
 	// demand reads ask the cache's backing (demandLegCache), and a cache
 	// carrying it would advertise exactness over a bd backing.
@@ -211,7 +232,7 @@ func TestControllerBindingCacheForwardsEveryEngineCapability(t *testing.T) {
 // one-shot emitter).
 func TestControllerBindingWriteEmitsExactlyOnce(t *testing.T) {
 	cs, ep := newCachedSplitControllerState(context.Background(), t, splitClassRoutes(openBindingEngineForTest(t)), beads.NewMemStore())
-	store := cs.SessionsBeadStore().Store
+	store := cs.Stores().Sessions().Store
 
 	created, err := store.Create(beads.Bead{Title: "worker", Type: "session"})
 	if err != nil {
@@ -314,13 +335,13 @@ func TestBindingCacheSurvivesConfigReload(t *testing.T) {
 
 	cs.update(&config.City{Workspace: config.Workspace{Name: "test-city"}}, nil)
 
-	if got := cs.SessionsBeadStore().Store; got != beads.Store(binding) {
+	if got := cs.Stores().Sessions().Store; got != beads.Store(binding) {
 		t.Fatalf("after reload the sessions class resolves to %p, want the same binding cache %p", got, binding)
 	}
 	if got := binding.WriteRev("").Epoch; got != bindingEpoch {
 		t.Fatalf("binding epoch moved %d -> %d across a reload", bindingEpoch, got)
 	}
-	if _, err := cs.SessionsBeadStore().Create(beads.Bead{Title: "after reload", Type: "session"}); err != nil {
+	if _, err := cs.Stores().Sessions().Create(beads.Bead{Title: "after reload", Type: "session"}); err != nil {
 		t.Fatalf("writing the binding after a reload: %v", err)
 	}
 	reloaded, ok := cs.CityBeadStore().(*beads.CachingStore)
@@ -333,8 +354,9 @@ func TestBindingCacheSurvivesConfigReload(t *testing.T) {
 }
 
 // TestClassBindingHasLegacyResidentsUnwrapsCache pins the boot census lookup
-// once the binding is cached: the census keyed its verdict by the engine it
-// read, and the class accessors now hand out the cache. Kills: a lookup keyed on
+// (storageRoutes.hasLegacyResidents, which the epoch's topology carries) once
+// the binding is cached: the census keyed its verdict by the engine it read,
+// and the class accessors now hand out the cache. Kills: a lookup keyed on
 // the wrapper, which misses and answers the pessimistic "relics" for a clean
 // binding, keeping every by-id probe alive forever.
 func TestClassBindingHasLegacyResidentsUnwrapsCache(t *testing.T) {
@@ -349,11 +371,11 @@ func TestClassBindingHasLegacyResidentsUnwrapsCache(t *testing.T) {
 	}
 
 	cs, _ := newCachedSplitControllerState(context.Background(), t, routes, beads.NewMemStore())
-	graph := cs.GraphBeadStore().Store
+	graph := cs.Stores().Graph().Store
 	if _, cached := graph.(*beads.CachingStore); !cached {
 		t.Fatalf("graph class resolves to %T, want the binding cache", graph)
 	}
-	if cs.ClassBindingHasLegacyResidents(graph) {
+	if cs.storageRoutes.hasLegacyResidents(graph) {
 		t.Fatal("a clean binding reads as holding relics once cached; the census lookup is keyed on the wrapper")
 	}
 }
@@ -393,7 +415,7 @@ func TestSplitCityControllerBindingCacheComposition(t *testing.T) {
 	}
 
 	// A controller write is in the census, and the census covers its watermark.
-	written, err := cs.SessionsBeadStore().Create(beads.Bead{Title: "controller session", Type: "session"})
+	written, err := cs.Stores().Sessions().Create(beads.Bead{Title: "controller session", Type: "session"})
 	if err != nil {
 		t.Fatalf("controller write: %v", err)
 	}
@@ -434,7 +456,7 @@ func TestSplitCityControllerBindingCacheComposition(t *testing.T) {
 	}
 	// A dark write (no event) is the re-scan's; a live read sees it now.
 	dark := "dark"
-	carried, err := cs.SessionsBeadStore().Create(beads.Bead{Title: "carried", Type: "session"})
+	carried, err := cs.Stores().Sessions().Create(beads.Bead{Title: "carried", Type: "session"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -501,6 +523,27 @@ func TestControllerBindingCacheSeesSQLiteReadyProjection(t *testing.T) {
 	}
 }
 
+// bindingGraphRow is a task-typed graph step for the binding engine fixtures:
+// a node of root (gc.root_bead_id), so it is graph class like every row a
+// split city's binding holds. A task row with no graph marker is work class,
+// which the binding never holds: these fixtures now match the production path,
+// where the controller's autoclose reads a closed binding row through the
+// binding (the split-strict gate charged the old work-class rows to it).
+func bindingGraphRow(title, root string) beads.Bead {
+	return beads.Bead{Title: title, Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root}}
+}
+
+// bindingGraphRoot seeds the graph.v2 root the bindingGraphRow fixtures hang
+// off.
+func bindingGraphRoot(t *testing.T, engine beads.Store) string {
+	t.Helper()
+	root, err := engine.Create(beads.Bead{Title: "workflow root", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}})
+	if err != nil {
+		t.Fatalf("Create root: %v", err)
+	}
+	return root.ID
+}
+
 func containsBeadID(rows []beads.Bead, id string) bool {
 	for _, row := range rows {
 		if row.ID == id {
@@ -546,11 +589,12 @@ func TestControlReadyScanReadsTheBindingEngine(t *testing.T) {
 // key wiping them.
 func TestBindingCacheKeepsEngineEdgesThroughEveryWriteVerb(t *testing.T) {
 	engine := openBindingEngineForTest(t)
-	blocker, err := engine.Create(beads.Bead{Title: "blocker", Type: "task"})
+	root := bindingGraphRoot(t, engine)
+	blocker, err := engine.Create(bindingGraphRow("blocker", root))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	step, err := engine.Create(beads.Bead{Title: "step", Type: "task"})
+	step, err := engine.Create(bindingGraphRow("step", root))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -592,7 +636,7 @@ func TestBindingCacheKeepsEngineEdgesThroughEveryWriteVerb(t *testing.T) {
 			t.Fatalf("%s %s: cached Ready offers %s, which the engine blocks", verb, when, step.ID)
 		}
 	}
-	store := cs.GraphBeadStore().Store
+	store := cs.Stores().Graph().Store
 	revision := func() int64 {
 		row, err := engine.Get(step.ID)
 		if err != nil {
@@ -641,7 +685,9 @@ func TestBindingCacheKeepsEngineEdgesThroughEveryWriteVerb(t *testing.T) {
 		}},
 		// A new blocked step created through the cache; the checks follow it.
 		{"Create with Needs", func() error {
-			created, err := store.Create(beads.Bead{Title: "new step", Type: "task", Needs: []string{blocker.ID}})
+			row := bindingGraphRow("new step", root)
+			row.Needs = []string{blocker.ID}
+			created, err := store.Create(row)
 			if err == nil {
 				step = created
 			}
@@ -758,11 +804,12 @@ func TestCLIEventOnAnEdgelessRowDoesNotStormTheBindingCache(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			engine := openBindingEngineForTest(t)
-			blocker, err := engine.Create(beads.Bead{Title: "blocker", Type: "task"})
+			root := bindingGraphRoot(t, engine)
+			blocker, err := engine.Create(bindingGraphRow("blocker", root))
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
-			step, err := engine.Create(beads.Bead{Title: "step", Type: "task"})
+			step, err := engine.Create(bindingGraphRow("step", root))
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
@@ -771,13 +818,13 @@ func TestCLIEventOnAnEdgelessRowDoesNotStormTheBindingCache(t *testing.T) {
 			}
 			var loose []string
 			for i := 0; i < 5; i++ {
-				row, err := engine.Create(beads.Bead{Title: "edge-less", Type: "task"})
+				row, err := engine.Create(bindingGraphRow("edge-less", root))
 				if err != nil {
 					t.Fatalf("Create: %v", err)
 				}
 				loose = append(loose, row.ID)
 			}
-			other, err := engine.Create(beads.Bead{Title: "closes later", Type: "task"})
+			other, err := engine.Create(bindingGraphRow("closes later", root))
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
@@ -792,7 +839,7 @@ func TestCLIEventOnAnEdgelessRowDoesNotStormTheBindingCache(t *testing.T) {
 				t.Fatalf("CLI write: %v", err)
 			}
 			cs.applyBeadEventToStores(cliEventFor(t, engine, loose[0], tc.withEdges))
-			if err := cs.GraphBeadStore().Close(other.ID); err != nil {
+			if err := cs.Stores().Graph().Close(other.ID); err != nil {
 				t.Fatalf("status change: %v", err)
 			}
 			feedBackBeadEvents(cs, ep, &cursor)
@@ -845,6 +892,61 @@ func TestEmitterWritesAnExplicitEmptyDependenciesArray(t *testing.T) {
 	}
 }
 
+// Unsetting a bead's LAST metadata key leaves an empty map, which the Bead
+// encoding omits. A peer cache reading that event as "metadata not reported"
+// keeps the removed key until its next refresh. The emitter therefore writes an
+// explicit "metadata":{} on a row with no metadata. Kills: an emitter that lets
+// omitempty drop the key, so another process's cache keeps the unset key.
+func TestEmitterUnsetOfTheLastMetadataKeyReachesAPeerCache(t *testing.T) {
+	cityPath := t.TempDir()
+	engine := openBindingEngineForTest(t)
+	store := splitClassRoutes(engine).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	row, err := store.Create(beads.Bead{Title: "one key", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(row.ID, "only", "v"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	// The peer is another process's cache over the same engine, primed while
+	// the key is still there. An event that names metadata makes it verify
+	// against the engine; one that omits metadata is merged as "unchanged".
+	peer := beads.NewCachingStoreForTest(engine, nil)
+	if err := peer.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	before := len(readCityJournal(t, cityPath))
+	if err := store.Update(row.ID, beads.UpdateOpts{UnsetMetadata: []string{"only"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	journal := readCityJournal(t, cityPath)
+	applied := 0
+	for _, evt := range journal[before:] {
+		if evt.Subject != row.ID || evt.Type != events.BeadUpdated {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(evt.Payload, &fields); err != nil {
+			t.Fatalf("decoding: %v", err)
+		}
+		if meta, ok := fields["metadata"]; !ok || string(meta) != "{}" {
+			t.Errorf("payload metadata = %q (present %v), want an explicit {}", meta, ok)
+		}
+		peer.ApplyEventSnapshot(evt.Type, evt.Payload)
+		applied++
+	}
+	if applied == 0 {
+		t.Fatal("the emitter wrote no bead.updated for the unset")
+	}
+	got, err := peer.Get(row.ID)
+	if err != nil {
+		t.Fatalf("peer Get: %v", err)
+	}
+	if _, kept := got.Metadata["only"]; kept {
+		t.Fatalf("peer cache kept the unset last key after the event: %v", got.Metadata)
+	}
+}
+
 // Every class the binding serves shares one cache. Kills (M29): a cache per
 // class, which turns one binding into five legs (callers dedup by store
 // identity), primes and re-scans the engine five times, and lets a write
@@ -867,5 +969,128 @@ func TestControllerBindingCacheIsSharedByEveryClass(t *testing.T) {
 	}
 	if len(routes.caches) != 1 {
 		t.Fatalf("routes track %d caches, want 1", len(routes.caches))
+	}
+}
+
+// TestBindingCacheReconcileStaysQuietAfterTheControllersOwnWrites pins the
+// split-city binding flood (ga-ylpbsy.67). On a city whose infrastructure
+// classes live in a SQLite binding, every re-scan of the binding cache
+// re-announced nearly every open row: ~14k bead.updated per ~2-minute pass,
+// each carrying the same is_blocked verdict as the last, against a backing
+// nothing had changed.
+//
+// The loop runs through the controller's own wiring. Order dispatch closes each
+// run's tracking row with orders.Store.CloseRuns, a CloseAll, which keeps the
+// closed row but drops its dependency entry. The row has no edges, so its
+// bead.closed comes back through the bead-event watcher with no dependencies
+// key, applied to the binding cache as a snapshot. Read as "this row's edges
+// are unknown", it cleared the cache's store-wide dependency coverage and wiped
+// every cached ready verdict; the next re-scan re-stamped all of them and
+// announced each as an update. Orders close a tracking row every few seconds,
+// so the cache never converged.
+//
+// Everything below goes through the production path: the engine is opened as
+// the sqlite-beads provider opens it, the cache is withControllerCache's, the
+// close is order dispatch's, every event the cache records is fed back through
+// applyBeadEventToStores, and the passes are the cache's own reconcile. Kills:
+// an echo of the controller's own write that costs untouched rows their
+// verdict, and a re-scan that reports an update for a row whose backing row did
+// not change.
+func TestBindingCacheReconcileStaysQuietAfterTheControllersOwnWrites(t *testing.T) {
+	engine := openBindingEngineForTest(t)
+	root := bindingGraphRoot(t, engine)
+	create := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := engine.Create(b)
+		if err != nil {
+			t.Fatalf("Create %q: %v", b.Title, err)
+		}
+		return created
+	}
+	// Rows nothing writes to after the cache primes: a blocked step, its
+	// blocker, and mail as the binding holds it. No re-scan may report them.
+	blocker := create(bindingGraphRow("blocker", root))
+	step := create(bindingGraphRow("step", root))
+	if err := engine.DepAdd(step.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	untouched := []string{root, blocker.ID, step.ID}
+	for i := 0; i < 12; i++ {
+		session := fmt.Sprintf("gcg-session-%032d", i)
+		mail := create(beads.Bead{
+			Title:     "context cycle",
+			Type:      "message",
+			Assignee:  session,
+			From:      "rig--worker-1-pool",
+			Ephemeral: true,
+			Labels:    []string{fmt.Sprintf("thread:thread-%012d", i), "gc:auto-handoff", "gc:archive-after-inject", "priority:1"},
+			Metadata:  map[string]string{"mail.from_display": "rig--worker-1-pool", "mail.from_session_id": session},
+		})
+		untouched = append(untouched, mail.ID)
+	}
+	// Rows the controller writes between two passes: an order run's tracking
+	// row, and a step that finishes.
+	tracking := create(beads.Bead{
+		Title:     "order:pr-merge-queue",
+		Type:      "task",
+		Labels:    []string{"order-run:pr-merge-queue", "order-tracking"},
+		NoHistory: true,
+	})
+	finished := create(bindingGraphRow("finished step", root))
+
+	cs, ep := newCachedSplitControllerState(context.Background(), t, splitClassRoutes(engine), beads.NewMemStore())
+	cache := bindingCacheOf(t, cs)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cursor := len(ep.Events)
+	cache.ReconcileNowForTest()
+	feedBackBeadEvents(cs, ep, &cursor)
+	cache.ReconcileNowForTest()
+	if n := feedBackBeadEvents(cs, ep, &cursor); n != 0 {
+		t.Fatalf("an idle binding cache emitted %d bead events on its second re-scan, want 0", n)
+	}
+
+	// The controller's own writes between two passes, each echo fed back as
+	// the watcher delivers it.
+	if _, err := orders.NewStore(cs.Stores().Orders()).CloseRuns(context.Background(), []string{tracking.ID}, completedOrderTrackingCloseReason); err != nil {
+		t.Fatalf("closing the order run's tracking row: %v", err)
+	}
+	feedBackBeadEvents(cs, ep, &cursor)
+	store := cs.Stores().Graph().Store
+	if err := store.Close(finished.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	feedBackBeadEvents(cs, ep, &cursor)
+
+	// The echoes must not cost the cache its dependency coverage: readers
+	// between two re-scans would otherwise fall back to the backing (#8643's
+	// first hunk), which the re-scan below would hide.
+	readyBetween, err := cache.ReadyContext(context.Background())
+	if err != nil {
+		t.Fatalf("the controller's own close echoes cost the binding cache its dependency coverage: %v", err)
+	}
+	if containsBeadID(readyBetween, step.ID) {
+		t.Fatalf("cached ReadyContext offers %s, which its open blocker holds back", step.ID)
+	}
+
+	before := cache.Stats().Updates
+	cache.ReconcileNowForTest()
+	var reannounced []string
+	for _, evt := range ep.Events[cursor:] {
+		if evt.Type == events.BeadUpdated && slices.Contains(untouched, evt.Subject) {
+			reannounced = append(reannounced, evt.Subject)
+		}
+	}
+	if updates := cache.Stats().Updates - before; len(reannounced) > 0 || updates != 0 {
+		t.Fatalf("the re-scan after the controller's own writes reported %d updates and re-announced %d of %d rows whose backing rows did not change: %v",
+			updates, len(reannounced), len(untouched), reannounced)
+	}
+	ready, err := beads.HandlesFor(cache).Cached.Ready()
+	if err != nil {
+		t.Fatalf("cached Ready: %v", err)
+	}
+	if containsBeadID(ready, step.ID) {
+		t.Fatalf("cached Ready offers %s, which its open blocker holds back", step.ID)
 	}
 }

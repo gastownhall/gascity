@@ -59,7 +59,7 @@ func (c keepCase) run(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s is not in the census", c.row.ID)
 	}
-	if _, rolled := armRollback(&rowFacts{row: row, found: true, entry: e}); rolled != c.wantRollback {
+	if _, rolled := armRollback(&rowFacts{w: &World{}, row: row, found: true, entry: e}); rolled != c.wantRollback { // a pass that read no work
 		t.Fatalf("armRollback = %v, want %v: entry %s(%s) liveness %v", rolled, c.wantRollback, e.Desired, e.Reason, e.Liveness)
 	}
 }

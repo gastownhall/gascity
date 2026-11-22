@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -125,8 +126,9 @@ func TestManagerStartRunsUnderTheRuntimeLease(t *testing.T) {
 	if len(m.sp.starts) != 1 || m.sp.starts[0] == "" || !m.sp.watched[0] {
 		t.Fatalf("lease holders seen at Start = %q (watched %v), want one held, watched lease", m.sp.starts, m.sp.watched)
 	}
-	if meta := m.f.meta(t); meta[RuntimeLeaseHolderKey] != "" || meta[RuntimeLeaseEpochKey] != "1" {
-		t.Fatalf("record after Start = %v, want epoch 1 released", meta)
+	// The create's first start held epoch 1 (createStarted takes the lease).
+	if meta := m.f.meta(t); meta[RuntimeLeaseHolderKey] != "" || meta[RuntimeLeaseEpochKey] != "2" {
+		t.Fatalf("record after Start = %v, want epoch 2 released", meta)
 	}
 }
 
@@ -457,19 +459,19 @@ func TestInterruptRefusesAStopPendingRow(t *testing.T) {
 func TestLeaselessManagerFailsAtUse(t *testing.T) {
 	ExpectNoCityRefusalsForTest(t)
 	m := newManagerLeaseFixture(t)
-	mgr := NewManagerWithOptions(m.f.store, m.sp)
+	mgr := NewManagerWithOptions(beadstest.Sessions(m.f.store), m.sp)
 	cmd, hints := BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}
 	if err := mgr.Start(context.Background(), Actor{Kind: ActorOperator}, m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
 		t.Fatalf("start without a city = %v, want ErrRuntimeLeaseNoCity", err)
 	}
-	if err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController}, m.info.ID, cmd, hints); !errors.Is(err, ErrNoCallerLease) {
+	if err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController}, m.info.ID, Incarnation{}, cmd, hints); !errors.Is(err, ErrNoCallerLease) {
 		t.Fatalf("runtime-only start without a lease = %v, want ErrNoCallerLease", err)
 	}
 	if m.sp.IsRunning(m.info.SessionName) {
 		t.Fatal("the refused runtime-only start started the runtime")
 	}
 	held := m.hold(t)
-	err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController, Lease: held}, m.info.ID, cmd, hints)
+	err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController, Lease: held}, m.info.ID, mintUnder(t, mgr, held, m.info.ID), cmd, hints)
 	held.Release()
 	if err != nil {
 		t.Fatalf("runtime-only start under its caller's lease: %v", err)

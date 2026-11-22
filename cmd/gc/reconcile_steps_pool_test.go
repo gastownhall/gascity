@@ -40,10 +40,11 @@ func nudgeStepsFixture(t *testing.T) (externalReadsEnv, beads.Store) {
 	return externalReadsEnv{Cfg: idleClaimTestCfg(), CityStore: store, SP: runningIdleClaimFake(t, "session-a")}, store
 }
 
-// Kills: nudging from stale or empty demand. The claim backstop starts its
-// grace on a slot whose trigger the last allocation holds, as assigned or
-// as ready routed work, and on nothing when there is no allocation yet or
-// the last one is older than a recording stays fresh.
+// Kills: nudging from stale or empty demand. Rolled back, the claim
+// backstop starts its grace on a slot whose trigger the last allocation
+// holds, as assigned or as ready routed work, and on nothing when there is
+// no allocation yet or the last one is older than a recording stays fresh.
+// (TestWorkLadderUsesLastAllocation is the ladder's.)
 func TestNudgeStepsUseLastAllocation(t *testing.T) {
 	work := []beads.Bead{{ID: "work-a", Status: "open"}}
 	for _, tc := range []struct {
@@ -58,8 +59,9 @@ func TestNudgeStepsUseLastAllocation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, store := nudgeStepsFixture(t)
+			env.Cfg.Daemon.WorkLadder = "off"
 			lane, _ := newPoolStepsTestLane(env, func() *allocSummary { return tc.sum }, nil)
-			lane.nudges(context.Background(), env)
+			lane.workLadder(context.Background(), env)
 			if got := mustGetTestBead(t, store, "session-bead-a").Metadata[idleClaimNudgeTriggerKey]; got != tc.want {
 				t.Errorf("idle-claim marker = %q, want %q", got, tc.want)
 			}
@@ -123,11 +125,19 @@ func TestOrphanReleaseSkipsIncompleteSnapshot(t *testing.T) {
 }
 
 // Kills: a step that reads a summary the next pass rewrites, or edits the
-// one it loaded (S-14). Under -race, the nudges and orphan-release steps run
-// while another goroutine reads every summary field, and the summary they
-// were handed still equals a fresh build of it afterwards.
+// one it loaded (S-14). Under -race, the work-ladder step (the ladder, and
+// rolled back) and the orphan-release step run while another goroutine
+// reads every summary field, and the summary they were handed still equals
+// a fresh build of it afterwards.
 func TestNudgeStepsReadImmutableSummary(t *testing.T) {
+	for _, mode := range []string{"on", "off"} {
+		t.Run(mode, func(t *testing.T) { testNudgeStepsReadImmutableSummary(t, mode) })
+	}
+}
+
+func testNudgeStepsReadImmutableSummary(t *testing.T, mode string) {
 	env, store := nudgeStepsFixture(t)
+	env.Cfg.Daemon.WorkLadder = mode
 	env.Cfg.Agents = append(env.Cfg.Agents, orphanCfg().Agents...)
 	build := orphanSummary(t, store)
 	trigger := beads.Bead{ID: "work-a", Status: "open", Metadata: map[string]string{"k": "v"}}
@@ -162,7 +172,7 @@ func TestNudgeStepsReadImmutableSummary(t *testing.T) {
 		}
 	}()
 	for range 3 {
-		lane.nudges(context.Background(), env)
+		lane.workLadder(context.Background(), env)
 		lane.orphanRelease(context.Background(), env)
 	}
 	close(stop)
@@ -267,15 +277,16 @@ func TestOrphanReleaseDetectsStrandedClaims(t *testing.T) {
 	}
 }
 
-// Kills v2's claim backstop leaving a wedged slot on its seat (mc-zndi7.80):
-// at the cap, with the slot quiet and its own trigger still ready routed work
-// in the last allocation and open on a live read through the work legs, the
-// nudges step posts the slot's execution-stalled request to
+// Kills v2's claim backstop, rolled back, leaving a wedged slot on its seat
+// (mc-zndi7.80): at the cap, with the slot quiet and its own trigger still
+// ready routed work in the last allocation and open on a live read through
+// the work legs, the step posts the slot's execution-stalled request to
 // the planner (A16 turns it into a drain no lens cancels) once, at the row's
 // generation; a trigger no longer in the allocation posts nothing.
 func TestNudgeStepsDrainAWedgedSlot(t *testing.T) {
 	for _, routed := range []bool{true, false} {
 		env, store := nudgeStepsFixture(t)
+		env.Cfg.Daemon.WorkLadder = "off"
 		store = beads.NewMemStoreFrom(0, []beads.Bead{mustGetTestBead(t, store, "session-bead-a"), {ID: "work-a", Title: "work-a", Type: "task", Status: "open"}}, nil)
 		env.CityStore = store
 		env.WorkLegs = workLegsFromCensus(t.TempDir(), env.Cfg, cityWorkLegOf(beads.WorkStore{Store: store}), nil)
@@ -292,8 +303,8 @@ func TestNudgeStepsDrainAWedgedSlot(t *testing.T) {
 		}
 		var posted []executionStalledRequest
 		lane, _ := newPoolStepsTestLane(env, func() *allocSummary { return sum }, func(r executionStalledRequest) { posted = append(posted, r) })
-		lane.nudges(context.Background(), env)
-		lane.nudges(context.Background(), env)
+		lane.workLadder(context.Background(), env)
+		lane.workLadder(context.Background(), env)
 		want := 0
 		if routed {
 			want = 1
@@ -304,8 +315,8 @@ func TestNudgeStepsDrainAWedgedSlot(t *testing.T) {
 	}
 }
 
-// Kills v2's claim backstop sending nothing to a rig-scoped pool that
-// configures no nudge (mc-zndi7.80, the production-dead case): the nudges
+// Kills v2's claim backstop, rolled back, sending nothing to a rig-scoped
+// pool that configures no nudge (mc-zndi7.80, the production-dead case): the
 // step delivers the default claim nudge after the grace.
 func TestNudgeStepsNudgeARigPoolWithoutNudge(t *testing.T) {
 	sess := beads.Bead{ID: "gcg-session-2", Status: "open", Type: "session", Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
@@ -313,17 +324,21 @@ func TestNudgeStepsNudgeARigPoolWithoutNudge(t *testing.T) {
 		testTriggerBeadIDKey: "gcg-step", idleClaimNudgeTriggerKey: "gcg-step", idleClaimNudgeCountKey: "0",
 		idleClaimNudgeAtKey: stepsTestNow.Add(-idleClaimNudgeGrace - time.Second).Format(time.RFC3339),
 	}}
-	store := beads.NewMemStoreFrom(0, []beads.Bead{sess}, nil)
+	// The step is in the store, and the env carries work legs, because the
+	// backstop re-reads the trigger live before it delivers.
+	store := beads.NewMemStoreFrom(0, []beads.Bead{sess, {ID: "gcg-step", Status: "open"}}, nil)
 	sp := runningIdleClaimFake(t, "beads--claude-max-gw-2-pool")
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "c"},
 		Rigs:      []config.Rig{{Name: "beads", Path: t.TempDir()}},
 		Agents:    []config.Agent{{Name: "claude-max-gw", Dir: "beads", MaxActiveSessions: intPtr(100)}},
+		Daemon:    config.DaemonConfig{WorkLadder: "off"},
 	}
 	env := externalReadsEnv{Cfg: cfg, CityStore: store, SP: sp}
+	env.WorkLegs = workLegsFromCensus(t.TempDir(), cfg, cityWorkLegOf(beads.WorkStore{Store: store}), nil)
 	sum := &allocSummary{At: stepsTestNow, ReadyRouted: []beads.Bead{{ID: "gcg-step", Status: "open"}}, ReadyRoutedRefs: []string{""}}
 	lane, _ := newPoolStepsTestLane(env, func() *allocSummary { return sum }, nil)
-	lane.nudges(context.Background(), env)
+	lane.workLadder(context.Background(), env)
 	if got := sp.CountCalls("Nudge", "beads--claude-max-gw-2-pool"); got != 1 {
 		t.Fatalf("nudges = %d, want the default claim nudge delivered", got)
 	}

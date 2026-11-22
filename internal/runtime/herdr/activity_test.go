@@ -366,3 +366,30 @@ func TestActivityReconcileLoopPollsOnAnyEventKind(t *testing.T) {
 		})
 	}
 }
+
+// TestActivityIgnoresUnnamedPanes pins the tracker's keys to registered names:
+// a pane herdr detected claude in but nobody named is no session, so it must
+// not seed an entry under the kind that a session named like the kind would
+// then read as its own activity.
+func TestActivityIgnoresUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setRawAgents(
+		`{"agent":"claude","name":"alpha","pane_id":"w1:p1","agent_status":"working","revision":1}`,
+		unnamedClaudePane,
+	)
+	p := activityTestProvider(t, sock)
+	if got := lastActivity(t, p, "alpha"); got.IsZero() {
+		t.Fatal("alpha: want a seeded activity stamp, got zero")
+	}
+	if got := lastActivity(t, p, "claude"); !got.IsZero() {
+		t.Errorf("claude: want zero (no session is named claude), got %v", got)
+	}
+	p.act.mu.Lock()
+	defer p.act.mu.Unlock()
+	if len(p.act.entries) != 1 {
+		t.Errorf("activity entries = %v; want only alpha", p.act.entries)
+	}
+	if _, ok := p.act.entries["alpha"]; !ok {
+		t.Errorf("activity entries = %v; want alpha", p.act.entries)
+	}
+}

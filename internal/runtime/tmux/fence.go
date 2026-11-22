@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,16 +21,16 @@ import (
 // the agent-pane marker it belongs to the pane: it survives respawn-pane, and
 // a new session's pane starts without it. A new digest format needs a new
 // option name, since a pane never re-adopts an own value.
-const inputFenceOption = "@gc_fence"
+const inputFenceOption = runtime.TmuxInputFenceOption
 
 // The tmux formats a fenced operation reads and conditions on.
 const (
 	// fenceReadFormat reads a pane's fence value, id and death.
-	fenceReadFormat = "#{" + inputFenceOption + "}|#{pane_id}|#{pane_dead}"
+	fenceReadFormat = runtime.TmuxFenceReadFormat
 	// fenceNotOwnCondition is true when the pane has no own fence value.
 	fenceNotOwnCondition = "#{?#{m:*.#{pane_id},#{" + inputFenceOption + "}},,1}"
 	// fenceMissPrefix leads the output of a guarded command's else branch.
-	fenceMissPrefix = "gc-fence-miss:"
+	fenceMissPrefix = runtime.TmuxFenceMissPrefix
 	// fenceOwnPrefix leads the output of an adoption that found an own value.
 	fenceOwnPrefix = "gc-fence-own:"
 	// fenceAdoptMissPrefix leads the output of a caller-proven adoption whose
@@ -125,7 +124,8 @@ func inputCtx(ctx context.Context) context.Context {
 // checks the agent pane's fence before any input or wait (adopting the
 // session's own identity once if the pane holds none), and then runs every
 // input command body sends through the guard (Tmux.runCtx). Any miss wins
-// over body's own result. textOnly is set for a nudge: only its text (and
+// over body's own result; a check that fails otherwise sent nothing
+// (runtime.ErrInputNotSent). textOnly is set for a nudge: only its text (and
 // what follows it) makes a miss partial, not the preparatory keys before.
 func (p *Provider) fenced(ctx context.Context, name string, f runtime.InputFence, textOnly bool, body func(context.Context) error) error {
 	if err := f.Validate(); err != nil {
@@ -143,7 +143,7 @@ func (p *Provider) fenced(ctx context.Context, name string, f runtime.InputFence
 	g := newPaneGuard(name, f.Digest(), textOnly)
 	ctx = withPaneGuard(ctx, g)
 	if err := g.verify(ctx, p.tm); err != nil {
-		return err
+		return g.notSent(err)
 	}
 	return g.finish(body(ctx))
 }
@@ -315,18 +315,42 @@ func (g *paneGuard) verifiedPane() string {
 }
 
 // finish is the operation's result: its miss when it had one, else err, or
-// the server it lost when body swallowed that.
+// the server it lost when body swallowed that. A server lost after input
+// reached the fenced incarnation also wraps
+// runtime.ErrNudgeDeliveryUnconfirmed: that input may have delivered.
 func (g *paneGuard) finish(err error) error {
 	if miss := g.missed(); miss != nil {
 		return miss
 	}
 	g.mu.Lock()
-	unavailable := g.unavailable
+	unavailable, applied := g.unavailable, g.applied
 	g.mu.Unlock()
 	if err == nil && unavailable != nil {
-		return unavailable
+		err = unavailable
+	}
+	var lost *fenceUnavailableError
+	if applied && errors.As(err, &lost) && !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		return fmt.Errorf("%w after input was applied: %w", runtime.ErrNudgeDeliveryUnconfirmed, err)
 	}
 	return err
+}
+
+// notSent marks err, a failure before any of the operation's effect was
+// applied (as a miss's Partial counts it), as runtime.ErrInputNotSent:
+// checking the fence or staging text failed, so nothing reached the
+// incarnation. A miss and a lost server say so already and pass through.
+func (g *paneGuard) notSent(err error) error {
+	var miss *runtime.FenceMismatchError
+	if err == nil || errors.As(err, &miss) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return err
+	}
+	g.mu.Lock()
+	applied := g.applied
+	g.mu.Unlock()
+	if applied {
+		return err
+	}
+	return fmt.Errorf("fenced input to %q: %w: %w", g.name, runtime.ErrInputNotSent, err)
 }
 
 // gone turns an error the unfenced path would absorb as "session gone, so
@@ -362,53 +386,10 @@ func (e *fenceUnavailableError) Unwrap() []error {
 	return []error{runtime.ErrRuntimeUnavailable, e.cause}
 }
 
-// fenceRead is one read of a pane's fence. A read with no pane id found no
-// session: tmux answers display-message -t and if-shell -F -t for a session
-// that no longer exists (while the server lives) with exit 0 and every
-// field empty.
-type fenceRead struct {
-	value, pane string
-	dead        bool
-}
+// fenceRead is one read of a pane's fence (runtime.TmuxFenceRead).
+type fenceRead = runtime.TmuxFenceRead
 
-func parseFenceRead(out string) (fenceRead, bool) {
-	parts := strings.Split(strings.TrimSpace(out), "|")
-	switch {
-	case len(parts) != 3:
-		return fenceRead{}, false
-	case parts[1] == "":
-		return fenceRead{}, true
-	case !wellFormedTmuxID(parts[1], '%'):
-		return fenceRead{}, false
-	}
-	return fenceRead{value: parts[0], pane: parts[1], dead: parts[2] == "1"}, true
-}
-
-// absent reports whether the read found no session.
-func (r fenceRead) absent() bool { return r.pane == "" }
-
-// own is the digest the pane holds as its own fence, "" when it holds none
-// (no value, or one inherited from another scope or another pane).
-func (r fenceRead) own() string {
-	digest, ok := strings.CutSuffix(r.value, "."+r.pane)
-	if !ok {
-		return ""
-	}
-	return digest
-}
-
-// found is what a miss on r reports.
-func (r fenceRead) found() string {
-	switch {
-	case r.absent():
-		return runtime.FenceFoundAbsent
-	case r.dead:
-		return runtime.FenceFoundDead
-	case r.own() != "":
-		return r.own()
-	}
-	return runtime.FenceFoundUnproven
-}
+func parseFenceRead(out string) (fenceRead, bool) { return runtime.ParseTmuxFenceRead(out) }
 
 // read reads the agent pane's fence, returning its target.
 func (g *paneGuard) read(ctx context.Context, t *Tmux) (string, fenceRead, error) {
@@ -428,7 +409,7 @@ func (g *paneGuard) read(ctx context.Context, t *Tmux) (string, fenceRead, error
 	if !ok {
 		return "", fenceRead{}, fmt.Errorf("reading input fence of %q: unexpected tmux output %q", g.name, out)
 	}
-	if r.absent() || r.pane != guardPaneID(target) {
+	if r.Absent() || r.Pane != guardPaneID(target) {
 		// No session, or tmux answered for the window's active pane: the
 		// agent pane is gone.
 		return "", fenceRead{}, g.gone(errAgentPaneGone)
@@ -451,10 +432,10 @@ func (g *paneGuard) verify(ctx context.Context, t *Tmux) error {
 	if err != nil {
 		return err
 	}
-	if r.dead {
+	if r.Dead {
 		return g.recordMiss(runtime.FenceFoundDead)
 	}
-	own := r.own()
+	own := r.Own()
 	if own == "" {
 		if own, err = g.adopt(ctx, t, target); err != nil {
 			return err
@@ -464,7 +445,7 @@ func (g *paneGuard) verify(ctx context.Context, t *Tmux) error {
 		return g.recordMiss(own)
 	}
 	g.mu.Lock()
-	g.pane = r.pane
+	g.pane = r.Pane
 	g.mu.Unlock()
 	return nil
 }
@@ -499,13 +480,13 @@ func (g *paneGuard) adopt(ctx context.Context, t *Tmux, target string) (string, 
 		return envDigest, nil
 	case strings.HasPrefix(out, fenceOwnPrefix):
 		r, ok := parseFenceRead(strings.TrimPrefix(out, fenceOwnPrefix))
-		if ok && (r.absent() || r.pane != guardPaneID(target)) {
+		if ok && (r.Absent() || r.Pane != guardPaneID(target)) {
 			// No session, or tmux evaluated the window's active pane: the
 			// agent pane is gone.
 			return "", g.gone(errAgentPaneGone)
 		}
-		if ok && r.own() != "" {
-			return r.own(), nil
+		if ok && r.Own() != "" {
+			return r.Own(), nil
 		}
 	}
 	return "", fmt.Errorf("adopting input fence of %q: unexpected tmux output %q", g.name, out)
@@ -529,13 +510,13 @@ func (g *paneGuard) checkLive(ctx context.Context, t *Tmux) error {
 	switch {
 	case !ok:
 		return fmt.Errorf("reading input fence of %q: unexpected tmux output %q", g.name, out)
-	case r.absent():
+	case r.Absent():
 		return g.gone(ErrSessionNotFound)
-	case r.pane != g.verifiedPane():
+	case r.Pane != g.verifiedPane():
 		// Another pane has the client's input: the target is not the agent.
 		return g.recordMiss(runtime.FenceFoundUnproven)
-	case r.dead || r.own() != g.digest:
-		return g.recordMiss(r.found())
+	case r.Dead || r.Own() != g.digest:
+		return g.recordMiss(r.Found())
 	}
 	return nil
 }
@@ -545,10 +526,6 @@ func (g *paneGuard) checkLive(ctx context.Context, t *Tmux) error {
 func isPaneInputCommand(args []string) bool {
 	return len(args) > 0 && (args[0] == "send-keys" || args[0] == "paste-buffer")
 }
-
-// guardKeyRe is a key name a guarded send-keys may carry: tmux key names
-// (Enter, C-c, Up, a digit), never text.
-var guardKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9+_-]{0,31}$`)
 
 // pasteInput is a guarded input command broken into its parts.
 type pasteInput struct {
@@ -646,7 +623,9 @@ func isDigits(s string) bool {
 // target pane being live and holding the guard's digest as its own fence.
 // Text never enters a command string or argv: send-keys -l TEXT is staged
 // into a private file, loaded into a named buffer, and pasted under the
-// guard. After the operation's first miss nothing more is sent.
+// guard; staging that fails before the operation's effect is
+// runtime.ErrInputNotSent. After the operation's first miss nothing more is
+// sent.
 func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, error) {
 	if miss := g.missed(); miss != nil {
 		return "", miss
@@ -667,7 +646,7 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 		}
 		buffer, err = t.loadPasteBuffer(ctx, in.keys[0])
 		if err != nil {
-			return "", err
+			return "", g.notSent(err)
 		}
 		inner = []string{"paste-buffer", "-d", "-r", "-b", buffer, "-t", in.target}
 	case args[0] == "paste-buffer":
@@ -677,7 +656,7 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 			return "", fmt.Errorf("fenced send-keys: no keys")
 		}
 		for _, k := range in.keys {
-			if !guardKeyRe.MatchString(k) {
+			if !runtime.TmuxKeyName(k) {
 				return "", fmt.Errorf("fenced send-keys: %q is not a key name", k)
 			}
 		}
@@ -716,12 +695,12 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 		return "", nil
 	case strings.HasPrefix(out, fenceMissPrefix):
 		if r, ok := parseFenceRead(strings.TrimPrefix(out, fenceMissPrefix)); ok {
-			if r.absent() || r.pane != guardPaneID(in.target) {
+			if r.Absent() || r.Pane != guardPaneID(in.target) {
 				// No session, or tmux evaluated the window's active pane: the
 				// agent pane is gone.
 				return "", g.recordMiss(runtime.FenceFoundAbsent)
 			}
-			return "", g.recordMiss(r.found())
+			return "", g.recordMiss(r.Found())
 		}
 		return "", g.recordMiss(runtime.FenceFoundUnproven)
 	}
@@ -757,70 +736,22 @@ func (t *Tmux) deleteBufferBestEffort(name string) {
 	}
 }
 
-// guardedInputArgs is the if-shell that runs inner only while target is live
-// and holds digest as its own fence; otherwise it deletes buffer (when set)
-// and prints what it found after fenceMissPrefix. The condition names
-// target's pane id too: tmux evaluates it in the window's active pane when
-// target's pane is gone, and that context must miss.
+// guardedInputArgs is the if-shell that runs inner only while target (an
+// agent-pane target) is live and holds digest as its own fence
+// (runtime.TmuxGuardedInputArgs).
 func guardedInputArgs(target, digest string, inner []string, buffer string) ([]string, error) {
-	if !guardKeyRe.MatchString(digest) {
-		return nil, fmt.Errorf("fenced input: invalid digest %q", digest)
-	}
-	then, err := tmuxCommandString(inner...)
-	if err != nil {
-		return nil, err
-	}
-	show, err := tmuxCommandString("display-message", "-p", "-t", target, fenceMissPrefix+fenceReadFormat)
-	if err != nil {
-		return nil, err
-	}
-	elseCmd := show
-	if buffer != "" {
-		del, err := tmuxCommandString("delete-buffer", "-b", buffer)
-		if err != nil {
-			return nil, err
-		}
-		elseCmd = del + " ; " + show
-	}
-	pane := guardPaneID(target)
-	if !wellFormedTmuxID(pane, '%') {
-		return nil, fmt.Errorf("fenced input: target %q names no pane", target)
-	}
-	cond := "#{&&:#{==:#{pane_id}," + pane + "},#{&&:#{==:#{" + inputFenceOption + "}," + digest + ".#{pane_id}},#{!=:#{pane_dead},1}}}"
-	return []string{"if-shell", "-F", "-t", target, cond, then, elseCmd}, nil
+	return runtime.TmuxGuardedInputArgs(target, guardPaneID(target), digest, inner, buffer)
 }
 
-// tmuxCommandString renders args as one tmux command for if-shell, each
-// argument single-quoted. Arguments tmux would parse or expand (a quote, a
-// control byte, or text that is not ours) are refused: only the provider's
-// own targets, key names, buffer names and the guard's own formats reach it.
+// tmuxCommandString renders args as one tmux command for if-shell
+// (runtime.TmuxCommandString), accepting only the formats the guard and its
+// adoption write.
 func tmuxCommandString(args ...string) (string, error) {
-	quoted := make([]string, len(args))
-	for i, a := range args {
-		if a == "" {
-			return "", fmt.Errorf("fenced tmux command: empty argument")
-		}
-		for _, r := range a {
-			if r == '\'' || r < 0x20 || r == 0x7f {
-				return "", fmt.Errorf("fenced tmux command: argument %q is unsafe", a)
-			}
-		}
-		if strings.Contains(a, "#{") && !ownFormatArg(a) {
-			return "", fmt.Errorf("fenced tmux command: argument %q holds a format", a)
-		}
-		quoted[i] = "'" + a + "'"
-	}
-	return strings.Join(quoted, " "), nil
+	return runtime.TmuxCommandString(ownFormatArg, args...)
 }
 
 // ownFormatArg reports whether a is one of the formats the guard writes
-// itself: a fence value or one of the miss reports.
+// itself: a fence value, a miss report, or an adoption's report.
 func ownFormatArg(a string) bool {
-	switch {
-	case strings.HasSuffix(a, ".#{pane_id}") && guardKeyRe.MatchString(strings.TrimSuffix(a, ".#{pane_id}")):
-		return true
-	case a == fenceMissPrefix+fenceReadFormat, a == fenceOwnPrefix+fenceReadFormat, a == fenceAdoptMissPrefix+"#{pane_pid}":
-		return true
-	}
-	return false
+	return runtime.TmuxGuardFormatArg(a) || a == fenceOwnPrefix+fenceReadFormat || a == fenceAdoptMissPrefix+"#{pane_pid}"
 }

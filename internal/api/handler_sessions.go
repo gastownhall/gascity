@@ -29,10 +29,13 @@ type sessionResponse struct {
 	Reason      string `json:"reason,omitempty"`
 	Title       string `json:"title"`
 	Alias       string `json:"alias,omitempty"`
+	AgentName   string `json:"agent_name" required:"false" doc:"The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it."`
 	Provider    string `json:"provider"`
+	Transport   string `json:"transport,omitempty" doc:"How gc drives the session runtime, for example tmux or acp. Empty when unknown."`
 	DisplayName string `json:"display_name,omitempty"`
 	SessionName string `json:"session_name"`
 	WorkDir     string `json:"work_dir,omitempty"`
+	WorkerDir   string `json:"worker_dir,omitempty" doc:"The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be."`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
 	// LastNudgeDeliveredAt is the most recent successful nudge delivery
@@ -52,7 +55,15 @@ type sessionResponse struct {
 	AgentKind string `json:"agent_kind,omitempty"`
 
 	// Enrichment fields for dashboard consumption.
-	Running       bool   `json:"running"`
+	//
+	// Running is a point-in-time observation of the session's runtime, in any
+	// open state: whether the provider held it live when this response was
+	// built (sessionRuntimeRunning). On tmux that is a pane whose process has
+	// not exited, not proof the agent itself is up: a launch wrapper or shell
+	// pane reads true, a remain-on-exit corpse reads false. A session in a
+	// transitional state (creating, start-pending, draining) can start or stop
+	// its process right after that.
+	Running       bool   `json:"running" doc:"Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles."`
 	ActiveBead    string `json:"active_bead,omitempty"`
 	LastOutput    string `json:"last_output,omitempty"`
 	Model         string `json:"model,omitempty"`
@@ -61,6 +72,16 @@ type sessionResponse struct {
 
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
+	// ActivitySource names where Activity came from. Set only while
+	// ProgramStatus is shown.
+	ActivitySource string `json:"activity_source,omitempty" enum:"program,transcript" doc:"Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report."`
+	// ProgramStatus is the session program's own status report; absent
+	// means unknown, never idle.
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty" doc:"The session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."`
+
+	// WakeReasons are the reasons the controller keeps an open session awake,
+	// set only when the list request asks for them (they cost runtime probes).
+	WakeReasons []string `json:"wake_reasons,omitempty" doc:"Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them."`
 
 	// SubmissionCapabilities describes which semantic submit intents the
 	// session runtime can honor.
@@ -76,6 +97,11 @@ type sessionResponse struct {
 
 	// Metadata exposes real_world_app_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// Turn is the turn the session's conversation-lane observer last
+	// recorded (X11 §5.3). Set on GET /session/{id} only, and only while
+	// the city's lane host runs with a kind to execute.
+	Turn *SessionTurn `json:"turn,omitempty" doc:"The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row."`
 }
 
 type sessionResponseHandle interface {
@@ -83,17 +109,42 @@ type sessionResponseHandle interface {
 	worker.PeekHandle
 }
 
+// runtimeSessionResponseHandle returns the runtime handle the list endpoints
+// enrich a session from. Every open session gets one, not only active ones:
+// running must report a live agent in a transitional state (creating,
+// start-pending, draining) too.
 func (s *Server) runtimeSessionResponseHandle(info session.Info) sessionResponseHandle {
-	if info.State != session.StateActive {
+	if info.Closed {
 		return nil
 	}
 	return newProviderSessionResponseHandle(s.state.SessionProvider(), info.SessionName, info.Provider)
 }
 
+// sessionProviderInfo is resolveProviderInfo for a session: the provider it
+// recorded, else the workspace default. A control-dispatcher session records
+// none because its agent has none (agentProviderName), so it inherits none.
+func sessionProviderInfo(info session.Info, cfg *config.City) (provider, displayName string) {
+	if strings.TrimSpace(info.Provider) == "" && isControlDispatcherSession(info, cfg) {
+		return "", ""
+	}
+	return resolveProviderInfo(info.Provider, cfg)
+}
+
+// isControlDispatcherSession reports whether a session's template resolves to
+// the SDK's providerless control dispatcher
+// (config.IsDeterministicControlDispatcher).
+func isControlDispatcherSession(info session.Info, cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	a, ok := findAgent(cfg, info.Template)
+	return ok && config.IsDeterministicControlDispatcher(&a)
+}
+
 func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	provider, displayName := info.Provider, ""
 	if cfg != nil {
-		provider, displayName = resolveProviderInfo(info.Provider, cfg)
+		provider, displayName = sessionProviderInfo(info, cfg)
 	}
 	rig, _ := config.ParseQualifiedName(info.Template)
 	state := string(info.State)
@@ -108,10 +159,13 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		State:       state,
 		Title:       info.Title,
 		Alias:       info.Alias,
+		AgentName:   info.AgentName,
 		Provider:    provider,
+		Transport:   info.Transport,
 		DisplayName: displayName,
 		SessionName: info.SessionName,
 		WorkDir:     info.WorkDir,
+		WorkerDir:   strings.TrimSpace(info.WorkerDir),
 		CreatedAt:   info.CreatedAt.Format(time.RFC3339),
 		Attached:    info.Attached,
 		Rig:         rig,
@@ -204,7 +258,7 @@ func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, 
 	}
 	r.Reason = session.LifecycleDisplayReasonWithLiveness(pr.Status, pr.Metadata, time.Now().UTC(), info.SessionName, isRunning)
 	r.ConfiguredNamedSession = strings.TrimSpace(pr.Metadata[apiNamedSessionMetadataKey]) == "true"
-	r.SubmissionCapabilities = session.SubmissionCapabilitiesForRuntime(pr.Metadata, hasDeferredQueue, runtime.TurnInterruptModeFor(sp, info.SessionName))
+	r.SubmissionCapabilities = session.SubmissionCapabilitiesForRuntime(pr.Metadata, hasDeferredQueue, runtime.TurnInterruptModeFor(sp, info.SessionName), runtime.SteerModeFor(sp, info.SessionName))
 	// Expose only real_world_app_* prefixed metadata keys to API consumers.
 	// Internal fields (session_key, command, work_dir, etc.) are redacted.
 	r.Metadata = filterMetadata(pr.Metadata)
@@ -251,12 +305,12 @@ func writeResolveError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
 	q := r.URL.Query()
@@ -264,7 +318,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), stateFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -341,26 +395,26 @@ func sessionTranscriptProviderFallback(cfg *config.City) string {
 }
 
 func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 	cfg := s.state.Config()
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
 	wantPeek := r.URL.Query().Get("peek") == "true"
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
 		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
 	}
@@ -368,18 +422,18 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -392,17 +446,17 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -420,7 +474,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 
 	// Optional: permanently delete the bead after closing.
 	if r.URL.Query().Get("delete") == "true" {
-		if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
+		if err := deleteSessionBeadAfterClose(store, id); err != nil {
 			log.Printf("gc api: deleting bead after close %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
 			return
@@ -430,7 +484,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func deleteSessionBeadAfterClose(store beads.Store, id string) error {
+func deleteSessionBeadAfterClose(store beads.SessionStore, id string) error {
 	const maxAttempts = 5
 	var err error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -481,13 +535,13 @@ func (s *Server) handleSessionPermissionMode(w http.ResponseWriter, r *http.Requ
 
 // handleSessionWake clears hold and quarantine on a session.
 func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -533,13 +587,13 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionRename updates a session's title.
 func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -575,7 +629,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		sessFront.RepairTypeBestEffort(id)
 	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -586,7 +640,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to return the updated session, consistent with PATCH.
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -613,18 +667,21 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 // exact transcript paths. A non-nil map is authoritative, including misses,
 // so list callers can batch Codex discovery once instead of scanning per row.
 func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
+	if info.Closed || runtimeHandle == nil {
+		return
+	}
+	// running reports the runtime in every open state: a start-pending or
+	// draining session can have a live agent, and a client checking for
+	// quiescence must see it. It is the runtime probe, the same one for every
+	// endpoint, never the worker phase: that phase is derived from the
+	// lifecycle state, so a start-pending or creating session reads
+	// "starting" before any agent process exists, and the single-session read
+	// would claim a runtime the list endpoints do not see. The rest of the
+	// enrichment is for active sessions only.
+	resp.Running = sessionRuntimeRunning(s.state.SessionProvider(), info.SessionName)
 	if info.State != session.StateActive {
 		return
 	}
-	stateHandle, peekHandle := s.sessionRuntimeHandles(runtimeHandle, info)
-	if stateHandle == nil {
-		return
-	}
-	state, err := stateHandle.State(context.Background())
-	if err != nil {
-		return
-	}
-	resp.Running = workerPhaseHasLiveOutput(state.Phase)
 
 	// Active bead: search rig stores for in_progress work assigned to the
 	// concrete session first, then fall back to alias/runtime/session names.
@@ -646,41 +703,50 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 	// Peek preview (opt-in, only when running). peekLines=0 means "use
 	// default" so existing callers that omit the query param keep the
 	// historical 5-line preview.
-	if wantPeek && resp.Running && peekHandle != nil {
-		lines := peekLines
-		if lines <= 0 {
-			lines = defaultSessionPeekLines
-		}
-		if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
-			resp.LastOutput = output
+	if wantPeek && resp.Running {
+		if peekHandle := s.sessionPeekHandle(runtimeHandle, info); peekHandle != nil {
+			lines := peekLines
+			if lines <= 0 {
+				lines = defaultSessionPeekLines
+			}
+			if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
+				resp.LastOutput = output
+			}
 		}
 	}
 
 	s.applySessionModelContext(resp, info, cfg, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
+	if resp.Running {
+		published, sp := configuredProgramStatusMode(cfg), s.state.SessionProvider()
+		ps := programStatusUnder(published, sp, info.SessionName)
+		shadowObservation(published, sp, ps, info.SessionName, info.ID, session.ProviderFamilyFromInfo(info, ""), resp.Activity)
+		obs := observeProgram(ps, resp.Activity)
+		resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
+	}
 }
 
-// sessionRuntimeHandles resolves the state and peek handles for an active
-// session from its runtime handle. It returns nil handles when none is usable
-// (unsupported handle type, missing bead store, or a worker lookup error); the
-// caller treats a nil state handle as "nothing to enrich".
-func (s *Server) sessionRuntimeHandles(runtimeHandle any, info session.Info) (worker.StateHandle, worker.PeekHandle) {
+// sessionPeekHandle resolves the peek handle for an active session from its
+// runtime handle. It returns nil when none is usable (unsupported handle type,
+// missing bead store, or a worker lookup error). A bare runtime provider is
+// resolved to the session's worker handle only here, when a peek is wanted.
+func (s *Server) sessionPeekHandle(runtimeHandle any, info session.Info) worker.PeekHandle {
 	switch v := runtimeHandle.(type) {
 	case worker.Handle:
-		return v, v
+		return v
 	case sessionResponseHandle:
-		return v, v
+		return v
 	case runtime.Provider:
-		store := s.state.SessionsBeadStore()
-		if store.Store == nil {
-			return nil, nil
+		store := s.state.Stores().Sessions()
+		if store == (beads.SessionStore{}) {
+			return nil
 		}
-		resolved, err := s.workerHandleForSession(store.Store, info.ID)
+		resolved, err := s.workerHandleForSession(store, info.ID)
 		if err != nil {
-			return nil, nil
+			return nil
 		}
-		return resolved, resolved
+		return resolved
 	default:
-		return nil, nil
+		return nil
 	}
 }
 
@@ -694,13 +760,18 @@ func (s *Server) applySessionModelContext(resp *sessionResponse, info session.In
 	if abs, err := filepath.Abs(workDir); err == nil {
 		workDir = abs
 	}
-	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+	factory, err := s.workerFactory(s.state.Stores().Sessions())
 	if err != nil {
 		return
 	}
 	// Prefer session-key lookup to avoid cross-reading another session's transcript.
 	provider := info.Provider
 	if strings.TrimSpace(provider) == "" && cfg != nil {
+		if isControlDispatcherSession(info, cfg) {
+			// The control dispatcher runs no model, so it writes no
+			// transcript: one found in its work dir is another session's.
+			return
+		}
 		provider, _ = resolveProviderInfo(provider, cfg)
 	}
 	transcriptProvider := session.ProviderFamilyFromInfo(info, provider)
@@ -744,13 +815,13 @@ func (s *Server) resolveSessionTranscriptFile(info session.Info, workDir, transc
 
 // handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
 func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -814,7 +885,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		sessFront.RepairTypeBestEffort(id)
 	}
 
-	catalog, err := s.workerSessionCatalog(store.Store)
+	catalog, err := s.workerSessionCatalog(store)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -831,7 +902,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), *aliasPtr, id); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); err != nil {
 				return err
 			}
 			return updateFn()
@@ -845,7 +916,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to get updated state.
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

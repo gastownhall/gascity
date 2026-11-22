@@ -7,9 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -504,6 +508,85 @@ func httpShowWatchTestCity(t *testing.T) string {
 	return cityPath
 }
 
+// showWatchRigUnderHTTPCity is httpShowWatchTestCity with a rig "frontend" at
+// <city>/frontend whose .beads holds the given metadata.json and config.yaml,
+// each written only when non-empty.
+func showWatchRigUnderHTTPCity(t *testing.T, metadata, config string) (cityPath, rigPath string) {
+	t.Helper()
+	cityPath = httpShowWatchTestCity(t)
+	rigPath = filepath.Join(cityPath, "frontend")
+	cityToml := filepath.Join(cityPath, "city.toml")
+	data, err := os.ReadFile(cityToml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, "\n[[rigs]]\nname = \"frontend\"\npath = "+strconv.Quote(rigPath)+"\nprefix = \"fe\"\n"...)
+	if err := os.WriteFile(cityToml, data, 0o644); err != nil { //nolint:gosec // fixture config
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if metadata != "" {
+		writeScopeBeadsMetadata(t, rigPath, metadata)
+	}
+	if config != "" {
+		if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(config), 0o644); err != nil { //nolint:gosec // fixture config
+			t.Fatal(err)
+		}
+	}
+	return cityPath, rigPath
+}
+
+// stubShowWatchSeams pins a doBd-level watch test: the proxied check answers
+// false, so only the remote predicate can route the watch to gc; bd's own
+// interval is too long to ever tick, so only the remote interval (20ms, which
+// records that it was asked) can drive a redraw; and cancel stops the watch
+// the way Ctrl+C would.
+func stubShowWatchSeams(t *testing.T) (remoteAsked *atomic.Bool, cancel context.CancelFunc) {
+	t.Helper()
+	origRefuses, origInterval, origRemote, origCtx := bdScopeRefusesShowWatch, bdShowWatchInterval, bdShowWatchRemoteInterval, bdShowWatchContext
+	t.Cleanup(func() {
+		bdScopeRefusesShowWatch, bdShowWatchInterval, bdShowWatchRemoteInterval, bdShowWatchContext = origRefuses, origInterval, origRemote, origCtx
+	})
+	bdScopeRefusesShowWatch = func(string, execStoreTarget, []string) bool { return false }
+	bdShowWatchInterval = time.Hour
+	remoteAsked = new(atomic.Bool)
+	bdShowWatchRemoteInterval = func() time.Duration {
+		remoteAsked.Store(true)
+		return 20 * time.Millisecond
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	bdShowWatchContext = func() (context.Context, context.CancelFunc) { return ctx, func() {} }
+	return remoteAsked, cancel
+}
+
+// awaitShowWatchExit returns the exit code of a doBd watch running in the
+// background, once cancel has stopped it.
+func awaitShowWatchExit(t *testing.T, done <-chan int) int {
+	t.Helper()
+	select {
+	case code := <-done:
+		return code
+	case <-time.After(10 * time.Second):
+		t.Fatal("gc bd show --watch did not stop on cancel")
+		return 0
+	}
+}
+
+func readShowWatchLog(t *testing.T, logPath string) string {
+	t.Helper()
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(log)
+}
+
 // On an http scope `gc bd show <id> --watch` is served by gc's poller, as on a
 // proxied scope: enterprise bd refuses --watch against an HTTP workspace, and
 // OSS bd would poll the server every 2s. bd never receives --watch, and gc
@@ -511,22 +594,7 @@ func httpShowWatchTestCity(t *testing.T) string {
 func TestGcBdShowWatchServesRemoteScopes(t *testing.T) {
 	cityPath := httpShowWatchTestCity(t)
 	logPath, statusPath := showWatchFakeBdSetup(t, cityPath)
-
-	origInterval, origRemote, origCtx := bdShowWatchInterval, bdShowWatchRemoteInterval, bdShowWatchContext
-	t.Cleanup(func() {
-		bdShowWatchInterval, bdShowWatchRemoteInterval, bdShowWatchContext = origInterval, origRemote, origCtx
-	})
-	// The local interval is left far too long to reach a redraw in the test:
-	// only the remote interval can drive it.
-	bdShowWatchInterval = time.Hour
-	remoteAsked := false
-	bdShowWatchRemoteInterval = func() time.Duration {
-		remoteAsked = true
-		return 20 * time.Millisecond
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	bdShowWatchContext = func() (context.Context, context.CancelFunc) { return ctx, func() {} }
+	remoteAsked, cancel := stubShowWatchSeams(t)
 
 	stdout, stderr := newSyncBuffer(), newSyncBuffer()
 	done := make(chan int, 1)
@@ -543,59 +611,241 @@ func TestGcBdShowWatchServesRemoteScopes(t *testing.T) {
 	}
 	waitForText(t, stdout, "mp-1 · hello [open]", 2)
 	cancel()
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("doBd = %d, want 0; stderr=%q", code, stderr.String())
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("gc bd show --watch did not stop on cancel")
+	if code := awaitShowWatchExit(t, done); code != 0 {
+		t.Fatalf("doBd = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if !remoteAsked {
+	if !remoteAsked.Load() {
 		t.Fatal("an http scope's watch did not use the remote poll interval")
 	}
-	log, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(log), "--watch") {
+	if log := readShowWatchLog(t, logPath); strings.Contains(log, "--watch") {
 		t.Fatalf("bd was handed --watch on an http scope:\n%s", log)
 	}
 }
 
-// A rig with no metadata of its own inherits its city's http backend, and so
-// its watch is served by gc too; a rig with its own Dolt metadata does not.
-func TestBdScopeUsesRemoteBackendInheritsCityHTTP(t *testing.T) {
-	cityPath := httpShowWatchTestCity(t)
-	bare := filepath.Join(cityPath, "rigs", "bare")
-	if err := os.MkdirAll(bare, 0o755); err != nil {
-		t.Fatal(err)
+// Whether a rig's watch is gc's follows the rule that picks the rig's bd
+// binary (resolveBdBinaryForScope): a rig that overrides the city backend
+// answers from its own metadata, and every other rig inherits the city's,
+// whatever its own metadata.json or config.yaml leave unsaid. Under an http
+// city an inheriting rig's watch is served by gc at the remote interval and bd
+// never sees --watch; an overriding rig keeps bd's own watch.
+func TestGcBdShowWatchOnRigsFollowsCanonicalBackendInheritance(t *testing.T) {
+	const (
+		inheritedConfig = "issue_prefix: fe\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"
+		explicitConfig  = "issue_prefix: fe\ngc.endpoint_origin: explicit\ngc.endpoint_status: unverified\ndolt.auto-start: false\ndolt.host: 127.0.0.1\ndolt.port: 3307\n"
+	)
+	tests := []struct {
+		name     string
+		metadata string
+		config   string
+		remote   bool
+	}{
+		{name: "no .beads inherits", remote: true},
+		{name: "metadata naming no backend inherits", metadata: `{"database":"beads"}`, remote: true},
+		{name: "inherited_city config inherits", metadata: `{"database":"beads"}`, config: inheritedConfig, remote: true},
+		{name: "explicit endpoint config overrides", config: explicitConfig},
+		{name: "own dolt metadata overrides", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`},
 	}
-	if !bdScopeUsesRemoteBackend(cityPath, cityPath) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, rigPath := showWatchRigUnderHTTPCity(t, tt.metadata, tt.config)
+			if got := bdScopeUsesRemoteBackend(cityPath, rigPath); got != tt.remote {
+				t.Fatalf("bdScopeUsesRemoteBackend(rig) = %v, want %v", got, tt.remote)
+			}
+			logPath, _ := showWatchFakeBdSetup(t, cityPath)
+			remoteAsked, cancel := stubShowWatchSeams(t)
+			args := []string{"--rig", "frontend", "show", "mp-1", "--watch"}
+			if !tt.remote {
+				// The fake bd refuses --watch with exit 1: reaching it proves passthrough.
+				var stdout, stderr bytes.Buffer
+				if code := doBd(args, &stdout, &stderr); code != 1 {
+					t.Fatalf("doBd = %d, want bd's own exit 1; stderr=%q", code, stderr.String())
+				}
+				if got := strings.TrimSpace(readShowWatchLog(t, logPath)); got != "show mp-1 --watch" {
+					t.Fatalf("bd argv = %q, want the original show mp-1 --watch", got)
+				}
+				return
+			}
+			stdout, stderr := newSyncBuffer(), newSyncBuffer()
+			done := make(chan int, 1)
+			go func() { done <- doBd(args, stdout, stderr) }()
+			waitForText(t, stdout, "mp-1 · hello [open]", 1)
+			cancel()
+			if code := awaitShowWatchExit(t, done); code != 0 {
+				t.Fatalf("doBd = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			if !remoteAsked.Load() {
+				t.Fatal("the rig's watch did not use the remote poll interval")
+			}
+			if log := readShowWatchLog(t, logPath); strings.Contains(log, "--watch") {
+				t.Fatalf("bd was handed --watch on a rig under an http city:\n%s", log)
+			}
+		})
+	}
+}
+
+// The city scope answers from its own metadata, and so does a rig that
+// overrides the city backend: a rig with its own http metadata is remote even
+// under a Dolt city. bd's http backend is a library backend, recognized once a
+// build that serves it registers it.
+func TestBdScopeUsesRemoteBackendReadsTheGoverningScope(t *testing.T) {
+	registerLibraryBackendForTest(t, "http")
+	httpCity := httpShowWatchTestCity(t)
+	if !bdScopeUsesRemoteBackend(httpCity, httpCity) {
 		t.Fatal("http city scope not remote")
-	}
-	if !bdScopeUsesRemoteBackend(cityPath, bare) {
-		t.Fatal("rig without metadata did not inherit the city's http backend")
-	}
-	own := filepath.Join(cityPath, "rigs", "own")
-	writeScopeBeadsMetadata(t, own, `{"database":"dolt","backend":"dolt","dolt_database":"own"}`)
-	if bdScopeUsesRemoteBackend(cityPath, own) {
-		t.Fatal("rig with its own dolt metadata reported remote")
 	}
 	doltCity, _ := proxiedEnvTestCity(t)
 	if bdScopeUsesRemoteBackend(doltCity, doltCity) {
 		t.Fatal("dolt city reported remote")
 	}
+	rig := filepath.Join(doltCity, "rigs", "served")
+	writeScopeBeadsMetadata(t, rig, convertedHTTPMetadata)
+	if !bdScopeUsesRemoteBackend(doltCity, rig) {
+		t.Fatal("a rig's own http metadata under a dolt city did not report remote")
+	}
+}
+
+// gc serves a watch on a remote scope at the remote interval even where bd
+// would refuse it anyway, on a proxied scope at bd's own interval, and leaves
+// everything that is not a watch to bd.
+func TestBdShowWatchServedByGCPicksTheInterval(t *testing.T) {
+	forceGCServedWatch(t)
+	origRemote := bdShowWatchRemoteInterval
+	t.Cleanup(func() { bdShowWatchRemoteInterval = origRemote })
+	bdShowWatchRemoteInterval = func() time.Duration { return 42 * time.Second }
+	watch := []string{"show", "mp-1", "--watch"}
+
+	httpCity := httpShowWatchTestCity(t)
+	req, interval, ok := bdShowWatchServedByGC(watch, httpCity, execStoreTarget{ScopeRoot: httpCity}, nil)
+	if !ok || req.ID != "mp-1" || interval != 42*time.Second {
+		t.Fatalf("http scope: req, interval, ok = %+v, %v, %v; want mp-1 at 42s", req, interval, ok)
+	}
+	doltCity, _ := proxiedEnvTestCity(t)
+	if _, interval, ok := bdShowWatchServedByGC(watch, doltCity, execStoreTarget{ScopeRoot: doltCity}, nil); !ok || interval != bdShowWatchInterval {
+		t.Fatalf("proxied scope: interval, ok = %v, %v; want %v", interval, ok, bdShowWatchInterval)
+	}
+	if _, _, ok := bdShowWatchServedByGC([]string{"show", "mp-1"}, httpCity, execStoreTarget{ScopeRoot: httpCity}, nil); ok {
+		t.Fatal("a show without --watch was served by gc")
+	}
+}
+
+// A failing poll is reported once, with bd's first error line, when the
+// failing starts. The last view stays up, and each consecutive failure doubles
+// the wait before the next poll, up to bdShowWatchMaxBackoff, so a watch never
+// keeps hammering a server that answers 503s. The first poll that succeeds
+// again is reported once, drops back to the base interval and redraws what
+// changed meanwhile.
+func TestRunBdShowWatchBacksOffWhileReadsFail(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const interval = 10 * time.Second
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var polls []time.Time
+		renders := 0
+		var run bdWatchRunFunc = func(_ context.Context, args []string, stdout, stderr io.Writer) int {
+			if args[1] != "--json" {
+				renders++
+				_, _ = io.WriteString(stdout, "mp-1\n")
+				return 0
+			}
+			polls = append(polls, time.Now())
+			switch n := len(polls); {
+			case n == 1:
+				_, _ = io.WriteString(stdout, `[{"id":"mp-1","status":"open","updated_at":"t1"}]`)
+			case n <= 8:
+				_, _ = io.WriteString(stderr, "Error: server returned 503 Service Unavailable\nretries exhausted\n")
+				return 1
+			default:
+				_, _ = io.WriteString(stdout, `[{"id":"mp-1","status":"closed","updated_at":"t2"}]`)
+				if n == 11 {
+					cancel()
+				}
+			}
+			return 0
+		}
+		req, _ := parseBdShowWatchArgs([]string{"show", "mp-1", "--watch"})
+		var stdout, stderr bytes.Buffer
+		if code := runBdShowWatch(ctx, req, run, interval, &stdout, &stderr); code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr.String())
+		}
+
+		var gaps []time.Duration
+		for i := 1; i < len(polls); i++ {
+			gaps = append(gaps, polls[i].Sub(polls[i-1]))
+		}
+		s := time.Second
+		want := []time.Duration{10 * s, 20 * s, 40 * s, 80 * s, 160 * s, 300 * s, 300 * s, 300 * s, 10 * s, 10 * s}
+		if !slices.Equal(gaps, want) {
+			t.Fatalf("gaps between polls = %v, want %v", gaps, want)
+		}
+		failed := "gc bd: watch: reading mp-1 failed: Error: server returned 503 Service Unavailable; keeping the last view and retrying with backoff\n"
+		recovered := "gc bd: watch: reading mp-1 recovered\n"
+		errText := stderr.String()
+		if strings.Count(errText, failed) != 1 || strings.Count(errText, recovered) != 1 || strings.Index(errText, failed) > strings.Index(errText, recovered) {
+			t.Fatalf("stderr wants one failure line, then one recovery line:\n%s", errText)
+		}
+		if strings.Contains(errText, "retries exhausted") || strings.Contains(stdout.String(), "503") {
+			t.Fatalf("bd's error leaked past its first line into the watch:\nstdout:\n%s\nstderr:\n%s", stdout.String(), errText)
+		}
+		if renders != 2 {
+			t.Fatalf("renders = %d, want the first view plus one redraw after recovery", renders)
+		}
+		if !strings.HasSuffix(errText, bdShowWatchStopped) {
+			t.Fatalf("stderr does not end with bd's stop line:\n%q", errText)
+		}
+	})
+}
+
+// A bd that cannot even start fails that call: the error goes to the call's
+// own stderr, where a poll captures it for its one failure line, rather than
+// to gc's diagnostics once per poll.
+func TestBdWatchRunnerReportsStartFailureOnTheCallsStderr(t *testing.T) {
+	var diagnostics, callStderr bytes.Buffer
+	r := &bdWatchRunner{bdPath: filepath.Join(t.TempDir(), "no-such-bd"), stderr: &diagnostics}
+	if code := r.run(context.Background(), []string{"show", "mp-1"}, io.Discard, &callStderr); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.HasPrefix(callStderr.String(), "gc bd: ") || !strings.Contains(callStderr.String(), "no-such-bd") {
+		t.Fatalf("call stderr = %q, want the start failure", callStderr.String())
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("start failure went to gc's diagnostics: %q", diagnostics.String())
+	}
+}
+
+// A failed poll is summed up by bd's first non-blank stderr line, or by its
+// exit code when it printed none.
+func TestBdShowWatchFailureReason(t *testing.T) {
+	tests := []struct {
+		stderr string
+		code   int
+		want   string
+	}{
+		{stderr: "Error: server returned 503 Service Unavailable\nretries exhausted\n", code: 1, want: "Error: server returned 503 Service Unavailable"},
+		{stderr: "\n   \n\tError: unauthorized  \r\n", code: 1, want: "Error: unauthorized"},
+		{stderr: "", code: 3, want: "bd exited 3"},
+		{stderr: " \n\t\n", code: 2, want: "bd exited 2"},
+	}
+	for _, tt := range tests {
+		if got := bdShowWatchFailureReason(tt.stderr, tt.code); got != tt.want {
+			t.Errorf("bdShowWatchFailureReason(%q, %d) = %q, want %q", tt.stderr, tt.code, got, tt.want)
+		}
+	}
 }
 
 // A remote watch never polls faster than once every 10s: that is one served
 // read per watcher per 10s, where bd's own watch would poll every 2s. The
-// jitter only ever lengthens it, by at most 20%.
+// jitter only ever lengthens it, by at most 20%, and it does vary, which is
+// what keeps watchers started together from polling in lockstep.
 func TestRemoteShowWatchIntervalIsBounded(t *testing.T) {
+	seen := make(map[time.Duration]bool)
 	for range 1000 {
 		got := bdShowWatchRemoteInterval()
 		if got < 10*time.Second || got > 12*time.Second {
 			t.Fatalf("remote watch interval = %v, want within [10s, 12s]", got)
 		}
+		seen[got] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("remote watch interval took %d distinct values in 1000 draws, want jitter", len(seen))
 	}
 }

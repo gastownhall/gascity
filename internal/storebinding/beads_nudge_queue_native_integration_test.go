@@ -146,10 +146,8 @@ func TestBeadsNudgeQueueClaimBatchOnTheNativeStore(t *testing.T) {
 
 // TestBeadsNudgeQueueClaimBatchOverTheCachedNativeStore runs the queue the way
 // the controller hosts it: over a primed CachingStore wrapping the native
-// store, with records enqueued by another process straight on the store. The
-// native List leaves revisions unstamped, so the cache serves revision 0 after
-// any Live List; a new batch, a resumed batch and a backoff release must still
-// land on the first pass.
+// store, with records enqueued by another process straight on the store. A new
+// batch, a resumed batch and a backoff release must land on the first pass.
 func TestBeadsNudgeQueueClaimBatchOverTheCachedNativeStore(t *testing.T) {
 	for _, prime := range []string{"active", "full"} {
 		t.Run(prime, func(t *testing.T) {
@@ -201,8 +199,7 @@ func TestBeadsNudgeQueueClaimBatchOverTheCachedNativeStore(t *testing.T) {
 }
 
 // TestBeadsNudgeQueueSweepOnTheNativeStore pins the terminal sweep on the
-// native store, whose List leaves revisions unstamped: a retired record past
-// retention is deleted.
+// native store: a retired record past retention is deleted.
 func TestBeadsNudgeQueueSweepOnTheNativeStore(t *testing.T) {
 	native := openNativeNudgeQueueWorkspace(t)
 	queue := newNudgeQueue(t, native)

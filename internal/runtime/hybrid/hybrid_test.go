@@ -177,6 +177,34 @@ func TestProvider_ForwardsRelaunchToRoutedBackend(t *testing.T) {
 	}
 }
 
+// StopBackgroundWork must reach the routed backend (local vs remote), or
+// session StopTurn's BackgroundWorkStopper type-assert would be masked by the
+// hybrid router and a stopped Codex turn's background terminals would keep
+// running. A backend without it answers unsupported.
+func TestProvider_ForwardsStopBackgroundWorkToRoutedBackend(t *testing.T) {
+	local, remote := runtime.NewFake(), runtime.NewFake()
+	h := New(local, remote, isRemote)
+	for _, tc := range []struct {
+		name string
+		leg  *runtime.Fake
+	}{{"local-agent", local}, {"remote-agent-1", remote}} {
+		if err := h.StopBackgroundWork(context.Background(), tc.name); err != nil {
+			t.Fatalf("StopBackgroundWork(%s): %v", tc.name, err)
+		}
+		if got := tc.leg.CountCalls("StopBackgroundWork", tc.name); got != 1 {
+			t.Errorf("routed backend StopBackgroundWork(%s) calls = %d, want 1", tc.name, got)
+		}
+	}
+	if got := local.CountCalls("StopBackgroundWork", "remote-agent-1") + remote.CountCalls("StopBackgroundWork", "local-agent"); got != 0 {
+		t.Errorf("StopBackgroundWork reached the other backend %d times, want 0", got)
+	}
+
+	bare := New(local, bareLeaf{runtime.NewFake()}, isRemote)
+	if err := bare.StopBackgroundWork(context.Background(), "remote-agent-2"); !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("StopBackgroundWork on a backend without it = %v, want ErrInteractionUnsupported", err)
+	}
+}
+
 func TestStart_RoutesToLocal(t *testing.T) {
 	local, remote := runtime.NewFake(), runtime.NewFake()
 	h := New(local, remote, isRemote)

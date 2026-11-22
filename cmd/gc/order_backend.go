@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -53,6 +54,10 @@ func orderScopeBackend(cityPath, scopeRoot string) string {
 	return backend
 }
 
+// orderScopeBackendFn is the scope-backend resolver every order path uses. A
+// var so tests can count resolutions.
+var orderScopeBackendFn = orderScopeBackend
+
 // orderInapplicableBackend reports whether order a declares requires_backend
 // and its bead scope uses a backend it does not name. It returns the scope's
 // backend when the order is inapplicable there. An order that declares
@@ -66,7 +71,7 @@ func orderInapplicableBackend(cityPath string, cfg *config.City, a orders.Order)
 	if err != nil {
 		return "", false
 	}
-	backend := orderScopeBackend(cityPath, target.ScopeRoot)
+	backend := orderScopeBackendFn(cityPath, target.ScopeRoot)
 	if a.AppliesToBackend(backend) {
 		return "", false
 	}
@@ -77,4 +82,12 @@ func orderInapplicableBackend(cityPath string, cfg *config.City, a orders.Order)
 // that does not apply to its scope's backend.
 func orderInapplicableLabel(backend string) string {
 	return "inapplicable (backend " + backend + ")"
+}
+
+// orderInapplicableReason is the one-line explanation every refusal of an
+// inapplicable order gives: the label, what the order requires, and what the
+// scope uses.
+func orderInapplicableReason(a orders.Order, backend string) string {
+	return fmt.Sprintf("order %q is %s: it requires backend %s, and its scope uses %s",
+		a.ScopedName(), orderInapplicableLabel(backend), strings.Join(a.RequiresBackend, " or "), backend)
 }

@@ -159,7 +159,8 @@ func TestFencedGoneAndNoServerNeverSucceed(t *testing.T) {
 			m := claudeModel("draft")()
 			c.set(m)
 			err := op(fenceModelProvider(m))
-			if !c.check(err) {
+			// A miss and a lost server say so, never as ErrInputNotSent.
+			if !c.check(err) || errors.Is(err, runtime.ErrInputNotSent) {
 				t.Errorf("%s with %s: err = %v", name, c.fault, err)
 			}
 			if _, events, _ := m.snapshot(); len(events) != 0 {
@@ -569,7 +570,9 @@ func TestFencedSwallowedNoServerIsUnavailable(t *testing.T) {
 // Partial counts only what carries the operation's effect: a nudge's text
 // (and what follows it), and any key of a keys, interrupt or ctx-fenced
 // operation. A copy-mode exit, a composer clear or a dialog key before a
-// nudge's text never makes a miss partial.
+// nudge's text never makes a miss partial. ErrInputNotSent counts the same
+// way: text that fails to stage before the effect sent nothing, and text
+// that fails after it makes no such claim.
 func TestFencePartialCountsOnlyEffectInput(t *testing.T) {
 	t.Run("nudge miss after the composer clear", func(t *testing.T) {
 		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
@@ -625,6 +628,43 @@ func TestFencePartialCountsOnlyEffectInput(t *testing.T) {
 			t.Fatalf("err = %v, want a non-partial miss", err)
 		}
 	})
+	loadErr := errors.New("load-buffer: no space left on device")
+	t.Run("nudge text fails to stage after the composer clear", func(t *testing.T) {
+		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+		m.env["GC_PROVIDER"] = "opencode"
+		m.screen = staticShellScreen
+		m.inMode, m.detached = true, true
+		m.failLoad = map[int]error{1: loadErr}
+		err := fenceModelProvider(m).NudgeFenced(context.Background(), fenceModelSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: testFence, Immediate: true})
+		_, events, _ := m.snapshot()
+		if !errors.Is(err, runtime.ErrInputNotSent) || !errors.Is(err, loadErr) {
+			t.Fatalf("err = %v (events %q), want ErrInputNotSent wrapping the staging failure", err, events)
+		}
+		if !slices.Equal(events, []string{"copy:cancel", "key:C-u"}) {
+			t.Fatalf("events %q, want the copy-mode exit and the clear, no text", events)
+		}
+	})
+	t.Run("text fails to stage after the effect", func(t *testing.T) {
+		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+		m.failLoad = map[int]error{2: loadErr}
+		p := fenceModelProvider(m)
+		g := newPaneGuard(fenceModelSession, testFence.Digest(), false)
+		ctx := withPaneGuard(context.Background(), g)
+		if err := g.verify(ctx, p.tm); err != nil {
+			t.Fatal(err)
+		}
+		target := fakeAgentPane(fenceModelSession)
+		if _, err := p.tm.runCtx(ctx, "send-keys", "-t", target, "-l", "a"); err != nil {
+			t.Fatal(err)
+		}
+		_, err := p.tm.runCtx(ctx, "send-keys", "-t", target, "-l", "b")
+		if !errors.Is(err, loadErr) || errors.Is(err, runtime.ErrInputNotSent) {
+			t.Fatalf("err = %v, want the staging failure, not ErrInputNotSent", err)
+		}
+		if _, events, _ := m.snapshot(); !slices.Equal(events, []string{"text:a"}) {
+			t.Fatalf("events %q, want the first text only", events)
+		}
+	})
 }
 
 // Fenced literal text that looks like a flag is text.
@@ -664,5 +704,41 @@ func TestWrapErrorNoSuchPane(t *testing.T) {
 	err := wrapError(errors.New("exit status 1"), "no such pane: =lab:@0.%1", []string{"set-option"})
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("wrapError(no such pane) = %v, want ErrSessionNotFound", err)
+	}
+}
+
+// TestPaneGuardFinishLostServerAfterInputIsUnconfirmed proves a fenced
+// operation that lost the tmux server after its input reached the fenced
+// incarnation reports the input possibly delivered, while one that lost it
+// before any input applied stays plainly unavailable.
+func TestPaneGuardFinishLostServerAfterInputIsUnconfirmed(t *testing.T) {
+	lost := func() *fenceUnavailableError {
+		return &fenceUnavailableError{session: "lab", cause: ErrNoServer}
+	}
+	for _, tc := range []struct {
+		name        string
+		applied     bool
+		swallowed   bool
+		unconfirmed bool
+	}{
+		{name: "returned before input", applied: false},
+		{name: "swallowed before input", applied: false, swallowed: true},
+		{name: "returned after input", applied: true, unconfirmed: true},
+		{name: "swallowed after input", applied: true, swallowed: true, unconfirmed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &paneGuard{name: "lab", applied: tc.applied}
+			var bodyErr error = lost()
+			if tc.swallowed {
+				g.unavailable, bodyErr = lost(), nil
+			}
+			err := g.finish(bodyErr)
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("finish = %v, want ErrRuntimeUnavailable", err)
+			}
+			if got := errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed); got != tc.unconfirmed {
+				t.Fatalf("finish = %v, unconfirmed %v, want %v", err, got, tc.unconfirmed)
+			}
+		})
 	}
 }
