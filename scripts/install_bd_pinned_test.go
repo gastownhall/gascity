@@ -22,7 +22,10 @@ const installBdPin = "v1.3.4"
 //   - `install ...` by writing a fake bd into $GOBIN that embeds
 //     $STUB_STAGED_VERSION, or by failing when $STUB_INSTALL_FAIL is set;
 //   - `version -m <file>` from the file's "beads-version:" marker, failing
-//     like the real tool when the file carries none.
+//     like the real tool when the file carries none. Like the real tool on a
+//     bd, it writes the main module first and then a long dep list: about
+//     800 KiB here, more than any pipe buffers, so a reader that stops at
+//     the mod line kills it with SIGPIPE however large the host's pipes are.
 const installBdStubGo = `#!/bin/sh
 printf '%s|GOFLAGS=%s|GOWORK=%s|CGO_ENABLED=%s|PWD=%s\n' "$*" "${GOFLAGS-unset}" "${GOWORK-unset}" "${CGO_ENABLED-unset}" "$(pwd)" >> "$STUB_GO_LOG"
 case "$1" in
@@ -45,7 +48,9 @@ version)
 		echo "$file: could not read Go build info from $file: not a Go executable" >&2
 		exit 1
 	fi
-	printf '%s: go1.25.0\n\tpath\tgithub.com/steveyegge/beads/cmd/bd\n\tmod\tgithub.com/steveyegge/beads\t%s\th1:stub=\n\tdep\tgithub.com/spf13/cobra\tv1.9.1\th1:stub=\n' "$file" "$v"
+	printf '%s: go1.25.0\n\tpath\tgithub.com/steveyegge/beads/cmd/bd\n\tmod\tgithub.com/steveyegge/beads\t%s\th1:stub=\n' "$file" "$v"
+	awk 'BEGIN { for (i = 0; i < 16384; i++) printf "\tdep\tgithub.com/example/dep%05d\tv1.0.0\th1:stub=\n", i }'
+	printf '\tbuild\tCGO_ENABLED=1\n'
 	;;
 *) exit 0 ;;
 esac
@@ -73,14 +78,14 @@ func newInstallBdEnv(t *testing.T) *installBdEnv {
 		binDir:     filepath.Join(tmp, "stubbin"),
 		goLog:      filepath.Join(tmp, "go.log"),
 	}
-	for _, dir := range []string{e.installDir, filepath.Join(e.home, ".local", "bin"), e.tmpDir, e.binDir} {
+	for _, dir := range []string{e.installDir, e.localBin(), e.tmpDir, e.binDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
 	writeExecutable(t, filepath.Join(e.binDir, "go"), installBdStubGo)
 	e.env = append(os.Environ(),
-		"PATH="+e.binDir+string(os.PathListSeparator)+pathWithoutCommand("bd"),
+		"PATH="+e.pathWith(),
 		"HOME="+e.home,
 		"TMPDIR="+e.tmpDir,
 		"STUB_GO_LOG="+e.goLog,
@@ -98,6 +103,15 @@ func newInstallBdEnv(t *testing.T) *installBdEnv {
 func (e *installBdEnv) setenv(kv ...string) { e.env = append(e.env, kv...) }
 
 func (e *installBdEnv) dest() string { return filepath.Join(e.installDir, "bd") }
+
+// localBin is ~/.local/bin in the sandbox, where beads' own installer puts bd.
+func (e *installBdEnv) localBin() string { return filepath.Join(e.home, ".local", "bin") }
+
+// pathWith is a PATH of the stub go, then dirs, then the host's PATH without
+// any directory holding a bd.
+func (e *installBdEnv) pathWith(dirs ...string) string {
+	return strings.Join(append(append([]string{e.binDir}, dirs...), pathWithoutCommand("bd")), string(os.PathListSeparator))
+}
 
 // run runs `make install-bd` against the real Makefile.
 func (e *installBdEnv) run(t *testing.T) (string, error) {
@@ -166,6 +180,9 @@ func embeddedVersion(t *testing.T, e *installBdEnv, path string) string {
 	return ""
 }
 
+// TestInstallBdPinnedFreshInstall: with no bd at the destination, install-bd
+// builds the pin outside the repository and installs it, reading the build's
+// version from a `go version -m` that writes more than a pipe holds.
 func TestInstallBdPinnedFreshInstall(t *testing.T) {
 	e := newInstallBdEnv(t)
 	goMod := filepath.Join(e.repoRoot, "go.mod")
@@ -204,27 +221,29 @@ func TestInstallBdPinnedFreshInstall(t *testing.T) {
 	if strings.Contains(installs[0], "|PWD="+e.repoRoot) {
 		t.Fatalf("go install ran inside the repository: %q", installs[0])
 	}
-
-	link := filepath.Join(e.home, ".local", "bin", "bd")
-	target, err := os.Readlink(link)
-	if err != nil || target != e.dest() {
-		t.Fatalf("%s -> %q (%v), want a symlink to %s\n%s", link, target, err, e.dest(), out)
+	if _, err := os.Lstat(filepath.Join(e.localBin(), "bd")); !os.IsNotExist(err) {
+		t.Fatalf("install-bd created %s (%v); it writes nothing but the destination\n%s", filepath.Join(e.localBin(), "bd"), err, out)
 	}
+	assertNoInstallBdLeftovers(t, e, out)
 }
 
-// TestMakeInstallDependsOnInstallBd pins the Makefile wiring: `install`
-// builds the pinned bd before it replaces gc, and `install-bd` is phony.
-func TestMakeInstallDependsOnInstallBd(t *testing.T) {
+// TestMakeInstallBdIsAnExplicitTarget pins the Makefile wiring: install-bd is
+// a phony target of its own, `install` does not run it, and `install` ends by
+// noting the bd on PATH.
+func TestMakeInstallBdIsAnExplicitTarget(t *testing.T) {
 	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)
 	}
 	text := string(makefile)
-	if !strings.Contains(text, "\ninstall: check-self-contained install-bd\n") {
-		t.Fatal("Makefile install target does not depend on install-bd")
+	if !strings.Contains(text, "\ninstall-bd:\n\t@scripts/install-bd-pinned.sh \"$(INSTALL_DIR)/bd\"\n") {
+		t.Fatal("Makefile install-bd target does not run scripts/install-bd-pinned.sh on $(INSTALL_DIR)/bd")
 	}
-	if !strings.Contains(text, "\ninstall-bd:\n") {
-		t.Fatal("Makefile has no install-bd target")
+	if !strings.Contains(text, "\ninstall: check-self-contained\n") {
+		t.Fatal("Makefile install target's prerequisites are no longer exactly check-self-contained; it must not build or replace bd")
+	}
+	if !strings.Contains(text, "\n\t@scripts/install-bd-pinned.sh --note \"$(INSTALL_DIR)/bd\"\n") {
+		t.Fatal("Makefile install recipe does not note the bd on PATH")
 	}
 	phony := false
 	for _, line := range strings.Split(text, "\n") {
@@ -237,9 +256,14 @@ func TestMakeInstallDependsOnInstallBd(t *testing.T) {
 	}
 }
 
-// writeFakeBd writes a bd that the stub go reports as embedding version.
+// writeFakeBd writes a bd that the stub go reports as embedding version; an
+// empty version writes one the stub reports as carrying no Go build info.
 func writeFakeBd(t *testing.T, path, version string) {
 	t.Helper()
+	if version == "" {
+		writeExecutable(t, path, "#!/bin/sh\necho 'a wrapper, not a Go binary'\n")
+		return
+	}
 	writeExecutable(t, path, "#!/bin/sh\n# beads-version: "+version+"\n")
 }
 
@@ -266,7 +290,112 @@ func TestInstallBdPinnedFastPath(t *testing.T) {
 	}
 }
 
-// installBdSkewed is a beads version other than the pin.
+// TestInstallBdPinnedLeavesLocalBinBd: install-bd never writes
+// ~/.local/bin/bd, the location beads' own installer uses. On the fast path
+// and on the build path alike, a bd there that shadows the destination on
+// PATH is named with its version and left byte for byte as it was, and none
+// is created where there was none.
+func TestInstallBdPinnedLeavesLocalBinBd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// destVersion is the bd already at the destination ("" for none).
+		destVersion string
+		// local sets up ~/.local/bin/bd and returns what it must still be
+		// afterwards ("" when it must still be absent).
+		local func(t *testing.T, e *installBdEnv) string
+	}{
+		{
+			name:        "fast path, regular file",
+			destVersion: installBdPin,
+			local:       localBinRegularBd,
+		},
+		{
+			name:        "build path, regular file",
+			destVersion: installBdSkewed,
+			local:       localBinRegularBd,
+		},
+		{
+			name:        "build path, symlink to another bd",
+			destVersion: installBdSkewed,
+			local: func(t *testing.T, e *installBdEnv) string {
+				other := filepath.Join(t.TempDir(), "bd")
+				writeFakeBd(t, other, installBdSkewed)
+				if err := os.Symlink(other, filepath.Join(e.localBin(), "bd")); err != nil {
+					t.Fatal(err)
+				}
+				return "symlink to " + other
+			},
+		},
+		{
+			name:        "build path, none",
+			destVersion: "",
+			local:       func(*testing.T, *installBdEnv) string { return "" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInstallBdEnv(t)
+			if tc.destVersion != "" {
+				writeFakeBd(t, e.dest(), tc.destVersion)
+			}
+			want := tc.local(t, e)
+			e.setenv("PATH=" + e.pathWith(e.localBin(), e.installDir))
+
+			out, err := e.run(t)
+			if err != nil {
+				t.Fatalf("make install-bd: %v\n%s", err, out)
+			}
+			wantInstalls := 1
+			if tc.destVersion == installBdPin {
+				wantInstalls = 0
+			}
+			if installs := e.goInstalls(t); len(installs) != wantInstalls {
+				t.Fatalf("go install calls = %q, want %d\n%s", installs, wantInstalls, out)
+			}
+			if got := embeddedVersion(t, e, e.dest()); got != installBdPin {
+				t.Fatalf("destination bd embeds beads %s, want %s\n%s", got, installBdPin, out)
+			}
+			local := filepath.Join(e.localBin(), "bd")
+			if got := describeLocalBinBd(t, local); got != want {
+				t.Fatalf("%s is %q after install-bd, want it left as %q\n%s", local, got, want, out)
+			}
+			if want != "" && (!strings.Contains(out, "NOTE: bd on PATH is "+local) || !strings.Contains(out, installBdSkewed)) {
+				t.Fatalf("output does not name the shadowing %s and its beads %s:\n%s", local, installBdSkewed, out)
+			}
+		})
+	}
+}
+
+// localBinRegularBd writes an older regular-file bd at ~/.local/bin/bd and
+// returns its description.
+func localBinRegularBd(t *testing.T, e *installBdEnv) string {
+	t.Helper()
+	local := filepath.Join(e.localBin(), "bd")
+	writeFakeBd(t, local, installBdSkewed)
+	return "file " + fileSum(t, local)
+}
+
+// describeLocalBinBd says what is at path: "" when nothing, else a regular
+// file's content hash or a symlink's target.
+func describeLocalBinBd(t *testing.T, path string) string {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "symlink to " + target
+	}
+	return "file " + fileSum(t, path)
+}
+
+// installBdSkewed is a beads version older than the pin.
 const installBdSkewed = "v1.2.0"
 
 // assertNoInstallBdLeftovers fails when a staging directory or an install
@@ -294,10 +423,10 @@ func assertNoInstallBdLeftovers(t *testing.T, e *installBdEnv, out string) {
 	}
 }
 
-// TestInstallBdPinnedReplacesSkewedBd: a bd from another beads version is
-// replaced by a rename, never rewritten in place, so a process running the
-// old binary (or a hard link to it) keeps a complete file.
-func TestInstallBdPinnedReplacesSkewedBd(t *testing.T) {
+// TestInstallBdPinnedReplacesAnOlderBd: a bd older than the pin is replaced
+// by a rename, never rewritten in place, so a process running the old binary
+// (or a hard link to it) keeps a complete file.
+func TestInstallBdPinnedReplacesAnOlderBd(t *testing.T) {
 	e := newInstallBdEnv(t)
 	writeFakeBd(t, e.dest(), installBdSkewed)
 	oldContent, err := os.ReadFile(e.dest())
@@ -336,6 +465,86 @@ func TestInstallBdPinnedReplacesSkewedBd(t *testing.T) {
 	assertNoInstallBdLeftovers(t, e, out)
 }
 
+// TestInstallBdPinnedOnlyUpgrades: install-bd replaces a bd only when it is
+// older than the pin by semver precedence (a prerelease or pseudo-version of
+// the pinned release is older; a pseudo-version past it is newer). A newer bd
+// is kept: an older bd cannot read a store the newer one migrated.
+func TestInstallBdPinnedOnlyUpgrades(t *testing.T) {
+	for _, tc := range []struct {
+		version  string
+		replaced bool
+	}{
+		{"v1.3.3", true},
+		{"v1.3.4-rc.1", true},
+		{"v1.3.4-0.20261001000000-abcdef123456", true},
+		{"v0.9.0", true},
+		{"v1.3.5", false},
+		{"v1.3.10", false},
+		{"v1.4.0-rc.2", false},
+		{"v1.3.5-0.20261101120000-abcdef123456", false},
+		{"v2.0.0", false},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			e := newInstallBdEnv(t)
+			writeFakeBd(t, e.dest(), tc.version)
+			before := fileSum(t, e.dest())
+
+			out, err := e.run(t)
+			if err != nil {
+				t.Fatalf("make install-bd: %v\n%s", err, out)
+			}
+			got := embeddedVersion(t, e, e.dest())
+			if tc.replaced {
+				if got != installBdPin || len(e.goInstalls(t)) != 1 {
+					t.Fatalf("bd at %s: destination embeds %s after %d build(s), want it replaced by %s\n%s", tc.version, got, len(e.goInstalls(t)), installBdPin, out)
+				}
+				return
+			}
+			if fileSum(t, e.dest()) != before || len(e.goInstalls(t)) != 0 {
+				t.Fatalf("bd at %s, newer than the pin, was rebuilt or rewritten\n%s", tc.version, out)
+			}
+			if !strings.Contains(out, "newer than the "+installBdPin) || !strings.Contains(out, tc.version) {
+				t.Fatalf("output does not say %s is newer than the pin %s and kept:\n%s", tc.version, installBdPin, out)
+			}
+		})
+	}
+}
+
+// TestInstallBdPinnedRefusesABdItCannotRead: a bd at the destination whose
+// beads version cannot be compared (not a Go binary, or a modified source
+// build) is neither built over nor rewritten; install-bd fails and says how
+// to get the pinned bd.
+func TestInstallBdPinnedRefusesABdItCannotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version string
+	}{
+		{"not a Go binary", ""},
+		{"modified source build", "v1.3.4+dirty"},
+		{"modified pseudo-version build", "v0.0.0-20261107052026-05ebdd78fd3c+dirty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInstallBdEnv(t)
+			writeFakeBd(t, e.dest(), tc.version)
+			before := fileSum(t, e.dest())
+
+			out, err := e.run(t)
+			if err == nil {
+				t.Fatalf("make install-bd succeeded over a bd it cannot read:\n%s", out)
+			}
+			if fileSum(t, e.dest()) != before || len(e.goInstalls(t)) != 0 {
+				t.Fatalf("install-bd rebuilt or rewrote a bd it cannot read\n%s", out)
+			}
+			for _, want := range []string{e.dest(), "Move it aside", installBdPin} {
+				if !strings.Contains(out, want) {
+					t.Errorf("output lacks %q:\n%s", want, out)
+				}
+			}
+			assertNoInstallBdLeftovers(t, e, out)
+		})
+	}
+}
+
 // TestInstallBdPinnedFailsClosed: when the pinned bd cannot be built, or the
 // build does not embed the pin, install-bd fails and the installed bd is the
 // old one, byte for byte.
@@ -354,6 +563,11 @@ func TestInstallBdPinnedFailsClosed(t *testing.T) {
 			name:    "staged bd embeds another version",
 			env:     []string{"STUB_STAGED_VERSION=v1.1.0"},
 			wantOut: []string{"v1.1.0", installBdPin},
+		},
+		{
+			name:    "staged bd has no readable build info",
+			env:     []string{"STUB_STAGED_VERSION="},
+			wantOut: []string{"embeds beads 'unknown'", installBdPin},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -407,51 +621,44 @@ func TestInstallBdPinnedNotesShadowingPathBd(t *testing.T) {
 	shadow := filepath.Join(shadowDir, "bd")
 	writeFakeBd(t, shadow, installBdSkewed)
 	before := fileSum(t, shadow)
-	e.setenv("PATH=" + e.binDir + string(os.PathListSeparator) + shadowDir + string(os.PathListSeparator) + pathWithoutCommand("bd"))
+	e.setenv("PATH=" + e.pathWith(shadowDir))
 
 	out, err := e.run(t)
 	if err != nil {
 		t.Fatalf("make install-bd: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, shadow) || !strings.Contains(out, e.dest()) {
-		t.Fatalf("output does not name the shadowing %s and the installed %s:\n%s", shadow, e.dest(), out)
+	for _, want := range []string{shadow, installBdSkewed, e.dest()} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output does not name %q (the shadowing bd, its version, the installed bd):\n%s", want, out)
+		}
 	}
 	if fileSum(t, shadow) != before {
 		t.Fatal("install-bd modified the shadowing bd")
 	}
 }
 
-// TestMakeInstallKeepsGcWhenInstallBdFails: install-bd runs before install
-// replaces anything, so a failed bd build leaves the installed gc and its
-// companion as they were and the pair stays consistent.
-func TestMakeInstallKeepsGcWhenInstallBdFails(t *testing.T) {
-	e := newInstallBdEnv(t)
-	e.setenv("STUB_INSTALL_FAIL=1")
+// runMakeInstall runs `make install` with the gc build prerequisite dropped,
+// installing a fake gc and companion from a build dir into the install dir.
+func (e *installBdEnv) runMakeInstall(t *testing.T) (string, error) {
+	t.Helper()
 	tmp := t.TempDir()
 	buildDir := filepath.Join(tmp, "build")
 	if err := os.Mkdir(buildDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	installed := map[string]string{}
 	for _, bin := range []string{"gc", "gc-osc7501"} {
 		writeExecutable(t, filepath.Join(buildDir, bin), "new "+bin)
-		writeExecutable(t, filepath.Join(e.installDir, bin), "old "+bin)
-		installed[bin] = "old " + bin
 	}
-	writeFakeBd(t, e.dest(), installBdSkewed)
-	bdBefore := fileSum(t, e.dest())
-
 	makefile, err := os.ReadFile(filepath.Join(e.repoRoot, "Makefile"))
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)
 	}
-	const rule = "\ninstall: check-self-contained install-bd\n"
+	const rule = "\ninstall: check-self-contained\n"
 	if !strings.Contains(string(makefile), rule) {
-		t.Fatal("Makefile install target no longer depends on check-self-contained and install-bd as expected")
+		t.Fatal("Makefile install target no longer depends on check-self-contained alone")
 	}
-	// Keep install-bd, drop the real gc build.
 	testMakefile := filepath.Join(tmp, "Makefile")
-	if err := os.WriteFile(testMakefile, []byte(strings.Replace(string(makefile), rule, "\ninstall: install-bd\n", 1)), 0o644); err != nil {
+	if err := os.WriteFile(testMakefile, []byte(strings.Replace(string(makefile), rule, "\ninstall:\n", 1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("make", "--no-print-directory", "-f", testMakefile, "install",
@@ -462,16 +669,76 @@ func TestMakeInstallKeepsGcWhenInstallBdFails(t *testing.T) {
 	cmd.Env = e.env
 	out, err := cmd.CombinedOutput()
 	if err == nil {
-		t.Fatalf("make install succeeded although install-bd failed:\n%s", out)
-	}
-	for bin, want := range installed {
-		got, err := os.ReadFile(filepath.Join(e.installDir, bin))
-		if err != nil || string(got) != want {
-			t.Fatalf("installed %s = %q (%v), want %q after install-bd failed\n%s", bin, got, err, want, out)
+		for _, bin := range []string{"gc", "gc-osc7501"} {
+			if got, readErr := os.ReadFile(filepath.Join(e.installDir, bin)); readErr != nil || string(got) != "new "+bin {
+				t.Fatalf("make install left %s = %q (%v), want the new build\n%s", bin, got, readErr, out)
+			}
 		}
 	}
-	if fileSum(t, e.dest()) != bdBefore {
-		t.Fatalf("the installed bd changed after install-bd failed\n%s", out)
+	return string(out), err
+}
+
+// TestMakeInstallNotesButNeverBuildsBd: `make install` installs gc and never
+// builds or replaces a bd. It says so when PATH resolves no bd or one older
+// than the pin, and is quiet about a bd at, or newer than, the pin and about
+// one whose beads version it cannot read.
+func TestMakeInstallNotesButNeverBuildsBd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// pathBd is the beads version of the bd on PATH, or "none".
+		pathBd   string
+		wantNote string
+	}{
+		{name: "no bd on PATH", pathBd: "none", wantNote: "NOTE: no bd on PATH"},
+		{name: "older bd", pathBd: installBdSkewed, wantNote: "NOTE: bd on PATH"},
+		{name: "pinned bd", pathBd: installBdPin},
+		{name: "newer bd", pathBd: "v1.4.0-rc.2"},
+		{name: "unreadable bd", pathBd: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInstallBdEnv(t)
+			if tc.pathBd != "none" {
+				writeFakeBd(t, e.dest(), tc.pathBd)
+				e.setenv("PATH=" + e.pathWith(e.installDir))
+			}
+			bdBefore := optionalFileSum(t, e.dest())
+
+			out, err := e.runMakeInstall(t)
+			if err != nil {
+				t.Fatalf("make install: %v\n%s", err, out)
+			}
+			if installs := e.goInstalls(t); len(installs) != 0 {
+				t.Fatalf("make install built bd: %q\n%s", installs, out)
+			}
+			if optionalFileSum(t, e.dest()) != bdBefore {
+				t.Fatalf("make install changed %s\n%s", e.dest(), out)
+			}
+			if tc.wantNote == "" {
+				if strings.Contains(out, "NOTE:") {
+					t.Fatalf("make install noted a bd that needs nothing:\n%s", out)
+				}
+				return
+			}
+			for _, want := range []string{tc.wantNote, installBdPin, "make install-bd"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("make install output lacks %q:\n%s", want, out)
+				}
+			}
+		})
 	}
-	assertNoInstallBdLeftovers(t, e, string(out))
+}
+
+// TestMakeInstallSucceedsWhenGoModReplacesBeads: with beads replaced there is
+// no pin to compare a bd with; `make install` still succeeds and says why it
+// did not check bd.
+func TestMakeInstallSucceedsWhenGoModReplacesBeads(t *testing.T) {
+	e := newInstallBdEnv(t)
+	e.setenv(`STUB_REPLACE_JSON=,"Replace":[{"Old":{"Path":"github.com/steveyegge/beads"},"New":{"Path":"../beads"}}]`)
+	out, err := e.runMakeInstall(t)
+	if err != nil {
+		t.Fatalf("make install failed with beads replaced: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "NOTE: bd not checked") || !strings.Contains(out, "replaces github.com/steveyegge/beads") {
+		t.Fatalf("make install output does not say why bd was not checked:\n%s", out)
+	}
 }

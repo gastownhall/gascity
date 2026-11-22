@@ -14,7 +14,7 @@ import (
 
 const (
 	bdBeadsVersionTestLinked = "v1.3.4"
-	bdBeadsVersionTestSkewed = "v1.2.0"
+	bdBeadsVersionTestOlder  = "v1.2.0"
 )
 
 // bdBuildInfoWithBeads is the build info of a bd built with `go install
@@ -38,10 +38,15 @@ func gcBuildInfoLinkingBeads() *debug.BuildInfo {
 // bdBeadsVersionFixture is a bd-backed city whose only bd on PATH is a fake
 // that records every execution, with the build-info readers injected.
 type bdBeadsVersionFixture struct {
-	city    string
-	binDir  string
-	bd      string
-	execLog string
+	city   string
+	binDir string
+	// bd is the fake bd's resolved path, the key of bdInfo and reads;
+	// bdOnPath is the unresolved path a PATH lookup returns and the check
+	// reports. They differ where the temp dir sits under a symlink, as
+	// macOS's /var -> /private/var does.
+	bd       string
+	bdOnPath string
+	execLog  string
 	// bdInfo answers the bd build-info reader by resolved path; a missing
 	// entry reads as a file without Go build info.
 	bdInfo map[string]*debug.BuildInfo
@@ -58,17 +63,24 @@ func newBdBeadsVersionFixture(t *testing.T) *bdBeadsVersionFixture {
 	t.Helper()
 	f := &bdBeadsVersionFixture{
 		city:     t.TempDir(),
-		binDir:   t.TempDir(),
+		binDir:   filepath.Join(t.TempDir(), "bin"),
 		bdInfo:   map[string]*debug.BuildInfo{},
 		reads:    map[string]int{},
 		gcInfo:   gcBuildInfoLinkingBeads(),
 		gcInfoOK: true,
 	}
+	// PATH reaches the fake bd through a symlinked directory, as it does
+	// under macOS's /var -> /private/var, so the path the check reports and
+	// the resolved path differ on every platform.
+	if err := os.Symlink(t.TempDir(), f.binDir); err != nil {
+		t.Fatal(err)
+	}
 	f.execLog = filepath.Join(t.TempDir(), "bd-exec.log")
 	if err := os.WriteFile(filepath.Join(f.city, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f.bd = f.writeBd(t, filepath.Join(f.binDir, "bd"))
+	f.bdOnPath = filepath.Join(f.binDir, "bd")
+	f.bd = f.writeBd(t, f.bdOnPath)
 	for _, key := range []string{"GC_BEADS", "GC_BEADS_SCOPE_ROOT", "GC_BEADS_BACKEND", "BD_BIN"} {
 		t.Setenv(key, "")
 	}
@@ -121,12 +133,14 @@ func (f *bdBeadsVersionFixture) run(t *testing.T, cfg *config.City) *doctor.Chec
 	return r
 }
 
-// TestBdBeadsVersionCheckWarnsOnSkew: the bd the city scope resolves from
-// PATH embeds another beads version than gc links. The warning names the
-// scope, the bd, both versions and make install-bd.
-func TestBdBeadsVersionCheckWarnsOnSkew(t *testing.T) {
+// TestBdBeadsVersionCheckWarnsOnAnOlderBd: the bd the city scope resolves
+// from PATH is older than the beads gc links. The warning names the scope,
+// the bd as PATH resolves it, both versions and the risk, and the fix hint
+// names the bd version required rather than a make target in a checkout
+// release users do not have.
+func TestBdBeadsVersionCheckWarnsOnAnOlderBd(t *testing.T) {
 	f := newBdBeadsVersionFixture(t)
-	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
 	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
 
 	r := f.run(t, cfg)
@@ -134,7 +148,7 @@ func TestBdBeadsVersionCheckWarnsOnSkew(t *testing.T) {
 		t.Fatalf("status = %v, want Warning: %+v", r.Status, r)
 	}
 	details := strings.Join(r.Details, "\n")
-	for _, want := range []string{"city", f.bd, bdBeadsVersionTestSkewed, bdBeadsVersionTestLinked} {
+	for _, want := range []string{"city", f.bdOnPath, bdBeadsVersionTestOlder, bdBeadsVersionTestLinked, "older than", "refuses to read"} {
 		if !strings.Contains(details, want) {
 			t.Errorf("details lack %q:\n%s", want, details)
 		}
@@ -142,11 +156,62 @@ func TestBdBeadsVersionCheckWarnsOnSkew(t *testing.T) {
 			t.Errorf("message lacks %q: %s", want, r.Message)
 		}
 	}
-	if !strings.Contains(r.FixHint, "make install-bd") {
-		t.Errorf("fix hint does not name make install-bd: %q", r.FixHint)
+	for _, want := range []string{"install bd " + bdBeadsVersionTestLinked, "newer release of the same major version", "BD_BIN"} {
+		if !strings.Contains(r.FixHint, want) {
+			t.Errorf("fix hint lacks %q: %q", want, r.FixHint)
+		}
+	}
+	if strings.Contains(r.FixHint, "make install-bd") {
+		t.Errorf("fix hint names make install-bd, a target in a checkout release users lack: %q", r.FixHint)
 	}
 	if r.Name != "bd-beads-version" {
 		t.Errorf("name = %q", r.Name)
+	}
+}
+
+// TestBdBeadsVersionCheckAcceptsCompatibleBds: by the policy the native-store
+// preflight applies (gastownhall/gascity#5164), a newer release of the linked
+// major version and a prerelease of the same release are compatible, so the
+// check is quiet about them.
+func TestBdBeadsVersionCheckAcceptsCompatibleBds(t *testing.T) {
+	for _, tc := range []struct {
+		name, bd, linked string
+	}{
+		{"newer patch release", "v1.3.5", "v1.3.4"},
+		{"newer minor prerelease", "v1.4.0-rc.2", "v1.3.4"},
+		{"prerelease of the same release", "v1.4.0-rc.1", "v1.4.0-rc.2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBdBeadsVersionFixture(t)
+			f.bdInfo[f.bd] = bdBuildInfoWithBeads(tc.bd)
+			f.gcInfo.Deps[0].Version = tc.linked
+
+			r := f.run(t, &config.City{Workspace: config.Workspace{Name: "demo"}})
+			if r.Status != doctor.StatusOK {
+				t.Fatalf("status = %v, want OK for bd %s against gc's %s: %+v", r.Status, tc.bd, tc.linked, r)
+			}
+			if !strings.Contains(r.Message, "compatible with the "+tc.linked) {
+				t.Fatalf("message does not say the bd is compatible with %s: %q", tc.linked, r.Message)
+			}
+		})
+	}
+}
+
+// TestBdBeadsVersionCheckWarnsOnANewerMajorBd: semver does not promise a
+// newer major version is compatible, and the preflight's policy does not
+// accept one either.
+func TestBdBeadsVersionCheckWarnsOnANewerMajorBd(t *testing.T) {
+	f := newBdBeadsVersionFixture(t)
+	f.bdInfo[f.bd] = bdBuildInfoWithBeads("v2.0.0")
+
+	r := f.run(t, &config.City{Workspace: config.Workspace{Name: "demo"}})
+	if r.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want Warning: %+v", r.Status, r)
+	}
+	for _, want := range []string{"v2.0.0", "newer major version", bdBeadsVersionTestLinked} {
+		if !strings.Contains(r.Message, want) {
+			t.Errorf("message lacks %q: %s", want, r.Message)
+		}
 	}
 }
 
@@ -170,7 +235,7 @@ func TestBdBeadsVersionCheckOKWhenVersionsMatch(t *testing.T) {
 // still named.
 func TestBdBeadsVersionCheckReadsASharedBdOnce(t *testing.T) {
 	f := newBdBeadsVersionFixture(t)
-	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
 	link := filepath.Join(t.TempDir(), "bd")
 	if err := os.Symlink(f.bd, link); err != nil {
 		t.Fatal(err)
@@ -204,13 +269,13 @@ func TestBdBeadsVersionCheckReadsASharedBdOnce(t *testing.T) {
 	}
 }
 
-// TestBdBeadsVersionCheckNamesTheSkewedRig: only the rig whose own bd is
-// skewed is named; the city's matching bd is not.
-func TestBdBeadsVersionCheckNamesTheSkewedRig(t *testing.T) {
+// TestBdBeadsVersionCheckNamesTheRigWithAnOlderBd: only the rig whose own bd
+// is older is named; the city's matching bd is not.
+func TestBdBeadsVersionCheckNamesTheRigWithAnOlderBd(t *testing.T) {
 	f := newBdBeadsVersionFixture(t)
 	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestLinked)
 	rigBd := f.writeBd(t, filepath.Join(t.TempDir(), "bd"))
-	f.bdInfo[rigBd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+	f.bdInfo[rigBd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
 	rigDir := t.TempDir()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "demo"},
@@ -272,11 +337,11 @@ func TestBdBeadsVersionCheckIsWarmupEligibleAndRegistered(t *testing.T) {
 // be known, or no scope is bd-backed, nothing is compared. The check is OK and
 // says why; it never warns, never errors and never executes bd.
 func TestBdBeadsVersionCheckOKWhenAVersionIsUnknown(t *testing.T) {
-	replacedBd := bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
-	replacedBd.Main.Replace = &debug.Module{Path: "../beads"}
 	gcWithoutBeads := &debug.BuildInfo{Main: debug.Module{Path: "github.com/gastownhall/gascity", Version: "(devel)"}}
 	gcReplacedBeads := gcBuildInfoLinkingBeads()
-	gcReplacedBeads.Deps[0].Replace = &debug.Module{Path: "../beads"}
+	gcReplacedBeads.Deps[0].Replace = &debug.Module{Path: "github.com/fork/beads", Version: "v1.3.9"}
+	gcPseudoBeads := gcBuildInfoLinkingBeads()
+	gcPseudoBeads.Deps[0].Version = "v1.3.5-0.20261101120000-abcdef123456"
 
 	cases := []struct {
 		name  string
@@ -299,24 +364,41 @@ func TestBdBeadsVersionCheckOKWhenAVersionIsUnknown(t *testing.T) {
 			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
 				f.bdInfo[f.bd] = bdBuildInfoWithBeads("(devel)")
 			},
-			reason: "names no beads version",
+			reason: "beads version unknown: source build",
 		},
 		{
 			name: "bd with an empty version",
 			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
 				f.bdInfo[f.bd] = bdBuildInfoWithBeads("")
 			},
-			reason: "names no beads version",
+			reason: "beads version unknown: source build",
 		},
 		{
-			name:   "bd built from a replaced beads module",
-			setup:  func(_ *testing.T, f *bdBeadsVersionFixture) { f.bdInfo[f.bd] = replacedBd },
-			reason: "names no beads version",
+			// Since Go 1.24 a build from a modified checkout says +dirty.
+			name: "bd built from a modified checkout",
+			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads("v0.0.0-20261107052026-05ebdd78fd3c+dirty")
+			},
+			reason: "beads version unknown: modified source build",
+		},
+		{
+			name: "bd at a pseudo-version",
+			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads("v1.3.5-0.20261101120000-abcdef123456")
+			},
+			reason: "beads version unknown: pseudo-version",
+		},
+		{
+			name: "bd built from another main module",
+			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = &debug.BuildInfo{Main: debug.Module{Path: "example.com/bdwrapper", Version: "v1.0.0"}}
+			},
+			reason: "beads version unknown: no beads module",
 		},
 		{
 			name: "gc without build info",
 			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
-				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
 				f.gcInfo, f.gcInfoOK = nil, false
 			},
 			reason: "gc was built without module build info",
@@ -324,23 +406,31 @@ func TestBdBeadsVersionCheckOKWhenAVersionIsUnknown(t *testing.T) {
 		{
 			name: "gc linking no beads module",
 			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
-				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
 				f.gcInfo = gcWithoutBeads
 			},
-			reason: "gc's build info names no beads version",
+			reason: "the beads gc links names no release (no beads module)",
 		},
 		{
 			name: "gc linking a replaced beads module",
 			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
-				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
 				f.gcInfo = gcReplacedBeads
 			},
-			reason: "gc's build info names no beads version",
+			reason: "the beads gc links names no release (replaced module)",
+		},
+		{
+			name: "gc linking beads at a pseudo-version",
+			setup: func(_ *testing.T, f *bdBeadsVersionFixture) {
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
+				f.gcInfo = gcPseudoBeads
+			},
+			reason: "the beads gc links names no release (pseudo-version)",
 		},
 		{
 			name: "no bd-backed scope",
 			setup: func(t *testing.T, f *bdBeadsVersionFixture) {
-				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+				f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
 				t.Setenv("GC_BEADS", "file")
 			},
 			reason: "no scope uses a bd-backed store",
@@ -366,7 +456,7 @@ func TestBdBeadsVersionCheckOKWhenAVersionIsUnknown(t *testing.T) {
 // no scope to compare.
 func TestBdBeadsVersionCheckOKWithoutCityConfig(t *testing.T) {
 	f := newBdBeadsVersionFixture(t)
-	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
 
 	r := f.run(t, nil)
 	if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "no city config") {
@@ -379,7 +469,7 @@ func TestBdBeadsVersionCheckOKWithoutCityConfig(t *testing.T) {
 // warm-up stays fail-open: it returns normally and start carries on.
 func TestStartWarmupStderrNamesBdBeadsVersionSkew(t *testing.T) {
 	f := newBdBeadsVersionFixture(t)
-	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestSkewed)
+	f.bdInfo[f.bd] = bdBuildInfoWithBeads(bdBeadsVersionTestOlder)
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_MAIL", "fake")
 	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}

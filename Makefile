@@ -174,14 +174,15 @@ ifneq ($(_NIX_ICU_DEV),)
 endif
 
 ## install-bd: build bd from the beads version go.mod pins and install it beside gc
-## gc migrates a city store to the schema of the beads module it links, and a
-## bd built from any other beads version then fails every read of that store.
+## A bd older than the beads library gc links refuses to read a store migrated
+## past its schema. install-bd only upgrades. It keeps a newer bd, refuses one
+## whose beads version it cannot read, and writes nothing but $(INSTALL_DIR)/bd.
 install-bd:
 	@scripts/install-bd-pinned.sh "$(INSTALL_DIR)/bd"
 
-## install: build and install gc, gc-osc7501 and the go.mod-pinned bd to GOPATH/bin (same location as go install)
-## The pinned bd is built first, so a failed bd build leaves the installed gc untouched.
-install: check-self-contained install-bd
+## install: build and install gc and gc-osc7501 to GOPATH/bin (same location as go install)
+## It never builds or replaces bd; it notes when PATH has no bd, or one older than go.mod's beads pin.
+install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
 		for bin in $(BINARY) $(COMPANION); do \
@@ -207,6 +208,7 @@ install: check-self-contained install-bd
 		done; \
 	fi
 	@echo "Installed $(BINARY) and $(COMPANION) to $(INSTALL_DIR)"
+	@scripts/install-bd-pinned.sh --note "$(INSTALL_DIR)/bd"
 
 ## generate: regenerate JSON schemas and reference docs
 generate:

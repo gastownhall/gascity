@@ -152,7 +152,6 @@ go_test(
         "mac_regression_required_test.go",
         "makefile_bazel_primary_test.go",
         "makefile_cgo_test.go",
-        "makefile_install_bd_lockstep_test.go",
         "makefile_install_test.go",
         "native_doltlite_target_test.go",
         "oasdiff_pin_test.go",

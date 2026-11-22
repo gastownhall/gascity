@@ -18,15 +18,19 @@ var (
 	bdBeadsVersionReadGcBuildInfo = debug.ReadBuildInfo
 )
 
-// bdBeadsVersionCheck compares the beads module embedded in each bd-backed
-// scope's bd with the one gc links. gc migrates a store to the schema of the
-// beads it links, and a bd built from another beads version then fails every
-// read of that store with "schema version mismatch". bd-schema compares a
+// bdBeadsVersionCheck compares the beads module each bd-backed scope's bd was
+// built from with the beads library gc links, by the version policy the
+// native-store preflight applies (contract.RelateBDVersion). It warns about a
+// bd older than that library: once a store is migrated past the schema such a
+// bd knows (by gc's library where beads.allow_schema_behind_migrate allows
+// it, or by a newer client), the bd refuses to read it. A newer release of
+// the same major version reads it. It also warns about a newer major
+// version, which semver does not promise is compatible. bd-schema compares a
 // database with gc; this compares bd with gc.
 //
-// A skew is a warning, never an error: it is advisory, and it never blocks
-// gc start, whose warm-up runs the check too. Nothing is compared, and the
-// check is OK with the reason, when either version is unknown.
+// A warning is advisory, and it never blocks gc start, whose warm-up runs the
+// check too. Nothing is compared, and the check is OK with the reason, when
+// either version names no beads release (contract.ReadBeadsBuild).
 type bdBeadsVersionCheck struct {
 	cityPath string
 	cfg      *config.City
@@ -49,47 +53,116 @@ type bdBeadsVersionScope struct {
 	root  string
 }
 
-// scopes returns the city scope and every bound rig scope.
-func (c *bdBeadsVersionCheck) scopes() []bdBeadsVersionScope {
-	out := []bdBeadsVersionScope{{label: "city", root: bdCityScopeTarget(c.cityPath, c.cfg).ScopeRoot}}
+// bdBackedScopes returns the city scope and every bound rig scope whose
+// store is bd-backed.
+func (c *bdBeadsVersionCheck) bdBackedScopes() []bdBeadsVersionScope {
+	all := []bdBeadsVersionScope{{label: "city", root: bdCityScopeTarget(c.cityPath, c.cfg).ScopeRoot}}
 	for _, rig := range c.cfg.Rigs {
 		if strings.TrimSpace(rig.Path) != "" {
-			out = append(out, bdBeadsVersionScope{label: fmt.Sprintf("rig %q", rig.Name), root: bdRigScopeTarget(c.cityPath, rig).ScopeRoot})
+			all = append(all, bdBeadsVersionScope{label: fmt.Sprintf("rig %q", rig.Name), root: bdRigScopeTarget(c.cityPath, rig).ScopeRoot})
 		}
 	}
-	return out
+	var backed []bdBeadsVersionScope
+	for _, scope := range all {
+		if providerUsesBdStoreContract(rawBeadsProviderForScope(scope.root, c.cityPath)) {
+			backed = append(backed, scope)
+		}
+	}
+	return backed
 }
 
-// bdBeadsVersionRead is what one bd binary's build info says: the beads
-// version it embeds, or why that is unknown.
-type bdBeadsVersionRead struct {
-	version string
-	unknown string
-}
-
-func readBdBeadsVersion(bdPath string) bdBeadsVersionRead {
+// readBdBeadsBuild reads which beads a bd binary was built from.
+func readBdBeadsBuild(bdPath string) contract.BeadsBuild {
 	info, err := bdBeadsVersionReadBdBuildInfo(bdPath)
 	if err != nil {
-		return bdBeadsVersionRead{unknown: fmt.Sprintf("no Go build info (a shim or non-Go bd?): %v", err)}
+		return contract.BeadsBuild{Unconfirmed: fmt.Sprintf("no Go build info, as in a shim or a non-Go bd: %v", err)}
 	}
-	version, ok := contract.BeadsModuleVersion(info)
-	if !ok {
-		return bdBeadsVersionRead{unknown: "its build info names no beads version to compare (a (devel) source build, a replaced module, or no beads module)"}
-	}
-	return bdBeadsVersionRead{version: version}
+	return contract.ReadBeadsBuild(info)
 }
 
-// linkedBeadsVersion returns the beads version gc links, or why it is unknown.
-func linkedBeadsVersion() (version, unknown string) {
+// linkedBeadsVersion returns the beads version gc links, or why it cannot be
+// compared.
+func linkedBeadsVersion() (version, unconfirmed string) {
 	info, ok := bdBeadsVersionReadGcBuildInfo()
 	if !ok {
 		return "", "gc was built without module build info"
 	}
-	version, known := contract.BeadsModuleVersion(info)
-	if !known {
-		return "", "gc's build info names no beads version to compare (a (devel) source build or a replaced module)"
+	build := contract.ReadBeadsBuild(info)
+	if build.Unconfirmed != "" {
+		return "", "the beads gc links names no release (" + build.Unconfirmed + ")"
 	}
-	return version, ""
+	return build.Version, ""
+}
+
+// bdBeadsVersionComparison sorts each scope's bd by the version policy.
+type bdBeadsVersionComparison struct {
+	linked       string
+	incompatible []string
+	uncompared   []string
+	compatible   int
+}
+
+// compare resolves and reads each scope's bd, reading each binary once.
+func (c *bdBeadsVersionCheck) compare(scopes []bdBeadsVersionScope, linked string) bdBeadsVersionComparison {
+	cmp := bdBeadsVersionComparison{linked: linked}
+	reads := map[string]contract.BeadsBuild{}
+	for _, scope := range scopes {
+		bdPath, err := c.resolveBd(c.cityPath, scope.root)
+		if err != nil {
+			cmp.uncompared = append(cmp.uncompared, fmt.Sprintf("%s: bd not resolved: %v", scope.label, err))
+			continue
+		}
+		key := bdPath
+		if resolved, err := filepath.EvalSymlinks(bdPath); err == nil {
+			key = resolved
+		}
+		build, seen := reads[key]
+		if !seen {
+			build = readBdBeadsBuild(bdPath)
+			reads[key] = build
+		}
+		if build.Unconfirmed != "" {
+			cmp.uncompared = append(cmp.uncompared, fmt.Sprintf("%s: %s (beads version unknown: %s)", scope.label, bdPath, build.Unconfirmed))
+			continue
+		}
+		switch relation := contract.RelateBDVersion(build.Version, linked); relation {
+		case contract.BDVersionOlder:
+			cmp.incompatible = append(cmp.incompatible, fmt.Sprintf("%s: %s embeds beads %s, older than the beads %s gc links; once a store is migrated past that bd's schema, the bd refuses to read it", scope.label, bdPath, build.Version, linked))
+		case contract.BDVersionNewerMajor:
+			cmp.incompatible = append(cmp.incompatible, fmt.Sprintf("%s: %s embeds beads %s, a newer major version than the beads %s gc links, which semver does not promise is compatible", scope.label, bdPath, build.Version, linked))
+		default:
+			if relation.Compatible() {
+				cmp.compatible++
+			} else {
+				cmp.uncompared = append(cmp.uncompared, fmt.Sprintf("%s: %s (beads version unknown: %s is not semver)", scope.label, bdPath, build.Version))
+			}
+		}
+	}
+	return cmp
+}
+
+// result renders the comparison as the check's result.
+func (cmp bdBeadsVersionComparison) result(r *doctor.CheckResult) *doctor.CheckResult {
+	switch {
+	case len(cmp.incompatible) > 0:
+		r.Status = doctor.StatusWarning
+		if len(cmp.incompatible) == 1 {
+			r.Message = cmp.incompatible[0]
+		} else {
+			r.Message = fmt.Sprintf("%d scope(s) resolve a bd older than, or a major version ahead of, the beads %s gc links", len(cmp.incompatible), cmp.linked)
+		}
+		r.Details = append(append(make([]string, 0, len(cmp.incompatible)+len(cmp.uncompared)), cmp.incompatible...), cmp.uncompared...)
+		r.FixHint = fmt.Sprintf("install bd %s, or a newer release of the same major version, and make sure it is the bd each listed scope resolves (PATH order, or BD_BIN in [workspace.env])", cmp.linked)
+	case len(cmp.uncompared) > 0 && cmp.compatible == 0:
+		r.Message = "not compared: " + strings.Join(cmp.uncompared, "; ")
+		r.Details = cmp.uncompared
+	case len(cmp.uncompared) > 0:
+		r.Message = fmt.Sprintf("every compared bd embeds a beads version compatible with the %s gc links; not compared: %s", cmp.linked, strings.Join(cmp.uncompared, "; "))
+		r.Details = cmp.uncompared
+	default:
+		r.Message = fmt.Sprintf("every bd-backed scope's bd embeds a beads version compatible with the %s gc links", cmp.linked)
+	}
+	return r
 }
 
 func (c *bdBeadsVersionCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
@@ -98,71 +171,15 @@ func (c *bdBeadsVersionCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		r.Message = "not compared: no city config"
 		return r
 	}
-	var scopes []bdBeadsVersionScope
-	for _, scope := range c.scopes() {
-		if providerUsesBdStoreContract(rawBeadsProviderForScope(scope.root, c.cityPath)) {
-			scopes = append(scopes, scope)
-		}
-	}
+	scopes := c.bdBackedScopes()
 	if len(scopes) == 0 {
 		r.Message = "not compared: no scope uses a bd-backed store"
 		return r
 	}
-	linked, unknown := linkedBeadsVersion()
-	if unknown != "" {
-		r.Message = "not compared: " + unknown
+	linked, unconfirmed := linkedBeadsVersion()
+	if unconfirmed != "" {
+		r.Message = "not compared: " + unconfirmed
 		return r
 	}
-
-	var skewed, uncompared []string
-	matched := 0
-	// One read per resolved binary: scopes sharing a bd read it once.
-	reads := map[string]bdBeadsVersionRead{}
-	for _, scope := range scopes {
-		bdPath, err := c.resolveBd(c.cityPath, scope.root)
-		if err != nil {
-			uncompared = append(uncompared, fmt.Sprintf("%s: bd not resolved: %v", scope.label, err))
-			continue
-		}
-		key := bdPath
-		if resolved, err := filepath.EvalSymlinks(bdPath); err == nil {
-			key = resolved
-		}
-		read, seen := reads[key]
-		if !seen {
-			read = readBdBeadsVersion(bdPath)
-			reads[key] = read
-		}
-		switch {
-		case read.unknown != "":
-			uncompared = append(uncompared, fmt.Sprintf("%s: %s: %s", scope.label, bdPath, read.unknown))
-		case read.version != linked:
-			skewed = append(skewed, fmt.Sprintf("%s: %s embeds beads %s, but gc links beads %s", scope.label, bdPath, read.version, linked))
-		default:
-			matched++
-		}
-	}
-
-	switch {
-	case len(skewed) > 0:
-		r.Status = doctor.StatusWarning
-		if len(skewed) == 1 {
-			r.Message = skewed[0] + "; that bd fails every read of a store gc migrated"
-		} else {
-			r.Message = fmt.Sprintf("%d scope(s) run a bd built from another beads version than gc links (%s); such a bd fails every read of a store gc migrated", len(skewed), linked)
-		}
-		r.Details = make([]string, 0, len(skewed)+len(uncompared))
-		r.Details = append(r.Details, skewed...)
-		r.Details = append(r.Details, uncompared...)
-		r.FixHint = "run `make install-bd` in the gascity checkout gc was built from, then make sure that bd is the one the scope resolves (PATH order, or BD_BIN in [workspace.env])"
-	case len(uncompared) > 0 && matched == 0:
-		r.Message = "not compared: " + strings.Join(uncompared, "; ")
-		r.Details = uncompared
-	case len(uncompared) > 0:
-		r.Message = fmt.Sprintf("every compared bd embeds beads %s, the version gc links; not compared: %s", linked, strings.Join(uncompared, "; "))
-		r.Details = uncompared
-	default:
-		r.Message = fmt.Sprintf("every bd-backed scope's bd embeds beads %s, the version gc links", linked)
-	}
-	return r
+	return c.compare(scopes, linked).result(r)
 }

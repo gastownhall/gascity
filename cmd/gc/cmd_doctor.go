@@ -313,8 +313,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		} else {
 			register(newBdInventoryCheck(cityPath, cfg))
 		}
-		// A bd built from another beads version than gc links fails every
-		// read of a store gc migrated (doctor_bd_beads_version.go).
+		// A bd older than the beads gc links refuses to read a store
+		// migrated past its schema (doctor_bd_beads_version.go).
 		register(newBdBeadsVersionCheck(cityPath, cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
 		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
