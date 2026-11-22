@@ -29,7 +29,8 @@ type workLegFixture struct {
 	// envBuilds is the agent dir of each leg env the route built ("" for the
 	// city leg), in build order.
 	envBuilds []string
-	// calls is each op the fixture served, as "<op> <dir>".
+	// calls is each op the fixture served, as "<op> <dir> <leg>", leg being
+	// the GC_TEST_LEG its env carried.
 	calls []string
 }
 
@@ -107,11 +108,22 @@ func (f *workLegFixture) get(dir, beadID string) (*beads.MemStore, beads.Bead, e
 	return store, b, nil
 }
 
+// record notes one op served against dir with env.
+func (f *workLegFixture) record(op, dir string, env []string) {
+	leg := ""
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "GC_TEST_LEG="); ok {
+			leg = v
+		}
+	}
+	f.calls = append(f.calls, op+" "+dir+" "+leg)
+}
+
 // ops are claim ops served by the fixture's stores, by dir.
 func (f *workLegFixture) ops() hookClaimOps {
 	return hookClaimOps{
-		Claim: func(_ context.Context, dir string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-			f.calls = append(f.calls, "claim "+dir)
+		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+			f.record("claim", dir, env)
 			store, _, err := f.get(dir, beadID)
 			if err != nil {
 				return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, err)
@@ -123,10 +135,41 @@ func (f *workLegFixture) ops() hookClaimOps {
 			claimed, err := store.Get(beadID)
 			return claimed, true, err
 		},
-		ReadWorkMeta: func(_ context.Context, dir string, _ []string, beadID, _ string) (beads.Bead, error) {
-			f.calls = append(f.calls, "read "+dir)
+		ReadWorkMeta: func(_ context.Context, dir string, env []string, beadID, _ string) (beads.Bead, error) {
+			f.record("read", dir, env)
 			_, b, err := f.get(dir, beadID)
 			return b, err
+		},
+		StampWorkMeta: func(_ context.Context, dir string, env []string, beadID, _ string, patch map[string]string) error {
+			f.record("stamp", dir, env)
+			store, _, err := f.get(dir, beadID)
+			if err != nil {
+				return err
+			}
+			return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
+		},
+		Release: func(_ context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+			f.record("release", dir, env)
+			store, b, err := f.get(dir, beadID)
+			if err != nil || b.Assignee != assignee {
+				return false, err
+			}
+			open, nobody := "open", ""
+			return true, store.Update(beadID, beads.UpdateOpts{Status: &open, Assignee: &nobody})
+		},
+		RestampAdopted: func(_ context.Context, dir string, env []string, beadID, from, to string) (bool, error) {
+			f.record("restamp", dir, env)
+			store, b, err := f.get(dir, beadID)
+			if err != nil || b.Assignee != from {
+				return false, err
+			}
+			return true, store.Update(beadID, beads.UpdateOpts{Assignee: &to})
+		},
+		EmitExecutionStepStarted: func(_ beads.Bead, dir string, env []string, _ string) {
+			f.record("started", dir, env)
+		},
+		StoreRef: func(dir string) string {
+			return claimStoreRefAt(f.cityPath, f.cfg, dir)
 		},
 		EmitClaimRejected: func(string, string, string) {},
 		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
@@ -177,7 +220,8 @@ func (f *workLegFixture) route(primaryRig string) *hookClaimWorkLegRoute {
 func (f *workLegFixture) callsIn(rig string) []string {
 	var ops []string
 	for _, call := range f.calls {
-		op, dir, _ := strings.Cut(call, " ")
+		fields := strings.Fields(call)
+		op, dir := fields[0], fields[1]
 		if dir == f.dirOf(rig) {
 			ops = append(ops, op)
 		}
@@ -251,4 +295,58 @@ func TestHookClaimWorkLegRouteClaimsInTheLegThatHoldsIt(t *testing.T) {
 			t.Fatalf("ops on the primary leg = %v, want only its own claim: the route must not probe the primary again", got)
 		}
 	})
+}
+
+// TestHookClaimWorkLegRouteFollowOnOpsUseTheHomeLeg pins AC-3: once the route
+// has claimed a bead in a non-primary leg, every op that finishes or unwinds
+// that claim runs with the home leg's dir and env, the work_started entry keys
+// it by that leg as resident, and the primary leg is not written.
+func TestHookClaimWorkLegRouteFollowOnOpsUseTheHomeLeg(t *testing.T) {
+	ctx := context.Background()
+	f := newWorkLegFixture(t, "alpha")
+	bead := f.mint("alpha")
+	primary := f.primary("")
+	ops := workLegRoutedHookClaimOps(f.ops(), f.route(""))
+	ops.ClassesRelocated = true
+
+	if _, ok, err := ops.Claim(ctx, primary.dir, primary.env, bead, "worker"); !ok || err != nil {
+		t.Fatalf("Claim = ok %v err %v, want the route to land it in rig alpha", ok, err)
+	}
+	f.calls = nil
+
+	if err := ops.StampWorkMeta(ctx, primary.dir, primary.env, bead, "worker", map[string]string{"work_dir": "/seat"}); err != nil {
+		t.Fatalf("StampWorkMeta: %v", err)
+	}
+	readback, err := ops.ReadWorkMeta(ctx, primary.dir, primary.env, bead, "worker")
+	if err != nil || readback.Metadata["work_dir"] != "/seat" {
+		t.Fatalf("ReadWorkMeta = %+v, %v; want the stamped bead from rig alpha", readback, err)
+	}
+	ops.EmitExecutionStepStarted(readback, primary.dir, primary.env, "worker")
+	if restamped, err := ops.RestampAdopted(ctx, primary.dir, primary.env, bead, "worker", "worker-2"); !restamped || err != nil {
+		t.Fatalf("RestampAdopted = %v, %v; want the adoption restamped in rig alpha", restamped, err)
+	}
+	if released, err := ops.Release(ctx, primary.dir, primary.env, bead, "worker-2"); !released || err != nil {
+		t.Fatalf("Release = %v, %v; want the claim released in rig alpha", released, err)
+	}
+
+	want := []string{"stamp", "read", "started", "restamp", "release"}
+	if len(f.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v, each in rig alpha", f.calls, want)
+	}
+	for i, call := range f.calls {
+		fields := strings.Fields(call)
+		if fields[0] != want[i] || fields[1] != f.dirOf("alpha") || fields[2] != "leg-alpha" {
+			t.Fatalf("call %d = %q, want %s in %s with rig alpha's env", i, call, want[i], f.dirOf("alpha"))
+		}
+	}
+	if b, _ := f.stores[f.dirOf("alpha")].Get(bead); b.Status != "open" || b.Assignee != "" {
+		t.Fatalf("rig alpha's bead after release = %q/%q, want open and unassigned", b.Status, b.Assignee)
+	}
+
+	for _, verdict := range []hookAdoptionVerdict{hookClaimMinted, hookAdoptionUnverified} {
+		key := hookStartedKeyFor(ops, primary.dir, bead, verdict)
+		if key.Store != "rig:alpha" || key.Bead != bead || !key.Resident {
+			t.Fatalf("hookStartedKeyFor(verdict %d) = %+v, want rig:alpha %s resident", verdict, key, bead)
+		}
+	}
 }

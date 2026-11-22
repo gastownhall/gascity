@@ -1943,6 +1943,10 @@ func forgetHookWorkStarted(opts hookClaimOptions, ops hookClaimOps, key hookStar
 // an id's hyphenated one), and to its contributor auto-routing, which gc turns
 // off for every bd it runs (applyBdContributorRoutingOptOut).
 //
+// A bead the work-leg route proved another work leg holds is keyed by that
+// leg (claim_work_leg_route.go), resident: the probe that found it is the
+// proof.
+//
 // An adoption on a city that relocates classes (a class route, or one that
 // degraded) whose readback found it in no store (hookAdoptionUnverified: the
 // read failed, or the leg did not hold the bead and no route found it in the
@@ -1954,6 +1958,10 @@ func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, verdict hookAdoptio
 	beadID = strings.TrimSpace(beadID)
 	if route := ops.ClassRoute; route != nil && route.knownResident(beadID) {
 		ref := route.storeRef()
+		return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != ""}
+	}
+	if home, ok := ops.WorkLegRoute.homeOf(beadID); ok {
+		ref := ops.StoreRef(home.dir)
 		return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != ""}
 	}
 	ref := ops.StoreRef(dir)

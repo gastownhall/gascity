@@ -135,6 +135,35 @@ func (r *hookClaimWorkLegRoute) probe(ctx context.Context, id, assignee string) 
 	return hookStore{}, false
 }
 
+// homeOf is the leg the route proved holds id, if it did.
+func (r *hookClaimWorkLegRoute) homeOf(id string) (hookStore, bool) {
+	if r == nil {
+		return hookStore{}, false
+	}
+	home, ok := r.home[strings.TrimSpace(id)]
+	return home, ok
+}
+
+// at is the dir and env an op on id runs with: its home leg's once the route
+// proved one, else the caller's.
+func (r *hookClaimWorkLegRoute) at(dir string, env []string, id string) (string, []string) {
+	if home, ok := r.homeOf(id); ok {
+		return home.dir, home.env
+	}
+	return dir, env
+}
+
+// elsewhere is the leg to re-run an op on id in after the primary answered it
+// with err: the work leg that holds id, when err proves the primary lacks it
+// and a probe finds it. Once a home is known the op already ran there, so it
+// is never re-run.
+func (r *hookClaimWorkLegRoute) elsewhere(ctx context.Context, id, assignee string, err error) (hookStore, bool) {
+	if _, known := r.homeOf(id); known || !hookClaimBeadIsElsewhere(err) {
+		return hookStore{}, false
+	}
+	return r.probe(ctx, id, assignee)
+}
+
 // workLegRoutedHookClaimOps returns ops whose claim-time ops fall back to the
 // work leg that holds a bead the primary leg proved absent.
 //
@@ -149,31 +178,92 @@ func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute) h
 	route.readLeg = base.ReadWorkMeta
 	ops.WorkLegRoute = route
 
+	// The ops that resolve a bead by id: the home leg once known, else the
+	// primary first and the holding work leg on its proven absence. A claim
+	// the primary made (ok) is its answer, whatever error rides with it.
 	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		dir, env = route.at(dir, env, beadID)
 		claimed, ok, err := base.Claim(ctx, dir, env, beadID, assignee)
-		if ok || !hookClaimBeadIsElsewhere(err) {
+		if ok {
 			return claimed, ok, err
 		}
-		home, found := route.probe(ctx, beadID, assignee)
-		if !found {
-			return claimed, ok, err
+		if home, found := route.elsewhere(ctx, beadID, assignee, err); found {
+			return base.Claim(ctx, home.dir, home.env, beadID, assignee)
 		}
-		return base.Claim(ctx, home.dir, home.env, beadID, assignee)
+		return claimed, ok, err
 	}
 
 	ops.ReadWorkMeta = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
-		if home, ok := route.home[strings.TrimSpace(beadID)]; ok {
+		dir, env = route.at(dir, env, beadID)
+		bead, err := base.ReadWorkMeta(ctx, dir, env, beadID, assignee)
+		if home, found := route.elsewhere(ctx, beadID, assignee, err); found {
 			return base.ReadWorkMeta(ctx, home.dir, home.env, beadID, assignee)
 		}
-		bead, err := base.ReadWorkMeta(ctx, dir, env, beadID, assignee)
-		if !hookClaimBeadIsElsewhere(err) {
-			return bead, err
+		return bead, err
+	}
+
+	ops.StampWorkMeta = func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
+		dir, env = route.at(dir, env, beadID)
+		err := base.StampWorkMeta(ctx, dir, env, beadID, assignee, patch)
+		if home, found := route.elsewhere(ctx, beadID, assignee, err); found {
+			return base.StampWorkMeta(ctx, home.dir, home.env, beadID, assignee, patch)
 		}
-		home, found := route.probe(ctx, beadID, assignee)
-		if !found {
-			return bead, err
+		return err
+	}
+
+	ops.AssignContinuation = func(ctx context.Context, dir string, env []string, beadID, assignee string) error {
+		dir, env = route.at(dir, env, beadID)
+		err := base.AssignContinuation(ctx, dir, env, beadID, assignee)
+		if home, found := route.elsewhere(ctx, beadID, "", err); found {
+			return base.AssignContinuation(ctx, home.dir, home.env, beadID, assignee)
 		}
-		return base.ReadWorkMeta(ctx, home.dir, home.env, beadID, assignee)
+		return err
+	}
+
+	ops.ReclaimStale = func(ctx context.Context, dir string, env []string, beadID string) (bool, string, error) {
+		dir, env = route.at(dir, env, beadID)
+		reclaimed, previousOwner, err := base.ReclaimStale(ctx, dir, env, beadID)
+		if home, found := route.elsewhere(ctx, beadID, "", err); found {
+			return base.ReclaimStale(ctx, home.dir, home.env, beadID)
+		}
+		return reclaimed, previousOwner, err
+	}
+
+	// The ops that only ever act on a claim already made: the home leg, or
+	// the caller's dir unchanged. They never probe; the claim they act on
+	// proved where the bead lives. WorkflowStore is not among them: a seam
+	// that hands back a raw beads.Store is storeclass debt, so it keeps the
+	// caller's dir.
+	ops.Release = func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+		dir, env = route.at(dir, env, beadID)
+		return base.Release(ctx, dir, env, beadID, assignee)
+	}
+
+	ops.RestampAdopted = func(ctx context.Context, dir string, env []string, beadID, fromAssignee, toAssignee string) (bool, error) {
+		dir, env = route.at(dir, env, beadID)
+		return base.RestampAdopted(ctx, dir, env, beadID, fromAssignee, toAssignee)
+	}
+
+	ops.EmitExecutionStepStarted = func(step beads.Bead, dir string, env []string, assignee string) {
+		dir, env = route.at(dir, env, step.ID)
+		base.EmitExecutionStepStarted(step, dir, env, assignee)
+	}
+
+	// The ops keyed by a workflow root: the root's home leg once the route
+	// proved one, so a continuation and its root are read where they live.
+	ops.ListContinuation = func(ctx context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {
+		dir, env = route.at(dir, env, rootID)
+		return base.ListContinuation(ctx, dir, env, rootID, group)
+	}
+
+	ops.InputVerdict = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+		dir, env = route.at(dir, env, workflowRootIDForInputCheck(candidate))
+		return base.InputVerdict(ctx, dir, env, candidate, identityCandidates, prove)
+	}
+
+	ops.RetireWorkflow = func(ctx context.Context, dir string, env []string, verdict workflowInputVerdict) error {
+		dir, env = route.at(dir, env, verdict.RootID)
+		return base.RetireWorkflow(ctx, dir, env, verdict)
 	}
 
 	return ops
