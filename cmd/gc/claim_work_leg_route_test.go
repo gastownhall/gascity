@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -603,5 +604,77 @@ func TestHookClaimWorkLegRouteUnreadableLegSkipsWithoutWriting(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestHookClaimWorkLegRouteNotInstalledOffTheScopedBranch pins AC-8: only the
+// primary-scoped branch carries a work-leg route. A single-store city and a
+// split city whose agent sets a custom work_query keep the full fan-out and no
+// route, and a nil route leaves every claim op the unwrapped value.
+func TestHookClaimWorkLegRouteNotInstalledOffTheScopedBranch(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	resolveRigPaths(cityDir, cfg.Rigs)
+	cityName := loadedCityName(cfg, cityDir)
+	singleStoreTopo := config.QueryTopology{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}}
+	for _, tc := range []struct {
+		name      string
+		agent     config.Agent
+		topo      config.QueryTopology
+		wantRoute bool
+	}{
+		{name: "single-store city", agent: config.Agent{Name: "worker", Scope: "city"}, topo: singleStoreTopo},
+		{name: "split city, custom work_query", agent: config.Agent{Name: "worker", Scope: "city", WorkQuery: "bd ready --json"}, topo: federatedHookTopology()},
+		{name: "split city, generated work_query", agent: config.Agent{Name: "worker", Scope: "city"}, topo: federatedHookTopology(), wantRoute: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := tc.agent
+			overrides, err := hookQueryEnv(cityDir, cfg, &a)
+			if err != nil {
+				t.Fatalf("hookQueryEnv: %v", err)
+			}
+			workDir := agentCommandDir(cityDir, &a, cfg.Rigs)
+			queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
+			workQuery := expandAgentCommandTemplate(cityDir, cityName, &a, cfg.Rigs, "work_query", a.EffectiveWorkQueryFor(tc.topo), io.Discard)
+			singleStore := singleStoreHookWorkQuery(cityDir, cityName, cfg, &a, tc.topo, io.Discard)
+
+			stores, route := hookClaimStores(cityDir, cfg, &a, "worker", workDir, queryEnv, overrides, workQuery, singleStore, func() map[string]bool { return nil })
+			if got := route != nil; got != tc.wantRoute {
+				t.Fatalf("work-leg route installed = %v, want %v", got, tc.wantRoute)
+			}
+			wantStores := len(hookWorkQueryStores(cityDir, cfg, &a, "worker", workDir, queryEnv, overrides, nil))
+			if tc.wantRoute {
+				wantStores = 1
+			}
+			if len(stores) != wantStores {
+				t.Fatalf("claim stores = %d, want %d", len(stores), wantStores)
+			}
+			if wantStores < 2 && !tc.wantRoute {
+				t.Fatalf("fixture has %d stores; the unscoped branch must fan out to every leg", wantStores)
+			}
+			if tc.wantRoute {
+				return
+			}
+
+			ops := (&workLegFixture{t: t}).ops()
+			for _, relocated := range []bool{false, true} {
+				routed := workLegRoutedHookClaimOps(ops, route, relocated)
+				if routed.WorkLegRoute != nil {
+					t.Fatalf("relocated=%v: ops carry a work-leg route", relocated)
+				}
+				want, got := reflect.ValueOf(ops), reflect.ValueOf(routed)
+				for i := 0; i < want.NumField(); i++ {
+					if want.Field(i).Kind() != reflect.Func {
+						continue
+					}
+					if want.Field(i).Pointer() != got.Field(i).Pointer() {
+						t.Errorf("relocated=%v: op %s was wrapped", relocated, want.Type().Field(i).Name)
+					}
+				}
+			}
+		})
 	}
 }
