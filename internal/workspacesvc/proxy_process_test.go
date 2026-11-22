@@ -176,7 +176,16 @@ func TestProxyProcessHelper(t *testing.T) {
 	defer ln.Close() //nolint:errcheck // best-effort cleanup
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		switch proxyProcessHelperHealthFailMode() {
+		case "hang":
+			// Stall until the prober's client timeout closes the connection.
+			<-r.Context().Done()
+			return
+		case "503":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/env", func(w http.ResponseWriter, _ *http.Request) {
@@ -208,6 +217,123 @@ func TestProxyProcessHelper(t *testing.T) {
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("serve: %v", err)
 	}
+}
+
+// proxyProcessHelperHealthFailMode returns the contents of the file named by
+// GC_SERVICE_HELPER_HEALTH_FAIL_FILE: "hang" stalls /healthz, "503" fails it,
+// and a missing file or unset variable leaves it healthy.
+func proxyProcessHelperHealthFailMode() string {
+	path := os.Getenv("GC_SERVICE_HELPER_HEALTH_FAIL_FILE")
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// startHealthToggleManager starts a Manager running one proxy_process service
+// served by TestProxyProcessHelper and waits for it to report ready. The
+// returned path is the helper's health-failure marker: write "hang" or "503"
+// to it to fail the next probe, remove it to pass again.
+func startHealthToggleManager(t *testing.T) (*Manager, string) {
+	t.Helper()
+	t.Setenv("GC_SERVICE_HELPER", "1")
+	marker := filepath.Join(t.TempDir(), "health-fail")
+	t.Setenv("GC_SERVICE_HELPER_HEALTH_FAIL_FILE", marker)
+	setHelperPassthrough(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	rt := &testRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{
+			Services: []config.Service{{
+				Name: "bridge",
+				Kind: "proxy_process",
+				Process: config.ServiceProcessConfig{
+					Command:    []string{exe, "-test.run=^TestProxyProcessHelper$", "--"},
+					HealthPath: "/healthz",
+				},
+			}},
+		},
+		sp:    runtime.NewFake(),
+		store: beads.NewMemStore(),
+	}
+	mgr := NewManager(rt)
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+	if status, _ := mgr.Get("bridge"); status.LocalState != "ready" {
+		t.Fatalf("LocalState = %q, want ready (reason=%q)", status.LocalState, status.Reason)
+	}
+	return mgr, marker
+}
+
+func setHealthFailMode(t *testing.T, marker, mode string) {
+	t.Helper()
+	if mode == "" {
+		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("removing health marker: %v", err)
+		}
+		return
+	}
+	if err := os.WriteFile(marker, []byte(mode), 0o644); err != nil {
+		t.Fatalf("writing health marker: %v", err)
+	}
+}
+
+// serveBridgeHook sends POST /svc/bridge/hooks/example through mgr and
+// returns the response.
+func serveBridgeHook(t *testing.T, mgr *Manager) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/svc/bridge/hooks/example", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	if ok := mgr.ServeHTTP(rec, req); !ok {
+		t.Fatal("ServeHTTP returned false, want true")
+	}
+	return rec
+}
+
+func requireProxiedBridgeHook(t *testing.T, mgr *Manager, while string) {
+	t.Helper()
+	rec := serveBridgeHook(t, mgr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 %s; body=%q", rec.Code, while, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "POST /hooks/example" {
+		t.Fatalf("body = %q, want %q %s", got, "POST /hooks/example", while)
+	}
+}
+
+func requireDegraded(t *testing.T, mgr *Manager, reasonPart string) {
+	t.Helper()
+	status, _ := mgr.Get("bridge")
+	if status.State != "degraded" || status.LocalState != "degraded" || !strings.Contains(status.Reason, reasonPart) {
+		t.Fatalf("status = %s/%s %q, want degraded/degraded with a reason containing %q", status.State, status.LocalState, status.Reason, reasonPart)
+	}
+}
+
+// TestProxyProcessProxiesLiveProcessAfterFailedHealthProbe: a running service
+// whose health probe failed, by timing out or by answering non-2xx, still
+// proxies requests to its process.
+func TestProxyProcessProxiesLiveProcessAfterFailedHealthProbe(t *testing.T) {
+	mgr, marker := startHealthToggleManager(t)
+
+	setHealthFailMode(t, marker, "hang")
+	mgr.Tick(context.Background(), time.Now().UTC())
+	requireDegraded(t, mgr, "health check failed")
+	requireProxiedBridgeHook(t, mgr, "while degraded by a timed-out probe")
+
+	setHealthFailMode(t, marker, "503")
+	mgr.Tick(context.Background(), time.Now().UTC())
+	requireDegraded(t, mgr, "health check returned 503")
+	requireProxiedBridgeHook(t, mgr, "while degraded by a non-2xx probe")
 }
 
 func countProxyProcessHelperEnvKey(key string) int {

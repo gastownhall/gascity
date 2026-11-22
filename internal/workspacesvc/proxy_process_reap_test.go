@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -166,6 +168,50 @@ func TestProxyProcessGenerationStaysCurrentWhileItsTreeIsReaped(t *testing.T) {
 	awaitClosed(t, firstDone, "the reaper to retire the generation")
 	if cmd, _ := currentGeneration(inst); cmd != nil {
 		t.Fatalf("generation still current after its reaper finished (current=%v)", cmd)
+	}
+}
+
+// TestProxyProcessReportsUnreachableDegradedGenerationAsBadGateway: while an
+// exited leader's tree is still being released, the generation stays current
+// and a failed probe marks it degraded; a request is then proxied and fails
+// at once with 502, and once the reaper retires the generation it answers 503.
+func TestProxyProcessReportsUnreachableDegradedGenerationAsBadGateway(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+	var unblockOnce sync.Once
+	inst, _ := startReadyReapTestInstance(t, func(cmd *exec.Cmd) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-unblock
+		return processgroup.ReleaseCommand(cmd)
+	})
+	t.Cleanup(func() { unblockOnce.Do(func() { close(unblock) }) })
+
+	first, firstDone := currentGeneration(inst)
+	killLeader(t, first)
+	awaitClosed(t, entered, "the reaper to begin releasing the tree")
+	inst.Tick(context.Background(), time.Now().UTC())
+	if status := inst.Status(); status.LocalState != "degraded" {
+		t.Fatalf("LocalState = %q after a failed probe, want degraded (reason=%q)", status.LocalState, status.Reason)
+	}
+	if cmd, _ := currentGeneration(inst); cmd != first {
+		t.Fatalf("generation retired before its tree release finished (current=%v)", cmd)
+	}
+
+	rec := httptest.NewRecorder()
+	inst.HandleHTTP(rec, httptest.NewRequest(http.MethodGet, "/hooks/example", nil), "/hooks/example")
+	if rec.Code != http.StatusBadGateway || !strings.HasPrefix(rec.Body.String(), "service unavailable: dial unix") {
+		t.Fatalf("response = %d %q, want 502 naming the failed dial", rec.Code, rec.Body.String())
+	}
+
+	unblockOnce.Do(func() { close(unblock) })
+	awaitClosed(t, firstDone, "the reaper to retire the generation")
+	rec = httptest.NewRecorder()
+	inst.HandleHTTP(rec, httptest.NewRequest(http.MethodGet, "/hooks/example", nil), "/hooks/example")
+	if rec.Code != http.StatusServiceUnavailable || !strings.HasPrefix(rec.Body.String(), "service unavailable: process exited") {
+		t.Fatalf("response = %d %q, want 503 naming the exit", rec.Code, rec.Body.String())
 	}
 }
 
