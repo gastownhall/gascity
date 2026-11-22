@@ -67,6 +67,17 @@ fi
 
 installed="$INSTALL_DIR/bd"
 
+# Fast path: an installed bd that already embeds the pin needs nothing built
+# or rewritten — a rebuild is minutes of CGO compilation for no change.
+if [ -f "$installed" ]; then
+	if installed_pin=$(bd_beads_version "$installed"); then
+		if [ "$installed_pin" = "$pin" ]; then
+			echo "install-bd: $installed already embeds github.com/steveyegge/beads $pin; nothing to do"
+			exit 0
+		fi
+	fi
+fi
+
 echo "install-bd: building bd from github.com/steveyegge/beads/cmd/bd@$pin"
 mkdir -p "$INSTALL_DIR"
 # CGO_ENABLED=1 + gms_pure_go is the embedded-storage-capable bd build; a

@@ -155,7 +155,7 @@ func stubBdVersionOf(t *testing.T, stub *bdStubGo, path string) string {
 
 // runInstallBdPinned runs the install script under the stub go, with a PATH
 // that holds no other bd unless extraPATH prepends one.
-func runInstallBdPinned(t *testing.T, stub *bdStubGo, extraPATH string, extraEnv ...string) (string, error) {
+func runInstallBdPinned(t *testing.T, stub *bdStubGo, extraPATH string) (string, error) {
 	t.Helper()
 	root := repoRoot(t)
 	path := stub.binDir + string(os.PathListSeparator) + pathWithoutCommand("bd")
@@ -176,12 +176,27 @@ func runInstallBdPinned(t *testing.T, stub *bdStubGo, extraPATH string, extraEnv
 	if stub.installFail {
 		cmd.Env = append(cmd.Env, "BD_STUB_INSTALL_FAIL=1")
 	}
-	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
 func (s *bdStubGo) installDir() string { return filepath.Join(s.home, "gc-bin") }
+
+// stubArgv returns the stub go's argv log, one line per invocation.
+func stubArgv(t *testing.T, stub *bdStubGo) []string {
+	t.Helper()
+	data, err := os.ReadFile(stub.logPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", stub.logPath, err)
+	}
+	var argv []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" {
+			argv = append(argv, line)
+		}
+	}
+	return argv
+}
 
 func fileSHA(t *testing.T, path string) string {
 	t.Helper()
@@ -224,6 +239,33 @@ func TestInstallBdPinnedFreshInstallEmbedsThePin(t *testing.T) {
 	link := filepath.Join(stub.home, ".local", "bin", "bd")
 	if target, linkErr := os.Readlink(link); linkErr != nil || target != bd {
 		t.Errorf("~/.local/bin/bd = %q (%v), want a symlink to %s", target, linkErr, bd)
+	}
+}
+
+// TestInstallBdPinnedFastPathSkipsTheBuild is AC-2: when the installed bd
+// already embeds the pin, the script is a no-op — no `go install` runs (a
+// rebuild is minutes of CGO compilation for nothing) and the file's content,
+// not its mtime, is what must stay unchanged.
+func TestInstallBdPinnedFastPathSkipsTheBuild(t *testing.T) {
+	stub := writeBdStubGo(t)
+	bd := filepath.Join(stub.installDir(), "bd")
+	if err := os.MkdirAll(stub.installDir(), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", stub.installDir(), err)
+	}
+	writeStubBd(t, bd, bdStubPin)
+	before := fileSHA(t, bd)
+
+	out, err := runInstallBdPinned(t, stub, "")
+	if err != nil {
+		t.Fatalf("install-bd-pinned.sh over an already-pinned bd: %v\n%s", err, out)
+	}
+	for _, argv := range stubArgv(t, stub) {
+		if strings.HasPrefix(argv, "install ") {
+			t.Errorf("the fast path still ran `go %s`:\n%s", argv, out)
+		}
+	}
+	if after := fileSHA(t, bd); after != before {
+		t.Errorf("the installed bd was rewritten by a no-op run:\n%s", out)
 	}
 }
 
