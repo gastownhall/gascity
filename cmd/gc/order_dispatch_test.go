@@ -4393,6 +4393,48 @@ func TestOrderTrackingRetentionDeletesExpiredRunsInOneBatch(t *testing.T) {
 	}
 }
 
+// The CLI sweep and the supervisor's watchdog both hand the prune their stores
+// wrapped in orderTrackingSweepScopedStore. The wrapper must still batch the
+// delete: one bd call for the lot, not two dep reads and a delete per run.
+func TestOrderTrackingRetentionBatchesThroughSweepScopedStore(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	for _, bounded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
+			store := &orderTrackingRetentionBatchStore{
+				orderTrackingRetentionDeleteStore: newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+3, ""),
+			}
+			stores := []beads.Store{orderTrackingSweepScopedStore{Store: store, label: "city", key: "city"}}
+			policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+			var deleted int
+			var err error
+			if bounded {
+				deleted, err = sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores, now, policy, nil, 100)
+			} else {
+				var result orderTrackingRetentionSweepResult
+				result, err = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, policy, nil)
+				deleted = result.deleted
+			}
+			if err != nil || deleted != 3 {
+				t.Fatalf("sweep = (%d, %v), want (3, nil)", deleted, err)
+			}
+			if len(store.batches) != 1 || store.deleteCalls != 0 {
+				t.Fatalf("DeleteBatch calls = %d, Delete calls = %d, want 1 and 0", len(store.batches), store.deleteCalls)
+			}
+		})
+	}
+}
+
+// A wrapped store without a batch delete still prunes, one bead at a time.
+func TestOrderTrackingRetentionSweepScopedStoreFallsBackWithoutBatch(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	store := newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+3, "")
+	stores := []beads.Store{orderTrackingSweepScopedStore{Store: store, label: "city", key: "city"}}
+	result, err := sweepClosedOrderTrackingRetentionAcrossStores(stores, now, orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}, nil)
+	if err != nil || result.deleted != 3 || store.deleteCalls != 3 {
+		t.Fatalf("sweep = (%d, %v), Delete calls = %d, want (3, nil) and 3", result.deleted, err, store.deleteCalls)
+	}
+}
+
 func TestOrderTrackingRetentionBatchKeepsRunWithOpenStep(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	for _, bounded := range []bool{false, true} {

@@ -94,6 +94,19 @@ func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
 	return s.key
 }
 
+// DeleteBatch forwards the wrapped store's batch delete. Embedding a bare
+// beads.Store hides BatchDeleter, so without it the retention prune deleted one
+// bead at a time, two dep reads and a delete each, where a batch is one bd call
+// that also tolerates ids already gone. beads.As finds the capability through a
+// class handle the wrapped store may be.
+func (s orderTrackingSweepScopedStore) DeleteBatch(ids []string) error {
+	deleter, ok := beads.As[beads.BatchDeleter](s.Store)
+	if !ok {
+		return beads.ErrBatchDeleteUnsupported
+	}
+	return deleter.DeleteBatch(ids)
+}
+
 func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
 	target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 	if err != nil {
