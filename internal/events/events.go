@@ -491,6 +491,10 @@ const (
 	// else escalates. Re-emitted at most hourly while the streak lasts, and
 	// never for failures inside the startup grace after a controller start.
 	OrderFailing = "order.failing"
+	// OrderRecovered reports that an order whose failure streak raised
+	// order.failing has completed successfully, ending the streak. Emitted
+	// once per alerted streak; a streak that never alerted ends silently.
+	OrderRecovered = "order.recovered"
 	// OrderSkipped reports that an exec order finished (exit 0) but declared
 	// that some or all of its work did not run: a bead scope it could not
 	// reach, or a safety gate that held a step back. It accompanies the run's
@@ -764,7 +768,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RequestAccepted, RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderFailing, OrderSkipped, OrderInapplicable,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderFailing, OrderRecovered, OrderSkipped, OrderInapplicable,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,

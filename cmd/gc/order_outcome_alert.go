@@ -10,7 +10,8 @@ import (
 
 // orderOutcomeAlertRecorder is the order dispatcher's events.Recorder. It
 // forwards every event unchanged and feeds each order outcome to a failure
-// streak table, recording order.failing when an order's streak alerts.
+// streak table, recording order.failing when an order's streak alerts and
+// order.recovered when a success ends an alerted streak.
 //
 // Wrapping the recorder, rather than editing each order.failed emit site,
 // means every way an order can fail is counted, including ones added later.
@@ -38,10 +39,31 @@ func (r *orderOutcomeAlertRecorder) Record(e events.Event) {
 	if e.Subject == "" {
 		return
 	}
-	if e.Type == events.OrderFailed {
+	switch e.Type {
+	case events.OrderFailed:
 		if alert, ok := r.streaks.ObserveFailure(e.Subject, e.Message, r.now()); ok {
 			r.next.Record(orderFailingEvent(alert))
 		}
+	case events.OrderCompleted:
+		if recovery, ok := r.streaks.ObserveSuccess(e.Subject, r.now()); ok {
+			r.next.Record(orderRecoveredEvent(recovery))
+		}
+	}
+}
+
+func orderRecoveredEvent(rc orders.OrderRecovery) events.Event {
+	firstFailed := rc.FirstFailed.UTC().Format(time.RFC3339)
+	return events.Event{
+		Type:    events.OrderRecovered,
+		Actor:   "controller",
+		Subject: rc.OrderName,
+		Message: fmt.Sprintf("order %s recovered after %d consecutive failures since %s", rc.OrderName, rc.Consecutive, firstFailed),
+		Payload: events.OrderRecoveredPayloadJSON(events.OrderRecoveredPayload{
+			OrderName:   rc.OrderName,
+			Consecutive: rc.Consecutive,
+			FirstFailed: firstFailed,
+			FailedForMS: rc.FailedFor.Milliseconds(),
+		}),
 	}
 }
 
@@ -60,4 +82,29 @@ func orderFailingEvent(a orders.OrderFailingAlert) events.Event {
 			LastError:    a.LastError,
 		}),
 	}
+}
+
+// carryOrderFailureStreaksFrom hands prev's failure streaks to m, keeping only
+// orders m still dispatches, so a reload or rescan neither resets a running
+// streak nor restarts the startup grace. Only call after draining prev.
+func (m *memoryOrderDispatcher) carryOrderFailureStreaksFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	next, ok := m.rec.(*orderOutcomeAlertRecorder)
+	if !ok {
+		return
+	}
+	old, ok := prev.rec.(*orderOutcomeAlertRecorder)
+	if !ok {
+		return
+	}
+	live := make(map[string]struct{}, len(m.aa))
+	for i := range m.aa {
+		live[m.aa[i].ScopedName()] = struct{}{}
+	}
+	next.streaks.Inherit(old.streaks, func(name string) bool {
+		_, ok := live[name]
+		return ok
+	})
 }

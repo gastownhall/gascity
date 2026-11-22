@@ -91,3 +91,62 @@ func (s *FailureStreaks) ObserveFailure(name, message string, at time.Time) (Ord
 		LastError:   message,
 	}, true
 }
+
+// OrderRecovery describes the success that ended an order's alerted failure
+// streak.
+type OrderRecovery struct {
+	OrderName string
+	// Consecutive is how many failures the streak counted.
+	Consecutive int
+	// FirstFailed is the streak anchor, matching the alerts it raised.
+	FirstFailed time.Time
+	// FailedFor is the gap from FirstFailed to the success.
+	FailedFor time.Duration
+}
+
+// ObserveSuccess records a successful run of the named order at at, ending
+// its streak so the next failure starts a new one at 1. It returns the
+// recovery to publish when the streak it ended had alerted.
+func (s *FailureStreaks) ObserveSuccess(name string, at time.Time) (OrderRecovery, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.streaks[name]
+	if st == nil {
+		return OrderRecovery{}, false
+	}
+	delete(s.streaks, name)
+	if !st.alerted {
+		return OrderRecovery{}, false
+	}
+	return OrderRecovery{
+		OrderName:   name,
+		Consecutive: st.count,
+		FirstFailed: st.first,
+		FailedFor:   at.Sub(st.first),
+	}, true
+}
+
+// Inherit takes over prev's controller start and the streaks of the orders
+// keep accepts, so a table rebuilt on a config reload neither restarts the
+// startup grace nor forgets a running streak. A streak keep rejects, an order
+// no longer configured, is dropped: no later outcome could reach it.
+func (s *FailureStreaks) Inherit(prev *FailureStreaks, keep func(name string) bool) {
+	if s == nil || prev == nil || s == prev {
+		return
+	}
+	prev.mu.Lock()
+	defer prev.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.startedAt = prev.startedAt
+	for name, st := range prev.streaks {
+		if !keep(name) {
+			continue
+		}
+		if _, ok := s.streaks[name]; ok {
+			continue
+		}
+		cp := *st
+		s.streaks[name] = &cp
+	}
+}

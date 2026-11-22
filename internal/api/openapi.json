@@ -3549,6 +3549,9 @@
             "$ref": "#/components/schemas/OrderInapplicablePayload"
           },
           {
+            "$ref": "#/components/schemas/OrderRecoveredPayload"
+          },
+          {
             "$ref": "#/components/schemas/OrderSkippedPayload"
           },
           {
@@ -6427,6 +6430,32 @@
         },
         "required": [
           "orders"
+        ],
+        "type": "object"
+      },
+      "OrderRecoveredPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "consecutive": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "failed_for_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "first_failed": {
+            "type": "string"
+          },
+          "order_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_name",
+          "consecutive",
+          "first_failed",
+          "failed_for_ms"
         ],
         "type": "object"
       },
@@ -15103,6 +15132,7 @@
             "order.failing": "#/components/schemas/TypedEventStreamEnvelopeOrderFailing",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
             "order.inapplicable": "#/components/schemas/TypedEventStreamEnvelopeOrderInapplicable",
+            "order.recovered": "#/components/schemas/TypedEventStreamEnvelopeOrderRecovered",
             "order.skipped": "#/components/schemas/TypedEventStreamEnvelopeOrderSkipped",
             "order.suppressed": "#/components/schemas/TypedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
@@ -15372,6 +15402,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderInapplicable"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderRecovered"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderSkipped"
@@ -17301,6 +17334,7 @@
                 "order.failed",
                 "order.suppressed",
                 "order.failing",
+                "order.recovered",
                 "order.skipped",
                 "order.inapplicable",
                 "provider.swapped",
@@ -19581,6 +19615,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope order.inapplicable",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeOrderRecovered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderRecoveredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.recovered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope order.recovered",
         "type": "object"
       },
       "TypedEventStreamEnvelopeOrderSkipped": {
@@ -23359,6 +23450,7 @@
             "order.failing": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailing",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
             "order.inapplicable": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderInapplicable",
+            "order.recovered": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderRecovered",
             "order.skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSkipped",
             "order.suppressed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
@@ -23628,6 +23720,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderInapplicable"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderRecovered"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSkipped"
@@ -25672,6 +25767,7 @@
                 "order.failed",
                 "order.suppressed",
                 "order.failing",
+                "order.recovered",
                 "order.skipped",
                 "order.inapplicable",
                 "provider.swapped",
@@ -28109,6 +28205,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope order.inapplicable",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeOrderRecovered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderRecoveredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.recovered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope order.recovered",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeOrderSkipped": {

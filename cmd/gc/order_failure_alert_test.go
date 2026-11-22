@@ -129,3 +129,89 @@ func TestOrderDispatcherIgnoresFailuresRightAfterControllerStart(t *testing.T) {
 		t.Fatalf("order.failing inside the startup grace: %+v", got)
 	}
 }
+
+func recordOrderCompleted(m *memoryOrderDispatcher, scoped string) {
+	m.rec.Record(events.Event{Type: events.OrderCompleted, Actor: "controller", Subject: scoped})
+}
+
+func TestOrderDispatcherRecordsOrderRecoveredOnceAfterAnAlertedStreak(t *testing.T) {
+	var rec memRecorder
+	m, clock := alertingOrderDispatcher(t, &rec, nil)
+	const scoped = "gate-sweep"
+
+	first := clock.now()
+	for i := 0; i < orders.FailureAlertAfter; i++ {
+		recordOrderFailed(m, scoped, "boom")
+		clock.advance(time.Minute)
+	}
+	recordOrderCompleted(m, scoped)
+	recordOrderCompleted(m, scoped)
+
+	recovered := rec.eventsOfType(events.OrderRecovered)
+	if len(recovered) != 1 {
+		t.Fatalf("order.recovered events = %d, want exactly 1", len(recovered))
+	}
+	if recovered[0].Subject != scoped || recovered[0].Actor != "controller" {
+		t.Errorf("order.recovered subject/actor = %q/%q", recovered[0].Subject, recovered[0].Actor)
+	}
+	var p events.OrderRecoveredPayload
+	if err := json.Unmarshal(recovered[0].Payload, &p); err != nil {
+		t.Fatalf("decoding order.recovered payload %s: %v", recovered[0].Payload, err)
+	}
+	want := events.OrderRecoveredPayload{
+		OrderName:   scoped,
+		Consecutive: orders.FailureAlertAfter,
+		FirstFailed: first.UTC().Format(time.RFC3339),
+		FailedForMS: (time.Duration(orders.FailureAlertAfter) * time.Minute).Milliseconds(),
+	}
+	if p != want {
+		t.Errorf("payload = %+v, want %+v", p, want)
+	}
+
+	clock.advance(time.Minute)
+	restart := clock.now()
+	for i := 0; i < orders.FailureAlertAfter; i++ {
+		recordOrderFailed(m, scoped, "again")
+	}
+	failing := rec.eventsOfType(events.OrderFailing)
+	if len(failing) != 2 {
+		t.Fatalf("order.failing events = %d, want 2 (one per streak)", len(failing))
+	}
+	var second events.OrderFailingPayload
+	if err := json.Unmarshal(failing[1].Payload, &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Consecutive != orders.FailureAlertAfter || second.FirstFailed != restart.UTC().Format(time.RFC3339) {
+		t.Errorf("new streak = %+v, want it to restart at 1 from %s", second, restart.UTC().Format(time.RFC3339))
+	}
+}
+
+// The wiring, not just the table: a reload that rebuilds the dispatcher
+// through replaceOrderDispatcher continues a still-configured order's streak
+// and drops a removed order's.
+func TestReplaceOrderDispatcherCarriesOrderFailureStreaks(t *testing.T) {
+	var rec memRecorder
+	order := func(name string) orders.Order {
+		return orders.Order{Name: name, Trigger: "cooldown", Interval: "1h", Exec: "true"}
+	}
+	prev, _ := alertingOrderDispatcher(t, &rec, []orders.Order{order("gate-sweep"), order("retired")})
+	for i := 0; i < orders.FailureAlertAfter-1; i++ {
+		recordOrderFailed(prev, "gate-sweep", "boom")
+		recordOrderFailed(prev, "retired", "boom")
+	}
+
+	next, _ := alertingOrderDispatcher(t, &rec, []orders.Order{order("gate-sweep")})
+	(&CityRuntime{od: prev}).replaceOrderDispatcher(next)
+
+	recordOrderFailed(next, "gate-sweep", "boom")
+	failing := rec.eventsOfType(events.OrderFailing)
+	if len(failing) != 1 || failing[0].Subject != "gate-sweep" {
+		t.Fatalf("order.failing after the rebuild = %+v, want gate-sweep's streak continued to %d", failing, orders.FailureAlertAfter)
+	}
+	for i := 0; i < orders.FailureAlertAfter-1; i++ {
+		recordOrderFailed(next, "retired", "boom")
+	}
+	if got := rec.eventsOfType(events.OrderFailing); len(got) != 1 {
+		t.Fatalf("a removed order's streak was carried across the rebuild: %+v", got)
+	}
+}

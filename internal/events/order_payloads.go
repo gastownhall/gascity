@@ -55,6 +55,29 @@ func OrderFailingPayloadJSON(p OrderFailingPayload) json.RawMessage {
 	return b
 }
 
+// OrderRecoveredPayload is the typed payload for order.recovered events: the
+// order whose alerted failure streak a success ended, how many consecutive
+// failures it counted, and its anchor. FirstFailed (RFC3339) equals the
+// first_failed of every order.failing the streak raised, so a consumer can
+// match the recovery to its alerts. FailedForMS is the gap from it to the
+// success.
+type OrderRecoveredPayload struct {
+	OrderName   string `json:"order_name"`
+	Consecutive int    `json:"consecutive"`
+	FirstFailed string `json:"first_failed"`
+	FailedForMS int64  `json:"failed_for_ms"`
+}
+
+// IsEventPayload marks OrderRecoveredPayload as an events.Payload variant.
+func (OrderRecoveredPayload) IsEventPayload() {}
+
+// OrderRecoveredPayloadJSON builds the JSON wire form for attachment to an
+// Event.Payload field.
+func OrderRecoveredPayloadJSON(p OrderRecoveredPayload) json.RawMessage {
+	b, _ := json.Marshal(p) //nolint:errcheck // a struct of scalars cannot fail to marshal
+	return b
+}
+
 // OrderSkippedPayload is the typed payload for order.skipped events: which
 // order declared it, whether nothing ("skipped") or only some ("partial") of
 // its work ran, and the scopes or steps that did not run.
@@ -111,6 +134,7 @@ func OrderInapplicablePayloadJSON(p OrderInapplicablePayload) json.RawMessage {
 func init() {
 	RegisterPayload(OrderSuppressed, OrderSuppressedPayload{})
 	RegisterPayload(OrderFailing, OrderFailingPayload{})
+	RegisterPayload(OrderRecovered, OrderRecoveredPayload{})
 	RegisterPayload(OrderSkipped, OrderSkippedPayload{})
 	RegisterPayload(OrderInapplicable, OrderInapplicablePayload{})
 }

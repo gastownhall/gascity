@@ -9,14 +9,14 @@ import (
 var streakControllerStart = time.Date(2030, 8, 21, 9, 0, 0, 0, time.UTC)
 
 // pastGrace is a time well after the startup grace, so failures count.
-func pastGrace(offset time.Duration) time.Time {
-	return streakControllerStart.Add(StartupFailureGrace + time.Minute + offset)
+func pastGrace() time.Time {
+	return streakControllerStart.Add(StartupFailureGrace + time.Minute)
 }
 
 func TestFailureStreaksAlertsOnceAtThresholdThenHourly(t *testing.T) {
 	s := NewFailureStreaks(streakControllerStart)
 	const name = "gate-sweep"
-	first := pastGrace(0)
+	first := pastGrace()
 
 	for i := 1; i < FailureAlertAfter; i++ {
 		if a, ok := s.ObserveFailure(name, fmt.Sprintf("fail %d", i), first.Add(time.Duration(i-1)*30*time.Second)); ok {
@@ -56,7 +56,7 @@ func TestFailureStreaksSkipFailuresInsideTheStartupGrace(t *testing.T) {
 			t.Fatalf("failure inside the startup grace alerted: %+v", a)
 		}
 	}
-	first := pastGrace(0)
+	first := pastGrace()
 	for i := 0; i < FailureAlertAfter-1; i++ {
 		if a, ok := s.ObserveFailure(name, "real", first.Add(time.Duration(i)*time.Minute)); ok {
 			t.Fatalf("grace-window failures were counted toward the streak: %+v", a)
@@ -70,7 +70,7 @@ func TestFailureStreaksSkipFailuresInsideTheStartupGrace(t *testing.T) {
 
 func TestFailureStreaksAreIndependentPerOrder(t *testing.T) {
 	s := NewFailureStreaks(streakControllerStart)
-	at := pastGrace(0)
+	at := pastGrace()
 	for i := 0; i < FailureAlertAfter-1; i++ {
 		s.ObserveFailure("a", "x", at)
 		s.ObserveFailure("b", "x", at)
@@ -94,5 +94,80 @@ func TestFailureStreakConstantsMatchTheirDocumentedContract(t *testing.T) {
 	}
 	if FailureAlertRepeat != time.Hour {
 		t.Errorf("FailureAlertRepeat = %s, want 1h", FailureAlertRepeat)
+	}
+}
+
+func TestFailureStreaksRecoverOnlyAnAlertedStreakThenRestartAtOne(t *testing.T) {
+	s := NewFailureStreaks(streakControllerStart)
+	const name = "gate-sweep"
+	first := pastGrace()
+	for i := 0; i < FailureAlertAfter; i++ {
+		s.ObserveFailure(name, "x", first.Add(time.Duration(i)*time.Minute))
+	}
+	recoveredAt := first.Add(time.Hour)
+	r, ok := s.ObserveSuccess(name, recoveredAt)
+	if !ok {
+		t.Fatal("success after an alerted streak did not report a recovery")
+	}
+	want := OrderRecovery{OrderName: name, Consecutive: FailureAlertAfter, FirstFailed: first, FailedFor: time.Hour}
+	if r != want {
+		t.Fatalf("recovery = %+v, want %+v", r, want)
+	}
+	if r, ok := s.ObserveSuccess(name, recoveredAt.Add(time.Minute)); ok {
+		t.Fatalf("a second success reported another recovery: %+v", r)
+	}
+
+	restart := recoveredAt.Add(time.Hour)
+	for i := 0; i < FailureAlertAfter-1; i++ {
+		if a, ok := s.ObserveFailure(name, "y", restart.Add(time.Duration(i)*time.Minute)); ok {
+			t.Fatalf("the streak did not restart at 1 after recovery: %+v", a)
+		}
+	}
+	a, ok := s.ObserveFailure(name, "y", restart.Add(time.Duration(FailureAlertAfter-1)*time.Minute))
+	if !ok || a.Consecutive != FailureAlertAfter || a.FirstFailed != restart {
+		t.Fatalf("new streak alert = %+v (ok=%v), want consecutive %d anchored at %s", a, ok, FailureAlertAfter, restart)
+	}
+}
+
+// A success that ends a streak which never alerted announces nothing, but
+// still resets the count.
+func TestFailureStreaksSuccessResetsAnUnalertedStreakSilently(t *testing.T) {
+	s := NewFailureStreaks(streakControllerStart)
+	const name = "gate-sweep"
+	at := pastGrace()
+	for i := 0; i < FailureAlertAfter-1; i++ {
+		s.ObserveFailure(name, "x", at)
+	}
+	if r, ok := s.ObserveSuccess(name, at); ok {
+		t.Fatalf("recovery reported for a streak that never alerted: %+v", r)
+	}
+	for i := 0; i < FailureAlertAfter-1; i++ {
+		if a, ok := s.ObserveFailure(name, "x", at); ok {
+			t.Fatalf("failures before the success were still counted: %+v", a)
+		}
+	}
+}
+
+// A dispatcher rebuild hands the table on: a still-configured order keeps its
+// streak, a removed one's streak is dropped, and the controller start (so the
+// startup grace) is the original one, not the rebuild's.
+func TestFailureStreaksInheritKeepsConfiguredOrdersAndTheControllerStart(t *testing.T) {
+	prev := NewFailureStreaks(streakControllerStart)
+	at := pastGrace()
+	for i := 0; i < FailureAlertAfter-1; i++ {
+		prev.ObserveFailure("kept", "x", at)
+		prev.ObserveFailure("removed", "x", at)
+	}
+	next := NewFailureStreaks(at)
+	next.Inherit(prev, func(name string) bool { return name == "kept" })
+
+	a, ok := next.ObserveFailure("kept", "x", at.Add(time.Minute))
+	if !ok || a.Consecutive != FailureAlertAfter || a.FirstFailed != at {
+		t.Fatalf("kept order's streak did not carry across the rebuild: %+v (ok=%v)", a, ok)
+	}
+	for i := 0; i < FailureAlertAfter-1; i++ {
+		if a, ok := next.ObserveFailure("removed", "x", at.Add(time.Minute)); ok {
+			t.Fatalf("removed order's streak was carried: %+v", a)
+		}
 	}
 }
