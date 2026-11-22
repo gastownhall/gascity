@@ -66,6 +66,23 @@ func PodSession() string {
 	return strings.TrimSpace(os.Getenv(PodSessionEnv))
 }
 
+// ValidateStaticConfig checks, without a Kubernetes client, the pod-creation
+// settings a k8s provider reads from the environment: the scheduling fields
+// (GC_K8S_NODE_SELECTOR, GC_K8S_TOLERATIONS, GC_K8S_AFFINITY) and the managed
+// in-cluster service alias (GC_K8S_DOLT_HOST/GC_K8S_DOLT_PORT). It parses them
+// exactly as NewProvider does. NewPodLocal deliberately does not call it, so a
+// malformed setting the pod never uses cannot stop a running worker from
+// acknowledging a drain.
+func ValidateStaticConfig() error {
+	if _, err := parseSchedulingEnv(); err != nil {
+		return fmt.Errorf("k8s scheduling settings: %w", err)
+	}
+	if _, _, err := managedServiceAlias(); err != nil {
+		return fmt.Errorf("k8s managed service alias: %w", err)
+	}
+	return nil
+}
+
 // NewPodLocal returns the pod-local provider serving the session self, the
 // value of PodSessionEnv, on the pod's local tmux server. An empty self is an
 // error. It constructs no Kubernetes client and reads no kubeconfig.

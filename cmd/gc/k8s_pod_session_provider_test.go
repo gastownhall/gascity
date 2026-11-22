@@ -128,3 +128,68 @@ func TestK8sPodSessionMarkerLeavesOtherSelectionsUnchanged(t *testing.T) {
 		}
 	})
 }
+
+// A control dispatcher inside a generated pod validates its k8s/hybrid
+// selection statically at startup: valid settings pass with no Kubernetes
+// credentials, and malformed pod settings or an unregistered runtime name
+// fail with the dispatcher's startup context.
+func TestValidateDispatchSessionProviderConfigInMarkedPod(t *testing.T) {
+	for _, provider := range []string{"k8s", "hybrid"} {
+		cases := []struct {
+			name    string
+			env     map[string]string
+			wantErr []string
+		}{
+			{name: "valid static settings"},
+			{
+				name: "valid scheduling and managed service",
+				env: map[string]string{
+					"GC_K8S_NODE_SELECTOR": `{"pool":"agents"}`,
+					"GC_K8S_TOLERATIONS":   `[{"key":"k","operator":"Exists"}]`,
+					"GC_K8S_DOLT_HOST":     "dolt.svc",
+					"GC_K8S_DOLT_PORT":     "3307",
+				},
+			},
+			{name: "malformed node selector", env: map[string]string{"GC_K8S_NODE_SELECTOR": "{"}, wantErr: []string{"GC_K8S_NODE_SELECTOR"}},
+			{name: "malformed tolerations", env: map[string]string{"GC_K8S_TOLERATIONS": "nope"}, wantErr: []string{"GC_K8S_TOLERATIONS"}},
+			{name: "malformed affinity", env: map[string]string{"GC_K8S_AFFINITY": "[1]"}, wantErr: []string{"GC_K8S_AFFINITY"}},
+			{name: "half a managed service", env: map[string]string{"GC_K8S_DOLT_HOST": "dolt.svc"}, wantErr: []string{"GC_K8S_DOLT_HOST", "GC_K8S_DOLT_PORT"}},
+		}
+		for _, tc := range cases {
+			t.Run(provider+"/"+tc.name, func(t *testing.T) {
+				withoutKubeCredentials(t)
+				t.Setenv(sessionk8s.PodSessionEnv, "pod-city--control-dispatcher")
+				for _, k := range []string{"GC_K8S_NODE_SELECTOR", "GC_K8S_TOLERATIONS", "GC_K8S_AFFINITY", "GC_K8S_PRIORITY_CLASS_NAME", "GC_K8S_DOLT_HOST", "GC_K8S_DOLT_PORT"} {
+					t.Setenv(k, tc.env[k])
+				}
+				cfg := &config.City{Session: config.SessionConfig{Provider: provider}}
+				cfg.Workspace.Name = "pod-city"
+				err := validateDispatchSessionProviderConfig(cfg, t.TempDir())
+				if len(tc.wantErr) == 0 {
+					if err != nil {
+						t.Fatalf("validateDispatchSessionProviderConfig: %v", err)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatalf("validateDispatchSessionProviderConfig succeeded; want an error naming %v", tc.wantErr)
+				}
+				for _, want := range append([]string{"control dispatcher"}, tc.wantErr...) {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("error %q does not contain %q", err, want)
+					}
+				}
+			})
+		}
+	}
+	t.Run("unregistered runtime name", func(t *testing.T) {
+		withoutKubeCredentials(t)
+		t.Setenv(sessionk8s.PodSessionEnv, "pod-city--control-dispatcher")
+		cfg := &config.City{Session: config.SessionConfig{Provider: "k8z"}}
+		cfg.Workspace.Name = "pod-city"
+		err := validateDispatchSessionProviderConfig(cfg, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "control dispatcher") || !strings.Contains(err.Error(), `"k8z"`) {
+			t.Fatalf("validateDispatchSessionProviderConfig(k8z) = %v; want a contextual unresolved-runtime error", err)
+		}
+	})
+}
