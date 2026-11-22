@@ -55,8 +55,9 @@ func nudgeEvent(seq int, typ, ts, id, routedTo string, flat bool) string {
 
 // nudgeFixture writes the events file behind a filtering fake gc, seeds the
 // optional high-water seq mark, and returns the fake's bin dir, its log, and
-// the state dir.
-func nudgeFixture(t *testing.T, seedSeq string, events ...string) (binDir, logPath, stateDir string) {
+// the state dir. members maps a pool template to its live session names, as
+// `gc session list --template` answers them.
+func nudgeFixture(t *testing.T, seedSeq string, members map[string][]string, events ...string) (binDir, logPath, stateDir string) {
 	t.Helper()
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.jsonl")
@@ -75,6 +76,7 @@ func nudgeFixture(t *testing.T, seedSeq string, events ...string) (binDir, logPa
 	binDir, logPath = fakeGCBin(t, cascadeFake{
 		eventsPath:   eventsPath,
 		failDir:      dir,
+		members:      members,
 		filterEvents: true,
 	}.body())
 	return binDir, logPath, stateDir
@@ -347,7 +349,7 @@ func TestNudgeOnRouteNudgesRoutingStampedAtCreation(t *testing.T) {
 
 	run := func(t *testing.T, events ...string) (logPath, stateDir string) {
 		t.Helper()
-		binDir, logPath, stateDir := nudgeFixture(t, "", events...)
+		binDir, logPath, stateDir := nudgeFixture(t, "", nil, events...)
 		out, err := runNudgeOnRoute(t, binDir, stateDir, "GC_NUDGE_ON_ROUTE_LOOKBACK=2m")
 		if err != nil {
 			t.Fatalf("nudge-on-route.sh failed: %v\n%s", err, out)
@@ -411,7 +413,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	}
 
 	t.Run("routed event older than the fast window is caught up", func(t *testing.T) {
-		binDir, logPath, stateDir := nudgeFixture(t, "10",
+		binDir, logPath, stateDir := nudgeFixture(t, "10", nil,
 			nudgeEvent(11, "bead.updated", nudgeAgo(10*time.Minute), "ga-gap", "gascity/builder", false),
 			nudgeEvent(12, "bead.updated", nudgeAgo(30*time.Second), "ga-new", "", false))
 		out, err := runNudgeOnRoute(t, binDir, stateDir)
@@ -430,7 +432,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	})
 
 	t.Run("an empty fast read still catches up", func(t *testing.T) {
-		binDir, logPath, stateDir := nudgeFixture(t, "10",
+		binDir, logPath, stateDir := nudgeFixture(t, "10", nil,
 			nudgeEvent(11, "bead.created", nudgeAgo(10*time.Minute), "ga-old", "gascity/builder", false))
 		out, err := runNudgeOnRoute(t, binDir, stateDir)
 		if err != nil {
@@ -448,7 +450,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	})
 
 	t.Run("steady state reads only the fast window", func(t *testing.T) {
-		binDir, logPath, stateDir := nudgeFixture(t, "10",
+		binDir, logPath, stateDir := nudgeFixture(t, "10", nil,
 			nudgeEvent(11, "bead.updated", nudgeAgo(30*time.Second), "ga-now", "gascity/builder", false))
 		out, err := runNudgeOnRoute(t, binDir, stateDir)
 		if err != nil {
@@ -466,7 +468,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	})
 
 	t.Run("incomplete catch-up names the skipped span", func(t *testing.T) {
-		binDir, logPath, stateDir := nudgeFixture(t, "10",
+		binDir, logPath, stateDir := nudgeFixture(t, "10", nil,
 			nudgeEvent(20, "bead.updated", nudgeAgo(30*time.Second), "ga-far", "gascity/builder", false),
 			nudgeEvent(21, "bead.updated", nudgeAgo(30*time.Second), "ga-far2", "", false))
 		out, err := runNudgeOnRoute(t, binDir, stateDir)
@@ -485,7 +487,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	})
 
 	t.Run("retention shorter than the catch-up window warns and still nudges", func(t *testing.T) {
-		binDir, logPath, stateDir := nudgeFixture(t, "",
+		binDir, logPath, stateDir := nudgeFixture(t, "", nil,
 			nudgeEvent(1, "bead.created", nudgeAgo(30*time.Second), "ga-keep", "gascity/builder", false))
 		out, err := runNudgeOnRoute(t, binDir, stateDir, "GC_NUDGE_ON_ROUTE_RETENTION=30m")
 		if err != nil {
@@ -500,7 +502,7 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 	})
 
 	t.Run("defaults do not warn", func(t *testing.T) {
-		binDir, logPath, stateDir := nudgeFixture(t, "",
+		binDir, logPath, stateDir := nudgeFixture(t, "", nil,
 			nudgeEvent(1, "bead.created", nudgeAgo(30*time.Second), "ga-quiet", "gascity/builder", false))
 		out, err := runNudgeOnRoute(t, binDir, stateDir)
 		if err != nil {
@@ -637,7 +639,7 @@ func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
 		"seq file above the log": {seed: "1000", wantWindow: []string{"2m", "1h"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			binDir, logPath, stateDir := nudgeFixture(t, tc.seed,
+			binDir, logPath, stateDir := nudgeFixture(t, tc.seed, nil,
 				nudgeEvent(5, "bead.created", nudgeAgo(40*time.Minute), "ga-first", "gascity/builder", false))
 			out, err := runNudgeOnRoute(t, binDir, stateDir)
 			if err != nil {
@@ -659,7 +661,7 @@ func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
 	}
 
 	t.Run("a smaller MAX_LOOKBACK bounds the first run", func(t *testing.T) {
-		binDir, logPath, stateDir := nudgeFixture(t, "",
+		binDir, logPath, stateDir := nudgeFixture(t, "", nil,
 			nudgeEvent(5, "bead.created", nudgeAgo(40*time.Minute), "ga-deep", "gascity/builder", false),
 			nudgeEvent(6, "bead.created", nudgeAgo(3*time.Minute), "ga-fresh", "gascity/builder", false))
 		out, err := runNudgeOnRoute(t, binDir, stateDir, "GC_NUDGE_ON_ROUTE_MAX_LOOKBACK=5m")
@@ -682,4 +684,61 @@ func TestNudgeOnRouteFirstRunReadsMaxLookback(t *testing.T) {
 			t.Fatalf("gc events windows = %v, want one read of the configured 5m catch-up window", got)
 		}
 	})
+}
+
+// TestNudgeOnRouteCoalescesNudgesPerTarget pins the per-target coalescing: a
+// batch that routes several beads to one target wakes that target once — one
+// wake-up covers the whole batch, the target reads its hook and finds them all
+// — while a pool target still fans out to every live member, and every
+// delivered pair is recorded so no later run re-nudges it.
+func TestNudgeOnRouteCoalescesNudgesPerTarget(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; nudge-on-route.sh requires it")
+	}
+
+	ago := nudgeAgo(30 * time.Second)
+	binDir, logPath, stateDir := nudgeFixture(t, "", map[string][]string{
+		"gascity/pool": {"pool-1", "pool-2"},
+	},
+		nudgeEvent(1, "bead.created", ago, "ga-a", "gascity/builder", false),
+		nudgeEvent(2, "bead.created", ago, "ga-b", "gascity/builder", false),
+		nudgeEvent(3, "bead.created", ago, "ga-c", "gascity/builder", false),
+		nudgeEvent(4, "bead.created", ago, "ga-p", "gascity/pool", false))
+	out, err := runNudgeOnRoute(t, binDir, stateDir)
+	if err != nil {
+		t.Fatalf("nudge-on-route.sh failed: %v\n%s", err, out)
+	}
+	if got, logged := countNudges(t, logPath); got != 3 {
+		t.Fatalf("nudges = %d, want 3: gascity/builder once for its three beads plus pool-1 and pool-2 once each; gc calls:\n%s", got, logged)
+	}
+	if got := countNudgesTo(t, logPath, "gascity/builder"); got != 1 {
+		t.Fatalf("nudges to gascity/builder = %d, want 1: one wake-up covers every bead routed to the target", got)
+	}
+	if got := countNudgesTo(t, logPath, "pool-1"); got != 1 {
+		t.Fatalf("nudges to pool-1 = %d, want 1", got)
+	}
+	if got := countNudgesTo(t, logPath, "pool-2"); got != 1 {
+		t.Fatalf("nudges to pool-2 = %d, want 1", got)
+	}
+	for _, pair := range []string{
+		"ga-a|gascity/builder", "ga-b|gascity/builder", "ga-c|gascity/builder",
+		"ga-p|gascity/pool",
+	} {
+		if !nudgeStateHasKey(t, stateDir, pair) {
+			t.Fatalf("pair %s must be recorded as nudged", pair)
+		}
+	}
+	if got := nudgeReadSeq(t, stateDir); got != "4" {
+		t.Fatalf("seq mark = %q, want 4", got)
+	}
+
+	// The next run over the same events nudges nothing: the seq cut alone
+	// suppresses the batch.
+	out, err = runNudgeOnRoute(t, binDir, stateDir)
+	if err != nil {
+		t.Fatalf("second run failed: %v\n%s", err, out)
+	}
+	if got, logged := countNudges(t, logPath); got != 3 {
+		t.Fatalf("nudges after rerun = %d, want still 3; gc calls:\n%s", got, logged)
+	}
 }

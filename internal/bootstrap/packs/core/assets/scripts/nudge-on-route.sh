@@ -216,22 +216,41 @@ STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"
 echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TAB="$(printf '\t')"
 NUDGED=0
-while IFS="$(printf '\t')" read -r bead_id routed_to; do
+# First pass: split the batch. Pairs already nudged only refresh last-seen so
+# this still-active routing is not pruned and re-nudged while it keeps
+# re-emitting; the rest collect as new pairs.
+NEW_PAIRS=""
+while IFS="$TAB" read -r bead_id routed_to; do
     if [ -z "$bead_id" ] || [ -z "$routed_to" ]; then continue; fi
     key="$bead_id|$routed_to"
     if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
-        # Already nudged. Refresh last-seen so this still-active routing is
-        # not pruned and re-nudged while it keeps re-emitting.
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         continue
     fi
-    if nudge_routed_target "$routed_to"; then
-        STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
-        NUDGED=$((NUDGED + 1))
-    fi
+    NEW_PAIRS="${NEW_PAIRS}${bead_id}${TAB}${routed_to}
+"
 done <<EOF
 $PAIRS
+EOF
+
+# Coalesce the new pairs per routed target: one wake-up covers every bead
+# routed to that target in this batch — the target reads its hook once and
+# finds them all. A nudge per pair would instead spam a hot target once per
+# bead; pools fan out to members inside nudge_routed_target either way.
+TARGETS="$(printf '%s\n' "$NEW_PAIRS" \
+    | jq -R -r -n 'reduce inputs as $l ({}; if $l == "" then . else ($l | split("\t")) as $p | .[$p[1]] += [$p[0]] end) | to_entries[] | [.key, (.value | join(","))] | @tsv' 2>/dev/null)" || TARGETS=""
+while IFS="$TAB" read -r routed_to ids; do
+    [ -n "$routed_to" ] || continue
+    if nudge_routed_target "$routed_to"; then
+        for bead_id in $(printf '%s' "$ids" | tr ',' ' '); do
+            STATE="$(echo "$STATE" | jq --arg k "$bead_id|$routed_to" --arg now "$NOW" '.[$k] = $now')"
+            NUDGED=$((NUDGED + 1))
+        done
+    fi
+done <<EOF
+$TARGETS
 EOF
 
 # Prune entries older than RETENTION so the state file stays bounded.
