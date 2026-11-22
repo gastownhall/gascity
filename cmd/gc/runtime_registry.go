@@ -87,7 +87,15 @@ func buildRuntimeRegistry() *registry.Registry {
 	// resolves per city via runtimeRegistryForCity. A city without that pack
 	// that selects session = "cloudflare" falls through to the tmux fallback
 	// (RUNTIME-SEL-006) — the delivery-independence boundary (RUNTIME-PLAN-004).
+	// A gc process inside a pod the k8s provider generated carries the
+	// provider's session marker; it serves its k8s or hybrid selection
+	// through the client-free pod-local provider, since the pod holds no
+	// Kubernetes credentials and the controller owns every runtime operation
+	// beyond its own session's metadata.
 	must(r.Register("k8s", func(_ string, _ config.SessionConfig, cityName, _ string) (runtime.Provider, error) {
+		if self := sessionk8s.PodSession(); self != "" {
+			return sessionk8s.NewPodLocal(self)
+		}
 		return sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
 	}))
 	// herdr (https://herdr.dev): opt-in multiplexer backend. One shared herdr
@@ -103,6 +111,9 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
 	}, hostFilesystemAndPreStart))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+		if self := sessionk8s.PodSession(); self != "" {
+			return sessionk8s.NewPodLocal(self)
+		}
 		return newHybridProvider(sc, cityName, cityPath)
 	}))
 	must(r.RegisterPrefix("exec:", func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {

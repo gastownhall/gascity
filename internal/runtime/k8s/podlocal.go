@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -57,6 +58,12 @@ var _ runtime.Provider = (*PodLocal)(nil)
 type PodLocal struct {
 	self string
 	run  tmuxRunner
+}
+
+// PodSession returns this process's PodSessionEnv value, trimmed: the logical
+// session of the generated pod it runs in, or empty outside one.
+func PodSession() string {
+	return strings.TrimSpace(os.Getenv(PodSessionEnv))
 }
 
 // NewPodLocal returns the pod-local provider serving the session self, the

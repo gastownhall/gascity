@@ -147,6 +147,8 @@ func Catalog() []Entry {
 	autoConstructor := repoSymbol("internal/runtime/auto", "New")
 	guardConstructor := repoSymbol("internal/runtime/guard", "New")
 	hybridConstructor := repoSymbol("internal/runtime/hybrid", "New")
+	podLocalConstructor := repoSymbol("internal/runtime/k8s", "NewPodLocal")
+	podLocalReason := "internal/runtime/k8s.NewPodLocal serves a k8s or hybrid selection inside a pod the k8s provider generated (its session marker is set): it reads and writes only the pod's own session metadata and refuses every lifecycle operation, because the controller owns them, so the shared contract's successful lifecycle cannot apply. Its own-session service and refusals are covered by internal/runtime/k8s/podlocal_test.go."
 	return []Entry{
 		reusableBuiltin(
 			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
@@ -227,6 +229,7 @@ func Catalog() []Entry {
 				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s."+
 					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
+			notApplicableRuntime(podLocalConstructor, podLocalReason),
 		),
 		builtin(
 			"herdr", "exact:herdr", nil,
@@ -245,6 +248,7 @@ func Catalog() []Entry {
 					" Its tmux and K8s constructors are not claimed here; internal/runtime/hybrid.New is proved separately by runtime.composition.hybrid, and the wrapper's own conditional construction stays ungated."+
 					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
+			notApplicableRuntime(podLocalConstructor, podLocalReason),
 		),
 		builtin(
 			"exec", "prefix:exec:", nil,
