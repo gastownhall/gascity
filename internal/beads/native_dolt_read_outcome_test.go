@@ -4,14 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -480,4 +483,202 @@ func TestNativeProxiedReadDeadlineIsANonTerminalVerdict(t *testing.T) {
 	if atomic.LoadInt32(&calls) != 1 || connector.pings.Load() != 1 {
 		t.Errorf("calls = %d, pings = %d, want 1 and 1", atomic.LoadInt32(&calls), connector.pings.Load())
 	}
+}
+
+// pipeMySQLMode is how a pipeMySQL server treats a query.
+type pipeMySQLMode int
+
+const (
+	// pipeMySQLSlowQuery never answers a query but keeps answering pings: a
+	// healthy server running a query longer than the client's read deadline.
+	pipeMySQLSlowQuery pipeMySQLMode = iota
+	// pipeMySQLHardKill drops the connection on a query and refuses every
+	// later dial: a server killed mid-read whose port is gone.
+	pipeMySQLHardKill
+)
+
+var pipeMySQLNetworks atomic.Int32
+
+// newPipeMySQL opens a go-sql-driver pool against an in-process MySQL fixture
+// reached over net.Pipe, with a 50ms client read deadline. It needs no socket
+// and no sleep: the driver's own deadline is the only clock.
+func newPipeMySQL(t *testing.T, mode pipeMySQLMode) *sql.DB {
+	t.Helper()
+	network := fmt.Sprintf("gc-pipe-mysql-%d", pipeMySQLNetworks.Add(1))
+	var killed atomic.Bool
+	mysql.RegisterDialContext(network, func(context.Context, string) (net.Conn, error) {
+		if killed.Load() {
+			return nil, refusedDialError()
+		}
+		client, server := net.Pipe()
+		go servePipeMySQL(server, mode, &killed)
+		return client, nil
+	})
+	t.Cleanup(func() { mysql.DeregisterDialContext(network) })
+	db, err := sql.Open("mysql", fmt.Sprintf("root@%s(dolt)/?readTimeout=50ms", network))
+	if err != nil {
+		t.Fatalf("open pipe MySQL pool: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// servePipeMySQL speaks just enough MySQL for a session: a v10 greeting, an OK
+// to the login, an OK to every COM_PING, and mode's treatment of a COM_QUERY.
+func servePipeMySQL(conn net.Conn, mode pipeMySQLMode, killed *atomic.Bool) {
+	defer conn.Close() //nolint:errcheck // the fixture's end of the pipe
+	if writePipeMySQLPacket(conn, 0, pipeMySQLGreeting()) != nil {
+		return
+	}
+	if _, err := readPipeMySQLPacket(conn); err != nil {
+		return
+	}
+	if writePipeMySQLPacket(conn, 2, pipeMySQLOK()) != nil {
+		return
+	}
+	const (
+		comQuit  = 0x01
+		comQuery = 0x03
+		comPing  = 0x0e
+	)
+	for {
+		payload, err := readPipeMySQLPacket(conn)
+		if err != nil || len(payload) == 0 {
+			return
+		}
+		switch payload[0] {
+		case comPing:
+			if writePipeMySQLPacket(conn, 1, pipeMySQLOK()) != nil {
+				return
+			}
+		case comQuery:
+			if mode == pipeMySQLHardKill {
+				killed.Store(true)
+				return
+			}
+			// Slow query: no answer. The next read returns when the client
+			// gives up and closes its end.
+		case comQuit:
+			return
+		default:
+			return
+		}
+	}
+}
+
+// pipeMySQLGreeting is a protocol-10 handshake offering mysql_native_password
+// with the capabilities go-sql-driver requires.
+func pipeMySQLGreeting() []byte {
+	const caps = uint32(0x1 | 0x8 | 0x200 | 0x2000 | 0x8000 | 0x80000)
+	p := []byte{10}
+	p = append(p, "8.0.33\x00"...)
+	p = binary.LittleEndian.AppendUint32(p, 1)
+	p = append(p, "abcdefgh\x00"...)
+	p = binary.LittleEndian.AppendUint16(p, uint16(caps&0xffff))
+	p = append(p, 33)
+	p = binary.LittleEndian.AppendUint16(p, 2)
+	p = binary.LittleEndian.AppendUint16(p, uint16(caps>>16))
+	p = append(p, 21)
+	p = append(p, make([]byte, 10)...)
+	p = append(p, "ijklmnopqrst\x00"...)
+	p = append(p, "mysql_native_password\x00"...)
+	return p
+}
+
+// pipeMySQLOK is an OK packet with nothing affected and autocommit set.
+func pipeMySQLOK() []byte { return []byte{0, 0, 0, 2, 0, 0, 0} }
+
+func writePipeMySQLPacket(conn net.Conn, seq byte, payload []byte) error {
+	header := []byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), seq}
+	_, err := conn.Write(append(header, payload...))
+	return err
+}
+
+func readPipeMySQLPacket(conn net.Conn) ([]byte, error) {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return nil, err
+	}
+	payload := make([]byte, int(header[0])|int(header[1])<<8|int(header[2])<<16)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+// pipeMySQLStorage is a library handle over a pipe MySQL pool.
+type pipeMySQLStorage struct {
+	*nativeDoltStorageSpy
+	db *sql.DB
+}
+
+func (s *pipeMySQLStorage) UnderlyingDB() *sql.DB { return s.db }
+
+// beginReadTx opens and rolls back a read-only transaction on db, wrapped the
+// way beads' withReadTx wraps a failure.
+func beginReadTx(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin read tx: %w", err)
+	}
+	return tx.Rollback()
+}
+
+func TestNativeReadDriverDeadlineAndRebindAreDistinct(t *testing.T) {
+	// The driver fact the read loop's endpoint probe rests on: a read that
+	// outlives the client deadline on a healthy server and a server killed
+	// mid-read surface as the SAME sentinel with the SAME text, so no
+	// classification of the error can tell them apart. A driver that starts
+	// returning a typed timeout fails here.
+	slowErr := beginReadTx(context.Background(), newPipeMySQL(t, pipeMySQLSlowQuery))
+	killErr := beginReadTx(context.Background(), newPipeMySQL(t, pipeMySQLHardKill))
+	if !errors.Is(slowErr, mysql.ErrInvalidConn) || !errors.Is(killErr, mysql.ErrInvalidConn) {
+		t.Fatalf("slow-query err = %v, hard-kill err = %v, want both mysql.ErrInvalidConn", slowErr, killErr)
+	}
+	if slowErr.Error() != killErr.Error() {
+		t.Fatalf("slow-query err %q and hard-kill err %q differ, want identical text", slowErr, killErr)
+	}
+
+	read := func(fresh beadslib.Storage, calls *int32) func(context.Context, beadslib.Storage) error {
+		return func(ctx context.Context, storage beadslib.Storage) error {
+			atomic.AddInt32(calls, 1)
+			if storage == fresh {
+				return nil
+			}
+			return beginReadTx(ctx, storage.(*pipeMySQLStorage).db)
+		}
+	}
+
+	t.Run("slow query on an answering endpoint", func(t *testing.T) {
+		live := &pipeMySQLStorage{nativeDoltStorageSpy: &nativeDoltStorageSpy{}, db: newPipeMySQL(t, pipeMySQLSlowQuery)}
+		fresh := &nativeDoltStorageSpy{}
+		var reopens, calls int32
+		store := storeWithReopen(live, fresh, &reopens)
+		store.readRetryBudgetOverride = 5 * time.Second
+
+		err := store.withReadRetry(read(fresh, &calls))
+
+		if !errors.Is(err, ErrNativeReadDeadline) || !errors.Is(err, mysql.ErrInvalidConn) {
+			t.Fatalf("read err = %v (%d reopens), want ErrNativeReadDeadline wrapping mysql.ErrInvalidConn",
+				err, atomic.LoadInt32(&reopens))
+		}
+		if atomic.LoadInt32(&reopens) != 0 || atomic.LoadInt32(&calls) != 1 {
+			t.Errorf("reopens = %d, calls = %d, want 0 and 1", atomic.LoadInt32(&reopens), atomic.LoadInt32(&calls))
+		}
+	})
+
+	t.Run("hard-killed endpoint", func(t *testing.T) {
+		dead := &pipeMySQLStorage{nativeDoltStorageSpy: &nativeDoltStorageSpy{}, db: newPipeMySQL(t, pipeMySQLHardKill)}
+		fresh := &nativeDoltStorageSpy{}
+		var reopens, calls int32
+		store := storeWithReopen(dead, fresh, &reopens)
+		store.readRetryBudgetOverride = 5 * time.Second
+
+		if err := store.withReadRetry(read(fresh, &calls)); err != nil {
+			t.Fatalf("read err = %v (%d reopens), want recovery on the fresh handle", err, atomic.LoadInt32(&reopens))
+		}
+		if atomic.LoadInt32(&reopens) != 1 || atomic.LoadInt32(&calls) != 2 {
+			t.Errorf("reopens = %d, calls = %d, want 1 and 2", atomic.LoadInt32(&reopens), atomic.LoadInt32(&calls))
+		}
+	})
 }
