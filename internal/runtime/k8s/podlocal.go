@@ -156,9 +156,12 @@ func (*podLocalProvider) Start(_ context.Context, name string, _ runtime.Config)
 }
 
 // Stop refuses with ErrControllerOwnedRuntime for every name: the
-// controller owns the session lifecycle.
+// controller owns the session lifecycle. The refusal also matches
+// runtime.ErrStopRefused, so cleanup paths that absorb a gone session
+// (StopForCleanup and its callers) keep treating it as a stop the worker
+// could not perform rather than as success or as a session that is gone.
 func (p *podLocalProvider) Stop(name string) error {
-	return podLocalRefusal("stop", name)
+	return fmt.Errorf("%w: %w", runtime.ErrStopRefused, podLocalRefusal("stop", name))
 }
 
 // Interrupt refuses with ErrControllerOwnedRuntime.

@@ -1,11 +1,13 @@
 package k8s
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/guard"
 )
 
 // fakePodLocalRunner records every argv a pod-local provider produces and
@@ -269,5 +271,84 @@ func TestPodLocalRemoveMetaIsIdempotentOnUnsetVariable(t *testing.T) {
 	p := newPodLocalForTest(run)
 	if err := p.RemoveMeta("main", "GC_DRAIN"); err != nil {
 		t.Fatalf("RemoveMeta of an unset variable = %v, want nil", err)
+	}
+}
+
+// TestPodLocalRefusesLifecycleAndDeliveryOperations pins the refusal
+// surface: every lifecycle and delivery operation is the controller-owned
+// refusal for any name — not session absence, not a transient availability
+// failure — and executes nothing. Stop is additionally a stop refusal so
+// cleanup paths that absorb a gone session cannot mistake it.
+func TestPodLocalRefusesLifecycleAndDeliveryOperations(t *testing.T) {
+	p := &podLocalProvider{self: "reviewer-7", run: (&fakePodLocalRunner{}).run}
+	for _, check := range []struct {
+		name string
+		err  error
+	}{
+		{"Start", p.Start(context.Background(), "main", runtime.Config{})},
+		{"Stop", p.Stop("reviewer-7")},
+		{"Interrupt", p.Interrupt("main")},
+		{"Attach", p.Attach("main")},
+		{"Nudge", p.Nudge("main", runtime.TextContent("hi"))},
+		{"Peek", func() error { _, err := p.Peek("main", 10); return err }()},
+		{"ListRunning", func() error { _, err := p.ListRunning(""); return err }()},
+		{"GetLastActivity", func() error { _, err := p.GetLastActivity("main"); return err }()},
+		{"ClearScrollback", p.ClearScrollback("main")},
+		{"CopyTo", p.CopyTo("main", "/src", "dst")},
+		{"SendKeys", p.SendKeys("main", "Enter")},
+		{"RunLive", p.RunLive("main", runtime.Config{})},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			if !errors.Is(check.err, guard.ErrControllerOwnedRuntime) {
+				t.Fatalf("%s = %v, want the controller-owned refusal", check.name, check.err)
+			}
+			if errors.Is(check.err, runtime.ErrSessionNotFound) || errors.Is(check.err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("%s = %v, refusal must not classify as session absence or unavailable runtime", check.name, check.err)
+			}
+		})
+	}
+	if !errors.Is(p.Stop("main"), runtime.ErrStopRefused) {
+		t.Fatalf("Stop = %v, want a stop refusal (runtime.ErrStopRefused)", p.Stop("main"))
+	}
+}
+
+// TestPodLocalStopRefusalSurvivesCleanup drives the stop the recycle path
+// takes: runtime.StopForCleanup absorbs only an all-session-gone answer, so
+// the pod-local Stop refusal — a stop refusal, not a gone session —
+// propagates out of the cleanup wrapper instead of reporting the session
+// cleaned up.
+func TestPodLocalStopRefusalSurvivesCleanup(t *testing.T) {
+	p := &podLocalProvider{self: "reviewer-7", run: (&fakePodLocalRunner{}).run}
+	err := runtime.StopForCleanup(p, "reviewer-7")
+	if err == nil {
+		t.Fatal("StopForCleanup(pod-local) = nil, want the refusal to propagate")
+	}
+	if !errors.Is(err, guard.ErrControllerOwnedRuntime) || !errors.Is(err, runtime.ErrStopRefused) {
+		t.Fatalf("StopForCleanup = %v, want both the controller-owned and the stop refusal", err)
+	}
+}
+
+// TestPodLocalHasNoFreshObservationCapability pins the observation contract:
+// the provider implements no fresh-observation interface, so a false probe of
+// its IsRunning can never be escalated by Manager.runtimeConfirmedGone into
+// confirmed absence of another session; IsAttached and ProcessAlive answer
+// false without probing at all.
+func TestPodLocalHasNoFreshObservationCapability(t *testing.T) {
+	p := &podLocalProvider{self: "reviewer-7", run: (&fakePodLocalRunner{}).run}
+	if runtime.FreshReadable(p) {
+		t.Fatal("FreshReadable(pod-local) = true, want false: no fresh-observation capability")
+	}
+	var sp runtime.Provider = p
+	if _, ok := sp.(runtime.LivenessObserverWithError); ok {
+		t.Fatal("pod-local claims LivenessObserverWithError, want no fresh liveness observation")
+	}
+	if _, ok := sp.(runtime.FreshLivenessObserver); ok {
+		t.Fatal("pod-local claims FreshLivenessObserver, want no fresh liveness observation")
+	}
+	if p.IsAttached("main") {
+		t.Fatal("IsAttached = true, want false")
+	}
+	if p.ProcessAlive("main", nil) {
+		t.Fatal("ProcessAlive = true, want false")
 	}
 }
