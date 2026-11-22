@@ -227,6 +227,10 @@ func Catalog() []Entry {
 				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s."+
 					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
+			notApplicableRuntime(
+				repoSymbol("internal/runtime/k8s", "NewPodLocal"),
+				"marked-worker pod-local provider: it serves only its own pod's tmux metadata and liveness and refuses every other runtime operation, so a successful lifecycle cannot be exercised and the successful-provider contract is not applicable",
+			),
 		),
 		builtin(
 			"herdr", "exact:herdr", nil,
@@ -244,6 +248,10 @@ func Catalog() []Entry {
 				"cmd/gc.newHybridProvider is the selected registry construction boundary. It builds the K8s backend before it consults its routing predicate, so the shared runtime contract cannot run against the wrapper without a Kubernetes client configuration."+
 					" Its tmux and K8s constructors are not claimed here; internal/runtime/hybrid.New is proved separately by runtime.composition.hybrid, and the wrapper's own conditional construction stays ungated."+
 					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
+			),
+			notApplicableRuntime(
+				repoSymbol("internal/runtime/k8s", "NewPodLocal"),
+				"marked-worker pod-local provider: it serves only its own pod's tmux metadata and liveness and refuses every other runtime operation, so a successful lifecycle cannot be exercised and the successful-provider contract is not applicable",
 			),
 		),
 		builtin(

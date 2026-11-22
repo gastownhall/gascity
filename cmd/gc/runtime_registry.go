@@ -87,7 +87,15 @@ func buildRuntimeRegistry() *registry.Registry {
 	// resolves per city via runtimeRegistryForCity. A city without that pack
 	// that selects session = "cloudflare" falls through to the tmux fallback
 	// (RUNTIME-SEL-006) — the delivery-independence boundary (RUNTIME-PLAN-004).
+	// The k8s marker arm runs before construction: a process the k8s
+	// provider marked (GC_K8S_POD_SESSION, its own generated pod) resolves
+	// the client-free pod-local provider, whatever the city's constructor
+	// would build, because worker pods hold no Kubernetes credentials. An
+	// absent or empty marker keeps ordinary construction.
 	must(r.Register("k8s", func(_ string, _ config.SessionConfig, cityName, _ string) (runtime.Provider, error) {
+		if _, marked := sessionk8s.MarkedPodSession(); marked {
+			return sessionk8s.NewPodLocal()
+		}
 		return sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
 	}))
 	// herdr (https://herdr.dev): opt-in multiplexer backend. One shared herdr
@@ -103,6 +111,14 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
 	}, hostFilesystemAndPreStart))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+		// The marker arm returns the pod-local provider directly: a marked
+		// process is one worker pod, so building the local tmux backend or
+		// applying remote-match routing to its own session would only
+		// misroute — and the k8s backend it would need cannot be built
+		// without credentials.
+		if _, marked := sessionk8s.MarkedPodSession(); marked {
+			return sessionk8s.NewPodLocal()
+		}
 		return newHybridProvider(sc, cityName, cityPath)
 	}))
 	must(r.RegisterPrefix("exec:", func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
