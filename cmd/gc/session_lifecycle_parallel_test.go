@@ -4544,6 +4544,13 @@ func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T)
 		t.Fatalf("event = %+v, want type %q actor controller subject drifter message containing %q",
 			ev, events.SessionAsyncStartDiscarded, "desired command changed during startup")
 	}
+	// The Message names the session and the reason only: no command text,
+	// hash or fingerprint of either the prepared or the persisted command.
+	for _, secret := range []string{"CUSTOM_VERSION=v1 report", "CUSTOM_VERSION=v2 report"} {
+		if strings.Contains(rec.Events[0].Message, secret) {
+			t.Fatalf("event Message %q leaks command text %q", rec.Events[0].Message, secret)
+		}
+	}
 	updated, err := store.Get(session.ID)
 	if err != nil {
 		t.Fatal(err)
