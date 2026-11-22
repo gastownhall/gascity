@@ -463,3 +463,56 @@ func TestResolveNudgeOrphanSeat(t *testing.T) {
 func fencedOrphanItem(p session.Info) queuedNudge {
 	return newQueuedNudgeWithOptions(p.ID, "continuation", "hook-claim-continuation", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: p.ID, ContinuationEpoch: p.ContinuationEpoch})
 }
+
+// An adopted orphan still moves only when the claim's own live census lets
+// it: a census that still lists the predecessor, or no census at all, leaves
+// the item pending under its own fence; a census of the successor alone
+// delivers it.
+func TestDispatchOrphanAdoptionDefersToClaimCensus(t *testing.T) {
+	cases := []struct {
+		name string
+		// census builds the claim's live census from the predecessor and
+		// successor IDs; nil means the census was unavailable.
+		census    func(pred, succ string) map[string]struct{}
+		delivered bool
+	}{
+		{name: "census still lists the predecessor", census: func(pred, succ string) map[string]struct{} {
+			return map[string]struct{}{pred: {}, succ: {}}
+		}},
+		{name: "census unavailable", census: func(string, string) map[string]struct{} { return nil }},
+		{name: "census lists only the successor", census: func(_, succ string) map[string]struct{} {
+			return map[string]struct{}{succ: {}}
+		}, delivered: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOrphanSeatFixture(t)
+			p := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+			item := f.enqueueFencedTo(t, p, "continue the claimed work", time.Now().Add(-time.Minute))
+			f.closeSession(t, p.ID)
+			s := f.startIdle(t, f.createSeat(t, "worker-2", "2").ID)
+			f.fake.Calls = nil
+
+			census := tc.census(p.ID, s.ID)
+			old := liveNudgeFenceSessionIDs
+			liveNudgeFenceSessionIDs = func(string) map[string]struct{} { return census }
+			t.Cleanup(func() { liveNudgeFenceSessionIDs = old })
+
+			delivered := f.dispatch(t, f.fake, nil)
+			msgs := f.nudgeCalls()
+			state := f.state(t)
+			if tc.delivered {
+				if delivered != 1 || len(msgs) != 1 || !strings.HasPrefix(msgs[0], s.SessionName+":") {
+					t.Fatalf("delivered=%d nudges=%v, want one delivery to successor %s", delivered, msgs, s.SessionName)
+				}
+				return
+			}
+			if delivered != 0 || len(msgs) != 0 {
+				t.Fatalf("delivered=%d nudges=%v, want nothing delivered", delivered, msgs)
+			}
+			if len(state.Pending) != 1 || state.Pending[0].ID != item.ID || state.Pending[0].Agent != p.ID || state.Pending[0].SessionID != p.ID {
+				t.Fatalf("pending = %+v, want %s pending under %s with its own fence", state.Pending, item.ID, p.ID)
+			}
+		})
+	}
+}
