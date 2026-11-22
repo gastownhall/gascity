@@ -355,3 +355,69 @@ func TestSlingExpandedRootCustomQueryLeavesMembersToTheCommand(t *testing.T) {
 		}
 	}
 }
+
+// TestSlingMemberRoutingSkipsNonExpandedRoots pins the scope of member
+// routing: it exists only for expanded graph.v2 workflow roots. A plain task
+// and a root-only workflow bead (gc.kind=workflow without
+// gc.workflow_expanded — the v1 materialization shape) route exactly as
+// slings always have: the bead's own metadata changes and nothing else's,
+// members or no members.
+func TestSlingMemberRoutingSkipsNonExpandedRoots(t *testing.T) {
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker}}
+	runner := newFakeRunner()
+
+	t.Run("plain task", func(t *testing.T) {
+		store := beads.NewMemStoreFrom(0, []beads.Bead{
+			{ID: "task-1", Title: "a plain task", Type: "task", Status: "open", Metadata: map[string]string{}},
+		}, nil)
+		deps := testDeps(cfg, runtime.NewFake(), runner.run)
+		deps = withStore(deps, store)
+		deps.Router = &recordingRouter{store: store}
+
+		result, err := DoSling(testOpts(worker, "task-1"), deps, deps.Store)
+		if err != nil {
+			t.Fatalf("DoSling: %v", err)
+		}
+		if result.RoutedMembers != 0 {
+			t.Fatalf("RoutedMembers = %d, want 0: a plain task has no members to route", result.RoutedMembers)
+		}
+		if got := mustMeta(t, store, "task-1", beadmeta.RoutedToMetadataKey); got != "worker" {
+			t.Fatalf("task-1 gc.routed_to = %q, want worker", got)
+		}
+	})
+
+	t.Run("root-only workflow with members", func(t *testing.T) {
+		// The v1 shape: a workflow root that never expanded, carrying child
+		// beads through gc.root_bead_id. Member routing must not adopt them.
+		root := beads.Bead{
+			ID: "mol-1", Title: "v1 molecule root", Type: "task", Status: "open",
+			Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+		}
+		child := beads.Bead{
+			ID: "mol-1.step", Title: "a v1 step", Type: "task", Status: "open",
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "mol-1"},
+		}
+		store := beads.NewMemStoreFrom(0, []beads.Bead{root, child}, nil)
+		deps := testDeps(cfg, runtime.NewFake(), runner.run)
+		deps = withStore(deps, store)
+		deps.Router = &recordingRouter{store: store}
+
+		result, err := DoSling(testOpts(worker, "mol-1"), deps, deps.Store)
+		if err != nil {
+			t.Fatalf("DoSling: %v", err)
+		}
+		if result.RoutedMembers != 0 {
+			t.Fatalf("RoutedMembers = %d, want 0: a root-only workflow is not an expanded run", result.RoutedMembers)
+		}
+		if got := mustMeta(t, store, "mol-1", beadmeta.RoutedToMetadataKey); got != "worker" {
+			t.Fatalf("mol-1 gc.routed_to = %q, want worker (its own route is untouched business)", got)
+		}
+		if got := mustMeta(t, store, "mol-1.step", beadmeta.RoutedToMetadataKey); got != "" {
+			t.Fatalf("mol-1.step gc.routed_to = %q, want empty: v1 members are not member routing's to route", got)
+		}
+		if len(result.BeadWarnings) != 0 {
+			t.Fatalf("BeadWarnings = %q, want none: nothing was left behind", result.BeadWarnings)
+		}
+	})
+}
