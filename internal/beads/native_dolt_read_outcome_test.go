@@ -40,12 +40,22 @@ const (
 // treats every ping as answered, which would make the refused and blocking
 // modes indistinguishable from the answering one.
 type fakePingConnector struct {
-	mode    pingMode
-	pings   atomic.Int32
+	mode  pingMode
+	pings atomic.Int32
+	// saturated makes every Connect wait for its context, the way a pool
+	// whose connections are all busy never hands a ping a connection.
+	saturated bool
+	// dials counts every Connect, saturated ones included.
+	dials   atomic.Int32
 	started chan struct{}
 }
 
-func (c *fakePingConnector) Connect(context.Context) (driver.Conn, error) {
+func (c *fakePingConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	c.dials.Add(1)
+	if c.saturated {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return &fakePingConn{connector: c}, nil
 }
 
@@ -172,14 +182,20 @@ func shortenEndpointProbeBudget(t *testing.T, budget time.Duration) {
 func TestNativeReadUnansweredEndpointStillReconnects(t *testing.T) {
 	shortenEndpointProbeBudget(t, 50*time.Millisecond)
 	for _, tc := range []struct {
-		name string
-		mode pingMode
+		name      string
+		mode      pingMode
+		saturated bool
+		pings     int32
 	}{
-		{name: "refused ping", mode: pingRefused},
-		{name: "ping outlives the probe budget", mode: pingBlocks},
+		{name: "refused ping", mode: pingRefused, pings: 1},
+		{name: "ping outlives the probe budget", mode: pingBlocks, pings: 1},
+		// A pool with no free connection never reaches the ping: the probe
+		// waits on the dial until its budget ends, which is "unanswered".
+		{name: "saturated pool whose ping waits past the probe budget", mode: pingAnswers, saturated: true, pings: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dead, connector := newPooledStorageSpy(t, tc.mode)
+			connector.saturated = tc.saturated
 			fresh, _ := newPooledStorageSpy(t, pingAnswers)
 			var reopens int32
 			store := storeWithReopen(dead, fresh, &reopens)
@@ -196,8 +212,11 @@ func TestNativeReadUnansweredEndpointStillReconnects(t *testing.T) {
 			if n := atomic.LoadInt32(&calls); n != 2 {
 				t.Errorf("read ran %d times, want 2: the failed pass and the replay", n)
 			}
-			if n := connector.pings.Load(); n != 1 {
-				t.Errorf("pings = %d, want 1", n)
+			if n := connector.pings.Load(); n != tc.pings {
+				t.Errorf("pings = %d, want %d", n, tc.pings)
+			}
+			if n := connector.dials.Load(); n != 1 {
+				t.Errorf("dials = %d, want 1: the probe asks the failing pool for exactly one connection", n)
 			}
 		})
 	}
