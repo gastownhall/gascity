@@ -313,6 +313,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		} else {
 			register(newBdInventoryCheck(cityPath, cfg))
 		}
+		// One check per bd-backed scope (doctor_bd_beads_version.go): the bd
+		// a scope resolves must embed the beads module gc links, or its reads
+		// fail with schema version mismatch. Reads binaries' build info, never
+		// executes bd, and one constructor serves doctor and warm-up alike.
+		register(newBdBeadsVersionCheck(cityPath, cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
 		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
 		register(reconcilerCheck)
