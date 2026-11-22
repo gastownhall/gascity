@@ -234,3 +234,32 @@ func TestMakeInstallDependsOnInstallBd(t *testing.T) {
 		t.Fatal("install-bd is not declared .PHONY")
 	}
 }
+
+// writeFakeBd writes a bd that the stub go reports as embedding version.
+func writeFakeBd(t *testing.T, path, version string) {
+	t.Helper()
+	writeExecutable(t, path, "#!/bin/sh\n# beads-version: "+version+"\n")
+}
+
+// TestInstallBdPinnedFastPath: a bd that already embeds the pin is left
+// alone. Content, not mtime, is compared: mtime is too coarse on some
+// filesystems to prove the file was not rewritten.
+func TestInstallBdPinnedFastPath(t *testing.T) {
+	e := newInstallBdEnv(t)
+	writeFakeBd(t, e.dest(), installBdPin)
+	before := fileSum(t, e.dest())
+
+	out, err := e.run(t, "install-bd")
+	if err != nil {
+		t.Fatalf("make install-bd: %v\n%s", err, out)
+	}
+	if installs := e.goCalls(t, "install"); len(installs) != 0 {
+		t.Fatalf("go install ran although bd already embeds the pin: %q\n%s", installs, out)
+	}
+	if fileSum(t, e.dest()) != before {
+		t.Fatalf("make install-bd rewrote a bd that already embeds the pin\n%s", out)
+	}
+	if !strings.Contains(out, "already") || !strings.Contains(out, installBdPin) {
+		t.Fatalf("make install-bd output does not say bd is already at %s:\n%s", installBdPin, out)
+	}
+}
