@@ -4,10 +4,14 @@ package core
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // beadPayloadShape names one of the two shapes `gc events` prints a bead.*
@@ -140,4 +144,94 @@ func TestBeadEventConsumersReadBothPayloadShapes(t *testing.T) {
 			})
 		}
 	}
+}
+
+// beadEventTypeRef matches a script naming a bead.* event type.
+var beadEventTypeRef = regexp.MustCompile(`bead\.(created|updated|closed|deleted)`)
+
+// beadEventConsumerDrift compares the *.sh scripts in scripts that call
+// `gc events` and name a bead.* event type against registered. missing lists
+// consumers absent from registered; stale lists registered names that are no
+// longer such consumers. Both are sorted.
+func beadEventConsumerDrift(scripts fs.FS, registered []string) (missing, stale []string, err error) {
+	paths, err := fs.Glob(scripts, "*.sh")
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing scripts: %w", err)
+	}
+	found := map[string]bool{}
+	for _, p := range paths {
+		data, err := fs.ReadFile(scripts, p)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading script %q: %w", p, err)
+		}
+		if strings.Contains(string(data), "gc events") && beadEventTypeRef.Match(data) {
+			found[p] = true
+		}
+	}
+	for name := range found {
+		if !slices.Contains(registered, name) {
+			missing = append(missing, name)
+		}
+	}
+	for _, name := range registered {
+		if !found[name] {
+			stale = append(stale, name)
+		}
+	}
+	slices.Sort(missing)
+	slices.Sort(stale)
+	return missing, stale, nil
+}
+
+// registeredBeadEventConsumers returns the script names in the registry.
+func registeredBeadEventConsumers() []string {
+	names := make([]string, 0, len(beadEventConsumers))
+	for _, c := range beadEventConsumers {
+		names = append(names, c.script)
+	}
+	return names
+}
+
+// TestBeadEventConsumerRegistryCoversShippedScripts keeps the shape-contract
+// registry equal to the set of shipped scripts that read bead.* events from
+// `gc events`, so a new consumer cannot ship without proving it reads both
+// payload shapes (the gap the cascade selector slipped through after #9279).
+func TestBeadEventConsumerRegistryCoversShippedScripts(t *testing.T) {
+	t.Run("shipped scripts", func(t *testing.T) {
+		scripts, err := fs.Sub(PackFS, "assets/scripts")
+		if err != nil {
+			t.Fatalf("open embedded scripts: %v", err)
+		}
+		missing, stale, err := beadEventConsumerDrift(scripts, registeredBeadEventConsumers())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(missing) > 0 {
+			t.Errorf("scripts read bead.* events from `gc events` but are not in beadEventConsumers: %s; register each so it is run against both payload shapes",
+				strings.Join(missing, ", "))
+		}
+		if len(stale) > 0 {
+			t.Errorf("beadEventConsumers names scripts that no longer read bead.* events from `gc events`: %s", strings.Join(stale, ", "))
+		}
+	})
+
+	t.Run("detects drift", func(t *testing.T) {
+		scripts := fstest.MapFS{
+			"registered.sh":   {Data: []byte("gc events --type bead.closed\n")},
+			"unregistered.sh": {Data: []byte("EVENTS=\"$(gc events --since 5m)\"\n# selects bead.deleted\n")},
+			"other-events.sh": {Data: []byte("gc events --type agent.claims_stalled\n")},
+			"no-events.sh":    {Data: []byte("# mentions bead.updated but never reads events\n")},
+			"notes.txt":       {Data: []byte("gc events --type bead.updated\n")},
+		}
+		missing, stale, err := beadEventConsumerDrift(scripts, []string{"registered.sh", "removed.sh"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(missing, []string{"unregistered.sh"}) {
+			t.Errorf("missing = %q, want [unregistered.sh]", missing)
+		}
+		if !slices.Equal(stale, []string{"removed.sh"}) {
+			t.Errorf("stale = %q, want [removed.sh]", stale)
+		}
+	})
 }
