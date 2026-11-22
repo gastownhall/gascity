@@ -1153,7 +1153,7 @@ func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int,
 	if err != nil {
 		return 0, nil, err
 	}
-	live := beads.HandlesFor(store.Store).Live
+	live := beads.HandlesFor(store).Live
 	for _, b := range candidates {
 		if limit > 0 && closed >= limit {
 			break
