@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,8 +16,12 @@ import (
 )
 
 // defaultBDMaxChildren is the process-wide bound on concurrently running bd
-// children.
+// children when GC_BD_MAX_CHILDREN does not set one.
 const defaultBDMaxChildren = 16
+
+// minBDMaxChildren is the smallest accepted GC_BD_MAX_CHILDREN: one read slot
+// plus one slot reserved for mutations.
+const minBDMaxChildren = 2
 
 // ErrBDExecSlotWait marks a bd call that never ran because its budget ended
 // while it waited for a bd exec slot. A deadline-form error also reads as a
@@ -40,7 +48,7 @@ type bdExecGate struct {
 }
 
 // newBDExecGate returns a gate of size slots whose read ceiling is
-// size - max(1, size/4). size must be at least 2.
+// size - max(1, size/4). size must be at least minBDMaxChildren.
 func newBDExecGate(size int) *bdExecGate {
 	readCap := size - max(1, size/4)
 	return &bdExecGate{
@@ -52,9 +60,27 @@ func newBDExecGate(size int) *bdExecGate {
 }
 
 // processBDExecGate is the gate every exported exec runner constructor uses.
+// GC_BD_MAX_CHILDREN is read once, the first time a runner is built.
 var processBDExecGate = sync.OnceValue(func() *bdExecGate {
-	return newBDExecGate(defaultBDMaxChildren)
+	return newBDExecGate(bdExecGateSize(os.Getenv("GC_BD_MAX_CHILDREN"), log.Printf))
 })
+
+// bdExecGateSize parses a GC_BD_MAX_CHILDREN value. Unset or empty gives
+// defaultBDMaxChildren; an integer of at least minBDMaxChildren is taken as
+// is; anything else gives defaultBDMaxChildren after one warning through
+// warnf.
+func bdExecGateSize(raw string, warnf func(format string, args ...any)) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultBDMaxChildren
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < minBDMaxChildren {
+		warnf("gc: GC_BD_MAX_CHILDREN=%q is not an integer >= %d, using %d", raw, minBDMaxChildren, defaultBDMaxChildren)
+		return defaultBDMaxChildren
+	}
+	return n
+}
 
 // acquire blocks until the call's lane admits it or ctx ends. On success the
 // returned release must be called once the child has been reaped. On failure

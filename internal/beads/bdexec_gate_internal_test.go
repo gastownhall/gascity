@@ -250,3 +250,43 @@ func TestBDExecGate_MutationProgressesWhileReadsSaturated(t *testing.T) {
 		}
 	}
 }
+
+// TestBDExecGateSize covers AC-4: GC_BD_MAX_CHILDREN unset or empty gives the
+// default, an integer of at least 2 is taken as is, and anything else gives
+// the default with exactly one warning naming the variable.
+func TestBDExecGateSize(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		raw      string
+		want     int
+		warnings int
+	}{
+		{raw: "", want: 16},
+		{raw: "  ", want: 16},
+		{raw: "2", want: 2},
+		{raw: "40", want: 40},
+		{raw: " 8 ", want: 8},
+		{raw: "1", want: 16, warnings: 1},
+		{raw: "0", want: 16, warnings: 1},
+		{raw: "-4", want: 16, warnings: 1},
+		{raw: "eight", want: 16, warnings: 1},
+		{raw: "8.5", want: 16, warnings: 1},
+	}
+	for _, tc := range cases {
+		var warnings []string
+		got := bdExecGateSize(tc.raw, func(format string, args ...any) {
+			warnings = append(warnings, fmt.Sprintf(format, args...))
+		})
+		if got != tc.want {
+			t.Errorf("bdExecGateSize(%q) = %d, want %d", tc.raw, got, tc.want)
+		}
+		if len(warnings) != tc.warnings {
+			t.Errorf("bdExecGateSize(%q) warned %d times (%q), want %d", tc.raw, len(warnings), warnings, tc.warnings)
+		}
+		for _, w := range warnings {
+			if !strings.Contains(w, "GC_BD_MAX_CHILDREN") {
+				t.Errorf("bdExecGateSize(%q) warning %q does not name GC_BD_MAX_CHILDREN", tc.raw, w)
+			}
+		}
+	}
+}
