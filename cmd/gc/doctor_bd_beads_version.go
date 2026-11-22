@@ -105,7 +105,7 @@ func (c *bdBeadsVersionCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		return r
 	}
 
-	var skew, unknown []string
+	var skew, skewVersions, unknown []string
 	compared := 0
 	// One read per distinct binary: a city whose rigs share one bd (a symlink
 	// or a shared pin) reads it once, and every scope resolving that binary
@@ -147,6 +147,7 @@ func (c *bdBeadsVersionCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			unknown = append(unknown, fmt.Sprintf("%s: %s embeds no comparable beads version (a (devel) or replaced build)", label, bdPath))
 		case read.version != ownVersion:
 			skew = append(skew, fmt.Sprintf("%s: %s embeds beads %s, gc links %s", label, bdPath, read.version, ownVersion))
+			skewVersions = append(skewVersions, read.version)
 		default:
 			compared++
 		}
@@ -154,7 +155,10 @@ func (c *bdBeadsVersionCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 
 	if len(skew) > 0 {
 		r.Status = doctor.StatusWarning
-		r.Message = fmt.Sprintf("%d scope(s) resolve a bd built from a different beads module than gc links; its reads can fail with schema version mismatch", len(skew))
+		// The message carries both versions itself: `gc start`'s warm-up mail
+		// to the mayor quotes the message and the fix hint, not the details,
+		// and a warning that cannot name the versions cannot be acted on.
+		r.Message = fmt.Sprintf("%d scope(s) resolve a bd built from another beads module than gc links (e.g. bd %s vs gc %s); its reads can fail with schema version mismatch", len(skew), skewVersions[0], ownVersion)
 		details := make([]string, 0, len(skew)+len(unknown))
 		details = append(details, skew...)
 		details = append(details, unknown...)

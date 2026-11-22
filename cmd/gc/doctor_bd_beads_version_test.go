@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/warmup"
 )
 
 // This file exercises the bd-beads-version doctor check (ga-upttvz): gc
@@ -370,5 +374,84 @@ func TestBdBeadsVersionCheckUnknownSidesStayOK(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// capturingWarmupMailer records the one call warm-up makes — Send — without a
+// store behind it; every other Provider method would panic through the nil
+// embed, which is exactly the assertion that warm-up sends and does nothing
+// else with the mailer.
+type capturingWarmupMailer struct {
+	mail.Provider
+	sent    int
+	subject string
+	body    string
+}
+
+func (m *capturingWarmupMailer) Send(from, to, subject, body string) (mail.Message, error) {
+	m.sent++
+	m.subject, m.body = subject, body
+	return mail.Message{ID: "warmup-mail-1", From: from, To: to, Subject: subject}, nil
+}
+
+// TestBdBeadsVersionWarnsThroughStartWarmup is AC-7: a skewed bd surfaces in
+// `gc start`'s warm-up scan without changing the boot. Warm-up reports a
+// warning through its two channels: one stderr line carrying the failure
+// count and the warning severity, and a mail to the mayor naming the check —
+// both versions and the make install-bd remedy ride the mail body, which is
+// where warm-up names checks by design (writeWarmupStderr prints the summary
+// and points at that mail). The scan itself returns no error and the report
+// stays a warning: `gc start` warns and boots, exactly as before.
+func TestBdBeadsVersionWarnsThroughStartWarmup(t *testing.T) {
+	f := newBdBeadsVersionFixture(t)
+	writeBuildinfoBd(t, filepath.Join(f.binDir, "bd"), "v1.2.0")
+
+	// gc's own build info reaches the check through the package vars the
+	// buildDoctorChecks constructor reads; the bd side reads the real file.
+	prevOwn := bdBeadsVersionReadOwnBuildInfo
+	bdBeadsVersionReadOwnBuildInfo = func() (*debug.BuildInfo, bool) {
+		return gcBuildInfoWithBeads(ownBeadsVersion), true
+	}
+	t.Cleanup(func() { bdBeadsVersionReadOwnBuildInfo = prevOwn })
+
+	all := buildDoctorChecks(f.city, f.cfg, nil, buildDoctorChecksOpts{
+		Warmup:               true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+		SkipStorePreflight:   true,
+	})
+	var check doctor.Check
+	for _, c := range all {
+		if c.Name() == "bd-beads-version" {
+			check = c
+		}
+	}
+	if check == nil {
+		t.Fatal("buildDoctorChecks(Warmup) did not register bd-beads-version")
+	}
+
+	var stderr bytes.Buffer
+	mailer := &capturingWarmupMailer{}
+	report, err := warmup.RunWarmupChecks(context.Background(), f.city, f.cfg, warmup.WarmupOpts{
+		Checks: []doctor.Check{check},
+		Mailer: mailer,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("a warm-up warning must not fail the boot: %v", err)
+	}
+	if report.HighestSeverity != doctor.StatusWarning {
+		t.Fatalf("highest severity = %v, want a warning: %+v", report.HighestSeverity, report)
+	}
+	if !strings.Contains(stderr.String(), "gc start: warmup: 1 check(s) failed (Warning)") {
+		t.Errorf("the warm-up warning line is not on stderr: %q", stderr.String())
+	}
+	if mailer.sent != 1 || !strings.Contains(mailer.subject, "bd-beads-version") {
+		t.Fatalf("warm-up mail = %d send(s), subject %q; the check must be named there", mailer.sent, mailer.subject)
+	}
+	for _, want := range []string{"bd-beads-version", "v1.2.0", ownBeadsVersion, "make install-bd"} {
+		if !strings.Contains(mailer.body, want) {
+			t.Errorf("warm-up mail body lacks %q:\n%s", want, mailer.body)
+		}
 	}
 }
