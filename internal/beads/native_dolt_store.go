@@ -917,7 +917,7 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 			// A dial-stage failure never reached the endpoint, so it reconnects
 			// without asking.
 			if !isNativeReadDialStage(opErr) {
-				answered := s.endpointAnswers(ctx)
+				answered := s.endpointAnswers(ctx, gen)
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetOutcome(parent, ctxErr, opErr))
 				}

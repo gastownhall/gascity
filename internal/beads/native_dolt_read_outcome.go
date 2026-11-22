@@ -45,18 +45,24 @@ func newNativeReadDeadlineError(readErr error) error {
 	}
 }
 
-// endpointAnswers reports whether the store's current pool still answers one
-// ping within nativeReadEndpointProbeBudget. Only a nil ping is evidence: a
-// closed store, a handle that exports no pool, a ping error or an expired probe
-// budget all report false, and the caller reconnects as it would
-// without the probe. The ping goes straight to the library's *sql.DB, so it
-// never runs the reopen hook or managed-Dolt recovery.
-func (s *NativeDoltStore) endpointAnswers(ctx context.Context) bool {
-	storage, _, release, err := s.acquireStorageGen()
+// endpointAnswers reports whether the pool a read failed on, the one installed
+// as generation observedGen, still answers one ping within
+// nativeReadEndpointProbeBudget. Only a nil ping is evidence: a moved
+// generation (another reader already reconnected), a closed store, a handle
+// that exports no pool, a ping error or an expired probe budget all report
+// false, and the caller reconnects as it would without the probe. The ping goes
+// straight to the library's *sql.DB, so it never runs the reopen hook or
+// managed-Dolt recovery. The acquisition is held across the ping so the pool
+// cannot be swapped and closed under it.
+func (s *NativeDoltStore) endpointAnswers(ctx context.Context, observedGen uint64) bool {
+	storage, gen, release, err := s.acquireStorageGen()
 	if err != nil {
 		return false
 	}
 	defer release()
+	if gen != observedGen {
+		return false
+	}
 	accessor, ok := storage.(interface{ UnderlyingDB() *sql.DB })
 	if !ok {
 		return false

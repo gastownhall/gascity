@@ -371,3 +371,81 @@ func TestNativeReadCancelDuringProbeReturnsCallerError(t *testing.T) {
 		t.Errorf("reopens = %d, want 0", n)
 	}
 }
+
+func TestNativeReadUnprobedShapesAreUnchanged(t *testing.T) {
+	t.Run("non-transient error on an answering pool", func(t *testing.T) {
+		answering, connector := newPooledStorageSpy(t, pingAnswers)
+		var reopens int32
+		store := storeWithReopen(answering, answering, &reopens)
+		syntaxErr := errors.New("search issues: Error 1064 (42000): You have an error in your SQL syntax")
+
+		var calls int32
+		err := store.withReadRetry(failOn(answering, syntaxErr, &calls))
+
+		if err != syntaxErr { //nolint:errorlint // identity: the error must come back untouched
+			t.Fatalf("read err = %v, want the read error itself", err)
+		}
+		if connector.pings.Load() != 0 || atomic.LoadInt32(&reopens) != 0 || atomic.LoadInt32(&calls) != 1 {
+			t.Errorf("pings = %d, reopens = %d, calls = %d, want 0, 0, 1",
+				connector.pings.Load(), atomic.LoadInt32(&reopens), atomic.LoadInt32(&calls))
+		}
+	})
+
+	t.Run("store without a reopen hook", func(t *testing.T) {
+		answering, connector := newPooledStorageSpy(t, pingAnswers)
+		store := newNativeDoltStoreForTest(answering)
+
+		var calls int32
+		err := store.withReadRetry(failOn(answering, errPostConnectRead, &calls))
+
+		if err != errPostConnectRead { //nolint:errorlint // identity: the error must come back untouched
+			t.Fatalf("read err = %v, want the read error itself", err)
+		}
+		if connector.pings.Load() != 0 || atomic.LoadInt32(&calls) != 1 {
+			t.Errorf("pings = %d, calls = %d, want 0 and 1", connector.pings.Load(), atomic.LoadInt32(&calls))
+		}
+	})
+
+	t.Run("storage that exports no pool", func(t *testing.T) {
+		dead := &nativeDoltStorageSpy{}
+		fresh := &nativeDoltStorageSpy{}
+		var reopens int32
+		store := storeWithReopen(dead, fresh, &reopens)
+		store.readRetryBudgetOverride = 5 * time.Second
+
+		var calls int32
+		if err := store.withReadRetry(failOn(dead, errPostConnectRead, &calls)); err != nil {
+			t.Fatalf("read err = %v, want the replay on the fresh handle to succeed", err)
+		}
+		if atomic.LoadInt32(&reopens) != 1 || atomic.LoadInt32(&calls) != 2 {
+			t.Errorf("reopens = %d, calls = %d, want 1 and 2", atomic.LoadInt32(&reopens), atomic.LoadInt32(&calls))
+		}
+	})
+
+	t.Run("generation moved before the probe", func(t *testing.T) {
+		// Another reader already reconnected: the pool installed now is not
+		// the one the read failed on, so its answer says nothing about that
+		// read. The caller's reconnect is then a no-op and the read replays on
+		// the new handle, as it did before the probe existed.
+		answering, connector := newPooledStorageSpy(t, pingAnswers)
+		store := newNativeDoltStoreForTest(answering)
+		_, failedGen, release, err := store.acquireStorageGen()
+		if err != nil {
+			t.Fatalf("acquireStorageGen: %v", err)
+		}
+		release()
+		store.mu.Lock()
+		store.generation++
+		store.mu.Unlock()
+
+		if store.endpointAnswers(context.Background(), failedGen) {
+			t.Error("endpointAnswers = true for a generation that is no longer installed, want false")
+		}
+		if n := connector.pings.Load(); n != 0 {
+			t.Errorf("pings = %d, want 0", n)
+		}
+		if !store.endpointAnswers(context.Background(), failedGen+1) {
+			t.Error("endpointAnswers = false for the installed generation's answering pool, want true")
+		}
+	})
+}
