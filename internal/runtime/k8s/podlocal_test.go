@@ -1,11 +1,13 @@
 package k8s
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/guard"
@@ -281,5 +283,69 @@ func TestPodLocalStopStaysARefusalThroughCleanup(t *testing.T) {
 	}
 	if _, ok := any(p).(runtime.FreshLivenessObserver); ok {
 		t.Fatal("pod-local provider implements FreshLivenessObserver; want only the boolean probe")
+	}
+}
+
+// TestPodLocalBoundsEveryTmuxCommand: a stopped or wedged pod tmux server must
+// fail an own-session operation instead of hanging the drain-ack, drain-check
+// or hook claim that asked. Every tmux command runs under the pod-local
+// deadline, and a command the deadline ended reports
+// runtime.ErrRuntimeUnavailable: the session could not be observed, which is
+// neither a missing session, an unset variable nor a refusal. Kills: a command
+// run without a deadline, and a deadline read as absence or as an unset value.
+func TestPodLocalBoundsEveryTmuxCommand(t *testing.T) {
+	var undeadlined [][]string
+	wedged := func(ctx context.Context, args ...string) (string, string, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			undeadlined = append(undeadlined, append([]string(nil), args...))
+			return "", "", nil
+		}
+		<-ctx.Done()
+		return "", "", ctx.Err()
+	}
+	p, err := newPodLocal("worker-1", wedged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.timeout != podLocalTmuxTimeout || podLocalTmuxTimeout <= 0 {
+		t.Fatalf("timeout = %v; want podLocalTmuxTimeout (%v) > 0", p.timeout, podLocalTmuxTimeout)
+	}
+	p.timeout = 10 * time.Millisecond
+	for op, call := range map[string]func() error{
+		"SetMeta":    func() error { return p.SetMeta("worker-1", "K", "v") },
+		"GetMeta":    func() error { _, err := p.GetMeta("main", "K"); return err },
+		"RemoveMeta": func() error { return p.RemoveMeta("worker-1", "K") },
+	} {
+		err := call()
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Errorf("%s against a wedged tmux server = %v; want runtime.ErrRuntimeUnavailable", op, err)
+		}
+		if errors.Is(err, runtime.ErrSessionNotFound) || runtime.IsSessionGone(err) || errors.Is(err, guard.ErrControllerOwnedRuntime) {
+			t.Errorf("%s against a wedged tmux server = %v; reads as absence or a refusal", op, err)
+		}
+	}
+	if p.IsRunning("worker-1") {
+		t.Error("IsRunning against a wedged tmux server = true; want false")
+	}
+	if len(undeadlined) != 0 {
+		t.Fatalf("tmux ran without a deadline: %v", undeadlined)
+	}
+}
+
+// TestPodLocalTmuxCommandBoundsPipeWait pins the WaitDelay on the real tmux
+// command: the tmux client hands its stdio to the server, so a wedged server
+// can hold the output pipes open after the client is killed, and without a
+// WaitDelay the command would never return.
+func TestPodLocalTmuxCommandBoundsPipeWait(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := podLocalTmuxCommand(context.Background(), []string{"has-session", "-t", podLocalTarget}, &stdout, &stderr)
+	if cmd.WaitDelay != podLocalTmuxWaitDelay || podLocalTmuxWaitDelay <= 0 {
+		t.Fatalf("WaitDelay = %v; want podLocalTmuxWaitDelay (%v) > 0", cmd.WaitDelay, podLocalTmuxWaitDelay)
+	}
+	if want := []string{"tmux", "has-session", "-t", "=main"}; !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("Args = %v; want %v on the pod's default server", cmd.Args, want)
+	}
+	if cmd.Stdout != &stdout || cmd.Stderr != &stderr {
+		t.Fatal("tmux command does not capture stdout and stderr")
 	}
 }

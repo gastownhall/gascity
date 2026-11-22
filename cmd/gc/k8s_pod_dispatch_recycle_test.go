@@ -26,6 +26,12 @@ import (
 // session. Kills: a kill path that reads the refusal (or the pod's false
 // liveness probe of another session) as a session already gone and reports the
 // recycle done, and a marked selection that still builds a Kubernetes client.
+//
+// The control beads are graph class, so the fixture seeds and reads them
+// through the city's graph-class store, and the dispatch is the serve drain a
+// dispatcher session runs (controlDispatcherServe), which reads the control
+// from that store. On a city that relocates nothing that store is the city
+// store; under the split-strict gate it is the class view that holds them.
 func TestPodHostedDispatcherQuarantinesARefusedPooledRecycle(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
@@ -58,9 +64,10 @@ provider = "k8s"
 	if err != nil {
 		t.Fatalf("openStoreAtForCity: %v", err)
 	}
+	graph := cliGraphStore(store, nil, cityPath)
 	create := func(b beads.Bead) beads.Bead {
 		t.Helper()
-		created, err := store.Create(b)
+		created, err := graph.Create(b)
 		if err != nil {
 			t.Fatalf("Create(%s): %v", b.Title, err)
 		}
@@ -78,23 +85,23 @@ provider = "k8s"
 		"gc.logical_bead_id": logical.ID, "gc.attempt": "1", "gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
 		"gc.outcome": "fail", "gc.failure_class": "transient", "gc.failure_reason": "rate_limited",
 	}})
-	if err := store.Close(run1.ID); err != nil {
+	if err := graph.Close(run1.ID); err != nil {
 		t.Fatalf("Close(run1): %v", err)
 	}
 	eval1 := create(beads.Bead{Title: "review eval 1", Type: "task", Metadata: map[string]string{
 		"gc.kind": "retry-eval", "gc.root_bead_id": root.ID, "gc.step_ref": "demo.review.eval.1",
 		"gc.logical_bead_id": logical.ID, "gc.attempt": "1", "gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
 	}})
-	if err := store.DepAdd(logical.ID, eval1.ID, "blocks"); err != nil {
+	if err := graph.DepAdd(logical.ID, eval1.ID, "blocks"); err != nil {
 		t.Fatalf("DepAdd(logical->eval1): %v", err)
 	}
-	if err := store.DepAdd(eval1.ID, run1.ID, "blocks"); err != nil {
+	if err := graph.DepAdd(eval1.ID, run1.ID, "blocks"); err != nil {
 		t.Fatalf("DepAdd(eval1->run1): %v", err)
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runControlDispatcher(eval1.ID, &stdout, &stderr); err != nil {
-		t.Fatalf("runControlDispatcher(retry-eval) = %v; want the refusal quarantined, not retried; stderr=%s", err, stderr.String())
+	if err := runControlDispatcherInStore(cityPath, cityPath, eval1.ID, &stdout, &stderr, nil); err != nil {
+		t.Fatalf("runControlDispatcherInStore(retry-eval) = %v; want the refusal quarantined, not retried; stderr=%s", err, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "control dispatch: quarantined bead="+eval1.ID) {
 		t.Fatalf("stderr = %q; want the control quarantined", stderr.String())
@@ -104,7 +111,7 @@ provider = "k8s"
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(reload): %v", err)
 	}
-	evalAfter, err := reloaded.Get(eval1.ID)
+	evalAfter, err := cliGraphStore(reloaded, nil, cityPath).Get(eval1.ID)
 	if err != nil {
 		t.Fatalf("Get(eval1): %v", err)
 	}

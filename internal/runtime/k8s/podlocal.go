@@ -3,6 +3,7 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,18 +27,36 @@ const PodSessionEnv = "GC_K8S_POD_SESSION"
 // exec.
 const podLocalTarget = "=" + tmuxSession
 
+// podLocalTmuxTimeout bounds each pod-local tmux command, as the tmux
+// provider bounds each of its subprocesses: a stopped or wedged pod tmux
+// server fails the drain-ack, drain-check or hook claim that asked instead of
+// hanging it.
+const podLocalTmuxTimeout = 30 * time.Second
+
+// podLocalTmuxWaitDelay bounds how long a tmux command's output pipes may stay
+// open after the client exits or its deadline kills it: the tmux client hands
+// its stdio to the server, so a wedged server can hold them open forever.
+const podLocalTmuxWaitDelay = 2 * time.Second
+
 // tmuxRunner runs one tmux command with the given arguments and returns its
 // stdout and stderr.
 type tmuxRunner func(ctx context.Context, args ...string) (stdout, stderr string, err error)
 
 // execTmux runs tmux on the pod's default server, without socket arguments.
 func execTmux(ctx context.Context, args ...string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, "tmux", args...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := podLocalTmuxCommand(ctx, args, &stdout, &stderr).Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// podLocalTmuxCommand builds a tmux command on the pod's default server that
+// captures stdout and stderr, with podLocalTmuxWaitDelay set.
+func podLocalTmuxCommand(ctx context.Context, args []string, stdout, stderr *bytes.Buffer) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.WaitDelay = podLocalTmuxWaitDelay
+	return cmd
 }
 
 var _ runtime.Provider = (*PodLocal)(nil)
@@ -50,14 +69,16 @@ var _ runtime.Provider = (*PodLocal)(nil)
 // The controller owns every other runtime operation, so PodLocal refuses
 // lifecycle and delivery operations for every name, and metadata access to
 // any other session, with an error wrapping guard.ErrControllerOwnedRuntime;
-// Stop's refusal also wraps runtime.ErrStopRefused. It claims no capabilities
-// and offers no fresh liveness observation, so a false probe of another
-// session never confirms that session gone. Like the guard provider, it does
-// not satisfy the shared provider conformance contract, which exercises a
-// successful lifecycle.
+// Stop's refusal also wraps runtime.ErrStopRefused. Each tmux command it runs
+// is bounded by podLocalTmuxTimeout. It claims no capabilities and offers no
+// fresh liveness observation, so a false probe of another session never
+// confirms that session gone. Like the guard provider, it does not satisfy the
+// shared provider conformance contract, which exercises a successful
+// lifecycle.
 type PodLocal struct {
-	self string
-	run  tmuxRunner
+	self    string
+	run     tmuxRunner
+	timeout time.Duration
 }
 
 // PodSession returns this process's PodSessionEnv value, trimmed: the logical
@@ -96,7 +117,7 @@ func newPodLocal(self string, run tmuxRunner) (*PodLocal, error) {
 	if self == "" {
 		return nil, fmt.Errorf("pod-local session provider: %s names no session", PodSessionEnv)
 	}
-	return &PodLocal{self: self, run: run}, nil
+	return &PodLocal{self: self, run: run, timeout: podLocalTmuxTimeout}, nil
 }
 
 // ownSession reports whether name addresses the pod's own session: the
@@ -105,17 +126,36 @@ func (p *PodLocal) ownSession(name string) bool {
 	return name == tmuxSession || name == p.self
 }
 
+// runTmux runs one tmux command for op on name under the pod-local deadline.
+// A command the deadline ended returns an error wrapping
+// runtime.ErrRuntimeUnavailable: the session could not be observed, which is
+// neither a missing session nor a refusal.
+func (p *PodLocal) runTmux(op, name string, args ...string) (stdout, stderr string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	defer cancel()
+	stdout, stderr, err = p.run(ctx, args...)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return stdout, stderr, fmt.Errorf("pod-local %s %q: tmux did not answer within %s: %w: %w", op, name, p.timeout, err, runtime.ErrRuntimeUnavailable)
+	}
+	return stdout, stderr, err
+}
+
 // tmux runs one tmux command against the pod's own session.
 func (p *PodLocal) tmux(op, name string, args ...string) error {
-	if _, stderr, err := p.run(context.Background(), args...); err != nil {
+	if _, stderr, err := p.runTmux(op, name, args...); err != nil {
 		return podLocalError(op, name, stderr, err)
 	}
 	return nil
 }
 
 // podLocalError gives a failed tmux command its context, mapping a missing
-// session or server to runtime.ErrSessionNotFound.
+// session or server to runtime.ErrSessionNotFound. A command the deadline
+// ended already carries its context and runtime.ErrRuntimeUnavailable, and is
+// returned as it is.
 func podLocalError(op, name, stderr string, err error) error {
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return err
+	}
 	diag := strings.TrimSpace(stderr)
 	if podLocalSessionMissing(diag) {
 		return fmt.Errorf("pod-local %s %q: %s: %w", op, name, diag, runtime.ErrSessionNotFound)
@@ -155,13 +195,14 @@ func (p *PodLocal) SetMeta(name, key, value string) error {
 
 // GetMeta reads key from the pod's own session tmux environment. A variable
 // the session does not have, or has marked unset, reads as empty; a missing
-// session or server is runtime.ErrSessionNotFound; every other failure is
-// returned.
+// session or server is runtime.ErrSessionNotFound; a server that does not
+// answer within the deadline is runtime.ErrRuntimeUnavailable; every other
+// failure is returned.
 func (p *PodLocal) GetMeta(name, key string) (string, error) {
 	if !p.ownSession(name) {
 		return "", p.refuse("get-meta", name)
 	}
-	stdout, stderr, err := p.run(context.Background(), "show-environment", "-t", podLocalTarget, key)
+	stdout, stderr, err := p.runTmux("get-meta", name, "show-environment", "-t", podLocalTarget, key)
 	if err != nil {
 		diag := strings.TrimSpace(stderr)
 		if strings.Contains(diag, "unknown variable") && !podLocalSessionMissing(diag) {
@@ -189,12 +230,13 @@ func (p *PodLocal) RemoveMeta(name, key string) error {
 }
 
 // IsRunning probes the pod's own session on the local tmux server. Every
-// other session reads false: the pod observes no other runtime.
+// other session reads false: the pod observes no other runtime. A probe that
+// fails, a deadline included, reads false.
 func (p *PodLocal) IsRunning(name string) bool {
 	if !p.ownSession(name) {
 		return false
 	}
-	_, _, err := p.run(context.Background(), "has-session", "-t", podLocalTarget)
+	_, _, err := p.runTmux("is-running", name, "has-session", "-t", podLocalTarget)
 	return err == nil
 }
 
