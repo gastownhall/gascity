@@ -96,6 +96,22 @@ import (
 // table matches neither, so "terminal" and "unclassified" are the same
 // immediate return). TestClassifyNativeDoltReadErrorOrder pins both exceptions.
 //
+// # What withReadRetry does with a transient class on both lanes
+//
+// The classifier is unchanged by it, but the read loop does not reconnect on
+// every transient class. Unless the failure is dial-stage (the pass never
+// reached the endpoint), it first pings the pool the read failed on, and a pool
+// that answers ends the read with ErrNativeReadDeadline on that pass (rendered
+// as a non-terminal budget_exhausted verdict on the proxied lane). That is the
+// one deliberate direct-lane exception to the byte-identical rule above: a
+// post-connect transient failure on a pool that still answers a ping no longer
+// reconnects. go-sql-driver reports a read that outlived the pool read deadline
+// and a server that died mid-read with the same "invalid connection" sentinel,
+// so the ping is the only signal that separates them. The accepted residual is
+// a server that dies and comes back on the same address between the failed
+// read and the ping: that read returns ErrNativeReadDeadline instead of
+// replaying, and the caller's next read runs on the restarted server.
+//
 // # What the classifier does NOT decide
 //
 // It never decides whether a verdict is produced. classifyNativeDoltReadError
@@ -173,7 +189,9 @@ const (
 	// though it failed, because it may have taken effect.
 	nativeReadNonReplayable
 	// nativeReadTransient means reconnect and retry: the failure is about the
-	// connection or a lost race, not about the data.
+	// connection or a lost race, not about the data. withReadRetry skips the
+	// reconnect when the failing pool still answers a ping (see
+	// endpointAnswers).
 	nativeReadTransient
 	// nativeReadCircuitOpen means wait the breaker's cooldown and retry the
 	// SAME handle. Reconnecting is pointless: the refusal never reached a
@@ -230,7 +248,8 @@ type nativeReadLane bool
 const (
 	// directNativeLane is a handle against a database gc configured — a direct
 	// or hosted managed-Dolt city. The rollout flag is off for it and its read
-	// path must stay byte-identical to the one it has today.
+	// path must stay byte-identical to the one it has today, except for the
+	// answering-endpoint outcome described above.
 	directNativeLane nativeReadLane = false
 	// proxiedNativeLane is a handle against a database bd's proxy owns.
 	proxiedNativeLane nativeReadLane = true

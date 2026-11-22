@@ -801,6 +801,18 @@ const (
 // reopen hook (test handle built directly from a storage value) keeps the prior
 // fail-fast behavior.
 //
+// A transient failure is NOT proof the endpoint moved: go-sql-driver returns the
+// same "invalid connection" for a read that outlived the pool read deadline on
+// a healthy server as for a hard-killed one. So before reconnecting, a failure
+// that got past the dial asks the failing pool for one bounded ping
+// (endpointAnswers). A pool that answers ends the read with
+// ErrNativeReadDeadline on that pass: replaying the same read under the same
+// deadline against the same server cannot finish it. A failed or slow ping, a
+// pool another reader already replaced, or a handle that exports no pool
+// reconnects as before. An exhausted budget is typed
+// ErrNativeReadBudgetExhausted and a failed reconnect
+// ErrNativeReadRecoveryFailed; their text is unchanged.
+//
 // What "transient" means is decided by classifyNativeDoltReadError, which runs
 // a typed table (indeterminate commit, serialization conflict, open circuit,
 // MySQL 1049/1045, sentinel connection-level failures) AHEAD of the substring
@@ -922,7 +934,7 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetOutcome(parent, ctxErr, opErr))
 				}
 				if answered {
-					return newNativeReadDeadlineError(opErr)
+					return s.proxiedReadDeadlineVerdict(newNativeReadDeadlineError(opErr))
 				}
 			}
 			if rcErr := s.reconnect(ctx, gen); rcErr != nil {

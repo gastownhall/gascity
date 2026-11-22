@@ -115,3 +115,16 @@ var ErrNativeReadRecoveryFailed = errors.New("native Dolt read endpoint recovery
 func newNativeReadRecoveryError(err error) error {
 	return &nativeReadOutcomeError{kind: ErrNativeReadRecoveryFailed, err: err}
 }
+
+// proxiedReadDeadlineVerdict renders an ErrNativeReadDeadline outcome for this
+// handle's lane. A proxied handle gets the non-terminal budget_exhausted
+// verdict, so the ProxiedStore wrapper stands this open down and the next one
+// re-admits, as it does for an exhausted budget; a direct or hosted handle gets
+// the outcome unchanged.
+func (s *NativeDoltStore) proxiedReadDeadlineVerdict(outcome error) error {
+	if s == nil || !s.proxiedReadVerdicts {
+		return outcome
+	}
+	return NewNonTerminalProxiedVerdictError(ProxiedVerdictBudgetExhausted,
+		"a native read over bd's proxy failed on an endpoint that still answers", outcome)
+}

@@ -449,3 +449,35 @@ func TestNativeReadUnprobedShapesAreUnchanged(t *testing.T) {
 		}
 	})
 }
+
+func TestNativeProxiedReadDeadlineIsANonTerminalVerdict(t *testing.T) {
+	answering, connector := newPooledStorageSpy(t, pingAnswers)
+	var reopens int32
+	store := storeWithReopen(answering, answering, &reopens)
+	store.proxiedReadVerdicts = true
+	store.readRetryBudgetOverride = 3 * time.Second
+
+	var calls int32
+	err := store.withReadRetry(failOn(answering, errPostConnectRead, &calls))
+
+	verdict, ok := ProxiedVerdictOf(err)
+	if !ok {
+		t.Fatalf("read err = %v (%d reopens), want a *ProxiedVerdictError: the proxied wrapper demotes only on a verdict",
+			err, atomic.LoadInt32(&reopens))
+	}
+	if verdict.Verdict != ProxiedVerdictBudgetExhausted {
+		t.Errorf("verdict = %q, want %q", verdict.Verdict, ProxiedVerdictBudgetExhausted)
+	}
+	if verdict.Terminal() {
+		t.Error("verdict is terminal, want non-terminal: the next open re-admits")
+	}
+	if !errors.Is(err, ErrNativeReadDeadline) || !errors.Is(err, errPostConnectRead) {
+		t.Errorf("read err = %v, want ErrNativeReadDeadline and the read error in the chain", err)
+	}
+	if n := atomic.LoadInt32(&reopens); n != 0 {
+		t.Errorf("reopens = %d, want 0", n)
+	}
+	if atomic.LoadInt32(&calls) != 1 || connector.pings.Load() != 1 {
+		t.Errorf("calls = %d, pings = %d, want 1 and 1", atomic.LoadInt32(&calls), connector.pings.Load())
+	}
+}
