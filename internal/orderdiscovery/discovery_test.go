@@ -1059,3 +1059,73 @@ enabled = false
 		t.Fatalf("got %d orders (%v), want the invalid order dropped", len(aa), aa)
 	}
 }
+
+func TestScanAllRigOverrideEnablesOnlyThatRigsFileDisabledPackOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "bench-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "nightly-bench", `[order]
+exec = "scripts/bench.sh"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+	enabled := true
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}, "beta": {cityLayer}},
+		},
+		RigPackDirs: map[string][]string{"alpha": {packDir}, "beta": {packDir}},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{{Name: "nightly-bench", Rig: "alpha", Enabled: &enabled}},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	enabledByRig := map[string]bool{}
+	for _, a := range aa {
+		if a.Name != "nightly-bench" {
+			t.Fatalf("unexpected order %q in %#v", a.Name, aa)
+		}
+		enabledByRig[a.Rig] = a.IsEnabled()
+	}
+	if len(aa) != 2 || !enabledByRig["alpha"] || enabledByRig["beta"] {
+		t.Fatalf("enabled by rig = %v (%d orders), want alpha enabled and beta disabled", enabledByRig, len(aa))
+	}
+	if active := orders.FilterEnabled(aa); len(active) != 1 || active[0].Rig != "alpha" {
+		t.Fatalf("FilterEnabled = %#v, want only alpha's instance", active)
+	}
+}
+
+func TestScanAllRiglessEnablingOverrideForRigOnlyPackOrderGetsRigHint(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "bench-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "nightly-bench", `[order]
+exec = "scripts/bench.sh"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+	enabled := true
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		RigPackDirs: map[string][]string{"alpha": {packDir}},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{{Name: "nightly-bench", Enabled: &enabled}},
+		},
+	}
+
+	_, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err == nil {
+		t.Fatal("ScanAll returned nil error, want the rig-scoped not-found hint")
+	}
+	if !strings.Contains(err.Error(), `order "nightly-bench" not found at city scope`) || !strings.Contains(err.Error(), `rig = "alpha"`) {
+		t.Fatalf("ScanAll error = %q, want the city-scope miss with a rig = \"alpha\" hint", err)
+	}
+}
