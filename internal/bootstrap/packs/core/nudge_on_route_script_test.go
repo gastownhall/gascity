@@ -348,6 +348,26 @@ func (r *nudgeOnRouteRig) seedState(keys ...string) {
 	}
 }
 
+// failNudgesTo makes every `gc session nudge <target>` exit 1.
+func (r *nudgeOnRouteRig) failNudgesTo(target string) {
+	r.t.Helper()
+	marker := filepath.Join(r.dir, "fail", target)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		r.t.Fatalf("mkdir fail marker dir: %v", err)
+	}
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		r.t.Fatalf("write fail marker: %v", err)
+	}
+}
+
+// unfailNudgesTo lets nudges to target succeed again.
+func (r *nudgeOnRouteRig) unfailNudgesTo(target string) {
+	r.t.Helper()
+	if err := os.Remove(filepath.Join(r.dir, "fail", target)); err != nil {
+		r.t.Fatalf("remove fail marker: %v", err)
+	}
+}
+
 // run executes the script once and returns its combined output.
 func (r *nudgeOnRouteRig) run(extraEnv ...string) string {
 	r.t.Helper()
@@ -682,6 +702,82 @@ func TestNudgeOnRouteCatchesUpPastTheFastWindow(t *testing.T) {
 		}
 		if got, logged := r.nudges(target); got != 1 {
 			t.Fatalf("nudges to %s = %d, want 1; gc calls:\n%s", target, got, logged)
+		}
+	})
+}
+
+// TestNudgeOnRouteEvaluatesEachEventOnce pins the mark's commit rule: it
+// advances after every successful read, including one whose nudge failed, so
+// a later run over the same events attempts nothing. The failed pair has no
+// dedup entry, so the next event that re-emits the routing retries it.
+func TestNudgeOnRouteEvaluatesEachEventOnce(t *testing.T) {
+	const target = "lane-a"
+
+	t.Run("a failed nudge is not retried from the same events", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		events := []nudgeEvent{
+			{seq: 1, typ: "bead.updated", bead: "ga-x", age: 50 * time.Second},
+			{seq: 2, typ: "bead.updated", bead: "ga-y", age: 40 * time.Second},
+			{seq: 3, typ: "bead.updated", bead: "ga-r", routedTo: target, age: 30 * time.Second},
+		}
+		r.writeEvents(events...)
+		r.failNudgesTo(target)
+		r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("run 1: nudge attempts to %s = %d, want 1; gc calls:\n%s", target, got, logged)
+		}
+		if r.hasKey("ga-r|" + target) {
+			t.Fatalf("run 1: a failed nudge must not record ga-r|%s", target)
+		}
+		if got := r.seq(); got != "3" {
+			t.Fatalf("run 1: seq mark = %q, want 3 even though the nudge failed", got)
+		}
+
+		r.unfailNudgesTo(target)
+		r.run()
+		if got, logged := r.nudges(target); got != 1 {
+			t.Fatalf("run 2: nudge attempts to %s = %d, want still 1 with no event above the mark; gc calls:\n%s", target, got, logged)
+		}
+		if got := r.seq(); got != "3" {
+			t.Fatalf("run 2: seq mark = %q, want 3", got)
+		}
+
+		events = append(events, nudgeEvent{seq: 4, typ: "bead.updated", bead: "ga-r", routedTo: target, age: 10 * time.Second})
+		r.writeEvents(events...)
+		r.run()
+		if got, logged := r.nudges(target); got != 2 {
+			t.Fatalf("run 3: nudge attempts to %s = %d, want 2 once the routing re-emits; gc calls:\n%s", target, got, logged)
+		}
+		if !r.hasKey("ga-r|" + target) {
+			t.Fatalf("run 3: dedup state lacks ga-r|%s after the retried nudge", target)
+		}
+		if got := r.seq(); got != "4" {
+			t.Fatalf("run 3: seq mark = %q, want 4", got)
+		}
+	})
+
+	t.Run("a batch with nothing routed advances the mark", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.seedSeq("5")
+		r.writeEvents(
+			nudgeEvent{seq: 6, typ: "bead.updated", bead: "ga-x", age: 40 * time.Second},
+			nudgeEvent{seq: 7, typ: "bead.created", bead: "ga-y", age: 30 * time.Second},
+		)
+		r.run()
+		if total, logged := countNudges(t, r.logPath); total != 0 {
+			t.Fatalf("nudges = %d, want 0; gc calls:\n%s", total, logged)
+		}
+		if got := r.seq(); got != "7" {
+			t.Fatalf("seq mark = %q, want 7", got)
+		}
+	})
+
+	t.Run("a failed events read leaves the mark", func(t *testing.T) {
+		r := newNudgeOnRouteRig(t, true)
+		r.seedSeq("7")
+		r.run()
+		if got := r.seq(); got != "7" {
+			t.Fatalf("seq mark = %q, want 7 after a failed read", got)
 		}
 	})
 }
