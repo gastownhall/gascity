@@ -82,3 +82,19 @@ func isNativeReadDialStage(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "dial tcp") || strings.Contains(msg, "connection refused")
 }
+
+// ErrNativeReadBudgetExhausted marks a native read whose own retry budget ran
+// out while it reconnected and replayed. It is not attached when the caller's
+// context ended the chain.
+var ErrNativeReadBudgetExhausted = errors.New("native Dolt read retry budget exhausted")
+
+// nativeReadRetryBudgetOutcome is nativeReadRetryBudgetError, tagged with
+// ErrNativeReadBudgetExhausted when the store's own budget ended the chain
+// rather than the caller's context (parent). The text is unchanged.
+func nativeReadRetryBudgetOutcome(parent context.Context, ctxErr, lastErr error) error {
+	err := nativeReadRetryBudgetError(ctxErr, lastErr)
+	if parent.Err() != nil {
+		return err
+	}
+	return &nativeReadOutcomeError{kind: ErrNativeReadBudgetExhausted, err: err}
+}

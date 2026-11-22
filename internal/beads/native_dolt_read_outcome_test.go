@@ -234,3 +234,40 @@ func TestNativeReadDialStageFailureReconnectsWithoutProbe(t *testing.T) {
 		})
 	}
 }
+
+// alwaysFails is a read that fails with readErr on every handle.
+func alwaysFails(readErr error) func(context.Context, beadslib.Storage) error {
+	return func(context.Context, beadslib.Storage) error { return readErr }
+}
+
+func TestNativeReadBudgetExhaustionIsTyped(t *testing.T) {
+	shortenEndpointProbeBudget(t, 50*time.Millisecond)
+	dead, _ := newPooledStorageSpy(t, pingRefused)
+	store := newNativeDoltStoreForTest(dead)
+	var reopens int32
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		atomic.AddInt32(&reopens, 1)
+		next, _ := newPooledStorageSpy(t, pingRefused)
+		return next, nil
+	}
+	store.readRetryBudgetOverride = 300 * time.Millisecond
+
+	err := store.withReadRetry(alwaysFails(errPostConnectRead))
+
+	if !errors.Is(err, ErrNativeReadBudgetExhausted) {
+		t.Fatalf("read err = %v (%d reopens), want ErrNativeReadBudgetExhausted", err, atomic.LoadInt32(&reopens))
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("read err = %v, want context.DeadlineExceeded in the chain", err)
+	}
+	if errors.Is(err, ErrNativeReadDeadline) {
+		t.Errorf("read err = %v matches ErrNativeReadDeadline, but no endpoint ever answered", err)
+	}
+	const want = "native Dolt read retry budget exhausted (context deadline exceeded), last error: begin read tx: invalid connection"
+	if got := err.Error(); got != want {
+		t.Errorf("read err text = %q, want it unchanged: %q", got, want)
+	}
+	if atomic.LoadInt32(&reopens) == 0 {
+		t.Error("reopens = 0, want the unanswered endpoint to reconnect until the budget ran out")
+	}
+}
