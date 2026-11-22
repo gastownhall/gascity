@@ -5435,6 +5435,15 @@ run_provider_owned_bd() {
             unset BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET
             unset BEADS_DOLT_AUTO_START
         fi
+        if [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] && [ -n "${GC_BEADS_PING_DOLT_HOST:-}" ] && [ -n "${GC_BEADS_PING_DOLT_PORT:-}" ] && [ "$#" -eq 1 ] && [ "$1" = ping ]; then
+            # The operator password belongs only to this validated binding,
+            # never a stale local port file or a user-level shared server.
+            export BEADS_DOLT_SERVER_HOST="$GC_BEADS_PING_DOLT_HOST"
+            export BEADS_DOLT_SERVER_PORT="$GC_BEADS_PING_DOLT_PORT"
+            export BEADS_DOLT_SERVER_SOCKET= BEADS_DOLT_AUTO_START=0
+            export BEADS_DOLT_SHARED_SERVER=0 BD_DOLT_SHARED_SERVER=false
+        fi
+        unset GC_BEADS_PING_DOLT_HOST GC_BEADS_PING_DOLT_PORT
         if [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
             export BEADS_DOLT_PROXIED_SERVER=1
         else

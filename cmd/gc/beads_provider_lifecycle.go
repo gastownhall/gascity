@@ -1475,11 +1475,88 @@ func runProviderOwnedScopeLifecycleOpGuarded(parent context.Context, cityPath, s
 			env = overlayEnvEntries(env, map[string]string{"BEADS_DOLT_PROXIED_SERVER": "1"})
 		}
 	}
-	env = overlayEnvEntries(env, map[string]string{
+	overrides := map[string]string{
 		"BEADS_DIR":               filepath.Join(scopeRoot, ".beads"),
 		"GC_BEADS_PROVIDER_OWNED": "1",
-	})
+	}
+	if providerUsesBdStoreContract(provider) {
+		hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+		if err != nil {
+			return err
+		}
+		// Each overlay filters credential names again. Preserve a non-hosted
+		// file selector, without undoing the hosted builder's ambient isolation.
+		if !hosted {
+			if path := ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"); path != "" {
+				overrides["BEADS_CREDENTIALS_FILE"] = path
+			}
+		}
+		for _, key := range []string{"GC_BEADS_PING_DOLT_HOST", "GC_BEADS_PING_DOLT_PORT"} {
+			env = removeEnvKey(env, key)
+		}
+		if !proxied && !providerOwnedOpRetires(op) {
+			if err := projectProviderOperatorPassword(overrides, scopeRoot, entry); err != nil {
+				return err
+			}
+		}
+	}
+	env = overlayEnvEntries(env, overrides)
 	return runProviderOwnedOpStrict(parent, timeout, strings.TrimPrefix(provider, "exec:"), env, op)
+}
+
+// projectProviderOperatorPassword lends an operator password only to its exact
+// persisted TCP endpoint. Scope files and endpoint-keyed credentials stay bd's
+// responsibility; transient PID records do not decide lifecycle ownership.
+func projectProviderOperatorPassword(env map[string]string, scopeRoot string, entry providerScopeOwnershipEntry) error {
+	host, port, password := strings.TrimSpace(os.Getenv("GC_DOLT_HOST")), strings.TrimSpace(os.Getenv("GC_DOLT_PORT")), os.Getenv("GC_DOLT_PASSWORD")
+	if host == "" || port == "" || password == "" || strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_DOLT_SERVER_SOCKET")) != "" {
+		return nil
+	}
+	if entry.State == providerScopeInitializing && entry.Intent.Target != "external" {
+		return nil
+	}
+	fs := fsys.OSFS{}
+	path := scopeMetadataJSONPath(scopeRoot)
+	meta, exists, err := contract.LoadMetadataState(fs, path)
+	if err != nil {
+		return err
+	}
+	if !exists || meta.Backend != "dolt" || meta.DoltMode != "server" {
+		return nil
+	}
+	binding, bound, err := contract.ReadPersistedServerBinding(fs, path)
+	if err != nil {
+		return err
+	}
+	if !bound || binding.DoltSocket != "" || !strings.EqualFold(strings.Trim(host, "[]"), strings.Trim(binding.DoltHost, "[]")) || port != binding.DoltPort {
+		return nil
+	}
+	configPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
+	cfg, _, err := contract.ReadConfigState(fs, configPath)
+	if err != nil {
+		return err
+	}
+	if cfg.EndpointOrigin == contract.EndpointOriginManagedCity {
+		return nil
+	}
+	if (cfg.DoltHost != "" && !strings.EqualFold(strings.Trim(cfg.DoltHost, "[]"), strings.Trim(binding.DoltHost, "[]"))) ||
+		(cfg.DoltPort != "" && cfg.DoltPort != binding.DoltPort) || cfg.DoltSocket != "" {
+		// bd still owns normal endpoint resolution; only decline the override.
+		return nil
+	}
+	if managedLocalDoltHost(binding.DoltHost) {
+		disabled, err := contract.ReadAutoStartDisabled(fs, configPath)
+		if err != nil {
+			return err
+		}
+		if !disabled {
+			return nil // A stopped bd-owned local listener must remain recoverable.
+		}
+	}
+	env["BEADS_DOLT_PASSWORD"] = password
+	env["GC_BEADS_PING_DOLT_HOST"] = binding.DoltHost
+	env["GC_BEADS_PING_DOLT_PORT"] = binding.DoltPort
+	return nil
 }
 
 func runProviderOwnedScopesLifecycleOp(cityPath, op string) error {

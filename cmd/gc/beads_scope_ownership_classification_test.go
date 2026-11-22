@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -345,5 +346,297 @@ func TestProviderOwnedProxiedScopeWithoutStoreStillStops(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got != "stop" {
 		t.Fatalf("stop invocations = %q, want %q", got, "stop")
+	}
+}
+
+// A stopped local binding stays bd-owned with or without its transient PID
+// record. Credential isolation must not pin its listener or disable auto-start.
+func TestProviderOwnedLocalRecoveryKeepsBdOwnership(t *testing.T) {
+	for _, tt := range []struct {
+		name, mode, pid string
+	}{
+		{name: "direct no PID", mode: "server"},
+		{name: "direct stale PID", mode: "server", pid: "2147483647\n"},
+		{name: "direct invalid PID", mode: "server", pid: "invalid\n"},
+		{name: "direct unrelated live PID", mode: "server", pid: fmt.Sprintf("%d\n", os.Getpid())},
+		{name: "proxied no PID", mode: "proxied-server"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			city := t.TempDir()
+			bd := filepath.Join(city, "bd-fixture")
+			if err := os.WriteFile(bd, []byte(`#!/bin/sh
+set -eu
+test -z "${BEADS_DOLT_SERVER_HOST:-}"
+test -z "${BEADS_DOLT_SERVER_PORT:-}"
+test -z "${BEADS_DOLT_SERVER_SOCKET:-}"
+test -z "${BEADS_DOLT_AUTO_START:-}"
+printf '%s\n' "$*" >> "$BEADS_DIR/calls"
+`), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(fmt.Sprintf("[workspace]\nname = \"t\"\n[workspace.env]\nBD_BIN = %q\n[beads]\nprovider = \"bd\"\n", bd)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			materializeBuiltinPacksForTest(t, city)
+			writeScopeBeadsMetadata(t, city, fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":%q,"dolt_database":"work"}`, tt.mode))
+			if err := os.MkdirAll(filepath.Join(city, ".beads", "dolt"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for name, content := range map[string]string{
+				"config.yaml":      "dolt:\n  auto-start: true\n  shared-server: false\n",
+				"dolt-server.port": "43123\n",
+			} {
+				if err := os.WriteFile(filepath.Join(city, ".beads", name), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.pid != "" {
+				if err := os.WriteFile(filepath.Join(city, ".beads", "dolt-server.pid"), []byte(tt.pid), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			transport := "direct"
+			if tt.mode == "proxied-server" {
+				transport = "proxied"
+			}
+			if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: transport, Target: "local"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := markProviderScopeOwnershipReady(city, city); err != nil {
+				t.Fatal(err)
+			}
+			before, _, err := providerScopeOwnership(city, city)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, op := range []string{"health", "recover", "stop"} {
+				if err := runProviderOwnedScopeLifecycleOpContext(context.Background(), city, city, op); err != nil {
+					t.Fatalf("%s: %v", op, err)
+				}
+			}
+			data, err := os.ReadFile(filepath.Join(city, ".beads", "calls"))
+			if err != nil || string(data) != "ping\ndolt stop\nping\ndolt stop\n" {
+				t.Fatalf("local lifecycle commands = %q, error = %v", data, err)
+			}
+			after, _, err := providerScopeOwnership(city, city)
+			if err != nil || !reflect.DeepEqual(before, after) || after.State != providerScopeReady {
+				t.Fatalf("local ownership changed: %v", err)
+			}
+		})
+	}
+}
+
+// A ready ownership record can survive a switch to hosted storage. Exercise
+// the health entrypoint so hosted isolation must survive every later overlay.
+func TestProviderOwnedLifecycleHostedCredentialFileIsolation(t *testing.T) {
+	for _, hosted := range []bool{true, false} {
+		t.Run(fmt.Sprintf("hosted=%t", hosted), func(t *testing.T) {
+			city := t.TempDir()
+			rig := filepath.Join(city, "rig")
+			for _, kv := range os.Environ() {
+				key, _, _ := strings.Cut(kv, "=")
+				if (strings.HasPrefix(key, "GC_") && key != "GC_HOME") || strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") {
+					t.Setenv(key, "")
+				}
+			}
+			t.Setenv("HOME", t.TempDir())
+			credentials := filepath.Join(city, "ambient-credentials")
+			t.Setenv("BEADS_CREDENTIALS_FILE", credentials)
+			t.Setenv(registryCredentialProviderEnv, `["/opt/gasworks","credential-provider"]`)
+			if err := os.WriteFile(credentials, []byte("[untrusted.invalid:3307]\npassword=synthetic-only\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			wantFile, wantCommand := credentials, ""
+			if hosted {
+				wantFile = ""
+				wantCommand = stubHostedBeadsCredentialExecutable(t, filepath.Join(city, "gc"))
+			}
+			bd := filepath.Join(city, "bd-fixture")
+			if err := os.WriteFile(bd, []byte(`#!/bin/sh
+set -eu
+test "$#" = 1
+test "$1" = ping
+test "${BEADS_CREDENTIALS_FILE:-}" = "$(/bin/cat "$BEADS_DIR/expected-file")" || { echo 'hosted credential file isolation violated' >&2; exit 1; }
+test "${BEADS_DOLT_CREDENTIAL_COMMAND:-}" = "$(/bin/cat "$BEADS_DIR/expected-command")" || { echo 'selected credential bridge lost' >&2; exit 1; }
+printf 'ping\n' >> "$BEADS_DIR/calls"
+`), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg := "[workspace]\nname = \"credential-isolation\"\n"
+			if hosted {
+				cfg = hostedBeadsCityTOML("https://beads.example/workspaces/infra", "gasworks", false)
+			}
+			cfg += fmt.Sprintf("\n[workspace.env]\nBD_BIN = %q\n[beads]\nprovider = \"bd\"\n[[rigs]]\nname = \"rig\"\npath = %q\n", bd, rig)
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			materializeBuiltinPacksForTest(t, city)
+			for _, scope := range []string{city, rig} {
+				writeCompleteStorageBinding(t, scope)
+				for name, value := range map[string]string{"expected-file": wantFile, "expected-command": wantCommand} {
+					if err := os.WriteFile(filepath.Join(scope, ".beads", name), []byte(value), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := persistProviderScopeOwnership(city, scope, providerScopeIntent{Transport: "direct", Target: "external"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := markProviderScopeOwnershipReady(city, scope); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := healthBeadsProvider(city); err != nil {
+				t.Fatal(err)
+			}
+			for _, scope := range []string{city, rig} {
+				data, err := os.ReadFile(filepath.Join(scope, ".beads", "calls"))
+				if err != nil || string(data) != "ping\n" {
+					t.Fatalf("scope %s did not reach bd once: %v", scope, err)
+				}
+			}
+		})
+	}
+}
+
+// Exercise endpoint-matched operator auth through the Go adapter and real
+// provider script. Otherwise bd must receive no password and use its own chain.
+func TestProviderOwnedLifecycleScopedOperatorAuth(t *testing.T) {
+	for _, tt := range []struct {
+		name, host, port, password, socket   string
+		configHost, configPort, configSocket string
+		local, defaultCredentials            bool
+	}{
+		{name: "scope local credentials"},
+		{name: "scope selects its own credential file", defaultCredentials: true},
+		{name: "operator password without selectors", password: "operator-synthetic"},
+		{name: "operator host only", host: "city-db.invalid", password: "operator-synthetic"},
+		{name: "operator port only", port: "3307", password: "operator-synthetic"},
+		{name: "operator matches city", host: "city-db.invalid", port: "3307", password: "operator-synthetic"},
+		{name: "operator mismatches port", host: "rig-db.invalid", port: "4406", password: "operator-synthetic"},
+		{name: "operator matches rig", host: "rig-db.invalid", port: "3308", password: "operator-synthetic"},
+		{name: "socket selector does not lend TCP password", host: "city-db.invalid", port: "3307", password: "operator-synthetic", socket: "/unused/socket"},
+		{name: "bd local policy does not pin a stopped listener", host: "127.0.0.1", port: "3307", password: "operator-synthetic", local: true},
+		{name: "config host mismatch uses normal ping", host: "city-db.invalid", port: "3307", password: "operator-synthetic", configHost: "other-db.invalid"},
+		{name: "config port mismatch uses normal ping", host: "city-db.invalid", port: "3307", password: "operator-synthetic", configPort: "3309"},
+		{name: "config socket mismatch uses normal ping", host: "city-db.invalid", port: "3307", password: "operator-synthetic", configSocket: "/unused/config.sock"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			city := t.TempDir()
+			rig := filepath.Join(city, "rig")
+			for _, kv := range os.Environ() {
+				key, _, _ := strings.Cut(kv, "=")
+				if (strings.HasPrefix(key, "GC_") && key != "GC_HOME") || strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") {
+					t.Setenv(key, "")
+				}
+			}
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("GC_DOLT_HOST", tt.host)
+			t.Setenv("GC_DOLT_PORT", tt.port)
+			t.Setenv("GC_DOLT_PASSWORD", tt.password)
+			t.Setenv("BEADS_DOLT_PASSWORD", "ambient-synthetic")
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", tt.socket)
+			t.Setenv("GC_BEADS_PING_DOLT_HOST", "untrusted.invalid")
+			t.Setenv("GC_BEADS_PING_DOLT_PORT", "4406")
+			credentials := filepath.Join(city, "credentials")
+			t.Setenv("BEADS_CREDENTIALS_FILE", credentials)
+			if tt.defaultCredentials {
+				t.Setenv("BEADS_CREDENTIALS_FILE", "")
+			}
+			if err := os.WriteFile(credentials, []byte("[city-db.invalid:3307]\npassword=city-file-synthetic\n[rig-db.invalid:3308]\npassword=rig-file-synthetic\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			bd := filepath.Join(city, "bd-fixture")
+			// Do not emulate bd's resolver. Assert the final bd environment,
+			// leaving .env/endpoint-file resolution to bd's own chain.
+			if err := os.WriteFile(bd, []byte(`#!/bin/sh
+set -eu
+test "$#" = 1
+test "$1" = ping
+expected=$("/bin/cat" "$BEADS_DIR/expected-password")
+test "${BEADS_DOLT_PASSWORD:-}" = "$expected" || { echo 'wrong scoped operator password' >&2; exit 1; }
+if [ -n "$expected" ]; then
+    test "$BEADS_DOLT_SERVER_HOST:$BEADS_DOLT_SERVER_PORT" = "$("/bin/cat" "$BEADS_DIR/expected-endpoint")"
+    test -z "${BEADS_DOLT_SERVER_SOCKET:-}"
+    test "$BEADS_DOLT_AUTO_START" = 0
+    test "$BEADS_DOLT_SHARED_SERVER" = 0
+else
+    test -z "${BEADS_DOLT_SERVER_HOST:-}"
+    test -z "${BEADS_DOLT_SERVER_PORT:-}"
+    test -z "${BEADS_DOLT_SERVER_SOCKET:-}"
+    test -z "${BEADS_DOLT_AUTO_START:-}"
+fi
+expected_file=$("/bin/cat" "$BEADS_DIR/expected-file")
+if [ -n "$expected_file" ]; then
+    test "${BEADS_CREDENTIALS_FILE:-}" = "$expected_file" || { echo 'scoped credential file selector lost' >&2; exit 1; }
+    test -f "$BEADS_CREDENTIALS_FILE"
+else
+    test -z "${BEADS_CREDENTIALS_FILE+x}" || { echo 'empty projection blocks bd scope credential source' >&2; exit 1; }
+fi
+printf 'ping\n' >> "$BEADS_DIR/calls"
+`), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cityConfig := fmt.Sprintf("[workspace]\nname = \"t\"\n[workspace.env]\nBD_BIN = %q\n[beads]\nprovider = \"bd\"\n[[rigs]]\nname = \"rig\"\npath = %q\n", bd, rig)
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			materializeBuiltinPacksForTest(t, city)
+			for i, scope := range []string{city, rig} {
+				host, port, database, user, origin := "city-db.invalid", 3307, "city_work", "city_user", "city_canonical"
+				if i == 1 {
+					host, port, database, user, origin = "rig-db.invalid", 3308, "rig_work", "rig_user", "explicit"
+				}
+				if tt.local {
+					host = "127.0.0.1"
+				}
+				writeScopeBeadsMetadata(t, scope, fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":%q,"dolt_server_host":%q,"dolt_server_port":%d,"dolt_server_user":%q}`, database, host, port, user))
+				password, credentialFile := "", credentials
+				if tt.host == host && tt.port == fmt.Sprint(port) && tt.socket == "" && !tt.local && tt.configHost == "" && tt.configPort == "" && tt.configSocket == "" {
+					password = tt.password
+				}
+				if tt.defaultCredentials {
+					credentialFile = ""
+				}
+				configHost, configPort := host, fmt.Sprint(port)
+				if tt.configHost != "" {
+					configHost = tt.configHost
+				}
+				if tt.configPort != "" {
+					configPort = tt.configPort
+				}
+				endpointConfig := fmt.Sprintf("  host: %s\n  port: %s\n", configHost, configPort)
+				if tt.configSocket != "" {
+					endpointConfig = fmt.Sprintf("  socket: %s\n", tt.configSocket)
+				}
+				for name, content := range map[string]string{
+					"config.yaml":       fmt.Sprintf("dolt:\n  mode: server\n%s  auto-start: %t\ngc:\n  endpoint_origin: %s\n  endpoint_status: verified\n", endpointConfig, tt.local, origin),
+					".env":              "BEADS_DOLT_PASSWORD=" + database + "-synthetic\nBEADS_CREDENTIALS_FILE=" + credentials + "\n",
+					"expected-password": password,
+					"expected-file":     credentialFile,
+					"expected-endpoint": fmt.Sprintf("%s:%d", host, port),
+					"dolt-server.port":  "43123\n", // stale local bookkeeping must not redirect an operator password
+					"dolt-server.pid":   "2147483647\n",
+				} {
+					if err := os.WriteFile(filepath.Join(scope, ".beads", name), []byte(content), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := persistProviderScopeOwnership(city, scope, providerScopeIntent{Transport: "direct", Target: "external"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := markProviderScopeOwnershipReady(city, scope); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := runProviderOwnedScopesLifecycleOp(city, "health"); err != nil {
+				t.Fatal(err)
+			}
+			for _, scope := range []string{city, rig} {
+				data, err := os.ReadFile(filepath.Join(scope, ".beads", "calls"))
+				if err != nil || string(data) != "ping\n" {
+					t.Fatalf("scope %s did not reach bd exactly once: %v", scope, err)
+				}
+			}
+		})
 	}
 }
