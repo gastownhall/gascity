@@ -15,6 +15,7 @@ func doctorLiveSessionInfos(cityPath string, cfg *config.City) ([]session.Info, 
 	if err != nil {
 		return nil, err
 	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close of a read-only handle
 	infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		return nil, err
@@ -48,4 +49,55 @@ func doctorLiveSessionNames(cityPath string, cfg *config.City) doctor.LiveSessio
 		}
 		return names, nil
 	}
+}
+
+// doctorSessionRegistry returns the session registry the agent-sessions and
+// orphan-sessions checks read: each open session row's runtime session name,
+// mapped to the configured agent it runs. A row whose agent or named session
+// is no longer configured is left out: the controller drains that runtime as
+// orphaned, so the row must not account for it. It lists the rows the way gc session list
+// and the controller do (the type+label union) from the session
+// coordination-class store, so a city that relocates its sessions class is
+// read from that binding. Each call reads afresh, and a failed or partial read
+// is returned as an error, so a check that cannot read the registry says so
+// instead of calling every bead-named session orphaned.
+func doctorSessionRegistry(cityPath string, cfg *config.City) doctor.SessionRegistry {
+	return func() (map[string]string, error) {
+		store, err := openSessionProviderStore(cityPath)
+		if err != nil {
+			return nil, err
+		}
+		defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close of a read-only handle
+		infos, err := cliSessionFrontDoor(store, cfg, cityPath).ListAll(session.ListAllOptions{})
+		if err != nil {
+			return nil, err
+		}
+		names := make(map[string]string, len(infos))
+		for _, info := range infos {
+			if info.Closed || info.SessionName == "" {
+				continue
+			}
+			template := resolvedSessionTemplateInfo(info, cfg)
+			if findSessionAgentByTemplate(cfg, template) == nil || removedNamedSessionInfo(info, cfg) {
+				continue
+			}
+			names[info.SessionName] = template
+		}
+		return names, nil
+	}
+}
+
+// removedNamedSessionInfo reports whether info is a named-session row whose
+// declaration is no longer configured, by the predicate the controller retires
+// such rows with: its identity resolves to no named session and is not a bare
+// leaf two configured named sessions still claim. Its template may still be
+// configured, so the agent filter alone keeps the row.
+func removedNamedSessionInfo(info session.Info, cfg *config.City) bool {
+	if !isNamedSessionInfo(info) {
+		return false
+	}
+	identity := namedSessionIdentityInfo(info)
+	return identity != "" &&
+		config.FindNamedSession(cfg, identity) == nil &&
+		len(config.NamedSessionBareCandidates(cfg, identity)) < 2
 }

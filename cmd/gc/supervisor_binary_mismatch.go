@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // allowSupervisorMismatch is the --allow-supervisor-mismatch flag shared by
@@ -253,10 +255,7 @@ func supervisorServiceBinary() (string, string) {
 }
 
 func resolveExecutablePath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return resolved
-	}
-	return path
+	return pathutil.NormalizePathForCompare(path)
 }
 
 func knownGCVersion(v string) bool {

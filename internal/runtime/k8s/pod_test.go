@@ -2,6 +2,8 @@ package k8s
 
 import (
 	"encoding/base64"
+	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -300,5 +302,39 @@ func TestBuildPod_InitContainerOnlyWaitsForStaging(t *testing.T) {
 	}
 	if !strings.Contains(cmd, ".gc-ready") {
 		t.Errorf("init container should wait for staging; got: %s", cmd)
+	}
+}
+
+func TestProjectedPodWorkDirMatchesStagingNormalization(t *testing.T) {
+	tests := []struct {
+		name    string
+		city    string
+		workDir string
+		want    string
+	}{
+		{name: "clean nested", city: "/city", workDir: "/city/rig", want: "/workspace/rig"},
+		{name: "trailing-slash city", city: "/city/", workDir: "/city/rig", want: "/workspace/rig"},
+		{name: "unclean workdir", city: "/city", workDir: "/city/rigs/../rig/", want: "/workspace/rig"},
+		{name: "city root", city: "/city", workDir: "/city/", want: "/workspace"},
+		{name: "shared-prefix sibling", city: "/city", workDir: "/city-backup/rig", want: "/workspace"},
+		{name: "outside city", city: "/city", workDir: "/other", want: "/workspace"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := projectedPodWorkDir(runtime.Config{
+				Env:     map[string]string{"GC_CITY": tc.city},
+				WorkDir: tc.workDir,
+			})
+			if got != tc.want {
+				t.Fatalf("projectedPodWorkDir(GC_CITY=%q, WorkDir=%q) = %q, want %q", tc.city, tc.workDir, got, tc.want)
+			}
+			staged := "/workspace"
+			if rel, ok := relativeCityWorkDir(tc.city, tc.workDir); ok {
+				staged = path.Join("/workspace", filepath.ToSlash(rel))
+			}
+			if got != staged {
+				t.Fatalf("projectedPodWorkDir = %q, staging destination = %q; launch and staging disagree", got, staged)
+			}
+		})
 	}
 }

@@ -27,12 +27,19 @@ func (f FullFake) NoteInterrupt(name string) {
 }
 
 // SetStartupNudgeHandback sets the startup nudge a FullFake hands back for
-// session name ([Fake.StartupNudgeHandbacks]) under the fake's lock.
+// session name ([Fake.StartupNudgeHandbacks]) under the fake's lock, to be
+// sent as soon as the session is ready.
 func (f *Fake) SetStartupNudgeHandback(name, nudge string) {
+	f.SetStartupNudgeHandbackAt(name, StartupNudge{Text: nudge})
+}
+
+// SetStartupNudgeHandbackAt is SetStartupNudgeHandback for a nudge carrying
+// its earliest send time.
+func (f *Fake) SetStartupNudgeHandbackAt(name string, nudge StartupNudge) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.StartupNudgeHandbacks == nil {
-		f.StartupNudgeHandbacks = map[string]string{}
+		f.StartupNudgeHandbacks = map[string]StartupNudge{}
 	}
 	f.StartupNudgeHandbacks[name] = nudge
 }
@@ -40,7 +47,7 @@ func (f *Fake) SetStartupNudgeHandback(name, nudge string) {
 // TakeStartupNudgeHandback implements [StartupNudgeHandbackProvider]: name's
 // handed-back startup nudge ([Fake.StartupNudgeHandbacks]), once. It records
 // no call: a start's caller takes it after every Start.
-func (f FullFake) TakeStartupNudgeHandback(name string) (string, bool) {
+func (f FullFake) TakeStartupNudgeHandback(name string) (StartupNudge, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	nudge, ok := f.StartupNudgeHandbacks[name]

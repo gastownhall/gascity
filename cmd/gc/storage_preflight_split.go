@@ -250,6 +250,24 @@ func estimateSplitDisk(allJSON, movedJSON int64, exact string, rigs int64) split
 	}
 }
 
+// splitManagedDoltDataDirBytes sizes the managed Dolt data directory the
+// split's snapshot copies when the city's work store lives in it; inDolt is
+// false for any other store.
+func splitManagedDoltDataDirBytes(cityPath string) (size int64, inDolt bool, err error) {
+	if !snapshotScopeInManagedDolt(cityPath, cityPath) {
+		return 0, false, nil
+	}
+	dataDir, err := snapshotManagedDoltDataDir(cityPath)
+	if err != nil {
+		return 0, true, err
+	}
+	size, err = snapshotTreeBytes(dataDir)
+	if err != nil {
+		return 0, true, err
+	}
+	return size, true, nil
+}
+
 // splitRigSnapshotBytes sizes the rigs in the snapshot Ready names (`gc
 // storage snapshot --work --rigs`): every rig snapshotRigs selects, sized as
 // the work store is, from the rows the census read from its store. The chain
@@ -332,6 +350,11 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 	split := splitHypotheticalConfig(request.Cfg)
 	fmt.Fprintf(stdout, "the [storage] block the split writes (hypothetical; nothing is written):\n\n%s\n", splitStorageTOML(split)) //nolint:errcheck // best-effort stdout
 	preflightPass(stdout, "config", "city.toml authors no [storage]; the split writes the block above")
+	if err := splitVersionFloorRefusal(request.CityPath, splitMinGCVersion); err != nil {
+		block("gc version", err)
+		return splitPreflightFooter(stdout, request, summary), summary
+	}
+	splitPreflightSessionGC(request, stdout, block)
 
 	// The reconciler, before and after: an existing city moves its storage
 	// and its reconciler in one step. A mode the split city would refuse to
@@ -407,7 +430,74 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 		summary.RigImports = summary.RigImports || (r.Plan != nil && len(r.Plan.Move)+len(r.Plan.Retained) > 0)
 	}
 	summary.Estimate = splitPreflightEstimate(request, found, lane, diag, known, stdout, block)
+	splitPreflightReverseNote(found.plan, found.writesPayloads, cityRestoreUnrestorable(request), stdout)
 	return splitPreflightFooter(stdout, request, summary), summary
+}
+
+// splitPreflightSessionGC holds the gc an agent session runs (B10) against
+// the floor the split leaves (splitLeavesFloor): agents running a gc below it
+// do not read the split. The rehearsal blocks on it, so the split refuses
+// with nothing written instead of finding it in the storage-split doctor
+// check its last phase runs, once the city is cut over and its rigs
+// imported. A gc it cannot run or whose version does not compare is a note,
+// as in that check.
+func splitPreflightSessionGC(request storageOperatorRequest, stdout io.Writer, block func(string, error)) {
+	const check = "gc version"
+	floor, err := splitLeavesFloor(request.CityPath, splitMinGCVersion)
+	if err != nil {
+		block(check, err)
+		return
+	}
+	path, running, err := minGCVersionPathProbe(request.Cfg)
+	switch {
+	case err != nil:
+		preflightNote(stdout, check, fmt.Sprintf("the gc on the session PATH could not report its version (%v), so it is not compared with the floor %s", err, floor))
+	case path == "":
+		preflightNote(stdout, check, "no gc on the session PATH to compare with the floor "+floor)
+	case gcVersionBelowFloor(running, floor):
+		block(check, fmt.Errorf("the gc on the session PATH (%s) is %s, below the floor %s the split leaves: agents running it do not read the split. Upgrade it, or take it off the PATH agent sessions get, and run this again", path, running, floor))
+	default:
+		if _, ok := gcVersionCore(running); !ok {
+			preflightNote(stdout, check, fmt.Sprintf("the gc on the session PATH (%s) reports version %s, which cannot be compared with the floor %s", path, running, floor))
+			return
+		}
+		preflightPass(stdout, check, fmt.Sprintf("the gc on the session PATH (%s) is %s, at or above the floor %s", path, running, floor))
+	}
+}
+
+// splitPayloadEdges counts the edges the copy carries into the binding that
+// hold a payload.
+func splitPayloadEdges(plan infraCopyPlan) int {
+	n := 0
+	for pair := range plan.copied {
+		if _, ok := plan.payloads[pair]; ok {
+			n++
+		}
+	}
+	return n
+}
+
+// splitPreflightReverseNote says whether the way back after the split,
+// `gc storage migrate --to-work`, could carry every edge the copy carries. It
+// carries an edge's payload only into a work store whose lane writes one
+// (writesPayloads), and refuses each edge that holds one on any other. The
+// city restore of the split's snapshot is then the way back, when the
+// snapshot copies every store of the city so the restore puts it back;
+// unrestorable says why it does not (cityRestoreUnrestorable), and then no
+// automated way back carries those edges.
+func splitPreflightReverseNote(plan infraCopyPlan, writesPayloads bool, unrestorable string, stdout io.Writer) {
+	n := splitPayloadEdges(plan)
+	refused := fmt.Sprintf("%d edge(s) the copy carries hold a payload, and this work store's lane has no edge-payload writer, so `gc storage migrate --to-work` would refuse them", n)
+	switch {
+	case n == 0:
+		preflightPass(stdout, "way back", "no edge the copy carries holds a payload, so `gc storage migrate --to-work` can carry every one back")
+	case writesPayloads:
+		preflightPass(stdout, "way back", fmt.Sprintf("%d edge(s) the copy carries hold a payload; this work store's lane writes payloads, so `gc storage migrate --to-work` can carry them back", n))
+	case unrestorable == "":
+		preflightNote(stdout, "way back", fmt.Sprintf("%s; the way back is the city restore of the split's snapshot (`gc storage snapshot restore <id> --city --%s`)", refused, storageFleetStoppedFlag))
+	default:
+		preflightNote(stdout, "way back", refused+"; and "+unrestorable+", so no automated way back carries them")
+	}
 }
 
 // splitConvergedRefusal is the refusal for an unsplit city whose split
@@ -602,9 +692,22 @@ func splitPreflightEstimate(request storageOperatorRequest, found preflightFindi
 		}
 	}
 	rigs, rigRows := splitRigSnapshotBytes(request, found.rigs)
+	// A work store in the city's managed Dolt is copied whole: the server's
+	// data directory, with every database it serves (snapshotDoltDataDir).
+	dataDirBytes, inDolt, sizeErr := splitManagedDoltDataDirBytes(request.CityPath)
+	if inDolt && sizeErr == nil {
+		exact = snapshotMethodDoltDataDir
+	}
 	est.disk = estimateSplitDisk(allJSON, splitJSONBytes(moved), exact, rigs)
+	est.disk.snapshot += dataDirBytes
 	dir := filepath.Join(request.CityPath, ".gc")
 	snapshot := fmt.Sprintf("the work store's %s rows' JSONL, exact copy: %s", strconv.Itoa(len(found.all)), est.disk.exact)
+	switch {
+	case inDolt && sizeErr != nil:
+		snapshot += fmt.Sprintf(", though the snapshot copies the managed Dolt's data directory, which could not be sized (%v), so this estimate leaves it out", sizeErr)
+	case inDolt:
+		snapshot = fmt.Sprintf("the work store's %s rows' JSONL, exact copy: the managed Dolt's data directory, %s", strconv.Itoa(len(found.all)), splitBytes(dataDirBytes))
+	}
 	if rigRows > 0 {
 		snapshot += fmt.Sprintf("; the rigs' %d rows' JSONL and exact copies, %s", rigRows, splitBytes(est.disk.rigs))
 	}

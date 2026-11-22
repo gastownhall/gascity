@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -25,12 +26,12 @@ func writeScript(t *testing.T, stateDir string, bodies map[string]string) string
 }
 
 // writeGolden writes the full golden reference: the host-filesystem
-// variant, which declares every token the catalog gates, so it exercises
-// every requirement.
+// variant with input outcomes and the launch op, which declares every token
+// the catalog gates, so it exercises every requirement.
 func writeGolden(t *testing.T) string {
 	t.Helper()
 	state := t.TempDir()
-	return writeScript(t, state, reference.InputOutcomeBodies(reference.HostFSBodies()))
+	return writeScript(t, state, reference.LaunchBodies(reference.InputOutcomeBodies(reference.HostFSBodies())))
 }
 
 func runGolden(t *testing.T, path string) Report {
@@ -84,8 +85,8 @@ func TestRunCoversEveryCatalogRequirementInOrder(t *testing.T) {
 
 func TestGoldenReferenceIsFullyConformant(t *testing.T) {
 	for name, bodies := range map[string]map[string]string{
-		"tmux": reference.InputOutcomeBodies(reference.HostFSBodies()),
-		"ops":  reference.InputOutcomeBodies(reference.NonTmuxHostFSBodies()),
+		"tmux": reference.LaunchBodies(reference.InputOutcomeBodies(reference.HostFSBodies())),
+		"ops":  reference.LaunchBodies(reference.InputOutcomeBodies(reference.NonTmuxHostFSBodies())),
 	} {
 		t.Run(name, func(t *testing.T) {
 			state := t.TempDir()
@@ -350,6 +351,43 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { echo '{"outcome":"gone"}'; head -c 70000 /dev/zero | tr '\0' '\n'; exit 80; };`), "exits 80 with a gone line padded past gc's 64 KiB stdout cap"},
 		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { printf '{"outcome":"gone","detail":"%s"}\n' "$(head -c 1025 /dev/zero | tr '\0' x)"; exit 80; };`), "exits 80 with a detail past 1 KiB"},
 	}
+	// observationMutants edit Bodies, the default-carrier golden, which
+	// declares report-activity; opsObservationMutants edit NonTmuxBodies,
+	// whose carrier.ops makes peek and clear-scrollback mandatory.
+	observationMutants := []mutant{
+		{ReqObservationPeek, edit("peek", `cat "$box/cmd0"; echo`, `echo "cannot read the screen" >&2; exit 1`), "peek of a running box fails"},
+		{ReqObservationPeek, set("peek", `exit 2`), "the v2 profile is declared but peek is not implemented"},
+		{ReqObservationLastActivity, set("get-last-activity", `echo "no activity store" >&2; exit 1`), "get-last-activity of a running box fails"},
+		{ReqObservationLastActivity, set("get-last-activity", `echo yesterday`), "get-last-activity answers a time gc cannot parse"},
+		{ReqObservationLastActivity, set("get-last-activity", `exit 2`), "report-activity declared but get-last-activity is not implemented"},
+		{ReqObservationClearScrollback, set("clear-scrollback", `echo "cannot clear" >&2; exit 1`), "clear-scrollback of a running box fails"},
+		{ReqObservationCopyTo, set("copy-to", `[ -e "$3" ] || { echo "no such source" >&2; exit 1; }`), "copy-to of a missing source fails"},
+	}
+	opsObservationMutants := []mutant{
+		{ReqObservationPeek, set("peek", `exit 2`), "carrier.ops declared but peek is not implemented"},
+		{ReqObservationClearScrollback, set("clear-scrollback", `exit 2`), "carrier.ops declared but clear-scrollback is not implemented"},
+	}
+	// launchMutants edit the launch golden over input outcomes, whose peek
+	// shows what was typed, the base of the provision group's proc.launch
+	// requirements.
+	l := reference.LaunchBodies(reference.InputOutcomeBodies(reference.Bodies()))
+	ledit := func(op, from, to string) map[string]string {
+		if !strings.Contains(l[op], from) {
+			t.Fatalf("mutant of %s: %q is not in the launch golden body", op, from)
+		}
+		return map[string]string{op: strings.Replace(l[op], from, to, 1)}
+	}
+	launchMutants := []mutant{
+		{ReqProvisionLaunchStartsAgent, set("launch", `cat >/dev/null`), "launch starts no agent"},
+		{ReqProvisionLaunchStartsAgent, ledit("launch", `mv "$box.tmp" "$box"`, `mv "$box.tmp" "$box"; printf %s "$cfg" | sed -n 's/.*"nudge":"\([^"]*\)".*/\1/p' >> "$box/typed"`), "launch types the config's nudge"},
+		{ReqProvisionLaunchStartsAgent, set("launch", `cat >/dev/null; exit 2`), "declared launch is not implemented"},
+		{ReqProvisionLaunchReplaces, ledit("launch", `reap "$box"; rm -rf "$box"; fi; `, `exit 0; fi; `), "launch keeps the old agent"},
+		{ReqProvisionLaunchFreshOnly, ledit("launch", `if [ -n "$fresh" ]; then exit 73; fi; reap`, `if [ -n "$fresh" ]; then exit 0; fi; reap`), "a fresh_only launch on a running agent exits 0"},
+		{ReqProvisionLaunchFreshOnly, ledit("launch", `if [ -d "$box" ]; then if [ -n "$fresh" ]; then exit 73; fi; reap`, `if [ -n "$fresh" ]; then exit 73; fi; if [ -d "$box" ]; then reap`), "every fresh_only launch exits 73, even into a box with no agent"},
+		{ReqProvisionLaunchFreshOnly, set("provision", `case "$(cat)" in *'"fresh_only":true'*) exit 1 ;; esac`), "provision refuses the fresh_only config gc's fresh start sends it"},
+		{ReqProvisionLaunchIdentity, ledit("set-meta", `v=$(cat); `, `v=$(cat); case "$3" in GC_*) exit 0 ;; esac; `), "set-meta drops the launch identity keys gc writes"},
+		{ReqProvisionLaunchIdentity, set("get-meta", `exit 2`), "get-meta is not implemented on a pack that un-welds start"},
+	}
 	// atMostOnceMutants edit the at-most-once golden, whose written nudge
 	// answers delivered_unobserved and keeps no send record.
 	typedLine := `printf '%s\n' "$txt" >> "$box/typed"; `
@@ -380,6 +418,17 @@ func TestEveryRequirementIsGated(t *testing.T) {
 	}
 	for _, m := range inputMutants {
 		all = append(all, gated{m, inputBase})
+	}
+	for _, m := range observationMutants {
+		all = append(all, gated{m, reference.Bodies})
+	}
+	for _, m := range opsObservationMutants {
+		all = append(all, gated{m, reference.NonTmuxBodies})
+	}
+	for _, m := range launchMutants {
+		all = append(all, gated{m, func() map[string]string {
+			return reference.LaunchBodies(reference.InputOutcomeBodies(reference.Bodies()))
+		}})
 	}
 	for _, m := range atMostOnceMutants {
 		all = append(all, gated{m, func() map[string]string {
@@ -415,8 +464,151 @@ func TestEveryRequirementIsGated(t *testing.T) {
 				t.Errorf("mutant (%s) did not fail %s: status=%s detail=%q — the check is vacuous",
 					m.whatItBreaks, m.target, res.Status, res.Detail)
 			}
-			if report.V2Ready {
+			req := requirementFor(t, m.target)
+			switch {
+			case advisory(req.Group) && !report.V2Ready:
+				t.Errorf("mutant (%s) failed advisory %s yet reads not v2-ready (failed %v): an advisory requirement does not gate v2_ready", m.whatItBreaks, m.target, report.V2Failed)
+			case !advisory(req.Group) && report.V2Ready:
 				t.Errorf("mutant (%s) failed %s yet reads v2-ready", m.whatItBreaks, m.target)
+			}
+		})
+	}
+}
+
+// requirementFor returns the catalog requirement code names.
+func requirementFor(t *testing.T, code Code) Requirement {
+	t.Helper()
+	for _, req := range catalog {
+		if req.Code == code {
+			return req
+		}
+	}
+	t.Fatalf("no catalog requirement %s", code)
+	return Requirement{}
+}
+
+// The observation group lands advisory: a pack that fails one of its
+// requirements sees the FAIL, marked advisory, but stays v2-ready, and the
+// code stays out of v2_failed until the group is made strict.
+// Kills: an observation FAIL that takes a pack off v2_ready, and an advisory
+// FAIL that is not reported.
+func TestObservationFailLeavesV2Ready(t *testing.T) {
+	bodies := reference.InputOutcomeBodies(reference.HostFSBodies())
+	bodies["copy-to"] = `[ -e "$3" ] || { echo "no such source" >&2; exit 1; }`
+	report := runGolden(t, writeScript(t, t.TempDir(), bodies))
+	res := resultFor(t, report, ReqObservationCopyTo)
+	if res.Status != StatusFail {
+		t.Fatalf("%s = %s (%s), want FAIL", res.Code, res.Status, res.Detail)
+	}
+	if !strings.Contains(res.Detail, "advisory") {
+		t.Errorf("%s detail %q does not say the FAIL is advisory", res.Code, res.Detail)
+	}
+	for _, other := range report.Results {
+		if other.Code != ReqObservationCopyTo && other.Status == StatusFail {
+			t.Errorf("only %s should fail, but %s failed: %s", ReqObservationCopyTo, other.Code, other.Detail)
+		}
+	}
+	if !report.V2Ready || len(report.V2Failed) != 0 {
+		t.Errorf("v2-ready %v, failed %v; want v2-ready with nothing in v2_failed", report.V2Ready, report.V2Failed)
+	}
+	if report.Failed() || report.RequiredFailed() != 0 {
+		t.Errorf("Failed() = %v, RequiredFailed() = %d for an advisory-only FAIL; want a passing run", report.Failed(), report.RequiredFailed())
+	}
+}
+
+// The advisory set is exactly RPP-OBSERVATION-001..004: the group lands
+// non-gating while every other requirement keeps gating v2_ready.
+func TestAdvisorySetIsTheObservationGroup(t *testing.T) {
+	want := map[Code]bool{
+		"RPP-OBSERVATION-001": true,
+		"RPP-OBSERVATION-002": true,
+		"RPP-OBSERVATION-003": true,
+		"RPP-OBSERVATION-004": true,
+	}
+	got := map[Code]bool{}
+	for _, req := range catalog {
+		if advisory(req.Group) {
+			got[req.Code] = true
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("advisory set = %v, want %v", got, want)
+	}
+}
+
+// Kills an observation group whose gate is wrong: an op that answers exit 2
+// SKIPs unless a declared token makes it mandatory (carrier.ops or the v2
+// profile for peek, as gc's exec provider holds it; carrier.ops for
+// clear-scrollback, input-outcome for clear-scrollback, report-activity
+// for get-last-activity); copy-to is optional under every handshake; and
+// a present op is held to its answer whatever is declared.
+func TestObservationGroupGatesOnWhatIsDeclared(t *testing.T) {
+	ops := []string{"peek", "get-last-activity", "clear-scrollback", "copy-to"}
+	for _, tc := range []struct {
+		name   string
+		caps   []string
+		absent bool
+		want   map[Code]Status
+	}{
+		{
+			name:   "nothing declared, ops absent",
+			caps:   nil,
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusSkip, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusSkip, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name: "nothing declared, ops present",
+			caps: nil,
+			want: map[Code]Status{ReqObservationPeek: StatusPass, ReqObservationLastActivity: StatusPass, ReqObservationClearScrollback: StatusPass, ReqObservationCopyTo: StatusPass},
+		},
+		{
+			name:   "carrier.ops declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityCarrierOps},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusFail, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusFail, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name:   "input-outcome declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityInputOutcome},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusSkip, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusFail, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name:   "v2 profile declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityObserveV1, runtime.ProtocolCapabilityReportAttachment},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusFail, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusSkip, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name:   "observe.v1 alone declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityObserveV1},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusSkip, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusSkip, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name:   "report-activity declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityReportActivity},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusSkip, ReqObservationLastActivity: StatusFail, ReqObservationClearScrollback: StatusSkip, ReqObservationCopyTo: StatusSkip},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bodies := reference.Bodies()
+			caps := make([]string, len(tc.caps))
+			for i, c := range tc.caps {
+				caps[i] = `"` + c + `"`
+			}
+			bodies["protocol"] = `echo '{"version":0,"capabilities":[` + strings.Join(caps, ",") + `]}'`
+			if tc.absent {
+				for _, op := range ops {
+					delete(bodies, op)
+				}
+			}
+			report := runGolden(t, writeScript(t, t.TempDir(), bodies))
+			for code, want := range tc.want {
+				if res := resultFor(t, report, code); res.Status != want {
+					t.Errorf("%s = %s (%s), want %s", code, res.Status, res.Detail, want)
+				}
 			}
 		})
 	}
@@ -644,6 +836,20 @@ func TestPortedGroupsGateOnWhatIsDeclared(t *testing.T) {
 			want:     func(Result) Status { return StatusSkip },
 		},
 		{
+			// A pack that un-welds start binds its first turn to the
+			// launch identity gc stores with set-meta, so its metadata
+			// ops are required as under observe.v1.
+			name:     "un-welded start, optional ops absent",
+			protocol: `{"version":0,"capabilities":["proc.provision","proc.launch","conformance-faults"]}`,
+			absent:   []string{"set-meta", "get-meta", "remove-meta", "list-running", "process-alive"},
+			want: func(req Result) Status {
+				if req.Group == GroupMeta {
+					return StatusFail
+				}
+				return StatusSkip
+			},
+		},
+		{
 			name:     "observe.v1, optional ops absent",
 			protocol: `{"version":0,"capabilities":["observe.v1","conformance-faults"]}`,
 			absent:   []string{"set-meta", "get-meta", "remove-meta", "list-running", "process-alive"},
@@ -684,15 +890,24 @@ func TestPortedGroupsGateOnWhatIsDeclared(t *testing.T) {
 
 // Kills a token group that runs for a script not declaring its token: the
 // golden answers every op the group sends, so only the gate can make the
-// group skip, and an undeclared pack is never sent the token's op.
+// group skip, and an undeclared pack is never sent the token's op. The
+// provision group's proc.launch requirements are gated on their own: the
+// provision op itself is optional, not a token.
 func TestEveryTokenGroupSkipsWhenUndeclared(t *testing.T) {
-	for group, token := range map[Group]string{
-		GroupServer: runtime.ProtocolCapabilityServerLifecycle,
-		GroupInput:  runtime.ProtocolCapabilityInputOutcome,
+	launchCodes := map[Code]bool{ReqProvisionLaunchStartsAgent: true, ReqProvisionLaunchReplaces: true, ReqProvisionLaunchFreshOnly: true, ReqProvisionLaunchIdentity: true}
+	for _, tc := range []struct {
+		group Group
+		token string
+		codes map[Code]bool // nil: the whole group
+	}{
+		{GroupServer, runtime.ProtocolCapabilityServerLifecycle, nil},
+		{GroupInput, runtime.ProtocolCapabilityInputOutcome, nil},
+		{GroupProvision, runtime.ProtocolCapabilityLaunch, launchCodes},
 	} {
-		bodies := reference.InputOutcomeBodies(reference.Bodies())
+		group, token := tc.group, tc.token
+		bodies := reference.LaunchBodies(reference.InputOutcomeBodies(reference.Bodies()))
 		var caps []string
-		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle, runtime.ProtocolCapabilityInputOutcome} {
+		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle, runtime.ProtocolCapabilityInputOutcome, runtime.ProtocolCapabilityProvision, runtime.ProtocolCapabilityLaunch} {
 			if c != token {
 				caps = append(caps, `"`+c+`"`)
 			}
@@ -704,7 +919,7 @@ func TestEveryTokenGroupSkipsWhenUndeclared(t *testing.T) {
 		}
 		seen := 0
 		for _, res := range report.Results {
-			if res.Group != group {
+			if res.Group != group || (tc.codes != nil && !tc.codes[res.Code]) {
 				continue
 			}
 			seen++
@@ -821,9 +1036,10 @@ func TestFSHostGroupSkipsWhenUndeclared(t *testing.T) {
 	}
 }
 
-// The base golden, which declares neither fs.host nor input-outcome, fails
-// nothing and skips exactly the fshost and input groups: each token adds a
-// promise, it changes no other. The same holds under either carrier.
+// The base golden, which declares neither fs.host, input-outcome nor
+// proc.launch, fails nothing and skips exactly the fshost and input groups
+// and the proc.launch requirements: each token adds a promise, it changes no
+// other. The same holds under either carrier.
 func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
 	for name, bodies := range map[string]map[string]string{"tmux": reference.Bodies(), "ops": reference.NonTmuxBodies()} {
 		t.Run(name, func(t *testing.T) {
@@ -833,8 +1049,8 @@ func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
 				switch {
 				case res.Status == StatusFail:
 					t.Errorf("base golden failed %s: %s", res.Code, res.Detail)
-				case (res.Status == StatusSkip) != (res.Group == GroupFSHost || res.Group == GroupInput):
-					t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost and input groups", res.Code, res.Group, res.Status)
+				case (res.Status == StatusSkip) != (res.Group == GroupFSHost || res.Group == GroupInput || launchRequirement(res.Code)):
+					t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost and input groups and proc.launch", res.Code, res.Group, res.Status)
 				}
 			}
 			if name == "ops" {
@@ -843,5 +1059,307 @@ func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// cityOnlyGolden wraps the full golden in reference.CityOnlyScript and
+// returns the wrapper and its ops log.
+func cityOnlyGolden(t *testing.T) (path, opsLog string) {
+	t.Helper()
+	return cityOnly(t, writeGolden(t))
+}
+
+// cityOnly wraps the executable at runtimePath in reference.CityOnlyScript
+// and returns the wrapper and its ops log.
+func cityOnly(t *testing.T, runtimePath string) (path, opsLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	opsLog = filepath.Join(dir, "ops.log")
+	path = filepath.Join(dir, "city-only")
+	if err := os.WriteFile(path, []byte(reference.CityOnlyScript(runtimePath, opsLog)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path, opsLog
+}
+
+// cityGroups selects the groups whose ops name cities, inject faults or
+// send server-stop: the ones a run's city reaches.
+func cityGroups(c Code) bool {
+	for _, req := range catalog {
+		if req.Code == c {
+			switch req.Group {
+			case GroupProtocol, GroupLifecycle, GroupObserve, GroupInput, GroupServer:
+				return true
+			}
+			return false
+		}
+	}
+	return false
+}
+
+// Kills a run outside a city that runs its ops in no city: a runtime that
+// serves only a city, as gc's own ops always name one, refuses them and
+// fails the run. Run outside a city, every op names a city, the run's own a
+// private one, which is gone after the run, and whose server is ended by a
+// final server-stop; a probe's own city and its faults still reach the
+// runtime.
+func TestRunOutsideACityRunsInAPrivateCity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	path, opsLog := cityOnlyGolden(t)
+
+	report, err := run(context.Background(), path, Options{}, cityGroups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := 0
+	for _, res := range report.Results {
+		if !cityGroups(res.Code) {
+			continue
+		}
+		selected++
+		if res.Status != StatusPass {
+			t.Errorf("%s (%s) = %s (%s), want PASS", res.Code, res.Group, res.Status, res.Detail)
+		}
+	}
+	if selected == 0 {
+		t.Fatal("no requirement selected")
+	}
+	ops, err := reference.ReadCityOps(opsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || ops[0].Args != "protocol" || ops[0].City == "" {
+		t.Fatalf("first op = %v, want protocol in a city", ops[:min(1, len(ops))])
+	}
+	private := ops[0].City
+	var last string
+	for _, op := range ops {
+		if op.City == "" {
+			t.Errorf("op %q named no city", op.Args)
+		}
+		if op.City == private {
+			last = op.Args
+		}
+	}
+	if _, err := os.Stat(private); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the run: stat err = %v, want it removed", private, err)
+	}
+	if last != "server-stop" {
+		t.Errorf("last op in the private city = %q, want server-stop: the run left its server running", last)
+	}
+}
+
+// Kills a run from a city that leaves that city: with GC_EXEC_CITY_PATH set,
+// the run's ops run there, and it sends the caller's city no server-stop.
+func TestRunFromACityRunsThere(t *testing.T) {
+	path, opsLog := cityOnlyGolden(t)
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+
+	if _, err := run(context.Background(), path, Options{}, cityGroups); err != nil {
+		t.Fatal(err)
+	}
+	ops, err := reference.ReadCityOps(opsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || ops[0].Args != "protocol" || ops[0].City != "/live/city" {
+		t.Fatalf("first op = %v, want protocol in the caller's city /live/city", ops[:min(1, len(ops))])
+	}
+	for _, op := range ops {
+		if op.Args == "server-stop" && op.City == "/live/city" {
+			t.Error("server-stop sent to the caller's city")
+		}
+	}
+}
+
+// readCityOps reads the ops a cityOnly wrapper logged.
+func readCityOps(t *testing.T, opsLog string) []reference.CityOp {
+	t.Helper()
+	ops, err := reference.ReadCityOps(opsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ops
+}
+
+// lastOpIn returns the last op logged in city, empty for none.
+func lastOpIn(ops []reference.CityOp, city string) string {
+	var last string
+	for _, op := range ops {
+		if op.City == city {
+			last = op.Args
+		}
+	}
+	return last
+}
+
+// Kills a run that leaves a server behind in a city a probe made: the
+// city-scope probes' cities (RPP-OBSERVE city scope, RPP-SERVER-004) and the
+// server probes' cities each end with a final server-stop, after their
+// sessions' stops, and are removed, whether the run inherited a city or not.
+func TestRunEndsTheServerOfEveryProbeCity(t *testing.T) {
+	for _, tc := range []struct{ name, cityName, cityPath string }{
+		{"outside a city", "", ""},
+		{"from a city", "live", "/live/city"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, opsLog := cityOnlyGolden(t)
+			t.Setenv("GC_EXEC_CITY_NAME", tc.cityName)
+			t.Setenv("GC_EXEC_CITY_PATH", tc.cityPath)
+
+			report, err := run(context.Background(), path, Options{}, cityGroups)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Warnings) != 0 {
+				t.Errorf("warnings %q, want none from a golden whose server-stop exits 0", report.Warnings)
+			}
+			ops := readCityOps(t, opsLog)
+			if len(ops) == 0 {
+				t.Fatal("no op logged")
+			}
+			runCity := ops[0].City
+			probeCities := map[string]bool{}
+			for _, op := range ops {
+				if op.City != runCity && op.City != "" {
+					probeCities[op.City] = true
+				}
+			}
+			// Two city-scope observe cities, one per server probe and two for
+			// RPP-SERVER-004.
+			if len(probeCities) < 7 {
+				t.Errorf("probe cities = %d, want at least 7: %v", len(probeCities), probeCities)
+			}
+			for city := range probeCities {
+				if last := lastOpIn(ops, city); last != "server-stop" {
+					t.Errorf("last op in probe city %s = %q, want the final server-stop", city, last)
+				}
+				if _, err := os.Stat(city); !os.IsNotExist(err) {
+					t.Errorf("probe city %s after the run: stat err = %v, want it removed", city, err)
+				}
+			}
+		})
+	}
+}
+
+// cancelOnFirstStart wraps the executable at runtimePath in
+// reference.OnFirstOp, calling cancel once its first start begins.
+func cancelOnFirstStart(t *testing.T, cancel context.CancelFunc, runtimePath string) string {
+	t.Helper()
+	wrapper, release, err := reference.OnFirstOp(runtimePath, "start", t.TempDir(), cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	return wrapper
+}
+
+// Kills an interrupted run outside a city that removes its private city
+// without the final server-stop, leaving the server a session brought up
+// there keyed to a path that no longer exists: the stop must run on a
+// cancellation-detached context.
+func TestCanceledBareRunSendsServerStopToItsPrivateCity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel, as a Ctrl-C would, once a session has started.
+	path, opsLog := cityOnly(t, cancelOnFirstStart(t, cancel, writeGolden(t)))
+
+	report, err := Run(ctx, path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		t.Fatalf("handshake %+v does not declare server-lifecycle; the test needs it", report.Protocol)
+	}
+	ops := readCityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].City == "" {
+		t.Fatalf("ops = %v, want protocol first, in a private city", ops)
+	}
+	private := ops[0].City
+	if last := lastOpIn(ops, private); last != "server-stop" {
+		t.Errorf("last op in the private city of the canceled run = %q, want server-stop", last)
+	}
+	if _, err := os.Stat(private); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the canceled run: stat err = %v, want it removed", private, err)
+	}
+}
+
+// Kills a run that swallows a final server-stop that fails before it
+// removes a private city: the server may still run, keyed to a deleted
+// path, so the run reports it as a warning naming the city.
+func TestFailedFinalServerStopIsAWarning(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	bodies := reference.InputOutcomeBodies(reference.HostFSBodies())
+	bodies["server-stop"] = `echo "server still up" >&2; exit 1`
+	path, opsLog := cityOnly(t, writeScript(t, t.TempDir(), bodies))
+
+	report, err := run(context.Background(), path, Options{}, func(c Code) bool { return c == ReqServerStopIdempotent })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := readCityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].City == "" {
+		t.Fatalf("ops = %v, want protocol first, in a private city", ops)
+	}
+	want := map[string]bool{ops[0].City: false}
+	for _, op := range ops {
+		if op.City != ops[0].City {
+			want[op.City] = false
+		}
+	}
+	for _, w := range report.Warnings {
+		for city := range want {
+			if strings.Contains(w, "server-stop in private city "+city+" ") && strings.Contains(w, "server still up") {
+				want[city] = true
+			}
+		}
+	}
+	for city, warned := range want {
+		if !warned {
+			t.Errorf("warnings %q: none names city %s and server-stop's stderr", report.Warnings, city)
+		}
+	}
+	if len(want) != 2 || len(report.Warnings) != 2 {
+		t.Errorf("cities %v, warnings %q: want 2 of each, the run's city and the probe's", want, report.Warnings)
+	}
+}
+
+// launchRequirement reports a provision-group requirement gated on
+// proc.launch, or on an un-welded start, which a golden without proc.launch
+// does not declare.
+func launchRequirement(code Code) bool {
+	switch code {
+	case ReqProvisionLaunchStartsAgent, ReqProvisionLaunchReplaces, ReqProvisionLaunchFreshOnly, ReqProvisionLaunchIdentity:
+		return true
+	default:
+		return false
+	}
+}
+
+// Kills an RPP-PROVISION-001 that still requires an exec-able box from a
+// pack declaring proc.launch without proc.exec, which gc never launches over
+// exec, and one that waives the exec check for a pack declaring proc.exec as
+// well: the launch golden passes with its exec gone, and keeps the check
+// when it declares proc.exec.
+func TestProvisionExecCheckFollowsTheLaunchPath(t *testing.T) {
+	for _, tc := range []struct {
+		extraCap string
+		want     Status
+	}{{"", StatusPass}, {`,"proc.exec"`, StatusFail}} {
+		bodies := reference.LaunchBodies(reference.Bodies())
+		bodies["exec"] = `cat >/dev/null; exit 2`
+		bodies["protocol"] = `echo '{"version":0,"capabilities":["proc.provision","proc.launch"` + tc.extraCap + `]}'`
+		report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res := resultFor(t, report, ReqProvisionBoxWithoutAgent); res.Status != tc.want {
+			t.Errorf("proc.launch%s with no exec: %s = %s (%s), want %s", tc.extraCap, res.Code, res.Status, res.Detail, tc.want)
+		}
 	}
 }

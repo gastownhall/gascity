@@ -157,6 +157,8 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
+	processScanState
+
 	dops                    drainOps
 	ct                      crashTracker
 	it                      idleTracker
@@ -715,6 +717,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		lastProviderName = v
 	}
+	if lastProviderName == "" {
+		lastProviderName = sessionProviderRuntimeDefault
+	}
 
 	cityRoot := cr.cityPath
 	if cityRoot == "" && cr.tomlPath != "" {
@@ -741,6 +746,18 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// after its import are named once, here, and never in a CLI process. A
 	// rig suspended now is censused when it resumes (censusResumedRigs).
 	cr.startRigResidueCensus(ctx)
+
+	// The verdict the boot gate already reached is this city's first
+	// containment lease: storage-verdict (controller.go) can answer it
+	// immediately, without waiting for the first recheck tick below. Route
+	// registration (registerResidencyRoutes) always runs before run() is
+	// called, so servedContainmentLease can already find these routes by
+	// the time this publishes. Boot itself carries no basis for a genesis
+	// city — recordInfraGenesis never calls confirmInfraContainment — so
+	// there is nothing to publish for one; its first recheck tick publishes
+	// instead (boot-check-design.md §4.6, "Genesis: the first tick
+	// publishes").
+	publishBootContainmentLease(cr.storageRoutes)
 
 	// The containment check the boot gate ran, again every
 	// strandRecheckInterval, read-only and report-only: a write that strands
@@ -2881,6 +2898,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		newProviderName = v
 	}
+	if newProviderName == "" {
+		newProviderName = sessionProviderRuntimeDefault
+	}
 	compositionChanged := sessionTransportCompositionChanged(cr.cfg, nextCfg, newProviderName)
 	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) || compositionChanged {
 		// Build through the transport resolver, not the bare registry, so a city
@@ -2919,6 +2939,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 		if cityRuntimeReloadLifecycleRetryDelay > 0 {
 			time.Sleep(cityRuntimeReloadLifecycleRetryDelay)
 		}
+	}
+	// The lifecycle migrates only a database it is bootstrapping. Every other
+	// one whose schema differs from the linked beads library's goes back to
+	// the operator in the reply, with the command that migrates it, whether
+	// or not the lifecycle succeeded.
+	for _, notice := range bdSchemaNoticesFor(cityRoot, nextCfg) {
+		appendWarning(notice)
 	}
 	if lifecycleErr != nil {
 		err := fmt.Errorf("config reload: %w", lifecycleErr)
@@ -3042,6 +3069,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// accepts, so the tick loop never runs a config the API rejected. On
 	// rejection nothing below runs: the order dispatcher is neither staged
 	// nor installed, so the lane keeps the controller's generation.
+	// Scope the provider's process-table scan before the provider is
+	// published; the refresh reads the outgoing config, so it runs first.
+	cr.refreshProcessTableScan(nextSp, cr.cfg, nextCfg)
 	if !cr.publishRuntimeConfig(nextCfg, nextSp, nextDops, result.Revision) {
 		return rejectSuperseded("during runtime publication")
 	}
@@ -3471,13 +3501,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	if poolDesired == nil {
 		phaseStart = time.Now()
 		openInfos := sessionBeads.OpenInfos()
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
 		poolDecisionTime := time.Now()
 		parked = parkSeatsForResult(cr.cfg, openInfos, result, poolDecisionTime.UTC())
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-				cr.cfg, poolWorkBeads, openInfos, result.ScaleCheckCounts, nil, poolDecisionTime, parked, trace)),
+				cr.cfg, poolWorkBeads, readyAssignedFlagsForBeads(result.ReadyAssigned, poolWorkBeads, poolWorkRefs), openInfos, result.ScaleCheckCounts, nil, poolDecisionTime, parked, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -4421,7 +4451,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	filteredRows := filterReconcileRowsByName(updated, reconcileNames)
 	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
-	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
+	poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
 	poolDecisionTime := time.Now()
 	// The pass's park verdicts, decided once: the pool counts and the
 	// reconciler's hold read the same set.
@@ -4429,7 +4459,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
+			filteredCfg, poolWorkBeads, readyAssignedFlagsForBeads(wfcResult.ReadyAssigned, poolWorkBeads, poolWorkRefs), openInfos, wfcResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		filteredSnap,
 		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
@@ -4847,12 +4877,12 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			openSessionInfos = sessionBeads.OpenInfos()
 		}
 		subPhaseStart := trace.demandNow()
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
+		poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 		poolDecisionTime := time.Now()
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, nil, poolDecisionTime,
+				cr.cfg, poolWorkBeads, readyAssignedFlagsForBeads(result.ReadyAssigned, poolWorkBeads, poolWorkRefs), openSessionInfos, result.ScaleCheckCounts, nil, poolDecisionTime,
 				parkSeatsForResult(cr.cfg, openSessionInfos, result, poolDecisionTime.UTC()), trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),

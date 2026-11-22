@@ -687,6 +687,38 @@ func writeNamedSessionJSONL(t *testing.T, searchBase, workDir, fileName string, 
 	}
 }
 
+// writeNamedSessionJSONLAtomic writes the session transcript the way a writer
+// that finishes a file before publishing it does: a temp file in the same
+// directory, then a rename onto fileName. Use it for a first write that a live
+// stream may be looking for, so the stream sees either no file or the whole
+// file, never a created-but-empty one. Do not use it to rewrite a file a
+// stream already holds open: the rename leaves that stream reading the old
+// inode.
+func writeNamedSessionJSONLAtomic(t *testing.T, searchBase, workDir, fileName string, lines ...string) {
+	t.Helper()
+	dir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmp, err := os.CreateTemp(dir, "."+fileName+".tmp-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmp.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		_ = tmp.Close()
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp.Name(), filepath.Join(dir, fileName)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type syncResponseRecorder struct {
 	*httptest.ResponseRecorder
 	mu sync.Mutex

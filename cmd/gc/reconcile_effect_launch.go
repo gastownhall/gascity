@@ -352,9 +352,10 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack-startFailureSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), undo: in.undo, relaunched: in.relaunched, tp: in.tp, prepared: prepared}
 	stop()
-	// A startup nudge the session's program held back behind a dialog
-	// (program_status = "on", row A20) is queued, never typed or failed.
-	if err := queueStartupNudgeHandback(in.w.CityPath, launchCityConfig(in.w), leaf, launchHandbackRow(in), name, out.err == nil, c.start.clock.Now()); err != nil && c.start.stderr != nil {
+	// A startup nudge the runtime handed back (one held behind a dialog
+	// under program_status = "on", row A20, or an un-welded exec launch's
+	// first turn) is queued, never typed or failed.
+	if err := queueStartupNudgeHandback(in.w.CityPath, launchCityConfig(in.w), leaf, launchHandbackRow(in), name, prepared.cfg.Env[runtime.InstanceTokenEnv], out.err == nil, c.start.clock.Now()); err != nil && c.start.stderr != nil {
 		fmt.Fprintf(c.start.stderr, "v2 start %s: %v\n", in.row.ID, err) //nolint:errcheck // best-effort stderr
 	}
 	// The commit lands on a runtime alive with the PreWake token whatever the

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -930,8 +931,41 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 // provider claims as a live runtime it does not list (LiveUnlisted: a pane of
 // its socket on a server it cannot reach) is not an orphan: the start refuses
 // with ErrRuntimeUnavailable naming the pid, terminating nothing, not even a
-// reparented sibling, and starting nothing.
+// reparented sibling, and starting nothing. The claim wins over the detached
+// user-service fence (SESSION-START-028): a claimed root in a foreign service
+// cgroup still refuses the start, and an unclaimed foreign service and an
+// ordinary orphan ahead of it in the results are not terminated either.
 func TestStartRefusesLiveUnlistedRoot(t *testing.T) {
+	for _, fixture := range []struct {
+		name    string
+		cgroups map[int]string
+	}{
+		{name: "plain"},
+		{name: "service cgroup", cgroups: map[int]string{
+			1236: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/devserver.service",
+			1235: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-9.scope",
+			1234: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/agent-host.service",
+		}},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			root := t.TempDir()
+			for pid, cgroup := range fixture.cgroups {
+				dir := filepath.Join(root, strconv.Itoa(pid))
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(cgroup+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			proctable.SetScanRootForTesting(t, root)
+			testStartRefusesLiveUnlistedRoot(t, len(fixture.cgroups) > 0)
+		})
+	}
+}
+
+func testStartRefusesLiveUnlistedRoot(t *testing.T, withService bool) {
+	t.Helper()
 	for _, tc := range []struct {
 		name  string
 		start func(mgr *Manager, info Info) error
@@ -948,6 +982,9 @@ func TestStartRefusesLiveUnlistedRoot(t *testing.T) {
 			sp.results = []runtime.LiveRuntime{
 				{PID: 1235, PPID: 1},
 				{PID: 1234, PPID: 4200, ParentIsProviderInfrastructure: true, LiveUnlisted: true},
+			}
+			if withService {
+				sp.results = append([]runtime.LiveRuntime{{PID: 1236, PPID: 1}}, sp.results...)
 			}
 
 			err := tc.start(mgr, info)

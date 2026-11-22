@@ -2386,6 +2386,57 @@ func TestReconcileSessionBeads_DrainAckDeferredAssignedWorkSuppressesEvent(t *te
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckStatusBlockedAssignedWorkSuppressesEvent pins
+// the status-blocked half of the provably-non-claimable suppression: an OPEN
+// bead assigned to the seat whose bd status is "blocked" (read back as "open",
+// the raw status kept in SourceStatus) is excluded from the seat's ready query
+// whatever its dependencies, so the seat drained correctly and the event must
+// NOT fire. It carries no blocks edge, which is what made it settle as claimable
+// before.
+func TestReconcileSessionBeads_DrainAckStatusBlockedAssignedWorkSuppressesEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		work, err := store.Create(beads.Bead{Title: "parked phase", Type: "task", Status: "open", SourceStatus: "blocked", Assignee: sessionID})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		// Guard the premise on a real read: the store must hand the recorded
+		// status back, or this test would quietly cover the unmarked shape.
+		readBack, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("Get(work): %v", err)
+		}
+		if readBack.SourceStatus != "blocked" {
+			t.Fatalf("work.SourceStatus = %q, want %q — this test is only meaningful when the store reports bd's blocked status", readBack.SourceStatus, "blocked")
+		}
+	})
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — an open row bd parked as blocked is not claimable whatever its dependencies, so the seat drained correctly",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestOpenAssignedRowStatusBlockedMakesNoDependencyRead pins that the
+// status-blocked cause is proof and not a question: a dependency read that would
+// fail is never made, so the row suppresses without an error (the fail-closed
+// polarity of the unproven cause is unchanged, see
+// TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError), and
+// the same row without the recorded status still reads the dependencies.
+func TestOpenAssignedRowStatusBlockedMakesNoDependencyRead(t *testing.T) {
+	store := depListErrStore{Store: beads.NewMemStore(), err: errors.New("dependency read failed")}
+	now := time.Now()
+
+	parked := beads.Bead{ID: "wb-1", Status: "open", SourceStatus: "blocked", Type: "task"}
+	suppress, err := openAssignedRowProvablyNonClaimable(store, parked, now)
+	if err != nil || !suppress {
+		t.Fatalf("status-blocked row: suppress, err = %v, %v; want true, nil (no dependency read)", suppress, err)
+	}
+
+	unmarked := beads.Bead{ID: "wb-2", Status: "open", Type: "task"}
+	if _, err := openAssignedRowProvablyNonClaimable(store, unmarked, now); err == nil {
+		t.Fatal("unmarked row: err = nil, want the dependency read error (an unproven row still settles against dependencies)")
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckOpenStepAssignedWorkEmitsEvent is the MAJOR
 // regression guard. An execution STEP bead can be assigned straight to a seat at
 // dispatch (control.go stamps step.Assignee) and sit OPEN before the agent claims
@@ -4757,7 +4808,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
-		env.cfg, failingStore, testSeatWork(env.city, env.cfg, failingStore, nil), env.sessionInfo(session.ID), "worker", false,
+		env.city, env.cfg, failingStore, testSeatWork(env.city, env.cfg, failingStore, nil), env.sessionInfo(session.ID), "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -4784,7 +4835,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
-		env.cfg, racingStore, testSeatWork(env.city, env.cfg, racingStore, nil), env.sessionInfo(session.ID), "worker", true,
+		env.city, env.cfg, racingStore, testSeatWork(env.city, env.cfg, racingStore, nil), env.sessionInfo(session.ID), "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -7113,6 +7164,131 @@ func TestReconcileSessionBeads_DefersPendingCreateRecoveryWhileStartInFlight(t *
 	}
 }
 
+func TestReconcileSessionBeads_DefersPendingCreateRecoveryWhileStartInFlightAfterAwakeHeal(t *testing.T) {
+	for _, state := range []string{"awake", "creating"} {
+		t.Run(state, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			env.desiredState["worker"] = TemplateParams{
+				Command:      "new-cmd",
+				SessionName:  "worker",
+				TemplateName: "worker",
+			}
+			session := env.createSessionBead("worker", "worker")
+			// The heal pass already projected the alive runtime to awake, or
+			// the row is still creating: both are the claimed start's faces
+			// while the async provider.Start is inside its startup timeout.
+			env.setSessionMetadata(&session, map[string]string{
+				"command":              "old-cmd",
+				"state":                state,
+				"pending_create_claim": "true",
+				"last_woke_at":         env.clk.Now().Add(-45 * time.Second).UTC().Format(time.RFC3339),
+			})
+			if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "old-cmd"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", session.Metadata["instance_token"]); err != nil {
+				t.Fatal(err)
+			}
+
+			woken := env.reconcile([]beads.Bead{session})
+			if woken != 0 {
+				t.Fatalf("woken = %d, want 0 while pending create start is still in flight", woken)
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Metadata["started_config_hash"] != "" {
+				t.Fatalf("started_config_hash = %q, want empty until async start commits", got.Metadata["started_config_hash"])
+			}
+			if got.Metadata["pending_create_claim"] != "true" {
+				t.Fatalf("pending_create_claim = %q, want preserved while async start is in flight", got.Metadata["pending_create_claim"])
+			}
+			switch got.Metadata["state"] {
+			case state, "awake":
+			default:
+				t.Fatalf("state = %q, want %s or awake while async start is in flight", got.Metadata["state"], state)
+			}
+		})
+	}
+}
+
+func TestReconcileSessionBeads_AwakePendingCreateRecoveredOnceStartWindowLapses(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", StartCommand: "test-cmd", MaxActiveSessions: intPtr(1)}},
+	}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	// The heal projected the alive runtime to awake during its start, but the
+	// in-flight window has since lapsed: recovery must commit, not defer.
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "awake",
+		"pending_create_claim": "true",
+		"last_woke_at":         env.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+	})
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", session.Metadata["instance_token"]); err != nil {
+		t.Fatal(err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared once the start window lapses", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["started_config_hash"] == "" {
+		t.Fatal("started_config_hash should be recorded when recovery commits after the start window lapses")
+	}
+}
+
+func TestReconcileSessionBeads_ActivePendingCreateClaimRecoveredInsideStartWindow(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", StartCommand: "test-cmd", MaxActiveSessions: intPtr(1)}},
+	}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	// Only CommitStartedPatch writes active, so a claim on an active row is a
+	// partial commit to repair now, not an in-flight start to defer.
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pending_create_claim": "true",
+	})
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", session.Metadata["instance_token"]); err != nil {
+		t.Fatal(err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared on the tick that sees an active partial commit", got.Metadata["pending_create_claim"])
+	}
+}
+
 func TestReconcileSessionBeads_PendingCreateLeasePreventsOrphanClose(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -8551,6 +8727,70 @@ func TestReconcileSessionBeads_StaleExplicitWakeOnRunningSessionStillIdleDrains(
 	}
 	if ds.reason != "idle" {
 		t.Fatalf("drain reason = %q, want idle", ds.reason)
+	}
+}
+
+// An explicit wake recorded on a rig's named session while the rig is
+// suspended waits for `gc rig resume`: `gc session wake` reports that the
+// session will not start and leaves the wake pending, and the controller does
+// not try to start it. The session's agent is a scope="rig" agent with no dir,
+// whose bare name ("worker") carries none of its rig's suspension; the
+// rig-stamped copy the session was built from does. Kills an explicit-wake
+// arm that read the bare agent: it woke the session every tick, the start
+// refused the suspended rig, and each refusal counted as a wake failure,
+// clearing the conversation key and quarantining the session at the fifth.
+func TestReconcileSessionBeads_ExplicitWakeOnSuspendedRigWaitsForDirlessRigAgent(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	const identity = "rig-a/worker"
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Rigs:          []config.Rig{{Name: "rig-a", Path: filepath.Join(env.city, "rig-a"), SuspendedOnStart: true}},
+		Agents:        []config.Agent{{Name: "worker", Scope: "rig", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand", Scope: "rig", Dir: "rig-a"}},
+	}
+	name := config.NamedSessionRuntimeName(env.cfg.EffectiveCityName(), env.cfg.Workspace, identity)
+	session := env.createSessionBead(name, identity)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "on_demand",
+		"wake_request":               string(sessionpkg.WakeCauseExplicit),
+		"wake_requested_at":          env.clk.Now().UTC().Format(time.RFC3339),
+		"session_key":                "conversation-1",
+		"started_config_hash":        "config-1",
+	})
+
+	// Seven ticks, 30s apart: the old arm reached its fifth wake failure,
+	// and the quarantine, on the sixth.
+	for tick := 1; tick <= 7; tick++ {
+		current, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("tick %d: Get(session): %v", tick, err)
+		}
+		env.reconcile([]beads.Bead{current})
+		env.clk.Advance(30 * time.Second)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if attempts := got.Metadata["wake_attempts"]; attempts != "" && attempts != "0" {
+		t.Errorf("wake_attempts = %q, want no wake failure: the controller tried to start a session on a suspended rig; stderr=%q", attempts, env.stderr.String())
+	}
+	if until := got.Metadata["quarantined_until"]; until != "" {
+		t.Errorf("quarantined_until = %q, want no quarantine", until)
+	}
+	if key := got.Metadata["session_key"]; key != "conversation-1" {
+		t.Errorf("session_key = %q, want the conversation kept for the resume", key)
+	}
+	if wake := got.Metadata["wake_request"]; wake != string(sessionpkg.WakeCauseExplicit) {
+		t.Errorf("wake_request = %q, want the wake still pending for `gc rig resume`", wake)
+	}
+	for _, call := range env.sp.SnapshotCalls() {
+		if call.Method == "Start" {
+			t.Errorf("runtime Start(%s) on a suspended rig", call.Name)
+		}
 	}
 }
 
@@ -13726,7 +13966,7 @@ func TestReconcileSessionBeads_FreshAlwaysNamedWithPoolDemandMaterializesNamedDe
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3)},
+			{Name: "mayor", StartCommand: "true", ScaleCheck: printCountCommand(1), MaxActiveSessions: intPtr(3)},
 		},
 		NamedSessions: []config.NamedSession{
 			{Template: "mayor", Mode: "always"},
@@ -13765,7 +14005,7 @@ func TestReconcileSessionBeads_ExistingAlwaysNamedStillAllowsSameTemplatePoolDem
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3)},
+			{Name: "mayor", StartCommand: "true", ScaleCheck: printCountCommand(1), MaxActiveSessions: intPtr(3)},
 		},
 		NamedSessions: []config.NamedSession{
 			{Template: "mayor", Mode: "always"},
@@ -14298,7 +14538,7 @@ func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderAFreshBeadScop
 					Name:              "worker",
 					StartCommand:      "true",
 					MaxActiveSessions: intPtr(3),
-					ScaleCheck:        "printf 1",
+					ScaleCheck:        printCountCommand(1),
 				}},
 			}
 
@@ -14409,7 +14649,7 @@ func poolTeardownHoldCity() *config.City {
 			Name:              "claude",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 }

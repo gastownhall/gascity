@@ -189,8 +189,10 @@ func startControllerSocket(
 // "lane:<conversation>[:<row id>[,<row id>...]]" (a conversation-lane
 // doorbell naming the journal rows to refresh, replying ok, "ok, rows
 // waiting for a retry: <n>", no-host or refused <reason>; laneReplyPoked
-// reads the reply), and "lane-status" (the conversation-lane
-// host's status, for doctor).
+// reads the reply), "lane-status" (the conversation-lane
+// host's status, for doctor), and "storage-verdict" (this process's live
+// containment lease for cityPath, or no reply at all when none is
+// registered or none has been captured yet; #9237 follow-up).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
@@ -263,6 +265,18 @@ func handleControllerConn(
 			writeJSONLine(conn, wake.v2PassStatus(time.Now()))
 		case line == ledgerFeedStatusCommand:
 			writeJSONLine(conn, ledgerFeedStatusFor(cityPath, time.Now()))
+		case line == storageVerdictCommand:
+			// Slice 1 (#9237 follow-up): the controller's own containment
+			// lease, keyed by canonical city path like ledgerFeedStatusFor
+			// above. No routes registered for cityPath (an older controller
+			// would not have reached this case at all, and a process mid-boot
+			// before registerResidencyRoutes runs looks the same) or no
+			// definitive verdict captured yet both reply with nothing, same
+			// as an unrecognized command: the one-shot caller (slice 2) takes
+			// that as "take the full check", never as a refusal.
+			if lease, ok := servedContainmentLease(cityPath); ok {
+				writeJSONLine(conn, lease.wire(time.Now()))
+			}
 		case strings.HasPrefix(line, laneSocketPrefix):
 			conn.Write([]byte(laneSocketReply(cityPath, line[len(laneSocketPrefix):]) + "\n")) //nolint:errcheck // best-effort reply
 		case line == laneStatusCommand:
@@ -512,6 +526,10 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 	writeJSONLine(conn, finalReply)
 }
 
+// convergeReplyTimeout bounds how long handleConvergeSocketCmd waits for the
+// event loop to reply to an enqueued convergence request. Tests override it.
+var convergeReplyTimeout = 60 * time.Second
+
 // handleConvergeSocketCmd parses a convergence JSON request, enqueues it
 // to the event loop, and writes the reply back to the connection.
 func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceRequest) {
@@ -521,6 +539,7 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 		return
 	}
 	req.replyCh = make(chan convergenceReply, 1)
+	req.canceled = &atomic.Bool{}
 	// Send to event loop with a timeout to prevent hanging if the loop is stuck.
 	select {
 	case ch <- req:
@@ -532,7 +551,12 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 	select {
 	case reply := <-req.replyCh:
 		writeJSONLine(conn, reply)
-	case <-time.After(60 * time.Second):
+	case <-time.After(convergeReplyTimeout):
+		// Mark the request abandoned so the event loop skips it instead of
+		// running it behind this caller's back once its tick ends — the
+		// enqueued copy shares this pointer, so the Store is visible to
+		// whichever goroutine dequeues it (gastownhall/gascity#8387).
+		req.canceled.Store(true)
 		writeJSONLine(conn, convergenceReply{Error: "controller did not respond in time"})
 	}
 }

@@ -160,8 +160,8 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	// instead of passing KEY=, so namespace isolation remains real to children.
 	// The parent env is read through execenv.Environ so a native beads store
 	// open projecting its scope's BEADS_* variables cannot leak into the session.
-	// It is read before p.mu: execenv.Environ waits out an in-flight open, and
-	// the provider's other calls must not wait with it.
+	// It is read before p.mu, so the provider's other calls never wait on the
+	// read; execenv.Environ itself never waits for an open's projection window.
 	env := execenv.Environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))
@@ -1116,9 +1116,11 @@ func (p *Provider) stopBySocketAt(name string, euid int) error {
 const stopSocketReplyMargin = 2 * time.Second
 
 // stopSocketTimeout bounds a cross-process stop request: the owner replies only
-// after its stop grace and the post-SIGKILL reap grace have both run out.
+// after its stop grace and the post-SIGKILL reap grace have both run out, plus
+// however long its SIGTERM and SIGKILL spend retrying an EPERM from a member
+// that is still exiting.
 func stopSocketTimeout() time.Duration {
-	return sessionStopGrace + runtime.ManagedProcessReapGrace + stopSocketReplyMargin
+	return sessionStopGrace + runtime.ManagedProcessReapGrace + processgroup.ManagedStopSignalRetryBudget + stopSocketReplyMargin
 }
 
 // --- In-memory process helpers ---

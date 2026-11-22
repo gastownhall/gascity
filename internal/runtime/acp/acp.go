@@ -75,9 +75,11 @@ func (c *Config) stopGrace() time.Duration {
 }
 
 // stopSocketTimeout bounds a cross-process stop request: the owner replies
-// only after its stop grace and the post-SIGKILL reap grace have both run out.
+// only after its stop grace and the post-SIGKILL reap grace have both run out,
+// plus however long its SIGTERM and SIGKILL spend retrying an EPERM from a
+// member that is still exiting.
 func (c *Config) stopSocketTimeout() time.Duration {
-	return c.stopGrace() + runtime.ManagedProcessReapGrace + stopSocketReplyMargin
+	return c.stopGrace() + runtime.ManagedProcessReapGrace + processgroup.ManagedStopSignalRetryBudget + stopSocketReplyMargin
 }
 
 func (c *Config) outputBufferLines() int {
@@ -168,11 +170,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// withhold inherited variables, as they do for the other session runtimes.
 	// The parent env is read through execenv.Environ so a native beads store
 	// open projecting its scope's BEADS_* variables cannot leak into the session.
-	// It is read before the lifecycle lock and the startup reservation:
-	// execenv.Environ waits out an in-flight open and cannot be canceled, and
-	// Stop must not wait with it. A Stop during the wait finds no session, as
-	// one before Start does; a canceled ctx, checked again after the wait,
-	// abandons the start instead.
+	// It is read before the lifecycle lock and the startup reservation, so a
+	// Stop during the read finds no session, as one before Start does; a
+	// canceled ctx, checked again after the read, abandons the start instead.
+	// execenv.Environ never waits for an open's projection window, so the read
+	// is short.
 	env := p.environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))

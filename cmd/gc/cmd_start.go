@@ -164,6 +164,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 			fmt.Fprintf(stderr, "on_death %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 			continue
 		}
+		reported := false
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
@@ -172,6 +173,15 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 				continue
 			}
 			cmd = expandAgentCommandTemplate(cityPath, cityName, &instance, cfg.Rigs, "on_death", cmd, stderr)
+			if a.OnDeathIsGenerated() {
+				if reason := generatedHookUnavailable(cmd); reason != "" {
+					if stderr != nil && !reported {
+						fmt.Fprintf(stderr, "on_death %s: not run: %s\n", a.QualifiedName(), reason) //nolint:errcheck // best-effort stderr
+					}
+					reported = true
+					continue
+				}
+			}
 			dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 			sn := startupSessionName(cityName, qualifiedInstance, st)
 			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir, Env: agentEnv}
@@ -616,11 +626,20 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 		printDoltAuthorIdentityBlock(stderr, "gc start", status)
 		return 1
 	}
+	if w := startBdBatchFileWarning(cityPath); w != "" {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
 	startStdout := stdout
 	if jsonOut {
 		startStdout = io.Discard
 	}
-	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true); code != 0 {
+	code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true)
+	// The supervisor ran the bead lifecycle, so its notices for databases left
+	// for an operator to migrate went to its log; repeat them here, whether
+	// or not the city came up (a city store the pinned bd cannot open is one
+	// way it does not).
+	printBdSchemaStartWarnings(cityPath, stderr)
+	if code != 0 {
 		return code
 	}
 	warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
@@ -661,6 +680,18 @@ func printRigFederationStartWarnings(cityPath string, stderr io.Writer) {
 	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// printBdSchemaStartWarnings writes gc start's warning for each bd database
+// whose schema differs from the linked beads library's (bdSchemaNotices). A
+// config that does not load says nothing here; the start reports it.
+func printBdSchemaStartWarnings(cityPath string, stderr io.Writer) {
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), io.Discard)
+	if err != nil {
+		return
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	writeBdSchemaNotices(stderr, "gc start: warning: ", bdSchemaNoticesFor(cityPath, cfg))
 }
 
 // resolveStartDir resolves the city directory for start/restart. The
@@ -882,6 +913,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// a plan instead of writing (below).
 	if !dryRunMode {
 		ensureInitArtifacts(cityPath, stderr, "gc start")
+	}
+	if w := startBdBatchFileWarning(cityPath); w != "" {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 
 	// Resolve rig paths and run the full bead store lifecycle:
@@ -1166,7 +1200,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
-	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	poolDecisionTime := time.Now()
 	// The pass's park verdicts, decided once: the pool counts and the
 	// reconciler's hold read the same set.
@@ -1174,7 +1208,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
 		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
+			cfg, poolWorkBeads, readyAssignedFlagsForBeads(dsResult.ReadyAssigned, poolWorkBeads, poolWorkRefs), openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)

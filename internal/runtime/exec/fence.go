@@ -117,13 +117,13 @@ func parseSavedPaneFence(out string) savedPaneFence {
 	return savedPaneFence{digest: digest, pane: parts[1], pid: parts[2]}
 }
 
-// clearInputFence removes the agent pane's fence before a welded start op,
-// for a pack that can fence, so a pack whose start reuses a pane never leaves
-// the previous incarnation's fence naming the new agent. One tmux command
-// list reads the fence it removes, which it returns so that a start op
-// refused by a live box can put it back (restoreInputFence). Best-effort: a
-// box that does not exist yet has no pane to clear, and the publish after
-// the start op is required.
+// clearInputFence removes the agent pane's fence before a welded start op or
+// a launch op, for a pack that can fence, so a pack whose start reuses a pane
+// never leaves the previous incarnation's fence naming the new agent. One
+// tmux command list reads the fence it removes, which it returns so that a
+// start op refused by a live box, or a launch that failed, can put it back
+// (restoreInputFence). Best-effort: a box that does not exist yet has no
+// pane to clear, and the publish after the op is required.
 func (p *Provider) clearInputFence(ctx context.Context, name string) savedPaneFence {
 	if p.InputFencing(name) == runtime.InputFencingNone {
 		return savedPaneFence{}
@@ -139,7 +139,8 @@ func (p *Provider) clearInputFence(ctx context.Context, name string) savedPaneFe
 
 // restoreInputFence puts saved back on the agent pane after a start op that
 // left a live box in place (a collision with the session it was started
-// for), so that session keeps taking fenced input. It sets the fence only
+// for), or a launch that failed (runLaunchOp), so that session keeps taking
+// fenced input. It sets the fence only
 // while the pane is the one saved, with the same root process and no fence
 // of its own: a pane the start op respawned, or one a concurrent start has
 // fenced since, is left alone. A restore that fails leaves the pane
@@ -165,9 +166,10 @@ func (p *Provider) restoreInputFence(ctx context.Context, name string, saved sav
 }
 
 // publishInputFence records the incarnation cfg.Env names on the agent pane
-// a welded start op created, for a pack that can fence. A pane left without
-// its fence would be unproven to every fenced op, so a failed publish fails
-// the start (which puts back the fence of a box it keeps).
+// a welded start op or a launch op created, for a pack that can fence. A
+// pane left without its fence would be unproven to every fenced op, so a
+// failed publish fails the start or the launch (which puts back the fence of
+// a box it keeps).
 func (p *Provider) publishInputFence(ctx context.Context, name string, cfg runtime.Config) error {
 	f, ok := runtime.InputFenceFromEnv(cfg.Env)
 	if !ok || p.InputFencing(name) == runtime.InputFencingNone {

@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 func TestCompactScriptRealDoltRemotePush(t *testing.T) {
@@ -126,53 +129,84 @@ func runDoltForCompactTest(t *testing.T, doltPath, dir string, args ...string) s
 	return string(out)
 }
 
+// compactDoltPortPicker, when set, chooses the port startRealDoltServerForCompactTest
+// starts dolt on in place of probing for a free one. A test sets it to hand the
+// helper a port that another process already holds; it is nil otherwise.
+var compactDoltPortPicker func() (int, error)
+
+func TestStartRealDoltServerForCompactTestOwnsItsPort(t *testing.T) {
+	doltPath, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skipf("dolt not found: %v", err)
+	}
+
+	// Another process holds the first port the helper is handed and accepts
+	// connections on it, as a sibling test's sql-server would.
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("holding a port: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+	go func() {
+		for {
+			conn, err := held.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	heldPort := held.Addr().(*net.TCPAddr).Port
+
+	picks := 0
+	original := compactDoltPortPicker
+	compactDoltPortPicker = func() (int, error) {
+		picks++
+		if picks == 1 {
+			return heldPort, nil
+		}
+		probe, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 0, err
+		}
+		defer func() { _ = probe.Close() }()
+		return probe.Addr().(*net.TCPAddr).Port, nil
+	}
+	t.Cleanup(func() { compactDoltPortPicker = original })
+
+	port, pid := startRealDoltServerForCompactTest(t, doltPath, t.TempDir())
+
+	if port == heldPort {
+		t.Fatalf("helper returned port %d, which another process holds, with dolt pid %d; the server it started cannot hold that port", port, pid)
+	}
+	// Hosts without socket tables cannot say who holds a port; there the
+	// difference from the held port is all this can check.
+	if holder, readable := pidutil.ListenerPID(port, pid); readable && holder != pid {
+		t.Fatalf("port %d is held by pid %d, not by the dolt server the helper started (pid %d)", port, holder, pid)
+	}
+}
+
 func startRealDoltServerForCompactTest(t *testing.T, doltPath, dataDir string) (int, int) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("allocating dolt port: %v", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("closing dolt port probe: %v", err)
-	}
-
-	logPath := filepath.Join(dataDir, "sql-server.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("create dolt server log: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, doltPath, "sql-server",
-		"-H", "127.0.0.1",
-		"-P", fmt.Sprintf("%d", port),
-		"--data-dir", dataDir,
-		"--loglevel", "warning",
-	)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		t.Fatalf("start dolt sql-server: %v", err)
-	}
-
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-	cleanup := func() {
-		cancel()
-		select {
-		case <-waitCh:
-		case <-time.After(10 * time.Second):
-			_ = cmd.Process.Kill()
-			<-waitCh
-		}
-		_ = logFile.Close()
-	}
-	t.Cleanup(cleanup)
-	return port, cmd.Process.Pid
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltPath,
+		Args: func(port int) []string {
+			return []string{
+				"sql-server",
+				"-H", "127.0.0.1",
+				"-P", fmt.Sprintf("%d", port),
+				"--data-dir", dataDir,
+				"--loglevel", "warning",
+			}
+		},
+		LogPath:  filepath.Join(dataDir, "sql-server.log"),
+		PickPort: compactDoltPortPicker,
+	})
+	t.Cleanup(func() {
+		_ = srv.Process.Kill()
+		<-srv.Exited
+	})
+	return srv.Port, srv.PID
 }
 
 func waitForDoltServerQueryForCompactTest(t *testing.T, doltPath string, port int) {

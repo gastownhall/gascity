@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -133,34 +132,26 @@ func TestDeadlineEnvExpiredParentSpawnsNothing(t *testing.T) {
 	}
 }
 
-// Kills: the deadline armed before the env is read. Waiting out an in-flight
-// process-env projection is not the op's time, so the op still sees its
-// whole budget once the projection restores — on a city provider and on one
-// built for no city alike.
-func TestDeadlineEnvExcludesTheProcessEnvProjectionWait(t *testing.T) {
+// Kills: an op that waits out an in-flight process-env projection before it
+// starts. The projection is not the op's time and not its wait: the op starts
+// at once and sees its whole budget, on a city provider and on one built for no
+// city alike.
+func TestDeadlineEnvIsUnaffectedByAProcessEnvProjection(t *testing.T) {
 	script := writeScript(t, t.TempDir(), `echo "$GC_EXEC_DEADLINE_MS"`)
 	t.Run("city", func(t *testing.T) {
-		assertDeadlineExcludesProjection(t, NewProviderForCity(script, "alpha", "/cities/alpha"))
+		assertDeadlineIgnoresProjection(t, NewProviderForCity(script, "alpha", "/cities/alpha"))
 	})
 	t.Run("no city", func(t *testing.T) {
-		assertDeadlineExcludesProjection(t, NewProvider(script))
+		assertDeadlineIgnoresProjection(t, NewProvider(script))
 	})
 }
 
-// assertDeadlineExcludesProjection holds a process-env projection across
-// part of p's op budget and checks the op still sees most of that budget.
-func assertDeadlineExcludesProjection(t *testing.T, p *Provider) {
+// assertDeadlineIgnoresProjection holds a process-env projection while p's op
+// runs and checks the op returns at once with most of its budget.
+func assertDeadlineIgnoresProjection(t *testing.T, p *Provider) {
 	t.Helper()
-	const budget, held = 6 * time.Second, 3 * time.Second
-	execenv.ProcessEnvLock.Lock()
-	projected := true
-	restore := func() {
-		if projected {
-			projected = false
-			execenv.ProcessEnvLock.Unlock()
-		}
-	}
-	t.Cleanup(restore)
+	const budget = 6 * time.Second
+	end := holdProcessEnvProjection(t)
 
 	type result struct {
 		out string
@@ -173,21 +164,15 @@ func assertDeadlineExcludesProjection(t *testing.T, p *Provider) {
 	}()
 	select {
 	case r := <-done:
-		restore()
-		t.Fatalf("op returned (%q, %v) while a process-env projection was in flight", r.out, r.err)
-	case <-time.After(held):
-	}
-	restore()
-	select {
-	case r := <-done:
 		if r.err != nil {
 			t.Fatal(r.err)
 		}
-		// Armed before the read, the op would see budget-held at most.
-		if got := deadlineMS(t, "get-meta", r.out); got <= budget-held/2 || got > budget {
-			t.Errorf("GC_EXEC_DEADLINE_MS = %v after a %v projection; want in (%v, %v]", got, held, budget-held/2, budget)
+		if got := deadlineMS(t, "get-meta", r.out); got <= budget-time.Second || got > budget {
+			t.Errorf("GC_EXEC_DEADLINE_MS = %v during a projection; want in (%v, %v]", got, budget-time.Second, budget)
 		}
 	case <-time.After(testutil.ExecRaceTimeout):
-		t.Fatal("op did not return after the projection restored")
+		end()
+		t.Fatal("op did not start while a process-env projection stood")
 	}
+	end()
 }
