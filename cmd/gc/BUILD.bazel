@@ -2435,6 +2435,7 @@ go_test(
         "session_w4_split_equiv_test.go",
         "session_wake_fairness_pin_test.go",
         "session_wake_refused_test.go",
+        "session_wake_rig_patch_remedy_test.go",
         "session_wake_test.go",
         "session_worktree_prune_info_test.go",
         "session_worktree_prune_test.go",
