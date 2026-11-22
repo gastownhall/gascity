@@ -369,6 +369,7 @@ go_test(
         "handler_beads_partial_test.go",
         "handler_beads_ready_cache_test.go",
         "handler_beads_test.go",
+        "handler_beads_unknown_query_test.go",
         "handler_city_test.go",
         "handler_config_test.go",
         "handler_convoy_dispatch_test.go",
