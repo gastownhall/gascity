@@ -19,16 +19,6 @@ var ciAggregateJobs = map[string]bool{
 	"check":        true,
 }
 
-// ciAdvisoryAllowlist holds real jobs deliberately left out of
-// ci-required's needs closure, each documented in ci.yml itself at the
-// referenced line. Any job in this set must stay unreachable from
-// ci-required -- TestCIRequiredCoversEveryRealJob fails if one becomes
-// reachable, so the allowlist doesn't silently outlive its reason.
-var ciAdvisoryAllowlist = map[string]bool{
-	"contract-radar-bd-head": true, // ci.yml:422 -- a bd-main break must never block a gascity merge
-	"mcp-mail":               true, // ci.yml:1348 -- continue-on-error isolates gascity from upstream mcp_agent_mail API drift
-}
-
 // ciNeedsClosure walks needs: edges from root and returns every job root
 // depends on, directly or transitively, including root itself.
 func ciNeedsClosure(jobs map[string]ciCriticalPathJob, root string) map[string]bool {
@@ -47,11 +37,14 @@ func ciNeedsClosure(jobs map[string]ciCriticalPathJob, root string) map[string]b
 	return seen
 }
 
-// TestCIRequiredCoversEveryRealJob guards against a job silently falling
-// out of the merge gate: a job added to ci.yml that neither feeds
-// ci-required (directly or via an intermediate rollup) nor is documented
-// as advisory can stay green in isolation while never actually blocking
-// a broken merge.
+// TestCIRequiredCoversEveryRealJob: every real job in ci.yml feeds
+// ci-required, directly or via an intermediate rollup. That guards against a
+// job silently falling out of the merge gate (green in isolation, blocking
+// nothing), and it keeps advisory jobs out of the workflow of the required
+// checks: GitHub reports a red Check or CI / required without naming the
+// need that failed, so every failed job of a CI run must be one they wait
+// on. An advisory job (a live probe that must never block a merge) belongs
+// in advisory-probes.yml (TestAdvisoryProbesRunOutsideTheRequiredCIWorkflow).
 func TestCIRequiredCoversEveryRealJob(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 	if len(wf.Jobs) == 0 {
@@ -65,7 +58,7 @@ func TestCIRequiredCoversEveryRealJob(t *testing.T) {
 
 	var uncovered []string
 	for name := range wf.Jobs {
-		if ciAggregateJobs[name] || ciAdvisoryAllowlist[name] {
+		if ciAggregateJobs[name] {
 			continue
 		}
 		if !reachable[name] {
@@ -74,23 +67,9 @@ func TestCIRequiredCoversEveryRealJob(t *testing.T) {
 	}
 	if len(uncovered) > 0 {
 		sort.Strings(uncovered)
-		t.Fatalf("jobs not reachable from %q's transitive needs: closure and not in ciAdvisoryAllowlist "+
-			"(wire into ci-required's needs, an existing rollup's needs, or document as advisory):\n  %v",
+		t.Fatalf("jobs not reachable from %q's transitive needs: closure:\n  %v\n"+
+			"wire a gating job into ci-required's needs (and Check's, or an existing rollup's); "+
+			"move an advisory job to advisory-probes.yml",
 			ciRequiredRoot, uncovered)
-	}
-
-	var stale []string
-	for name := range ciAdvisoryAllowlist {
-		if _, ok := wf.Jobs[name]; !ok {
-			stale = append(stale, name+" (job no longer exists in ci.yml)")
-			continue
-		}
-		if reachable[name] {
-			stale = append(stale, name+" (now reachable from ci-required; remove from ciAdvisoryAllowlist)")
-		}
-	}
-	if len(stale) > 0 {
-		sort.Strings(stale)
-		t.Fatalf("ciAdvisoryAllowlist is stale:\n  %v", stale)
 	}
 }

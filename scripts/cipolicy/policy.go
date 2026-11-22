@@ -320,7 +320,30 @@ const (
 	// bumps) merged without it running. requiredFilterPaths pins the three
 	// paths. Reviewed delta: three filter paths; no new job, step command or
 	// permission.
-	expectedCIExecutionHash     = "97af365879b1ea3c6a86cfdb6e9cc662a2cef31bc50463f833f57eef7067d6a9"
+	//
+	// Bumped again (eMudhra CA follow-up): the mcp-mail job's setup-python
+	// python-version moves from '3.12' to the patched '3.12.16'. Reviewed
+	// delta: one `with` input; no new job, step command or permission.
+	//
+	// Bumped again (ga-ylpbsy.55, advisory probes in their own workflow): the
+	// contract-radar-bd-head and mcp-mail jobs move, steps unchanged, to
+	// advisory-probes.yml, with the changes job's beads and mail filters and
+	// outputs that only they read. Neither was in the needs of Check or
+	// CI / required, whose needs are unchanged. Reviewed delta: two jobs, two
+	// filters and two outputs removed; no new job, trigger, step command or
+	// permission.
+	//
+	// Bumped again (#8977, Windows lane): two new jobs. windows-lane
+	// (runner_16vcpu, needs runner-policy, timeout 30m): GOOS=windows build
+	// of .github/windows-lane/build.txt, GOOS=windows test compile
+	// (-vet=off -run '^$' -exec /bin/true) of test-build.txt, the same for
+	// tools/nogo ./analyzers/..., and GOOS=darwin build plus test compile of
+	// ./.... windows-lane-test (runner_windows, needs runner-policy,
+	// timeout 30m): go test -count=1 over test.txt. Neither is path-gated;
+	// both join the needs of Check and CI / required, whose allow_skipped is
+	// unchanged. Reviewed delta: two jobs and four needs entries; no new
+	// trigger or permission.
+	expectedCIExecutionHash     = "2c0db5f4a5ba7390f63fccfcee565f6936801bee8f51f2f2ebae8c75688ed5f4"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -357,8 +380,14 @@ const (
 	// permission. Then Beads v1.3.1 -> v1.3.2 (the v1.5.1 pin, merged back
 	// from hotfix/1.5.1): BD_VERSION env value only. Then Dolt 2.2.0 -> 2.6.0
 	// (the first patched Dolt release for the eMudhra CA distrust):
-	// the workflow DOLT_VERSION env value only.
-	expectedNightlyExecutionHash = "56ab9f58ed4e8b418c22d7890cd3372de3f276bdf37956322e2f1a69911205e4"
+	// the workflow DOLT_VERSION env value only. Then Beads v1.3.2 -> v1.3.3:
+	// the workflow BD_VERSION env value only. Then Beads v1.3.3 -> v1.3.4:
+	// the workflow BD_VERSION env value only. Then (ga-hd99jq D5) one new
+	// job, nightly-summary: ubuntu-latest, timeout-minutes 5, `if: always()`,
+	// needs every other Nightly job, one python3 step fed by a dedicated
+	// needs.<job>.result env var per dependency that fails closed on anything
+	// but "success"; no new trigger, permission or secret.
+	expectedNightlyExecutionHash = "adfd68dfb5d2c4285bb6cf2ecf5a81ea1446fa54e2bf2a39aa5dd4e4581153cf"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
@@ -372,22 +401,9 @@ const (
 	expectedSetupActionHash = "2894a52d9e9e5fc4ae62402076003c6e7ee8f6ad74f53c14126ceda00b3dae70"
 )
 
+// requiredFilterPaths pins the paths each of ci.yml's changes filters must
+// keep. scripts/advisory_probes_workflow_test.go pins advisory-probes.yml's.
 var requiredFilterPaths = map[string][]string{
-	"mail": {
-		"internal/mail/**",
-		"contrib/mail-scripts/**",
-		".github/requirements/mcp-agent-mail.in",
-		".github/requirements/mcp-agent-mail.overrides.txt",
-		".github/requirements/mcp-agent-mail.txt",
-	},
-	"beads": {
-		"go.mod",
-		"internal/beads/**",
-		"test/acceptance/beads_cli_contract_test.go",
-		"deps.env",
-		".github/scripts/install-bd-archive.sh",
-		"cmd/gc/init_provider_readiness.go",
-	},
 	"packs": {
 		"examples/gastown/**",
 		"internal/config/pack.go",

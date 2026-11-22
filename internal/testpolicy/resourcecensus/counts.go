@@ -291,7 +291,7 @@ func hasConflictMarkers(data []byte) bool {
 func DerivedCount(records []CountRecord, scope Scope, resource Resource) Count {
 	var count Count
 	for _, record := range records {
-		if record.Resource != resource || !scopeContains(scope, Occurrence{Path: record.Path, Tagged: record.Tagged}) {
+		if record.Resource != resource || !scopeContains(scope, Occurrence{Path: record.Path, Resource: record.Resource, Tagged: record.Tagged}) {
 			continue
 		}
 		count.Calls += record.Calls
@@ -306,7 +306,7 @@ func DerivedCount(records []CountRecord, scope Scope, resource Resource) Count {
 func DerivedSmallCount(records []CountRecord, scope Scope, resource Resource) Count {
 	var count Count
 	for _, record := range records {
-		if record.Resource != resource || !scopeContains(scope, Occurrence{Path: record.Path, Tagged: record.Tagged}) {
+		if record.Resource != resource || !scopeContains(scope, Occurrence{Path: record.Path, Resource: record.Resource, Tagged: record.Tagged}) {
 			continue
 		}
 		if small := record.Calls - record.Medium; small > 0 {

@@ -33,6 +33,10 @@ type Report struct {
 	Capabilities []string `json:"declaredCapabilities"`
 	Results      []Result `json:"results"`
 	Summary      Summary  `json:"summary"`
+	// Warnings name what the run could not clean up and did not gate: a
+	// final server-stop in its private city that did not exit 0 before the
+	// city was removed.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Failed reports whether any declared capability failed its probe.

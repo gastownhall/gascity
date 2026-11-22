@@ -1329,6 +1329,67 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Errorf("GetLocalString b = %q, want b-value", gotB)
 		}
 	})
+
+	// A key's durable value and its clone-local value are separate cells:
+	// a durable write (set or clear) never reaches the local value, and a
+	// local write (set or clear) never reaches the durable value. This pins
+	// the independence the single-home rule on SetLocalString depends on.
+	t.Run("SetLocalStringIndependentOfDurableWrites", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "local-string-independent"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		const key = "shared_key"
+		if err := s.SetLocalString(b.ID, key, "local-value"); err != nil {
+			t.Fatalf("SetLocalString: %v", err)
+		}
+		wantLocal := func(step string) {
+			t.Helper()
+			got, err := s.GetLocalString(b.ID, key)
+			if err != nil {
+				t.Fatalf("GetLocalString after %s: %v", step, err)
+			}
+			if got != "local-value" {
+				t.Errorf("GetLocalString after %s = %q, want local-value", step, got)
+			}
+		}
+		wantDurable := func(step, want string) {
+			t.Helper()
+			got, err := s.Get(b.ID)
+			if err != nil {
+				t.Fatalf("Get after %s: %v", step, err)
+			}
+			if v := got.Metadata[key]; v != want {
+				t.Errorf("durable Metadata[%q] after %s = %q, want %q", key, step, v, want)
+			}
+		}
+
+		if err := s.SetMetadata(b.ID, key, "durable-value"); err != nil {
+			t.Fatalf("SetMetadata: %v", err)
+		}
+		wantLocal("durable set")
+		wantDurable("durable set", "durable-value")
+
+		if err := s.SetMetadata(b.ID, key, ""); err != nil {
+			t.Fatalf("SetMetadata empty: %v", err)
+		}
+		wantLocal("durable clear")
+		wantDurable("durable clear", "")
+
+		if err := s.SetMetadata(b.ID, key, "durable-again"); err != nil {
+			t.Fatalf("SetMetadata again: %v", err)
+		}
+		if err := s.SetLocalString(b.ID, key, ""); err != nil {
+			t.Fatalf("SetLocalString empty: %v", err)
+		}
+		wantDurable("local clear", "durable-again")
+		if got, err := s.GetLocalString(b.ID, key); err != nil {
+			t.Fatalf("GetLocalString after local clear: %v", err)
+		} else if got != "" {
+			t.Errorf("GetLocalString after local clear = %q, want empty", got)
+		}
+	})
 }
 
 // RunMetadataTests runs conformance tests for metadata absent-vs-empty

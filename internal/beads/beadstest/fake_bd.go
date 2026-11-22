@@ -124,6 +124,9 @@ func (f *FakeBd) Run(_, name string, args ...string) ([]byte, error) {
 	case "query":
 		flags, positional := parseFakeBdArgs(args[1:])
 		return f.query(flags, positional)
+	case "delete":
+		_, positional := parseFakeBdArgs(args[1:])
+		return f.deleteIssues(positional)
 	case "dep":
 		if len(args) > 1 && args[1] == "list" {
 			flags, positional := parseFakeBdArgs(args[2:])
@@ -193,6 +196,17 @@ func (f *FakeBd) create(flags map[string][]string, positional []string) ([]byte,
 			return nil, fmt.Errorf("fake bd create: --metadata: %w", err)
 		}
 	}
+	if v, ok := lastFlag(flags, "--parent"); ok && v != "" {
+		// bd keeps the parent as a parent-child edge, which edges() derives
+		// from ParentID; an unknown parent fails the create, as bd fails it.
+		if _, err := f.store.Get(v); err != nil {
+			return nil, fmt.Errorf("fake bd create: --parent %s: issue not found", v)
+		}
+		b.ParentID = v
+	}
+	if _, ok := flags["--ephemeral"]; ok {
+		b.Ephemeral = true
+	}
 	created, err := f.store.Create(b)
 	if err != nil {
 		return nil, err
@@ -257,9 +271,48 @@ func (f *FakeBd) list(flags map[string][]string) ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// splitBdQueryAnd splits a bd query expression on " AND " outside
+// double-quoted strings, honoring backslash escapes inside quotes.
+func splitBdQueryAnd(expr string) []string {
+	var parts []string
+	inQuote, escaped, start := false, false, 0
+	for i := 0; i < len(expr); i++ {
+		c := expr[i]
+		switch {
+		case escaped:
+			escaped = false
+		case c == '\\' && inQuote:
+			escaped = true
+		case c == '"':
+			inQuote = !inQuote
+		case !inQuote && strings.HasPrefix(expr[i:], " AND "):
+			parts = append(parts, expr[start:i])
+			i += len(" AND ") - 1
+			start = i + 1
+		}
+	}
+	return append(parts, expr[start:])
+}
+
+// unquoteBdQueryValue strips the outer double quotes of a quoted bd query
+// value and undoes its \" and \\ escapes; an unquoted value is returned as is.
+func unquoteBdQueryValue(v string) string {
+	if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
+		return v
+	}
+	var b strings.Builder
+	for i := 1; i < len(v)-1; i++ {
+		if v[i] == '\\' && i+1 < len(v)-1 {
+			i++
+		}
+		b.WriteByte(v[i])
+	}
+	return b.String()
+}
+
 // query answers bd's wisp-tier query: `bd query --json "ephemeral=true AND
 // k=v AND ..." [--all] [--limit N]`, ephemeral rows only, for the keys a
-// BdStore sends (id, parent, status, type, label, assignee).
+// BdStore sends (id, parent, status, type, label, assignee, metadata.<key>).
 func (f *FakeBd) query(flags map[string][]string, positional []string) ([]byte, error) {
 	if len(positional) != 1 {
 		return nil, fmt.Errorf("fake bd query: want one expression, got %v", positional)
@@ -269,12 +322,19 @@ func (f *FakeBd) query(flags map[string][]string, positional []string) ([]byte, 
 		query.IncludeClosed = true
 	}
 	ephemeral := false
-	for _, clause := range strings.Split(positional[0], " AND ") {
+	for _, clause := range splitBdQueryAnd(positional[0]) {
 		k, v, ok := strings.Cut(strings.TrimSpace(clause), "=")
 		if !ok {
 			return nil, fmt.Errorf("fake bd query: unsupported clause %q", clause)
 		}
-		v = strings.Trim(v, `"`)
+		v = unquoteBdQueryValue(v)
+		if strings.HasPrefix(k, "metadata.") {
+			if query.Metadata == nil {
+				query.Metadata = map[string]string{}
+			}
+			query.Metadata[strings.TrimPrefix(k, "metadata.")] = v
+			continue
+		}
 		switch k {
 		case "ephemeral":
 			ephemeral = v == "true"
@@ -498,4 +558,24 @@ func (f *FakeBd) reopen(ids []string) ([]byte, error) {
 		}
 	}
 	return f.show(ids)
+}
+
+// deleteIssues removes the given ids and every edge touching them, as
+// `bd delete <ids> --force` does. An id it does not hold fails the command, as
+// bd fails it.
+func (f *FakeBd) deleteIssues(ids []string) ([]byte, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("fake bd: delete needs an id")
+	}
+	for _, id := range ids {
+		if _, err := f.store.Get(id); err != nil {
+			return nil, fmt.Errorf("fake bd: delete %s: issue not found", id)
+		}
+	}
+	for _, id := range ids {
+		if err := f.store.Delete(id); err != nil {
+			return nil, fmt.Errorf("fake bd: delete %s: %w", id, err)
+		}
+	}
+	return []byte("{}"), nil
 }

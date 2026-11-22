@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -34,7 +36,7 @@ func newCodexTurnErrorSession(t *testing.T) (*fakeState, http.Handler, string) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -100,7 +102,7 @@ func TestHandleSessionStreamSurfacesCodexTurnError(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -138,7 +140,7 @@ func TestHandleSessionTranscriptSurfacesCodex0162TaskCompleteAPIError(t *testing
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

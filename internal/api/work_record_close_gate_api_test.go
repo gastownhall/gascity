@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/workrecord"
 )
@@ -301,10 +302,10 @@ func TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo(t *testing.T) {
 		beadmeta.WorkBranchMetadataKey:  "main",
 	}}
 
-	if got := s.workRecordRepoDir(rig, shipped); got != rigPath {
+	if got := s.workRecordRepoDir(s.state.Stores(), beadstest.Resident(rig), shipped); got != rigPath {
 		t.Fatalf("rig-resident bead resolves to %q, want the rig checkout %q", got, rigPath)
 	}
-	if got := s.workRecordRepoDir(city, shipped); got != st.cityPath {
+	if got := s.workRecordRepoDir(s.state.Stores(), beadstest.Resident(city), shipped); got != st.cityPath {
 		t.Fatalf("city-resident bead resolves to %q, want the city directory %q", got, st.cityPath)
 	}
 
@@ -315,7 +316,7 @@ func TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo(t *testing.T) {
 	// to close.
 	binding := beads.NewMemStore()
 	st.graphBeadStore = binding
-	if got := s.workRecordRepoDir(binding, shipped); got != st.cityPath {
+	if got := s.workRecordRepoDir(s.state.Stores(), beadstest.Resident(binding), shipped); got != st.cityPath {
 		t.Fatalf("binding-owned bead resolves to %q, want the city directory %q", got, st.cityPath)
 	}
 
@@ -323,7 +324,7 @@ func TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo(t *testing.T) {
 	// server's working directory — is what a relative path resolves against.
 	st.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "rigs/myrig"}}
 	wantRelative := filepath.Join(st.cityPath, "rigs/myrig")
-	if got := s.workRecordRepoDir(rig, shipped); got != wantRelative {
+	if got := s.workRecordRepoDir(s.state.Stores(), beadstest.Resident(rig), shipped); got != wantRelative {
 		t.Fatalf("relative rig path resolves to %q, want %q", got, wantRelative)
 	}
 
@@ -338,7 +339,7 @@ func TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo(t *testing.T) {
 	// It is pinned because State is an interface — a future implementation that
 	// does register such a store must still resolve to "unknown".
 	st.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "  "}}
-	if got := s.workRecordRepoDir(rig, shipped); got != "" {
+	if got := s.workRecordRepoDir(s.state.Stores(), beadstest.Resident(rig), shipped); got != "" {
 		t.Fatalf("rig with no configured checkout resolves to %q, want %q (unknown)", got, "")
 	}
 
@@ -346,7 +347,7 @@ func TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo(t *testing.T) {
 	// commit was made where the work happened.
 	recorded := shipped
 	recorded.Metadata = beads.StringMap{beadmeta.WorkDirMetadataKey: "/work/elsewhere"}
-	if got := s.workRecordRepoDir(rig, recorded); got != "/work/elsewhere" {
+	if got := s.workRecordRepoDir(s.state.Stores(), beadstest.Resident(rig), recorded); got != "/work/elsewhere" {
 		t.Fatalf("bead with %s resolves to %q, want the recorded directory", beadmeta.WorkDirMetadataKey, got)
 	}
 

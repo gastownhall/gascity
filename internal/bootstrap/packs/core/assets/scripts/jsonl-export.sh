@@ -356,27 +356,27 @@ has_pending_archive_push() {
     [ "$(read_state_json | jq -r '.pending_archive_push // false')" = "true" ]
 }
 
-refresh_archive_remote_main() {
-    git -c maintenance.auto=false -c gc.auto=0 fetch origin main -q 2>/dev/null
+refresh_archive_remote_branch() {
+    git -c maintenance.auto=false -c gc.auto=0 fetch origin "$ARCHIVE_BRANCH" -q 2>/dev/null
 }
 
 archive_has_local_only_commits_from_tracking() {
     local merge_base
 
-    if ! git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
+    if ! git rev-parse --verify "refs/remotes/origin/$ARCHIVE_BRANCH" >/dev/null 2>&1; then
         return 1
     fi
-    merge_base=$(git merge-base refs/remotes/origin/main HEAD 2>/dev/null) || return 1
+    merge_base=$(git merge-base "refs/remotes/origin/$ARCHIVE_BRANCH" HEAD 2>/dev/null) || return 1
     [ "$(git rev-list --count "$merge_base..HEAD" 2>/dev/null || echo "0")" -gt 0 ]
 }
 
 archive_has_local_only_commits() {
-    if refresh_archive_remote_main >/dev/null 2>&1; then
+    if refresh_archive_remote_branch >/dev/null 2>&1; then
         archive_has_local_only_commits_from_tracking
         return
     fi
     if archive_has_local_only_commits_from_tracking; then
-        echo "jsonl-export: fetch failed while checking deferred archive push; using existing origin/main tracking ref" >&2
+        echo "jsonl-export: fetch failed while checking deferred archive push; using existing origin/$ARCHIVE_BRANCH tracking ref" >&2
         return 0
     fi
     return 1
@@ -680,22 +680,22 @@ ESCALATION
     # Successful git commands can emit benign stderr (e.g. "warning: redirecting
     # to https://...", credential-helper notes, protocol upgrade hints) which
     # would otherwise misclassify the run as a failure and falsely escalate.
-    if ! fetch_err=$(git -c maintenance.auto=false -c gc.auto=0 fetch origin main -q 2>&1 >/dev/null); then
-        if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
+    if ! fetch_err=$(git -c maintenance.auto=false -c gc.auto=0 fetch origin "$ARCHIVE_BRANCH" -q 2>&1 >/dev/null); then
+        if git rev-parse --verify "refs/remotes/origin/$ARCHIVE_BRANCH" >/dev/null 2>&1; then
             record_archive_push_failure \
-                "jsonl-export: fetching origin/main failed" \
+                "jsonl-export: fetching origin/$ARCHIVE_BRANCH failed" \
                 "$fetch_err"
             return 1
         fi
-        echo "jsonl-export: origin/main missing; attempting initial push bootstrap" >&2
+        echo "jsonl-export: origin/$ARCHIVE_BRANCH missing; attempting initial push bootstrap" >&2
     fi
 
-    if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
-        if ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
-            if ! rebase_err=$(git -c maintenance.auto=false -c gc.auto=0 rebase refs/remotes/origin/main 2>&1 >/dev/null); then
+    if git rev-parse --verify "refs/remotes/origin/$ARCHIVE_BRANCH" >/dev/null 2>&1; then
+        if ! git merge-base --is-ancestor "refs/remotes/origin/$ARCHIVE_BRANCH" HEAD >/dev/null 2>&1; then
+            if ! rebase_err=$(git -c maintenance.auto=false -c gc.auto=0 rebase "refs/remotes/origin/$ARCHIVE_BRANCH" 2>&1 >/dev/null); then
                 git rebase --abort >/dev/null 2>&1 || true
                 record_archive_push_failure \
-                    "jsonl-export: rebase onto origin/main failed during archive push recovery" \
+                    "jsonl-export: rebase onto origin/$ARCHIVE_BRANCH failed during archive push recovery" \
                     "$rebase_err"
                 return 1
             fi
@@ -714,7 +714,7 @@ ESCALATION
     # in tests to keep failure-path coverage fast.
     push_succeeded=false
     for push_attempt in 1 2 3; do
-        if push_err=$(git push origin main -q 2>&1 >/dev/null); then
+        if push_err=$(git push origin "HEAD:refs/heads/$ARCHIVE_BRANCH" -q 2>&1 >/dev/null); then
             push_succeeded=true
             if [ "$push_attempt" -gt 1 ]; then
                 echo "jsonl-export: push succeeded on retry attempt $push_attempt" >&2
@@ -727,13 +727,13 @@ ESCALATION
 
             # Refresh origin tracking before retry — a sibling rig may have
             # moved the ref while we slept.
-            if fetch_err=$(git -c maintenance.auto=false -c gc.auto=0 fetch origin main -q 2>&1 >/dev/null); then
-                if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1 \
-                    && ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
-                    if ! rebase_err=$(git -c maintenance.auto=false -c gc.auto=0 rebase refs/remotes/origin/main 2>&1 >/dev/null); then
+            if fetch_err=$(git -c maintenance.auto=false -c gc.auto=0 fetch origin "$ARCHIVE_BRANCH" -q 2>&1 >/dev/null); then
+                if git rev-parse --verify "refs/remotes/origin/$ARCHIVE_BRANCH" >/dev/null 2>&1 \
+                    && ! git merge-base --is-ancestor "refs/remotes/origin/$ARCHIVE_BRANCH" HEAD >/dev/null 2>&1; then
+                    if ! rebase_err=$(git -c maintenance.auto=false -c gc.auto=0 rebase "refs/remotes/origin/$ARCHIVE_BRANCH" 2>&1 >/dev/null); then
                         git rebase --abort >/dev/null 2>&1 || true
                         record_archive_push_failure \
-                            "jsonl-export: rebase onto origin/main failed during retry $push_attempt" \
+                            "jsonl-export: rebase onto origin/$ARCHIVE_BRANCH failed during retry $push_attempt" \
                             "$rebase_err"
                         return 1
                     fi
@@ -746,7 +746,7 @@ ESCALATION
 
     if [ "$push_succeeded" != "true" ]; then
         record_archive_push_failure \
-            "jsonl-export: pushing archive main failed after 3 attempts" \
+            "jsonl-export: pushing archive $ARCHIVE_BRANCH failed after 3 attempts" \
             "$push_err"
         return 1
     fi
@@ -1061,11 +1061,21 @@ if [ ! -d "$ARCHIVE_REPO/.git" ]; then
         fi
     fi
 fi
+# Existing archives retain their current branch. New repositories use Git's
+# configured default. An explicit override selects the remote destination
+# without requiring the local branch to be renamed.
+ARCHIVE_BRANCH="${GC_JSONL_ARCHIVE_BRANCH:-$(git -C "$ARCHIVE_REPO" symbolic-ref --quiet --short HEAD 2>/dev/null || printf '%s\n' main)}"
 
 TOTAL_EXPORTED=0
 TOTAL_DBS=0
 FAILED_DBS=""
 FAILED_DB_COUNT=0
+# A scope bd serves without SQL (embedded mode) cannot be named for the
+# archive, so it is not exported. That is not a failure, but the scope counts
+# toward TOTAL_DBS and every summary and snapshot commit names it, so a run
+# never claims coverage the archive does not have.
+NOT_ARCHIVED_SCOPES=""
+NOT_ARCHIVED_COUNT=0
 HALTED=0
 STAGE_PATHS=()
 HALT_DB=""
@@ -1081,6 +1091,24 @@ record_failed_db() {
     FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
     FAILED_DBS="${FAILED_DBS}$1
 "
+}
+
+record_not_archived_scope() {
+    NOT_ARCHIVED_COUNT=$((NOT_ARCHIVED_COUNT + 1))
+    NOT_ARCHIVED_SCOPES="${NOT_ARCHIVED_SCOPES:+$NOT_ARCHIVED_SCOPES }$1"
+}
+
+# coverage_gaps prints the suffix that summaries and snapshot commits end
+# with: the counted scopes the archive does not hold, those bd serves without
+# SQL and then those that failed. It prints nothing when every counted scope
+# was exported.
+coverage_gaps() {
+    if [ -n "$NOT_ARCHIVED_SCOPES" ]; then
+        printf ', not archived (bd embedded mode): %s' "$NOT_ARCHIVED_SCOPES"
+    fi
+    if [ -n "$FAILED_DBS" ]; then
+        printf ', failed: %s' "$(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
+    fi
 }
 
 # read_source_issue_count counts the scope's durable issues with the same
@@ -1208,6 +1236,13 @@ while IFS= read -r SCOPE_SPEC; do
             order_outcome_scope_skipped "$SCOPE_LABEL" "not a bd bead store"
             continue
         fi
+        if [ "$SCOPE_SQL_UNSUPPORTED" -eq 1 ]; then
+            echo "jsonl-export: $SCOPE_LABEL is a bd store that serves no SQL (embedded mode); its database cannot be named for the archive, so it is not archived"
+            TOTAL_DBS=$((TOTAL_DBS + 1))
+            record_not_archived_scope "$SCOPE_LABEL"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "bead store serves no SQL (bd embedded mode)"
+            continue
+        fi
         echo "jsonl-export: $SCOPE_LABEL unreachable through gc bd: $SCOPE_LAST_ERROR" >&2
         TOTAL_DBS=$((TOTAL_DBS + 1))
         record_failed_db "$SCOPE_LABEL"
@@ -1271,9 +1306,10 @@ done <<EOF
 $SCOPE_SPECS
 EOF
 
+EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT - NOT_ARCHIVED_COUNT))
 if [ "$TOTAL_DBS" -eq 0 ]; then
     order_outcome_set skipped "no bd bead store to export"
-elif [ "$FAILED_DB_COUNT" -ge "$TOTAL_DBS" ]; then
+elif [ "$EXPORTED_DBS" -eq 0 ]; then
     order_outcome_set skipped "no bead scope could be exported"
 fi
 
@@ -1292,9 +1328,8 @@ fi
 # until a later run pushes the archive forward.
 if [ "$HALTED" -eq 1 ]; then
     if ! git diff --cached --quiet 2>/dev/null; then
-        EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
         commit_archive_snapshot \
-            "[HALT] backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED (spike detected; push skipped)" \
+            "[HALT] backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED (spike detected; push skipped)$(coverage_gaps)" \
             "HALT baseline" || {
             discard_staged_archive_outputs
             exit 1
@@ -1309,7 +1344,7 @@ if [ "$HALTED" -eq 1 ]; then
     fi
     # Pack only after the alert is sent or saved for retry: the commit above
     # already advanced the baseline, so this spike is never detected again.
-    SUMMARY="jsonl — HALTED on spike detection"
+    SUMMARY="jsonl — HALTED on spike detection$(coverage_gaps)"
     maintain_archive_or_exit "$SUMMARY"
     maintenance_done "$SUMMARY"
     exit 0
@@ -1325,9 +1360,8 @@ if git diff --cached --quiet 2>/dev/null; then
         else
             PUSH_STATUS="skipped (local-only)"
         fi
-        if [ -n "$FAILED_DBS" ]; then
-            EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
-            SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
+        if [ -n "$FAILED_DBS$NOT_ARCHIVED_SCOPES" ]; then
+            SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS$(coverage_gaps)"
         else
             SUMMARY="jsonl — no changes, push: $PUSH_STATUS"
         fi
@@ -1336,9 +1370,8 @@ if git diff --cached --quiet 2>/dev/null; then
         echo "jsonl-export: $SUMMARY"
         exit 0
     fi
-    if [ -n "$FAILED_DBS" ]; then
-        EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
-        SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
+    if [ -n "$FAILED_DBS$NOT_ARCHIVED_SCOPES" ]; then
+        SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped$(coverage_gaps)"
         maintain_archive_or_exit "$SUMMARY"
         maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
@@ -1351,9 +1384,8 @@ if git diff --cached --quiet 2>/dev/null; then
     exit 0
 fi
 
-EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
 commit_archive_snapshot \
-    "backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED" \
+    "backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED$(coverage_gaps)" \
     "archive snapshot" || {
     discard_staged_archive_outputs
     exit 1
@@ -1369,10 +1401,7 @@ else
     PUSH_STATUS="skipped (local-only)"
 fi
 
-SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS"
-if [ -n "$FAILED_DBS" ]; then
-    SUMMARY="$SUMMARY, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
-fi
+SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS$(coverage_gaps)"
 
 # After the push, so a packing failure never holds back the new snapshot.
 maintain_archive_or_exit "$SUMMARY"

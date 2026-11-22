@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -70,7 +71,7 @@ func TestOperatorCloseIsNoCrashToTheExitAccrual(t *testing.T) {
 				env.reconcile([]beads.Bead{snapshot})
 				accrued = mustGetBead(t, mem, row.ID).Metadata
 			}
-			mgr := sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithCityPath(env.city))
+			mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(env.store), env.sp, sessionpkg.WithCityPath(env.city))
 			if err := mgr.Close(context.Background(), testOperatorIn(t, env.city), row.ID); err != nil {
 				t.Fatalf("operator close: %v", err)
 			}
@@ -232,7 +233,7 @@ func TestOperatorCloseIsNoCrashToTheV2DeadRuntimeHeal(t *testing.T) {
 		ran = true
 		_, s = c.run(t, gone().tmux(), nil)
 	}
-	mgr := sessionpkg.NewManagerWithOptions(store, runtime.NewFake(), sessionpkg.WithCityPath(c.w.CityPath))
+	mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), sessionpkg.WithCityPath(c.w.CityPath))
 	if err := mgr.Close(context.Background(), testOperatorIn(t, c.w.CityPath), c.k.ID); err != nil {
 		t.Fatalf("operator close: %v", err)
 	}
