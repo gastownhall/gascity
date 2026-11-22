@@ -45,14 +45,19 @@ func newWorkLegFixture(t *testing.T, rigs ...string) *workLegFixture {
 		stores:   map[string]*beads.MemStore{},
 	}
 	f.cfg = &config.City{Workspace: config.Workspace{Name: "town"}}
-	f.stores[f.cityPath] = beads.NewMemStore()
+	newStore := func() *beads.MemStore {
+		store := beads.NewMemStore()
+		store.HonorExplicitIDs = true
+		return store
+	}
+	f.stores[f.cityPath] = newStore()
 	for _, name := range rigs {
 		path := filepath.Join(f.cityPath, "rigs", name)
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		f.cfg.Rigs = append(f.cfg.Rigs, config.Rig{Name: name, Path: path})
-		f.stores[path] = beads.NewMemStore()
+		f.stores[path] = newStore()
 	}
 	prev := hookStoreQueryEnv
 	hookStoreQueryEnv = func(_ string, _ *config.City, a *config.Agent) (map[string]string, error) {
@@ -470,5 +475,65 @@ func TestHookClaimWorkLegRouteWorkLegsBeforeBinding(t *testing.T) {
 		if got := f.callsIn(rig); len(got) != 1 || got[0] != "read" {
 			t.Fatalf("ops on rig %s = %v, want exactly one read proving absence", rig, got)
 		}
+	}
+}
+
+// mintAs creates an open bead routed to the agent in each named leg's store,
+// all under one id, the way a co-resident copy exists in more than one leg.
+func (f *workLegFixture) mintAs(id string, rigs ...string) {
+	f.t.Helper()
+	for _, rig := range rigs {
+		if _, err := f.stores[f.dirOf(rig)].Create(beads.Bead{
+			ID:       id,
+			Title:    "routed work",
+			Type:     "task",
+			Metadata: map[string]string{"gc.routed_to": f.agent.Name},
+		}); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+}
+
+// TestHookClaimWorkLegRouteFirstHolderInReaderOrder pins AC-6: an id more than
+// one non-primary work leg holds is claimed in the first holder in `gc
+// ready`'s leg order — the city work store, then the serving rigs by name
+// ascending, whatever the config order, a rig named like the city left out as
+// the reader leaves it out — which is the copy the reader served.
+func TestHookClaimWorkLegRouteFirstHolderInReaderOrder(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		rigs    []string
+		primary string
+		holders []string
+		want    string
+	}{
+		{name: "city before rigs", rigs: []string{"alpha", "mid"}, primary: "mid", holders: []string{"alpha", ""}, want: ""},
+		{name: "rigs by name, not config order", rigs: []string{"zeta", "alpha"}, primary: "", holders: []string{"zeta", "alpha"}, want: "alpha"},
+		{name: "a rig named like the city is not a leg", rigs: []string{"town", "zulu"}, primary: "", holders: []string{"town", "zulu"}, want: "zulu"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newWorkLegFixture(t, tt.rigs...)
+			if tt.primary != "" {
+				f.agent = config.Agent{Name: "worker", Dir: tt.primary}
+			}
+			f.mintAs("wk-1", tt.holders...)
+
+			code, result, stderr := f.claim(f.primary(tt.primary), f.route(tt.primary), f.routedRow("wk-1"))
+			if code != 0 || result.Action != "work" || result.BeadID != "wk-1" {
+				t.Fatalf("claim = exit %d %+v, want exit 0 action=work for wk-1; stderr=%q", code, result, stderr)
+			}
+			b, err := f.stores[f.dirOf(tt.want)].Get("wk-1")
+			if err != nil || b.Status != "in_progress" || b.Assignee != f.agent.Name {
+				t.Fatalf("leg %q copy = %+v (err %v), want it claimed by %s", tt.want, b, err, f.agent.Name)
+			}
+			for _, other := range tt.holders {
+				if other == tt.want {
+					continue
+				}
+				if b, _ := f.stores[f.dirOf(other)].Get("wk-1"); b.Status != "open" || b.Assignee != "" {
+					t.Fatalf("leg %q copy = %q/%q, want it untouched", other, b.Status, b.Assignee)
+				}
+			}
+		})
 	}
 }

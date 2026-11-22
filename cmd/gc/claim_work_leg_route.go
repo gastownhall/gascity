@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -84,16 +85,23 @@ func newHookClaimWorkLegRouteOver(frame func() ([]hookClaimWorkLeg, error)) *hoo
 }
 
 // hookClaimWorkLegFrame is the work legs a primary-scoped claim may find a
-// bead the reader served in: the city work store, then every serving rig. The
-// leg primaryRef names is the primary itself, which has already answered, so
-// it is left out; the class binding is the class route's to consult.
+// bead the reader served in, in `gc ready`'s leg order: the city work store,
+// then every serving rig by name ascending, leaving out a rig named like the
+// city as the reader does (rigLegsExcludingCityName). The first leg holding
+// an id is then the copy the reader served. The leg primaryRef names is the
+// primary itself, which has already answered, so it is left out; the class
+// binding is the class route's to consult.
 func hookClaimWorkLegFrame(cityPath string, cfg *config.City, a *config.Agent, primaryRef string, identityOverrides map[string]string) ([]hookClaimWorkLeg, error) {
 	serving, err := readyServingRigs(cfg, cityPath)
 	if err != nil {
 		return nil, err
 	}
+	cityName := loadedCityName(cfg, cityPath)
+	slices.SortStableFunc(serving, func(x, y config.Rig) int {
+		return strings.Compare(strings.TrimSpace(x.Name), strings.TrimSpace(y.Name))
+	})
 	var legs []hookClaimWorkLeg
-	cityRef := "city:" + hookStoreCityName(cityPath, loadedCityName(cfg, cityPath))
+	cityRef := "city:" + hookStoreCityName(cityPath, cityName)
 	if cityRef != primaryRef {
 		legs = append(legs, hookClaimWorkLeg{
 			ref: cityRef,
@@ -105,7 +113,7 @@ func hookClaimWorkLegFrame(cityPath string, cfg *config.City, a *config.Agent, p
 	for _, rig := range serving {
 		name := strings.TrimSpace(rig.Name)
 		ref := "rig:" + name
-		if ref == primaryRef {
+		if name == cityName || ref == primaryRef {
 			continue
 		}
 		legs = append(legs, hookClaimWorkLeg{
