@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -98,6 +99,29 @@ func TestCompositesForwardEveryLeafCapability(t *testing.T) {
 			if !slices.Contains(leaves, iface) {
 				t.Errorf("%s's entry %s: no leaf implements it", name, iface)
 			}
+		}
+	}
+}
+
+// Kills a hybrid FreshLivenessObserver entry that stops saying what reads the
+// leaf. Hybrid stays unforwarded on purpose (ruling ga-f6y5q8n): the per-name
+// fresh read is resolved by the consumer on the routed leaf, in internal/session
+// Manager.freshLiveness, and cmd/gc's unlistedElsewhere judges a hop through
+// hybrid. The reason names both, so a rename of either is a change to this entry.
+func TestHybridFreshLivenessEntryNamesWhatReadsTheLeaf(t *testing.T) {
+	e, ok := unforwarded["hybrid"]["FreshLivenessObserver"]
+	if !ok {
+		t.Fatal("hybrid has no FreshLivenessObserver entry: it stays unforwarded on purpose, so the entry stays")
+	}
+	if e.Class != "deliberate" {
+		t.Errorf("hybrid's FreshLivenessObserver class = %q, want deliberate", e.Class)
+	}
+	for _, reader := range []string{
+		"internal/session Manager.freshLiveness",
+		"cmd/gc/reconcile_effect_runtime.go unlistedElsewhere",
+	} {
+		if !strings.Contains(e.Reason, reader) {
+			t.Errorf("hybrid's FreshLivenessObserver reason %q does not name %q, which reads the leaf instead", e.Reason, reader)
 		}
 	}
 }
