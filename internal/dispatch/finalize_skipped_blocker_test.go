@@ -431,3 +431,74 @@ func TestProcessWorkflowFinalizeSkippedBlockerAddsNoStoreCalls(t *testing.T) {
 			withSkip.reads, withSkip.writes, allPass.reads, allPass.writes, withSkip.ops, allPass.ops)
 	}
 }
+
+// TestProcessWorkflowFinalizeSkippedBlockerEdges covers the pass-path edges of
+// gc.skipped_blockers: a padded outcome is still a skip, a crash retry over a
+// root already closed with the marker leaves the same value, and the
+// finalizer itself does not close with the skip-directive close_reason.
+func TestProcessWorkflowFinalizeSkippedBlockerEdges(t *testing.T) {
+	t.Parallel()
+
+	t.Run("padded skipped outcome is recorded", func(t *testing.T) {
+		t.Parallel()
+
+		f := newSkippedBlockerFixture(t, beads.NewMemStore(), []map[string]string{
+			outcomeMeta("pass"),
+			outcomeMeta(" skipped "),
+		}, nil)
+		_, root := f.finalize(t)
+		if got, want := root.Metadata["gc.skipped_blockers"], f.blockers[1].ID; got != want {
+			t.Fatalf("root gc.skipped_blockers = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("crash retry keeps the marker", func(t *testing.T) {
+		t.Parallel()
+
+		store := beads.NewMemStore()
+		f := newSkippedBlockerFixture(t, store, []map[string]string{
+			outcomeMeta("pass"),
+			outcomeMeta("skipped"),
+		}, nil)
+		// The root closed with the marker; the crash left the finalizer open.
+		if err := store.SetMetadataBatch(f.root.ID, map[string]string{
+			"gc.outcome":          "pass",
+			"gc.skipped_blockers": f.blockers[1].ID,
+		}); err != nil {
+			t.Fatalf("stamp root: %v", err)
+		}
+		if err := store.Close(f.root.ID); err != nil {
+			t.Fatalf("close root: %v", err)
+		}
+		result, root := f.finalize(t)
+		if result.Action != "workflow-pass" {
+			t.Fatalf("action = %q, want workflow-pass", result.Action)
+		}
+		if got, want := root.Metadata["gc.skipped_blockers"], f.blockers[1].ID; got != want {
+			t.Fatalf("root gc.skipped_blockers after retry = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("finalizer close_reason is not the skip directive", func(t *testing.T) {
+		t.Parallel()
+
+		store := beads.NewMemStore()
+		f := newSkippedBlockerFixture(t, store, []map[string]string{
+			outcomeMeta("pass"),
+			{"gc.outcome": "skipped", "close_reason": sourceworkflow.WorkflowSkippedCloseReason},
+		}, nil)
+		f.finalize(t)
+		finalizer := mustGetBead(t, store, f.finalizer.ID)
+		if finalizer.Status != "closed" || finalizer.Metadata["gc.outcome"] != "pass" {
+			t.Fatalf("finalizer status=%q gc.outcome=%q, want closed/pass", finalizer.Status, finalizer.Metadata["gc.outcome"])
+		}
+		for field, got := range map[string]string{
+			"metadata close_reason": finalizer.Metadata["close_reason"],
+			"CloseReason":           finalizer.CloseReason,
+		} {
+			if got == sourceworkflow.WorkflowSkippedCloseReason {
+				t.Fatalf("finalizer %s = %q, want anything but the skip directive", field, got)
+			}
+		}
+	})
+}
