@@ -1,9 +1,11 @@
 package coordclass
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -153,10 +155,12 @@ func TestTouchesClassIsExact(t *testing.T) {
 		labels = append(labels, p+"binding")
 	}
 	keys := ClassifierMetadataKeys()
-	values := []string{"", "wisp", "workflow", "graph.v2", "gcg-1", "true"}
+	// "binding" is the session_id that makes the session: prefix probe label
+	// (session:binding) name a wait's own session.
+	values := []string{"", "wisp", "workflow", "graph.v2", "gcg-1", "true", "binding"}
 	types := []string{"task", "convoy", "molecule", "message", "session", "op", "convergence", "gate", "wisp"}
-	junkLabels := []string{"triage", "session:gc-7", "gc:rt-conv:gc-7", "gc:op-conv:gc-7", "order-run:x", "provides:cap", "gc:other", "Wisp", "gc:extmsg", "wisp "}
-	junkKeys := []string{"gc.outcome", "gc.output_json", "session_id", "gc.routed_to", "molecule_id", "gc.step_id", "GC.KIND"}
+	junkLabels := []string{"triage", "Session:gc-7", "gc:rt-conv:gc-7", "gc:op-conv:gc-7", "order-run:x", "provides:cap", "gc:other", "Wisp", "gc:extmsg", "wisp "}
+	junkKeys := []string{"gc.outcome", "gc.output_json", "gc.session_id", "gc.routed_to", "molecule_id", "gc.step_id", "GC.KIND"}
 
 	var pool []beads.Bead
 	for _, typ := range types {
@@ -234,11 +238,102 @@ func TestTouchesClassIsExact(t *testing.T) {
 	}
 }
 
+// TestOwnSessionWaitWritesAreClassWrites pins the own-session-wait arm to the
+// vocabulary table from the write side. The arm reads a wait's session:<id>
+// label and its session_id key, so a write of either can move the bead between
+// work and sessions: TouchesClass must call each such write live, and CheckFlip
+// must refuse it in a store that does not hold the new class. An arm that read
+// either around the table would still classify every bead correctly, and
+// TestTouchesClassIsExact would pass, while TouchesClass let the write skip the
+// before-read the flip guard needs.
+func TestOwnSessionWaitWritesAreClassWrites(t *testing.T) {
+	for _, typ := range []string{"gate", "wait"} {
+		labeled := beads.Bead{ID: "demo-1", Type: typ, Labels: []string{"session:s-1"}}
+		keyed := beads.Bead{ID: "demo-2", Type: typ, Metadata: map[string]string{"session_id": "s-1"}}
+		own := beads.Bead{ID: "gcs-1", Type: typ, Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}
+		cases := []struct {
+			name   string
+			before beads.Bead
+			m      Mutation
+			holds  []Class
+			want   Class
+		}{
+			{"add the label naming its own session", keyed, Mutation{AddLabels: []string{"session:s-1"}}, workHolds, ClassSessions},
+			{"set session_id to the session its label names", labeled, Mutation{SetMetadata: map[string]string{"session_id": "s-1"}}, workHolds, ClassSessions},
+			{"binding: remove the label", own, Mutation{RemoveLabels: []string{"session:s-1"}}, infraHolds, ClassWork},
+			{"binding: point session_id at another session", own, Mutation{SetMetadata: map[string]string{"session_id": "s-2"}}, infraHolds, ClassWork},
+			{"binding: unset session_id", own, Mutation{UnsetMetadata: []string{"session_id"}}, infraHolds, ClassWork},
+		}
+		for _, c := range cases {
+			t.Run(typ+": "+c.name, func(t *testing.T) {
+				after := c.m.Apply(c.before)
+				if got := Classify(c.before); got == c.want {
+					t.Fatalf("Classify(before) = %s already, so the write moves nothing (before=%+v)", got, c.before)
+				}
+				if got := Classify(after); got != c.want {
+					t.Fatalf("Classify(after) = %s, want %s (after=%+v)", got, c.want, after)
+				}
+				if !c.m.TouchesClass() {
+					t.Errorf("TouchesClass() = false for %+v, which moves a %s bead from %s to %s: a caller would skip the before-read CheckFlip needs", c.m, typ, Classify(c.before), c.want)
+				}
+				if flip := CheckFlip(c.before, after, c.holds); flip == nil || flip.After != c.want {
+					t.Errorf("CheckFlip = %v, want a refused flip to %s", flip, c.want)
+				}
+			})
+		}
+	}
+}
+
 // TestMintCommandNamesEveryClass keeps a refusal from ever pointing at nothing.
 func TestMintCommandNamesEveryClass(t *testing.T) {
 	for _, c := range Classes() {
 		if MintCommand(c) == "" {
 			t.Errorf("MintCommand(%s) is empty", c)
 		}
+	}
+}
+
+// TestClassMetadataOnly pins the declassify helper the stranded-row repair
+// advice rests on: it names the classifier metadata keys whose removal returns
+// a bead to the work class, and only when metadata ALONE decided the class.
+func TestClassMetadataOnly(t *testing.T) {
+	cases := []struct {
+		name     string
+		bead     beads.Bead
+		wantKeys []string
+		wantOK   bool
+	}{
+		// The substrate 2026-11-09 incident shape: an agent's plain `bd create`
+		// stamped its workflow root as provenance on ordinary work.
+		{"task with root bead id", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-622605", "gc.step_ref": "x"}}, []string{beadmeta.RootBeadIDMetadataKey}, true},
+		{"bug with root bead id", beads.Bead{Type: "bug", Labels: []string{"triage/needs-decision"}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-622605"}}, []string{beadmeta.RootBeadIDMetadataKey}, true},
+		// Genuine graph beads are never work-shaped: an operator told to unset
+		// their keys would strip a real workflow of its members.
+		{"workflow root (kind and contract)", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.FormulaContractMetadataKey: "graph.v2"}}, nil, false},
+		{"contract alone", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.FormulaContractMetadataKey: "graph.v2"}}, nil, false},
+		{"wisp by gc.kind alone", beads.Bead{Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}}, nil, false},
+		{"real step (root and step id)", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1", beadmeta.StepIDMetadataKey: "s1", "gc.step_ref": "f.s1"}}, nil, false},
+		{"root id beside another class key", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1", beadmeta.SyntheticMetadataKey: "true"}}, nil, false},
+		{"work bead has nothing to remove", beads.Bead{Type: "task"}, nil, false},
+		{"session label decides", beads.Bead{Type: "task", Labels: []string{labelSession}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1"}}, nil, false},
+		{"session type decides", beads.Bead{Type: typeSession}, nil, false},
+		{"convergence type decides", beads.Bead{Type: typeConvergence, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1"}}, nil, false},
+		{"message type decides", beads.Bead{Type: typeMessage}, nil, false},
+		{"wisp label decides", beads.Bead{Type: "task", Labels: []string{labelGCWisp}}, nil, false},
+		{"classifier label alongside metadata decides", beads.Bead{Type: "task", Labels: []string{labelNudge}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1"}}, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keys, ok := ClassMetadataOnly(tc.bead)
+			if ok != tc.wantOK || !slices.Equal(keys, tc.wantKeys) {
+				t.Fatalf("ClassMetadataOnly = %v, %v; want %v, %v", keys, ok, tc.wantKeys, tc.wantOK)
+			}
+			if ok {
+				after := Mutation{UnsetMetadata: keys}.Apply(tc.bead)
+				if got := Classify(after); got != ClassWork {
+					t.Fatalf("removing %v leaves class %s, want work", keys, got)
+				}
+			}
+		})
 	}
 }

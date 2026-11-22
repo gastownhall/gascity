@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/privatecity"
 )
 
 const (
@@ -60,17 +62,30 @@ func (o *Options) applyDefaults() {
 	}
 }
 
-// Run verifies the runtime's declared env.* capabilities. It returns an error
-// only when the run cannot start (executable unresolvable); capability
-// violations are recorded as failed results.
-func Run(ctx context.Context, executable string, opts Options) (Report, error) {
+// Run verifies the runtime's declared env.* capabilities. Every op runs in a
+// city, as gc's own ops do: the inherited GC_EXEC_CITY_NAME and
+// GC_EXEC_CITY_PATH when GC_EXEC_CITY_PATH is set, otherwise a private city
+// removed when Run returns, after server-stop there for a runtime declaring
+// server-lifecycle (a failed one is a Warning). It returns an error only
+// when the run cannot start (executable unresolvable, or a fixture dir or
+// private city cannot be made); capability violations are recorded as
+// failed results.
+func Run(ctx context.Context, executable string, opts Options) (report Report, err error) {
 	path, err := exec.LookPath(executable)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolving executable %q: %w", executable, err)
 	}
 	opts.applyDefaults()
 	r := &runner{path: path, opts: opts}
-	report := Report{Executable: path}
+	report = Report{Executable: path}
+	if !privatecity.Inherited() {
+		city, removeCity, err := privatecity.New("gc-cb-city-")
+		if err != nil {
+			return Report{}, fmt.Errorf("running %s outside a city: %w", executable, err)
+		}
+		defer removeCity()
+		r.city = city
+	}
 
 	// env.transcripts copy-back contract: an in-session transcript source and a
 	// controller-local destination, exposed via the runtime PROCESS env (opEnv)
@@ -106,6 +121,17 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 			report.record(cb, false, StatusSkip, "not declared in handshake")
 		}
 		return report, nil
+	}
+	if r.city != nil && hs.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		// As gc does to a city it stops: the server the run's session brought
+		// up in its private city ends before the city is removed, an
+		// interrupted run's included. The conformance suite gates the op, so
+		// one that does not exit 0 here is a Warning, not a result.
+		defer func() {
+			if w := r.endServer(ctx); w != "" {
+				report.Warnings = append(report.Warnings, w)
+			}
+		}()
 	}
 
 	// Fixture: a work_dir with a sentinel + a known session identity.
@@ -178,6 +204,9 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 type runner struct {
 	path string
 	opts Options
+	// city is the env of the private city every op runs in; nil means every
+	// op runs in the city the run inherited.
+	city []string
 	// transcriptsSrc/Dest are the env.transcripts copy-back contract dirs: the
 	// in-session source the runtime forwards from, and the controller-local
 	// destination it copies to (asserted by probeTranscripts).
@@ -223,12 +252,13 @@ func (r *runner) stop(ctx context.Context, name string) {
 	_, _, _ = r.invoke(ctx, r.opts.OpTimeout, nil, "stop", name)
 }
 
-// opEnv is the runtime's process env for every op. The env.transcripts copy-back
-// contract (GC_TRANSCRIPTS_SRC/DEST) rides here — not the per-op start-config —
-// so the runtime can gate the capability in its handshake and the stateless stop
-// op can re-read it without persistence.
+// opEnv is the runtime's process env for every op: the run's private city,
+// when it has one, and the env.transcripts copy-back contract
+// (GC_TRANSCRIPTS_SRC/DEST). The contract rides here — not the per-op
+// start-config — so the runtime can gate the capability in its handshake and
+// the stateless stop op can re-read it without persistence.
 func (r *runner) opEnv() []string {
-	env := os.Environ()
+	env := append(execenv.Environ(), r.city...)
 	if r.transcriptsSrc != "" {
 		env = append(env, transcriptsSrcEnv+"="+r.transcriptsSrc)
 	}
@@ -236,6 +266,20 @@ func (r *runner) opEnv() []string {
 		env = append(env, transcriptsDestEnv+"="+r.transcriptsDest)
 	}
 	return env
+}
+
+// endServer sends server-stop to the run's private city on a
+// cancellation-detached context and returns the warning for one that does
+// not exit 0, empty when it does.
+func (r *runner) endServer(ctx context.Context) string {
+	_, code, err := r.invoke(context.WithoutCancel(ctx), r.opts.OpTimeout, nil, "server-stop")
+	if err == nil && code != 0 {
+		err = fmt.Errorf("exit %d", code)
+	}
+	if err != nil {
+		return privatecity.ServerStopWarning(r.city, err)
+	}
+	return ""
 }
 
 // execIn runs a command inside the session via the RPP exec op (command on

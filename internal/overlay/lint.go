@@ -21,11 +21,13 @@ type BareHookEntry struct {
 
 // FindBareHookEntries parses a .claude/settings.json document and returns every
 // top-level hook entry that is bare, e.g. {"type": "command", "command": ...}.
-// Claude Code requires the wrapped {"matcher": ..., "hooks": [...]} shape, so a
-// bare entry is a pack-authoring mistake that produces an invalid settings file
-// once projected. Categories are scanned in sorted order for deterministic
-// output. A document that isn't a JSON object yields a parse error; a document
-// with no "hooks" object yields no findings.
+// Claude Code requires each top-level entry to carry a "hooks" array; a bare
+// entry is a pack-authoring mistake that produces an invalid settings file once
+// projected. The "matcher" key is optional — omitting it activates the group on
+// every occurrence of the event — so a matcherless {"hooks": [...]} entry is
+// valid and is not reported. Categories are scanned in sorted order for
+// deterministic output. A document that isn't a JSON object yields a parse
+// error; a document with no "hooks" object yields no findings.
 func FindBareHookEntries(data []byte) ([]BareHookEntry, error) {
 	var bare []BareHookEntry
 	err := forEachHookEntry(data, func(category string, index int, entry map[string]any) {

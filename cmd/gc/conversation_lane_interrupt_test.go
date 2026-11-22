@@ -527,7 +527,9 @@ func TestLaneInterruptKeepsItsRefUnlessItSentNothing(t *testing.T) {
 			return worker.InterruptResult{}, fmt.Errorf("stopping the turn of gc-1: %w: %w: %w",
 				session.ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, errors.New("tmux: broken pipe"))
 		}, true},
-		{"sent, the restart stopped the runtime and could not start it", func(worker.InterruptRequest) (worker.InterruptResult, error) {
+		// Closed failed{restart_not_started}, naming the turn: the turn
+		// ended with the runtime (TestLaneInterruptFailedRestartKeepsItsCause).
+		{"restart not started: the runtime stopped and could not start", func(worker.InterruptRequest) (worker.InterruptResult, error) {
 			return worker.InterruptResult{}, errLaneRestartNotStarted
 		}, true},
 	} {
@@ -749,11 +751,10 @@ func TestLaneInterruptReleaseAtStartByNamesItsCause(t *testing.T) {
 	}
 }
 
-// A restart that stopped the runtime and could not start it again keeps its
-// cause on the op: the turn ended with the runtime, so the op is released
-// maybe delivered, the start's error its last error, and its retry, which
-// finds the turn gone, sends nothing and closes skipped{stale} with that
-// last error still on the row.
+// A restart that stopped the runtime and could not start it again closes
+// its op failed{restart_not_started} at once, naming the turn and keeping
+// the start's error as its last error: the turn ended with the runtime, and
+// a retry would find no runtime and hide the failure as skipped{stale}.
 func TestLaneInterruptFailedRestartKeepsItsCause(t *testing.T) {
 	c := newInterruptCase(t, laneCheckedTurnCaps)
 	c.answer = func(worker.InterruptRequest) (worker.InterruptResult, error) {
@@ -762,18 +763,12 @@ func TestLaneInterruptFailedRestartKeepsItsCause(t *testing.T) {
 	op := c.propose(t, "stop:1:t1", "t1", opjournal.OnFailureRestart)
 	c.pass(t)
 	got := c.f.get(t, c.st, op.ID)
-	if got.Status != opjournal.StatusAccepted || got.MaybeDelivered == 0 || !strings.HasPrefix(got.LastError, "unknown") || !strings.Contains(got.LastError, "cannot start") {
-		t.Fatalf("op %s maybe_delivered %d last error %q, want released maybe delivered with the start's error", got.Status, got.MaybeDelivered, got.LastError)
+	assertOutcome(t, got, opjournal.ArmFailed, opjournal.ReasonRestartNotStarted, "t1", "")
+	if !strings.HasPrefix(got.LastError, opjournal.ReasonRestartNotStarted) || !strings.Contains(got.LastError, "cannot start") {
+		t.Fatalf("last error %q, want the start's error kept", got.LastError)
 	}
-	c.answer = func(req worker.InterruptRequest) (worker.InterruptResult, error) {
-		return worker.InterruptResult{}, &runtime.TurnNotCurrentError{Session: c.f.name, TurnID: req.Turn}
-	}
-	c.f.clk.Advance(opjournal.ExecutorErrorBackoff + time.Second)
-	c.pass(t)
-	got = c.f.get(t, c.st, op.ID)
-	assertOutcome(t, got, opjournal.ArmSkipped, opjournal.ReasonStale, "", "")
-	if !strings.Contains(got.LastError, "cannot start") {
-		t.Fatalf("closed op's last error %q, want the failed start's cause kept", got.LastError)
+	if n := len(c.requests()); n != 1 {
+		t.Fatalf("%d requests, want the one that failed and no retry", n)
 	}
 }
 
@@ -872,7 +867,8 @@ func TestLaneInterruptResultMapping(t *testing.T) {
 		{"unavailable, the session mutation lock held", worker.InterruptResult{}, errLaneInterruptLockBusy, "t1", false, opjournal.NotDelivered{Transient: true, Cause: errLaneInterruptLockBusy}},
 		{"unavailable, the restart's runtime lease held", worker.InterruptResult{}, errLaneInterruptLeaseBusy, "t1", false, opjournal.NotDelivered{Transient: true, Cause: errLaneInterruptLeaseBusy}},
 		{"unavailable, an earlier read still out", worker.InterruptResult{}, errLaneInterruptReadOutstanding, "t1", false, opjournal.NotDelivered{Transient: true, Cause: errLaneInterruptReadOutstanding}},
-		{"restart not started", worker.InterruptResult{}, errLaneRestartNotStarted, "t1", false, opjournal.Unknown{Cause: errLaneRestartNotStarted}},
+		{"restart not started", worker.InterruptResult{}, errLaneRestartNotStarted, "t1", false, opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonRestartNotStarted, Turn: "t1", Cause: errLaneRestartNotStarted}},
+		{"restart not started, session scope", worker.InterruptResult{}, errLaneRestartNotStarted, "", false, opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonRestartNotStarted, Cause: errLaneRestartNotStarted}},
 		{"row unread under the lock, transcript source", worker.InterruptResult{}, errLaneTranscriptRowUnread, "t1", false, opjournal.NotDelivered{Transient: true, Cause: errLaneTranscriptRowUnread}},
 		{"row unread under the lock, protocol source", worker.InterruptResult{}, errLaneProtocolRowUnread, "t1", false, opjournal.NotDelivered{Transient: true, Cause: errLaneProtocolRowUnread}},
 		{"row closed under the lock", worker.InterruptResult{}, rowClosed, "t1", false, skipped},

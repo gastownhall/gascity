@@ -98,6 +98,9 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 // reconcileIfDue runs one reconcile when one is due, none is in flight, and
 // the reconcile gate (WithReconcileGate), if any, allows it.
 func (c *CachingStore) reconcileIfDue(now time.Time) {
+	// Counted before the gate is asked: the owner either sees this cycle in
+	// flight or the cycle sees the gate closed (WithStoreWork).
+	defer c.beginStoreWork()()
 	if c.reconcileGate != nil && !c.reconcileGate() {
 		return
 	}
@@ -609,7 +612,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 	c.preserveCachedReadyProjectionLocked(freshByID, depMap, useFreshDeps)
 
 	res := mergeSectionResult{notifications: make([]cacheNotification, 0, len(freshByID))}
-	nextDepsComplete := useFreshDeps
+	nextDepsComplete, coverageLost := useFreshDeps, "reconcile: dependency read incomplete"
 
 	// 1. Absorb loop — over freshByID. Classification reads pre-absorb state.
 	for id, freshBead := range freshByID {
@@ -637,8 +640,8 @@ func (c *CachingStore) mergeSnapshotLocked(
 			now:           now,
 			skipLabels:    true,
 		})
-		if d.degradeDepsComplete {
-			nextDepsComplete = false
+		if d.degradeDepsComplete && nextDepsComplete {
+			nextDepsComplete, coverageLost = false, "reconcile: skipped a row whose cached edges it could not verify"
 		}
 		if d.action != mergeAbsorb {
 			continue
@@ -751,7 +754,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0
-	c.depsComplete = nextDepsComplete
+	c.setDepsCompleteLocked(nextDepsComplete, coverageLost)
 	c.primePartialErr = nil
 	c.advanceObservationLocked()
 	c.promoteLiveLocked()

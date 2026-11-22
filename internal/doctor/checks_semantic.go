@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 // --- Duration reasonableness check ---
@@ -196,16 +197,17 @@ func (c *EventLogSizeCheck) Fix(_ *CheckContext) error { return nil }
 // --- Worktree disk size check ---
 
 // rigSize pairs a rig directory name with its measured byte footprint
-// under .gc/worktrees/<rig>/. Used as the sort key for ordered output.
+// under <worktrees root>/<rig>/. Used as the sort key for ordered output.
 type rigSize struct {
 	name  string
 	bytes int64
 }
 
-// WorktreeDiskSizeCheck warns when a per-rig footprint under
-// .gc/worktrees/<rig>/ exceeds the configured threshold. Build
-// artifacts, nested task worktrees, and accumulated state can grow
-// unboundedly here; without this check the disk fills silently.
+// WorktreeDiskSizeCheck warns when a per-rig footprint under the
+// configured worktrees root (workdir.WorktreesRoot) exceeds the
+// configured threshold. Build artifacts, nested task worktrees, and
+// accumulated state can grow unboundedly here; without this check the
+// disk fills silently.
 type WorktreeDiskSizeCheck struct {
 	cfg config.DoctorConfig
 	// measureDir is injectable so tests can avoid shelling out to du.
@@ -237,17 +239,17 @@ func (c *WorktreeDiskSizeCheck) Name() string { return "worktree-disk-size" }
 // exceeding the configured warn or error thresholds.
 func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
 			r.Status = StatusOK
-			r.Message = "no .gc/worktrees directory"
+			r.Message = fmt.Sprintf("no worktrees directory at %s", wtRoot)
 			return r
 		}
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("reading .gc/worktrees: %v", err)
+		r.Message = fmt.Sprintf("reading %s: %v", wtRoot, err)
 		return r
 	}
 
@@ -281,7 +283,7 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 			r.Status = StatusWarning
 			r.Message = "could not measure any rig worktree directory"
 			r.Details = measureErrs
-			r.FixHint = "check filesystem permissions on .gc/worktrees/<rig>/"
+			r.FixHint = fmt.Sprintf("check filesystem permissions on %s", filepath.Join(wtRoot, "<rig>"))
 		} else {
 			r.Status = StatusOK
 			r.Message = "no rig worktree directories"
@@ -328,7 +330,7 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("%d rig(s) over worktree size threshold (largest: %q at %s)",
 			overThreshold, sizes[0].name, humanSize(sizes[0].bytes))
 		r.Details = details
-		r.FixHint = "investigate .gc/worktrees/<rig>/ for build-artifact accumulation; consider routing builds out of worktrees, periodic clean steps, or running `gc doctor --fix` to remove safely-prunable nested worktrees"
+		r.FixHint = fmt.Sprintf("investigate %s for build-artifact accumulation; consider routing builds out of worktrees, periodic clean steps, or running `gc doctor --fix` to remove safely-prunable nested worktrees", filepath.Join(wtRoot, "<rig>"))
 	case StatusWarning:
 		if overThreshold > 0 {
 			r.Message = fmt.Sprintf("%d rig(s) approaching worktree size limit (largest: %q at %s)",
@@ -337,7 +339,7 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 		} else {
 			r.Message = fmt.Sprintf("could not measure %d rig worktree path(s) (largest measured: %q at %s)",
 				len(measureErrs), sizes[0].name, humanSize(sizes[0].bytes))
-			r.FixHint = "check filesystem permissions on .gc/worktrees/<rig>/"
+			r.FixHint = fmt.Sprintf("check filesystem permissions on %s", filepath.Join(wtRoot, "<rig>"))
 		}
 		r.Details = details
 	default:
@@ -377,13 +379,12 @@ type gitWorktree interface {
 	WorktreeList() ([]git.Worktree, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
-	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
 
 // NestedWorktreePruneCheck identifies nested git worktrees inside agent
 // home worktrees that are safely reclaimable: no uncommitted changes,
-// no unpushed commits, no stashed work. These reproduce from the remote
+// no unpushed commits. These reproduce from the remote
 // via `git worktree add path origin/<branch>`, so removing the local
 // directory is non-destructive.
 //
@@ -410,23 +411,24 @@ func NewNestedWorktreePruneCheck(cfg config.DoctorConfig) *NestedWorktreePruneCh
 // Name returns the check identifier.
 func (c *NestedWorktreePruneCheck) Name() string { return "nested-worktree-prune" }
 
-// Run walks .gc/worktrees/<rig>/<agent>/ for each agent home that is a
-// git worktree, lists its sibling worktrees, and classifies each
-// nested entry as safe-to-prune or rejected with a reason.
+// Run walks <worktrees root>/<rig>/<agent>/ (workdir.WorktreesRoot) for
+// each agent home that is a git worktree, lists its sibling worktrees,
+// and classifies each nested entry as safe-to-prune or rejected with a
+// reason.
 func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.findings = nil
 
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
 			r.Status = StatusOK
-			r.Message = "no .gc/worktrees directory"
+			r.Message = fmt.Sprintf("no worktrees directory at %s", wtRoot)
 			return r
 		}
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("reading .gc/worktrees: %v", err)
+		r.Message = fmt.Sprintf("reading %s: %v", wtRoot, err)
 		return r
 	}
 
@@ -572,7 +574,7 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	details = append(details, safe...)
 	details = append(details, unsafe...)
 	r.Details = details
-	r.FixHint = "run `gc doctor --fix` to remove safely-prunable nested worktrees (mechanical: only those with clean work tree, no unpushed commits, no stashes)"
+	r.FixHint = "run `gc doctor --fix` to remove safely-prunable nested worktrees (mechanical: only those with clean work tree, no unpushed commits)"
 	return r
 }
 
@@ -584,7 +586,7 @@ func (c *NestedWorktreePruneCheck) CanFix() bool { return true }
 // broken worktree does not strand the rest — operators run --fix to
 // reclaim disk, and partial success is more useful than zero progress.
 // Returns the joined errors of all failed removals, or nil on full
-// success. Worktrees marked unsafe (uncommitted / unpushed / stashed)
+// success. Worktrees marked unsafe (uncommitted / unpushed)
 // are never touched.
 func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 	var errs []error
@@ -616,8 +618,11 @@ func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 // classifyNested runs the safety gates on a candidate nested worktree
 // and returns a finding describing whether it is safe to remove and,
 // if not, the first reason it was rejected. Order of checks matches
-// the user's manual recovery procedure: probe git, then status, log,
-// stash. Any probe error rejects the candidate with a visible reason:
+// the user's manual recovery procedure: probe git, then status, log.
+// There is deliberately no stash gate: refs/stash lives in the shared
+// git-common-dir, so `git stash list` answers "does anyone in this repo
+// have a stash", never "does this worktree", and removing a worktree
+// never touches it. Any probe error rejects the candidate with a visible reason:
 // "can't tell" is not safe enough for a destructive fix.
 func classifyNested(newGit func(string) gitWorktree, path, parent, branch string) nestedWorktreeFinding {
 	f := nestedWorktreeFinding{path: path, parent: parent, branch: branch}
@@ -638,16 +643,6 @@ func classifyNested(newGit func(string) gitWorktree, path, parent, branch string
 	}
 	if hasUnpushed {
 		f.reason = "has unpushed commits"
-		return f
-	}
-	hasStashes, err := gw.HasStashesResult()
-	if err != nil {
-		f.reason = fmt.Sprintf("stash probe failed: %v", err)
-		f.probeErr = true
-		return f
-	}
-	if hasStashes {
-		f.reason = "has stashed work"
 		return f
 	}
 	f.safeToRm = true

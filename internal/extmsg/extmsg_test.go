@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestBindingServiceBindEnforcesOwnershipAndConflict(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	svc := fabric.Bindings
 	ref := testConversationRef()
 
@@ -84,7 +85,7 @@ func TestBindingServiceBindEnforcesOwnershipAndConflict(t *testing.T) {
 func TestBindingServiceExpiredBindingIsMissAndRebinds(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Bindings
 	ref := testConversationRef()
 	expiredAt := testNow().Add(-time.Minute)
 
@@ -158,7 +159,7 @@ func (c *commitCountingExtmsgStore) SetMetadataBatch(id string, kvs map[string]s
 func TestBindingServiceBindCoalescesWritesIntoSingleCommit(t *testing.T) {
 	freezeTestClock(t)
 	counting := &commitCountingExtmsgStore{Store: beads.NewMemStore()}
-	svc := NewServices(counting).Bindings
+	svc := NewServices(beadstest.Mail(counting), beadstest.Sessions(counting)).Bindings
 	ref := testConversationRef()
 
 	// A fresh bind creates three beads (binding + transcript-state +
@@ -200,7 +201,7 @@ func TestBindingServiceBindCoalescesWritesIntoSingleCommit(t *testing.T) {
 func TestBindingServiceBindSeparatesConversationVariants(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Bindings
 
 	threadRef := testConversationRef()
 	roomRef := testConversationRef()
@@ -245,7 +246,7 @@ func TestBindingServiceBindSeparatesConversationVariants(t *testing.T) {
 func TestBindingServiceConcurrentBindConflicts(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	var wg sync.WaitGroup
@@ -285,8 +286,8 @@ func TestBindingServiceConcurrentBindConflicts(t *testing.T) {
 func TestBindingServiceConcurrentBindConflictsAcrossBundles(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabricA := NewServices(store)
-	fabricB := NewServices(store)
+	fabricA := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
+	fabricB := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	var wg sync.WaitGroup
@@ -326,7 +327,7 @@ func TestBindingServiceConcurrentBindConflictsAcrossBundles(t *testing.T) {
 func TestBindingServiceUnbindClearsDeliveryContext(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	delivery := fabric.Delivery
 	svc := fabric.Bindings
 	ref := testConversationRef()
@@ -399,7 +400,7 @@ func TestBindingServiceUnbindClearsDeliveryContext(t *testing.T) {
 func TestDeliveryContextResolveKeepsValidRouteWhileClosingStaleRoute(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	delivery := fabric.Delivery
 	svc := fabric.Bindings
 	ref := testConversationRef()
@@ -500,7 +501,7 @@ func TestBindingServiceUnbindBySessionReturnsPartialClosedOnFailure(t *testing.T
 		failConversationIDs: map[string]bool{refFirst.ConversationID: true},
 		err:                 errors.New("boom"),
 	}
-	svc := newBindingService(store, delivery, nil, newBindingLockPool())
+	svc := newBindingService(beadstest.Mail(store), beadstest.Sessions(store), delivery, nil, newBindingLockPool())
 
 	bindingFirst, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: refFirst,
@@ -550,7 +551,7 @@ func TestBindingServiceUnbindKeepsClosedBindingWhenDeliveryClearFails(t *testing
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	delivery := &failingDeliveryContextService{err: errors.New("boom")}
-	svc := newBindingService(store, delivery, nil, newBindingLockPool())
+	svc := newBindingService(beadstest.Mail(store), beadstest.Sessions(store), delivery, nil, newBindingLockPool())
 	ref := testConversationRef()
 
 	binding, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -585,7 +586,7 @@ func TestBindingServiceUnbindKeepsClosedBindingWhenDeliveryClearFails(t *testing
 func TestBindingServiceListBySessionReturnsOnlyBindings(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	delivery := fabric.Delivery
 	bindings := fabric.Bindings
 	groups := fabric.Groups
@@ -637,7 +638,7 @@ func TestBindingServiceListBySessionReturnsOnlyBindings(t *testing.T) {
 func TestEmptyMetadataRecordsEncodeAsObjects(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	binding, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -679,7 +680,7 @@ func TestEmptyMetadataRecordsEncodeAsObjects(t *testing.T) {
 func TestBindingServiceTouchDebouncesMetadataWrites(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := newBindingService(store, nil, nil, newBindingLockPool(), WithBindingTouchDebounce(time.Hour))
+	svc := newBindingService(beadstest.Mail(store), beadstest.Sessions(store), nil, nil, newBindingLockPool(), WithBindingTouchDebounce(time.Hour))
 	ref := testConversationRef()
 	start := testNow()
 
@@ -727,7 +728,7 @@ func TestBindingServiceTouchDebouncesMetadataWrites(t *testing.T) {
 func TestDeliveryContextRecordRejectsBindingMismatch(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	delivery := fabric.Delivery
 	bindings := fabric.Bindings
 	ref := testConversationRef()
@@ -754,7 +755,7 @@ func TestDeliveryContextRecordRejectsBindingMismatch(t *testing.T) {
 func TestGroupServiceRoutesExplicitAndImplicitTargets(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -847,7 +848,7 @@ func TestGroupServiceRoutesExplicitAndImplicitTargets(t *testing.T) {
 func TestGroupServiceEnsureGroupPreservesLastAddressedHandle(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -895,7 +896,7 @@ func TestGroupServiceEnsureGroupPreservesLastAddressedHandle(t *testing.T) {
 func TestBindingServiceResolveByConversationRejectsDuplicateActiveBindings(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	if _, err := store.Create(beads.Bead{
@@ -952,7 +953,7 @@ func TestBindingServiceResolveByConversationRejectsDuplicateActiveBindings(t *te
 func TestGroupServiceResolveInboundRejectsDuplicateParticipants(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -1001,7 +1002,7 @@ func TestGroupServiceResolveInboundRejectsDuplicateParticipants(t *testing.T) {
 func TestGroupServiceUpsertParticipantPreservesSessionLabelOnIdempotentUpdate(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -1044,7 +1045,7 @@ func TestGroupServiceUpsertParticipantPreservesSessionLabelOnIdempotentUpdate(t 
 func TestGroupServiceParticipantMutationsEnforceOwnership(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -1073,7 +1074,7 @@ func TestGroupServiceParticipantMutationsEnforceOwnership(t *testing.T) {
 func TestGroupServiceParticipantMutationsAllowSameScopeAdapterAndSyncTranscript(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	groups := fabric.Groups
 	transcript := fabric.Transcript
 	ref := testConversationRef()
@@ -1112,7 +1113,7 @@ func TestGroupServiceParticipantMutationsAllowSameScopeAdapterAndSyncTranscript(
 func TestTranscriptServiceAppendDedupeAndList(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	first, err := svc.Append(context.Background(), AppendTranscriptInput{
@@ -1177,7 +1178,7 @@ func TestTranscriptServiceAppendDedupeAndList(t *testing.T) {
 func TestTranscriptServiceListOrderLimitAndCursor(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	const total = 5
@@ -1258,7 +1259,7 @@ func TestTranscriptServiceListOrderLimitAndCursor(t *testing.T) {
 func TestTranscriptServiceListOrderCrossBucket(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	// 130 entries guarantee the stream spans more than one transcript bucket
@@ -1366,7 +1367,7 @@ func TestTranscriptServiceListOrderCrossBucket(t *testing.T) {
 func TestTranscriptServiceMembershipBackfillAndAck(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	for i, id := range []string{"msg-1", "msg-2"} {
@@ -1435,7 +1436,7 @@ func TestTranscriptServiceMembershipBackfillAndAck(t *testing.T) {
 func TestTranscriptServiceHydrationPendingRejectsLiveAppendAndReplay(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	if _, err := svc.BeginHydration(context.Background(), testAdapterCaller(), ref, nil); err != nil {
@@ -1502,7 +1503,7 @@ func TestTranscriptServiceHydrationPendingRejectsLiveAppendAndReplay(t *testing.
 func TestTranscriptServiceHydrationTransitionsRequirePending(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	if _, err := svc.CompleteHydration(context.Background(), testAdapterCaller(), ref); !errors.Is(err, ErrInvalidInput) {
@@ -1522,7 +1523,7 @@ func TestTranscriptServiceHydrationTransitionsRequirePending(t *testing.T) {
 func TestTranscriptServiceHydrationFailedStillAllowsBackfill(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	if _, err := svc.BeginHydration(context.Background(), testAdapterCaller(), ref, nil); err != nil {
@@ -1569,7 +1570,7 @@ func TestTranscriptServiceHydrationFailedStillAllowsBackfill(t *testing.T) {
 func TestGroupServiceParticipantLifecycleSyncsTranscriptMembership(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	groups := fabric.Groups
 	transcript := fabric.Transcript
 	ref := testConversationRef()
@@ -1614,7 +1615,7 @@ func TestGroupServiceParticipantLifecycleSyncsTranscriptMembership(t *testing.T)
 func TestGroupServiceUpsertParticipantReassignsMembershipWhenLastHandleMoves(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	groups := fabric.Groups
 	transcript := fabric.Transcript
 	ref := testConversationRef()
@@ -1653,7 +1654,7 @@ func TestGroupServiceUpsertParticipantReassignsMembershipWhenLastHandleMoves(t *
 func TestGroupServiceUpsertParticipantReassignKeepsMembershipWhenSessionHasAnotherHandle(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	groups := fabric.Groups
 	transcript := fabric.Transcript
 	ref := testConversationRef()
@@ -1690,7 +1691,7 @@ func TestGroupServiceUpsertParticipantReassignKeepsMembershipWhenSessionHasAnoth
 func TestGroupServiceRemoveParticipantKeepsMembershipUntilLastHandle(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	groups := fabric.Groups
 	transcript := fabric.Transcript
 	ref := testConversationRef()
@@ -1736,7 +1737,7 @@ func TestGroupServiceRemoveParticipantKeepsMembershipUntilLastHandle(t *testing.
 func TestBindingServiceBindEnsuresTranscriptMembershipForController(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -1764,7 +1765,7 @@ func TestBindingServiceBindEnsuresTranscriptMembershipForController(t *testing.T
 func TestTranscriptServiceUpdateMembershipAddsManualOwnerAndRecomputesPolicy(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -1844,7 +1845,7 @@ func TestTranscriptServiceUpdateMembershipAddsManualOwnerAndRecomputesPolicy(t *
 func TestBindingServiceBindEnsuresTranscriptMembershipForAdapter(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	if _, err := fabric.Bindings.Bind(context.Background(), testAdapterCaller(), BindInput{
@@ -1866,7 +1867,7 @@ func TestBindingServiceBindEnsuresTranscriptMembershipForAdapter(t *testing.T) {
 func TestGroupServiceRemoveParticipantKeepsMembershipWhenBindingOwnsConversation(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -1914,7 +1915,7 @@ func TestGroupServiceRemoveParticipantKeepsMembershipWhenBindingOwnsConversation
 func TestBindingServiceUnbindKeepsMembershipWhenGroupOwnsConversation(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	group, err := fabric.Groups.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -1963,7 +1964,7 @@ func TestBindingServiceUnbindKeepsMembershipWhenGroupOwnsConversation(t *testing
 func TestBindingServiceUnbindRemovesMembershipWhenNoOtherOwnerRemains(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -1989,7 +1990,7 @@ func TestBindingServiceUnbindRetriesTranscriptCleanupWhenRemovalFails(t *testing
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
-	svc := newBindingService(store, nil, transcript, newBindingLockPool())
+	svc := newBindingService(beadstest.Mail(store), beadstest.Sessions(store), nil, transcript, newBindingLockPool())
 	ref := testConversationRef()
 
 	binding, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -2037,7 +2038,7 @@ func TestBindingServiceUnbindRetriesTranscriptCleanupWhenRemovalFails(t *testing
 func TestBindingServiceResolveByConversationExpiresBindingAndRemovesMembership(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 	expiredAt := testNow().Add(-time.Minute)
 
@@ -2066,7 +2067,7 @@ func TestGroupServiceUpsertParticipantRetriesTranscriptCleanupAfterReassignment(
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
-	svc := newGroupService(store, sharedBindingLockPool(store), transcript)
+	svc := newGroupService(beadstest.Mail(store), beadstest.Sessions(store), sharedBindingLockPool(beadstest.Mail(store)), transcript)
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -2125,7 +2126,7 @@ func TestGroupServiceUpsertParticipantCarriesDeferredCleanupAcrossLaterReassignm
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
-	svc := newGroupService(store, sharedBindingLockPool(store), transcript)
+	svc := newGroupService(beadstest.Mail(store), beadstest.Sessions(store), sharedBindingLockPool(beadstest.Mail(store)), transcript)
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -2176,7 +2177,7 @@ func TestBindingServiceBindRetriesTranscriptSyncOnRebind(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
-	svc := newBindingService(store, nil, transcript, newBindingLockPool())
+	svc := newBindingService(beadstest.Mail(store), beadstest.Sessions(store), nil, transcript, newBindingLockPool())
 	ref := testConversationRef()
 
 	_, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -2204,7 +2205,7 @@ func TestGroupServiceUpsertParticipantRetriesTranscriptSync(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
-	svc := newGroupService(store, sharedBindingLockPool(store), transcript)
+	svc := newGroupService(beadstest.Mail(store), beadstest.Sessions(store), sharedBindingLockPool(beadstest.Mail(store)), transcript)
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -2240,7 +2241,7 @@ func TestGroupServiceRemoveParticipantRetriesTranscriptCleanup(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
-	svc := newGroupService(store, sharedBindingLockPool(store), transcript)
+	svc := newGroupService(beadstest.Mail(store), beadstest.Sessions(store), sharedBindingLockPool(beadstest.Mail(store)), transcript)
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -2293,7 +2294,7 @@ func overrideResolveLiveSession(t *testing.T, fn func(session.AddressDirectory, 
 func overrideReassignmentTranscript(t *testing.T, transcript groupTranscriptSync) {
 	t.Helper()
 	prev := newReassignmentTranscript
-	newReassignmentTranscript = func(beads.Store, *bindingLockPool) groupTranscriptSync { return transcript }
+	newReassignmentTranscript = func(beads.MailStore, *bindingLockPool) groupTranscriptSync { return transcript }
 	t.Cleanup(func() { newReassignmentTranscript = prev })
 }
 
@@ -2302,7 +2303,7 @@ func TestGroupServiceUpsertParticipantStoresSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	sessID := makeSessionBead(t, store, "pl-alpha")
 
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,
@@ -2342,7 +2343,7 @@ func TestGroupServiceResolveInboundFollowsRespawnedSession(t *testing.T) {
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 	sessBID := makeSessionBead(t, store, "pl-alpha-v2") // different name, same slot
 
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,
@@ -2391,7 +2392,7 @@ func TestGroupServiceResolveOutboundFollowsRespawnedSession(t *testing.T) {
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 	sessBID := makeSessionBead(t, store, "pl-alpha-v2")
 
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,
@@ -2447,7 +2448,7 @@ func TestReassignSessionParticipants(t *testing.T) {
 	store := beads.NewMemStore()
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	svc := fabric.Groups
 	transcript := fabric.Transcript
 	ref := testConversationRef()
@@ -2479,7 +2480,7 @@ func TestReassignSessionParticipants(t *testing.T) {
 	if err := store.Close(sessAID); err != nil {
 		t.Fatalf("close retired session A bead: %v", err)
 	}
-	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err != nil {
+	if err := ReassignSessionParticipants(context.Background(), beadstest.Mail(store), sessAID, sessBID); err != nil {
 		t.Fatalf("ReassignSessionParticipants: %v", err)
 	}
 
@@ -2522,7 +2523,7 @@ func TestReassignSessionParticipantsLeavesOtherSessionMembershipsIntact(t *testi
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 	sessZID := makeSessionBead(t, store, "pl-zeta")
 
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	svc := fabric.Groups
 	transcript := fabric.Transcript
 	ref := testConversationRef()
@@ -2556,7 +2557,7 @@ func TestReassignSessionParticipantsLeavesOtherSessionMembershipsIntact(t *testi
 	if err := store.Close(sessAID); err != nil {
 		t.Fatalf("close retired session A bead: %v", err)
 	}
-	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err != nil {
+	if err := ReassignSessionParticipants(context.Background(), beadstest.Mail(store), sessAID, sessBID); err != nil {
 		t.Fatalf("ReassignSessionParticipants: %v", err)
 	}
 
@@ -2575,7 +2576,7 @@ func TestReassignSessionParticipantsRetriesAfterEnsureFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 
-	svc := NewServices(store).Groups
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Groups
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,
@@ -2602,7 +2603,7 @@ func TestReassignSessionParticipantsRetriesAfterEnsureFailure(t *testing.T) {
 	// First handover attempt: the replacement-session membership ensure fails.
 	flaky := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
 	overrideReassignmentTranscript(t, flaky)
-	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err == nil || !errors.Is(err, ErrTranscriptSyncFailed) {
+	if err := ReassignSessionParticipants(context.Background(), beadstest.Mail(store), sessAID, sessBID); err == nil || !errors.Is(err, ErrTranscriptSyncFailed) {
 		t.Fatalf("ReassignSessionParticipants(first) error = %v, want ErrTranscriptSyncFailed", err)
 	}
 
@@ -2624,7 +2625,7 @@ func TestReassignSessionParticipantsRetriesAfterEnsureFailure(t *testing.T) {
 	}
 
 	// Retry: ensure now succeeds and the handover completes.
-	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err != nil {
+	if err := ReassignSessionParticipants(context.Background(), beadstest.Mail(store), sessAID, sessBID); err != nil {
 		t.Fatalf("ReassignSessionParticipants(retry): %v", err)
 	}
 	if flaky.ensureCalls != 2 {
@@ -2653,7 +2654,7 @@ func TestReassignSessionParticipantsRetriesAfterRemoveFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 
-	svc := NewServices(store).Groups
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Groups
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,
@@ -2680,7 +2681,7 @@ func TestReassignSessionParticipantsRetriesAfterRemoveFailure(t *testing.T) {
 	// First attempt: ensure(replacement) succeeds, remove(retired) fails.
 	flaky := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
 	overrideReassignmentTranscript(t, flaky)
-	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err == nil || !errors.Is(err, ErrTranscriptSyncFailed) {
+	if err := ReassignSessionParticipants(context.Background(), beadstest.Mail(store), sessAID, sessBID); err == nil || !errors.Is(err, ErrTranscriptSyncFailed) {
 		t.Fatalf("ReassignSessionParticipants(first) error = %v, want ErrTranscriptSyncFailed", err)
 	}
 	stale, err := store.ListByLabel(groupParticipantSessionLabel(sessAID), 0)
@@ -2695,7 +2696,7 @@ func TestReassignSessionParticipantsRetriesAfterRemoveFailure(t *testing.T) {
 	}
 
 	// Retry: removal now succeeds and the handover completes.
-	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err != nil {
+	if err := ReassignSessionParticipants(context.Background(), beadstest.Mail(store), sessAID, sessBID); err != nil {
 		t.Fatalf("ReassignSessionParticipants(retry): %v", err)
 	}
 	if flaky.removeCalls != 2 {
@@ -2722,7 +2723,7 @@ func TestReapStaleParticipants(t *testing.T) {
 	store := beads.NewMemStore()
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	svc := fabric.Groups
 	transcript := fabric.Transcript
 	ref := testConversationRef()
@@ -2750,7 +2751,7 @@ func TestReapStaleParticipants(t *testing.T) {
 	// exists, so only the participant reaper can converge this session.
 	sessBID := respawn(t, store, sessAID, "pl-alpha")
 
-	stats, err := ReapStaleParticipants(context.Background(), store)
+	stats, err := ReapStaleParticipants(context.Background(), beadstest.Mail(store), beadstest.Sessions(store))
 	if err != nil {
 		t.Fatalf("ReapStaleParticipants: %v", err)
 	}
@@ -2770,7 +2771,7 @@ func TestReapStaleParticipants(t *testing.T) {
 
 	// Idempotent: a second sweep finds nothing stale now that the participant
 	// already points at the live bead.
-	stats, err = ReapStaleParticipants(context.Background(), store)
+	stats, err = ReapStaleParticipants(context.Background(), beadstest.Mail(store), beadstest.Sessions(store))
 	if err != nil {
 		t.Fatalf("ReapStaleParticipants(second): %v", err)
 	}
@@ -2791,7 +2792,7 @@ func TestReapStaleParticipantsFinishesPendingCleanupAfterPartialHandover(t *test
 	store := beads.NewMemStore()
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 
-	svc := NewServices(store).Groups
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Groups
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,
@@ -2820,7 +2821,7 @@ func TestReapStaleParticipantsFinishesPendingCleanupAfterPartialHandover(t *test
 	// retired-session label retained for retry discovery.
 	failing := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
 	overrideReassignmentTranscript(t, failing)
-	if err := ReassignSessionParticipants(context.Background(), store, sessAID, sessBID); err == nil || !errors.Is(err, ErrTranscriptSyncFailed) {
+	if err := ReassignSessionParticipants(context.Background(), beadstest.Mail(store), sessAID, sessBID); err == nil || !errors.Is(err, ErrTranscriptSyncFailed) {
 		t.Fatalf("ReassignSessionParticipants(partial) error = %v, want ErrTranscriptSyncFailed", err)
 	}
 	stale, err := store.Get(participant.ID)
@@ -2842,7 +2843,7 @@ func TestReapStaleParticipantsFinishesPendingCleanupAfterPartialHandover(t *test
 	// transcript lets the reaper finish the handover.
 	healthy := &flakyTranscriptService{}
 	overrideReassignmentTranscript(t, healthy)
-	stats, err := ReapStaleParticipants(context.Background(), store)
+	stats, err := ReapStaleParticipants(context.Background(), beadstest.Mail(store), beadstest.Sessions(store))
 	if err != nil {
 		t.Fatalf("ReapStaleParticipants: %v", err)
 	}
@@ -2870,7 +2871,7 @@ func TestReapStaleParticipantsFinishesPendingCleanupAfterPartialHandover(t *test
 	}
 
 	// Idempotent: a second sweep finds nothing pending now.
-	stats, err = ReapStaleParticipants(context.Background(), store)
+	stats, err = ReapStaleParticipants(context.Background(), beadstest.Mail(store), beadstest.Sessions(store))
 	if err != nil {
 		t.Fatalf("ReapStaleParticipants(second): %v", err)
 	}
@@ -2883,7 +2884,7 @@ func TestGroupServiceUpsertParticipantSessionNameLegacyFallback(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	// "legacy-sess" is a raw ID with no backing session bead — sessionNameForSelector returns "".
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,
@@ -2921,7 +2922,7 @@ func TestGroupServiceResolveInboundDeadSessionNameReturnsStaleID(t *testing.T) {
 	store := beads.NewMemStore()
 	sessAID := makeSessionBead(t, store, "pl-alpha")
 
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
 		RootConversation: ref,
@@ -3161,7 +3162,7 @@ func (f *flakyTranscriptService) State(context.Context, Caller, ConversationRef)
 func TestCloseSessionBindingsClosesGroupOwnedMembership(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	group, err := fabric.Groups.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -3182,7 +3183,7 @@ func TestCloseSessionBindingsClosesGroupOwnedMembership(t *testing.T) {
 		t.Fatalf("memberships(after participant upsert) = %#v, want [sess-a]", got)
 	}
 
-	if err := CloseSessionBindings(context.Background(), store, "sess-a", testNow().Add(time.Minute)); err != nil {
+	if err := CloseSessionBindings(context.Background(), beadstest.Mail(store), beadstest.Sessions(store), "sess-a", testNow().Add(time.Minute)); err != nil {
 		t.Fatalf("CloseSessionBindings: %v", err)
 	}
 
@@ -3194,7 +3195,7 @@ func TestCloseSessionBindingsClosesGroupOwnedMembership(t *testing.T) {
 func TestCloseSessionBindingsClosesGroupParticipants(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	group, err := fabric.Groups.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -3229,7 +3230,7 @@ func TestCloseSessionBindingsClosesGroupParticipants(t *testing.T) {
 		t.Fatalf("open participants(after upsert) = %#v, want 1", got)
 	}
 
-	if err := CloseSessionBindings(context.Background(), store, "sess-a", testNow().Add(time.Minute)); err != nil {
+	if err := CloseSessionBindings(context.Background(), beadstest.Mail(store), beadstest.Sessions(store), "sess-a", testNow().Add(time.Minute)); err != nil {
 		t.Fatalf("CloseSessionBindings: %v", err)
 	}
 

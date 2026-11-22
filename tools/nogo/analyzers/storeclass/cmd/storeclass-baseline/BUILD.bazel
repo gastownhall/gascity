@@ -1,0 +1,66 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "storeclass-baseline_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/tools/nogo/analyzers/storeclass/cmd/storeclass-baseline",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//tools/nogo/analyzers/storeclass",
+        "@org_golang_x_tools//go/analysis",
+        "@org_golang_x_tools//go/analysis/checker",
+        "@org_golang_x_tools//go/packages",
+    ],
+)
+
+go_binary(
+    name = "storeclass-baseline",
+    embed = [":storeclass-baseline_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "storeclass-baseline_test",
+    srcs = ["main_test.go"],
+    # TestWiringsReadTheTree reads the nogo wiring the growth gate guards.
+    data = [
+        "//:MODULE.bazel",
+        "//tools/nogo:config.json",
+    ],
+    embed = [":storeclass-baseline_lib"],
+    deps = [
+        "//tools/nogo/analyzers/internal/analyzertest",
+        "//tools/nogo/analyzers/storeclass",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

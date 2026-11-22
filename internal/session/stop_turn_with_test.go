@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -540,19 +541,19 @@ func TestStopTurnWithRowLoadFailureIsNotSent(t *testing.T) {
 			}
 		}, ErrSessionClosed},
 		{"gone", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
 				return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound)
-			}}
+			}})
 		}, beads.ErrNotFound},
 		{"not a session", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
 				return beads.Bead{ID: id, Type: "task", Status: "open"}, nil
-			}}
+			}})
 		}, ErrNotSession},
 		{"unreadable", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(string) (beads.Bead, error) {
 				return beads.Bead{}, errors.New("store: connection reset by peer")
-			}}
+			}})
 		}, nil},
 	} {
 		for _, stop := range []struct {
@@ -867,19 +868,19 @@ func TestInterruptTurnRowLoadFailureIsNotSent(t *testing.T) {
 			}
 		}, ErrSessionClosed},
 		{"gone", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
 				return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound)
-			}}
+			}})
 		}, beads.ErrNotFound},
 		{"not a session", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
 				return beads.Bead{ID: id, Type: "task", Status: "open"}, nil
-			}}
+			}})
 		}, ErrNotSession},
 		{"unreadable", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(string) (beads.Bead, error) {
 				return beads.Bead{}, errors.New("store: connection reset by peer")
-			}}
+			}})
 		}, nil},
 	} {
 		for _, restarts := range []bool{false, true} {
@@ -1159,5 +1160,36 @@ func TestStopTurnWithBoundaryDecidesAnUnobservedIdleWait(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A restart decided when the caller's deadline leaves less than the restart
+// may take (stopTurnRestartBound) is withheld: it runs apart from ctx and
+// would outlive the caller's lease, leaving a stopped runtime under a lease
+// another host may take. The runtime is left running, and the error wraps
+// ErrInterruptOutcomeUnknown and runtime.ErrRuntimeUnavailable.
+func TestStopTurnWithRestartWithheldPastItsDeadline(t *testing.T) {
+	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+	sp.WaitForIdleErrors[info.SessionName] = errors.New("agent not idle before timeout")
+	ctx, cancel := context.WithTimeout(context.Background(), stopTurnRestartBound-time.Second)
+	defer cancel()
+	report, err := mgr.StopTurnWith(ctx, info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
+	if report.Restarted || !errors.Is(err, ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
+		t.Fatalf("StopTurnWith(restart, short deadline) = %+v, %v; want ErrInterruptOutcomeUnknown and ErrRuntimeUnavailable, and no restart", report, err)
+	}
+	if n := countMethod(sp.SnapshotCalls(), "Stop") + countMethod(sp.SnapshotCalls(), "Start"); n != 0 || !sp.IsRunning(info.SessionName) {
+		t.Fatalf("calls = %v, running %v; want the runtime left running", callMethods(sp.SnapshotCalls()), sp.IsRunning(info.SessionName))
+	}
+}
+
+// A deadline that covers the restart's bound lets the restart run.
+func TestStopTurnWithRestartRunsWithinACoveringDeadline(t *testing.T) {
+	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+	sp.WaitForIdleErrors[info.SessionName] = errors.New("agent not idle before timeout")
+	ctx, cancel := context.WithTimeout(context.Background(), stopTurnRestartBound+time.Minute)
+	defer cancel()
+	report, err := mgr.StopTurnWith(ctx, info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
+	if err != nil || !report.Restarted {
+		t.Fatalf("StopTurnWith(restart, covering deadline) = %+v, %v; want a restart, nil", report, err)
 	}
 }

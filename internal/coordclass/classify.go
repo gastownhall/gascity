@@ -118,8 +118,37 @@ const (
 // before the broad workflow arm (which matches any bead carrying gc.root_bead_id)
 // exactly as policyNameForBead does, so a tracker or session bead is never
 // misrouted to ClassGraph.
+//
+// Classify applies CurrentGeneration; ClassifyAt applies an earlier one.
 func Classify(b beads.Bead) Class {
-	return classifyFields(b.Type, b.Labels, b.Metadata, nil)
+	return ClassifyAt(b, CurrentGeneration)
+}
+
+// Generation numbers the classifier's rules. It advances whenever a change
+// moves a bead shape that already exists off ClassWork, so a record of what an
+// earlier generation selected can be re-read under the rules it was written
+// with. The storage migration's copy manifest records the generation its copy
+// classified with, and the checks judged against that manifest select
+// work-store rows with that generation (cmd/gc/infra_copy_manifest.go): a
+// later widening cannot turn rows the copy deliberately left as work into
+// strands.
+type Generation int
+
+const (
+	// GenerationLegacy is every classifier before GenerationOwnedSessions.
+	GenerationLegacy Generation = 1
+	// GenerationOwnedSessions moves two session-owned shapes off ClassWork to
+	// ClassSessions: a startup-health episode, and a wait-typed bead whose
+	// session:<session_id> label names its own session (isOwnSessionWait).
+	GenerationOwnedSessions Generation = 2
+	// CurrentGeneration is the generation Classify applies.
+	CurrentGeneration = GenerationOwnedSessions
+)
+
+// ClassifyAt returns the class generation gen of the classifier gives b. A
+// generation this build does not know yet classifies as CurrentGeneration.
+func ClassifyAt(b beads.Bead, gen Generation) Class {
+	return classifyFields(b.Type, b.Labels, b.Metadata, nil, gen)
 }
 
 // ClassifyGraphPlan returns the [Class] for an entire graph-apply plan. A
@@ -134,7 +163,7 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 		return ClassWork
 	}
 	for _, node := range plan.Nodes {
-		if classifyFields(node.Type, node.Labels, node.Metadata, node.MetadataRefs) == ClassGraph {
+		if classifyFields(node.Type, node.Labels, node.Metadata, node.MetadataRefs, CurrentGeneration) == ClassGraph {
 			return ClassGraph
 		}
 	}
@@ -145,7 +174,7 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 			break
 		}
 	}
-	return classifyFields(root.Type, root.Labels, root.Metadata, root.MetadataRefs)
+	return classifyFields(root.Type, root.Labels, root.Metadata, root.MetadataRefs, CurrentGeneration)
 }
 
 // classifyFields is the shared decision used by both Classify and
@@ -155,8 +184,9 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 // for a beads.Bead, whose metadata is already merged into a single map; the
 // workflow arm consults both maps so a graph step node whose only
 // gc.root_bead_id marker lives in MetadataRefs routes to ClassGraph, matching
-// the storage-tier policyNameForGraphPlan classifier.
-func classifyFields(beadType string, labels []string, metadata, metadataRefs map[string]string) Class {
+// the storage-tier policyNameForGraphPlan classifier. gen gates the arms a
+// later Generation added.
+func classifyFields(beadType string, labels []string, metadata, metadataRefs map[string]string, gen Generation) Class {
 	switch {
 	// The order-tracking exclusion is the one deliberate divergence from
 	// cmd/gc's policyNameForBead, and it fixes a real collision rather than
@@ -181,6 +211,13 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassOrders
 	case hasLabel(labels, labelSession) || beadType == typeSession:
 		return ClassSessions
+	// A startup-health episode is the session class's quarantine record
+	// (session.SaveStartupHealthEpisode, through the sessions store). It
+	// carries no session label, so without this arm it fell to the work
+	// default: migration left it in the work store and quarantine reset at
+	// cutover. Ahead of the workflow arm, like the session arm.
+	case gen >= GenerationOwnedSessions && beadType == typeStartupHealthEpisode:
+		return ClassSessions
 	case hasLabel(labels, labelWait):
 		return ClassSessions
 	case beadType == typeOp || hasLabel(labels, labelOp) || hasLabel(labels, labelFact) ||
@@ -197,9 +234,35 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassGraph
 	case beadType == typeConvergence:
 		return ClassGraph
+	// A coordination-owned session wait that carries no class label of its
+	// own (CoordinationOwnedLabel). AFTER every graph arm on purpose: a graph
+	// gate step can carry a session label, and it stays graph.
+	//
+	// There is deliberately NO arm for a bare order-run: label. Order run
+	// records also carry order-tracking (the orders arm above), roots poured
+	// by an order are graph, and agents file real work that inherits the
+	// label from the patrol that found it — 150 work beads across four
+	// single-store cities in production (or-l50geh, pl-vm0tw, tr-b6glw). An
+	// arm would move them to orders and make `gc bd create` refuse them on a
+	// split city.
+	case gen >= GenerationOwnedSessions && isOwnSessionWait(beadType, labels, metadata):
+		return ClassSessions
 	default:
 		return ClassWork
 	}
+}
+
+// isOwnSessionWait reports a durable session wait written without gc:wait
+// (session.IsWaitBead): a wait-typed bead whose session:<session_id> label
+// names its own session_id. The per-entity label on any other shape is not a
+// class signal. Both reads go through the vocabulary table, so TouchesClass
+// sees a write of either.
+func isOwnSessionWait(beadType string, labels []string, metadata map[string]string) bool {
+	if beadType != typeWait && beadType != typeWaitLegacy {
+		return false
+	}
+	sessionID := classMeta(metadata, metaSessionID)
+	return sessionID != "" && hasLabel(labels, labelSessionPrefix+sessionID)
 }
 
 // isWispMetadata mirrors bead_policy_store.isWispPolicyMetadata.
@@ -259,17 +322,23 @@ func isSyntheticConvoy(metadata map[string]string) bool {
 // outside the table never fires (and the golden table fails), and anything a
 // write touches outside the table cannot change a class — which is what lets
 // TouchesClass skip the before-read for it.
+//
+// The own-session-wait arm puts the session: prefix and the session_id key in
+// it. The arm matches only the label naming the bead's own session_id, but
+// which label that is depends on the bead, so TouchesClass treats every
+// session: label write as live: an over-approximation that costs a write a
+// before-read, never a missed flip.
 var (
 	classifierLabels = map[string]bool{
 		labelWisp: true, labelGCWisp: true, labelOrderTracking: true, labelSession: true,
 		labelWait: true, labelOp: true, labelFact: true, labelRuntime: true,
 		labelNudge: true, labelNudgeQueue: true,
 	}
-	classifierLabelPrefixes = []string{labelExtmsgPrefix}
+	classifierLabelPrefixes = []string{labelExtmsgPrefix, labelSessionPrefix}
 	classifierMetadataKeys  = map[string]bool{
 		beadmeta.KindMetadataKey: true, beadmeta.FormulaContractMetadataKey: true,
 		beadmeta.RootBeadIDMetadataKey: true, beadmeta.SyntheticMetadataKey: true,
-		beadmeta.SyntheticKindMetadataKey: true,
+		beadmeta.SyntheticKindMetadataKey: true, metaSessionID: true,
 	}
 )
 
@@ -317,7 +386,7 @@ func classMeta(metadata map[string]string, k string) string {
 }
 
 func hasLabel(labels []string, want string) bool {
-	if !classifierLabels[want] {
+	if !isClassifierLabel(want) {
 		return false
 	}
 	for _, l := range labels {

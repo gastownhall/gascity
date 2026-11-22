@@ -40,6 +40,9 @@ type Incarnation struct {
 	// freshContext is whether the mint opened a fresh context: it bumped the
 	// continuation epoch and consumed the row's pending reset.
 	freshContext bool
+	// consumedResetCommit is whether that fresh context also cleared the
+	// restart handoff's reset_committed_at (MintRequest.ConsumeResetCommit).
+	consumedResetCommit bool
 	// prior is what the mint replaced, its identity keys as the row held
 	// them: the withdrawal of a mint no process ran under (unmintIncarnation).
 	prior MetadataPatch
@@ -92,8 +95,9 @@ func (i Incarnation) withContinuationEpoch(epoch int) Incarnation {
 
 // IdentityPatch is the row write that records i, as MintIncarnation writes
 // it: generation, instance_token, continuation_epoch and last_woke_at, and
-// the continuation reset consumed when the mint opened a fresh context. A
-// caller folds it onto its snapshot of the row.
+// the continuation reset consumed when the mint opened a fresh context (with
+// its reset_committed_at when the mint consumed that too). A caller folds it
+// onto its snapshot of the row.
 func (i Incarnation) IdentityPatch() MetadataPatch {
 	patch := MetadataPatch{
 		"generation":         strconv.FormatInt(i.Generation, 10),
@@ -103,6 +107,9 @@ func (i Incarnation) IdentityPatch() MetadataPatch {
 	}
 	if i.freshContext {
 		patch["continuation_reset_pending"] = ""
+	}
+	if i.consumedResetCommit {
+		patch[ResetCommittedAtKey] = ""
 	}
 	return patch
 }
@@ -139,6 +146,12 @@ type MintRequest struct {
 	// consumes a pending continuation reset (a fresh wake, or the reset the
 	// row records). nil opens none.
 	FreshContext func(fresh Info) bool
+	// ConsumeResetCommit has a fresh context also clear the restart
+	// handoff's reset_committed_at, for a start no start commit follows: the
+	// Manager's. The controller's PreWake leaves it to its start commit
+	// (CommitStartedPatch), and a refused start's restore puts the reset back
+	// without it (preWakeRestoredKeys).
+	ConsumeResetCommit bool
 }
 
 var (
@@ -258,6 +271,7 @@ func nextIncarnation(fresh Info, req MintRequest) Incarnation {
 	return Incarnation{
 		ID: fresh.ID, Generation: gen + 1, ContinuationEpoch: epoch, token: NewInstanceToken(),
 		MintedAt: req.Now.UTC().Truncate(time.Second), By: req.By, minted: true, freshContext: freshContext,
+		consumedResetCommit: freshContext && req.ConsumeResetCommit,
 	}
 }
 
@@ -313,10 +327,11 @@ func (s *Store) ConfirmIncarnation(inc Incarnation, patch MetadataPatch) (bool, 
 // unmintIncarnation withdraws a mint no process ran under (a start that
 // converged on a runtime already up, or failed before or at its launch): it
 // writes back what the mint replaced (the generation, token, continuation
-// epoch, last_woke_at and, where the mint consumed one, the reset marker),
-// fenced like ConfirmIncarnation and only while the row still records inc.
-// False means the row moved on and nothing was written. A legacy PreWake's
-// own keys (MintRequest.Patch) are its caller's to undo.
+// epoch, last_woke_at and, where the mint consumed one, the reset marker and
+// its reset_committed_at), fenced like ConfirmIncarnation and only while the
+// row still records inc. False means the row moved on and nothing was
+// written. A legacy PreWake's own keys (MintRequest.Patch) are its caller's
+// to undo.
 func (s *Store) unmintIncarnation(inc Incarnation) (bool, error) {
 	if !inc.Valid() || inc.prior == nil {
 		return false, fmt.Errorf("withdrawing session %q: %w", inc.ID, ErrIncarnationNotMinted)
