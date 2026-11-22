@@ -908,6 +908,8 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 func slingPlainBead(opts SlingOpts, deps SlingDeps, beadID string, result SlingResult) (SlingResult, error) {
 	plan, err := planExpandedRootMemberRoutes(opts, deps, beadID)
 	if err != nil {
+		a := opts.Target
+		telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), "bead", err)
 		return result, err
 	}
 	return finalizeInStore(opts, deps, beads.WorkMolecule(deps.Store), beadID, "bead", result, plan)

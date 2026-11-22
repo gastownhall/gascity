@@ -72,7 +72,7 @@ func SlingTargetBinding(a config.Agent, routedTo string, store beads.SessionStor
 //   - a member that already carries a route gets no patch: the sling fills
 //     missing routes, it never moves in-flight work between agents.
 //
-// Errors pass through from ApplyGraphRouteBinding unchanged.
+// An ApplyGraphRouteBinding error is returned wrapped with the member's ID.
 func UnroutedMemberPatch(b beads.Bead, binding GraphRouteBinding) (map[string]string, error) {
 	kind := strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])
 	if IsWorkflowTopologyKind(kind) {
@@ -111,7 +111,7 @@ func UnroutedMemberPatch(b beads.Bead, binding GraphRouteBinding) (map[string]st
 		member.ContinuationGroup = group
 	}
 	if err := ApplyGraphRouteBinding(step, member); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("routing member %s: %w", b.ID, err)
 	}
 	patch := make(map[string]string)
 	if v := step.Metadata[beadmeta.RoutedToMetadataKey]; strings.TrimSpace(v) != "" {

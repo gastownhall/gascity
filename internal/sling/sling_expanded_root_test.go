@@ -471,3 +471,58 @@ func TestSlingExpandedRootRefusesMidInstantiation(t *testing.T) {
 		})
 	}
 }
+
+// TestSlingExpandedRootDryRunWritesNothing: --dry-run previews the sling of a
+// cooked root without touching the root or any member.
+func TestSlingExpandedRootDryRunWritesNothing(t *testing.T) {
+	store := cookedWorkflowStore(t)
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker}}
+	runner := newFakeRunner()
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps = withStore(deps, store)
+	router := &recordingRouter{store: store}
+	deps.Router = router
+	opts := testOpts(worker, "wf-1")
+	opts.DryRun = true
+
+	if _, err := DoSling(opts, deps, deps.Store); err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	for _, id := range []string{"wf-1", "wf-1.mix", "wf-1.flip"} {
+		if got := mustMeta(t, store, id, beadmeta.RoutedToMetadataKey); got != "" {
+			t.Errorf("dry-run stamped %s gc.routed_to = %q, want empty", id, got)
+		}
+	}
+	if got := mustMeta(t, store, "wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey); got != "" {
+		t.Errorf("dry-run stamped control gc.execution_routed_to = %q, want empty", got)
+	}
+	if len(router.routed) != 0 {
+		t.Errorf("dry-run routed %v, want nothing", router.routed)
+	}
+}
+
+// TestSlingExpandedRootStampsSessionNameForSingleSessionTarget: a
+// single-session target gets its session back-reference on each routed step,
+// as a --formula launch stamps it.
+func TestSlingExpandedRootStampsSessionNameForSingleSessionTarget(t *testing.T) {
+	store := cookedWorkflowStore(t)
+	solo := config.Agent{Name: "solo", MaxActiveSessions: intPtr(1)}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{solo}}
+	runner := newFakeRunner()
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps = withStore(deps, store)
+	deps.Router = &recordingRouter{store: store}
+
+	if _, err := DoSling(testOpts(solo, "wf-1"), deps, deps.Store); err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	for _, id := range []string{"wf-1.mix", "wf-1.flip"} {
+		if got := mustMeta(t, store, id, beadmeta.RoutedToMetadataKey); got != "solo" {
+			t.Errorf("%s gc.routed_to = %q, want solo", id, got)
+		}
+		if got := mustMeta(t, store, id, beadmeta.SessionNameMetadataKey); got == "" {
+			t.Errorf("%s gc.session_name is empty, want the single-session target's session name", id)
+		}
+	}
+}
