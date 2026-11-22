@@ -70,14 +70,18 @@ func evictUncommittedLiveStartIfDue(e evictUncommittedStart) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	// Row guards: pending-create rows keep their own repair arms (#2081), a
-	// row an operator holds or suspends is never the controller's to
-	// restart (the typed Disposition projection covers the sleep intent),
+	// Row guards: a committed start owns its runtime, pending-create rows
+	// keep their own repair arms (#2081), a row an operator suspends or
+	// holds (the typed Disposition projection covers the sleep intent; a
+	// live held_until covers a hold) is never the controller's to restart,
 	// and a template that renders no prompt has nothing stranded to recover.
+	if strings.TrimSpace(e.info.StartedConfigHash) != "" {
+		return
+	}
 	if shouldRollbackPendingCreateInfo(e.info) {
 		return
 	}
-	if sessionpkg.DispositionOfInfo(e.info).KeepsSlot() {
+	if sessionpkg.DispositionOfInfo(e.info).KeepsSlot() || metadataTimeInFuture(e.info.HeldUntil, now) {
 		return
 	}
 	if strings.TrimSpace(e.tp.Prompt) == "" {
@@ -146,7 +150,7 @@ func evictUncommittedLiveStartIfDue(e evictUncommittedStart) {
 	// row live and uncommitted as its stand-in, kept in the drain tracker.
 	created, haveCreated := uncommittedStartBasisTime(live.ObjectCreated)
 	if !haveCreated {
-		created = e.dt.firstUncommittedLiveSight(e.info.ID, now)
+		created = e.dt.firstUncommittedLiveSight(e.info.ID, e.info.Generation+"/"+e.info.InstanceToken, now)
 	}
 	basis := created
 	for _, raw := range []string{e.info.LastWokeAt, e.info.ResetCommittedAt} {
@@ -159,12 +163,13 @@ func evictUncommittedLiveStartIfDue(e evictUncommittedStart) {
 		return
 	}
 	// The action: stop the occupant while the row still carries the facts the
-	// decision rests on. An in-flight start holds the runtime lease, so it
-	// holds this off; a benign refusal (a commit or a newer incarnation
-	// landing mid-kill) needs no noise.
+	// decision rests on. An in-flight start holds the runtime lease (or
+	// reports itself starting), so it holds this off; a benign refusal (a
+	// commit or a newer incarnation landing mid-kill) needs no noise.
 	d := sessionpkg.Decide(e.info, sessionpkg.FactsLegacyUncommittedEvict)
 	if err := e.stop(d); err != nil {
-		if runtime.IsSessionGone(err) || errors.Is(err, sessionpkg.ErrKillPremiseMoved) || errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) {
+		if runtime.IsSessionGone(err) || errors.Is(err, sessionpkg.ErrKillPremiseMoved) ||
+			errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) || errors.Is(err, sessionpkg.ErrSessionStarting) {
 			return
 		}
 		logStandingCondition(e.dt, stderr, e.info.ID, "uncommitted_start_evict_error", fmt.Sprintf(
