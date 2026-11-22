@@ -15,3 +15,16 @@ func sourceBlockedBy(deps SlingDeps, sourceID string) ([]string, error) {
 	}
 	return blockers, nil
 }
+
+// reportWaitingOn makes launch report waitingOn, the source bead's open
+// blockers the workflow was created waiting for (molecule.Result.BlockedBy),
+// as SlingResult.WaitingOn once it starts.
+func reportWaitingOn(launch pendingSourceWorkflowLaunch, waitingOn []string) pendingSourceWorkflowLaunch {
+	finalize := launch.finalize
+	launch.finalize = func() (SlingResult, error) {
+		result, err := finalize()
+		result.WaitingOn = waitingOn
+		return result, err
+	}
+	return launch
+}

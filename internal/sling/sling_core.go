@@ -1972,11 +1972,16 @@ func sourceWorkflowRootByIDInStore(store beads.Store, sourceBeadID, workflowID, 
 func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, child beads.Bead, a config.Agent, formulaName, formulaLabel, method string, isGraph bool) (SlingResult, error) {
 	childVars := BuildSlingFormulaVars(formulaName, child.ID, opts.Vars, a, deps)
 	run := func() (SlingResult, error) {
+		blockedBy, err := sourceBlockedBy(deps, child.ID)
+		if err != nil {
+			return SlingResult{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
+		}
 		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             childVars,
 			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: ClonePriorityPtr(child.Priority),
+			BlockedBy:        blockedBy,
 		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
@@ -1984,6 +1989,7 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		if mResult.GraphWorkflow || graphWorkflowAttachmentInGraphStore(deps.GraphStore, mResult.RootID) {
 			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, child.ID, child.ID, SlingMergeStrategy(opts.Merge, child.ID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
+			wfResult.WaitingOn = mResult.BlockedBy
 			return wfResult, wfErr
 		}
 		result := SlingResult{
@@ -2000,16 +2006,21 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		return result, nil
 	}
 	runGraph := func() (pendingSourceWorkflowLaunch, error) {
+		blockedBy, err := sourceBlockedBy(deps, child.ID)
+		if err != nil {
+			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
+		}
 		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             childVars,
 			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: ClonePriorityPtr(child.Priority),
+			BlockedBy:        blockedBy,
 		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
-		return pendingGraphWorkflowLaunch(mResult.RootID, child.ID, child.ID, SlingMergeStrategy(opts.Merge, child.ID, deps, a), a, method, formulaName, deps), nil
+		return reportWaitingOn(pendingGraphWorkflowLaunch(mResult.RootID, child.ID, child.ID, SlingMergeStrategy(opts.Merge, child.ID, deps, a), a, method, formulaName, deps), mResult.BlockedBy), nil
 	}
 	if !isGraph {
 		return run()

@@ -1,9 +1,11 @@
 package sling
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -179,5 +181,45 @@ func TestFormulaOnBlockedBeadReleasesWhenBlockerCloses(t *testing.T) {
 	}
 	if got := first.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
 		t.Errorf("entry step gc.routed_to = %q, want %q", got, "worker")
+	}
+}
+
+// TestBatchFormulaMemberWaitsForPredecessorMember is AC-3: when one batch
+// member blocks on another, the dependent member's graph workflow waits for
+// its predecessor while the predecessor's workflow starts at once.
+func TestBatchFormulaMemberWaitsForPredecessorMember(t *testing.T) {
+	deps := blockedSourceSlingDeps(t)
+	store := deps.Store
+	first, second := newBlockedSource(t, store, "blocks")
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+	opts := SlingOpts{Target: a, OnFormula: "graph-chain"}
+
+	firstResult, err := attachBatchFormula(context.Background(), opts, deps, first, a, "graph-chain", "formula", "batch", true)
+	if err != nil {
+		t.Fatalf("attachBatchFormula(%s): %v", first.ID, err)
+	}
+	secondResult, err := attachBatchFormula(context.Background(), opts, deps, second, a, "graph-chain", "formula", "batch", true)
+	if err != nil {
+		t.Fatalf("attachBatchFormula(%s): %v", second.ID, err)
+	}
+
+	if got := beadTitles(readyWorkflowBeads(t, store, firstResult.WorkflowID)); !slices.ContainsFunc(got, func(s string) bool { return strings.HasSuffix(s, " First step") }) {
+		t.Errorf("predecessor %s workflow Ready beads = %v, want its First step", first.ID, got)
+	}
+	if len(firstResult.WaitingOn) != 0 {
+		t.Errorf("predecessor WaitingOn = %v, want none", firstResult.WaitingOn)
+	}
+	if ready := readyWorkflowBeads(t, store, secondResult.WorkflowID); len(ready) > 0 {
+		t.Errorf("dependent %s workflow Ready while %s is open: %v", second.ID, first.ID, beadTitles(ready))
+	}
+	if !slices.Equal(secondResult.WaitingOn, []string{first.ID}) {
+		t.Errorf("dependent WaitingOn = %v, want [%s]", secondResult.WaitingOn, first.ID)
+	}
+
+	if err := store.Close(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := beadTitles(readyWorkflowBeads(t, store, secondResult.WorkflowID)); !slices.ContainsFunc(got, func(s string) bool { return strings.HasSuffix(s, " First step") }) {
+		t.Errorf("dependent %s workflow Ready beads after %s closed = %v, want its First step", second.ID, first.ID, got)
 	}
 }
