@@ -110,7 +110,7 @@ func TestOpsAuthoritativeParses(t *testing.T) {
 		t.Fatalf("Parse without authoritative: %v", err)
 	}
 	if empty.Ops.Authoritative != nil {
-		t.Fatalf("Authoritative = %#v, want nil by default", empty.Ops.Authoritative)
+		t.Fatalf("Authoritative = %#v, want nil by default", empty.Ops.AuthoritativeKinds())
 	}
 	if empty.Ops.LaneExecutes("message") {
 		t.Fatal("LaneExecutes(message) = true with the list empty")
@@ -119,8 +119,8 @@ func TestOpsAuthoritativeParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if !reflect.DeepEqual(cfg.Ops.Authoritative, []string{"message"}) {
-		t.Fatalf("Authoritative = %#v, want [message]", cfg.Ops.Authoritative)
+	if !reflect.DeepEqual(cfg.Ops.AuthoritativeKinds(), []string{"message"}) {
+		t.Fatalf("Authoritative = %#v, want [message]", cfg.Ops.AuthoritativeKinds())
 	}
 	if !cfg.Ops.LaneExecutes("message") {
 		t.Fatal("LaneExecutes(message) = false with message listed")
@@ -133,7 +133,7 @@ func TestOpsAuthoritativeParses(t *testing.T) {
 		t.Fatalf("Parse respond: %v", err)
 	}
 	if !both.Ops.LaneExecutes("respond") || !both.Ops.LaneExecutes("message") {
-		t.Fatalf("LaneExecutes(respond, message) false with both listed: %#v", both.Ops.Authoritative)
+		t.Fatalf("LaneExecutes(respond, message) false with both listed: %#v", both.Ops.AuthoritativeKinds())
 	}
 }
 
@@ -148,7 +148,7 @@ func TestOpsAuthoritativeAcceptsInterrupt(t *testing.T) {
 	}
 	for _, kind := range []string{"message", "interrupt", "respond"} {
 		if !cfg.Ops.LaneExecutes(kind) {
-			t.Fatalf("LaneExecutes(%s) = false with it listed: %#v", kind, cfg.Ops.Authoritative)
+			t.Fatalf("LaneExecutes(%s) = false with it listed: %#v", kind, cfg.Ops.AuthoritativeKinds())
 		}
 	}
 	only, err := Parse([]byte("[ops]\nauthoritative = [\"interrupt\"]\n"))
@@ -156,7 +156,7 @@ func TestOpsAuthoritativeAcceptsInterrupt(t *testing.T) {
 		t.Fatalf("Parse interrupt alone: %v", err)
 	}
 	if !only.Ops.LaneExecutes("interrupt") || only.Ops.LaneExecutes("message") {
-		t.Fatalf("LaneExecutes with interrupt alone listed: %#v", only.Ops.Authoritative)
+		t.Fatalf("LaneExecutes with interrupt alone listed: %#v", only.Ops.AuthoritativeKinds())
 	}
 }
 
@@ -210,8 +210,8 @@ func TestOpsAuthoritativeFragmentReplaces(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadWithIncludes: %v", err)
 			}
-			if !reflect.DeepEqual(cfg.Ops.Authoritative, tc.want) {
-				t.Fatalf("Authoritative = %#v, want %#v", cfg.Ops.Authoritative, tc.want)
+			if !reflect.DeepEqual(cfg.Ops.AuthoritativeKinds(), tc.want) {
+				t.Fatalf("Authoritative = %#v, want %#v", cfg.Ops.AuthoritativeKinds(), tc.want)
 			}
 		})
 	}
@@ -223,7 +223,7 @@ func TestOpsAuthoritativeFragmentReplaces(t *testing.T) {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 	if !cfg.Ops.LaneExecutes("message") {
-		t.Fatalf("a fragment's list did not reach the root: %#v", cfg.Ops.Authoritative)
+		t.Fatalf("a fragment's list did not reach the root: %#v", cfg.Ops.AuthoritativeKinds())
 	}
 }
 
@@ -247,5 +247,80 @@ func TestOpsAuthoritativeSchemaEnumMatchesLoad(t *testing.T) {
 	}
 	if !reflect.DeepEqual(enum, want) {
 		t.Fatalf("schema enum = %v, want the accepted kinds %v", enum, want)
+	}
+}
+
+// TestOpsAuthoritativeUnsetIsDistinctFromEmpty pins [ops] authoritative's
+// defined-ness bit (OJ-21 21a): unset is nil, the builtin default, and an
+// explicit [] is a non-nil empty list, the one-release rollback. The bit
+// survives a single layer, a fragment over the root, gc config show's
+// encoding and a city.toml rewrite.
+func TestOpsAuthoritativeUnsetIsDistinctFromEmpty(t *testing.T) {
+	unset, err := Parse([]byte("[ops]\ncontent = \"auto\"\n"))
+	if err != nil {
+		t.Fatalf("Parse unset: %v", err)
+	}
+	if unset.Ops.AuthoritativeSet() || unset.Ops.Authoritative != nil {
+		t.Fatalf("unset: AuthoritativeSet = %v, list %#v; want unset and nil", unset.Ops.AuthoritativeSet(), unset.Ops.AuthoritativeKinds())
+	}
+	empty, err := Parse([]byte("[ops]\nauthoritative = []\n"))
+	if err != nil {
+		t.Fatalf("Parse []: %v", err)
+	}
+	if !empty.Ops.AuthoritativeSet() || len(empty.Ops.AuthoritativeKinds()) != 0 {
+		t.Fatalf("[]: AuthoritativeSet = %v, list %#v; want set and empty", empty.Ops.AuthoritativeSet(), empty.Ops.AuthoritativeKinds())
+	}
+
+	// A fragment's [] replaces the root's list and stays set; a fragment
+	// without the key leaves an unset root unset.
+	for _, tc := range []struct {
+		name, root, fragment string
+		set                  bool
+	}{
+		{"fragment empties a listed root", "[ops]\nauthoritative = [\"message\"]\n", "[ops]\nauthoritative = []\n", true},
+		{"fragment empties an unset root", "", "[ops]\nauthoritative = []\n", true},
+		{"fragment without the key", "", "[ops]\ncontrol = \"auto\"\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte("include = [\"fragment.toml\"]\n\n[workspace]\nname = \"test\"\n\n" + tc.root)
+			fs.Files["/city/fragment.toml"] = []byte(tc.fragment)
+			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			if cfg.Ops.AuthoritativeSet() != tc.set || len(cfg.Ops.AuthoritativeKinds()) != 0 {
+				t.Fatalf("AuthoritativeSet = %v, list %#v; want set %v and empty", cfg.Ops.AuthoritativeSet(), cfg.Ops.AuthoritativeKinds(), tc.set)
+			}
+		})
+	}
+
+	// gc config show and a rewrite encode the city through Marshal: [] is
+	// written back, unset writes nothing, and a reparse keeps the bit.
+	for _, tc := range []struct {
+		name string
+		cfg  *City
+		want string
+		set  bool
+	}{
+		{"empty", empty, "authoritative = []", true},
+		{"unset", unset, "", false},
+	} {
+		t.Run("marshal "+tc.name, func(t *testing.T) {
+			data, err := tc.cfg.MarshalForWrite()
+			if err != nil {
+				t.Fatalf("MarshalForWrite: %v", err)
+			}
+			if got := strings.Contains(string(data), "authoritative"); got != (tc.want != "") || !strings.Contains(string(data), tc.want) {
+				t.Fatalf("encoded [ops]:\n%s\nwant %q", data, tc.want)
+			}
+			again, err := Parse(data)
+			if err != nil {
+				t.Fatalf("Parse the rewrite: %v", err)
+			}
+			if again.Ops.AuthoritativeSet() != tc.set {
+				t.Fatalf("after a rewrite AuthoritativeSet = %v, want %v", again.Ops.AuthoritativeSet(), tc.set)
+			}
+		})
 	}
 }

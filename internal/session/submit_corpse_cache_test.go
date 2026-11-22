@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -60,7 +61,7 @@ func TestSubmitOverACorpseBehindAStaleCache(t *testing.T) {
 			stale := true
 			sp := corpseBehindCache{Fake: fake, mu: &sync.Mutex{}, stale: &stale, refreshes: refreshes}
 			cityPath := t.TempDir()
-			mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+			mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
 				t.Fatal(err)

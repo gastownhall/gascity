@@ -40,7 +40,7 @@ func TestOnConsumedReportsEachConsumedMessage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
-			p := New(store)
+			p := newTestProvider(store)
 			var consumed []string
 			p.OnConsumed(func(id string) { consumed = append(consumed, id) })
 			msg, err := store.Create(beads.Bead{
@@ -60,7 +60,7 @@ func TestOnConsumedReportsEachConsumedMessage(t *testing.T) {
 	}
 	t.Run("not consumed", func(t *testing.T) {
 		store := beads.NewMemStore()
-		p := New(store)
+		p := newTestProvider(store)
 		var consumed []string
 		p.OnConsumed(func(id string) { consumed = append(consumed, id) })
 		msg, err := p.Send("alice", "bob", "hi", "body")
@@ -81,7 +81,7 @@ func TestOnConsumedReportsEachConsumedMessage(t *testing.T) {
 	// from the next, as from a repeated Read.
 	t.Run("archived again", func(t *testing.T) {
 		store := beads.NewMemStore()
-		p := New(store)
+		p := newTestProvider(store)
 		var consumed []string
 		p.OnConsumed(func(id string) { consumed = append(consumed, id) })
 		msg, err := p.Send("alice", "bob", "hi", "body")
@@ -120,7 +120,7 @@ func TestOnConsumedReportsEachConsumedMessage(t *testing.T) {
 	} {
 		t.Run(tc.name+" of a message already gone", func(t *testing.T) {
 			store := beads.NewMemStore()
-			p := New(store)
+			p := newTestProvider(store)
 			var consumed []string
 			p.OnConsumed(func(id string) { consumed = append(consumed, id) })
 			msg, err := p.Send("alice", "bob", "hi", "body")
@@ -157,7 +157,7 @@ func TestOnConsumedReportsEachConsumedMessage(t *testing.T) {
 		}},
 	} {
 		t.Run("removed under the "+tc.name, func(t *testing.T) {
-			p := New(removedOnCloseStore{beads.NewMemStore()})
+			p := newTestProvider(removedOnCloseStore{beads.NewMemStore()})
 			var consumed []string
 			p.OnConsumed(func(id string) { consumed = append(consumed, id) })
 			msg, err := p.Send("alice", "bob", "hi", "body")
@@ -189,7 +189,7 @@ func TestOnConsumedReportsEachConsumedMessage(t *testing.T) {
 	} {
 		t.Run("removed under the "+tc.name, func(t *testing.T) {
 			store := removedOnCloseStore{beads.NewMemStore()}
-			p := New(store)
+			p := newTestProvider(store)
 			var consumed []string
 			p.OnConsumed(func(id string) { consumed = append(consumed, id) })
 			msg, err := store.Create(beads.Bead{

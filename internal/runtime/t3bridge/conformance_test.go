@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -52,8 +53,9 @@ func t3BridgeConformanceSessionNameForSeq(t *testing.T, seq int64) string {
 	return fmt.Sprintf("gc-t3bridge-%s-%d", strings.ToLower(replacer.Replace(t.Name())), seq)
 }
 
-// t3BridgeConformanceConfig starts a fresh stateful t3BridgeTestServer and
-// points t3bridge.NewSeamBacked at it via a hand-built StartupEnvelope
+// t3BridgeConformanceConfig points t3bridge.NewSeamBacked at the stateful
+// t3BridgeTestServer shared by every factory call of t (see
+// t3BridgeConformanceServerFor) via a hand-built StartupEnvelope
 // supplied through GC_STARTUP_ENVELOPE.
 //
 // Assignment.BeadID is populated (so gc.bead metadata is non-empty and
@@ -65,19 +67,7 @@ func t3BridgeConformanceSessionNameForSeq(t *testing.T, seq int64) string {
 // intentional durable-reconnect design.
 func t3BridgeConformanceConfig(t *testing.T, name string) runtime.Config {
 	t.Helper()
-	resetBridgeAuthCacheForTest(t)
-	oldDefaults := defaultWSURLCandidates
-	defaultWSURLCandidates = nil
-	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
-
-	server := newStatefulT3BridgeTestServer(t)
-	t.Cleanup(server.Close)
-
-	t.Setenv("GC_EXEC_STATE_DIR", t.TempDir())
-	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
-	t.Setenv("T3_HOME", t.TempDir())
-	t.Setenv("T3_WS_URL", server.wsURL())
-	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+	t3BridgeConformanceServerFor(t)
 
 	workDir := t.TempDir()
 	envelope := StartupEnvelope{
@@ -104,6 +94,38 @@ func t3BridgeConformanceConfig(t *testing.T, name string) runtime.Config {
 			"GC_STARTUP_ENVELOPE": string(envJSON),
 		},
 	}
+}
+
+// t3BridgeConformanceServers holds the stateful fake server of each
+// *testing.T that has called t3BridgeConformanceConfig, so every session a
+// single conformance subtest creates lives on the same server and discovery
+// subtests observe all of them through the server snapshot.
+var t3BridgeConformanceServers sync.Map // *testing.T -> *t3BridgeTestServer
+
+// t3BridgeConformanceServerFor returns t's stateful fake server, starting it
+// and pointing the T3 bridge environment at it on t's first call.
+func t3BridgeConformanceServerFor(t *testing.T) *t3BridgeTestServer {
+	t.Helper()
+	if existing, ok := t3BridgeConformanceServers.Load(t); ok {
+		return existing.(*t3BridgeTestServer)
+	}
+	resetBridgeAuthCacheForTest(t)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+
+	server := newStatefulT3BridgeTestServer(t)
+	t.Cleanup(server.Close)
+
+	t.Setenv("GC_EXEC_STATE_DIR", t.TempDir())
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	t3BridgeConformanceServers.Store(t, server)
+	t.Cleanup(func() { t3BridgeConformanceServers.Delete(t) })
+	return server
 }
 
 func TestT3Bridge_RunProviderConformance(t *testing.T) {

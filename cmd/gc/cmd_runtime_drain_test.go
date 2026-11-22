@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2330,5 +2331,222 @@ func TestDrainRuntimeRowWriteFailure(t *testing.T) {
 	code := drainRuntime(dops, func() error { return errors.New("store down") }, sp, rec, "worker", "worker", false, &stdout, &stderr)
 	if code != 1 || dops.draining["worker"] || len(rec.Events) != 0 || !strings.Contains(stderr.String(), "store down") {
 		t.Fatalf("drain = %d (draining %v, events %v, stderr %q), want 1 with nothing set", code, dops.draining["worker"], rec.Events, stderr.String())
+	}
+}
+
+// stubDrainAckSideEffects stubs the held-claim release and the controller
+// poke for a drain-ack test, returning a pointer to the poke count.
+func stubDrainAckSideEffects(t *testing.T) *int {
+	t.Helper()
+	pokes := 0
+	oldPoke := drainAckPokeController
+	drainAckPokeController = func(string, reconcilekey.Key) error { pokes++; return nil }
+	oldRelease := drainAckReleaseHeldClaims
+	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) string { return "" }
+	t.Cleanup(func() {
+		drainAckPokeController = oldPoke
+		drainAckReleaseHeldClaims = oldRelease
+	})
+	return &pokes
+}
+
+// unpersistedAckDrainOps reports every ack write as successful while the
+// flag never lands, as a write to the wrong tmux server can (#8116).
+type unpersistedAckDrainOps struct {
+	*fakeDrainOps
+}
+
+func (unpersistedAckDrainOps) setDrainAck(string) error { return nil }
+
+func TestDoRuntimeDrainAckFailsWhenAckDidNotPersist(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(unpersistedAckDrainOps{newFakeDrainOps()}, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+		t.Errorf("stdout = %q, want no acknowledgement", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "did not persist") || !strings.Contains(got, `"worker-sess"`) {
+		t.Errorf("stderr = %q, want a did-not-persist error naming the session", got)
+	}
+	if *pokes != 0 {
+		t.Errorf("controller poked %d times, want 0", *pokes)
+	}
+}
+
+// cityTmuxProviderAnswering is the city's real tmux provider over a fake tmux
+// that runs script for every command, so the provider's own error
+// classification answers the ack.
+func cityTmuxProviderAnswering(t *testing.T, script string) runtime.Provider {
+	t.Helper()
+	installFakeTmux(t, script)
+	sp, err := newSessionProviderForCityByName(nil, "tmux", config.SessionConfig{Socket: "bright-lights"}, "city", t.TempDir())
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
+	}
+	return sp
+}
+
+// tmuxLacksSessionScript answers like a live tmux server that does not host
+// the session: #8116's stale server, which an operator shell or an unpinnable
+// $TMUX still reaches.
+const tmuxLacksSessionScript = `echo "can't find session: worker-sess" >&2; exit 1`
+
+// The ack write and its read-back both find no session on a server that lacks
+// it, and the read-back alone would take that for the reap race; with no server
+// at all, both find none either. The flag write found no session, so the legacy
+// ack fails before the poke.
+func TestDoRuntimeDrainAckFailsWhenTheFlagWriteFindsNoSession(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+	}{
+		{"live server without the session", tmuxLacksSessionScript},
+		{"no server", `echo "no server running on /tmp/tmux-1000/bright-lights" >&2; exit 1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pokes := stubDrainAckSideEffects(t)
+			dops := newDrainOps(cityTmuxProviderAnswering(t, tc.script))
+			var stdout, stderr bytes.Buffer
+			code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+				t.Errorf("stdout = %q, want no acknowledgement", got)
+			}
+			if got := stderr.String(); !strings.Contains(got, "did not land") || !strings.Contains(got, "nothing acknowledged") || !strings.Contains(got, `"worker-sess"`) {
+				t.Errorf("stderr = %q, want a did-not-land error naming the session", got)
+			}
+			if *pokes != 0 {
+				t.Errorf("controller poked %d times, want 0", *pokes)
+			}
+		})
+	}
+}
+
+// A flag write that landed, read back from a server that has since stopped
+// answering, fails the ack without claiming that nothing was acknowledged: the
+// flag may well be set.
+func TestDoRuntimeDrainAckFailsUnverifiedWhenTheReadBackFindsNoServer(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	dops := newDrainOps(cityTmuxProviderAnswering(t, `case "$*" in *show-environment*) echo "no server running on /tmp/tmux-1000/bright-lights" >&2; exit 1 ;; esac`))
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+		t.Errorf("stdout = %q, want no acknowledgement", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "could not be verified and may still take effect") || strings.Contains(got, "nothing acknowledged") || !strings.Contains(got, `"worker-sess"`) {
+		t.Errorf("stderr = %q, want an unverified-ack error naming the session", got)
+	}
+	if *pokes != 0 {
+		t.Errorf("controller poked %d times, want 0", *pokes)
+	}
+}
+
+// Under v2 the row is the ack, so a flag write that found no session leaves
+// nothing to mirror into, and the ack stands.
+func TestRowAckedDrainOpsKeepsTheAckWhenTheFlagWriteFindsNoSession(t *testing.T) {
+	var stderr bytes.Buffer
+	dops := rowAckedDrainOps{drainOps: newDrainOps(cityTmuxProviderAnswering(t, tmuxLacksSessionScript)), stderr: &stderr}
+	if err := dops.setDrainAck("worker-sess"); err != nil {
+		t.Fatalf("setDrainAck = %v, want nil: the row ack is in force", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing", stderr.String())
+	}
+}
+
+// goneMirrorProvider stores metadata like the fake, then reports that the
+// GC_DRAIN_ACK mirror found the session gone. The stored flag is in force, as
+// with any mirror failure.
+type goneMirrorProvider struct {
+	*runtime.Fake
+}
+
+func (p goneMirrorProvider) SetMeta(name, key, value string) error {
+	if err := p.Fake.SetMeta(name, key, value); err != nil || key != "GC_DRAIN_ACK" {
+		return err
+	}
+	return &runtime.MetadataNotMirroredError{Session: name, Key: key, Cause: runtime.ErrSessionNotFound}
+}
+
+// A flag write whose only failure is its mirror landed, even when the mirror
+// found the session gone: the legacy ack reads the flag back and stands.
+func TestDoRuntimeDrainAckGoneMirrorStaysAcknowledged(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	dops := newDrainOps(goneMirrorProvider{Fake: runtime.NewFake()})
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
+		t.Errorf("stdout = %q", got)
+	}
+	if *pokes != 1 {
+		t.Errorf("controller poked %d times, want 1", *pokes)
+	}
+}
+
+// scriptedAckDrainOps scripts the ack write and its read-back.
+type scriptedAckDrainOps struct {
+	*fakeDrainOps
+	t        *testing.T
+	writeErr error
+	readErr  error
+	noRead   bool
+}
+
+func (o scriptedAckDrainOps) setDrainAck(string) error { return o.writeErr }
+
+func (o scriptedAckDrainOps) isDrainAcked(sessionName string) (bool, error) {
+	if o.noRead {
+		o.t.Errorf("isDrainAcked(%q) called; the ack must not be read back", sessionName)
+	}
+	return false, o.readErr
+}
+
+// A session reaped between the ack and its read-back is the benign reap race:
+// the ack still succeeds and pokes the controller.
+func TestDoRuntimeDrainAckReadBackGoneStaysAcknowledged(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	gone := fmt.Errorf("reading GC_DRAIN_ACK: %w", fmt.Errorf("reading GC_DRAIN_ACK from session %q: %w: %w", "worker", runtime.ErrSessionNotFound, errors.New("session not found")))
+	dops := scriptedAckDrainOps{fakeDrainOps: newFakeDrainOps(), t: t, readErr: gone}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
+		t.Errorf("stdout = %q", got)
+	}
+	if *pokes != 1 {
+		t.Errorf("controller poked %d times, want 1", *pokes)
+	}
+}
+
+// An ack whose only failure is the runtime mirror is in force; it is reported
+// as a warning without a read-back, as before.
+func TestDoRuntimeDrainAckMirrorOnlyErrorSkipsReadBack(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	dops := scriptedAckDrainOps{fakeDrainOps: newFakeDrainOps(), t: t, writeErr: t3OutageMirrorFailure("worker", "GC_DRAIN_ACK"), noRead: true}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.HasPrefix(got, "gc runtime drain-ack: warning: ") {
+		t.Errorf("stderr = %q, want the mirror warning", got)
+	}
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
+		t.Errorf("stdout = %q", got)
+	}
+	if *pokes != 1 {
+		t.Errorf("controller poked %d times, want 1", *pokes)
 	}
 }

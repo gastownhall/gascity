@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -1132,7 +1133,7 @@ func newT3BridgeTestServerCore(t *testing.T, snapshot map[string]interface{}, st
 		threads:  make(map[string]map[string]interface{}),
 	}
 	upgrader := websocket.Upgrader{}
-	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts.server = httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" || r.URL.Path == "/api/auth/websocket-ticket" {
 			ts.mu.Lock()
 			ts.authRequestCount++
@@ -1309,7 +1310,7 @@ func newT3BridgeTestServerCore(t *testing.T, snapshot map[string]interface{}, st
 		if err := conn.WriteJSON(resp); err != nil {
 			t.Errorf("write websocket response: %v", err)
 		}
-	}))
+	})))
 	return ts
 }
 
@@ -1563,17 +1564,19 @@ func (ts *t3BridgeTestServer) applyCommand(typ string, payload map[string]interf
 }
 
 // dynamicSnapshot computes the current orchestration.getSnapshot response
-// from ts's project/thread state.
+// from ts's project/thread state. It returns deep copies built while ts.mu is
+// held, so the caller can encode the snapshot outside the lock while
+// applyCommand keeps mutating the live thread and project maps.
 func (ts *t3BridgeTestServer) dynamicSnapshot() map[string]interface{} {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	threads := make([]interface{}, 0, len(ts.threads))
 	for _, thread := range ts.threads {
-		threads = append(threads, thread)
+		threads = append(threads, cloneStatefulThread(thread))
 	}
 	projects := make([]interface{}, 0, len(ts.projects))
 	for _, project := range ts.projects {
-		projects = append(projects, project)
+		projects = append(projects, cloneStringInterfaceMap(project))
 	}
 	return map[string]interface{}{"threads": threads, "projects": projects}
 }
@@ -1663,12 +1666,72 @@ func (ts *t3BridgeTestServer) handleThreadArchiveLocked(payload map[string]inter
 	thread["deletedAt"] = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
+// cloneStatefulThread copies a stateful-fake thread together with its nested
+// customMetadata and session maps, the values applyCommand mutates in place.
+func cloneStatefulThread(thread map[string]interface{}) map[string]interface{} {
+	out := cloneStringInterfaceMap(thread)
+	for _, key := range []string{"customMetadata", "session"} {
+		if nested, ok := out[key].(map[string]interface{}); ok {
+			out[key] = cloneStringInterfaceMap(nested)
+		}
+	}
+	return out
+}
+
 func cloneStringInterfaceMap(m map[string]interface{}) map[string]interface{} {
 	out := make(map[string]interface{}, len(m))
 	for k, v := range m {
 		out[k] = v
 	}
 	return out
+}
+
+// TestT3BridgeStatefulSnapshotIsolated pins that a snapshot taken from the
+// stateful fake is a deep copy: commands applied after it is taken must not
+// reach the captured thread, which the HTTP handler encodes outside ts.mu.
+func TestT3BridgeStatefulSnapshotIsolated(t *testing.T) {
+	ts := newStatefulT3BridgeTestServer(t)
+	t.Cleanup(ts.Close)
+
+	ts.applyCommand("project.create", map[string]interface{}{
+		"projectId":     "project-1",
+		"workspaceRoot": t.TempDir(),
+		"title":         "project",
+	})
+	ts.applyCommand("thread.create", map[string]interface{}{
+		"threadId":       "thread-1",
+		"projectId":      "project-1",
+		"title":          "thread",
+		"customMetadata": map[string]interface{}{"gc.session_name": "session-1"},
+	})
+	snapshot := ts.dynamicSnapshot()
+
+	ts.applyCommand("thread.session.stop", map[string]interface{}{"threadId": "thread-1"})
+	ts.applyCommand("thread.meta.update", map[string]interface{}{
+		"threadId":       "thread-1",
+		"customMetadata": map[string]interface{}{"gc.added_later": "yes"},
+	})
+	ts.applyCommand("thread.archive", map[string]interface{}{"threadId": "thread-1"})
+
+	threads, _ := snapshot["threads"].([]interface{})
+	if len(threads) != 1 {
+		t.Fatalf("snapshot threads = %d, want 1", len(threads))
+	}
+	thread, _ := threads[0].(map[string]interface{})
+	session, _ := thread["session"].(map[string]interface{})
+	if got := session["status"]; got != "running" {
+		t.Errorf("snapshot session status = %v, want running", got)
+	}
+	if got := thread["deletedAt"]; got != nil {
+		t.Errorf("snapshot deletedAt = %v, want nil", got)
+	}
+	metadata, _ := thread["customMetadata"].(map[string]interface{})
+	if _, ok := metadata["gc.added_later"]; ok {
+		t.Errorf("snapshot customMetadata = %v, want no gc.added_later key", metadata)
+	}
+	if got := metadata["gc.session_name"]; got != "session-1" {
+		t.Errorf("snapshot gc.session_name = %v, want session-1", got)
+	}
 }
 
 func resetBridgeAuthCacheForTest(t *testing.T) {
