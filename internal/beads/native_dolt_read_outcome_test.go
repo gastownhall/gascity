@@ -156,3 +156,45 @@ func TestNativeReadSlowQueryOnAnsweringEndpointFailsFast(t *testing.T) {
 		t.Errorf("read took %s, want one pass plus at most the %s probe budget", elapsed, nativeReadEndpointProbeBudget)
 	}
 }
+
+// shortenEndpointProbeBudget sets nativeReadEndpointProbeBudget for one test.
+func shortenEndpointProbeBudget(t *testing.T, budget time.Duration) {
+	t.Helper()
+	previous := nativeReadEndpointProbeBudget
+	nativeReadEndpointProbeBudget = budget
+	t.Cleanup(func() { nativeReadEndpointProbeBudget = previous })
+}
+
+func TestNativeReadUnansweredEndpointStillReconnects(t *testing.T) {
+	shortenEndpointProbeBudget(t, 50*time.Millisecond)
+	for _, tc := range []struct {
+		name string
+		mode pingMode
+	}{
+		{name: "refused ping", mode: pingRefused},
+		{name: "ping outlives the probe budget", mode: pingBlocks},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dead, connector := newPooledStorageSpy(t, tc.mode)
+			fresh, _ := newPooledStorageSpy(t, pingAnswers)
+			var reopens int32
+			store := storeWithReopen(dead, fresh, &reopens)
+			store.readRetryBudgetOverride = 5 * time.Second
+
+			var calls int32
+			if err := store.withReadRetry(failOn(dead, errPostConnectRead, &calls)); err != nil {
+				t.Fatalf("read err = %v (%d calls, %d reopens), want the replay on the fresh handle to succeed",
+					err, atomic.LoadInt32(&calls), atomic.LoadInt32(&reopens))
+			}
+			if n := atomic.LoadInt32(&reopens); n != 1 {
+				t.Errorf("reopens = %d, want 1", n)
+			}
+			if n := atomic.LoadInt32(&calls); n != 2 {
+				t.Errorf("read ran %d times, want 2: the failed pass and the replay", n)
+			}
+			if n := connector.pings.Load(); n != 1 {
+				t.Errorf("pings = %d, want 1", n)
+			}
+		})
+	}
+}

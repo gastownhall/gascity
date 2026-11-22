@@ -44,8 +44,9 @@ func newNativeReadDeadlineError(readErr error) error {
 }
 
 // endpointAnswers reports whether the store's current pool still answers one
-// ping. Only a nil ping is evidence: a closed store, a handle that exports no
-// pool or a ping error all report false, and the caller reconnects as it would
+// ping within nativeReadEndpointProbeBudget. Only a nil ping is evidence: a
+// closed store, a handle that exports no pool, a ping error or an expired probe
+// budget all report false, and the caller reconnects as it would
 // without the probe. The ping goes straight to the library's *sql.DB, so it
 // never runs the reopen hook or managed-Dolt recovery.
 func (s *NativeDoltStore) endpointAnswers(ctx context.Context) bool {
@@ -62,5 +63,7 @@ func (s *NativeDoltStore) endpointAnswers(ctx context.Context) bool {
 	if db == nil {
 		return false
 	}
-	return db.PingContext(ctx) == nil
+	probeCtx, cancel := context.WithTimeout(ctx, nativeReadEndpointProbeBudget)
+	defer cancel()
+	return db.PingContext(probeCtx) == nil
 }
