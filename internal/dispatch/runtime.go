@@ -2209,11 +2209,11 @@ func closeWorkflowRoot(store beads.GraphStore, rootID, outcome string, skipped [
 }
 
 // workflowRootCloseMetadata is the metadata a workflow root closes with:
-// gc.outcome, plus gc.skipped_blockers (skipped, comma-joined) when the
-// workflow passed with one or more blockers closed gc.outcome=skipped. A skip
-// does not fail the workflow (beadOutcomeFailed); the marker keeps a pass with
-// skipped work distinguishable from one where every blocker ran. Every other
-// close writes gc.outcome alone.
+// gc.outcome, plus gc.skipped_blockers (skipped, sorted and comma-joined)
+// when the workflow passed with one or more blockers closed
+// gc.outcome=skipped. A skip does not fail the workflow (beadOutcomeFailed);
+// the marker keeps a pass with skipped work distinguishable from one where
+// every blocker ran. Every other close writes gc.outcome alone.
 func workflowRootCloseMetadata(outcome string, skipped []string) map[string]string {
 	meta := map[string]string{beadmeta.OutcomeMetadataKey: outcome}
 	if outcome == beadmeta.OutcomePass && len(skipped) > 0 {
@@ -2404,8 +2404,9 @@ func resolveBlockedOutcome(store beads.GraphStore, beadID string) (string, error
 	return outcome, err
 }
 
-// resolveBlockedOutcomeAndSkips is resolveBlockedOutcome that also returns the
-// IDs of the blockers that closed gc.outcome=skipped, from the same scan.
+// resolveBlockedOutcomeAndSkips is resolveBlockedOutcome that also returns,
+// sorted, the IDs of the blockers that closed gc.outcome=skipped, from the
+// same scan.
 func resolveBlockedOutcomeAndSkips(store beads.GraphStore, beadID string) (string, []string, error) {
 	deps, err := store.DepList(beadID, "down")
 	if err != nil {
@@ -2440,6 +2441,7 @@ func resolveBlockedOutcomeAndSkips(store beads.GraphStore, beadID string) (strin
 			skipped = append(skipped, blocker.ID)
 		}
 	}
+	slices.Sort(skipped)
 	return outcome, skipped, nil
 }
 

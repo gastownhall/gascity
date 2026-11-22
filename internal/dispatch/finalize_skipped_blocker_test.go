@@ -2,6 +2,8 @@ package dispatch
 
 import (
 	"maps"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -125,5 +127,33 @@ func TestProcessWorkflowFinalizeSkippedNativeStepIsDistinguishableFromPass(t *te
 
 	if maps.Equal(passed.Metadata, skipped.Metadata) {
 		t.Fatalf("root after a skip-directive-closed native step is indistinguishable from a real pass: both closed with metadata %v", skipped.Metadata)
+	}
+}
+
+// TestProcessWorkflowFinalizeRecordsSkippedBlockersSorted pins the encoding of
+// gc.skipped_blockers: every skipped blocker's ID, sorted ascending and
+// comma-joined, whatever order the blocks edges were added in, and no passed
+// blocker's ID.
+func TestProcessWorkflowFinalizeRecordsSkippedBlockersSorted(t *testing.T) {
+	t.Parallel()
+
+	f := newSkippedBlockerFixture(t, beads.NewMemStore(), []map[string]string{
+		outcomeMeta("skipped"),
+		outcomeMeta("pass"),
+		outcomeMeta("skipped"),
+		outcomeMeta("skipped"),
+	}, []int{3, 1, 0, 2})
+	result, root := f.finalize(t)
+
+	if result.Action != "workflow-pass" {
+		t.Fatalf("action = %q, want workflow-pass", result.Action)
+	}
+	want := []string{f.blockers[0].ID, f.blockers[2].ID, f.blockers[3].ID}
+	slices.Sort(want)
+	if got := root.Metadata["gc.skipped_blockers"]; got != strings.Join(want, ",") {
+		t.Fatalf("root gc.skipped_blockers = %q, want %q", got, strings.Join(want, ","))
+	}
+	if strings.Contains(root.Metadata["gc.skipped_blockers"], f.blockers[1].ID) {
+		t.Fatalf("root gc.skipped_blockers = %q contains passed blocker %s", root.Metadata["gc.skipped_blockers"], f.blockers[1].ID)
 	}
 }
