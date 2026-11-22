@@ -20,6 +20,7 @@ dolt-topology
 dolt-drift
 config-valid
 bd-command-inventory
+bd-beads-version
 legacy-suspended-field
 daemon-session-reconciler
 beads-ledger-feed
