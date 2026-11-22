@@ -260,6 +260,11 @@ func mutationError(err error) error {
 		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrPackDerived):
 		return huma.Error409Conflict(msg)
+	case errors.Is(err, configedit.ErrShadowed):
+		// The requested agent suspension is decided by another config layer
+		// (or that layer cannot be edited safely); the attempt was rolled
+		// back and the message names the agent and the deciding source.
+		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrValidation):
 		return huma.Error400BadRequest(msg)
 	case errors.Is(err, config.ErrReservedBeadPrefix):
