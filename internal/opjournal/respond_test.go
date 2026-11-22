@@ -135,6 +135,34 @@ func TestRespondKeyIsTheRaisedFactID(t *testing.T) {
 	}
 }
 
+func TestIsRespondKeyTellsTheNamespaceRespondKeyKeysIn(t *testing.T) {
+	f := Fact{Kind: FactInteractionRaised, Conversation: "gc-1", Generation: 2, Interaction: "perm-1#1", Basis: FactBasisObserved, At: t0}
+	id, err := FactID("gc", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ID = id
+	key, err := RespondKey(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]bool{
+		key: true,
+		// Any key in the namespace, whether or not it names a raising.
+		"respond:r-1":    true,
+		"":               false,
+		"r-1":            false,
+		"respond":        false,
+		"Respond:" + id:  false,
+		" respond:" + id: false,
+		"stop:2:turn-1":  false,
+	} {
+		if got := IsRespondKey(k); got != want {
+			t.Errorf("IsRespondKey(%q) = %t, want %t", k, got, want)
+		}
+	}
+}
+
 func TestRecordRaisingNumbersEachRaising(t *testing.T) {
 	h := newLaneHarness(t)
 	s := h.store

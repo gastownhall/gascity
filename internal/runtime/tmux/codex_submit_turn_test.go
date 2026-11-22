@@ -636,34 +636,40 @@ func TestCodexSubmitVerdictWithoutItsOwnRolloutStandsUnobserved(t *testing.T) {
 }
 
 // selectHeldCodexRollout names a session's rollout by the process tree under
-// its pane: the one rollout held open there, whichever process holds it.
+// its pane: the one rollout held open there, whichever process holds it. A
+// process whose open files the current user may not read (a root-owned
+// wrapper above Codex, a zombie) is skipped, as treeHeldFiles skips it; one
+// whose files cannot be read for any other reason leaves the rollout unnamed.
 func TestSelectHeldCodexRollout(t *testing.T) {
 	const (
 		own   = "/home/user/.codex/sessions/2026/10/15/rollout-2026-10-15T08-42-16-01a13eb9-f318-7c32-87de-d469fe118a8b.jsonl"
 		other = "/home/user/.codex/sessions/2026/10/15/rollout-2026-10-15T08-42-17-01a13eba-0000-7000-8000-000000000002.jsonl"
 	)
-	// 4242 is the pane's shell, 4300 the codex launcher, 4301 the codex
-	// binary; 5000 is another session's codex.
+	// 4242 is the pane's process, 4300 the codex launcher, 4301 the codex
+	// binary and 4302 a child of the launcher's that exited unreaped; 5000
+	// is another session's codex.
 	records := []proctable.ProcessRecord{
-		{PID: 4242, PPID: 1}, {PID: 4300, PPID: 4242}, {PID: 4301, PPID: 4300}, {PID: 5000, PPID: 1},
+		{PID: 4242, PPID: 1}, {PID: 4300, PPID: 4242}, {PID: 4301, PPID: 4300}, {PID: 4302, PPID: 4300}, {PID: 5000, PPID: 1},
 	}
 	for _, tt := range []struct {
 		name  string
 		files map[int][]string
-		err   map[int]bool
+		err   map[int]error
 		want  string
 	}{
 		{"held by a descendant", map[int][]string{4242: {"/dev/pts/3"}, 4301: {"/home/user/city", own}, 5000: {other}}, nil, own},
 		{"the same rollout held twice", map[int][]string{4300: {own}, 4301: {own, own}}, nil, own},
 		{"none held yet", map[int][]string{4301: {"/home/user/city"}, 5000: {other}}, nil, ""},
 		{"two rollouts in the tree", map[int][]string{4300: {other}, 4301: {own}}, nil, ""},
-		{"a descendant whose files cannot be read", map[int][]string{4301: {own}}, map[int]bool{4300: true}, ""},
+		{"a root-owned pane process above codex", map[int][]string{4301: {own}}, map[int]error{4242: fdTableUnreadable(4242)}, own},
+		{"a zombie in the tree", map[int][]string{4301: {own}}, map[int]error{4302: fdTableUnreadable(4302)}, own},
+		{"a descendant whose files cannot be read", map[int][]string{4301: {own}}, map[int]error{4300: fdTableFailed(4300)}, ""},
 		{"a rollout-named file outside sessions", map[int][]string{4301: {"/tmp/rollout-x.jsonl"}}, nil, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			openFiles := func(pid int) ([]string, error) {
-				if tt.err[pid] {
-					return nil, errors.New("permission denied")
+				if err := tt.err[pid]; err != nil {
+					return nil, err
 				}
 				return tt.files[pid], nil
 			}
@@ -711,7 +717,9 @@ func TestCodexSubmitDefersWhileATurnOutlastsTheReadyWait(t *testing.T) {
 
 // TestCodexSubmitResendsWhileTheDraftWaits keeps the #4706 recovery: when the
 // first Enter is taken as a newline, the message still sits in the idle
-// composer, and only then is the Escape+Enter submit sent again.
+// composer, and only then is the submit sent again, as the commit key alone: a
+// retried Escape+Enter pair can fuse into Alt+Enter again (ga-oqhooe), and a
+// lone Enter submits the draft the swallowed attempt left behind.
 func TestCodexSubmitResendsWhileTheDraftWaits(t *testing.T) {
 	pane, err := runCodexTurnNudge(t, "codex-submit-swallowed-enter", func(p *codexTurnPane) {
 		p.swallowEnters = 1
@@ -719,8 +727,66 @@ func TestCodexSubmitResendsWhileTheDraftWaits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NudgeSession = %v, want nil", err)
 	}
-	if got, want := pane.keysPressed(), []string{"C-u", "Escape", "Enter", "Escape", "Enter"}; !slices.Equal(got, want) {
+	if got, want := pane.keysPressed(), []string{"C-u", "Escape", "Enter", "Enter"}; !slices.Equal(got, want) {
 		t.Fatalf("keys = %q, want %q", got, want)
+	}
+	if recorded, aborted, _ := pane.snapshot(); aborted != 0 || !slices.Equal(recorded, []string{codexTurnMarker}) {
+		t.Fatalf("recorded %q, aborted %d; want the message once and no abort", recorded, aborted)
+	}
+	t.Run("NudgePane retries a failed submit with the commit key alone", checkNudgePaneRetriesWithTheCommitKeyAlone)
+}
+
+// failFirstEnterPane is a codexTurnPane whose tmux refuses the first Enter it is
+// sent: the send-keys returns an error and the key never reaches the pane.
+type failFirstEnterPane struct {
+	*codexTurnPane
+	faultMu sync.Mutex
+	failed  bool
+}
+
+func (p *failFirstEnterPane) execute(args []string) (string, error) {
+	if tmuxSubcommand(args) == "send-keys" && args[len(args)-1] == "Enter" {
+		p.faultMu.Lock()
+		first := !p.failed
+		p.failed = true
+		p.faultMu.Unlock()
+		if first {
+			return "", errors.New("send-keys Enter: tmux refused the key")
+		}
+	}
+	return p.codexTurnPane.execute(args)
+}
+
+func (p *failFirstEnterPane) executeCtx(_ context.Context, args []string) (string, error) {
+	return p.execute(args)
+}
+
+// checkNudgePaneRetriesWithTheCommitKeyAlone pins NudgePane's own submit retry
+// (ga-oqhooe), which NudgeSession's confirm loop does not run: the first attempt
+// sends codex's whole Escape+Enter sequence, and when tmux refuses that
+// attempt's Enter, the retry sends the commit key alone rather than a second
+// Escape+Enter pair that can fuse into Alt+Enter.
+func checkNudgePaneRetriesWithTheCommitKeyAlone(t *testing.T) {
+	const session = "codex-nudge-pane-retry"
+	// The bubble creates this pane's nudge lock channel; drop it so nothing
+	// outside the bubble ever touches it.
+	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
+	var pane *failFirstEnterPane
+	var err error
+	synctest.Test(t, func(t *testing.T) {
+		pane = &failFirstEnterPane{codexTurnPane: newCodexTurnPane(t, session)}
+		tm := &Tmux{cfg: DefaultConfig(), exec: pane}
+		err = tm.NudgePane(session, codexTurnMarker)
+		// Let the turn the submit started play out on the bubble's clock (no
+		// wall time passes), then cancel what is left of it.
+		<-time.After(time.Minute)
+		pane.stop()
+	})
+	if err != nil {
+		t.Fatalf("NudgePane = %v, want nil", err)
+	}
+	if got, want := pane.keysPressed(), []string{"Escape", "Enter"}; !slices.Equal(got, want) {
+		t.Fatalf("keys = %q, want %q: the first attempt's Escape, then the retry's Enter alone", got, want)
 	}
 	if recorded, aborted, _ := pane.snapshot(); aborted != 0 || !slices.Equal(recorded, []string{codexTurnMarker}) {
 		t.Fatalf("recorded %q, aborted %d; want the message once and no abort", recorded, aborted)
@@ -777,7 +843,7 @@ func TestSubmitAndConfirmWithholdsAnInterruptingResend(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			sends := 0
-			confirmed, _, sent, err := submitAndConfirm(func() error { sends++; return nil }, func() {},
+			confirmed, _, sent, err := submitAndConfirm(func(int) error { sends++; return nil }, func() {},
 				func() (bool, error) { return false, nil }, tt.mayResend, noSleep)
 			if err != nil || confirmed {
 				t.Fatalf("submitAndConfirm = %t, %v; want unconfirmed, nil", confirmed, err)
@@ -790,9 +856,12 @@ func TestSubmitAndConfirmWithholdsAnInterruptingResend(t *testing.T) {
 }
 
 // The first submit of an Escape-led sequence waits for an idle reading: a
-// pane busy at the baseline gets its submit only after it reads idle.
+// pane busy at the baseline gets its submit only after it reads idle. That
+// held submit is still the first one, so it carries attempt 0 and the full key
+// sequence, not the commit key a retry sends.
 func TestSubmitAndConfirmHoldsTheFirstInterruptingSubmitWhileBusy(t *testing.T) {
 	reads, sends := 0, 0
+	var attempts []int
 	busy := func() (bool, error) {
 		reads++
 		if sends > 0 {
@@ -800,13 +869,16 @@ func TestSubmitAndConfirmHoldsTheFirstInterruptingSubmitWhileBusy(t *testing.T) 
 		}
 		return reads <= 3, nil // an earlier turn ends after three reads
 	}
-	confirmed, _, sent, err := submitAndConfirm(func() error { sends++; return nil }, func() {}, busy,
+	confirmed, _, sent, err := submitAndConfirm(func(attempt int) error { sends++; attempts = append(attempts, attempt); return nil }, func() {}, busy,
 		func() (bool, error) { return true, nil }, noSleep)
 	if err != nil || !confirmed {
 		t.Fatalf("submitAndConfirm = %t, %v; want confirmed", confirmed, err)
 	}
 	if sent != 1 {
 		t.Fatalf("sends = %d, want 1, after the earlier turn ended", sent)
+	}
+	if !slices.Equal(attempts, []int{0}) {
+		t.Fatalf("attempts = %v, want [0]: a submit held back by a busy baseline is still the first", attempts)
 	}
 }
 

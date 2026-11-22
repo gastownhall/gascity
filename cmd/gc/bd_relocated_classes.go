@@ -209,9 +209,11 @@ var bdRelocatedClassGuardedVerbs = map[string]bdRelocatedClassScan{
 // added here alongside it — two triggers for one verb, where one always fires
 // first, is a dead branch that reads as coverage.
 //
-// A city that relocates nothing has no entry to match against, so a
-// single-store `gc bd ready` is byte-identical: same argv, same bd binary, same
-// exit code. bdSQLRelocatedClassRefusal returns early on an empty relocated
+// A city that relocates nothing has no entry to match against, so this guard
+// leaves a single-store `gc bd ready` unchanged: same bd binary, same exit code.
+// (Its argv still gains the session/order-tracking exclusions added by
+// rewriteBdReadyInternalArgs; see bd_ready_internal.go.)
+// bdSQLRelocatedClassRefusal returns early on an empty relocated
 // set, before this map is consulted at all.
 //
 // Not guarded here: a `ready` hidden behind an unrecognized root flag, which
@@ -738,9 +740,21 @@ func fileCreateFormForFlag(name string) fileCreateForm {
 // and exits non-zero WITHOUT writing when it fails, so a plan unreadable here
 // cannot become a bead either. The caller forwards it to fail at bd rather than
 // refusing a create that would mint nothing.
+//
+// Only a regular file is read here. A pipe (`<(...)`, /dev/stdin) can be read
+// once, and reading it here would leave the class-must-not-flip guard, which
+// runs next, an empty plan to refuse. That guard's node-by-node judge
+// (judgeBdCreateGraph) reads the pipe instead and hands bd the bytes it judged.
+// It runs on every city this guard can refuse on (storeClassHolds is non-nil
+// whenever a class is relocated), and it refuses every node whose class the
+// work store does not hold, so a pipe left unread here is still refused when
+// it would mint a relocated class.
 func bdRelocatedClassGraphPlanClass(scopeRoot, path string) (class coordclass.Class, parsed bool) {
 	if scopeRoot != "" && path != "" && !filepath.IsAbs(path) {
 		path = filepath.Join(scopeRoot, path)
+	}
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		return coordclass.ClassWork, false
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -824,7 +838,9 @@ func bdRelocatedClassCreateRefusal(cfg *config.City, scopeRoot string, bdArgs []
 		// so it classifies without drift via coordclass.ClassifyGraphPlan. An
 		// unreadable or malformed plan is left to fall through to bd, which
 		// applies the identical parse and mints nothing when it fails, so there
-		// is nothing for this guard to strand.
+		// is nothing for this guard to strand. A plan that is not a regular
+		// file is left unread for the class-must-not-flip guard to judge
+		// (bdRelocatedClassGraphPlanClass).
 		if class, parsed := bdRelocatedClassGraphPlanClass(scopeRoot, path); parsed {
 			return bdRelocatedClassMatch(verb, relocated, class)
 		}

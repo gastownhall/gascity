@@ -211,8 +211,10 @@ type Bead struct {
 	NoHistory bool `json:"no_history,omitempty"`
 	// DeferUntil hides the bead from ready/claimable views until this time,
 	// mirroring bd's defer_until column (a future value means "not yet ready";
-	// nil or past means ready). Create paths preserve it; UpdateOpts does not
-	// mutate it.
+	// nil or past means ready — for a row the store does not record as
+	// deferred: a store-recorded deferred status defers the bead through
+	// IndefinitelyDeferred until the store itself lifts the deferral). Create
+	// paths preserve it; UpdateOpts does not mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
 	// IsBlocked carries bd's denormalized dependency-ready projection. Nil
 	// means the store did not provide it and cached ready falls back to
@@ -225,20 +227,24 @@ type Bead struct {
 	// stamped before closing, the same value BdStore and NativeDoltStore
 	// forward to their close. Reopening clears it.
 	CloseReason string `json:"close_reason,omitempty"`
-	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
-	// after richer statuses normalize to Gas City's three-state model. Cache
-	// notifications restore status="deferred" on the event wire so another
-	// process can reconstruct it; other JSON surfaces remain unchanged.
+	// IndefinitelyDeferred preserves bd's status-based deferral after richer
+	// statuses normalize to Gas City's three-state model. It is set whenever
+	// the store records bd's deferred status, dated or not: defer_until only
+	// names when bd's own sweep may lift the deferral, and gc honors the lift
+	// once the store records it (#6207). Cache notifications restore
+	// status="deferred" on the event wire so another process can reconstruct
+	// it; other JSON surfaces remain unchanged.
 	//
 	// No read surface exposes it, so the two projections of the same bead
 	// disagree by design: a direct .gc/events.jsonl reader sees the
 	// status="deferred" EncodeBeadEventPayload wrote, while the HTTP, SSE and
-	// --json surfaces re-project through this struct and report status="open",
-	// defer_until=null, is_blocked=false — three signals that all read as
-	// "ready" for a bead ready deliberately excludes. An operator asking why a
-	// bead is not being picked up has nothing to read; giving the exclusion a
-	// derived read-only representation is a wire-design decision, not a
-	// consequence of this tag.
+	// --json surfaces re-project through this struct and report status="open"
+	// and is_blocked=false, with a defer_until that is null (a dateless
+	// deferral) or already past (a dated one the store has not woken) — signals
+	// that all read as "ready" for a bead ready deliberately excludes. An
+	// operator asking why a bead is not being picked up has nothing to read;
+	// giving the exclusion a derived read-only representation is a wire-design
+	// decision, not a consequence of this tag.
 	IndefinitelyDeferred bool `json:"-"`
 	// SourceStatus is the status the backing store recorded, as read, before
 	// Status folded it into Gas City's three-state model: bd's blocked,
@@ -605,8 +611,10 @@ type ConditionalWriterHandleProvider interface {
 // globally — mirroring GraphApplyFor. It does NOT unwrap the class_store.go
 // typed wrappers (WorkStore, GraphStore, …): those embed the Store interface, so
 // optional capabilities are not promoted through them and a direct assertion on
-// the wrapper fails. A caller holding a typed class wrapper must pass its
-// unwrapped .Store field to this helper, exactly as with GraphApplyFor.
+// the wrapper fails. A caller holding a typed class wrapper reaches the
+// capability with beads.As[ConditionalWriter], which sees through it; passing
+// the unwrapped .Store field here is the older unwrap the storeclass lint
+// baselines.
 func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
 	if store == nil {
 		return nil, false
@@ -932,10 +940,12 @@ func HasReadyExcludedLabel(b Bead) bool {
 	return false
 }
 
-// IsDeferred reports whether a bead is hidden indefinitely by bd's deferred
-// status or temporarily by a future defer_until.
-// cmd_hook.isFutureDeferredHookCandidate mirrors only the time-bound half; it
-// operates on raw bd JSON before this normalization.
+// IsDeferred reports whether a bead is hidden by bd's deferred status (dated
+// or not, until the store itself lifts the deferral) or by a future
+// defer_until on a row the store does not record as deferred.
+// cmd_hook's filterUnreadyHookCandidates mirrors both halves on raw bd JSON,
+// before this normalization: isStoreDeferredHookCandidate reads the raw
+// status and isFutureDeferredHookCandidate the date.
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.IndefinitelyDeferred ||
 		(b.DeferUntil != nil && b.DeferUntil.After(now))
@@ -1154,13 +1164,27 @@ type Store interface {
 	// arbitrary string key. Unlike SetMetadata, values written here are never
 	// synced through Dolt/git and are never visible in Bead.Metadata — they
 	// live only in this store's local clone (in-memory, or a local sidecar
-	// file for on-disk stores). Use this for ephemeral, high-churn, or
-	// clone-specific data where cross-clone durability is unnecessary or
-	// actively undesirable (e.g. synced_at, last_woke_at,
-	// pending_create_claim — illustrative examples, not an exhaustive list).
-	// Setting value to "" clears the key. Writing here never touches the
-	// bead's UpdatedAt, since that field is Dolt-synced and a clone-local
-	// write must not appear as a durable change to other clones.
+	// file for on-disk stores). Setting value to "" clears the key.
+	//
+	// A key is single-home: durable or clone-local, never both. A local write
+	// touches nothing durable — not the bead row, its Revision, or its
+	// UpdatedAt (that field is Dolt-synced, so a clone-local write must not
+	// appear as a durable change to other clones) — so a revision fence cannot
+	// see it. Likewise a durable write of the same key (SetMetadata, or a
+	// clear) leaves the local value as it was, and the two are not merged.
+	//
+	// The sidecar is a per-process cache: it reads its file on first use and
+	// never re-reads it, and every save rewrites the whole file. Two
+	// processes, or two Store instances, over one file diverge for their
+	// lifetime and the later save drops the other's keys (see "H2" in
+	// proxied_store.go, which patches it for one process only).
+	//
+	// That makes few keys suitable. Move a key here only if a durable write or
+	// Dolt commit removed on a named hot path was measured (a key written
+	// only inside a batch that is committed anyway saves nothing); nothing
+	// durable reads, writes, clears or fences on it; its writers and readers
+	// share one process; every reader goes through GetLocalString; and it is
+	// not cleared in the same patch that records an action.
 	//
 	// Implementations that already hold the bead set in process (MemStore,
 	// FileStore) return ErrNotFound for an unknown id, matching SetMetadata.
@@ -1176,10 +1200,13 @@ type Store interface {
 	// local clone. Returns "" with a nil error if the key was never set, was
 	// cleared, or was set by a different clone — not ErrNotFound — mirroring
 	// the empty-string-means-absent convention SetLocalString uses for
-	// clearing. As with SetLocalString, only in-process implementations
-	// additionally return ErrNotFound for an unknown bead id; external-store
-	// implementations return "", nil instead. Callers must not rely on this
-	// method to validate bead existence.
+	// clearing. It reads only the local value: it never falls back to a
+	// durable Metadata entry of the same key, and it does not see a value
+	// another process or Store instance wrote to the same sidecar file after
+	// this store first loaded it (see SetLocalString). As with SetLocalString,
+	// only in-process implementations additionally return ErrNotFound for an
+	// unknown bead id; external-store implementations return "", nil instead.
+	// Callers must not rely on this method to validate bead existence.
 	GetLocalString(id, key string) (string, error)
 
 	// Tx executes fn inside a single logical transaction identified by
