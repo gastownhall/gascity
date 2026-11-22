@@ -6935,10 +6935,12 @@ exit 0
 	}
 }
 
-// TestSpawnStormDetectListsOnlyUnassignedBeads pins the read filter. The sweep
-// must ask gc ready for --unassigned beads; an assigned bead carrying a
-// rejection_reason is being worked, not reset to pool. The stub behaves like gc
-// ready: it drops assigned rows only for --unassigned.
+// TestSpawnStormDetectListsOnlyUnassignedBeads pins the read filter and the
+// alert. The sweep must ask gc ready for --unassigned beads; an assigned bead
+// carrying a rejection_reason is being worked, not reset to pool, so it gets no
+// ledger entry and no SPAWN_STORM mail, while the unassigned bead reaches count
+// 1 and is alerted once. The stub behaves like gc ready: it drops assigned rows
+// only for --unassigned.
 func TestSpawnStormDetectListsOnlyUnassignedBeads(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -6992,6 +6994,23 @@ exit 0
 	}
 	if got := counts["ga-pool"]; got != 1 {
 		t.Fatalf("ledger count for ga-pool = %d, want 1\nledger: %s", got, ledgerData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if n := strings.Count(string(gcData), "SPAWN_STORM: bead ga-pool reset 1x"); n != 1 {
+		t.Fatalf("SPAWN_STORM mail for ga-pool sent %d times, want 1\ngc log:\n%s", n, gcData)
+	}
+	if strings.Contains(string(gcData), "ga-held") {
+		t.Fatalf("ga-held, which is assigned, was named in a gc call\ngc log:\n%s", gcData)
+	}
+	if !strings.Contains(string(gcData), "ready --unassigned") {
+		t.Fatalf("the sweep did not read the pool with --unassigned\ngc log:\n%s", gcData)
+	}
+	if strings.Contains(string(gcData), "--assignee") {
+		t.Fatalf("the sweep filtered assignees in the gc layer instead of reading the pool with --unassigned\ngc log:\n%s", gcData)
 	}
 }
 
