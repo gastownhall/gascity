@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -141,8 +142,20 @@ type relaunchPlan struct {
 }
 
 // relaunchStep hands the Call the relaunch A14 still decides on the fresh
-// row and runtime read.
+// row and runtime read, and that the fence's legs this section read under
+// the lease record pass (v5.9g; STALE-READ 7.2): the deferral's reads came
+// before the record, so a pending interaction, an attach or work that lands
+// between them holds the Relaunch here. The legs are driftNeeds' (L5 on an
+// ordinary row only), less L4 where legacy's pending exemption applies, as
+// the deferral reads it.
 func relaunchStep(v txView) txStep {
+	legs := driftNeeds(v.World, v.It).Legs
+	if pendingExempt(v.Row, v.Now) {
+		legs &^= legPending
+	}
+	if fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: legs}); !fv.Proceed {
+		return txStep{Refuse: causeDriftDeferred + fv.Reason}
+	}
 	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
 	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind {
 		return txStep{Refuse: causeRedecided}
@@ -169,7 +182,7 @@ type relaunched struct {
 // Relaunch. An attach holds it; any failure is the fallback's.
 func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, error) {
 	out := relaunched{Named: p.named, Hash: p.hash}
-	r, ok := c.start.sp.(runtime.RelaunchProvider)
+	r, ok := p.leaf.(runtime.RelaunchProvider) // the leaf the section fenced, never the composite, whose router re-routes by name (C8.7)
 	if !ok {
 		out.Err = runtime.ErrRelaunchUnsupported
 		return out, nil
@@ -178,8 +191,8 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 	switch {
 	case err != nil:
 		out.Err = err
-	case prepared.coreHash != runtime.CoreFingerprint(p.hash) || prepared.provisionHash != p.row.StartedProvisionHash ||
-		prepared.launchHash == p.row.StartedLaunchHash: // the core partitions into provision and launch: a matching core is the hash form's launch too
+	case prepared.coreHash != runtime.CoreFingerprint(p.hash) || !prepared.provisionMatches(p.row.StartedProvisionHash) ||
+		prepared.launchMatches(p.row.StartedLaunchHash): // the core partitions into provision and launch: a matching core is the hash form's launch too
 		out.Err = errors.New(causeRelaunchSkew)
 	case strings.TrimSpace(p.row.SessionKey) == "" && p.tp.ResolvedProvider != nil && strings.TrimSpace(p.tp.ResolvedProvider.SessionIDFlag) != "":
 		out.Err = errors.New("relaunch would mint a speculative resume key") // legacy's preparation mints one here, then falls back
@@ -188,6 +201,14 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 			return out, nil
 		}
 		out.Err = r.Relaunch(ctx, p.name, prepared.cfg)
+		// A startup nudge the runtime handed back (one held behind a dialog
+		// under program_status = "on", row A20, or an un-welded exec launch's
+		// first turn) is queued, never typed or failed.
+		// A warm relaunch keeps the box's token, never the config's, so the
+		// turn binds to the live token alone (else it is queued untagged).
+		if err := queueStartupNudgeHandback(p.w.CityPath, launchCityConfig(p.w), p.leaf, p.row, p.name, "", out.Err == nil, p.now); err != nil {
+			log.Printf("v2 relaunch %s: %v", p.row.ID, err)
+		}
 	}
 	out.OK = out.Err == nil
 	return out, nil
@@ -216,6 +237,14 @@ func relaunchResultStep(v txView) txStep {
 	if _, active := activeStop(row); active {
 		return txStep{Refuse: causeStopActive}
 	}
+	// The fallback rests on the drift the pass decided, on the row read
+	// before the relaunch: an operator's kill or hold since then makes the
+	// row another arm's, and the fresh row decides (CONTRACT v5.10e;
+	// the A14 generator's seeds 784, 958, 554, 683, 368, 238, 74, mc-i7efm).
+	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
+	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind {
+		return txStep{Refuse: causeRedecided}
+	}
 	step := txStep{Write: stopBeginPatch(row, drainConfigDrift, v.Now), Done: true}
 	step.Facts.Events = []events.Event{{Type: events.SessionDraining, Actor: "gc", Subject: res.TP.DisplayName(), Message: "config drift detected", SessionID: v.Row.ID}}
 	return drainBeginChecks(v, drainConfigDrift, step)
@@ -224,8 +253,9 @@ func relaunchResultStep(v txView) txStep {
 // causeStopActive: a stop request stands; the fallback drain begins none.
 const causeStopActive = "stop-active"
 
-// driftRestartStep, on a confirmed stop, resets the row to start-pending
-// for its restart, with legacy's session.draining.
+// driftRestartStep, on a confirmed stop that its own runtime read still
+// finds gone (goneNow), resets the row to start-pending for its restart,
+// with legacy's session.draining.
 func driftRestartStep(v txView) txStep {
 	out, err := callResult[stopped](v)
 	switch {
@@ -233,6 +263,8 @@ func driftRestartStep(v txView) txStep {
 		return txStep{Fail: causeCallError, Err: err}
 	case !out.Confirmed:
 		return txStep{Refuse: out.Reason}
+	case !goneNow(v):
+		return txStep{Refuse: causeRuntimePresent}
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	step := txStep{Write: driftRestartPatch(res.TP, v.Row, v.Now), Done: true} // legacy's drift kill records no stop metric
@@ -260,7 +292,7 @@ func driftRestartPatch(tp TemplateParams, row session.Info, now time.Time) sessi
 	if preserve {
 		patch["started_config_hash"] = hash
 	}
-	for _, k := range []string{namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, sessionAttachedConfigDriftDeferredAtMetadata, sessionAttachedConfigDriftDeferredKeyMetadata} {
+	for _, k := range []string{namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, sessionAttachedConfigDriftDeferredAtMetadata, sessionAttachedConfigDriftDeferredKeyMetadata, configDriftEscalatedAtMetadata} {
 		patch[k] = ""
 	}
 	return patch

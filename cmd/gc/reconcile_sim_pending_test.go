@@ -25,19 +25,23 @@ import (
 // (the row, then its session_name: staging J45) as outside moves. So the
 // corpus reaches A10's rollback and its S7 exit, the start's lost commit,
 // AL1's lease keep and A21's leased failed-create hold, and the invariants
-// below, each with a seeded mutant, hold them:
+// below, each with a seeded mutant, hold them (A10's hold over an older
+// incarnation whose work is in progress, #2081, in a directed scenario):
 //   - PC1 I-lease: v2 never rolls back or closes a row inside its pending
 //     create's lease (legacy's pendingCreateSessionStillLeasedInfo, its
 //     anchor not past the skew bound) unless its name holds another row's
 //     runtime or the row's own older incarnation (Foreign, StaleSelf);
 //   - PC2 I-S7: at quiescence no pending create rests with a StaleSelf
-//     runtime under its name that S7's exit could take;
+//     runtime under its name that S7's exit could take: one at its
+//     generation, or an older one whose session has no work in progress;
 //   - PC3 I-lost-commit: a start whose row moved under it (closed, or
 //     retokened) leaves no live runtime it created under the moved token;
 //   - PC4 I-teardown: a rollback that closed its row left nothing C3
 //     required it to stop: the row's own runtime (O2: Current, or StaleSelf
 //     at its generation) or, for a pool row, anything under its bead-scoped
-//     name (C8.2(a), v5.9q).
+//     name (C8.2(a), v5.9q); and none closed over a live incarnation of the
+//     row's own session while that session's work was in progress, which
+//     holds the rollback (#2081), as I4 and I5 forbid stopping it.
 
 func init() {
 	simEffectChecks = append(simEffectChecks, (*sim).markEffect, (*sim).checkLeaseRollback, (*sim).checkLostCommit, (*sim).checkRollbackTeardown)
@@ -121,6 +125,37 @@ func (s *sim) pendingCreateRows() []beads.Bead {
 	return rows
 }
 
+// sessionWorking reports in-progress work on the city leg of rows, a
+// snapshot (sim.prev, sim.snapshot), assigned to row's session by its ID or
+// its session name: the in-flight work of whichever incarnation of the
+// session runs, which a pending create's rollback must neither stop nor
+// close over (#2081).
+func sessionWorking(rows map[string]beads.Bead, row beads.Bead) bool {
+	name := row.Metadata["session_name"]
+	for k, b := range rows {
+		if strings.HasPrefix(k, simCityLeg+"/") && b.Status == "in_progress" && b.Metadata["session_name"] == "" &&
+			(b.Assignee == row.ID || name != "" && b.Assignee == name) {
+			return true
+		}
+	}
+	return false
+}
+
+// simLiveIncarnation reports rt, under row's name, as a live earlier or later
+// incarnation of row's own session: its ID under another token and another
+// epoch, its agent running.
+func simLiveIncarnation(row beads.Bead, rt *simRuntime) bool {
+	return rt != nil && !rt.corpse && !rt.zombie && rt.id == row.ID &&
+		rt.token != row.Metadata["instance_token"] && rt.epoch != row.Metadata["generation"]
+}
+
+// workingIncarnation reports rt, under pending create row's name, as a live
+// incarnation of row's own session whose work is in progress in rows: the
+// runtime #2081 keeps the rollback from stopping or closing over.
+func workingIncarnation(rows map[string]beads.Bead, row beads.Bead, rt *simRuntime) bool {
+	return row.Metadata["pending_create_claim"] == "true" && simLiveIncarnation(row, rt) && sessionWorking(rows, row)
+}
+
 // pendingCreate is pending create id of kind (pool at slot, manual or named),
 // created up to 15 minutes ago, started (last_woke_at) or not, named or
 // still nameless, and puts a runtime under its name: none, its own, a
@@ -185,17 +220,17 @@ var pendingRuntimeOps = []struct {
 	}},
 }
 
-// pickExternalOp is a step's outside move: externalOps, plus the pending
-// creates' when the sim seeds them. A sim that seeds none (the floored
-// corpus) draws from externalOps alone, so its RNG stream, and the
-// scenarios it reaches, are main's.
+// pickExternalOp is a step's outside move: externalOps and the config
+// drifts (reconcile_sim_drift_test.go), plus the pending creates' when the
+// sim seeds them. A sim that seeds none (the floored corpus) draws no
+// pending create.
 func (s *sim) pickExternalOp() struct {
 	name string
 	fn   func(s *sim, l *simLeg, b beads.Bead)
 } {
-	ops := externalOps
+	ops := slices.Concat(externalOps, driftOps) // reconcile_sim_drift_test.go
 	if !s.noPendingCreates {
-		ops = slices.Concat(externalOps, pendingCreateOps)
+		ops = slices.Concat(ops, pendingCreateOps)
 	}
 	return ops[s.rng.IntN(len(ops))]
 }
@@ -335,8 +370,9 @@ func (s *sim) checkLostCommit(e *simEffect) func(settlement) {
 // checkStaleCreates is PC2 I-S7 at quiescence: no open pending create on
 // the sessions leg rests with a StaleSelf runtime under its name (its ID,
 // another token, an epoch at or below its generation) that S7's exit can
-// take: one the census reads alive, not attached, whose probe answers, on
-// a row no kill fence or unknown state holds.
+// take: one the census reads alive, not attached, whose probe answers, on a
+// row no kill fence or unknown state holds. An older epoch whose session has
+// work in progress is a live incarnation the rollback holds over (#2081).
 func (s *sim) checkStaleCreates() {
 	_, obs := s.observed()
 	for _, k := range slices.Sorted(maps.Keys(s.prev)) {
@@ -358,7 +394,7 @@ func (s *sim) checkStaleCreates() {
 		if stale {
 			epoch, err1 := strconv.Atoi(rt.epoch)
 			gen, err2 := strconv.Atoi(b.Metadata["generation"])
-			stale = err1 == nil && err2 == nil && epoch <= gen
+			stale = err1 == nil && err2 == nil && (epoch == gen || epoch < gen && !sessionWorking(s.prev, b))
 		}
 		s.sp.mu.Unlock()
 		if stale {
@@ -368,12 +404,42 @@ func (s *sim) checkStaleCreates() {
 }
 
 // pendingCreateRollback reports a v2 close as failed-create of a row
-// holding its pending create's claim: a rollback (A10, S3) or A21's
-// failed-create close, which end the row and its holds with the Retire
-// cell, as legacy's failedCreateClosePatch does whatever holds the row
-// (SESS-061). I15 leaves the holds to it; PC1 judges when it may land.
+// holding its pending create's claim, or of a row already failed-create
+// whose claim a partial rollback or an attach's confirm cleared: a rollback
+// (A10, S3) or A21's failed-create close, which end the row and its holds
+// with the Retire cell, as legacy's failedCreateClosePatch does whatever
+// holds the row (SESS-061). I15 leaves the holds to it; PC1 judges when it
+// may land.
 func pendingCreateRollback(w simWrite) bool {
-	return w.Before.Metadata["pending_create_claim"] == "true" && w.After.Metadata["state"] == string(session.StateFailedCreate)
+	failed := string(session.StateFailedCreate)
+	return w.After.Metadata["state"] == failed && (w.Before.Metadata["pending_create_claim"] == "true" || w.Before.Metadata["state"] == failed)
+}
+
+// pendingCreateScreenPark reports A10's rollback screen parking a pending
+// create instead of closing it (SESS-051/092; CONTRACT v5.9z-1 (i), "close
+// or park"): a write of a row holding its claim that leaves it open and
+// asleep with a provider terminal error's park or a rate-limit quarantine,
+// which legacy's checkRateLimitStability writes whatever holds the row. I15
+// leaves it the hold's reason alone: no other held key, no wake, and no
+// quarantine shortened (an extension is no change).
+func pendingCreateScreenPark(w simWrite, stable bool) bool {
+	b, a := w.Before.Metadata, w.After.Metadata
+	if b["pending_create_claim"] != "true" || w.After.Status == "closed" || a["state"] != string(session.StateAsleep) {
+		return false
+	}
+	switch session.SleepReason(a["sleep_reason"]) {
+	case session.SleepReasonProviderTerminalError:
+		if a[sessionProviderTerminalErrorMetadataKey] == "" {
+			return false
+		}
+	case session.SleepReasonRateLimit:
+		if a["quarantined_until"] == "" {
+			return false
+		}
+	default:
+		return false
+	}
+	return slices.Equal(dormantChanges(w.Before, a, w.At, stable), []string{"sleep_reason"})
 }
 
 // pendingCreateAdopt reports v2's adopt (A10, S2) of a pending create whose
@@ -415,15 +481,15 @@ func (s *sim) pendingCreateTimers() []time.Time {
 	return out
 }
 
-// markEffect records, for the provider's kills, the kind of the v2 effect
-// now running (simKill.Effect), until it settles.
+// markEffect records, for the provider's kills, the kind and reason of the
+// v2 effect now running (simKill.Effect, Reason), until it settles.
 func (s *sim) markEffect(e *simEffect) func(settlement) {
 	s.sp.mu.Lock()
-	s.sp.effect = e.it.Kind
+	s.sp.effect, s.sp.reason = e.it.Kind, e.it.Reason
 	s.sp.mu.Unlock()
 	return func(settlement) {
 		s.sp.mu.Lock()
-		s.sp.effect = ""
+		s.sp.effect, s.sp.reason = "", ""
 		s.sp.mu.Unlock()
 	}
 }
@@ -432,19 +498,22 @@ func (s *sim) markEffect(e *simEffect) func(settlement) {
 // (I-attached), with the effects it covers: a rollback's teardown and S7's
 // exit (A10, C3) and the start's lost-commit cleanup (S2) stop the row's own
 // runtime (own: O2 Current, or StaleSelf at its generation) or, for a
-// pending create, its bead-scoped name (C8.2(a)), attached or not.
+// pending create, its bead-scoped name (C8.2(a)), attached or not, but a
+// live incarnation of the row's own session while that session's work is in
+// progress, which is never stopped there (#2081).
 func (s *sim) ownRuntimeException(k simKill, row beads.Bead, own bool) bool {
 	if !ownRuntimeEffect(k) {
 		return false
 	}
-	return own || row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name)
+	return own || row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name) && !workingIncarnation(s.prev, row, k.Hit)
 }
 
 // ownRuntimeEffect reports a Stop made by an effect the own-runtime
-// exception covers: a rollback (its teardown, S7's exit) or a start (its
-// lost commit, its abandon's teardown).
+// exception covers: a rollback (its teardown, S7's exit), a start (its
+// lost commit, its abandon's teardown), or A13's restart, which waives the
+// attach leg (CONTRACT v5.10u).
 func ownRuntimeEffect(k simKill) bool {
-	return k.Method == "Stop" && (k.Effect == intentRollback || k.Effect == intentStart)
+	return k.Method == "Stop" && (k.Effect == intentRollback || k.Effect == intentStart || k.Effect == intentStop && k.Reason == decideRestartRequested)
 }
 
 // stopAdmission is a stop a pass admitted (sim.stopAdmissions): whether
@@ -572,6 +641,14 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 			s.prev = map[string]beads.Bead{"city/x": row("x", "session_name", "chat", "pending_create_claim", "true")}
 			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "chat", Effect: intentRollback, Hit: &simRuntime{id: "x", epoch: "1", token: "tok-1"}})
 		}},
+		// I4's just-closed own-teardown exception (v5.10e): only a rollback's
+		// or a start's stop of the row's own StaleSelf at its generation; at
+		// another generation it still fails.
+		{"I4: a rollback kills a just-closed row's StaleSelf runtime at another generation", "I4 ", func(s *sim) {
+			s.prev = map[string]beads.Bead{}
+			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
+			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Effect: intentRollback, Hit: &simRuntime{id: "x", epoch: "1", token: "tok-old"}})
+		}},
 		{"I4: a stop verb kills another row's runtime under a just-closed pending create's name", "I4 ", func(s *sim) {
 			s.prev = map[string]beads.Bead{}
 			s.closedInStep = map[string]beads.Bead{"s-x": row("x", "pending_create_claim", "true", "pool_managed", "true")}
@@ -595,6 +672,26 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 			k := rowKey{Leg: rowLeg, ID: "gc-1"}
 			s.stopAdmissions = map[rowKey]stopAdmission{k: {moves: len(s.basisMoves)}}
 			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: k}})(settlement{Outcome: settledRefused, Cause: causePremise})
+		}},
+		// I15's named-reopen exception (mc-i7efm): only a configured named
+		// session's closed row reopened; a reopen of another closed row, or
+		// a named row's open write, that clears a hold still fails.
+		{"I15: a reopen of a closed row no configured named session holds", "I15 ", func(s *sim) {
+			b := row("x", held...)
+			b.Status = "closed"
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: row("x", "state", "stopped")})
+		}},
+		{"I15: a named row's open write that clears its hold", "I15 ", func(s *sim) {
+			b := row("x", append(held, "configured_named_session", "true")...)
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: row("x", "configured_named_session", "true", "state", "stopped")})
+		}},
+		// I16's deadline exception (mc-i7efm): a stop abandoned at its
+		// deadline only; one that failed on any other cause still fails.
+		{"I16: a stop failed on its write with no pane, left signaled", "I16 ", func(s *sim) {
+			s.setMeta(s.legs[0], "gc-1", signaled...)
+			s.sp.drop("s-gc-1")
+			k := rowKey{Leg: rowLeg, ID: "gc-1"}
+			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: k}})(settlement{Outcome: settledFailed, Cause: causeWrite})
 		}},
 		{"I16: signaled at quiescence with no pane, its probe answering", "I16 ", func(s *sim) {
 			s.setMeta(s.legs[0], "gc-1", signaled...)
@@ -624,8 +721,9 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 // the code's own cause: it is quiescent only at or past its row's backoff
 // expiry with no change but the runtime lease record, and only when the
 // sim's own hold model holds the row (simHeld). A refusal the model does not
-// back (planted X1), and a start refused attached (planted X2), are no
-// pacing. A rollback refused liveness-unknown is paced only over a
+// back (planted X1), and a start refused attached on an unattached pane
+// (planted X2), are no pacing; one refused attached under an attached pane
+// is. A rollback refused liveness-unknown is paced only over a
 // probe that keeps erroring.
 func TestSimPendingPacedRetries(t *testing.T) {
 	k := rowKey{Leg: rowLeg, ID: "gc-1"}
@@ -645,7 +743,8 @@ func TestSimPendingPacedRetries(t *testing.T) {
 		{"a held start at the expiry", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), true},
 		{"a start refused held on a row the hold model holds not (X1)", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_reason", "idle"), row("runtime_lease_epoch", "4", "sleep_reason", "idle"), false},
 		{"a held start before the expiry", intentStart, causeHeld, time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), false},
-		{"an attached start at the expiry (no pacing: no seed needs it)", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"an attached start at the expiry (paced: shifted seed 474)", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
+		{"an attached start before the expiry", intentStart, causeAttached, time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"a start refused attached on an unattached pane (X2)", intentStart, causeAttached, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"a held start that moved another key", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold", "state", "asleep"), false},
 		{"a start refused for another cause", intentStart, causePrepare, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
@@ -665,7 +764,9 @@ func TestSimPendingPacedRetries(t *testing.T) {
 // checkRollbackTeardown is PC4 I-teardown: a rollback whose close landed
 // left no live runtime C3 required it to stop, under the name the row held:
 // its own (O2: Current, or StaleSelf at its generation) or, under a pool
-// row's bead-scoped name, any (C8.2(a), v5.9q).
+// row's bead-scoped name, any (C8.2(a), v5.9q). A live incarnation of the
+// row's own session whose work was in progress when the rollback began holds
+// it instead (#2081), so no close lands over that one, under any name.
 func (s *sim) checkRollbackTeardown(e *simEffect) func(settlement) {
 	l := s.legOf(e.it.Key.Leg)
 	if e.it.Kind != intentRollback || l == nil {
@@ -675,6 +776,7 @@ func (s *sim) checkRollbackTeardown(e *simEffect) func(settlement) {
 	if err != nil || before.Status == "closed" {
 		return func(settlement) {}
 	}
+	working := sessionWorking(s.snapshot(), before)
 	return func(res settlement) {
 		name := before.Metadata["session_name"]
 		if !res.Closed || name == "" {
@@ -689,6 +791,9 @@ func (s *sim) checkRollbackTeardown(e *simEffect) func(settlement) {
 		own := rt.id == before.ID && (rt.token == before.Metadata["instance_token"] || rt.epoch == before.Metadata["generation"])
 		if own || ownsName(sessionInfoFromBead(before), name) {
 			s.failf("PC4 I-teardown", "rollback %s (%s) closed the row and left %s's runtime %s/%s/%s running", e.it.Key.ID, e.it.Reason, name, rt.id, rt.epoch, rt.token)
+		}
+		if working && simLiveIncarnation(before, rt) {
+			s.failf("PC4 I-teardown", "rollback %s (%s) closed the row over %s's live incarnation %s/%s/%s while its session's work was in progress (#2081)", e.it.Key.ID, e.it.Reason, name, rt.id, rt.epoch, rt.token)
 		}
 	}
 }
@@ -714,6 +819,7 @@ func simHeld(b beads.Bead, now time.Time) bool {
 // gates the invariants over floors and pending creates together. CI runs all
 // 1024 seeds in ranges (BUILD.bazel).
 func TestSimCorpusFlooredPending(t *testing.T) {
+	t.Cleanup(func() { writeSimCoverage(t) })
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})
@@ -785,9 +891,33 @@ func TestSimPendingAdoptUnderHold(t *testing.T) {
 }
 
 // pc2Mutant is A10 skipping S7's exit; pc3Mutant a lost commit that leaves
-// its runtime (no Moved hook). Directed scenarios drive both, not the
-// seeded sweep (the #7706 review).
+// its runtime (no Moved hook); staleWorkReadMutant A10 blind to the work in
+// flight under a live incarnation of the row's session (a cached demand read
+// that missed it), which the rollback effect's live work read still holds
+// over; blindIncarnationMutant that read blind too (#2081's stop-then-close
+// back), and wedgedIncarnationMutant A10 holding over one whatever its work
+// (a hold with no exit). Directed scenarios drive them, not the seeded sweep
+// (the #7706 review): the seed draws the shape too rarely for one.
 var (
+	staleWorkReadMutant    = simOpts{arms: mutateArm("A10", reflect.ValueOf(armRollback).Pointer(), armRollbackBlindToWork)}
+	blindIncarnationMutant = simOpts{arms: staleWorkReadMutant.arms, specs: func(specs map[string]effectSpec) {
+		spec := specs[intentRollback]
+		spec.sections = slices.Clone(spec.sections)
+		for i := range spec.sections {
+			decide := spec.sections[i].Decide
+			spec.sections[i].Decide = func(v txView) txStep {
+				v.Fence.Work = &txWork{Free: true} // the live work read finds none either
+				return decide(v)
+			}
+		}
+		specs[intentRollback] = spec
+	}}
+	wedgedIncarnationMutant = simOpts{arms: mutateArm("A10", reflect.ValueOf(armRollback).Pointer(), func(r *rowFacts) (intent, bool) {
+		if e := r.entry; e != nil && r.row.Info.PendingCreateClaim && e.Liveness == livenessAlive && liveIncarnation(r.row.Info, r.w.Observed[r.k].Identity) {
+			return intent{Reason: decideRollbackLive}, true
+		}
+		return armRollback(r)
+	})}
 	pc2Mutant = simOpts{arms: mutateArm("A10", reflect.ValueOf(armRollback).Pointer(), func(r *rowFacts) (intent, bool) {
 		it, ok := armRollback(r)
 		if it.Reason == decideStaleCreate {
@@ -805,6 +935,18 @@ var (
 	}}
 )
 
+// armRollbackBlindToWork is armRollback on a pass whose demand read assigns
+// the row's session no work and read every leg.
+func armRollbackBlindToWork(r *rowFacts) (intent, bool) {
+	w := *r.w
+	w.Demand.AssignedWork, w.Demand.StorePartial = nil, false
+	blind := *r
+	blind.w, blind.partial = &w, false
+	it, ok := armRollback(&blind)
+	r.rests, r.next = blind.rests, blind.next
+	return it, ok
+}
+
 // staleCreateSim is a sim over one manual pending create inside its lease
 // whose name holds its own StaleSelf runtime at its generation (S7).
 func staleCreateSim(t *testing.T, o simOpts) *sim {
@@ -819,6 +961,117 @@ func staleCreateSim(t *testing.T, o simOpts) *sim {
 	s.lag = false
 	s.advance(time.Second)
 	return s
+}
+
+// workingIncarnationSim is a sim over one pending create of kind (a pool row
+// under its bead-scoped name, or a manual row) past its lease, whose name
+// holds a live older incarnation of its own session (epoch 2 under
+// generation 3) with that incarnation's work in progress (#2081).
+func workingIncarnationSim(t *testing.T, kind string, o simOpts) *sim {
+	t.Helper()
+	meta := []string{
+		"template", "worker", "agent_name", "worker", "state", "creating", "generation", "3", "instance_token", "tok-gc-p1-3",
+		"pending_create_claim", "true", "pending_create_started_at", rowAt(-11 * time.Minute), "session_name", "s-gc-p1",
+	}
+	switch kind {
+	case "pool":
+		meta = append(meta, "pool_managed", "true", "pool_slot", "1", "session_origin", "ephemeral")
+	case "manual":
+		meta = append(meta, "session_origin", "manual")
+	}
+	row := sessionRow("gc-p1", meta...)
+	work := beads.Bead{ID: "gw-gc-p1", Title: "work", Type: "task", Status: "in_progress", Assignee: "gc-p1", Metadata: map[string]string{"gc.routed_to": "worker"}}
+	o.rows = func(s *sim) ([]beads.Bead, []beads.Bead) {
+		s.sp.put("s-gc-p1", "gc-p1", "2", "tok-gc-p1-2")
+		return []beads.Bead{row, work}, nil
+	}
+	s := newSim(t, 1, o)
+	s.lag = false
+	s.advance(time.Second)
+	return s
+}
+
+// Kills #2081's hold lost or left with no exit, and I4, PC4 or PC2 not
+// catching either: a pending create whose name holds a live older
+// incarnation of its own session holds, nothing stopped and the row open
+// with its claim, while that incarnation's work is in progress, also when
+// A10's read misses the work (the rollback effect reads it live); once the
+// work ends it rolls back with nothing else moving it, the pool row's
+// bead-scoped incarnation stopped first and the manual row closed without a
+// stop. With A10 and the effect's read blind to the work the pool row's
+// incarnation is stopped (I4) and the manual row closed over its own (PC4);
+// with A10 holding whatever the work, the row rests at quiescence over an
+// incarnation with none (PC2).
+func TestSimHoldsOverAWorkingIncarnation(t *testing.T) {
+	endWork := func(s *sim) { // the incarnation closes its in-flight work, an outside move
+		b, err := s.legs[0].backing.Get("gc-p1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.outside("incarnation-work-done", s.legs[0], b, func(l *simLeg, _ beads.Bead) {
+			if err := l.backing.Close("gw-gc-p1"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	failed := func(s *sim, inv string) bool {
+		return slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, inv) })
+	}
+	running := func(s *sim) bool { // the incarnation's agent runs under the row's name
+		s.sp.mu.Lock()
+		defer s.sp.mu.Unlock()
+		rt := s.sp.rts["s-gc-p1"]
+		return rt != nil && !rt.corpse && !rt.zombie
+	}
+	patrols := func(s *sim) { // eight patrols of passes and their effects
+		for range 8 {
+			s.settle()
+			s.advance(simPatrol)
+		}
+	}
+	for _, c := range []struct{ kind, blindCaughtBy string }{{"pool", "I4 "}, {"manual", "PC4 "}} {
+		for _, v := range []struct {
+			name string
+			o    simOpts
+		}{{"production", simOpts{}}, {"A10's work read stale", staleWorkReadMutant}} {
+			t.Run(c.kind+"/"+v.name, func(t *testing.T) {
+				s := workingIncarnationSim(t, c.kind, v.o)
+				patrols(s)
+				row, _ := s.legs[0].backing.Get("gc-p1")
+				if len(s.failures) > 0 || row.Status == "closed" || row.Metadata["pending_create_claim"] != "true" || !running(s) {
+					t.Fatalf("while its work is in progress: row %s claim %q running %v failures %q, want held open over its running incarnation",
+						row.Status, row.Metadata["pending_create_claim"], running(s), s.failures)
+				}
+				endWork(s)
+				patrols(s)
+				s.quiesce()
+				row, _ = s.legs[0].backing.Get("gc-p1")
+				if len(s.failures) > 0 || row.Status != "closed" || row.Metadata["state"] != string(session.StateFailedCreate) {
+					t.Fatalf("after its work ended: row %s state %q failures %q, want rolled back failed-create", row.Status, row.Metadata["state"], s.failures)
+				}
+				if live := running(s); live == (c.kind == "pool") {
+					t.Fatalf("after the rollback the incarnation runs %v, want it stopped only under the pool row's bead-scoped name", live)
+				}
+			})
+		}
+		t.Run(c.kind+"/A10 and its effect blind to the work", func(t *testing.T) {
+			s := workingIncarnationSim(t, c.kind, blindIncarnationMutant)
+			patrols(s)
+			if !failed(s, c.blindCaughtBy) {
+				t.Fatalf("failures %q, want %s to catch the rollback over the working incarnation\nschedule:\n%s", s.failures, c.blindCaughtBy, strings.Join(s.schedule, "\n"))
+			}
+		})
+		t.Run(c.kind+"/A10 holds whatever the work", func(t *testing.T) {
+			s := workingIncarnationSim(t, c.kind, wedgedIncarnationMutant)
+			patrols(s)
+			endWork(s)
+			patrols(s)
+			s.quiesce()
+			if !failed(s, "PC2 ") {
+				t.Fatalf("failures %q, want PC2 to catch the row resting over its workless incarnation", s.failures)
+			}
+		})
+	}
 }
 
 // Kills PC2 (I-S7) not catching a skipped S7 exit: a pending create whose
@@ -864,4 +1117,134 @@ func TestSimPC3CatchesALostCommitLeftRunning(t *testing.T) {
 		return
 	}
 	t.Fatal("no seed reached the lost commit")
+}
+
+// Kills I15's failed-create exception narrowed to a held claim (shifted
+// seeds 329, 665; SESS-061): A21's close of a row already failed-create,
+// its claim cleared, retires a heartbeat's hold as legacy's
+// failedCreateClosePatch does; the same close of a committed row still
+// fails I15, and so does a hold rewritten without a close.
+func TestFailedCreateCloseRetiresHolds(t *testing.T) {
+	held := rowAt(time.Hour)
+	closed := func(state string, closes bool, meta ...string) simWrite {
+		before := poolRow("gc-1", "worker", 1, state, append([]string{"held_until", held}, meta...)...)
+		after := poolRow("gc-1", "worker", 1, string(session.StateFailedCreate), "held_until", "")
+		if closes {
+			after.Status = "closed"
+		}
+		return simWrite{Leg: simCityLeg, Before: before, After: after, At: plannerT0}
+	}
+	for _, c := range []struct {
+		name  string
+		w     simWrite
+		fails bool
+	}{
+		{"a held claim", closed("creating", true, "pending_create_claim", "true"), false},
+		{"already failed-create, its claim cleared", closed(string(session.StateFailedCreate), true), false},
+		{"a committed row", closed("awake", true), true},
+		{"already failed-create, no close", closed(string(session.StateFailedCreate), false), true},
+	} {
+		s := scripted(t, nil, poolRow("gc-1", "worker", 1, "asleep"))
+		s.checkWrite(c.w)
+		failed := slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, "I15 ") })
+		if failed != c.fails {
+			t.Errorf("%s: failures %q, want an I15 failure %t", c.name, s.failures, c.fails)
+		}
+	}
+}
+
+// Kills I15's failed-create exception covering a close only (CONTRACT
+// v5.9z-1 (i), "close or park"): A10's rollback screen that parks a held
+// pending create with a provider terminal error, or quarantines it for a
+// rate limit, may rewrite the hold's sleep reason; the same park of a row
+// holding no claim, or a park that also rewrites the hold's timer, fails
+// I15.
+func TestRollbackScreenParkRewritesHolds(t *testing.T) {
+	held := []string{"sleep_intent", "user-hold", "held_until", rowAt(1000 * time.Hour), "sleep_reason", "user-hold"}
+	quarantined := func(d time.Duration) []string { return append(slices.Clone(held), "quarantined_until", rowAt(d)) }
+	park := func(claim bool, base []string, patch map[string]string) simWrite {
+		before := poolRow("gc-1", "worker", 1, "creating", base...)
+		if claim {
+			before.Metadata["pending_create_claim"] = "true"
+		}
+		after := poolRow("gc-1", "worker", 1, "creating", base...)
+		maps.Copy(after.Metadata, patch)
+		return simWrite{Leg: simCityLeg, Before: before, After: after, At: plannerT0}
+	}
+	closed := func(w simWrite) simWrite { w.After.Status = "closed"; return w }
+	// The parks are production's: A10's screen writes these patches.
+	terminal := providerTerminalErrorPatch("model_not_found", plannerT0)
+	rateLimit := maps.Clone(session.RateLimitQuarantinePatch())
+	rateLimit["quarantined_until"] = rowAt(30 * time.Minute)
+	with := func(p map[string]string, kv ...string) map[string]string {
+		p = maps.Clone(p)
+		for i := 0; i+1 < len(kv); i += 2 {
+			p[kv[i]] = kv[i+1]
+		}
+		return p
+	}
+	without := func(p map[string]string, k string) map[string]string { p = maps.Clone(p); delete(p, k); return p }
+	for _, c := range []struct {
+		name  string
+		w     simWrite
+		fails bool
+	}{
+		{"a terminal-error park of a held pending create", park(true, held, terminal), false},
+		{"a rate-limit quarantine of a held pending create", park(true, held, rateLimit), false},
+		{"a rate-limit park extending an operator's quarantine", park(true, quarantined(10*time.Minute), rateLimit), false},
+		{"the same park of a row holding no claim", park(false, held, terminal), true},
+		{"a park that also clears the hold's timer", park(true, held, with(terminal, "held_until", "")), true},
+		{"a park that closes the row", closed(park(true, held, terminal)), true},
+		{"an asleep write with another reason", park(true, held, with(terminal, "sleep_reason", string(session.SleepReasonIdle))), true},
+		{"a terminal-error park with no terminal error", park(true, held, without(terminal, sessionProviderTerminalErrorMetadataKey)), true},
+		{"a rate-limit park with no quarantine", park(true, held, without(rateLimit, "quarantined_until")), true},
+		{"a rate-limit park shortening an operator's quarantine", park(true, quarantined(24*time.Hour), rateLimit), true},
+		{"a terminal-error write that wakes the held row", park(true, held, with(terminal, "state", "active")), true},
+		{"a rate-limit write that wakes the held row", park(true, held, with(rateLimit, "state", "active")), true},
+		{"a terminal-error park that leaves the row creating", park(true, held, without(terminal, "state")), true},
+		{"a rate-limit park that leaves the row creating", park(true, held, without(rateLimit, "state")), true},
+	} {
+		s := scripted(t, nil, poolRow("gc-1", "worker", 1, "asleep"))
+		s.checkWrite(c.w)
+		failed := slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, "I15 ") })
+		if failed != c.fails {
+			t.Errorf("%s: failures %q, want an I15 failure %t", c.name, s.failures, c.fails)
+		}
+	}
+}
+
+// Kills I10's timer table counting what holds no plan back (mc-i7efm): an
+// ambiguous create's hard bound counts, a landed create's entry does not;
+// a fresh pool create's post-create protection counts, a committed row
+// past its creation_complete does not.
+func TestSimLastTimerCounts(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		arrange func(s *sim)
+		want    time.Duration
+	}{
+		{"nothing", func(*sim) {}, 0},
+		{"an ambiguous create", func(s *sim) {
+			s.inflight.creates["tok-a"] = inflightEntry{Kind: inflightCreate, Token: "tok-a", Ambiguous: true, SettledAt: s.clk.Now()}
+		}, inflightHardBound},
+		{"a running create", func(s *sim) {
+			s.inflight.creates["tok-a"] = inflightEntry{Kind: inflightCreate, Token: "tok-a", SettledAt: s.clk.Now()}
+		}, 0},
+		{"a fresh pool create", func(s *sim) {
+			s.setMeta(s.legs[0], "gc-1", "state", "awake", "state_reason", "creation_complete", "creation_complete_at", s.rel(0))
+		}, postCreateProtectionTimeout},
+		{"a committed row past its creation", func(s *sim) {
+			s.setMeta(s.legs[0], "gc-1", "state", "awake", "state_reason", "", "creation_complete_at", s.rel(0))
+		}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newSim(t, 3, simOpts{rows: func(*sim) ([]beads.Bead, []beads.Bead) {
+				return []beads.Bead{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1-1")}, nil
+			}})
+			c.arrange(s)
+			if got := s.lastTimer().Sub(s.clk.Now()); got != c.want {
+				t.Errorf("lastTimer = now+%s, want now+%s", got, c.want)
+			}
+		})
+	}
 }

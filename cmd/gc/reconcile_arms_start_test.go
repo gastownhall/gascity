@@ -28,6 +28,7 @@ func TestDecideRowStartGates(t *testing.T) {
 		desired  desire
 		meta     []string
 		episode  time.Time // the startup-health episode's quarantine end
+		backoff  time.Time // the startup-health episode's retry backoff end
 		health   map[string]bool
 		want     string
 		wantKind string
@@ -40,6 +41,9 @@ func TestDecideRowStartGates(t *testing.T) {
 		{name: "an expired quarantine heals in the start's CAS", liveness: livenessGone, desired: desireWake, meta: []string{"quarantined_until", woke}, want: decideStart, wantKind: intentStart},
 		{name: "SESS-607 the startup-health episode (#46)", liveness: livenessGone, desired: desireWake, episode: soon, want: decideStartEpisode, next: soon},
 		{name: "an expired episode starts", liveness: livenessGone, desired: desireWake, episode: gatherNow.Add(-time.Second), want: decideStart, wantKind: intentStart},
+		{name: "a pending backoff-only episode holds the start", liveness: livenessGone, desired: desireWake, backoff: soon, want: decideStartEpisode, next: soon},
+		{name: "an expired backoff-only episode starts", liveness: livenessGone, desired: desireWake, backoff: gatherNow.Add(-time.Second), want: decideStart, wantKind: intentStart},
+		{name: "a backoff later than the episode quarantine holds to the backoff", liveness: livenessGone, desired: desireWake, episode: soon, backoff: soon.Add(time.Hour), want: decideStartEpisode, next: soon.Add(time.Hour)},
 		{name: "SESS-610 a red provider", liveness: livenessGone, desired: desireWake, health: map[string]bool{"claude": false}, want: decideStartProviderRed},
 		{name: "GUAR-034 unknown health fails open", liveness: livenessGone, desired: desireWake, health: map[string]bool{}, want: decideStart, wantKind: intentStart},
 		{name: "a green provider starts", liveness: livenessGone, desired: desireWake, health: map[string]bool{"claude": true}, want: decideStart, wantKind: intentStart},
@@ -55,8 +59,8 @@ func TestDecideRowStartGates(t *testing.T) {
 			e := c.a.Snapshot.Entries[c.k]
 			e.Endpoint = "provider:claude"
 			info := c.w.Census.Rows[c.k].Info
-			if !tc.episode.IsZero() {
-				c.w.Episodes = map[string]session.StartupHealthEpisode{startupHealthEpisodeKey(info, "s-heal"): {QuarantinedUntil: tc.episode}}
+			if !tc.episode.IsZero() || !tc.backoff.IsZero() {
+				c.w.Episodes = map[string]session.StartupHealthEpisode{startupHealthEpisodeKey(info, "s-heal"): {QuarantinedUntil: tc.episode, BackoffUntil: tc.backoff}}
 			}
 			if tc.health != nil {
 				c.w.ProviderHealth = &providerHealthSnapshot{present: true, entries: tc.health}
@@ -250,6 +254,55 @@ func TestDeadRuntimeAccrualNeverShortensAQuarantine(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("rate limit over quarantined_until %s: it is %s, want %s", existing, got, want)
+		}
+	}
+}
+
+// TestAccrualKeepsALiveQuarantinesReason (CONTRACT v5.9z; seed 499). Kills
+// a v2 accrual that overwrites a live quarantine's reason: A6's rapid-crash
+// and churn accruals and the start-failure abandon's, reaching their
+// threshold during a live quarantine whose reason is the quarantine's,
+// leave sleep_reason as it is; with no quarantine they write their own.
+func TestAccrualKeepsALiveQuarantinesReason(t *testing.T) {
+	at := func(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339) }
+	for _, death := range []struct {
+		name, own string
+		meta      []string
+	}{
+		{"a rapid crash", string(session.SleepReasonQuarantine), []string{"last_woke_at", at(-10 * time.Second), "wake_attempts", "4"}},
+		{"churn", string(session.SleepReasonContextChurn), []string{"last_woke_at", at(-2 * time.Minute), "churn_count", "2"}},
+	} {
+		for _, live := range []bool{true, false} {
+			meta := append([]string{"state", "active", "session_key", "k-1"}, death.meta...)
+			if live {
+				meta = append(meta, "quarantined_until", at(time.Minute), "sleep_reason", string(session.SleepReasonRateLimit))
+			}
+			it := newHealCase(t, livenessGone, desireWake, meta...).decide()
+			got, wrote := it.folded()["sleep_reason"]
+			switch {
+			case live && wrote:
+				t.Errorf("%s over a live rate-limit quarantine: sleep_reason written %q, want rate_limit kept", death.name, got)
+			case !live && got != death.own:
+				t.Errorf("%s with no quarantine: sleep_reason %q, want %q", death.name, got, death.own)
+			}
+		}
+	}
+	for _, live := range []bool{true, false} {
+		row := session.Info{ID: "gc-1", MetadataState: string(session.StateCreating), WakeAttemptsMetadata: "4"}
+		meta := map[string]string{}
+		if live {
+			row.QuarantinedUntil, row.SleepReason = at(time.Minute), string(session.SleepReasonRateLimit)
+			meta = map[string]string{"quarantined_until": row.QuarantinedUntil, "sleep_reason": row.SleepReason}
+		}
+		patch, _, quarantined := otherFailurePatch(row, meta, startFailureRead{}, gatherNow)
+		got, wrote := patch["sleep_reason"]
+		switch {
+		case !quarantined:
+			t.Errorf("start-failure abandon (live %t): not quarantined, patch %v", live, patch)
+		case live && wrote:
+			t.Errorf("start-failure abandon over a live rate-limit quarantine: sleep_reason written %q, want rate_limit kept", got)
+		case !live && got != string(session.SleepReasonQuarantine):
+			t.Errorf("start-failure abandon with no quarantine: sleep_reason %q, want quarantine", got)
 		}
 	}
 }

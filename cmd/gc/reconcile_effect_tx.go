@@ -283,6 +283,11 @@ type needs struct {
 	// only before PreWake: an effect that ends before it, a deferral, writes
 	// nothing.
 	LeaseAt int
+	// IdleShadow brackets the effect's reads with the record's sleep proof
+	// (txFence.IdleShadow): an idle sleep decided without the Idle proof (a
+	// non-interactive idle begin, the idle-timeout stop), recorded under the
+	// program-status shadow switch beside the record (proved_idle).
+	IdleShadow bool
 }
 
 func (s effectSpec) needsOf(w *World, it intent) needs {
@@ -469,6 +474,10 @@ type txFence struct {
 	Idle            bool // proved idle: WaitForIdle, then no activity since the pass
 	Activity        *activityRead
 	Content         contentState // the pane's fresh snapshot (needs.Content)
+	// IdleShadow is the record's side of the idle sleep the effect decides
+	// (needs.IdleShadow), begun before the legs are read; nil, recording
+	// nothing, unless the routed leaf is shadowing.
+	IdleShadow *runtime.ShadowIdleSample
 }
 
 // workHeld reports L5 holding: work read on the seat, or a read that failed
@@ -512,7 +521,21 @@ type txStep struct {
 	Cause                   string
 	Facts                   effectFacts
 	Pass                    any
+	// IdleSleep is the idle sleep the step judged (an unproved idle begin,
+	// the idle stop's proof), which the transaction records beside the
+	// record's sleep proof (txFence.IdleShadow) before it acts on the step.
+	IdleSleep idleSleepVerdict
 }
+
+// idleSleepVerdict is a step's judgement that its session is idle enough to
+// sleep, or none.
+type idleSleepVerdict uint8
+
+const (
+	idleSleepUnjudged idleSleepVerdict = iota // the step judged no idle sleep
+	idleSleepProved                           // idle: the sleep goes ahead
+	idleSleepUnproved                         // not proved idle: the sleep is refused
+)
 
 // writes reports a step that writes the row: metadata, the disposition's
 // cells, a terminal close, its title, type or labels.
@@ -527,7 +550,8 @@ type effectFacts struct {
 	Transition *drainTransition // legacy's drain telemetry
 	Work       *workVerdict     // a worktree verdict for the work item's backoff
 	// Noted is a fresh read that found the row's runtime alive and Current,
-	// which the planner notes in the observation cache (v5 O4).
+	// or (Gone) found nothing under its name, which the planner notes in the
+	// observation cache (v5 O4; v5.10d (a)).
 	Noted *notedRuntime
 	// Quarantined is the agent a landed death accrual quarantined, for
 	// legacy's RecordAgentQuarantine.
@@ -558,10 +582,14 @@ type classifiedRuntime struct {
 	Recycle bool
 }
 
-// notedRuntime is a runtime name a fresh read issued at At found alive.
+// notedRuntime is a runtime name a fresh read issued at At found alive, or
+// absent when Gone. An alive note that only Clears is written only over a
+// name the cache reads unlisted (applyFacts: goneNoted).
 type notedRuntime struct {
-	Name string
-	At   time.Time
+	Name   string
+	At     time.Time
+	Gone   bool
+	Clears bool
 }
 
 func (f effectFacts) empty() bool {
@@ -739,6 +767,11 @@ type tx struct {
 	facts       effectFacts
 	pass        any // the concluded step's Pass, to its section's Call
 	view        txView
+	// fresh is the latest fresh read, when it found the name absent on
+	// every hop (rtAbsent) or the row's runtime alive and Current; zero once
+	// a later read finds anything else or a Call starts or stops a runtime.
+	// The settlement publishes it (CONTRACT O4, v5.10g).
+	fresh notedRuntime
 }
 
 // run runs the sections, each under the row's mutation lock.
@@ -787,9 +820,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		}
 		switch sec.callKind {
 		case callStart:
-			t.started = true
+			t.started, t.fresh = true, notedRuntime{}
 		case callStop:
-			t.started, t.stopped = false, true // a stopped runtime writes nothing more
+			t.started, t.stopped, t.fresh = false, true, notedRuntime{} // a stopped runtime writes nothing more
 		}
 		if err := t.c.at(ctx, seamAfterCall); err != nil {
 			s = injected(err)
@@ -802,8 +835,28 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			break
 		}
 	}
+	t.noteFresh()
 	s.Facts = t.facts
 	return s
+}
+
+// noteFresh publishes the latest fresh read (CONTRACT O4, amended in
+// v5.10g): the planner notes the name gone at the read's issue time, so the
+// next pass reads what this effect read rather than deciding again on an
+// inventory that lags it; or, where the cache reads the name unlisted (an
+// effect's gone note standing), the row's runtime alive and Current, which
+// clears it. Over an inventory that
+// already lists the runtime an alive note is not written: its listing would
+// not be the pass's enrichment, so the row would read its identity unread,
+// and A9 would hold it until the next pass (#7799 review). A
+// note the effect made itself at or after the read (a start's commit)
+// stands; a later inventory pass overrides either.
+func (t *tx) noteFresh() {
+	f := t.fresh
+	if f.At.IsZero() || f.Name == "" || t.facts.Noted != nil && !t.facts.Noted.At.Before(f.At) {
+		return
+	}
+	t.facts.Noted = &f
 }
 
 // section runs sec's attempts; end ends the effect with the settlement.
@@ -945,6 +998,14 @@ func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 			return refused(cause), false
 		}
 		t.view.RT = rt
+		switch {
+		case rt.Class == rtAbsent:
+			t.fresh = notedRuntime{Name: t.name, At: t.view.Now, Gone: true}
+		case rt.Alive() && compareIdentity(t.expect, rt.Identity) == identityCurrent:
+			t.fresh = notedRuntime{Name: t.name, At: t.view.Now, Clears: true}
+		default:
+			t.fresh = notedRuntime{}
+		}
 	}
 	if t.needs.Legs != 0 || t.needs.Idle {
 		if cause := t.readFence(ctx); cause != "" {
@@ -1002,6 +1063,11 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		}
 	} else {
 		step = sec.Decide(v)
+	}
+	if step.IdleSleep != idleSleepUnjudged {
+		// Under the program-status shadow switch, beside the record's sleep
+		// proof (proved_idle); Decide is pure, so the record is written here.
+		t.view.Fence.IdleShadow.Record(step.IdleSleep == idleSleepProved)
 	}
 	var s settlement
 	switch {

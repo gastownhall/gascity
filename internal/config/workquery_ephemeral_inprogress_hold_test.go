@@ -23,10 +23,9 @@ import (
 // the generated shell against a fake `bd` on PATH so they pin observable
 // behavior rather than the script's spelling.
 //
-// Scope note (ga-5736js): only the in_progress WORK-SERVING probe is
-// hold-gated. ephemeralAssignedReadyProbeScript stays hold-transparent by
-// design — pinned by
-// TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels.
+// Scope note: the open tier's wisp probe, ephemeralAssignedReadyProbeScript,
+// serves work the same way and drops held rows the same way (#8010); its
+// coverage is in workquery_assigned_ready_hold_test.go.
 
 // heldEphemeralInProgressRow is the ephemeral-store crash-recovery row for a
 // bead parked on label, as `bd query 'ephemeral=true AND status=in_progress'`
@@ -172,12 +171,14 @@ esac
 	}
 }
 
-// TestEphemeralInProgressProbeUnparseableFallsThrough pins the probe's failure
+// TestEphemeralInProgressProbeUnparseableFailsTheQuery pins the probe's failure
 // mode, which differs from the bd-list tier's fail-open serve: the probe's jq
-// consumes `bd query` stdout directly, so garbage yields an empty candidate and
-// the probe falls through. It must never serve raw non-JSON stdout, and the
-// hold filter must not change that.
-func TestEphemeralInProgressProbeUnparseableFallsThrough(t *testing.T) {
+// consumes the `bd query` snapshot, never raw stdout, so it never serves a
+// non-JSON row, and the hold filter must not change that. It used to pin that
+// garbage then fell through as an empty tier; that read an unreadable ephemeral
+// store as "no work in progress", so the snapshot read now fails the query and
+// names the cause instead.
+func TestEphemeralInProgressProbeUnparseableFailsTheQuery(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; the work-query shell requires it")
 	}
@@ -188,9 +189,15 @@ case "$1" in
 esac
 `
 	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+	res := runGeneratedQueryWithBD(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, fakeGCReadyFails, bdScript)
 
-	if strings.TrimSpace(out) != "[]" {
-		t.Fatalf("unparseable ephemeral query stdout must fall through, not be served: got %q", out)
+	if strings.Contains(res.stdout, "warning") {
+		t.Fatalf("unparseable ephemeral query stdout was served as a candidate: %q", res.stdout)
+	}
+	if res.exit == 0 {
+		t.Fatalf("unparseable ephemeral query stdout read as an empty tier (exit 0, stdout %q)", res.stdout)
+	}
+	if !strings.Contains(res.stderr, "bd query output is not valid JSON") {
+		t.Errorf("stderr = %q, want the unparseable scan named", res.stderr)
 	}
 }

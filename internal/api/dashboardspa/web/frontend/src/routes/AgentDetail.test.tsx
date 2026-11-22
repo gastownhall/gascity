@@ -1,5 +1,5 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { NowProvider } from '../contexts/NowContext';
 import { reportClientError } from '../lib/clientErrorReporting';
@@ -118,10 +118,7 @@ describe('AgentDetailPage error reporting', () => {
     });
 
     render(
-      <MemoryRouter
-        initialEntries={['/agents/mayor']}
-        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-      >
+      <MemoryRouter initialEntries={['/agents/mayor']}>
         <NowProvider intervalMs={1_000_000}>
           <Routes>
             <Route path="/agents/:slug" element={<AgentDetailPage />} />
@@ -164,10 +161,7 @@ describe('AgentDetailPage error reporting', () => {
     mockListSupervisorBeads.mockResolvedValue({ items: [] });
 
     render(
-      <MemoryRouter
-        initialEntries={['/agents/mayor']}
-        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-      >
+      <MemoryRouter initialEntries={['/agents/mayor']}>
         <NowProvider intervalMs={1_000_000}>
           <Routes>
             <Route path="/agents/:slug" element={<AgentDetailPage />} />

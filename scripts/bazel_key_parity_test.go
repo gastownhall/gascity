@@ -46,14 +46,28 @@ var bazelClientEnvAllowed = map[string]bool{"GC_TEST_REPO_ROOT": true}
 // The result-policy flags were checked against Bazel 9.2.0 on
 // //scripts/cipolicy:cipolicy_test: --flaky_test_attempts (any value) and
 // --[no]cache_test_results leave the aquery action keys and the executed
-// TestRunner spawn (arguments, environment, input digests, outputs,
-// platform, timeout: what the remote action cache hashes) unchanged, while a
-// different --test_env=PATH changes both. --profile only writes a local file.
+// TestRunner spawn's arguments, environment, input digests, outputs,
+// platform and timeout unchanged, while a different --test_env=PATH changes
+// both. That comparison missed Action.do_not_cache, which the REAPI action
+// digest also hashes: --nocache_test_results makes Bazel 9 mark each test
+// spawn no-cache (StandaloneTestStrategy), which sets it, so the TestRunner
+// action gets its own digest (as GoTestRun=+no-cache does below). It stays
+// admitted for --config=fresh, whose runs are meant not to share results;
+// it would re-key any other config that set it. --profile only writes a
+// local file.
 func bazelTransportFlag(flag string) bool {
 	name, _, _ := strings.Cut(flag, "=")
 	switch name {
 	case "--remote_default_exec_properties", "--remote_default_platform_properties":
 		return false // platform properties are part of the action
+	case "--modify_execution_info":
+		// Only no-cache on the simulator corpus's GoTestRun actions
+		// (go_test_run.bzl): it stops their results being read or written,
+		// so --config=fresh re-executes them as --nocache_test_results does
+		// a test; what each action is stays the same. Any other execution
+		// info may change how or where an action runs.
+		_, value, _ := strings.Cut(flag, "=")
+		return value == "GoTestRun=+no-cache"
 	case "--jobs", "--experimental_circuit_breaker_strategy", "--disk_cache", "--keep_going", "--nokeep_going",
 		"--flaky_test_attempts", "--cache_test_results", "--nocache_test_results", "--profile",
 		"--execution_log_compact_file", "--experimental_build_event_upload_strategy",
@@ -167,9 +181,9 @@ func checkBazelKeyParity(bazelrc string) []error {
 // checkBazelRCLocalLines checks lines destined for .bazelrc.local: only
 // build:remote-exec and build:fork-cache transport flags, the fork-cache
 // selection and the remote repo contents cache reader's two lines.
-// bazel.yml's probe-gated `build:fork-cache --remote_cache_compression` (zstd
-// while rbe-cache advertises it) is such a transport flag: compression
-// changes the bytes on the wire, never a digest. The reader's lines
+// `build:fork-cache --remote_cache_compression` (zstd, now committed in
+// .bazelrc's fork-cache) would be such a transport flag: compression changes
+// the bytes on the wire, never a digest. The reader's lines
 // (bazelRRCReadLines) change where external repositories' trees come from
 // and how many threads resolve them; a repository's cached tree is keyed by
 // its rule's predeclared inputs, and with it remote actions keep their keys
@@ -206,39 +220,42 @@ func TestBazelKeyParity(t *testing.T) {
 		"build:remote-exec --remote_download_minimal --jobs=64\n" +
 		"build:fork-cache --remote_cache=" + ep + " --remote_instance_name oss\n" +
 		"build:fork-cache --noremote_local_fallback --experimental_circuit_breaker_strategy=failure\n" +
+		"build:fork-cache --remote_cache_compression\n" +
 		"test:ci --flaky_test_attempts=1\n" +
 		"test:ci --experimental_remote_cache_eviction_retries=0\n" +
 		"test:ci --experimental_use_validation_aspect\n" +
 		"test:fresh --nocache_test_results\n" +
+		"test:fresh --modify_execution_info=GoTestRun=+no-cache\n" +
 		"build:other --define=gotags=x\n" +
 		"try-import %workspace%/.bazelrc.local\n"
 	if errs := checkBazelKeyParity(good); len(errs) != 0 {
 		t.Errorf("good fixture: %v", errs)
 	}
 	for name, rc := range map[string]string{
-		"bare PATH":            strings.Replace(good, "PATH="+bazelPinnedTestPath, "PATH", 1),
-		"other PATH":           strings.Replace(good, bazelPinnedTestPath, "/opt/go/bin:/usr/bin", 1),
-		"no PATH":              strings.Replace(good, "test --test_env=PATH="+bazelPinnedTestPath+"\n", "", 1),
-		"PATH re-forwarded":    good + "test --test_env=PATH\n",
-		"PATH only in config":  strings.Replace(good, "test --test_env=PATH=", "test:ci --test_env=PATH=", 1),
-		"client action env":    good + "build --action_env=HOME\n",
-		"client test env":      good + "test --test_env=USER\n",
-		"remote-exec test env": good + "test:remote-exec --test_env=PATH=" + bazelPinnedTestPath + "\n",
-		"fork-cache define":    good + "build:fork-cache --define=gotags=x\n",
-		"remote-exec platform": good + "build:remote-exec --extra_execution_platforms=//:rbe\n",
-		"exec properties":      good + "build:remote-exec --remote_default_exec_properties=OSFamily=linux\n",
-		"remote-exec config":   good + "build:remote-exec --config=other\n",
-		"strict env off":       good + "build:fork-cache --noincompatible_strict_action_env\n",
-		"no remote-exec":       strings.ReplaceAll(good, "build:remote-exec", "build:gone"),
-		"no fork-cache":        strings.ReplaceAll(good, "build:fork-cache", "build:gone"),
-		"no ci":                strings.ReplaceAll(good, "test:ci", "test:gone"),
-		"ci PATH copy":         good + "test:ci --test_env=PATH=" + bazelPinnedTestPath + "\n",
-		"ci define":            good + "test:ci --define=gotags=x\n",
-		"ci test timeout":      good + "test:ci --test_timeout=1100\n",
-		"ci action env":        good + "build:ci --action_env=GOFLAGS=-mod=mod\n",
-		"no fresh":             strings.ReplaceAll(good, "test:fresh", "test:gone"),
-		"fresh define":         good + "test:fresh --define=gotags=x\n",
-		"fresh action env":     good + "build:fresh --action_env=GOFLAGS=-mod=mod\n",
+		"bare PATH":             strings.Replace(good, "PATH="+bazelPinnedTestPath, "PATH", 1),
+		"other PATH":            strings.Replace(good, bazelPinnedTestPath, "/opt/go/bin:/usr/bin", 1),
+		"no PATH":               strings.Replace(good, "test --test_env=PATH="+bazelPinnedTestPath+"\n", "", 1),
+		"PATH re-forwarded":     good + "test --test_env=PATH\n",
+		"PATH only in config":   strings.Replace(good, "test --test_env=PATH=", "test:ci --test_env=PATH=", 1),
+		"client action env":     good + "build --action_env=HOME\n",
+		"client test env":       good + "test --test_env=USER\n",
+		"remote-exec test env":  good + "test:remote-exec --test_env=PATH=" + bazelPinnedTestPath + "\n",
+		"fork-cache define":     good + "build:fork-cache --define=gotags=x\n",
+		"remote-exec platform":  good + "build:remote-exec --extra_execution_platforms=//:rbe\n",
+		"exec properties":       good + "build:remote-exec --remote_default_exec_properties=OSFamily=linux\n",
+		"remote-exec config":    good + "build:remote-exec --config=other\n",
+		"strict env off":        good + "build:fork-cache --noincompatible_strict_action_env\n",
+		"no remote-exec":        strings.ReplaceAll(good, "build:remote-exec", "build:gone"),
+		"no fork-cache":         strings.ReplaceAll(good, "build:fork-cache", "build:gone"),
+		"no ci":                 strings.ReplaceAll(good, "test:ci", "test:gone"),
+		"ci PATH copy":          good + "test:ci --test_env=PATH=" + bazelPinnedTestPath + "\n",
+		"ci define":             good + "test:ci --define=gotags=x\n",
+		"ci test timeout":       good + "test:ci --test_timeout=1100\n",
+		"ci action env":         good + "build:ci --action_env=GOFLAGS=-mod=mod\n",
+		"no fresh":              strings.ReplaceAll(good, "test:fresh", "test:gone"),
+		"fresh define":          good + "test:fresh --define=gotags=x\n",
+		"fresh action env":      good + "build:fresh --action_env=GOFLAGS=-mod=mod\n",
+		"fresh other exec info": good + "test:fresh --modify_execution_info=GoLink=+no-remote\n",
 	} {
 		if len(checkBazelKeyParity(rc)) == 0 {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)
@@ -284,33 +301,23 @@ func TestBazelKeyParity(t *testing.T) {
 
 // TestBazelCIRCLocalCarriesOnlyTransport runs bazel.yml's lane steps that
 // write .bazelrc.local: both repo contents cache readers (the fork-cache one
-// with rbe-cache answering and without) and the zstd step (with rbe-cache
-// advertising zstd and without). Whatever they write must be transport-only,
-// so fork-cache lanes hash actions like trusted, rbe-fork and developer runs.
+// with rbe-cache answering and without). Whatever they write must be
+// transport-only, so fork-cache lanes hash actions like trusted, rbe-fork
+// and developer runs.
 func TestBazelCIRCLocalCarriesOnlyTransport(t *testing.T) {
 	rrc := bazelRCLocalLaneStep(t, bazelRRCReadStep)
-	lines, _ := runBazelRCLocalStep(t, rrc.Run, nil)
+	lines := runBazelRCLocalStep(t, rrc.Run, nil)
 	for _, err := range checkBazelRCLocalLines(lines) {
 		t.Errorf("%q: %v", rrc.Name, err)
 	}
 	fork := bazelRCLocalLaneStep(t, bazelForkRRCReadStep)
 	for _, probe := range []string{"", "ok"} {
-		run := runBazelRCLocalStepProbes(t, fork.Run, map[string]string{"BAZEL_TEST_RRC_PROBE": probe})
+		run := runBazelRCLocalStepProbes(t, fork.Run, map[string]string{"BAZEL_TEST_PROBE": "zstd", "BAZEL_TEST_RRC_PROBE": probe})
 		for _, err := range checkBazelRCLocalLines(run.lines) {
 			t.Errorf("%q, rrc probe %q: %v", fork.Name, probe, err)
 		}
 		if probe == "ok" && !slices.Equal(run.lines, bazelRRCReadLines) {
 			t.Errorf("%q with rbe-cache answering wrote %q, so this test no longer classifies the reader's lines", fork.Name, run.lines)
-		}
-	}
-	step := bazelCacheZstdLaneStep(t)
-	for _, probe := range []string{"", "zstd"} {
-		lines, _ := runBazelRCLocalStep(t, step.Run, map[string]string{"BAZEL_TEST_PROBE": probe})
-		for _, err := range checkBazelRCLocalLines(lines) {
-			t.Errorf("probe %q: %v", probe, err)
-		}
-		if probe == "zstd" && !slices.Contains(lines, bazelCacheZstdLine) {
-			t.Errorf("with rbe-cache advertising zstd the step wrote no %q, so this test no longer classifies it:\n%s", bazelCacheZstdLine, strings.Join(lines, "\n"))
 		}
 	}
 }
@@ -411,7 +418,8 @@ func TestSetupBazelRCCarriesOnlyTransport(t *testing.T) {
 
 // bazelSuiteConfigs select a tagged suite, keyed apart on purpose (--define,
 // --test_timeout); pre-push never runs them (bazel_multilane_test.go).
-var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true, "integration-smoke": true}
+// integration-packages is integration plus --jobs, a transport flag.
+var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true, "integration-packages": true}
 
 // TestBazelMultiLaneLanesHashLikePrePush: bazel.yml's unit lane runs what
 // pre-push runs (`bazel test //...`) with only non-key configs and flags, so
@@ -419,7 +427,7 @@ var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true,
 // config. The lane step's own flags (profile, BEP file) are non-key too.
 func TestBazelMultiLaneLanesHashLikePrePush(t *testing.T) {
 	prePush := readFile(t, repoRoot(t), ".githooks/lib/push-suite.sh")
-	if !strings.Contains(prePush, `exec bazel test //... "--config=$config" --keep_going`) {
+	if !strings.Contains(prePush, `run_suite bazel test //... "--config=$config" --keep_going`) {
 		t.Fatalf(".githooks/lib/push-suite.sh no longer runs bazel test //... with one remote-mode config; update this test")
 	}
 	for lane, cmd := range multiLaneCommands {

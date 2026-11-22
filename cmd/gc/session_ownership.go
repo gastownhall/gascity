@@ -137,17 +137,46 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 }
 
 // liveBeadRead reads one bead through the store's authoritative live handle,
-// bypassing a caching layer. The typed class wrappers (beads.SessionStore,
-// beads.WorkStore) do not promote the Handles capability, so they are peeled
-// first; without that the read would silently fall back to the cache.
+// bypassing a caching layer (liveReads): without the peel the read would
+// silently fall back to the cache, as CachingStore.Get serves the cache first.
 func liveBeadRead(store beads.Store, id string) (beads.Bead, error) {
-	switch v := store.(type) {
-	case beads.SessionStore:
-		store = v.Store
-	case beads.WorkStore:
-		store = v.Store
+	return liveReads(store).Get(id)
+}
+
+// liveRead is a read-only live handle on a store under its wrappers
+// (liveReads). It offers reads only, so a wrapper that refuses writes
+// (a v2 effect's read-only store) never hands its writable inner store on.
+type liveRead struct{ store beads.Store }
+
+// Get reads id through the peeled store's live reader (beads.LiveFor), past
+// any cache and any class layer above it.
+func (r liveRead) Get(id string) (beads.Bead, error) { return beads.LiveFor(r.store).Get(id) }
+
+// Ready is beads.ReadyLive on the peeled store: its Backing() fast path
+// where it has one.
+func (r liveRead) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return beads.ReadyLive(r.store, q...)
+}
+
+// liveReads is store's live read handle under v2's read-only wrappers
+// (readOnlyStore, blindWriteRefusingStore: a v2 effect's stores), which do
+// not promote their store's live capabilities (Handles, Backing). Each is
+// found below any class layer (beads.As), so a class handle over one is
+// peeled as the wrapper is, and a class handle over the store itself is read
+// through LiveFor, which sees through every class layer: no handle type is
+// named, so no handle a peel by hand forgot reads the cache.
+func liveReads(store beads.Store) liveRead {
+	for {
+		if v, ok := beads.As[readOnlyStore](store); ok {
+			store = v.Store
+			continue
+		}
+		if v, ok := beads.As[blindWriteRefusingStore](store); ok {
+			store = v.inner
+			continue
+		}
+		return liveRead{store: store}
 	}
-	return beads.HandlesFor(store).Live.Get(id)
 }
 
 // liveClaimVeto runs the ownership check for a demand-class drain decider and

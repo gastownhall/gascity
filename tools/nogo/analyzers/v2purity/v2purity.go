@@ -2,8 +2,9 @@
 // ARCH-RESTRUCTURE R6.2), checked on every compile through nogo:
 //
 //   - Purity: a //gc:pure root may not reach a forbidden function, a
-//     function or variable of a forbidden package, or a method of a
-//     forbidden interface. The roots are functions marked //gc:pure
+//     function or variable of a forbidden package, a method of a
+//     forbidden interface, or a method selected on (or through) a value of
+//     a forbidden type: the typed store handles. The roots are functions marked //gc:pure
 //     (the decide, admission, the dirty filters), every function stored in
 //     a struct field marked //gc:pure (a section's Decide), every argument
 //     a function marked //gc:pure-param passes for that parameter, and
@@ -23,7 +24,9 @@
 //     checked against the forbidden sets.
 //   - A function on the Exempt list, with its reason, is a leaf: the
 //     reviewed baseline, which only shrinks, and holds no live entry once
-//     the Cutover constant is true (C9).
+//     the Cutover constant is true (C9). An entry accepted at cutover
+//     (class "accepted", CONTRACT v5.10t) is live at run time but allowed
+//     past the gate; only the reviewed baseline may name one.
 //   - The seal: a value of a sealed type (a proof only a fresh read mints)
 //     is built, or a field of one written, only in its minting file
 //     (seal.go).
@@ -57,6 +60,12 @@ type Config struct {
 	// ForbiddenInterfaces are interface types, "path.Name": calling a
 	// method of one is forbidden, however it is reached.
 	ForbiddenInterfaces []string
+	// ForbiddenTypes are named types, "path.Name": a method selected on a
+	// value of one, declared on it or promoted through it from an embedded
+	// field at any depth, is forbidden. These are the typed store handles: a
+	// method a handle declares, or promotes from a concrete (generic) core,
+	// is no interface method, so ForbiddenInterfaces cannot see it.
+	ForbiddenTypes []string
 	// Roots, when set, pins the roots: a //gc:pure mark missing or added
 	// fails. A function root is its types.Func.FullName, a field "T.F", a
 	// parameter "F(p)", a variable its name.
@@ -74,7 +83,9 @@ type Config struct {
 }
 
 // Exemption is one baseline entry. Class is "live" (reachable in v2 at run
-// time) or "dead" (provably unreachable at run time); Bead tracks its
+// time), "accepted" (live, and accepted at cutover: CONTRACT v5.10t lets
+// these past the Cutover gate, each until its bead) or "dead" (provably
+// unreachable at run time); Bead tracks its
 // removal. A dead entry names in Via the functions every root path to it
 // passes, which the analyzer checks, and its Reason cites the line in one
 // that keeps it from running.
@@ -512,6 +523,11 @@ func (g *graph) edges(body ast.Node, visit func(edge)) {
 			switch sel.Kind() {
 			case types.MethodVal, types.MethodExpr:
 				fn := sel.Obj().(*types.Func).Origin()
+				if t := g.forbiddenTypeMethod(sel); t != "" {
+					skip[n.Sel] = true
+					visit(edge{pos: n.Sel.Pos(), target: t})
+					return true
+				}
 				if !abstract(fn) {
 					return true
 				}
@@ -623,6 +639,59 @@ func (g *graph) forbiddenMethod(fn *types.Func) string {
 		}
 	}
 	return g.banned[fn]
+}
+
+// forbiddenTypeMethod is "T.M" when sel selects method M on a value of a
+// forbidden type T, or through one: T is the receiver's type, the type of
+// an embedded field the selection passes, or the method's own receiver.
+func (g *graph) forbiddenTypeMethod(sel *types.Selection) string {
+	if len(g.c.ForbiddenTypes) == 0 {
+		return ""
+	}
+	named := func(t types.Type) string {
+		t = types.Unalias(t)
+		if p, ok := t.(*types.Pointer); ok {
+			t = types.Unalias(p.Elem())
+		}
+		n, ok := t.(*types.Named)
+		if !ok || n.Obj().Pkg() == nil {
+			return ""
+		}
+		if full := n.Obj().Pkg().Path() + "." + n.Obj().Name(); slices.Contains(g.c.ForbiddenTypes, full) {
+			return full
+		}
+		return ""
+	}
+	name := sel.Obj().Name()
+	t := sel.Recv()
+	if full := named(t); full != "" {
+		return full + "." + name
+	}
+	idx := sel.Index()
+	for _, i := range idx[:len(idx)-1] {
+		st, ok := derefNamed(t).Underlying().(*types.Struct)
+		if !ok {
+			break
+		}
+		t = st.Field(i).Type()
+		if full := named(t); full != "" {
+			return full + "." + name
+		}
+	}
+	if recv := sel.Obj().(*types.Func).Type().(*types.Signature).Recv(); recv != nil {
+		if full := named(recv.Type()); full != "" {
+			return full + "." + name
+		}
+	}
+	return ""
+}
+
+func derefNamed(t types.Type) types.Type {
+	t = types.Unalias(t)
+	if p, ok := t.(*types.Pointer); ok {
+		return types.Unalias(p.Elem())
+	}
+	return t
 }
 
 // types are the named types of the package and everything it imports, as
@@ -819,9 +888,9 @@ func (g *graph) checkExempt(reached map[types.Object]bool) {
 			pos = obj.Pos()
 		}
 		switch {
-		case e.Class != "live" && e.Class != "dead", e.Bead == "", e.Reason == "",
+		case e.Class != "live" && e.Class != "accepted" && e.Class != "dead", e.Bead == "", e.Reason == "",
 			e.Class == "dead" && (!strings.Contains(e.Reason, ".go:") || len(e.Via) == 0):
-			g.pass.Reportf(pos, "v2purity exemption %s is malformed: a class (live or dead), a bead and a reason; a dead one names its Via and cites the line that makes it dead", name)
+			g.pass.Reportf(pos, "v2purity exemption %s is malformed: a class (live, accepted or dead), a bead and a reason; a dead one names its Via and cites the line that makes it dead", name)
 		case obj == nil && g.names[name] && e.Class == "dead":
 			g.checkViaByName(name, e.Via, pos)
 		case obj == nil && g.names[name]: // another package's method an interface call reaches

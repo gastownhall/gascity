@@ -80,6 +80,10 @@ func RunCloseNotificationTests(t *testing.T, newBacking func(t *testing.T) beads
 			_, err := cs.RefreshRow(seed.ID)
 			mustNoErr(t, "RefreshRow", err)
 		}},
+		{"ExternalCloseSeenByPrime", always, func(t *testing.T, cs *beads.CachingStore, backing beads.Store, seed beads.Bead) {
+			mustNoErr(t, "backing Close", backing.Close(seed.ID))
+			mustNoErr(t, "Prime", cs.Prime(context.Background()))
+		}},
 	}
 
 	for _, m := range mutations {
@@ -175,7 +179,7 @@ func primedNotifyingCache(t *testing.T, backing beads.Store) (*beads.CachingStor
 
 // currentRevision reads id's revision token from s.Get. The conditional cases
 // read it from the backing, not the cache: a cache primed from a store whose
-// list rows publish no token (NativeDoltStore) holds Revision 0 for the bead,
+// list rows publish no token (BdStore) holds Revision 0 for the bead,
 // which means absent and fences nothing.
 func currentRevision(t *testing.T, s beads.Store, id string) int64 {
 	t.Helper()

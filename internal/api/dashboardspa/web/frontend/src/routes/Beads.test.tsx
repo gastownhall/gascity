@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BeadsPage } from './Beads';
 import { setActiveCity } from '../api/cityBase';
@@ -223,6 +223,24 @@ describe('BeadsPage', () => {
     expect(optionValues).toEqual(['east', 'west']);
   });
 
+  it('labels sling agents by agent name, with the provider label as context', async () => {
+    renderPage();
+
+    await screen.findByText('Sample bead');
+    fireEvent.click(screen.getByRole('button', { name: /new bead/i }));
+
+    const dialog = await screen.findByRole('dialog');
+    const agentSelect = within(dialog).getByLabelText(/agent/i) as HTMLSelectElement;
+    const agentLabels = () =>
+      Array.from(agentSelect.options).map((option) => option.textContent ?? '');
+
+    // display_name is the provider's label ("Claude Code"), shared by every
+    // agent on that provider, so it cannot be what tells the options apart.
+    expect(agentLabels()).toEqual(['mayor (Claude Code)']);
+    fireEvent.change(within(dialog).getByLabelText(/^rig$/i), { target: { value: 'west' } });
+    expect(agentLabels()).toEqual(['west/mechanic (Claude Code)']);
+  });
+
   it('deep-links to and selects a bead from the bead query param', async () => {
     renderPage('/beads?bead=gascity-0001');
 
@@ -255,6 +273,7 @@ describe('BeadsPage', () => {
         body: {
           title: 'Route failing work',
           description: 'Please investigate the failed deployment.',
+          rig: 'east',
         },
       },
       {
@@ -302,10 +321,7 @@ describe('BeadsPage', () => {
 
 function renderPage(path = '/beads') {
   return render(
-    <MemoryRouter
-      initialEntries={[path]}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={[path]}>
       <NowProvider intervalMs={1_000_000}>
         <OperatorConfigProvider
           operator={{
@@ -356,7 +372,8 @@ function sampleBead(): SupervisorBead {
 function agent(name: string, rig: string): unknown {
   return {
     name,
-    display_name: name,
+    // The supervisor fills display_name from the agent's provider.
+    display_name: 'Claude Code',
     rig,
     available: true,
     running: true,

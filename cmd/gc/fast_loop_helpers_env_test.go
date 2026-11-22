@@ -71,6 +71,23 @@ func TestSanitizedBaseEnv_PreservesUnrelatedVars(t *testing.T) {
 	}
 }
 
+// dolt forks a detached `dolt send-metrics` after every command unless
+// DOLT_DISABLE_EVENT_FLUSH is present, and internal/testenv sets it once for
+// the test process. sanitizedBaseEnv builds the env of every real bd/dolt
+// lifecycle child from os.Environ(), so it must keep that default.
+func TestSanitizedBaseEnv_CarriesDoltEventFlushDisable(t *testing.T) {
+	var got []string
+	for _, kv := range sanitizedBaseEnv() {
+		if strings.HasPrefix(kv, "DOLT_DISABLE_EVENT_FLUSH=") {
+			got = append(got, kv)
+		}
+	}
+
+	if len(got) != 1 || got[0] != "DOLT_DISABLE_EVENT_FLUSH=1" {
+		t.Fatalf("sanitizedBaseEnv DOLT_DISABLE_EVENT_FLUSH entries = %q, want exactly [DOLT_DISABLE_EVENT_FLUSH=1]", got)
+	}
+}
+
 func TestSanitizedBaseEnv_AppendsExtras(t *testing.T) {
 	// Also: extras that happen to start with GC_/BEADS_ are allowed — this
 	// is the mechanism the caller uses to set GC_CITY_PATH=<tempdir>.

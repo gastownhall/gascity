@@ -325,6 +325,7 @@ func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
 		fresh bool // a fresh key, not the row's
 	}{
 		{"no key", nil, true},
+		{"a started row the live-row guard left keyless", []string{"started_config_hash", "h-1", "continuation_epoch", "5"}, true}, // #5439
 		{"a committed key whose transcript is gone", []string{"session_key", "stale", "started_config_hash", "h-1"}, true},
 		{"an allocated key", []string{"session_key", "allocated", "continuation_epoch", "5"}, false},
 	} {
@@ -469,6 +470,41 @@ func TestPreWakeFoldsVerifiedBinding(t *testing.T) {
 	}
 }
 
+// Kills a parked resume's kept work dir applied unverified at the PreWake:
+// a kept dir that still hosts the resume stays the row's work dir and the
+// launch's, and one that is gone binds the derived dir instead.
+func TestPreWakeVerifiesAParkedResumesKeptWorkDir(t *testing.T) {
+	derived := filepath.Join(t.TempDir(), "worker-1")
+	for _, gone := range []bool{false, true} {
+		kept := t.TempDir()
+		k, leaf := launchKit(t, "asleep", beadmeta.WorkDirMetadataKey, kept, beadmeta.LegacyWorkDirMetadataKey, kept)
+		if gone {
+			if err := os.RemoveAll(kept); err != nil {
+				t.Fatal(err)
+			}
+		}
+		k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{WorkDir: derived, KeptWorkDir: kept, Patch: session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: "w-1"}}}
+		want := kept
+		if gone {
+			want = derived
+		}
+		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
+			t.Fatalf("gone=%v: settlement %+v, want one launch", gone, s)
+		}
+		for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+			if got := k.meta(key); got != want {
+				t.Errorf("gone=%v: row %s %q, want %q", gone, key, got, want)
+			}
+		}
+		if got := leaf.cfgs[0].WorkDir; got != want {
+			t.Errorf("gone=%v: launched in %q, want %q", gone, got, want)
+		}
+		if got := k.meta(beadmeta.TriggerBeadIDMetadataKey); got != "w-1" {
+			t.Errorf("gone=%v: trigger %q, want the binding's w-1", gone, got)
+		}
+	}
+}
+
 // Kills a concrete-pool work_dir repair left to prepare, which fails after
 // PreWake on every attempt (the generation climbs): the PreWake CAS carries
 // it, and the launch starts in the concrete dir.
@@ -540,6 +576,28 @@ func TestACPLaunchRoutesBeforeStart(t *testing.T) {
 	}
 }
 
+// Kills a recorded ACP session launched on the default backend: a row whose
+// recorded transport is ACP, under a template that now resolves the CLI
+// transport, starts the template's ACP launch (templateParamsForSession)
+// routed to ACP before the Start, with no route seeded for it.
+func TestRecordedACPLaunchRoutesBeforeStart(t *testing.T) {
+	k, leaf := launchKit(t, "asleep", "transport", "acp")
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", Command: "opencode -m acme/model-x", ACPLaunch: &TemplateACPLaunch{Command: "opencode acp"}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	leaf.onStart = func(context.Context) {
+		if len(leaf.routed) == 0 || leaf.routed[0] != "s-gc-1" {
+			t.Errorf("routes at Start = %v, want s-gc-1 routed to ACP", leaf.routed)
+		}
+	}
+	if s := k.runKind(); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	if len(leaf.cfgs) != 1 || leaf.cfgs[0].Command != "opencode acp" {
+		t.Fatalf("started %+v, want one start of the ACP launch %q", leaf.cfgs, "opencode acp")
+	}
+}
+
 // Kills a launch commit that drops legacy's MCP keys, the runtime snapshot
 // file, the #46 mirror's clear or the episode's: the commit writes the
 // snapshot and identity and zeroes the mirror, the launch rewrites the
@@ -602,6 +660,14 @@ func TestLaunchCommitPremise(t *testing.T) {
 		{"an outside close", []string{"closed"}, false, false, causeCommitLost, true},
 		{"an outside close over a zombie", []string{"closed", "zombie"}, false, false, causeCommitLost, true},
 		{"a kill fence over a zombie", []string{"state", "asleep", "sleep_reason", "killed", "zombie", ""}, false, false, causeCommitLost, true},
+		// An operator's suspend during the Start (mc-z1v39, §12.2 row 65: legacy too) moves state, which refuses.
+		{"an operator's suspend", []string{"sleep_intent", "user-hold", "held_until", gatherNow.Add(24 * time.Hour).Format(time.RFC3339), "suspended_at", gatherNow.Format(time.RFC3339), "state", "suspended"}, false, false, causeCommitLost, true},
+		// Pinned: S2's premise is the token and the state, not the hold (FactsCommit: a heartbeat's held_until
+		// during startup must not orphan the runtime), so a held row read awake commits. No v2 writer makes
+		// that shape during a start: the start owns its row (I8), a suspend writes state=suspended with the
+		// hold, and v2's awake heal never revives a held row (TestSoftSuspendIsNoHold "managed",
+		// TestAwakeHealNeverRevivesAnOperatorDormantRow). Legacy's heal pass did, which was mc-z1v39.
+		{"the operator's hold read awake (no v2 writer)", []string{"sleep_intent", "user-hold", "held_until", gatherNow.Add(24 * time.Hour).Format(time.RFC3339), "suspended_at", gatherNow.Format(time.RFC3339), "state", "awake"}, false, true, "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			k, leaf := launchKit(t, "asleep", "wake_attempts", "1")
@@ -1077,17 +1143,53 @@ func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
 	}
 }
 
+// Kills a bound launch template that names a trigger id, stale or fresh, that
+// marks an unstamped row as demand-spawned, or that drops a key instead of
+// withholding it: boundTemplate pins every GC_TRIGGER_* key empty and writes
+// the presence-only demand marker exactly when the bound row is stamped,
+// keeping unrelated keys. Pinned, not deleted: the launch env is an overlay,
+// so a deleted key would let the controller's own copy through
+// (gastownhall/gascity#5738).
+func TestBoundTemplateCarriesOnlyTheDemandMarker(t *testing.T) {
+	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
+	withheld := func(extra map[string]string) map[string]string {
+		env := map[string]string{"GC_SPAWN_ORIGIN": "", "GC_TRIGGER_BEAD_ID": "", "GC_TRIGGER_WORK_BEAD_ID": "", "GC_TRIGGER_BEAD_STORE_REF": "", "GC_TRIGGER_WORK_STORE_REF": ""}
+		maps.Copy(env, extra)
+		return env
+	}
+	for _, c := range []struct {
+		name, trigger string
+		env, want     map[string]string
+	}{
+		{"unstamped", "", stale, withheld(map[string]string{"GC_KEEP": "1"})},
+		{"stamped", "w-new", stale, withheld(map[string]string{"GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"})},
+		{"stamped row over a nil env", "w-new", nil, withheld(map[string]string{"GC_SPAWN_ORIGIN": "demand"})},
+		{"unstamped row over a nil env", "", nil, withheld(nil)},
+	} {
+		tp := boundTemplate(TemplateParams{TemplateName: "worker", Env: maps.Clone(c.env)}, session.Info{TriggerBeadID: c.trigger})
+		if !maps.Equal(tp.Env, c.want) {
+			t.Errorf("%s: bound env = %v, want %v", c.name, tp.Env, c.want)
+		}
+	}
+	if stale["GC_TRIGGER_BEAD_ID"] != "w-old" {
+		t.Errorf("boundTemplate wrote through to the template's env: %v", stale)
+	}
+}
+
 // Kills a launch env carrying the trigger the template was resolved under
-// after PreWake cleared or re-pointed it: the trigger env and the demand
-// origin follow the bound row (legacy binds, then resolves).
+// after PreWake cleared or re-pointed it, and a launch env that names a
+// trigger id at all: the demand origin follows the bound row (legacy binds,
+// then resolves), and every GC_TRIGGER_* key reaches the launch withheld,
+// stale or fresh (gastownhall/gascity#5738). A want of "" is a withheld key:
+// present and empty.
 func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
 	for _, c := range []struct {
 		name, bind string
 		want       map[string]string
 	}{
-		{"cleared", "", map[string]string{"GC_TRIGGER_BEAD_ID": "", "GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
-		{"re-pointed", "w-new", map[string]string{"GC_TRIGGER_BEAD_ID": "w-new", "GC_TRIGGER_WORK_BEAD_ID": "w-new", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
+		{"cleared", "", map[string]string{"GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
+		{"re-pointed", "w-new", map[string]string{"GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
 	} {
 		k, leaf := launchKit(t, "asleep", "gc.trigger_bead_id", "w-old")
 		row := k.p.World.Census.Rows[k.it.Key]
@@ -1097,10 +1199,11 @@ func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 			t.Fatalf("%s: settlement %+v, want one launch", c.name, s)
 		}
 		for key, want := range c.want {
-			if got := leaf.cfgs[0].Env[key]; got != want {
-				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
+			if got, ok := leaf.cfgs[0].Env[key]; !ok || got != want {
+				t.Errorf("%s: launch %s = (%q, present=%v), want %q", c.name, key, got, ok, want)
 			}
 		}
+		assertEnvWithholdsTriggerIDs(t, c.name+": launch env", leaf.cfgs[0].Env)
 	}
 }
 

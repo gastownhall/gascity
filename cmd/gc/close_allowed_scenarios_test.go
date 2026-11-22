@@ -15,24 +15,35 @@ import (
 
 // The R9-C review's table: a wake or restart request on an undesired or
 // orphaned row, which nothing consumes, never keeps the row open. Both
-// modes close it, as before closeAllowed.
+// modes close it, as before closeAllowed. One divergence (CONTRACT v5.10n,
+// §12.2 row 26): a fresh explicit wake on a configured agent's undesired
+// pool row is honored by v2 (D7 rule 4: never drained or closed, woken
+// within max_active_sessions, the wake consumed by its start); legacy closes
+// it.
 func TestCloseAllowed_StaleRequestsCloseUndesiredRowsInBothModes(t *testing.T) {
 	at := func(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
 	gone := func() *config.City {
 		return &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "other", StartCommand: "true", MaxActiveSessions: intPtr(3)}}}
 	}
-	for _, f := range []parityFixture{
-		{Name: "an undesired idle pool row, a stale wake", Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "wake_request", "explicit", "wake_requested_at", at(-2*time.Hour))}},
-		{Name: "an undesired idle pool row, a fresh wake", Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "wake_request", "explicit", "wake_requested_at", at(-time.Minute))}},
-		{Name: "a drained pool row, a stale wake", Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "drained", "slept_at", at(-time.Hour), "wake_request", "explicit", "wake_requested_at", at(-2*time.Hour))}},
-		{Name: "a removed agent's pool row, a wake request", City: gone, Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "wake_request", "explicit", "wake_requested_at", at(-time.Minute))}},
-		{Name: "an undesired idle pool row, a restart request", Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "restart_requested", "true")}},
+	for _, c := range []struct {
+		f     parityFixture
+		row26 bool // §12.2 row 26: v2 honors the wake
+	}{
+		{f: parityFixture{Name: "an undesired idle pool row, a stale wake", Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "wake_request", "explicit", "wake_requested_at", at(-2*time.Hour))}}},
+		{f: parityFixture{Name: "an undesired idle pool row, a fresh wake", Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "wake_request", "explicit", "wake_requested_at", at(-time.Minute))}}, row26: true},
+		{f: parityFixture{Name: "a drained pool row, a stale wake", Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "drained", "slept_at", at(-time.Hour), "wake_request", "explicit", "wake_requested_at", at(-2*time.Hour))}}},
+		{f: parityFixture{Name: "a removed agent's pool row, a wake request", City: gone, Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "wake_request", "explicit", "wake_requested_at", at(-time.Minute))}}},
+		{f: parityFixture{Name: "an undesired idle pool row, a restart request", Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "restart_requested", "true")}}},
 	} {
-		t.Run(f.Name, func(t *testing.T) {
+		t.Run(c.f.Name, func(t *testing.T) {
 			cityPath := t.TempDir()
-			rows := f.converged(t, cityPath)
-			l, v := legacyParity(t, f, cityPath, rows), v2Parity(t, f, cityPath, rows)
-			if lr, vr := l.rows["gc-1"], v.rows["gc-1"]; lr.Status != "closed" || vr.Status != "closed" {
+			rows := c.f.converged(t, cityPath)
+			l, v := legacyParity(t, c.f, cityPath, rows), v2Parity(t, c.f, cityPath, rows)
+			lr, vr := l.rows["gc-1"], v.rows["gc-1"]
+			switch {
+			case c.row26 && (lr.Status != "closed" || vr.Status == "closed" || vr.Metadata["wake_request"] != ""):
+				t.Fatalf("legacy %s; v2 %s wake %q; want legacy closed, v2 open with the wake consumed (§12.2 row 26)", lr.Status, vr.Status, vr.Metadata["wake_request"])
+			case !c.row26 && (lr.Status != "closed" || vr.Status != "closed"):
 				t.Fatalf("legacy %s, v2 %s; want both closed", lr.Status, vr.Status)
 			}
 		})

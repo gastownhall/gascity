@@ -14,6 +14,14 @@ nogo(
     deps = NOGO_ANALYZERS,
 )
 
+# Read by main-repository nogo actions only (third_party/patches/
+# rules_go_nogo_main_repo_data.patch), never compiled into the nogo binary.
+filegroup(
+    name = "main_repo_data",
+    srcs = ["//tools/nogo/analyzers/storeclass:baseline.txt"],
+    visibility = ["//visibility:public"],
+)
+
 exports_files([
     "analyzers.bzl",
     "config.json",
@@ -38,6 +46,7 @@ go_test(
         "//tools/nogo/analyzers/misspell",
         "//tools/nogo/analyzers/revive",
         "//tools/nogo/analyzers/runtimelease",
+        "//tools/nogo/analyzers/storeclass",
         "//tools/nogo/analyzers/testrelax",
         "//tools/nogo/analyzers/unconvert",
         "//tools/nogo/analyzers/unparam",

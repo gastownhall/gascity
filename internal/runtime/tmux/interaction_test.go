@@ -412,7 +412,7 @@ func pendingInteractionSeamResult(session string, pending *runtime.PendingIntera
 	}
 	for i, want := range [][]string{
 		phase2AgentPaneLookup(session),
-		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", fakeAgentPane(session), "-S", "-40"},
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", fakeAgentPane(session), "-S", "-120"},
 	} {
 		if err := matchTMuxCall(calls[i], want); err != nil {
 			evidence["tmux_call"] = strings.Join(calls[i], " ")
@@ -473,10 +473,10 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 	pane := fakeAgentPane(session)
 	wantCalls := [][]string{
 		phase2AgentPaneLookup(session),
-		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-40"},
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-120"},
 		{"-u", "-L", "phase2-sock", "display-message", "-t", pane, "-p", "#{pane_in_mode}"},
 		{"-u", "-L", "phase2-sock", "send-keys", "-t", pane, "-l", "1"},
-		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-40"},
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-120"},
 	}
 	for i, want := range wantCalls {
 		if callErr := matchTMuxCall(calls[i], want); callErr != nil {

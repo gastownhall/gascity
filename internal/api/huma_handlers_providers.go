@@ -75,13 +75,14 @@ func (s *Server) resolveAllProviders() []resolvedProvider {
 // GET /v0/city/{cityName}/providers (admin view). The browser-safe view
 // lives at /providers/public.
 func (s *Server) humaHandleProviderList(_ context.Context, _ *ProviderListInput) (*ListOutput[providerResponse], error) {
+	index := s.latestIndex()
 	resolved := s.resolveAllProviders()
 	providers := make([]providerResponse, 0, len(resolved))
 	for _, p := range resolved {
 		providers = append(providers, providerFromSpec(p.Name, p.Spec, p.Builtin, p.CityLevel))
 	}
 	return &ListOutput[providerResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  ListBody[providerResponse]{Items: providers, Total: len(providers)},
 	}, nil
 }
@@ -91,19 +92,21 @@ func (s *Server) humaHandleProviderList(_ context.Context, _ *ProviderListInput)
 // projection of every provider — city-level first, then built-ins — and
 // never exposes command/args/env or prompt-delivery details.
 func (s *Server) humaHandleProviderPublicList(_ context.Context, _ *ProviderPublicListInput) (*ProviderPublicListOutput, error) {
+	index := s.latestIndex()
 	resolved := s.resolveAllProviders()
 	providers := make([]ProviderPublicResponse, 0, len(resolved))
 	for _, p := range resolved {
 		providers = append(providers, toProviderPublicResponse(p.Name, p.Merged, p.Builtin, p.CityLevel))
 	}
 	return &ProviderPublicListOutput{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  ProviderPublicListBody{Items: providers, Total: len(providers)},
 	}, nil
 }
 
 // humaHandleProviderGet is the Huma-typed handler for GET /v0/provider/{name}.
 func (s *Server) humaHandleProviderGet(_ context.Context, input *ProviderGetInput) (*IndexOutput[providerResponse], error) {
+	index := s.latestIndex()
 	name := input.Name
 	cfg := s.state.Config()
 	builtins := config.BuiltinProviders()
@@ -112,7 +115,7 @@ func (s *Server) humaHandleProviderGet(_ context.Context, input *ProviderGetInpu
 	if spec, ok := cfg.Providers[name]; ok {
 		_, isBuiltin := builtins[name]
 		return &IndexOutput[providerResponse]{
-			Index: s.latestIndex(),
+			Index: index,
 			Body:  providerFromSpec(name, spec, isBuiltin, true),
 		}, nil
 	}
@@ -120,7 +123,7 @@ func (s *Server) humaHandleProviderGet(_ context.Context, input *ProviderGetInpu
 	// Check builtins.
 	if spec, ok := builtins[name]; ok {
 		return &IndexOutput[providerResponse]{
-			Index: s.latestIndex(),
+			Index: index,
 			Body:  providerFromSpec(name, spec, true, false),
 		}, nil
 	}

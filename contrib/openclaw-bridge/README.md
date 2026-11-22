@@ -121,16 +121,17 @@ What "import openclaw connectors" costs, learned by building this:
 
 1. **The published npm packages are enough.** The iMessage connector ships as
    its own package, `@openclaw/imessage` (split out of `openclaw` in
-   2026.8.x), with clean entry-module exports (`dist/runtime-api.js`,
-   `dist/api.js`) for send/probe/id-model; it imports `openclaw/plugin-sdk/*`
+   2026.8.x), with a clean entry-module export (`dist/api.js`) for the
+   probe and the id model; it imports `openclaw/plugin-sdk/*`
    at runtime, so both are pinned to the same release. Telegram still ships
    inside `openclaw` (`dist/extensions/telegram`). No monorepo checkout, pnpm,
    or build step needed.
-2. **One seam is not exported:** `createIMessageRpcClient` (the watch/inbound
-   client) only exists in a hash-named chunk under `dist/.setup/` with a
-   mangled alias. `lib/openclaw.mjs` resolves it by scanning chunk export
-   statements. Upstream ask: re-export the RPC client (and the notification
-   parser) from the plugin's public API.
+2. **Two seams are not exported:** `createIMessageRpcClient` (the
+   watch/inbound client) and, since 2026.10, `sendMessageIMessage` (the
+   outbound pipeline) only exist in hash-named chunks under `dist/.setup/`
+   with mangled aliases. `lib/openclaw.mjs` resolves them by scanning chunk
+   export statements. Upstream ask: re-export the RPC client, the send
+   pipeline and the notification parser from the plugin's public API.
 3. **Don't host their monitor/dispatch layer.** `monitorIMessageProvider` is
    hard-wired into openclaw's own pairing/agent-reply pipeline (and its dm
    policy would fight gc's routing). The right seam is one level down: RPC

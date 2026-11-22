@@ -19,6 +19,7 @@ go_test(
         "clone_test.go",
         "git_test.go",
         "revision_test.go",
+        "runctx_orphan_unix_test.go",
         "sshkeepalive_test.go",
         "testenv_import_test.go",
         "unreachable_commits_test.go",

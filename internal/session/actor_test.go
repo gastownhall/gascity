@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -132,7 +133,7 @@ func TestLifecycleVerbsRefuseAnActorWithoutCityOrKind(t *testing.T) {
 	starts := map[string]verb{
 		"Start": func(m managerLeaseFixture, by Actor) error { return m.start(by) },
 		"StartRuntimeOnly": func(m managerLeaseFixture, by Actor) error {
-			return m.mgr.StartRuntimeOnly(context.Background(), by, m.info.ID, BuildResumeCommand(m.info), hints(m))
+			return m.mgr.StartRuntimeOnly(context.Background(), by, m.info.ID, Incarnation{}, BuildResumeCommand(m.info), hints(m))
 		},
 		"Attach": func(m managerLeaseFixture, by Actor) error {
 			return m.mgr.Attach(context.Background(), by, m.info.ID, BuildResumeCommand(m.info), hints(m))
@@ -204,7 +205,7 @@ func TestLifecycleVerbsRefuseAnActorWithoutCityOrKind(t *testing.T) {
 func TestQueueForEachActor(t *testing.T) {
 	held := map[string]string{"state": string(StateAsleep), "held_until": "2099-01-01T00:00:00Z", "sleep_intent": "user-hold"}
 	unheld := map[string]string{"state": string(StateAsleep)}
-	mgr := NewManagerWithOptions(nil, runtime.NewFake())
+	mgr := NewManagerWithOptions(beads.SessionStore{}, runtime.NewFake())
 	for _, c := range []struct {
 		kind               ActorKind
 		queueHeld, queueUn bool

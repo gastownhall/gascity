@@ -34,13 +34,13 @@ func (s *interleavedStore) ConditionalWritesResolveTarget() beads.Store { return
 
 func stampedMemStore(t *testing.T, store beads.Store) {
 	t.Helper()
-	if err := beads.StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 }
 
-// zeroRevisionStore reads every row back with no revision, as a backend
-// without the revision layout does.
+// zeroRevisionStore reads every row back at revision 0 while the store holds a
+// real one.
 type zeroRevisionStore struct{ beads.Store }
 
 func (s zeroRevisionStore) Get(id string) (beads.Bead, error) {
@@ -86,11 +86,13 @@ func TestAutocloseCloseIfStill(t *testing.T) {
 			stampedMemStore(t, m)
 			return m
 		}, still: open, wantClosed: true, wantReason: true},
-		// A row read back without a revision cannot be CASed; the re-check
-		// is the guard.
+		// A re-read at revision 0 is CASed at 0 like any revision, never
+		// closed blind: over a row whose real revision is not 0 the CAS
+		// refuses.
 		{
-			name: "CAS store, row without a revision", store: func(t *testing.T) beads.Store { return stamped(t) },
-			wrap: func(inner beads.Store, _ string) beads.Store { return zeroRevisionStore{inner} }, still: open, wantClosed: true,
+			name: "CAS store, row read back at 0", store: func(t *testing.T) beads.Store { return stamped(t) },
+			wrap: func(inner beads.Store, _ string) beads.Store { return zeroRevisionStore{inner} }, still: open,
+			wantErr: func(err error) bool { return errors.Is(err, errAutocloseRefused) },
 		},
 		{
 			name: "re-read fails", store: func(*testing.T) beads.Store { return beads.NewMemStore() },
@@ -121,7 +123,7 @@ func TestAutocloseCloseIfStill(t *testing.T) {
 				store = tc.wrap(inner, target.ID)
 			}
 			unconditional := 0
-			closed, err := autocloseCloseIfStill(store, target.ID, "test-reason", tc.still, func() error {
+			closed, err := autocloseCloseIfStill(store, target.ID, "test-reason", nil, tc.still, func() error {
 				unconditional++
 				return inner.Close(target.ID)
 			})
@@ -137,6 +139,89 @@ func TestAutocloseCloseIfStill(t *testing.T) {
 			}
 			if tc.wantReason && unconditional != 0 {
 				t.Fatal("a conditional store took the unconditional close")
+			}
+		})
+	}
+}
+
+// legacyRowStore is a stamped MemStore holding one row at revision 0, the
+// default a legacy native row (row_lock backfilled by migration 0054) keeps
+// until its first write.
+func legacyRowStore(t *testing.T) (*beads.MemStore, string) {
+	t.Helper()
+	m := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "gc-1", Title: "legacy", Status: "open", Type: "task"}}, nil)
+	stampedMemStore(t, m)
+	return m, "gc-1"
+}
+
+// Kills the revision-0 blind close: a legacy row re-read at its real revision
+// 0 is closed by a CAS at 0, so a write landing between the re-read and the
+// close refuses it rather than being closed over.
+func TestAutocloseCloseIfStillFencesALegacyRow(t *testing.T) {
+	open := func(b beads.Bead) bool { return b.Status == "open" }
+	for _, interleave := range []bool{false, true} {
+		inner, id := legacyRowStore(t)
+		store := &interleavedStore{Store: inner, id: id}
+		if interleave {
+			store.between = func() { _ = inner.SetMetadata(id, "touched", "yes") }
+		}
+		unconditional := 0
+		closed, err := autocloseCloseIfStill(store, id, "legacy-reason", nil, open, func() error {
+			unconditional++
+			return inner.Close(id)
+		})
+		got, _ := inner.Get(id)
+		if unconditional != 0 {
+			t.Fatalf("interleave=%v: a legacy row at revision 0 took the unconditional close", interleave)
+		}
+		if interleave {
+			if !errors.Is(err, errAutocloseRefused) || closed || got.Status == "closed" {
+				t.Fatalf("interleave: (closed %v, err %v, status %q), want the CAS at 0 refused and the row open", closed, err, got.Status)
+			}
+			continue
+		}
+		if err != nil || !closed || got.Status != "closed" || got.Metadata["close_reason"] != "legacy-reason" {
+			t.Fatalf("(closed %v, err %v, row %+v), want the legacy row closed by the CAS at 0 with its reason", closed, err, got)
+		}
+	}
+}
+
+// TestAutocloseCloseIfStillWritesMetadataWithTheClose pins the metadata a
+// fenced close carries beside its reason on both conditional paths: committed
+// with the close by an atomic closer, and stamped after a plain CAS close.
+func TestAutocloseCloseIfStillWritesMetadataWithTheClose(t *testing.T) {
+	open := func(b beads.Bead) bool { return b.Status == "open" }
+	for _, tc := range []struct {
+		name  string
+		store func() beads.Store
+	}{
+		{name: "CAS close", store: func() beads.Store { return beads.NewMemStore() }},
+		{name: "atomic closer", store: beads.NewAtomicCloseMemStore},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := tc.store()
+			stampedMemStore(t, store)
+			target, err := store.Create(beads.Bead{Title: "target"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			unconditional := 0
+			closed, err := autocloseCloseIfStill(store, target.ID, "test-reason", map[string]string{"gc.outcome": "pass"}, open, func() error {
+				unconditional++
+				return store.Close(target.ID)
+			})
+			if err != nil || !closed {
+				t.Fatalf("autocloseCloseIfStill = (%v, %v), want closed", closed, err)
+			}
+			if unconditional != 0 {
+				t.Fatal("a conditional store took the unconditional close")
+			}
+			got, err := store.Get(target.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "closed" || got.Metadata["close_reason"] != "test-reason" || got.Metadata["gc.outcome"] != "pass" {
+				t.Fatalf("row = status %q close_reason %q gc.outcome %q, want closed with the reason and the metadata", got.Status, got.Metadata["close_reason"], got.Metadata["gc.outcome"])
 			}
 		})
 	}
@@ -189,7 +274,7 @@ func TestConvoyAutocloseReadsTheConvoyLiveBeforeClosing(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(cached, rec, member.ID, &stdout, &stdout)
+	doConvoyAutocloseWith(cached, testStores(cached, nil), convoyAutocloseHomes{}, rec, member.ID, &stdout, &stdout)
 
 	if got := statusOf(t, backing, convoy.ID); got != "open" {
 		t.Fatalf("convoy %s; the live row is owned", got)
@@ -226,7 +311,7 @@ func TestMoleculeAutocloseLeavesARootClosedBehindTheCache(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout bytes.Buffer
-	doMoleculeAutocloseWith(cached, "", rec, step.ID, &stdout, beads.GraphStore{Store: cached})
+	doMoleculeAutocloseWith(cached, "", rec, step.ID, &stdout, testStores(cached, cached))
 
 	for _, evt := range rec.Events {
 		if evt.Subject == root.ID {
@@ -264,7 +349,7 @@ func TestWispAutocloseRechecksTheParentBeforeClosing(t *testing.T) {
 	store := &reopeningStore{MemStore: mem, id: parent.ID}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, parent.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, parent.ID, &stdout, testStores(store, store))
 
 	if got := statusOf(t, mem, wisp.ID); got != "open" {
 		t.Fatalf("wisp %s under a parent reopened before the close", got)
@@ -284,7 +369,7 @@ func TestWispAutocloseRechecksAReapedRootBeforeClosing(t *testing.T) {
 	store := &reopeningStore{MemStore: mem, id: wisp.ID}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, parent.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, parent.ID, &stdout, testStores(store, store))
 
 	if got := statusOf(t, mem, wisp.ID); got != "open" {
 		t.Fatalf("wisp %s after it was reopened before the close", got)
@@ -310,7 +395,7 @@ func TestConvoyAutocloseRechecksTheConvoyIsStillOpen(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(cached, rec, member.ID, &stdout, &stdout)
+	doConvoyAutocloseWith(cached, testStores(cached, nil), convoyAutocloseHomes{}, rec, member.ID, &stdout, &stdout)
 	for _, evt := range rec.Events {
 		if evt.Type == events.ConvoyClosed {
 			t.Fatalf("recorded %s for a convoy another writer already closed", evt.Type)
@@ -350,7 +435,7 @@ func TestWispAutocloseRecheckFailsClosedOnAReadError(t *testing.T) {
 	store := &flakyLiveStore{MemStore: mem, id: parent.ID}
 
 	var stdout bytes.Buffer
-	run := doWispAutocloseWith(store, parent.ID, &stdout, beads.GraphStore{Store: store})
+	run := doWispAutocloseWith(store, parent.ID, &stdout, testStores(store, store))
 
 	if got := statusOf(t, mem, wisp.ID); got != "open" {
 		t.Fatalf("wisp %s after the parent re-check failed", got)
@@ -400,7 +485,7 @@ func TestWispAutocloseRecheckReadsTheParentLive(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, parent.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, parent.ID, &stdout, testStores(store, store))
 
 	if got := statusOf(t, mem, wisp.ID); got != "open" {
 		t.Fatalf("wisp %s; the live parent was reopened before the close", got)

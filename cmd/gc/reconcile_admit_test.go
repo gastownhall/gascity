@@ -559,6 +559,36 @@ func TestAdmitRowBackoffDefersAllButGoneFinalize(t *testing.T) {
 	}
 }
 
+// Kills a row backoff's expiry that schedules no pass (CONTRACT v5.10d (b)):
+// admission reports the earliest expiry of the live row backoffs that
+// deferred an intent, each the later of its row's records that hold it
+// (the row key and a drift kind's own); a finalize the backoff lets through,
+// and an expired backoff, schedule nothing.
+func TestAdmitReportsRowBackoffExpiry(t *testing.T) {
+	in := admitIn(50, 50)
+	in.Backoff = map[string]backoffRecord{
+		rowBackoffKey(admitRow(1)):   {Until: admitT0.Add(30 * time.Second), Cause: causeRedecided},
+		rowBackoffKey(admitRow(2)):   {Until: admitT0.Add(10 * time.Second), Cause: causeRedecided},
+		rowBackoffKey(admitRow(3)):   {Until: admitT0.Add(5 * time.Second), Cause: "fence-l3"},
+		driftBackoffKey(admitRow(3)): {Until: admitT0.Add(20 * time.Second), Cause: causeDriftDeferred},
+	}
+	if res := admit(in, []intent{startOn(1, "", 0), rowIntent(intentStop, 2)}); len(res.Deferred) != 2 || !res.NextBackoff.Equal(admitT0.Add(10*time.Second)) {
+		t.Fatalf("deferred %v, next backoff %v; want both deferred, the pass at +10s", causesOf(res.Deferred), res.NextBackoff)
+	}
+	if res := admit(in, []intent{rowIntent(intentDriftRestart, 3)}); !res.NextBackoff.Equal(admitT0.Add(20 * time.Second)) {
+		t.Fatalf("drift under both records: next backoff %v, want the later, +20s", res.NextBackoff)
+	}
+	finalize := rowIntent(intentStop, 2)
+	finalize.Finalize = true
+	if res := admit(in, []intent{finalize}); len(res.Admitted) != 1 || !res.NextBackoff.IsZero() {
+		t.Fatalf("admitted %v, next backoff %v; want the finalize through and no pass", keysOf(res.Admitted), res.NextBackoff)
+	}
+	in.Now = admitT0.Add(30 * time.Second)
+	if res := admit(in, []intent{startOn(1, "", 0)}); len(res.Admitted) != 1 || !res.NextBackoff.IsZero() {
+		t.Fatalf("admitted %v, next backoff %v; want an expired backoff to defer nothing", keysOf(res.Admitted), res.NextBackoff)
+	}
+}
+
 // Kills a re-probe storm (mc-zndi7.29): an attribution-unknown refusal's row
 // backoff defers the row's adopt, start and rollback until it expires or a
 // readable verdict drops it.

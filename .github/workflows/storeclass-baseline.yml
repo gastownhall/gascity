@@ -1,0 +1,193 @@
+name: storeclass baseline
+
+# The storeclass lint (tools/nogo/analyzers/storeclass) holds today's raw-store
+# debt in a baseline that only shrinks. nogo enforces it per package on every
+# compile; this workflow adds what nogo cannot:
+#
+#   1. The baseline, the ceiling and allowed.txt (the findings the allowlisted
+#      cmd/gc files hold) match the tree exactly, across every build-tag
+#      variant (a row for a tag-only or deleted file is caught here).
+#   2. The growth gate: against the merge-base, any new or raised baseline,
+#      allowed.txt or ceiling row fails, and so does any change to the lint
+#      itself (the analyzer, its allowlist and sealed lists, the generator,
+#      the two rules_go nogo patches, analyzers.bzl and tools/nogo/BUILD.bazel,
+#      this workflow, CODEOWNERS), a rename out of them included, or to the
+#      nogo wiring that runs it (MODULE.bazel's rules_go override and
+#      go_sdk.nogo registration, config.json's _base and storeclass scopes),
+#      unless the pull request carries the storeclass/baseline-raise label.
+#      Only the typed-store programme's coordinator applies it; the raise
+#      procedure is in the storeclass package doc.
+#
+# The gate cannot be edited by the change it judges: the generator and its
+# configuration are built from the MERGE-BASE checkout and run over the
+# change's tree, so a change that weakens the analyzer, widens the allowlist or
+# edits the generator still sees the merge-base's rules. A merge-base that
+# predates the gate (a branch cut before it landed) hands that role to the
+# base branch's tip: the tip's generator judges the change against the tip's
+# baseline. Only when the tip has no gate either does the change introduce
+# it, checked by its own generator. With the label, the change's own
+# generator checks its own configuration too.
+#
+# A change to this file runs as the pull request's version of it; the admin
+# settings that close that hole (this check required on main, code-owner
+# review enforced for .github/workflows, .github/actions and .github/scripts,
+# which this job runs before the trusted build, and the storeclass paths) are
+# listed in #8435.
+#
+# Label events do not start this workflow. It takes the same four pull request
+# types as the other required workflows, so every head pushed to a pull
+# request into main, hotfix/** or release/** gets a run. Status labels change
+# all day and carry no code: as triggers they would cancel and restart this
+# required check and hold a ready pull request BLOCKED at the merge handoff.
+# The job reads the pull request's labels through the API when it runs, so
+# once the coordinator applies storeclass/baseline-raise, a re-run of this job
+# on the pull request's current head sees it (a re-run replays the original
+# event, whose payload lists the old labels), and so does the next push. The
+# merge queue reads the labels the same way, so a removed label is enforced
+# there before anything merges to main.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, 'hotfix/**', 'release/**']
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  merge_group:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: storeclass-baseline-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.merge_group.head_ref || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
+      reason: ${{ steps.policy.outputs.reason }}
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_macos: ${{ steps.policy.outputs.runner_macos }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 .github/workflows/scripts/runner_policy.py
+
+  baseline:
+    name: storeclass baseline and growth gate
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+
+      - name: Check the baseline with the merge-base's generator
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          GROUP_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tree="$GITHUB_WORKSPACE"
+          gen=./analyzers/storeclass/cmd/storeclass-baseline
+          case "$EVENT_NAME" in
+            pull_request)
+              branch="$BASE_REF"
+              base="$(git merge-base "origin/$branch" HEAD)"
+              # The labels now, not the event's: a re-run replays the event.
+              labels="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '[.labels[].name]')"
+              ;;
+            merge_group)
+              branch="${GROUP_BASE_REF#refs/heads/}"
+              base="$GROUP_BASE_SHA"
+              # gh-readonly-queue/<base>/pr-<number>-<sha>: the queued PR's labels.
+              pr="$(sed -E 's|.*/pr-([0-9]+)-[0-9a-f]+$|\1|' <<<"$GROUP_HEAD_REF")"
+              labels="$(gh api "repos/$REPO/pulls/$pr" --jq '[.labels[].name]')"
+              ;;
+            *)
+              # A push to main: the tree is its own merge-base.
+              (cd tools/nogo && go run "$gen" -repo "$tree")
+              exit 0
+              ;;
+          esac
+          # Both as commits: a ref git cannot read fails here, never reading
+          # as one without the gate.
+          base="$(git rev-parse --verify "$base^{commit}")"
+          tip="$(git rev-parse --verify "origin/$branch^{commit}")"
+          approved=false
+          if jq -e 'index("storeclass/baseline-raise")' <<<"$labels" >/dev/null; then
+            approved=true
+          fi
+          # The generator that judges the change: the merge-base's, else, for
+          # a branch cut before the gate landed, the base branch tip's.
+          trusted_ref=""
+          for ref in "$base" "$tip"; do
+            found="$(git ls-tree -d --full-tree --name-only "$ref" -- tools/nogo/analyzers/storeclass/cmd/storeclass-baseline)"
+            if [ -n "$found" ]; then
+              trusted_ref="$ref"
+              break
+            fi
+          done
+          if [ -z "$trusted_ref" ]; then
+            echo "::notice title=storeclass::neither the merge-base nor the tip of $branch has the storeclass gate: this change introduces it"
+            (cd tools/nogo && go run "$gen" -repo "$tree" -growth-since "$base" -base-tip "$tip")
+            exit 0
+          fi
+          if [ "$trusted_ref" != "$base" ]; then
+            echo "::notice title=storeclass::the merge-base predates the storeclass gate: the tip of $branch judges this change"
+          fi
+          trusted="$RUNNER_TEMP/trusted"
+          git worktree add --detach "$trusted" "$trusted_ref"
+          (cd "$trusted/tools/nogo" && go build -o "$RUNNER_TEMP/storeclass-baseline-trusted" "$gen")
+          if [ "$approved" = true ]; then
+            echo "::notice title=storeclass::storeclass/baseline-raise applied: checking the change's own configuration and reporting its raises"
+            (cd tools/nogo && go run "$gen" -repo "$tree")
+            "$RUNNER_TEMP/storeclass-baseline-trusted" -repo "$tree" -growth-since "$base" -base-tip "$tip" -gate-only -allow-raise
+          else
+            # The census first: a baseline that does not match the tree is
+            # fixed by regenerating it, unless the change edits the lint
+            # itself (the merge-base's lint then judges it), which needs the
+            # label.
+            if ! "$RUNNER_TEMP/storeclass-baseline-trusted" -repo "$tree"; then
+              if [ "$EVENT_NAME" = pull_request ]; then
+                echo "::error title=storeclass::the baseline does not match the tree under the merge-base's lint: regenerate it with -write; if this change edits the lint itself, the coordinator applies storeclass/baseline-raise and then re-runs this job on the pull request's current head"
+              fi
+              exit 1
+            fi
+            if ! "$RUNNER_TEMP/storeclass-baseline-trusted" -repo "$tree" -growth-since "$base" -base-tip "$tip" -gate-only; then
+              if [ "$EVENT_NAME" = pull_request ]; then
+                echo "::error title=storeclass::a raise or a change to the lint needs the coordinator: apply storeclass/baseline-raise, then re-run this job on the pull request's current head (applying a label does not start it)"
+              fi
+              exit 1
+            fi
+          fi

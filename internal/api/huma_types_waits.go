@@ -10,21 +10,22 @@ package api
 // carry omitempty so an unset value is absent rather than "" on the wire; the
 // client edge (waitInfoFromGen) reconstitutes the session.WaitInfo.
 type WaitView struct {
-	ID              string   `json:"id" doc:"Wait bead ID."`
-	SessionID       string   `json:"session_id" doc:"Session bead ID the wait is registered against."`
-	SessionName     string   `json:"session_name,omitempty" doc:"Runtime session name recorded at registration."`
-	Kind            string   `json:"kind" doc:"Wait kind, e.g. deps."`
-	State           string   `json:"state" doc:"Wait lifecycle state (pending/ready/closed/...)."`
-	DepIDs          []string `json:"dep_ids,omitempty" doc:"Dependency bead IDs the wait watches."`
-	DepMode         string   `json:"dep_mode,omitempty" doc:"all or any."`
-	RegisteredEpoch string   `json:"registered_epoch,omitempty" doc:"Session continuation epoch at registration."`
-	DeliveryAttempt string   `json:"delivery_attempt,omitempty" doc:"Current delivery attempt counter."`
-	NudgeID         string   `json:"nudge_id,omitempty" doc:"Shadow wait-nudge ID once dispatched."`
-	ExpiresAt       string   `json:"expires_at,omitempty" doc:"Raw RFC3339 expiry string, kept verbatim."`
-	Note            string   `json:"note,omitempty" doc:"Reminder text delivered when the wait is satisfied."`
-	Status          string   `json:"status" doc:"Persisted bead status (open/closed)."`
-	CreatedAt       string   `json:"created_at,omitempty" doc:"Bead creation time (RFC3339, UTC)."`
-	Labels          []string `json:"labels,omitempty" doc:"Bead labels."`
+	ID                     string   `json:"id" doc:"Wait bead ID."`
+	SessionID              string   `json:"session_id" doc:"Session bead ID the wait is registered against."`
+	SessionName            string   `json:"session_name,omitempty" doc:"Runtime session name recorded at registration."`
+	Kind                   string   `json:"kind" doc:"Wait kind, e.g. deps."`
+	State                  string   `json:"state" doc:"Wait lifecycle state (pending/ready/closed/...)."`
+	DepIDs                 []string `json:"dep_ids,omitempty" doc:"Dependency bead IDs the wait watches."`
+	DepMode                string   `json:"dep_mode,omitempty" doc:"all or any."`
+	RegisteredEpoch        string   `json:"registered_epoch,omitempty" doc:"Session continuation epoch at registration."`
+	RegisteredResetPending bool     `json:"registered_reset_pending,omitempty" doc:"True when the wait was registered while its session had a fresh restart pending: it belongs to the conversation that restart starts."`
+	DeliveryAttempt        string   `json:"delivery_attempt,omitempty" doc:"Current delivery attempt counter."`
+	NudgeID                string   `json:"nudge_id,omitempty" doc:"Shadow wait-nudge ID once dispatched."`
+	ExpiresAt              string   `json:"expires_at,omitempty" doc:"Raw RFC3339 expiry string, kept verbatim."`
+	Note                   string   `json:"note,omitempty" doc:"Reminder text delivered when the wait is satisfied."`
+	Status                 string   `json:"status" doc:"Persisted bead status (open/closed)."`
+	CreatedAt              string   `json:"created_at,omitempty" doc:"Bead creation time (RFC3339, UTC)."`
+	Labels                 []string `json:"labels,omitempty" doc:"Bead labels."`
 }
 
 // WaitListInput is the Huma input for GET /v0/city/{cityName}/waits.
@@ -53,12 +54,14 @@ type WaitListBody struct {
 
 // WaitListOutput is the response envelope for GET /v0/city/{cityName}/waits.
 type WaitListOutput struct {
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
-	Body      WaitListBody
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheRefresh
+	Body WaitListBody
 }
 
 // WaitGetOutput is the response envelope for GET /v0/city/{cityName}/wait/{id}.
 type WaitGetOutput struct {
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
-	Body      WaitView
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheRefresh
+	Body WaitView
 }

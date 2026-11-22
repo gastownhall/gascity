@@ -69,9 +69,44 @@ func TestRuntimeConformanceCmd_JSONReport(t *testing.T) {
 	}
 }
 
+// Kills a conformance run that an advisory FAIL fails: a pack whose only
+// failure is an observation requirement (here copy-to, which fails a
+// missing source) sees the FAIL but exits 0 with ok:true, so its CI does
+// not go red on a gc upgrade that adds an advisory group.
+func TestRuntimeConformanceCmd_AdvisoryFailExitsZero(t *testing.T) {
+	script := conformanceScript(t, `  copy-to)    echo "no such source" >&2; exit 1 ;;
+`)
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeConformanceCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"--json", script})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("an advisory-only FAIL must exit 0: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var payload struct {
+		OK bool `json:"ok"`
+		runtimecontract.Report
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not a JSON report: %v\n%s", err, stdout.String())
+	}
+	if !payload.OK {
+		t.Errorf("ok = false for an advisory-only FAIL; want true:\n%s", stdout.String())
+	}
+	if payload.Summary.Failed != 1 {
+		t.Errorf("summary %+v: want the advisory FAIL still counted", payload.Summary)
+	}
+}
+
 // conformantConformanceScript writes a stateful RPP script that passes the
 // full runtimecontract catalog.
 func conformantConformanceScript(t *testing.T) string {
+	t.Helper()
+	return conformanceScript(t, "")
+}
+
+// conformanceScript writes conformantConformanceScript's script with extra
+// case arms ahead of its unknown-op arm.
+func conformanceScript(t *testing.T, extra string) string {
 	t.Helper()
 	state := t.TempDir()
 	return writeRPPScript(t, `
@@ -84,7 +119,38 @@ case "$op" in
   is-running) if [ -e "$S/$name" ]; then echo true; else echo false; fi ;;
   exec)       sh -c "$(cat)" ;;
   provision)  cat >/dev/null ;;
-  *) exit 2 ;;
+`+extra+`  *) exit 2 ;;
 esac
 `)
+}
+
+// Kills a conformance report that hides whether the executable is
+// v2-ready, or names the wrong gaps.
+func TestRuntimeConformanceCmd_ReportsV2Readiness(t *testing.T) {
+	for want, report := range map[string]runtimecontract.Report{
+		"v2-ready: yes": {V2Ready: true},
+		"v2-ready: no (missing observe.v1, report-attachment)":                          {V2Missing: []string{"observe.v1", "report-attachment"}},
+		"v2-ready: no (gc already reads it through observe.v1; failed RPP-OBSERVE-003)": {V2Failed: []runtimecontract.Code{"RPP-OBSERVE-003"}},
+		"v2-ready: no (missing report-attachment; failed RPP-LIFECYCLE-001)":            {V2Missing: []string{"report-attachment"}, V2Failed: []runtimecontract.Code{"RPP-LIFECYCLE-001"}},
+	} {
+		if got := v2ReadyLine(report); got != want {
+			t.Errorf("v2ReadyLine = %q, want %q", got, want)
+		}
+	}
+}
+
+// Kills a gc runtime conformance run from a shell outside any city that runs
+// its ops in no city, which a runtime serving only cities refuses.
+func TestRuntimeConformanceCmd_RunsOutsideACity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeConformanceCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{cityOnlyRPPScript(t, conformantConformanceScript(t))})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "0 failed") {
+		t.Errorf("conformant executable should report 0 failed outside a city; got:\n%s", out)
+	}
 }

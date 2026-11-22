@@ -98,6 +98,20 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 			})
 	})
 
+	t.Run("pinned_id_duplicate", func(t *testing.T) {
+		// MUST stay below the capability skip above. bd v1.0.4 through
+		// v1.2.2 runs `bd create --id` through INSERT ... ON DUPLICATE KEY
+		// UPDATE and overwrites an existing row; the refusal arrived with
+		// v1.3.0. Create-if-absent callers that fence every write (the op
+		// journal) refuse a bd without --if-revision at construction through
+		// beads.ProbeConditionalWrites, so the capable bd this leg runs on is
+		// the one they accept, and it must refuse a duplicate pinned id.
+		beadstest.RunPinnedIDDuplicateConformance(t, func(t *testing.T) beads.Store {
+			store, _ := newConditionalIntegrationBdStore(t)
+			return store
+		})
+	})
+
 	t.Run("capable_usage_echo_must_not_classify_unsupported", func(t *testing.T) {
 		// MUST stay below the capability skip above: a pre-#4682 bd rejects
 		// --if-revision ITSELF ("unknown flag: --if-revision"), which is a
@@ -217,6 +231,14 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 // route this row into their host-wide shared Dolt server.
 func newConditionalIntegrationRunner(t *testing.T, scopeDir string) beads.CommandRunner {
 	t.Helper()
+	return newConditionalIntegrationRunnerAs(t, scopeDir, "")
+}
+
+// newConditionalIntegrationRunnerAs is newConditionalIntegrationRunner with
+// bd's actor pinned to actor through BEADS_ACTOR, the variable gc's claim path
+// names its claimant with. An empty actor leaves bd's own default.
+func newConditionalIntegrationRunnerAs(t *testing.T, scopeDir, actor string) beads.CommandRunner {
+	t.Helper()
 	home := filepath.Join(filepath.Dir(scopeDir), "tool-home")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatalf("create bd tool home: %v", err)
@@ -228,6 +250,9 @@ func newConditionalIntegrationRunner(t *testing.T, scopeDir string) beads.Comman
 	}
 	env["BEADS_DIR"] = filepath.Join(scopeDir, ".beads")
 	env["BEADS_DOLT_AUTO_START"] = "0"
+	if actor != "" {
+		env["BEADS_ACTOR"] = actor
+	}
 	// toolhome.Environ drops every BEADS_* name, so BdSubprocessEnv re-applies the
 	// test-mode default that keeps bd's detached metrics flusher from racing the
 	// TempDir removal (ga-aik16g).
