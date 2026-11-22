@@ -157,3 +157,40 @@ func TestProcessWorkflowFinalizeRecordsSkippedBlockersSorted(t *testing.T) {
 		t.Fatalf("root gc.skipped_blockers = %q contains passed blocker %s", root.Metadata["gc.skipped_blockers"], f.blockers[1].ID)
 	}
 }
+
+// TestProcessWorkflowFinalizeAllPassLeavesSkippedBlockersAbsent pins that only
+// the finalizer's direct blockers feed gc.skipped_blockers: when every blocker
+// passed, the root closes pass without the key, even though the finalize
+// sweep then closes a never-reached non-blocker member gc.outcome=skipped.
+func TestProcessWorkflowFinalizeAllPassLeavesSkippedBlockersAbsent(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	f := newSkippedBlockerFixture(t, store, []map[string]string{
+		outcomeMeta("pass"),
+		outcomeMeta("pass"),
+	}, nil)
+	unreached := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "never-reached member",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": f.root.ID,
+			"gc.step_ref":     "unused",
+		},
+	})
+	result, root := f.finalize(t)
+
+	if result.Action != "workflow-pass" {
+		t.Fatalf("action = %q, want workflow-pass", result.Action)
+	}
+	if root.Status != "closed" || root.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("root status=%q gc.outcome=%q, want closed/pass", root.Status, root.Metadata["gc.outcome"])
+	}
+	if got, ok := root.Metadata["gc.skipped_blockers"]; ok {
+		t.Fatalf("root gc.skipped_blockers = %q, want the key absent", got)
+	}
+	member := mustGetBead(t, store, unreached.ID)
+	if member.Status != "closed" || member.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("never-reached member status=%q gc.outcome=%q, want the sweep's closed/skipped", member.Status, member.Metadata["gc.outcome"])
+	}
+}
