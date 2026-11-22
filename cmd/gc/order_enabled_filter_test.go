@@ -318,3 +318,43 @@ enabled = false
 	requireOrderAbsent(t, cs.Orders(), "keep")
 	requireOrderEnabledState(t, cs.OrdersAll(), "keep", false)
 }
+
+func TestBuildOrderDispatcherOverrideEnablesFileDisabledOrder(t *testing.T) {
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	writeFileDisabledOffOrder(t, cityDir)
+	enabled := true
+	cfg.Orders.Overrides = append(cfg.Orders.Overrides, config.OrderOverride{Name: "off", Enabled: &enabled})
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("buildOrderDispatcher returned nil; stderr: %s", stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("buildOrderDispatcher stderr = %q, want no override error", stderr.String())
+	}
+	mad := ad.(*memoryOrderDispatcher)
+	requireOrderEnabledState(t, mad.aa, "off", true)
+	requireOrderEnabledState(t, mad.aa, "keep", true)
+	requireOrderAbsent(t, mad.aa, "drop")
+}
+
+// writeFileDisabledOffOrder writes the city-local order "off", whose own
+// file sets enabled = false.
+func writeFileDisabledOffOrder(t *testing.T, cityDir string) {
+	t.Helper()
+
+	ordersDir := filepath.Join(cityDir, "orders")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatalf("mkdir orders: %v", err)
+	}
+	content := `[order]
+exec = "scripts/off"
+trigger = "cooldown"
+interval = "1m"
+enabled = false
+`
+	if err := os.WriteFile(filepath.Join(ordersDir, "off.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write order \"off\": %v", err)
+	}
+}
