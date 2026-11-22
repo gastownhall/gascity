@@ -2300,6 +2300,7 @@ go_test(
         "session_drain_ack_min_floor_test.go",
         "session_drain_ack_rewake_regression_test.go",
         "session_drain_skip_log_test.go",
+        "session_evict_uncommitted_guards_test.go",
         "session_drainack_info_equiv_test.go",
         "session_event_pump_acp_test.go",
         "session_event_pump_live_test.go",
