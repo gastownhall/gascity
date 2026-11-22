@@ -2,6 +2,7 @@ package sling
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"testing"
 
@@ -524,5 +525,79 @@ func TestSlingExpandedRootStampsSessionNameForSingleSessionTarget(t *testing.T) 
 		if got := mustMeta(t, store, id, beadmeta.SessionNameMetadataKey); got == "" {
 			t.Errorf("%s gc.session_name is empty, want the single-session target's session name", id)
 		}
+	}
+}
+
+// TestSlingExpandedRootRoutesControlExecutionAndSkipsSettledMembers: a
+// control keeps its control-dispatcher route and gains the target as its
+// execution route, while a scope latch, a spec sidecar, a step routed to
+// another agent, a closed step and an assigned step are left untouched.
+func TestSlingExpandedRootRoutesControlExecutionAndSkipsSettledMembers(t *testing.T) {
+	store := cookedWorkflowStore(t)
+	member := func(title string, meta map[string]string) beads.Bead {
+		t.Helper()
+		full := map[string]string{beadmeta.RootBeadIDMetadataKey: "wf-1"}
+		maps.Copy(full, meta)
+		b, err := store.Create(beads.Bead{Title: title, Type: "task", Status: "open", Metadata: full})
+		if err != nil {
+			t.Fatalf("create member %q: %v", title, err)
+		}
+		return b
+	}
+	scope := member("scope", map[string]string{beadmeta.KindMetadataKey: beadmeta.KindScope})
+	spec := member("spec", map[string]string{beadmeta.KindMetadataKey: beadmeta.KindSpec})
+	explicit := member("review", map[string]string{beadmeta.RoutedToMetadataKey: "reviewer"})
+	closed := member("already done", nil)
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+	assigned := member("in hand", nil)
+	claimer := "someone"
+	if err := store.Update(assigned.ID, beads.UpdateOpts{Assignee: &claimer}); err != nil {
+		t.Fatalf("assign step: %v", err)
+	}
+	untouched := map[string]map[string]string{}
+	for _, b := range []beads.Bead{scope, spec, explicit, closed, assigned} {
+		got, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("reading %s before the sling: %v", b.ID, err)
+		}
+		untouched[b.ID] = maps.Clone(got.Metadata)
+	}
+
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	reviewer := config.Agent{Name: "reviewer", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker, reviewer}}
+	runner := newFakeRunner()
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps = withStore(deps, store)
+	deps.Router = &recordingRouter{store: store}
+
+	result, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if got := mustMeta(t, store, "wf-1.finalize", beadmeta.RoutedToMetadataKey); got != "core.control-dispatcher" {
+		t.Errorf("control gc.routed_to = %q, want core.control-dispatcher (untouched)", got)
+	}
+	if got := mustMeta(t, store, "wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey); got != "worker" {
+		t.Errorf("control gc.execution_routed_to = %q, want worker", got)
+	}
+	for _, id := range []string{"wf-1.mix", "wf-1.flip"} {
+		if got := mustMeta(t, store, id, beadmeta.RoutedToMetadataKey); got != "worker" {
+			t.Errorf("%s gc.routed_to = %q, want worker", id, got)
+		}
+	}
+	for id, before := range untouched {
+		after, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("reading %s after the sling: %v", id, err)
+		}
+		if !maps.Equal(before, after.Metadata) {
+			t.Errorf("member %s (%s) metadata changed:\n before %v\n after  %v", id, after.Title, before, after.Metadata)
+		}
+	}
+	if result.RoutedMembers != 3 {
+		t.Errorf("RoutedMembers = %d, want 3 (the control and the two open steps)", result.RoutedMembers)
 	}
 }
