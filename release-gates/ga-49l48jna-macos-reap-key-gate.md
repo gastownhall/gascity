@@ -1,11 +1,11 @@
 # macOS workspace-service reap-key release gate
 
 **Bead:** ga-49l48jna; build ga-b50d6ctf; review ga-ae19oqn1.
-**Verdict:** **PENDING — actual Mac acceptance**
+**Verdict:** **PASS**
 **Linux gate:** **PASS**
-**Recorded:** 2026-11-22T00:44:20.988187+00:00
+**Recorded:** 2026-11-22T01:35:24.141933+00:00
 
-The mayor's sequencing ruling gcg-11064321 permits a draft PR after Linux PASS, with the Mac criterion pending. It permits no clearance, ready PR or merge-request until Mac / make test succeeds and the named regression runs without skip or failure. A failed test is never retried. Any moved head is re-gated.
+Sequencing ruling gcg-11064321: Linux PASS preceded draft publication; the required actual Mac unit acceptance is now verified on draft head badd3f7a62795b3023a05049f9532c62aa29b1f8. Supplemental failures have explicit standard3a attribution below. Every moved PR head still requires a fresh exact-head gate before clearance.
 
 Source: aebad195700b796afcdfe5bb76a4278fd379f944; original reviewed source: 20ac9e490fd587ce74d8f0ca1e209df341873de1.
 review_carryover_verified: 20ac9e490fd587ce74d8f0ca1e209df341873de1 -> aebad195700b796afcdfe5bb76a4278fd379f944 mechanical-conflict files=internal/workspacesvc/BUILD.bazel; helper result mechanical-conflict patch-id c03f52c0b76a3dd2faf33fc1ad7c462aac70e3c8 files=internal/workspacesvc/BUILD.bazel. Production Go files byte-identical to the original reviewed fix.
@@ -17,8 +17,8 @@ merge_validation: clean two-parent merge 34a6a899eb77959f2ac384c86c5e04bd20d527b
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
 | 1 | Review PASS | PASS | Review ga-ae19oqn1 passed; independently verified mechanical carryover and allowed generated BUILD context. |
-| 2 | Acceptance criteria | PENDING | Case-folding code, platform file partition and generated source entry verified. Actual Mac job and TestProxyProcessReapRegistryMatchesAnEquivalentSpelling remain mandatory and pending. |
-| 3 | Tests | PASS (Linux) | Complete five-phase fresh remote suite, 16 native coverage checks and six required-CI leaf accounts below. No diff-owned tests; no test retry or waiver. Mac acceptance remains pending in criterion 2. |
+| 2 | Acceptance criteria | PASS | Actual Mac / make test succeeded at https://github.com/gastownhall/gascity/actions/runs/44968647105/job/137043466613; exact checkout verified, named regression RUN with no SKIP/FAIL. Platform file partition and generated source entry verified. |
+| 3 | Tests | PASS | Complete fresh Linux suite and required-CI accounting below; actual required Mac unit job succeeded. Supplemental core FAIL is attributed under clauses1-4, with original failure and partial-core coverage retained below. No waiver or retry. |
 | 4 | No open HIGH review findings | PASS | Security findings none at any severity; style findings none blocking in original review. |
 | 5 | Clean final branch | PASS | Reviewed source and canonical validation tree have no uncommitted source changes; this administrative gate record is the sole deploy addition. Final isolated-branch cleanliness is verified after its record commit. |
 | 6 | Merge state, build and vet | PASS | Clean merge, exact parents/tree/base and terminal build/vet BEPs independently audited. |
@@ -44,14 +44,14 @@ Five phases: unit 426 executions / 309 targets; acceptance 25 / 8; integration-p
 
 load_gate: native floor threshold=15 waited_seconds=0 wait_timed_out=0 run_start_load=9.66 run_max_load=16.61 run_mean_load=13.05; raw floor-topup.stdout retained. Initial remote admission class=remote; free_gib=61.873958587646484; waited_seconds=0.001. Additional per-job load reports are retained with CI receipts.
 
-skip_justification: 337 names remain SKIP-only after farm + native checks, at 168 resolved sites; every site is outside changed hunks, no shared/helper test hunk changed, and no changed skip file requires a base control. Literal reasons, resolved sites, closures and raw events are retained. Linux selects the unchanged non-Darwin key implementation. The named case-insensitive-path regression skips at proxy_process_reap_test.go:377 because its two spellings name different directories on this Linux filesystem; this is not evidence that the Mac fix works. Its actual Mac run remains criterion 2, pending.
+skip_justification: 337 names remain SKIP-only after farm + native checks, at 168 resolved sites; every site is outside changed hunks, no shared/helper test hunk changed, and no changed skip file requires a base control. Literal reasons, resolved sites, closures and raw events are retained. Linux selects the unchanged non-Darwin key implementation. The named case-insensitive-path regression skips at proxy_process_reap_test.go:377 because its two spellings name different directories on this Linux filesystem; this is not evidence that the Mac fix works. Its actual successful Mac run is recorded below.
 
-failure_attribution: n/a, no test failure.
-attribution_evidence: n/a.
+failure_attribution: Linux suite none; supplemental Mac failures are explicitly mapped below.
+attribution_evidence: full Mac clause1/2/3(a)/4 proof retained in the pointers below.
 waiver_ref: none.
-uncovered_criteria: none waived or silently omitted; actual Mac acceptance explicitly pending.
+uncovered_criteria: none waived; required Mac unit acceptance verified. Supplemental core commands2-4 did not run after shard1 failed, recorded below.
 descoped_criteria: none.
-deploy_stage_criteria: Mac / make test success and named regression RUN/no SKIP/no FAIL on the exact draft head.
+deploy_stage_criteria: satisfied at badd3f7a62795b3023a05049f9532c62aa29b1f8 by successful Mac / make test and named RUN/no SKIP/no FAIL. Any resulting new PR head is re-gated before clearance.
 post_merge_criteria: none.
 
 fast_lane: format, policy/shell guards, generated BUILD/docs/spec drift, OpenAPI compatibility, complexity zero-growth and strict trusted-base storeclass policy all passed before runtime probes or the suite. Complexity baseline untouched, delta changes empty. No API/spec/dashboard changes require a manual dashboard preview.
@@ -96,3 +96,36 @@ Full storeclass policy retained: 59 lines; /var/tmp/gc-gate-ga-49l48jna-0dzji_k8
 Full platform file selection retained: 97 lines; /var/tmp/gc-gate-ga-49l48jna-0dzji_k8/platform-selection.json; SHA256 282d3658d624d5bed0b1fca9e33192200077e4b072daa198d661371d82ce866b.
 
 test_log_dir: /var/tmp/gc-gate-ga-49l48jna-0dzji_k8/c3-run/evidence/remote/logs; all raw evidence is retained. Re-read live bead state and service status on resume; no historical result authorizes a changed head.
+
+## Actual Mac acceptance and supplemental failure attribution
+
+mac_tested_head: badd3f7a62795b3023a05049f9532c62aa29b1f8 (fork quad341/gascity); actual unit-job git log output proves the checkout, independent of the base-main workflow-definition SHA.
+mac_unit: SUCCESS — https://github.com/gastownhall/gascity/actions/runs/44968647105/job/137043466613; make test-mac step SUCCESS.
+named_regression: TestProxyProcessReapRegistryMatchesAnEquivalentSpelling RUN, no SKIP or FAIL; raw event: 2026-11-22T01:10:03.8036070Z 2026-11-22T01:04:35.758502Z run TestProxyProcessReapRegistryMatchesAnEquivalentSpelling.
+mac_workflow: failure — https://github.com/gastownhall/gascity/actions/runs/44968647105. Every job is terminal. The core job failed with the two recorded tests; the summary aggregates that core failure. Other selected jobs, including quality and cmd/gc integration, succeeded; review-formulas was not selected by needs-mac.
+mac_evidence_scope: complete required unit acceptance. Supplemental integration-core stopped during packages-core-1-of-4 (61 packages); commands packages-core-2-of-4 through packages-core-4-of-4 did not run. Linux full-suite evidence above remains complete. No workflow-wide Mac PASS or completed later-core coverage is asserted.
+
+failure_attribution: TestCredentialProviderParentCancellationCleanup -> ga-2inf4mec | clause3(a): unreachable changed production package in Darwin/arm64 CGO1 Go1.27.4 integration test-binary imports; clauses1/4 clear.
+  clause2: tracker newly filed and opened in this observing run after open/closed lookup NONE; explicit gm-sf3238 discovering-run exception, no predating sighting claimed.
+  clause1: unchanged body and exact failure site; no shared/helper hunk. clause4: separate package, no added test load/census/target. Original result remains FAIL, never a test PASS.
+failure_attribution: TestStartSQLServerRetriesWhenAClientSocketHoldsTheProbedPort -> ga-2tucpj0k | clause3(a): unreachable changed production package in Darwin/arm64 CGO1 Go1.27.4 integration test-binary imports; clauses1/4 clear.
+  clause2: tracker newly filed and opened in this observing run after open/closed lookup NONE; explicit gm-sf3238 discovering-run exception, no predating sighting claimed.
+  clause1: unchanged body and exact failure site; no shared/helper hunk. clause4: separate package, no added test load/census/target. Original result remains FAIL, never a test PASS.
+
+waiver_ref: none. No test or workflow rerun was used to reach this first-head verdict.
+
+resolved_pr_ci_at_first_head: Windows lane / native tests SUCCESS https://github.com/gastownhall/gascity/actions/runs/44968594543/job/137043209649; CI / required SUCCESS https://github.com/gastownhall/gascity/actions/runs/44968594543/job/137043635553. The initial Linux gate native-Windows deferral above is resolved for this head.
+
+Full Mac unit verification retained: 21 lines; /var/tmp/gc-gate-ga-49l48jna-0dzji_k8/mac-first/unit-verification.json; SHA256 df47fa7bc191016433241ea235e475057526b0ea5a924dc4cc1babe0c0f96f79.
+
+Full Mac raw unit log retained: 51393 lines; /var/tmp/gc-gate-ga-49l48jna-0dzji_k8/mac-first/job-137043466613.raw.log; SHA256 b7421d9b32f7e7ebbcb686fcec40407bafae9064c862cc9a3ab6b29d76cd27ff.
+
+Full Mac supplemental attribution retained: 39 lines; /var/tmp/gc-gate-ga-49l48jna-0dzji_k8/mac-first/failure-attribution.json; SHA256 78c82fe36af638108fc735a838b8cc71f4f7b3bc8c733b854e4f3724747f1153.
+
+Full Mac failure import closures retained: 58 lines; /var/tmp/gc-gate-ga-49l48jna-0dzji_k8/mac-first/failure-import-proof.json; SHA256 32ce8b42a3d91d6c7681f7a7df82723e389575c2d7e680a919cc953f57e14d8c.
+
+Full Mac unchanged failure sites retained: 6 lines; /var/tmp/gc-gate-ga-49l48jna-0dzji_k8/mac-first/failure-sites.stdout; SHA256 e5cb97e6c7faa74c743735b8c536b5c611ea6e5ef0bd27d87c8cfb2c16126a65.
+
+Full Mac final job results and raw-log hashes retained: 3276 lines; /var/tmp/gc-gate-ga-49l48jna-0dzji_k8/mac-first/remainder-terminal.json; SHA256 1e2f476371d1ef601c9e3f40023e63786aecd03c14e7a58001812a06238f9c30.
+
+publication_guard: committing this final record advances the draft head. The new head receives a fresh gate and actual Mac verification before ready, deploy-clearance or merge-request. Those additional head-specific receipts stay in bead notes and durable artifacts so publication does not change the cleared head again.
