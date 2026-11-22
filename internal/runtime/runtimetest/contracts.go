@@ -183,6 +183,53 @@ func checkMissingSessionInput(sp runtime.Provider, in missingSessionInput) error
 	return nil
 }
 
+// InputRefusalFixtures provide sessions a runtime refuses input to: each
+// returns a provider and the name of a running session that runtime will
+// not deliver a nudge to (its agent waits on a pending interaction, or its
+// backend cannot be reached). A nil fixture skips its case.
+type InputRefusalFixtures struct {
+	Blocked     func(t *testing.T) (runtime.Provider, string)
+	Unavailable func(t *testing.T) (runtime.Provider, string)
+}
+
+// RunInputRefusalContract runs RUNTIME-CONTRACT-019's RefusalNeverDelivered
+// cases: a nudge the runtime refused (a blocked session, an unreachable
+// backend) returns a non-nil error that never reads as delivered
+// ([runtime.NudgeDelivered] is false), whether or not the caller reads the
+// runtime's typed outcomes. For the exec provider the fixtures run a pack
+// declaring input-outcome behind a failed handshake, so its exit 80 reaches
+// a gc that does not read the token.
+func RunInputRefusalContract(t *testing.T, f InputRefusalFixtures) {
+	t.Helper()
+	for _, c := range []struct {
+		name    string
+		fixture func(t *testing.T) (runtime.Provider, string)
+	}{{"Blocked", f.Blocked}, {"Unavailable", f.Unavailable}} {
+		t.Run("RefusalNeverDelivered_"+c.name, func(t *testing.T) {
+			if c.fixture == nil {
+				t.Skip("no fixture")
+			}
+			sp, name := c.fixture(t)
+			if err := checkRefusalNeverDelivered(sp, name); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// checkRefusalNeverDelivered reports how sp breaks RefusalNeverDelivered for
+// a nudge to name, which it refuses, or nil when it keeps the contract.
+func checkRefusalNeverDelivered(sp runtime.Provider, name string) error {
+	err := sp.Nudge(name, runtime.TextContent("refused input"))
+	switch {
+	case err == nil:
+		return errors.New("runtime contract 019: a nudge the runtime refused = nil, which reads as delivered")
+	case runtime.NudgeDelivered(err):
+		return fmt.Errorf("runtime contract 019: a nudge the runtime refused = %w, which reads as delivered", err)
+	}
+	return nil
+}
+
 // RunIdleWaitContractTests runs the RUNTIME-CONTRACT-016 cases: a wait is
 // bounded by its timeout, a timeout after a busy reading is the timeout alone,
 // and a timeout with no busy reading wraps [runtime.ErrWaitUnobserved].

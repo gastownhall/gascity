@@ -662,6 +662,69 @@ func TestDispatchAllQueuedNudgesHoldsNudgesForKillFencedSession(t *testing.T) {
 	}
 }
 
+// A nudge the runtime refuses because an interaction is pending waits out the
+// retry delay, uncharged, instead of being claimed again by the next
+// dispatcher pass.
+func TestDispatchAllQueuedNudgesBacksOffAPendingInteractionRefusal(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	if store.Store == nil {
+		t.Fatal("openNudgeBeadStore returned nil")
+	}
+	if err := enqueueQueuedNudgeWithStore(dir, store, newQueuedNudge("worker", "wake-up nudge", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "worker-session", runtime.Config{}); err != nil {
+		t.Fatalf("fake.Start: %v", err)
+	}
+	fake.SetActivity("worker-session", time.Now().Add(-10*time.Second))
+	fake.NudgeErrors = map[string]error{"worker-session": runtime.ErrNudgeRefusedPendingInteraction}
+
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session bead: %v", err)
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{created})
+
+	for pass := 1; pass <= 2; pass++ {
+		delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store, store, fake, snapshot, nil)
+		if err != nil || delivered != 0 {
+			t.Fatalf("pass %d: delivered %d err %v, want the refused nudge left queued", pass, delivered, err)
+		}
+	}
+	if got := fake.CountCalls("Nudge", "worker-session"); got != 1 {
+		t.Fatalf("nudge calls = %d, want 1: the refusal waits out the retry delay before the next try", got)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+	if item := pending[0]; item.Attempts != 0 || !item.DeliverAfter.After(time.Now()) {
+		t.Fatalf("pending item attempts %d deliver_after %v, want 0 attempts and a retry in the future", item.Attempts, item.DeliverAfter)
+	}
+}
+
 // TestDispatchAllQueuedNudgesDeliversToIdleACPSession verifies the
 // supervisor dispatcher delivers queued nudges to a running ACP session
 // once it has been idle longer than the quiescence window. Idle ACP

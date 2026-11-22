@@ -44,6 +44,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -301,6 +302,11 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		cs.mu.RLock()
 		stores := cs.beadEventStoresLocked(id)
 		probe := cs.beadEventRelicProbeLocked(id)
+		var route []storeref.StoreRef
+		if probe.routes != nil {
+			// Only a relic's close confirmation reads the route by ref.
+			route = cs.beadEventRouteLocked(id)
+		}
 		storeRef := cs.autocloseStoreRefLocked(id)
 		suspendedStore := cs.anySuspendedRigStoreLocked(stores)
 		cs.mu.RUnlock()
@@ -321,7 +327,11 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 			sweep.deferID(id, now.Add(sweep.interval))
 			continue
 		}
-		store, live, err := liveCloseOwner(stores, id, relic)
+		var epoch storeref.Stores
+		if relic != nil {
+			epoch = cs.Stores() // only the relic's CloseOwner plan reads it
+		}
+		store, live, err := liveCloseOwner(epoch, route, stores, id, relic)
 		switch confirmInferredClose(live, err) {
 		case closeConfirmed:
 			cs.emitCompletedFact(live, autocloseSweepActor)
@@ -349,14 +359,19 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 }
 
 // anySuspendedRigStoreLocked reports whether any of stores is the store of a
-// rig the city runtime last saw suspended. cs.mu must be held.
+// rig the city runtime last saw suspended. Identity is physical
+// (beads.SameStore): a handle over a suspended rig's store is that rig, and
+// reading it would restart the rig's retired proxy. A suspended rig whose
+// store did not open is a nil entry, which the unconfigured fallback
+// (beadEventStoresLocked) lists as it is: it matches a nil store, as it
+// always has. cs.mu must be held.
 func (cs *controllerState) anySuspendedRigStoreLocked(stores []beads.Store) bool {
 	for name, rigStore := range cs.beadStores {
 		if !cs.rigSuspended(name) {
 			continue
 		}
 		for _, store := range stores {
-			if store == rigStore {
+			if beads.SameStore(store, rigStore) || (store == nil && rigStore == nil) {
 				return true
 			}
 		}

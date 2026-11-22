@@ -532,10 +532,12 @@ func TestTheCityCopyRewritesAGateEdgeChangedBetweenRuns(t *testing.T) {
 	}
 }
 
-// TestEveryHoldIsNamedInOneRefusal: a city with an edge hold the plan refuses
-// and a status hold the binding cannot record is refused once, naming both,
-// by migrate and by preflight alike, so the operator fixes them in one pass.
-func TestEveryHoldIsNamedInOneRefusal(t *testing.T) {
+// TestAnEdgeHoldRefusesAndAStatusHoldCrosses: a city with an edge hold the
+// plan refuses and a status hold the binding cannot record (owner decision
+// D-a) is refused over the edge alone, by migrate and by preflight alike.
+// Neither refusal names the status hold, which is no refusal: the copy
+// carries it (TestTheCopyCarriesStatusHolds).
+func TestAnEdgeHoldRefusesAndAStatusHoldCrosses(t *testing.T) {
 	request, _, _ := preflightReadyCity(t, 0)
 	source, err := openInfraMigrationSource(request.CityPath)
 	if err != nil {
@@ -550,24 +552,28 @@ func TestEveryHoldIsNamedInOneRefusal(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	if code := doStoragePreflight(request, &stdout, &stderr); code == 0 {
-		t.Fatalf("preflight cleared a city with two holds: %s", stdout.String())
+		t.Fatalf("preflight cleared a city with an edge hold: %s", stdout.String())
 	}
 	var log bytes.Buffer
 	report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log)
 	if report.Outcome == infraMigrationConverged {
-		t.Fatalf("migrate converged over two holds: %s", log.String())
+		t.Fatalf("migrate converged over an edge hold: %s", log.String())
 	}
 	for name, out := range map[string]string{"preflight": stdout.String(), "migrate": log.String()} {
-		for _, id := range []string{waiting.ID, parked.ID} {
-			if !strings.Contains(out, id) {
-				t.Errorf("%s's refusal does not name %s: %s", name, id, out)
-			}
+		if !strings.Contains(out, waiting.ID) {
+			t.Errorf("%s's refusal does not name %s: %s", name, waiting.ID, out)
 		}
 	}
 	var boundary *infraBoundaryRefusal
-	var status *infraUncarriedHolds
-	if !errors.As(report.Fault, &boundary) || !errors.As(report.Fault, &status) {
-		t.Fatalf("the migrate refusal %v does not carry both holds", report.Fault)
+	if !errors.As(report.Fault, &boundary) || strings.Contains(report.Fault.Error(), parked.ID) {
+		t.Fatalf("the migrate refusal %v is not the edge hold alone", report.Fault)
+	}
+	holds := preflightRowText(stdout.String(), preflightBlockTag, "holds")
+	if holds == "" {
+		t.Fatalf("preflight has no %s holds row: %s", preflightBlockTag, stdout.String())
+	}
+	if strings.Contains(holds, parked.ID) {
+		t.Errorf("preflight's holds refusal names the status hold %s, which the copy carries: %s", parked.ID, holds)
 	}
 }
 

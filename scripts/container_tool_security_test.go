@@ -171,7 +171,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"litellm>=1.106.5",
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
-		"dnspython>=2.9.0",
+		"dnspython>=2.9.2",
 		"joserfc>=1.7.5",
 	} {
 		if !strings.Contains(input, want) {
@@ -208,7 +208,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"filelock==3.29.0 \\",
 		"opentelemetry-api==1.45.1 \\",
 		"authlib==1.9.1 \\",
-		"dnspython==2.9.0 \\",
+		"dnspython==2.9.2 \\",
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		"bleach==6.4.0 \\",
 		"h2==4.4.1 \\",
@@ -870,7 +870,7 @@ func TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers(t *testing.T) {
 
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
 // source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
-// 1.27.3 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
+// 1.27.4 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
 // rebuild instead of proving the fix holds. The surviving reviewed waivers are the
@@ -936,7 +936,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	for _, v := range doc.Vulnerabilities {
 		for _, p := range v.Paths {
 			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
-				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.27.3 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
+				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.27.4 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
 			}
 			if allowedPaths, ok := reviewedWaivers[v.ID]; ok && allowedPaths[p] {
 				if foundReviewed[v.ID] == nil {

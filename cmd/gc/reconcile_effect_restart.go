@@ -201,9 +201,12 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 			return out, nil
 		}
 		out.Err = r.Relaunch(ctx, p.name, prepared.cfg)
-		// A startup nudge the session's program held back behind a dialog
-		// (program_status = "on", row A20) is queued, never typed or failed.
-		if err := queueStartupNudgeHandback(p.w.CityPath, launchCityConfig(p.w), p.leaf, p.row, p.name, out.Err == nil, p.now); err != nil {
+		// A startup nudge the runtime handed back (one held behind a dialog
+		// under program_status = "on", row A20, or an un-welded exec launch's
+		// first turn) is queued, never typed or failed.
+		// A warm relaunch keeps the box's token, never the config's, so the
+		// turn binds to the live token alone (else it is queued untagged).
+		if err := queueStartupNudgeHandback(p.w.CityPath, launchCityConfig(p.w), p.leaf, p.row, p.name, "", out.Err == nil, p.now); err != nil {
 			log.Printf("v2 relaunch %s: %v", p.row.ID, err)
 		}
 	}
