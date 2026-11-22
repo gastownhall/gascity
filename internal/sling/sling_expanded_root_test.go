@@ -171,3 +171,63 @@ func TestSlingExpandedRootReSlingCompletesHalfRoutedRun(t *testing.T) {
 		t.Fatalf("auto-convoy roots after the re-sling = %+v, want exactly the reused %s", live, convoy.ID)
 	}
 }
+
+// TestSlingExpandedRootFullyRoutedStaysIdempotent pins the settled half of
+// the re-sling story: once every member of the run carries the route (steps
+// via gc.routed_to, the control via gc.execution_routed_to), the plain sling
+// is a no-op again — idempotent, nothing written, no second auto-convoy. The
+// member-routing refinement must fill missing routes, never rewrite settled
+// ones.
+func TestSlingExpandedRootFullyRoutedStaysIdempotent(t *testing.T) {
+	store := cookedWorkflowStore(t)
+	worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
+	cfg := &config.City{Agents: []config.Agent{worker}}
+	runner := newFakeRunner()
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps = withStore(deps, store)
+	router := &recordingRouter{store: store}
+	deps.Router = router
+
+	// The settled shape a completed sling leaves: root routed, live convoy,
+	// every step routed, the control carrying its execution route.
+	for id, meta := range map[string]map[string]string{
+		"wf-1":          {beadmeta.RoutedToMetadataKey: "worker"},
+		"wf-1.mix":      {beadmeta.RoutedToMetadataKey: "worker"},
+		"wf-1.flip":     {beadmeta.RoutedToMetadataKey: "worker"},
+		"wf-1.finalize": {beadmeta.ExecutionRoutedToMetadataKey: "worker"},
+	} {
+		for k, v := range meta {
+			if err := store.SetMetadata(id, k, v); err != nil {
+				t.Fatalf("settling %s: %v", id, err)
+			}
+		}
+	}
+	convoy, err := deps.Store.Create(beads.Bead{Title: AutoConvoyRootTitle("wf-1"), Type: "convoy"})
+	if err != nil {
+		t.Fatalf("mint the auto-convoy: %v", err)
+	}
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: deps.Store}, convoy.ID, "wf-1"); err != nil {
+		t.Fatalf("track the root in the auto-convoy: %v", err)
+	}
+
+	result, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if !result.Idempotent {
+		t.Fatal("a fully routed run is not idempotent: the sling would rewrite settled routes")
+	}
+	if result.RoutedMembers != 0 {
+		t.Fatalf("RoutedMembers = %d, want 0 on the settled run", result.RoutedMembers)
+	}
+	if len(router.routed) != 0 {
+		t.Errorf("router routed %v, want nothing on the idempotent return", router.routed)
+	}
+	live, err := liveAutoConvoyRoots(deps.Store, "wf-1")
+	if err != nil {
+		t.Fatalf("liveAutoConvoyRoots: %v", err)
+	}
+	if len(live) != 1 || live[0].ID != convoy.ID {
+		t.Fatalf("auto-convoy roots = %+v, want exactly the existing %s", live, convoy.ID)
+	}
+}
