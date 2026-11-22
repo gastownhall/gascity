@@ -175,3 +175,40 @@ func TestCompactRealDoltWriterCommitJustAfterFlattenIsNotQuarantined(t *testing.
 		t.Fatalf("pending-GC marker missing after later-writer defer (%v):\n%s", statErr, out)
 	}
 }
+
+// The pending-GC marker a later-writer defer leaves behind is retried on the
+// next eligible run: full GC runs and history is not flattened again.
+func TestCompactRealDoltPendingGCAfterLaterWriterRetriesFullGCWithoutReflatten(t *testing.T) {
+	c := newFlattenWindowCity(t)
+	if out, err := c.runWriterRace(t); err != nil {
+		t.Fatalf("first compact failed: %v\n%s", err, out)
+	}
+	if _, statErr := os.Stat(c.statePath("compact-pending-gc")); statErr != nil {
+		t.Fatalf("pending-GC marker missing after later-writer defer: %v", statErr)
+	}
+	commitsBefore := c.cell(t, "SELECT COUNT(*) FROM dolt_log")
+	headBefore := c.cell(t, "SELECT HASHOF('HEAD')")
+
+	out, err := c.compact(t, c.doltPath)
+	t.Logf("retry compact (err=%v):\n%s", err, out)
+	if err != nil {
+		t.Fatalf("pending-GC retry failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"pending_gc=present — retrying DOLT_GC --full", "pending-GC retry duration="} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("retry output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "flattening...") {
+		t.Fatalf("pending-GC retry flattened again:\n%s", out)
+	}
+	if got := c.cell(t, "SELECT COUNT(*) FROM dolt_log"); got != commitsBefore {
+		t.Fatalf("commit count changed across pending-GC retry: before=%s after=%s", commitsBefore, got)
+	}
+	if got := c.cell(t, "SELECT HASHOF('HEAD')"); got != headBefore {
+		t.Fatalf("HEAD changed across pending-GC retry: before=%s after=%s", headBefore, got)
+	}
+	if _, statErr := os.Stat(c.statePath("compact-pending-gc")); !os.IsNotExist(statErr) {
+		t.Fatalf("pending-GC marker not cleared after successful retry (stat err=%v)", statErr)
+	}
+}
