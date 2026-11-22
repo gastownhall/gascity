@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"time"
 )
 
@@ -66,4 +68,17 @@ func (s *NativeDoltStore) endpointAnswers(ctx context.Context) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, nativeReadEndpointProbeBudget)
 	defer cancel()
 	return db.PingContext(probeCtx) == nil
+}
+
+// isNativeReadDialStage reports whether a read failed before it reached the
+// endpoint at all: a dial that errored or was refused. Such a pass says the
+// endpoint was unreachable, so reconnect-and-replay is right even if the pool
+// answers by the time anyone asks, and the endpoint probe is skipped.
+func isNativeReadDialStage(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "dial tcp") || strings.Contains(msg, "connection refused")
 }

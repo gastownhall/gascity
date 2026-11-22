@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"syscall"
@@ -194,6 +195,41 @@ func TestNativeReadUnansweredEndpointStillReconnects(t *testing.T) {
 			}
 			if n := connector.pings.Load(); n != 1 {
 				t.Errorf("pings = %d, want 1", n)
+			}
+		})
+	}
+}
+
+func TestNativeReadDialStageFailureReconnectsWithoutProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		readErr error
+	}{
+		{name: "dial text", readErr: errors.New("begin read tx: dial tcp 127.0.0.1:3307: connect: connection refused")},
+		{name: "typed dial error", readErr: fmt.Errorf("begin read tx: %w", refusedDialError())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The pool answers now, but the pass could not reach the endpoint
+			// at all: a restart that finished after the library gave up still
+			// needs the reopen.
+			dead, connector := newPooledStorageSpy(t, pingAnswers)
+			fresh, _ := newPooledStorageSpy(t, pingAnswers)
+			var reopens int32
+			store := storeWithReopen(dead, fresh, &reopens)
+			store.readRetryBudgetOverride = 5 * time.Second
+
+			var calls int32
+			if err := store.withReadRetry(failOn(dead, tc.readErr, &calls)); err != nil {
+				t.Fatalf("read err = %v, want the replay on the fresh handle to succeed", err)
+			}
+			if n := connector.pings.Load(); n != 0 {
+				t.Errorf("pings = %d, want 0: a dial-stage failure never reached the endpoint", n)
+			}
+			if n := atomic.LoadInt32(&reopens); n != 1 {
+				t.Errorf("reopens = %d, want 1", n)
+			}
+			if n := atomic.LoadInt32(&calls); n != 2 {
+				t.Errorf("read ran %d times, want 2", n)
 			}
 		})
 	}
