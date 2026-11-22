@@ -2425,6 +2425,7 @@ go_test(
         "session_start_not_live_collision_test.go",
         "session_start_ours_converges_test.go",
         "session_start_own_launch_test.go",
+        "session_start_warm_reuse_guards_test.go",
         "session_state_helpers_test.go",
         "session_suspend_continuity_test.go",
         "session_suspend_sticks_test.go",
