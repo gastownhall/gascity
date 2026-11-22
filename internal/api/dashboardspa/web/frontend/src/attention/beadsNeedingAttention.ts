@@ -82,6 +82,29 @@ const CANONICAL_HOLD_ACTORS: ReadonlyMap<string, string> = new Map([
   [HOLD_EXTERNAL_LABEL, 'external'],
 ]);
 
+// Workflow-topology beads that are never anyone's claimable work, mirrored
+// from cmd/gc workflowTopologyIsNonExecutable, the gate every worker claim and
+// controller demand path applies: a `scope` or `spec` bead always
+// (beadmeta.WorkflowTopologyKinds), and a `workflow` root only once molecule
+// instantiation stamped it gc.workflow_expanded=true. An expanded root is a
+// latch that workflow-finalize closes, so it sits in_progress (sling) or open
+// (order dispatch) with no assignee for its whole run. A never-expanded,
+// root-only root IS the unit of work an agent claims, so it stays under the
+// ready-unclaimed and stalled rules. Both values are trimmed and compared
+// exactly, as the Go gate compares them. Keep in sync with that function.
+const KIND_META_KEY = 'gc.kind';
+const WORKFLOW_EXPANDED_META_KEY = 'gc.workflow_expanded';
+const KIND_WORKFLOW = 'workflow';
+const WORKFLOW_TOPOLOGY_KINDS: ReadonlySet<string> = new Set([KIND_WORKFLOW, 'scope', 'spec']);
+
+function isNonExecutableTopologyBead(bead: Bead): boolean {
+  const kind = bead.metadata?.[KIND_META_KEY]?.trim();
+  if (kind === KIND_WORKFLOW) {
+    return bead.metadata?.[WORKFLOW_EXPANDED_META_KEY]?.trim() === 'true';
+  }
+  return kind !== undefined && WORKFLOW_TOPOLOGY_KINDS.has(kind);
+}
+
 // Where a live worker's activity shows up. In practice that is the session's
 // own last_active: `gc.last_heartbeat_at` was retired as "a write nothing
 // reads" (cmd/gc/cmd_bd.go rewriteBdHeartbeatArgs, dip-wdt5aq) when gc bd
@@ -200,9 +223,12 @@ function escalatedRow(bead: Bead): BeadAttentionRow | null {
 // Ready-unclaimed: open work with no assignee, aged past the watch window so
 // normal churn does not inflate the badge. Plain dependency-blocked (bd
 // `blocked` = "blocked by a dependency") and in-progress/closed work are not
-// surfaced — only genuinely-claimable open beads.
+// surfaced — only genuinely-claimable open beads, so never a non-executable
+// workflow-topology bead, which no worker ever claims.
 function readyUnclaimedRow(bead: Bead, nowMs: number): BeadAttentionRow | null {
-  if (bead.status !== 'open' || hasAssignee(bead)) return null;
+  if (bead.status !== 'open' || hasAssignee(bead) || isNonExecutableTopologyBead(bead)) {
+    return null;
+  }
   const ageMs = elapsedSince(bead.created_at, nowMs);
   if (ageMs === null || ageMs < READY_UNCLAIMED_WATCH_MS) return null;
   const stale = ageMs >= READY_UNCLAIMED_STALE_MS;
@@ -242,35 +268,21 @@ function waitingHumanRow(bead: Bead, nowMs: number): BeadAttentionRow | null {
   };
 }
 
-// The workflow-topology `gc.kind` values, mirrored from internal/beadmeta
-// kindsets.go WorkflowTopologyKinds (key: beadmeta.KindMetadataKey). These are
-// controller-owned latch beads — "agents must never claim them" — so a
-// graph.v2 root sits in_progress with no assignee for its whole run by design.
-// Matched trimmed and case-folded like sourceworkflow.IsWorkflowRoot. Keep in
-// sync with the Go set.
-const KIND_META_KEY = 'gc.kind';
-const WORKFLOW_TOPOLOGY_KINDS: ReadonlySet<string> = new Set(['workflow', 'scope', 'spec']);
-
-function isWorkflowTopologyBead(bead: Bead): boolean {
-  const kind = bead.metadata?.[KIND_META_KEY]?.trim().toLowerCase();
-  return kind !== undefined && WORKFLOW_TOPOLOGY_KINDS.has(kind);
-}
-
 // Stalled: in-progress work whose assignee shows no sign of life — no assignee
 // at all, no session resolving to the assignee, a session in a non-live state,
 // or no activity (session last_active / bead heartbeat) for over an hour. When
 // the session read failed (`sessions` undefined), only the no-assignee check
 // runs: without session data we cannot distinguish "worker gone" from "worker
 // alive but not heartbeating", so we do not guess — a sessions outage must not
-// paint the board stalled. Workflow-topology beads are never stalled here:
-// their health is judged at run level, and a stuck workflow surfaces through
-// its own assignee-carrying step beads.
+// paint the board stalled. A non-executable workflow-topology bead is never
+// stalled here: it has no worker to lose, and a stuck workflow surfaces
+// through its own assignee-carrying step beads.
 function stalledRow(
   bead: Bead,
   sessions: readonly BeadAttentionSession[] | undefined,
   nowMs: number,
 ): BeadAttentionRow | null {
-  if (bead.status !== 'in_progress' || isWorkflowTopologyBead(bead)) return null;
+  if (bead.status !== 'in_progress' || isNonExecutableTopologyBead(bead)) return null;
   const assignee = bead.assignee?.trim() ?? '';
   const detail = stalledDetail(bead, assignee, sessions, nowMs);
   if (detail === null) return null;

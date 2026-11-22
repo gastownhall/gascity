@@ -471,19 +471,29 @@ describe('inProgressCardNote (gp-6xd)', () => {
   });
 });
 
-describe('workflow topology beads are exempt from the stalled rule (#7232)', () => {
-  // A graph.v2 workflow root is a controller-owned latch: in_progress, no
-  // assignee, untouched while its steps run.
+describe('non-executable workflow topology beads are exempt from the claim rules (#7232)', () => {
+  // A graph.v2 workflow root with real child steps is a controller-owned latch:
+  // instantiation stamps it gc.workflow_expanded=true, and it sits in_progress
+  // (sling) or open (order dispatch) with no assignee while its steps run.
+  const EXPANDED_ROOT_METADATA: Readonly<Record<string, string>> = {
+    'gc.kind': 'workflow',
+    'gc.formula_contract': 'graph.v2',
+    'gc.workflow_expanded': 'true',
+  };
+  // A root-only graph.v2 root never gets the stamp: the root itself is the
+  // unit of work an agent claims, so a dead worker on it is a real stall.
+  const ROOT_ONLY_METADATA: Readonly<Record<string, string>> = {
+    'gc.kind': 'workflow',
+    'gc.formula_contract': 'graph.v2',
+  };
+  const SIX_DAYS_AGO = '2026-06-01T11:00:00.000Z';
+
   function workflowRoot(overrides: Partial<Bead> = {}): Bead {
     return bead({
       id: 'R-wf',
       status: 'in_progress',
       updated_at: '2026-06-07T10:00:00.000Z',
-      metadata: {
-        'gc.kind': 'workflow',
-        'gc.formula_contract': 'graph.v2',
-        'gc.workflow_expanded': 'true',
-      },
+      metadata: { ...EXPANDED_ROOT_METADATA },
       ...overrides,
     });
   }
@@ -497,32 +507,69 @@ describe('workflow topology beads are exempt from the stalled rule (#7232)', () 
     expect(inProgressCardNote(workflowRoot(), [session({})], NOW)).toBeNull();
   });
 
-  const topologyShapes: ReadonlyArray<{
+  // Each shape names the stall detail an ordinary in-progress bead gets.
+  const assigneeShapes: ReadonlyArray<{
     name: string;
     assignee?: string;
     sessions: readonly BeadAttentionSession[];
+    detail: string;
   }> = [
-    { name: 'no assignee', sessions: [session({})] },
+    { name: 'no assignee', sessions: [session({})], detail: 'no assignee' },
     {
       name: 'assignee on a drained session',
       assignee: 'worker-ci-1',
       sessions: [session({ state: 'drained' })],
+      detail: 'session drained',
     },
-    { name: 'assignee with no session', assignee: 'worker-ci-1', sessions: [] },
+    {
+      name: 'assignee with no session',
+      assignee: 'worker-ci-1',
+      sessions: [],
+      detail: 'no live session for worker-ci-1',
+    },
   ];
-  const topologyCases = ['workflow', 'scope', 'spec'].flatMap((kind) =>
-    topologyShapes.map((shape) => ({ kind, ...shape })),
+  // Scope and spec beads are exempt whatever they carry; a workflow root only
+  // once it is expanded.
+  const nonExecutableTopology: ReadonlyArray<{
+    topology: string;
+    metadata: Readonly<Record<string, string>>;
+  }> = [
+    { topology: 'expanded gc.kind=workflow root', metadata: EXPANDED_ROOT_METADATA },
+    { topology: 'gc.kind=scope bead', metadata: { 'gc.kind': 'scope' } },
+    { topology: 'gc.kind=spec bead', metadata: { 'gc.kind': 'spec' } },
+  ];
+  const topologyCases = nonExecutableTopology.flatMap((topology) =>
+    assigneeShapes.map((shape) => ({ ...topology, ...shape })),
   );
 
   it.each(topologyCases)(
-    'does not flag an in-progress gc.kind=$kind bead with $name (AC-3)',
-    ({ kind, assignee, sessions }) => {
+    'does not flag an in-progress $topology with $name (AC-3)',
+    ({ metadata, assignee, sessions }) => {
       const topology = workflowRoot({
         ...(assignee === undefined ? {} : { assignee }),
-        metadata: { 'gc.kind': kind },
+        metadata: { ...metadata },
       });
       expect(select({ beads: [topology], sessions })).toEqual([]);
       expect(inProgressCardNote(topology, sessions, NOW) ?? '').not.toContain('stalled');
+    },
+  );
+
+  it.each(assigneeShapes)(
+    'still flags an in-progress never-expanded workflow root with $name as stalled',
+    ({ assignee, sessions, detail }) => {
+      const root = workflowRoot({
+        ...(assignee === undefined ? {} : { assignee }),
+        metadata: { ...ROOT_ONLY_METADATA },
+      });
+      expect(select({ beads: [root], sessions })).toEqual([
+        expect.objectContaining({
+          beadId: 'R-wf',
+          reason: 'stalled',
+          severity: 'attention',
+          summary: expect.stringContaining(detail),
+        }),
+      ]);
+      expect(inProgressCardNote(root, sessions, NOW)).toBe(`stalled 2h — ${detail}`);
     },
   );
 
@@ -562,10 +609,19 @@ describe('workflow topology beads are exempt from the stalled rule (#7232)', () 
     expect(rows.map((row) => `${row.beadId}:${row.reason}`)).toEqual(['S-impl:stalled']);
   });
 
-  it('exempts a padded mixed-case gc.kind workflow root', () => {
-    expect(select({ beads: [workflowRoot({ metadata: { 'gc.kind': ' Workflow ' } })] })).toEqual(
-      [],
-    );
+  it('matches kind and expansion stamp trimmed and case-sensitive, like the Go claim gate', () => {
+    const padded = workflowRoot({
+      metadata: { 'gc.kind': ' workflow ', 'gc.workflow_expanded': ' true ' },
+    });
+    expect(select({ beads: [padded], sessions: [session({})] })).toEqual([]);
+    // The claim gate compares the kind exactly, so a `Workflow` bead is
+    // claimable work there, and a stall on it must still surface.
+    const mixedCase = workflowRoot({
+      metadata: { 'gc.kind': 'Workflow', 'gc.workflow_expanded': 'true' },
+    });
+    expect(select({ beads: [mixedCase], sessions: [session({})] })).toEqual([
+      expect.objectContaining({ beadId: 'R-wf', reason: 'stalled' }),
+    ]);
   });
 
   it('still reports a held workflow root as waiting-human', () => {
@@ -576,12 +632,39 @@ describe('workflow topology beads are exempt from the stalled rule (#7232)', () 
     expect(rows.map((row) => `${row.beadId}:${row.reason}`)).toEqual(['R-wf:waiting-human']);
   });
 
-  it('leaves an open workflow root to the ready-unclaimed rule', () => {
+  it('does not flag an open expanded workflow root or scope as ready-unclaimed', () => {
+    // Order dispatch leaves a graph.v2 root open for its whole run, and no
+    // worker ever claims it: its open steps carry the unclaimed signal.
     const rows = select({
-      beads: [workflowRoot({ status: 'open', created_at: '2026-06-01T11:00:00.000Z' })],
+      beads: [
+        workflowRoot({ status: 'open', created_at: SIX_DAYS_AGO }),
+        bead({
+          id: 'S-scope',
+          status: 'open',
+          created_at: SIX_DAYS_AGO,
+          metadata: { 'gc.kind': 'scope' },
+        }),
+      ],
+    });
+    expect(rows).toEqual([]);
+  });
+
+  it('still flags an open never-expanded workflow root as ready-unclaimed', () => {
+    const rows = select({
+      beads: [
+        workflowRoot({
+          status: 'open',
+          created_at: SIX_DAYS_AGO,
+          metadata: { ...ROOT_ONLY_METADATA },
+        }),
+      ],
     });
     expect(rows).toEqual([
-      expect.objectContaining({ beadId: 'R-wf', reason: 'ready-unclaimed' }),
+      expect.objectContaining({
+        beadId: 'R-wf',
+        reason: 'ready-unclaimed',
+        severity: 'attention',
+      }),
     ]);
   });
 });
