@@ -94,7 +94,7 @@ func newTestV2Wiring(t *testing.T, cfg *config.City, stderr io.Writer) *controll
 	t.Helper()
 	latch := *cfg
 	latch.Daemon.SessionReconciler = "v2"
-	w, err := newControllerWiring(&latch, noEnv, stderr)
+	w, err := newControllerWiring(&latch, "", noEnv, stderr)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -192,8 +192,13 @@ func TestCityRuntimeV2StartupSkipsLegacyBootReconcile(t *testing.T) {
 		return DesiredStateResult{}
 	}
 
-	if !cr.startupReconcile(context.Background()) {
-		t.Fatal("the v2 startup step did not complete")
+	// The boot waits for the planner's first pass; bound it, so a pass that
+	// never completes fails here with its record instead of hanging the
+	// package.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if !cr.startupReconcile(ctx) {
+		t.Fatalf("the v2 startup step did not complete (boot %s, last pass %+v)", rt.bootState(), rt.planner.out.record.Load())
 	}
 	if n := cr.legacySessionEntries.Load(); n != 0 {
 		t.Errorf("legacySessionEntries = %d, want 0: the v2 startup step entered a legacy session phase", n)
@@ -644,7 +649,7 @@ func TestCityRuntimeV2SoftReloadRepliesUnavailable(t *testing.T) {
 func TestLegacyRuntimeConstructsNoV2State(t *testing.T) {
 	var stderr bytes.Buffer
 	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: config.SessionReconcilerLegacy}}
-	w, err := newControllerWiring(cfg, noEnv, &stderr)
+	w, err := newControllerWiring(cfg, "", noEnv, &stderr)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -692,7 +697,7 @@ func TestNewControllerWiringV2AdmissionGate(t *testing.T) {
 				v2.Agents = []config.Agent{{Name: "worker", DependsOn: []string{"db"}}}
 			}
 			var stderr bytes.Buffer
-			w, err := newControllerWiring(v2, tc.env, &stderr)
+			w, err := newControllerWiring(v2, "", tc.env, &stderr)
 			if tc.refused {
 				if err == nil || !strings.Contains(err.Error(), "is refused") {
 					t.Fatalf("wiring err = %v, want the v2 latch refusal", err)
@@ -726,7 +731,7 @@ func TestV2WiringRetainsKeysEnqueuedBeforeTheRuntime(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
 	cfg := *cr.cfg
 	cfg.Daemon.SessionReconciler = "v2"
-	w, err := newControllerWiring(&cfg, noEnv, io.Discard)
+	w, err := newControllerWiring(&cfg, "", noEnv, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -1302,7 +1307,7 @@ func TestV2HostResolvesTemplates(t *testing.T) {
 // controller latched with the developer override does not warn that a v2
 // edit will be refused at the next start.
 func TestCityRuntimeDriftJudgesWithTheWiringsEnv(t *testing.T) {
-	w, err := newControllerWiring(&config.City{}, noEnv, io.Discard)
+	w, err := newControllerWiring(&config.City{}, "", noEnv, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -1673,7 +1678,7 @@ func TestV2ReloadAndEnqueueWakeTheExternalReadsLane(t *testing.T) {
 	plain, _ := newPhaseFixtureRuntime(t, false, false)
 	cfg := *plain.cfg
 	cfg.Daemon.SessionReconciler = "v2"
-	w, err := newControllerWiring(&cfg, noEnv, io.Discard)
+	w, err := newControllerWiring(&cfg, "", noEnv, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}

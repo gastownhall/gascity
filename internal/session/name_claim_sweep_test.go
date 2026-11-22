@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -51,7 +52,7 @@ func TestReleaseStaleConfiguredNameClaims_ReleasesClosedLegacyClaim(t *testing.T
 		t.Fatalf("Close: %v", err)
 	}
 
-	released, err := ReleaseStaleConfiguredNameClaims(store, cfg, "test-city")
+	released, err := ReleaseStaleConfiguredNameClaims(beadstest.Sessions(store), cfg, "test-city")
 	if err != nil {
 		t.Fatalf("ReleaseStaleConfiguredNameClaims: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestReleaseStaleConfiguredNameClaims_ReleasesClosedFlaggedClaim(t *testing.
 		t.Fatalf("Close: %v", err)
 	}
 
-	released, err := ReleaseStaleConfiguredNameClaims(store, cfg, "test-city")
+	released, err := ReleaseStaleConfiguredNameClaims(beadstest.Sessions(store), cfg, "test-city")
 	if err != nil {
 		t.Fatalf("ReleaseStaleConfiguredNameClaims: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestReleaseStaleConfiguredNameClaims_PreservesLiveClaim(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	released, err := ReleaseStaleConfiguredNameClaims(store, cfg, "test-city")
+	released, err := ReleaseStaleConfiguredNameClaims(beadstest.Sessions(store), cfg, "test-city")
 	if err != nil {
 		t.Fatalf("ReleaseStaleConfiguredNameClaims: %v", err)
 	}
@@ -160,7 +161,7 @@ func TestReleaseStaleConfiguredNameClaims_IgnoresUnconfiguredName(t *testing.T) 
 		t.Fatalf("Close: %v", err)
 	}
 
-	released, err := ReleaseStaleConfiguredNameClaims(store, cfg, "test-city")
+	released, err := ReleaseStaleConfiguredNameClaims(beadstest.Sessions(store), cfg, "test-city")
 	if err != nil {
 		t.Fatalf("ReleaseStaleConfiguredNameClaims: %v", err)
 	}
@@ -219,7 +220,7 @@ func TestReleaseStaleConfiguredNameClaims_IgnoresMismatchedOwner(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	released, err := ReleaseStaleConfiguredNameClaims(store, cfg, "test-city")
+	released, err := ReleaseStaleConfiguredNameClaims(beadstest.Sessions(store), cfg, "test-city")
 	if err != nil {
 		t.Fatalf("ReleaseStaleConfiguredNameClaims: %v", err)
 	}

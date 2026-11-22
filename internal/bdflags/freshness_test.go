@@ -175,7 +175,7 @@ func TestBdTopLevelVerbsCurrent(t *testing.T) {
 // TestBdCommandInventoryCurrent applies the trust policy to the installed bd
 // (GC_TEST_BD_BIN, else bd on PATH): a structural walk of its --help tree
 // (WalkHelp) must equal the visible projection of a pinned inventory
-// (MatchHelpTree). CI's integration lane runs it against the pinned bd 1.3.2;
+// (MatchHelpTree). CI's integration lane runs it against the pinned bd 1.3.4;
 // run it with GC_TEST_BD_BIN pointing at the Enterprise build to check that
 // inventory. A failure lists the differences: regenerate the inventory with
 // inventorygen/generate.sh and decide every new path, alias and flag in cmd/gc's

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -151,6 +152,17 @@ const (
 	infraManifestCreatedPrefix       = "#gc:created "
 	infraManifestNoCreatedPrefix     = "#gc:no-created-at "
 	infraManifestGenerationPrefix    = "#gc:classifier-generation "
+	// The rig importer's annotations (rig_import.go). A city manifest carries
+	// none of them, and a build that does not know them reads each as an
+	// annotation, never an id.
+	infraManifestScopePrefix          = "#gc:scope "
+	infraManifestScopeAnnotatedPrefix = "#gc:scope-annotated "
+	infraManifestGatePrefix           = "#gc:gate "
+	// infraManifestPayloadBlindPrefix records that the copy's source declared
+	// its protocol carries no dependency payload (#gc:source-payload-blind
+	// exec), so its edges were copied carrying none by declaration, not by a
+	// read.
+	infraManifestPayloadBlindPrefix = "#gc:source-payload-blind "
 )
 
 // infraManifestClockSlack absorbs timestamp granularity: the work store
@@ -181,6 +193,19 @@ type infraCopyManifest struct {
 	// with; work-store rows are judged against this manifest under it (see
 	// "The classifier generation").
 	Generation coordclass.Generation
+	// Scope is the scope a rig manifest records (#gc:scope rig:<name>); empty
+	// on the city's manifest.
+	Scope string
+	// ScopeAnnotated names the ids the rig importer stamped with
+	// gc.root_store_ref because the rig row carried none (#gc:scope-annotated),
+	// so a reverse can restore the row's byte shape.
+	ScopeAnnotated map[string]bool
+	// Gates names the cross-store gates a rig import minted in the binding
+	// (#gc:gate). They are not rig rows: no containment verdict reads them.
+	Gates map[string]bool
+	// SourcePayloadBlind names the protocol a payload-blind source declared
+	// (#gc:source-payload-blind); empty for a source the copy read.
+	SourcePayloadBlind string
 }
 
 // infraManifestMatch is how one work-store row relates to the manifest.
@@ -310,9 +335,10 @@ func writeInfraCopyManifest(target infraBindingTarget, ids []string) error {
 // bound of every id created does not record (see "Legacy entries" above).
 // generation is the classifier generation the copy selected its rows with
 // (see "The classifier generation").
-func writeInfraCopyManifestRecord(target infraBindingTarget, ids []string, created map[string]time.Time, generation coordclass.Generation) error {
+// extra are annotation lines, as writeInfraCopyManifestFileAt takes them.
+func writeInfraCopyManifestRecord(target infraBindingTarget, ids []string, created map[string]time.Time, generation coordclass.Generation, extra ...string) error {
 	now := time.Now().UTC()
-	return writeInfraCopyManifestFile(target, ids, created, now, now, generation)
+	return writeInfraCopyManifestFile(target, ids, created, now, now, generation, extra...)
 }
 
 // rewriteInfraCopyManifest rewrites the manifest previous was read from as
@@ -327,7 +353,11 @@ func rewriteInfraCopyManifest(target infraBindingTarget, previous infraCopyManif
 	if writtenAt.IsZero() {
 		writtenAt = time.Now().UTC()
 	}
-	return writeInfraCopyManifestFile(target, ids, created, writtenAt, previous.LegacyBound, previous.Generation)
+	var extra []string
+	if previous.SourcePayloadBlind != "" {
+		extra = append(extra, infraManifestPayloadBlindPrefix+previous.SourcePayloadBlind)
+	}
+	return writeInfraCopyManifestFile(target, ids, created, writtenAt, previous.LegacyBound, previous.Generation, extra...)
 }
 
 // writeInfraCopyManifestFile writes the manifest. It is written atomically
@@ -336,12 +366,26 @@ func rewriteInfraCopyManifest(target infraBindingTarget, previous infraCopyManif
 // truncated manifest that reads as complete. created records each id's
 // created_at, a zero one for a bead that carries none (#gc:no-created-at).
 // legacyBound is persisted for the ids it does not record, the legacy
-// entries; zero means none is known, and they are unbounded.
-func writeInfraCopyManifestFile(target infraBindingTarget, ids []string, created map[string]time.Time, writtenAt, legacyBound time.Time, generation coordclass.Generation) error {
-	if err := os.MkdirAll(target.Root, 0o755); err != nil {
+// entries; zero means none is known, and they are unbounded. extra are
+// annotation lines, as writeInfraCopyManifestFileAt takes them.
+func writeInfraCopyManifestFile(target infraBindingTarget, ids []string, created map[string]time.Time, writtenAt, legacyBound time.Time, generation coordclass.Generation, extra ...string) error {
+	return writeInfraCopyManifestFileAt(target.Root, target.ManifestPath(), ids, created, writtenAt, legacyBound, generation, extra)
+}
+
+// writeInfraCopyManifestFileAt is writeInfraCopyManifestFile for a manifest
+// at path in dir: the city's, or a rig's (rigImportLocation.ManifestPath).
+// extra are annotation lines appended after the created_at lines; each must
+// start with '#'.
+func writeInfraCopyManifestFileAt(dir, path string, ids []string, created map[string]time.Time, writtenAt, legacyBound time.Time, generation coordclass.Generation, extra []string) error {
+	for _, line := range extra {
+		if !strings.HasPrefix(line, "#") {
+			return fmt.Errorf("writing the infra copy manifest: annotation %q does not start with '#'", line)
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("writing the infra copy manifest: %w", err)
 	}
-	tmp, err := os.CreateTemp(target.Root, infraCopyManifestName+".tmp-*")
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("writing the infra copy manifest: %w", err)
 	}
@@ -390,6 +434,7 @@ func writeInfraCopyManifestFile(target infraBindingTarget, ids []string, created
 	lines = append(lines, infraManifestGenerationPrefix+strconv.Itoa(int(generation)))
 	sort.Strings(annotated)
 	lines = append(lines, annotated...)
+	lines = append(lines, extra...)
 	for _, line := range lines {
 		if err := write(line); err != nil {
 			_ = tmp.Close()
@@ -409,10 +454,20 @@ func writeInfraCopyManifestFile(target infraBindingTarget, ids []string, created
 	if err := tmp.Close(); err != nil {
 		return cleanup(err)
 	}
-	if err := infraMigrationRename(name, target.ManifestPath()); err != nil {
+	if err := infraMigrationRename(name, path); err != nil {
 		return cleanup(err)
 	}
+	syncInfraDir(dir)
 	return nil
+}
+
+// syncInfraDir fsyncs a directory after a rename into it, best effort, so the
+// rename itself is durable.
+func syncInfraDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 }
 
 // readInfraCopyManifest returns the id set the copy was proven to deliver.
@@ -427,7 +482,12 @@ func readInfraCopyManifest(target infraBindingTarget) (proven map[string]bool, r
 
 // readInfraCopyManifestRecord reads the manifest in either format.
 func readInfraCopyManifestRecord(target infraBindingTarget) (infraCopyManifest, bool, error) {
-	path := target.ManifestPath()
+	return readInfraCopyManifestRecordAt(target.ManifestPath(), target.MarkerPath())
+}
+
+// readInfraCopyManifestRecordAt reads the manifest at path, in either format.
+// markerPath is the convergence marker a legacy manifest takes its bound from.
+func readInfraCopyManifestRecordAt(path, markerPath string) (infraCopyManifest, bool, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -480,6 +540,28 @@ func readInfraCopyManifestRecord(target infraBindingTarget) (infraCopyManifest, 
 				return infraCopyManifest{}, false, fmt.Errorf("reading the infra copy manifest %s: malformed %q line", path, line)
 			}
 			manifest.Generation = coordclass.Generation(n)
+		case strings.HasPrefix(line, infraManifestScopeAnnotatedPrefix):
+			fields := strings.Fields(strings.TrimPrefix(line, infraManifestScopeAnnotatedPrefix))
+			if len(fields) != 1 {
+				return infraCopyManifest{}, false, fmt.Errorf("reading the infra copy manifest %s: malformed %q line", path, line)
+			}
+			if manifest.ScopeAnnotated == nil {
+				manifest.ScopeAnnotated = map[string]bool{}
+			}
+			manifest.ScopeAnnotated[fields[0]] = true
+		case strings.HasPrefix(line, infraManifestGatePrefix):
+			fields := strings.Fields(strings.TrimPrefix(line, infraManifestGatePrefix))
+			if len(fields) != 1 {
+				return infraCopyManifest{}, false, fmt.Errorf("reading the infra copy manifest %s: malformed %q line", path, line)
+			}
+			if manifest.Gates == nil {
+				manifest.Gates = map[string]bool{}
+			}
+			manifest.Gates[fields[0]] = true
+		case strings.HasPrefix(line, infraManifestPayloadBlindPrefix):
+			manifest.SourcePayloadBlind = strings.TrimSpace(strings.TrimPrefix(line, infraManifestPayloadBlindPrefix))
+		case strings.HasPrefix(line, infraManifestScopePrefix):
+			manifest.Scope = strings.TrimSpace(strings.TrimPrefix(line, infraManifestScopePrefix))
 		case strings.HasPrefix(line, "#"):
 			// An annotation this build does not know: never an id.
 		default:
@@ -494,7 +576,7 @@ func readInfraCopyManifestRecord(target infraBindingTarget) (infraCopyManifest, 
 	// carried #gc:legacy-written bound and read as presumed reused when
 	// younger, which names them stranded rather than deleting anything.
 	if !annotated {
-		if bound, ok := readInfraMarkerBound(target); ok {
+		if bound, ok := readInfraMarkerBoundAt(markerPath); ok {
 			manifest.LegacyBound = bound
 			manifest.WrittenAt = bound
 		}
@@ -508,7 +590,12 @@ func readInfraCopyManifestRecord(target infraBindingTarget) (infraCopyManifest, 
 // same run was written just before it. ok=false when the marker is absent,
 // unreadable or carries no time.
 func readInfraMarkerBound(target infraBindingTarget) (time.Time, bool) {
-	contents, err := os.ReadFile(target.MarkerPath())
+	return readInfraMarkerBoundAt(target.MarkerPath())
+}
+
+// readInfraMarkerBoundAt is readInfraMarkerBound for the marker at path.
+func readInfraMarkerBoundAt(path string) (time.Time, bool) {
+	contents, err := os.ReadFile(path)
 	if err != nil {
 		return time.Time{}, false
 	}

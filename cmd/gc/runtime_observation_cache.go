@@ -107,6 +107,10 @@ const (
 	// obsReasonProbeIncomplete marks an agent-process fact whose probe timed
 	// out, erred or was overtaken by the pane's death. It stays Unknown.
 	obsReasonProbeIncomplete = "probe-incomplete"
+	// obsReasonUnread marks a fact the backend reports but whose read this
+	// pass did not answer (an exec inventory's `attached: null`): unknown,
+	// never the fact's no.
+	obsReasonUnread = "unread"
 )
 
 // observationRetentionPasses is how many consecutive passes a name may go
@@ -232,8 +236,10 @@ func (o InventoryOutcome) String() string {
 type BackendPass struct {
 	Label   string
 	Outcome InventoryOutcome
-	// Attested is runtime.ListRunningAttested on the backend, whatever the
-	// outcome, so health can tell an unattested backend from a failing one.
+	// Attested is the backend's listing attestation, whatever the outcome,
+	// so health can tell an unattested backend from a failing one: read
+	// around the listing (runtime.ListInventoryWithAttestation), or, for a
+	// pass with no listing answer, the backend's own.
 	Attested bool
 	Names    []string
 	Err      error
@@ -319,6 +325,14 @@ type InventoryAttrs struct {
 	ProcessProbed           bool
 	ProcessKnown            bool
 	ProcessAlive            bool
+	// batchedProcessKnown and batchedProcessAlive are the agent-process
+	// fact a batched inventory carried; probeProcesses takes it as the
+	// fact only for a name it would probe.
+	batchedProcessKnown, batchedProcessAlive bool
+	// AttachUnread says the leaf reports attachment but this pass's
+	// batched read did not answer it: attachment is uncertain, not
+	// unsupported.
+	AttachUnread bool
 	// ActivityKnown says the pass read the runtime's last activity
 	// (GetLastActivity, legacy's idle reference) error-free and non-zero;
 	// LastActivity is then that time. Anything else leaves it unknown.
@@ -696,8 +710,11 @@ func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time
 		}
 	}
 	obs.Attached = unsupported
-	if a.AttachedKnown {
+	switch {
+	case a.AttachedKnown:
 		obs.Attached = poller(obsFactOf(a.Attached))
+	case a.AttachUnread:
+		obs.Attached = RuntimeFact{Value: ObsUnknown, ObservedAt: at, Source: SourcePoller, Reason: obsReasonUnread}
 	}
 	if a.ActivityKnown {
 		obs.LastActivity, obs.LastActivityKnown = a.LastActivity, true
