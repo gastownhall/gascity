@@ -2621,8 +2621,7 @@ func refreshAsyncStartResult(result startResult, store beads.Store, rec events.R
 			Type:    events.SessionAsyncStartDiscarded,
 			Actor:   "controller",
 			Subject: name,
-			Message: fmt.Sprintf("session %q async start discarded: desired command changed during startup (prepared %q, persisted %q)",
-				name, strings.TrimSpace(result.prepared.candidate.tp.Command), strings.TrimSpace(currentInfo.Command)),
+			Message: fmt.Sprintf("session %q async start discarded: desired command changed during startup", name),
 		})
 		return result, verdict
 	}
