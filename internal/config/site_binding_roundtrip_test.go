@@ -151,6 +151,16 @@ func TestSiteBindingWritersPreserveUnknownContent(t *testing.T) {
 			}
 			return false
 		}},
+		{name: "RemoveRigAndWriteSiteBindingsForEdit", write: func(t *testing.T, _, cityPath string) bool {
+			cfg := loadRoundTripCity(t, cityPath)
+			if !cfg.RemoveRig("alpha") {
+				t.Fatal(`RemoveRig("alpha") = false, want true`)
+			}
+			if err := RemoveRigAndWriteSiteBindingsForEdit(fsys.OSFS{}, cityPath, cfg, "alpha"); err != nil {
+				t.Fatalf("RemoveRigAndWriteSiteBindingsForEdit: %v", err)
+			}
+			return false
+		}},
 		{name: "AppendRigAndWriteSiteBindingsForEdit", write: func(t *testing.T, _, cityPath string) bool {
 			cfg := loadRoundTripCity(t, cityPath)
 			newRig := Rig{Name: "beta", Path: "/srv/beta"}

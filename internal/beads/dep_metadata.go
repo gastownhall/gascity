@@ -2,6 +2,7 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 )
 
@@ -19,6 +20,37 @@ type DepMetadataReader interface {
 	// whether one is carried. A missing edge and an edge with no payload both
 	// answer ("", false, nil); only a failed read is an error.
 	DepMetadata(issueID, dependsOnID string) (string, bool, error)
+}
+
+// ErrDepMetadataUnsupported is the cause a wrapper reports when the store under
+// it has no edge-payload read: "cannot be asked", never "carries nothing".
+var ErrDepMetadataUnsupported = errors.New("the store exposes no edge-payload read")
+
+// DepMetadataAbsentByProtocol is the optional surface a Store implements when
+// its wire protocol has no field a dependency payload could travel in, so no
+// writer can ever have stored one through it.
+//
+// It is a declaration, not a read: the store still cannot be asked. It lets a
+// copy say "this source carries none" for a source whose protocol proves it,
+// instead of refusing a source it cannot ask. The generic exec store is the
+// one: its create request carries no edge payload and dep-add takes three
+// arguments (internal/beads/exec). An exec provider under the bd contract does
+// not declare it, because bd underneath can hold payloads a graph plan wrote.
+type DepMetadataAbsentByProtocol interface {
+	// DepMetadataAbsentByProtocol names the protocol and reports whether it
+	// carries no payload. A wrapper forwards what the store under it declares.
+	DepMetadataAbsentByProtocol() (protocol string, absent bool)
+}
+
+// DepMetadataAbsent reports the protocol s declares carries no dependency
+// payload, seeing through typed class handles (As). It is a declaration, not
+// a capability, so it is not one of As's XFor helpers.
+func DepMetadataAbsent(s Store) (string, bool) {
+	declared, ok := As[DepMetadataAbsentByProtocol](s)
+	if !ok {
+		return "", false
+	}
+	return declared.DepMetadataAbsentByProtocol()
 }
 
 // DepMetadataWriter is the optional surface a Store implements when it can

@@ -13,6 +13,8 @@ import (
 	"slices"
 	"sort"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 )
 
 // readRotationDir is the directory snapshot used by rotation catch-up readers.
@@ -299,7 +301,7 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 		}
 	}
 
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if len(result) == 0 {
@@ -536,7 +538,7 @@ func archiveSeq(line []byte) (uint64, bool) {
 // a monotonic log and should be seq-ordered, but `continue` saves the same
 // decode without depending on that.
 func streamArchive(path string, filter Filter, fn func(Event) bool) error {
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		return err
 	}
@@ -638,7 +640,7 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if limit <= 0 {
 		return ReadFiltered(path, filter)
 	}
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -672,23 +674,22 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 	return ascending(reversed, 0), nil
 }
 
-// ReadLatestSeq returns the highest complete event Seq visible in the
-// active events file or any canonical sibling archive. Event logs are
-// append-only and sequence numbers are monotonic, so the active file
-// is read backward from the tail and archives contribute their
-// filename-encoded LastSeq without being gunzipped.
+// ReadLatestSeq returns the highest complete event Seq the log holds: in
+// the active events file, any canonical sibling archive, or an in-flight
+// rotating-* file. Event logs are append-only and sequence numbers are
+// monotonic, so the active file is read backward from the tail, and
+// archives and rotating files contribute the LastSeq their filenames
+// encode without being read. A rotating file holds the log's newest events
+// from the moment a rotation renames the active log until the fresh one gets
+// an event: the rotation's anchor or, when it could not write that, the next
+// append.
 func ReadLatestSeq(path string) (uint64, error) {
 	seq, err := readLatestActiveSeq(path)
 	if err != nil {
 		return 0, err
 	}
-	archives, err := archiveFilesIn(filepath.Dir(path))
-	if err == nil {
-		for _, info := range archives {
-			if info.LastSeq > seq {
-				seq = info.LastSeq
-			}
-		}
+	if rotated, err := latestRotatedSeq(filepath.Dir(path)); err == nil && rotated > seq {
+		seq = rotated
 	}
 	return seq, nil
 }
@@ -704,11 +705,22 @@ func latestLiveSeq(path string) (uint64, error) {
 	if err != nil || seq > 0 {
 		return seq, err
 	}
-	entries, err := os.ReadDir(filepath.Dir(path))
+	return latestRotatedSeq(filepath.Dir(path))
+}
+
+// latestRotatedSeq returns the highest seq that the archives and in-flight
+// rotating files in dir cover, as their filenames encode it, or 0 when there
+// are none.
+func latestRotatedSeq(dir string) (uint64, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, fmt.Errorf("reading event log directory: %w", err)
 	}
+	var seq uint64
 	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
 		if info, err := parseArchiveBasename(entry.Name()); err == nil && info.LastSeq > seq {
 			seq = info.LastSeq
 		}
@@ -720,7 +732,7 @@ func latestLiveSeq(path string) (uint64, error) {
 }
 
 func readLatestActiveSeq(path string) (uint64, error) {
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
@@ -819,7 +831,7 @@ func latestSeqInCompleteLines(data []byte) (uint64, bool) {
 // and any error. Returns (nil, offset, nil) if no new data is available
 // or the file doesn't exist yet. Skips malformed lines (partial writes).
 func ReadFrom(path string, offset int64) ([]Event, int64, error) {
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, offset, nil

@@ -6,7 +6,7 @@ This devcontainer reproduces a development environment for [gastownhall/gascity]
 
 | Tool | Source | Version |
 |---|---|---|
-| Go 1.26 | `mcr.microsoft.com/devcontainers/go` base image | 1.26 (matches `go.mod`) |
+| Go 1.27 | `mcr.microsoft.com/devcontainers/go` base image | 1.27 (matches `go.mod`) |
 | `tmux` | apt | system |
 | `jq` | apt | system |
 | `libicu-dev` | apt | system |
@@ -14,7 +14,7 @@ This devcontainer reproduces a development environment for [gastownhall/gascity]
 | `git` | devcontainer feature | latest |
 | `gh` | devcontainer feature | latest |
 | `dolt` | `.github/scripts/install-dolt-archive.sh` (SHA-256 verified) | `DOLT_VERSION` from `deps.env` (currently 2.6.0) |
-| `bd` (Beads CLI) | `.github/scripts/install-bd-archive.sh` (SHA-256 verified) | `BD_VERSION` from `deps.env` (currently v1.3.2) |
+| `bd` (Beads CLI) | `.github/scripts/install-bd-archive.sh` (SHA-256 verified) | `BD_VERSION` from `deps.env` (currently v1.3.4) |
 | `gc` (Gas City) | `make install` from source | built from current commit |
 
 Versions come from `deps.env` so bumping is one file change.

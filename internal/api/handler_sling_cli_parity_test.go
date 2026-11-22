@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 )
@@ -131,7 +132,7 @@ func TestSlingDefaultFormulaCooksWorkflowWhereTheTargetsWorkersLook(t *testing.T
 	if inputConvoyID == "" {
 		t.Fatalf("workflow root %s has no gc.input_convoy_id; metadata = %v", root.ID, root.Metadata)
 	}
-	members, err := convoycore.Members(rigStore, inputConvoyID, true)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(rigStore)}, inputConvoyID, true)
 	if err != nil {
 		t.Fatalf("Members(%s): %v", inputConvoyID, err)
 	}

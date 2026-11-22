@@ -368,8 +368,9 @@ func TestRequestRestartReleasesNothing(t *testing.T) {
 	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) string { released = true; return "" }
 
 	var stdout, stderr bytes.Buffer
-	doRuntimeRequestRestart(newFakeDrainOps(), nil, false,
-		events.Discard, "worker-1", "worker-1", testCity, &stdout, &stderr)
+	restart := testRowFirstRestart("gc runtime request-restart", "worker-1", newFakeDrainOps(), &stderr)
+	restart.cityPath = testCity
+	doRuntimeRequestRestart(restart, events.Discard, &stdout)
 
 	if released {
 		t.Fatal("gc runtime request-restart released the session's claims; only drain-ack may")

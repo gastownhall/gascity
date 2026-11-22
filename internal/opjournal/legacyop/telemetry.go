@@ -57,6 +57,10 @@ const (
 	ReasonNoGeneration         = "no_generation"
 	ReasonUnreadableTarget     = "unreadable_target"
 	ReasonProposeError         = "propose_error"
+	// ReasonNotRecordedByDefault is a request a builtin-default auto gate
+	// leaves unrecorded because its sessions store is not SQLite-backed
+	// (opjournal.NotRecordedByDefaultError).
+	ReasonNotRecordedByDefault = "not_recorded_by_default"
 )
 
 // Degrade reason classes, the ops.recording_degraded event's reason.
@@ -66,6 +70,11 @@ const (
 	DegradeNoNamespace                  = "no_namespace"
 	DegradeStoreError                   = "store_error"
 	DegradeContention                   = "contention"
+	// DegradeNotRecordedByDefault is an op store a builtin-default auto gate
+	// did not open because the sessions store is not SQLite-backed
+	// (opjournal.NotRecordedByDefaultError). Only an opener under such a gate
+	// returns it, and that gate treats it as off (CannotRecord).
+	DegradeNotRecordedByDefault = "not_recorded_by_default"
 )
 
 // Degrade is one store failure a recorder degraded past: in auto the request
@@ -79,6 +88,28 @@ type Degrade struct {
 	Stage   string
 	Reason  string
 	Err     error
+}
+
+// CannotRecord reports whether a degrade of reason is a store that cannot
+// record ops at all as it is set up: no conditional writes, no namespace, or
+// a store the builtin default does not record on (not SQLite-backed). A store
+// error, contention or an unregistered op type is a fault, not that.
+func CannotRecord(reason string) bool {
+	switch reason {
+	case DegradeConditionalWritesUnsupported, DegradeNoNamespace, DegradeNotRecordedByDefault:
+		return true
+	default:
+		return false
+	}
+}
+
+// StoreCannotRecord reports whether d is an op store that did not open
+// because the store cannot record ops at all (CannotRecord). A gate that is
+// auto only by its builtin default treats that store as off: its surfaces
+// stay quiet (Recorder.QuietCannotRecord), as beads.conditional_writes does
+// under its auto default.
+func (d Degrade) StoreCannotRecord() bool {
+	return d.Stage == StageOpen && CannotRecord(d.Reason)
 }
 
 // surface is the telemetry surface of an executor: api, cli, or the
@@ -108,12 +139,22 @@ type degradeLogKey struct {
 }
 
 // degrade tells the Degraded hook about a store failure and logs it, at most
-// once per DegradeLogInterval per (surface, stage, reason).
+// once per DegradeLogInterval per (surface, stage, reason). Under
+// QuietCannotRecord a store that cannot record ops at all is logged at debug
+// and kept from the hook.
 func (r *Recorder) degrade(kind opjournal.Kind, stage, reason string, err error) {
 	d := Degrade{Mode: r.Mode, Surface: surface(r.Executor), Kind: kind, Stage: stage, Reason: reason, Err: err}
+	quiet := r.QuietCannotRecord && d.StoreCannotRecord()
 	if r.shouldLogDegrade(degradeLogKey{surface: d.Surface, stage: stage, reason: reason}) {
-		r.logger().Warn("op journal: recording degraded", "mode", d.Mode, "surface", d.Surface, "kind", d.Kind,
-			"stage", d.Stage, "reason", d.Reason, "err", err)
+		level := slog.LevelWarn
+		if quiet {
+			level = slog.LevelDebug
+		}
+		r.logger().Log(context.Background(), level, "op journal: recording degraded", "mode", d.Mode, "surface", d.Surface,
+			"kind", d.Kind, "stage", d.Stage, "reason", d.Reason, "err", err)
+	}
+	if quiet {
+		return
 	}
 	if r.Degraded != nil {
 		r.Degraded(d)

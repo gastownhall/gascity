@@ -316,6 +316,7 @@ type nudgeQueueFake struct{}
 func (nudgeQueueFake) Enqueue(nudgequeue.Item) error                              { return nil }
 func (nudgeQueueFake) EnqueueDeferred(nudgequeue.Item) error                      { return nil }
 func (nudgeQueueFake) ClaimDue(ClaimTarget, time.Time) ([]nudgequeue.Item, error) { return nil, nil }
+
 func (nudgeQueueFake) ListForAgent(string, time.Time) ([]nudgequeue.Item, []nudgequeue.Item, []nudgequeue.Item, error) {
 	return nil, nil, nil, nil
 }

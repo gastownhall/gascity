@@ -20,7 +20,7 @@ import (
 
 var fanoutVarPattern = regexp.MustCompile(`\{([^}]+)\}`)
 
-func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
+func processFanout(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	switch bead.Metadata[beadmeta.FanoutStateMetadataKey] {
 	case beadmeta.SpawnStateSpawned:
 		outcome, err := resolveBlockedOutcome(store, bead.ID)
@@ -123,7 +123,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 				return ControlResult{}, fmt.Errorf("%s: preparing fragment %d: %w", bead.ID, index+1, err)
 			}
 		}
-		if err := routeFanoutFragmentSteps(fragment, bead, opts, store); err != nil {
+		if err := routeFanoutFragmentSteps(fragment, bead, opts); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: routing fragment %d: %w", bead.ID, index+1, err)
 		}
 		externalDeps := expectedFragmentExternalDeps(fragment, mode, previousSinkIDs)
@@ -140,7 +140,8 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if len(existingMapping) > 0 {
 			idMapping = existingMapping
 		} else {
-			inst, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{
+			// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			inst, err := molecule.InstantiateFragment(context.Background(), beads.GraphMolecule(store), fragment, molecule.FragmentOptions{
 				RootID:       rootID,
 				Vars:         itemVars,
 				ExternalDeps: externalDeps,
@@ -191,7 +192,7 @@ func fanoutTargetRef(source beads.Bead, sourceRef string, index int) string {
 	return base + ".item." + strconv.Itoa(index+1)
 }
 
-func controlBlockerIDs(store beads.Store, controlID string) (map[string]struct{}, error) {
+func controlBlockerIDs(store beads.GraphStore, controlID string) (map[string]struct{}, error) {
 	deps, err := store.DepList(controlID, "down")
 	if err != nil {
 		return nil, err
@@ -261,7 +262,7 @@ type fragmentResumeMatchOptions struct {
 	FanoutSinkBlockers map[string]struct{}
 }
 
-func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Bead, opts ProcessOptions, store beads.Store) error {
+func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Bead, opts ProcessOptions) error {
 	if fragment == nil {
 		return nil
 	}
@@ -301,7 +302,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 			if target == "" {
 				target = fanoutFragmentStepTarget(*step, executionRoute, executionRigContext, routeCfg)
 			}
-			if err := applyAttemptControlStepRoute(step, target, routeCfg, store); err != nil {
+			if err := applyAttemptControlStepRoute(step, target, routeCfg, opts.Sessions); err != nil {
 				return fmt.Errorf("routing fanout control step %s: %w", step.ID, err)
 			}
 			continue
@@ -313,7 +314,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 		if target == "" {
 			continue
 		}
-		applyAttemptStepRoute(step, target, routeCfg, store)
+		applyAttemptStepRoute(step, target, routeCfg, opts.Sessions)
 	}
 	return nil
 }
@@ -346,7 +347,7 @@ func fanoutFragmentStepHasRoute(step formula.RecipeStep) bool {
 	return strings.TrimSpace(step.Assignee) != ""
 }
 
-func resolveExistingFragmentInstanceFromBeads(store beads.Store, all []beads.Bead, _ string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep, opts fragmentResumeMatchOptions) (map[string]string, error) {
+func resolveExistingFragmentInstanceFromBeads(store beads.GraphStore, all []beads.Bead, _ string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep, opts fragmentResumeMatchOptions) (map[string]string, error) {
 	if fragment == nil || len(fragment.Steps) == 0 {
 		return nil, nil
 	}
@@ -465,7 +466,7 @@ func fragmentAliasMatchesExistingBlockers(fragment *formula.FragmentRecipe, mapp
 	return true
 }
 
-func discardFragmentCandidates(store beads.Store, fragmentName string, groups ...map[string]beads.Bead) error {
+func discardFragmentCandidates(store beads.GraphStore, fragmentName string, groups ...map[string]beads.Bead) error {
 	candidates := make(map[string]beads.Bead)
 	for _, group := range groups {
 		for id, bead := range group {
@@ -498,7 +499,7 @@ func openFragmentBeads(group map[string]beads.Bead) map[string]beads.Bead {
 	return openOnly
 }
 
-func fragmentInstanceComplete(store beads.Store, fragment *formula.FragmentRecipe, mapping map[string]string, externalDeps []molecule.ExternalDep) (bool, error) {
+func fragmentInstanceComplete(store beads.GraphStore, fragment *formula.FragmentRecipe, mapping map[string]string, externalDeps []molecule.ExternalDep) (bool, error) {
 	if fragment == nil {
 		return false, fmt.Errorf("fragment is nil")
 	}
@@ -601,7 +602,7 @@ func expectedFragmentExternalDeps(fragment *formula.FragmentRecipe, mode string,
 	return externalDeps
 }
 
-func beadHasDep(store beads.Store, fromID, toID, depType string) (bool, error) {
+func beadHasDep(store beads.GraphStore, fromID, toID, depType string) (bool, error) {
 	deps, err := store.DepList(fromID, "down")
 	if err != nil {
 		return false, err
@@ -614,7 +615,7 @@ func beadHasDep(store beads.Store, fromID, toID, depType string) (bool, error) {
 	return false, nil
 }
 
-func fragmentDepSatisfiedDynamically(store beads.Store, stepByID map[string]formula.RecipeStep, dep formula.RecipeDep, mapping map[string]string) (bool, error) {
+func fragmentDepSatisfiedDynamically(store beads.GraphStore, stepByID map[string]formula.RecipeStep, dep formula.RecipeDep, mapping map[string]string) (bool, error) {
 	fromStep, ok := stepByID[dep.StepID]
 	if !ok {
 		return false, nil
@@ -653,7 +654,7 @@ func fragmentDepSatisfiedDynamically(store beads.Store, stepByID map[string]form
 	return false, nil
 }
 
-func discardPartialFragmentInstance(store beads.Store, partial map[string]beads.Bead) error {
+func discardPartialFragmentInstance(store beads.GraphStore, partial map[string]beads.Bead) error {
 	if len(partial) == 0 {
 		return nil
 	}
@@ -696,7 +697,7 @@ func discardPartialFragmentInstance(store beads.Store, partial map[string]beads.
 	return nil
 }
 
-func canDiscardPartialFragmentBead(store beads.Store, beadID string, pending map[string]beads.Bead) bool {
+func canDiscardPartialFragmentBead(store beads.GraphStore, beadID string, pending map[string]beads.Bead) bool {
 	deps, err := store.DepList(beadID, "up")
 	if err != nil {
 		return false
@@ -721,7 +722,7 @@ func sortedPendingFragmentIDs(pending map[string]beads.Bead) []string {
 	return ids
 }
 
-func detachIncomingDeps(store beads.Store, beadID string) error {
+func detachIncomingDeps(store beads.GraphStore, beadID string) error {
 	deps, err := store.DepList(beadID, "up")
 	if err != nil {
 		return err

@@ -87,14 +87,14 @@ var specs = []Spec{
 		ConfigPath:     "ops.content",
 		EnvOverride:    envOpsContent,
 		EnvSemantics:   EnvOverrides,
-		Default:        Default{Mode: ptr(Off)},
+		Default:        Default{Mode: ptr(Auto)},
 		Owner:          Owner{Bead: "ga-x1i8ww", GitHub: "@gastownhall/gascity-admin"},
 		Expires:        "2027-06-30",
 		VersionAnchor:  "internal/opjournal/legacyop",
 		SelectsBetween: [2]string{"legacy message delivery with no op row", "the same delivery recorded as a message op (auto shadow, require durable)"},
 		Justification: "Record each message delivery as an operation-journal op beside its legacy " +
 			"execution (O0 shadow ops), so a retry dedupes across restarts and every request gets " +
-			"one typed outcome; shipped off until X12 passes. Retires in OJ-21 with the legacy content " +
+			"one typed outcome; auto by default since X12 passed (OJ-8), require opt-in. Retires in OJ-21 with the legacy content " +
 			"executors; internal/opjournal/legacyop itself goes with the last ops gate in OJ-22.",
 	},
 	{
@@ -103,14 +103,14 @@ var specs = []Spec{
 		ConfigPath:     "ops.control",
 		EnvOverride:    envOpsControl,
 		EnvSemantics:   EnvOverrides,
-		Default:        Default{Mode: ptr(Off)},
+		Default:        Default{Mode: ptr(Auto)},
 		Owner:          Owner{Bead: "ga-x1i8ww", GitHub: "@gastownhall/gascity-admin"},
 		Expires:        "2027-06-30",
 		VersionAnchor:  "internal/opjournal/legacyop",
 		SelectsBetween: [2]string{"legacy interrupt and respond handling with no op row", "the same request recorded as an interrupt or respond op (auto shadow, require durable)"},
 		Justification: "Record each interrupt and respond request as an operation-journal op beside its legacy " +
 			"execution (O0 shadow ops), so a retry dedupes across restarts and every request gets " +
-			"one typed outcome; shipped off until X12 passes. Retires in OJ-21 with the legacy control " +
+			"one typed outcome; auto by default since X12 passed (OJ-8), require opt-in. Retires in OJ-21 with the legacy control " +
 			"executors; internal/opjournal/legacyop itself goes with the last ops gate in OJ-22.",
 	},
 	{
@@ -119,14 +119,14 @@ var specs = []Spec{
 		ConfigPath:     "ops.lifecycle",
 		EnvOverride:    envOpsLifecycle,
 		EnvSemantics:   EnvOverrides,
-		Default:        Default{Mode: ptr(Off)},
+		Default:        Default{Mode: ptr(Auto)},
 		Owner:          Owner{Bead: "ga-x1i8ww", GitHub: "@gastownhall/gascity-admin"},
 		Expires:        "2027-06-30",
 		VersionAnchor:  "internal/opjournal/legacyop",
 		SelectsBetween: [2]string{"legacy wake, suspend, restart, kill and close handling with no op row", "the same request recorded as a lifecycle op (auto shadow, require durable)"},
 		Justification: "Record each wake, suspend, restart, kill and close request as an operation-journal op " +
 			"beside its legacy execution (O0 shadow ops), so a retry dedupes across restarts and " +
-			"every request gets one typed outcome; shipped off until X12 passes. Retires in OJ-22 " +
+			"every request gets one typed outcome; auto by default since X12 passed (OJ-8), require opt-in. Retires in OJ-22 " +
 			"with the legacy lifecycle executors, deleting internal/opjournal/legacyop.",
 	},
 }

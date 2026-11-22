@@ -216,6 +216,13 @@ func TestX12FaultFreeLoad(t *testing.T) {
 	// round before it (the same mix, recording nothing).
 	opsBefore := -1
 	var rounds []x12RoundGrowth
+	// R3's retained measure: on an arm that collects, each round's growth is
+	// also read after a collection at its end, against the size the
+	// collection before it left.
+	var collected int64
+	if c.collectsGarbage() {
+		collected = c.collectGarbage()
+	}
 	defer func() {
 		if !record.Finished {
 			// The load stopped before its last round: its elapsed time is
@@ -248,7 +255,13 @@ func TestX12FaultFreeLoad(t *testing.T) {
 			c.restart("")
 			c.replayRound(reqs, fail)
 		}
-		rounds = append(rounds, x12RoundGrowth{Mode: mode, Bytes: c.bindingSize() - start})
+		rg := x12RoundGrowth{Mode: mode, Bytes: c.bindingSize() - start}
+		if c.collectsGarbage() {
+			after := c.collectGarbage()
+			retained := after - collected
+			rg.Retained, collected = &retained, after
+		}
+		rounds = append(rounds, rg)
 		all = append(all, reqs...)
 	}
 	record.Finished = true
@@ -380,10 +393,14 @@ func retryableError(r *x12LoadReq) bool {
 }
 
 // x12RoundGrowth is one load round's physical growth of the sessions
-// binding, from its start to the end of its replays.
+// binding, from its start to the end of its replays, and, on an arm that
+// collects garbage at each round's end (x12City.collectsGarbage), Retained:
+// the binding's growth from the collection before the round to the one
+// after it.
 type x12RoundGrowth struct {
-	Mode  string `json:"mode"`
-	Bytes int64  `json:"bytes"`
+	Mode     string `json:"mode"`
+	Bytes    int64  `json:"bytes"`
+	Retained *int64 `json:"retained_bytes,omitempty"`
 }
 
 // loadRound runs one round's phase A.
@@ -849,6 +866,27 @@ func latencyRow(backend, mode, path string, ds []time.Duration) x12Latency {
 	return row
 }
 
+// collectsGarbage reports whether R3 collects the binding's garbage at each
+// round's end: on the bd-dolt arm, whose server runs with automatic GC off
+// (doltServerConfig), every write leaves the chunks it replaced in the
+// server's journal until a collection, so its physical growth is mostly what
+// a collection frees.
+func (c *x12City) collectsGarbage() bool { return c.arm == armBdDolt }
+
+// collectGarbage stops the controller, runs DOLT_GC on the bd-dolt arm's
+// server with nothing writing, starts the controller again and returns the
+// binding's size after the collection.
+func (c *x12City) collectGarbage() int64 {
+	c.t.Helper()
+	c.stop()
+	if err := c.doltServer.collectGarbage(); err != nil {
+		c.t.Fatal(err)
+	}
+	size := c.bindingSize()
+	c.start("")
+	return size
+}
+
 // bindingSize is the bytes on disk under the sessions binding's dir.
 func (c *x12City) bindingSize() int64 {
 	var n int64
@@ -864,15 +902,31 @@ func (c *x12City) bindingSize() int64 {
 	return n
 }
 
-// x12Physical is R3's physical measure: the recorded rounds' growth, that
-// less each one's preceding off round, and that over the op rows the store
-// gained (PerOp), or, when no figure per op can be stated, Note says why.
+// x12Physical is one of R3's measures (x12Measure): the recorded rounds'
+// growth, that less each one's preceding off round, and that over the op
+// rows the store gained (PerOp), or, when no figure per op can be stated,
+// Note says why.
 type x12Physical struct {
 	RecordedBytes int64
 	OverOff       int64
 	PerOp         *float64
 	Note          string
 }
+
+// x12Measure is how R3 reads a round's growth: physical, the binding's
+// growth on disk over the round, or retained, what of it is left after a
+// garbage collection at the round's end (x12City.collectGarbage).
+type x12Measure struct {
+	name string
+	// shrank says why a round of this measure can shrink.
+	shrank string
+	bytes  func(x12RoundGrowth) int64
+}
+
+var (
+	x12MeasurePhysical = x12Measure{name: "physical", shrank: "so the store compacted mid-load", bytes: func(r x12RoundGrowth) int64 { return r.Bytes }}
+	x12MeasureRetained = x12Measure{name: "retained", shrank: "so the round's collection freed more than the round kept", bytes: func(r x12RoundGrowth) int64 { return *r.Retained }}
+)
 
 // x12PhysicalGrowth is R3's physical measure over the load's rounds, in
 // order, and the op rows the store gained over the recorded ones. A figure
@@ -884,37 +938,53 @@ type x12Physical struct {
 // mark, and a total over off would only net rounds of opposite sign), and
 // op rows to divide by.
 func x12PhysicalGrowth(rounds []x12RoundGrowth, newRows int) x12Physical {
+	return x12GrowthBy(x12MeasurePhysical, rounds, newRows)
+}
+
+// x12RetainedGrowth is R3's retained measure, by x12PhysicalGrowth's rules,
+// over rounds that each carry one; on a load whose rounds carry none (an arm
+// that does not collect) it is the zero measure, with no note.
+func x12RetainedGrowth(rounds []x12RoundGrowth, newRows int) x12Physical {
+	if len(rounds) == 0 || slices.ContainsFunc(rounds, func(r x12RoundGrowth) bool { return r.Retained == nil }) {
+		return x12Physical{}
+	}
+	return x12GrowthBy(x12MeasureRetained, rounds, newRows)
+}
+
+// x12GrowthBy is x12PhysicalGrowth's rules applied to measure m.
+func x12GrowthBy(m x12Measure, rounds []x12RoundGrowth, newRows int) x12Physical {
 	var p x12Physical
 	var lastOff int64
 	haveOff, unpaired := false, false
 	below := ""
 	for i, rg := range rounds {
-		if rg.Bytes < 0 && p.Note == "" {
-			p.Note = fmt.Sprintf("no physical figure per op: round %d (%s) shrank by %d bytes, so the store compacted mid-load", i+1, rg.Mode, -rg.Bytes)
+		b := m.bytes(rg)
+		if b < 0 && p.Note == "" {
+			p.Note = fmt.Sprintf("no %s figure per op: round %d (%s) shrank by %d bytes, %s", m.name, i+1, rg.Mode, -b, m.shrank)
 		}
 		if rg.Mode == "off" {
-			lastOff, haveOff = rg.Bytes, true
+			lastOff, haveOff = b, true
 			continue
 		}
 		unpaired = unpaired || !haveOff
-		if haveOff && rg.Bytes < lastOff && below == "" {
-			below = fmt.Sprintf("no physical figure per op: round %d (%s) grew %d bytes less than the off round before it (%d bytes), so that off round carried growth the ops did not cause", i+1, rg.Mode, lastOff-rg.Bytes, lastOff)
+		if haveOff && b < lastOff && below == "" {
+			below = fmt.Sprintf("no %s figure per op: round %d (%s) grew %d bytes less than the off round before it (%d bytes), so that off round carried growth the ops did not cause", m.name, i+1, rg.Mode, lastOff-b, lastOff)
 		}
-		p.RecordedBytes += rg.Bytes
-		p.OverOff += rg.Bytes - lastOff
+		p.RecordedBytes += b
+		p.OverOff += b - lastOff
 	}
 	switch {
 	case p.Note != "":
 	case unpaired:
-		p.Note = "no physical figure per op: a recorded round has no off round before it to set it against"
+		p.Note = fmt.Sprintf("no %s figure per op: a recorded round has no off round before it to set it against", m.name)
 	case below != "":
 		p.Note = below
 	case newRows <= 0:
-		p.Note = "no physical figure per op: the store gained no op rows"
+		p.Note = fmt.Sprintf("no %s figure per op: the store gained no op rows", m.name)
 	default:
 		perOp := float64(p.OverOff) / float64(newRows)
 		p.PerOp = &perOp
-		p.Note = fmt.Sprintf("%.0f physical bytes per op over the off round", perOp)
+		p.Note = fmt.Sprintf("%.0f %s bytes per op over the off round", perOp, m.name)
 	}
 	return p
 }
@@ -934,6 +1004,8 @@ func (c *x12City) growth(reqs []*x12LoadReq, newRows int, rounds []x12RoundGrowt
 	}
 	physical := x12PhysicalGrowth(rounds, newRows)
 	g.PhysicalBytes, g.PhysicalOverOff, g.PhysicalPerOp, g.PhysicalNote = physical.RecordedBytes, physical.OverOff, physical.PerOp, physical.Note
+	retained := x12RetainedGrowth(rounds, newRows)
+	g.RetainedBytes, g.RetainedOverOff, g.RetainedPerOp, g.RetainedNote = retained.RecordedBytes, retained.OverOff, retained.PerOp, retained.Note
 	sizes := map[string][]int{}
 	c.mustStore(func(raw beads.Store, _ *opjournal.Store) error {
 		for id := range seen {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/spf13/cobra"
 )
 
@@ -229,6 +231,11 @@ func cmdBeadsMetadataCAS(request beadsMetadataCASRequest, stdout, stderr io.Writ
 		fmt.Fprintf(stderr, "gc beads metadata-cas: opening %s: %v\n", canonicalRef, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if refusal := beadsMetadataCASClassFlipRefusal(store, request, workStoreClassHolds(cfg)); refusal != "" {
+		_ = closeBeadsMetadataCASStore(store)
+		fmt.Fprintf(stderr, "%s\n", refusal) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	result, err := applyBeadsMetadataCAS(store, request)
 	closeErr := closeBeadsMetadataCASStore(store)
 	if err != nil {
@@ -240,6 +247,40 @@ func cmdBeadsMetadataCAS(request beadsMetadataCASRequest, stdout, stderr io.Writ
 		return 1
 	}
 	return renderBeadsMetadataCAS(result, request.format, stdout, stderr)
+}
+
+// beadsMetadataCASClassFlipRefusal is the metadata-cas door onto the one
+// class-must-not-flip guard (coordclass.CheckFlip). The command writes a
+// caller-named key on a bead in an exact city or rig work store, and its key
+// grammar admits gc.kind and gc.root_bead_id; on a split city a swap that would
+// make the work bead an infrastructure-class bead strands it there. holds is
+// nil on a single-store city, where nothing is refused. A bead that cannot be
+// read is left to the CAS, which reports it.
+//
+// A key no Classify arm reads cannot change a class, so the bead is not read
+// for it. A bead the store could not read (other than absent) blocks a swap to
+// empty — a removal, which can unmask a marker and can only be judged against
+// the bead — and a swap to a value is judged on an empty work bead.
+func beadsMetadataCASClassFlipRefusal(store beads.Store, request beadsMetadataCASRequest, holds []coordclass.Class) string {
+	m := coordclass.Mutation{SetMetadata: map[string]string{request.key: request.next}}
+	if holds == nil || !m.TouchesClass() {
+		return ""
+	}
+	before, err := store.Get(request.beadID)
+	switch {
+	case err == nil:
+	case errors.Is(err, beads.ErrNotFound):
+		return ""
+	case strings.TrimSpace(request.next) == "":
+		return fmt.Sprintf("gc beads metadata-cas %s --key %s: refused: gc could not read the bead (%v) to check that clearing this key leaves its storage class alone. Retry once the store answers. Nothing was written.", request.beadID, request.key, err)
+	default:
+		before = beads.Bead{ID: request.beadID}
+	}
+	after := m.Apply(before)
+	if flip := coordclass.CheckFlip(before, after, holds); flip != nil {
+		return classFlipRefusalText(fmt.Sprintf("gc beads metadata-cas %s --key %s", request.beadID, request.key), flip)
+	}
+	return ""
 }
 
 func applyBeadsMetadataCAS(store beads.Store, request beadsMetadataCASRequest) (beadsMetadataCASResult, error) {
