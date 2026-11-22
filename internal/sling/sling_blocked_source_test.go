@@ -2,6 +2,7 @@ package sling
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,7 +11,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -425,4 +428,126 @@ func TestFormulaOnBeadSkipsOwnWorkflowRoot(t *testing.T) {
 	if len(second.WaitingOn) != 0 {
 		t.Errorf("WaitingOn = %v, want none", second.WaitingOn)
 	}
+}
+
+// TestFormulaOnBlockedBeadSplitCityRefuses is AC-8: on a city whose graph
+// store is relocated away from the work store, a blocker only the work store
+// holds cannot be an edge on a workflow bead, so the sling refuses, naming
+// the source bead and the blocker, and leaves no trace: no graph-store bead,
+// a closed synthetic input convoy, and the source bead's routing unchanged.
+// A blocker the graph store does hold is wired normally.
+func TestFormulaOnBlockedBeadSplitCityRefuses(t *testing.T) {
+	splitDeps := func(t *testing.T) (SlingDeps, beads.Store, beads.Store) {
+		t.Helper()
+		formulaDir := t.TempDir()
+		writeGraphV2ConvoyFormula(t, formulaDir)
+		deps, work, graph := splitSlingDeps(t, graphV2SlingTestConfig(t, formulaDir))
+		deps.CityPath = t.TempDir()
+		return deps, work, graph
+	}
+	listAll := func(t *testing.T, store beads.Store) []beads.Bead {
+		t.Helper()
+		all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return all
+	}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	t.Run("work-only blocker refuses", func(t *testing.T) {
+		deps, work, graph := splitDeps(t)
+		blocker, source := newBlockedSource(t, work)
+		graphBefore := len(listAll(t, graph))
+
+		_, err := DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID, OnFormula: "graph-work"}, deps, work)
+		var crossErr *graphv2.CrossStoreBlockersError
+		if !errors.As(err, &crossErr) {
+			t.Fatalf("DoSling error = %v, want a *graphv2.CrossStoreBlockersError", err)
+		}
+		if crossErr.SourceID != source.ID || !slices.Equal(crossErr.BlockerIDs, []string{blocker.ID}) {
+			t.Errorf("CrossStoreBlockersError = %+v, want source %s blockers [%s]", crossErr, source.ID, blocker.ID)
+		}
+		for _, id := range []string{source.ID, blocker.ID} {
+			if !strings.Contains(err.Error(), id) {
+				t.Errorf("error %q does not name %s", err, id)
+			}
+		}
+		if got := len(listAll(t, graph)); got != graphBefore {
+			t.Errorf("graph store holds %d beads after the refusal, want %d", got, graphBefore)
+		}
+		roots, err := graph.ListByMetadata(map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(roots) != 0 {
+			t.Errorf("refused launch created %d workflow roots in the graph store, want none", len(roots))
+		}
+		// The launch's synthetic input convoy is minted before the refusal and
+		// must be closed. It is found through its tracks edge on the source,
+		// since a closed bead is not listed by metadata.
+		up, err := work.DepList(source.ID, "up")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var convoyID string
+		for _, dep := range up {
+			if dep.Type == "tracks" {
+				convoyID = dep.IssueID
+			}
+		}
+		if convoyID == "" {
+			t.Fatal("launch minted no synthetic input convoy tracking the source")
+		}
+		convoy, err := work.Get(convoyID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if convoy.Type != "convoy" || convoy.Metadata[beadmeta.SyntheticMetadataKey] != "true" {
+			t.Fatalf("bead %s tracking the source is not a synthetic convoy", convoyID)
+		}
+		if convoy.Status != "closed" {
+			t.Errorf("synthetic input convoy %s is %q, want closed", convoy.ID, convoy.Status)
+		}
+		after, err := work.Get(source.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := after.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
+			t.Errorf("source gc.routed_to = %q after the refusal, want unchanged (empty)", got)
+		}
+	})
+
+	t.Run("graph-held blocker is wired", func(t *testing.T) {
+		deps, work, graph := splitDeps(t)
+		blocker, err := graph.Create(beads.Bead{Title: "graph blocker", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err := work.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// bd refuses a cross-prefix edge, but a SQLite-served work ledger
+		// records it as written; the strict leaf refuses it, so write past it.
+		if err := work.(*splittest.StrictStore).Store.DepAdd(source.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID, OnFormula: "graph-work"}, deps, work)
+		if err != nil {
+			t.Fatalf("DoSling: %v", err)
+		}
+		if !slices.Equal(result.WaitingOn, []string{blocker.ID}) {
+			t.Errorf("WaitingOn = %v, want [%s]", result.WaitingOn, blocker.ID)
+		}
+		if ready := readyWorkflowBeads(t, graph, result.WorkflowID); len(ready) > 0 {
+			t.Errorf("workflow beads Ready while %s is open: %v", blocker.ID, beadTitles(ready))
+		}
+		for _, b := range workflowBeads(t, graph, result.WorkflowID) {
+			if !dependsOn(t, graph, b.ID, blocker.ID) {
+				t.Errorf("workflow bead %s (%q) has no blocks edge on %s", b.ID, b.Title, blocker.ID)
+			}
+		}
+	})
 }

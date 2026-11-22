@@ -1465,6 +1465,11 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	graphWorkflow := graphroute.IsCompiledGraphWorkflow(recipe)
 	rootKey := ""
 	if graphWorkflow {
+		blockedBy, err := graphHeldBlockedBy(deps, sourceBeadID, opts.BlockedBy)
+		if err != nil {
+			return nil, err
+		}
+		opts.BlockedBy = blockedBy
 		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
 		sourceBeadID = ""
 		rootKey = strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])

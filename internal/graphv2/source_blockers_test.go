@@ -1,7 +1,9 @@
 package graphv2
 
 import (
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -251,5 +253,39 @@ func TestSourceBlockersKeepsForeignWorkflowRoot(t *testing.T) {
 	}
 	if !slices.Equal(got, []string{foreign.ID}) {
 		t.Fatalf("SourceBlockers = %v, want [%s]: a foreign workflow root keeps holding", got, foreign.ID)
+	}
+}
+
+// TestGraphHeldBlockersNormalizesAndRefusesUnheld pins the split-city
+// holdability check: an external:<id> ref names <id>, an external capability
+// is dropped, a held blocker is wired, and an unheld one refuses the launch
+// with an error naming the source bead and the blocker.
+func TestGraphHeldBlockersNormalizesAndRefusesUnheld(t *testing.T) {
+	graph := beads.NewMemStore()
+	held := createSourceBlockersBead(t, graph, "held")
+	other := createSourceBlockersBead(t, graph, "other")
+
+	got, err := GraphHeldBlockers(graph, "src-1", []string{"external:" + held.ID, other.ID, "external:rig:capability"})
+	if err != nil {
+		t.Fatalf("GraphHeldBlockers: %v", err)
+	}
+	want := []string{held.ID, other.ID}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("GraphHeldBlockers = %v, want %v", got, want)
+	}
+
+	_, err = GraphHeldBlockers(graph, "src-1", []string{held.ID, "wk-7"})
+	var crossErr *CrossStoreBlockersError
+	if !errors.As(err, &crossErr) {
+		t.Fatalf("GraphHeldBlockers error = %v, want a *CrossStoreBlockersError", err)
+	}
+	if crossErr.SourceID != "src-1" || !slices.Equal(crossErr.BlockerIDs, []string{"wk-7"}) {
+		t.Errorf("CrossStoreBlockersError = %+v, want source src-1 blockers [wk-7]", crossErr)
+	}
+	for _, part := range []string{"src-1", "wk-7", "bd dep remove src-1", "re-sling"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("error %q does not contain %q", err, part)
+		}
 	}
 }

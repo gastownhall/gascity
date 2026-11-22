@@ -114,3 +114,61 @@ func (o *ownWorkflowRoots) contains(b beads.Bead) (bool, error) {
 	}
 	return slices.Contains(o.convoys, inputConvoy), nil
 }
+
+// CrossStoreBlockersError refuses a launch whose workflow cannot wait on its
+// source bead's blockers: the workflow is created in a graph store relocated
+// away from the store holding the source bead, and that graph store does not
+// hold BlockerIDs, so no edge on a workflow bead could hold them.
+type CrossStoreBlockersError struct {
+	SourceID   string
+	BlockerIDs []string
+}
+
+// Error names the source bead and its blockers and says how to clear them.
+func (e *CrossStoreBlockersError) Error() string {
+	return fmt.Sprintf("%s is blocked by %s, which the workflow's store does not hold, so the workflow cannot wait for %s; close %s or remove the edge with `bd dep remove %s <blocker>`, then re-sling",
+		e.SourceID, strings.Join(e.BlockerIDs, ", "), pluralThem(len(e.BlockerIDs)), pluralThem(len(e.BlockerIDs)), e.SourceID)
+}
+
+func pluralThem(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+// GraphHeldBlockers returns blockers (SourceBlockers of sourceID) as edges a
+// workflow created in graph can hold, for a graph store relocated away from
+// the store holding sourceID. An "external:<id>" ref names <id>, and an
+// external capability names no bead and is dropped (beads.ExternalBlockerTarget,
+// as the drain reads it). A blocker graph does not hold fails the launch with
+// a *CrossStoreBlockersError rather than leaving the workflow free to run.
+func GraphHeldBlockers(graph beads.StoreReader, sourceID string, blockers []string) ([]string, error) {
+	targets := make([]string, 0, len(blockers))
+	for _, blocker := range blockers {
+		target, capability := beads.ExternalBlockerTarget(blocker)
+		if capability || target == "" || slices.Contains(targets, target) {
+			continue
+		}
+		targets = append(targets, target)
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	held, err := beads.GetMany(graph, targets)
+	if err != nil {
+		return nil, fmt.Errorf("reading blockers of %s in the workflow's store: %w", sourceID, err)
+	}
+	var missing []string
+	for _, target := range targets {
+		if _, ok := held[target]; !ok {
+			missing = append(missing, target)
+		}
+	}
+	if len(missing) > 0 {
+		slices.Sort(missing)
+		return nil, &CrossStoreBlockersError{SourceID: sourceID, BlockerIDs: missing}
+	}
+	slices.Sort(targets)
+	return targets, nil
+}

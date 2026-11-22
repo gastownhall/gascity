@@ -3,6 +3,7 @@ package sling
 import (
 	"fmt"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/graphv2"
 )
 
@@ -14,6 +15,18 @@ func sourceBlockedBy(deps SlingDeps, sourceID string) ([]string, error) {
 		return nil, fmt.Errorf("reading blockers of %s: %w", sourceID, err)
 	}
 	return blockers, nil
+}
+
+// graphHeldBlockedBy returns blockedBy, the source bead's blockers, as edges
+// a graph workflow created in deps.GraphStore can hold. Where that store is
+// the work store the blockers are wired as read; where it is relocated, each
+// must be held by the graph store (graphv2.GraphHeldBlockers), or the launch
+// fails with a *graphv2.CrossStoreBlockersError before anything is created.
+func graphHeldBlockedBy(deps SlingDeps, sourceID string, blockedBy []string) ([]string, error) {
+	if len(blockedBy) == 0 || beads.SameStore(deps.GraphStore, deps.Store) {
+		return blockedBy, nil
+	}
+	return graphv2.GraphHeldBlockers(deps.GraphStore, sourceID, blockedBy)
 }
 
 // reportWaitingOn makes launch report waitingOn, the source bead's open
