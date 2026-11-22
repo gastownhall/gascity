@@ -526,6 +526,31 @@ describe('workflow topology beads are exempt from the stalled rule (#7232)', () 
     },
   );
 
+  it.each(['check', 'workflow-finalize', 'wisp', undefined])(
+    'still flags an unassigned in-progress bead with gc.kind=%s as stalled (AC-4)',
+    (kind) => {
+      const rows = select({
+        beads: [
+          bead({
+            id: 'B-ctl',
+            status: 'in_progress',
+            updated_at: '2026-06-07T10:00:00.000Z',
+            ...(kind === undefined ? {} : { metadata: { 'gc.kind': kind } }),
+          }),
+        ],
+        sessions: [session({})],
+      });
+      expect(rows).toEqual([
+        expect.objectContaining({
+          beadId: 'B-ctl',
+          reason: 'stalled',
+          severity: 'attention',
+          summary: expect.stringContaining('no assignee'),
+        }),
+      ]);
+    },
+  );
+
   it('exempts a padded mixed-case gc.kind workflow root', () => {
     expect(select({ beads: [workflowRoot({ metadata: { 'gc.kind': ' Workflow ' } })] })).toEqual(
       [],
