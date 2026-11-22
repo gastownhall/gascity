@@ -306,6 +306,17 @@ type preparedStart struct {
 	// the session in, read once the start succeeded (startedRuntimeBinding);
 	// the start commit applies it.
 	runtimeBinding sessionpkg.MetadataPatch
+	// ownLaunchRequired reports that this start must commit only a runtime
+	// it launched itself (gastownhall/gascity#6417): the row it prepared had
+	// an empty started_config_hash (read before PreWake, which clears it on
+	// a fresh wake), holds no pending-create claim, and its template renders
+	// a startup prompt. A live runtime under the name is then not this
+	// start's to adopt — warm reuse and the ErrSessionExists converge path
+	// would commit the hash for a launch that never happened, stranding the
+	// prompt with nothing to retry it — so the start refuses the runtime and
+	// the collision classification defers unless the runtime carries this
+	// attempt's instance token.
+	ownLaunchRequired bool
 }
 
 type startResult struct {
@@ -1103,6 +1114,12 @@ func prepareStartCandidateForCity(
 	dispatchSources dispatchOptionSources,
 ) (*preparedStart, error) {
 	var undo preWakeUndo
+	// ownLaunchPreWakeRow is the row as re-read before PreWake, the read
+	// ownLaunchRequired is decided on: PreWake clears started_config_hash on
+	// a fresh wake, so a later read could no longer tell whether the runtime
+	// the start might adopt was started under a committed config (#6417).
+	var ownLaunchPreWakeRow sessionpkg.Info
+	haveOwnLaunchRow := false
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
 			sessFront := sessionFrontDoor(store)
@@ -1119,6 +1136,8 @@ func prepareStartCandidateForCity(
 			if err != nil {
 				return err
 			}
+			ownLaunchPreWakeRow = current
+			haveOwnLaunchRow = true
 			// An operator's suspend that landed since the snapshot wins: the
 			// controller never starts a row the operator holds.
 			if sessionpkg.DispositionOfInfo(current).KeepsSlot() {
@@ -1157,6 +1176,17 @@ func prepareStartCandidateForCity(
 	if prepared != nil && undo.written != nil {
 		undo.token = prepared.candidate.info.InstanceToken
 		prepared.preWakeUndo = undo
+	}
+	if prepared != nil && haveOwnLaunchRow &&
+		strings.TrimSpace(ownLaunchPreWakeRow.StartedConfigHash) == "" &&
+		!ownLaunchPreWakeRow.PendingCreateClaim &&
+		strings.TrimSpace(prepared.candidate.tp.Prompt) != "" {
+		// The row's start witness is empty but a prompt is due, so only a
+		// runtime this attempt launched may commit (#6417): warm reuse over a
+		// runtime another actor started would commit the hash and strand the
+		// prompt. Committed rows (a wake_mode = "fresh" warm pool slot
+		// included) and pending-create rows keep their existing arms.
+		prepared.ownLaunchRequired = true
 	}
 	return prepared, err
 }
@@ -2146,11 +2176,18 @@ func runPreparedStartCandidate(
 	rateLimitScreen := err != nil && !livenessUnavailable && !capacityRefused && startupRateLimitScreenDetected(probeCtx, item, cityPath, sp, store, cfg)
 	attribution := pendingCreateRuntimeForeign
 	var identity pendingCreateIdentity
-	if err != nil && rollbackPending && !rateLimitScreen {
+	// An uncommitted, prompt-bearing start (#6417) that collided with a live
+	// runtime reads the holder's identity too: only a runtime carrying this
+	// attempt's instance token may converge, anything else defers.
+	collisionOwnLaunch := err != nil && item.ownLaunchRequired && !rollbackPending &&
+		errors.Is(err, runtime.ErrSessionExists)
+	identityRead := false
+	if err != nil && (rollbackPending || collisionOwnLaunch) && !rateLimitScreen {
 		identity = readPendingCreateIdentityBounded(probeCtx, cityPath, item.candidate.info, item.candidate.name(), sp)
 		attribution = identity.attribution()
+		identityRead = true
 	}
-	if attribution == pendingCreateRuntimeOurs {
+	if rollbackPending && attribution == pendingCreateRuntimeOurs {
 		item.runtimeBinding = startedRuntimeBinding(ctx, cityPath, sp, item.candidate.name())
 		return startResult{
 			prepared:            item,
@@ -2210,6 +2247,19 @@ func runPreparedStartCandidate(
 		switch {
 		case sessionExistsObservationErr != nil || !runtimeObservationLive(sessionExistsObservation):
 			outcome = TraceOutcomeProviderError
+		case item.ownLaunchRequired && (!identityRead || identity.token != runtimeTokenMatch):
+			// The runtime under the name is not one this attempt launched
+			// (an unreadable identity included, #6417): commit nothing and
+			// stop nothing; the reconciler re-examines the row next tick,
+			// converging only on this attempt's own instance token.
+			outcome = TraceOutcomeDeferred
+			switch {
+			case !identityRead, !identity.otherEpochOfThisSession():
+				unattributedErr = unattributedStartError(err, identity)
+			default:
+				unattributedErr = liveIncarnationStartError(err, item.candidate.info, identity)
+			}
+			err = nil
 		case rollbackPending:
 			outcome = TraceOutcomeSessionExists
 		default:
@@ -2777,6 +2827,17 @@ func startPreparedStartCandidate(
 		}
 		if running {
 			if alive {
+				if item.ownLaunchRequired {
+					// A live runtime under an uncommitted, prompt-bearing row
+					// is not this start's to adopt (#6417): warm reuse would
+					// commit started_config_hash for a launch that never
+					// happened and strand the prompt, so refuse with the
+					// claim refusal's shape and let the collision
+					// classification read the runtime's identity: only this
+					// attempt's instance token converges, anything else
+					// defers with nothing launched or stopped.
+					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+				}
 				if shouldRollbackPendingCreateInfo(item.candidate.info) && attributePendingCreateRuntime(item.candidate.info, name, sp) != pendingCreateRuntimeOurs {
 					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 				}
