@@ -474,8 +474,20 @@ func TestSlingExpandedRootRefusesMidInstantiation(t *testing.T) {
 			deps = withStore(deps, store)
 			router := &recordingRouter{store: store}
 			deps.Router = router
+			// An initiator makes the sling stamp the root before routing, so
+			// the refusal must also prove that stamp never lands.
+			opts := testOpts(worker, "wf-1")
+			opts.Initiator = "human"
+			before := map[string]map[string]string{}
+			for _, id := range []string{"wf-1", "wf-1.mix", "wf-1.flip", "wf-1.finalize"} {
+				b, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("reading %s before the sling: %v", id, err)
+				}
+				before[id] = maps.Clone(b.Metadata)
+			}
 
-			_, err := DoSling(testOpts(worker, "wf-1"), deps, deps.Store)
+			_, err := DoSling(opts, deps, deps.Store)
 			if err == nil {
 				t.Fatal("sling of a mid-instantiation run succeeded; it would race the instantiation")
 			}
@@ -484,14 +496,16 @@ func TestSlingExpandedRootRefusesMidInstantiation(t *testing.T) {
 					t.Errorf("error %q does not name %q", err.Error(), want)
 				}
 			}
-			// Nothing was written: every bead keeps exactly what it carried.
-			for _, id := range []string{"wf-1", "wf-1.mix", "wf-1.flip"} {
-				if got := mustMeta(t, store, id, beadmeta.RoutedToMetadataKey); got != "" {
-					t.Errorf("%s gc.routed_to = %q, want empty (no writes on refusal)", id, got)
+			// Nothing was written: every bead keeps exactly what it carried,
+			// the root's initiator stamp included.
+			for id, meta := range before {
+				after, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("reading %s after the refusal: %v", id, err)
 				}
-			}
-			if got := mustMeta(t, store, "wf-1.finalize", beadmeta.ExecutionRoutedToMetadataKey); got != "" {
-				t.Errorf("control gc.execution_routed_to = %q, want empty (no writes on refusal)", got)
+				if !maps.Equal(meta, after.Metadata) {
+					t.Errorf("%s metadata = %v, want unchanged %v (no writes on refusal)", id, after.Metadata, meta)
+				}
 			}
 			if len(router.routed) != 0 {
 				t.Errorf("router routed %v, want nothing on refusal", router.routed)
