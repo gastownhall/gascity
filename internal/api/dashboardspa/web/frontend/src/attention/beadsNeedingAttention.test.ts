@@ -493,6 +493,10 @@ describe('workflow topology beads are exempt from the stalled rule (#7232)', () 
     expect(select({ beads: [workflowRoot()] })).toEqual([]);
   });
 
+  it('gives a running workflow root no board card note (AC-2)', () => {
+    expect(inProgressCardNote(workflowRoot(), [session({})], NOW)).toBeNull();
+  });
+
   it('exempts a padded mixed-case gc.kind workflow root', () => {
     expect(select({ beads: [workflowRoot({ metadata: { 'gc.kind': ' Workflow ' } })] })).toEqual(
       [],
