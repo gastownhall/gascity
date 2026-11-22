@@ -49,6 +49,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),
 	"IdleProbeBudgetProvider":         reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
 	"IdleSnapshotProvider":            reflect.TypeFor[runtime.IdleSnapshotProvider](),
+	"IdleWaitFamilyProvider":          reflect.TypeFor[runtime.IdleWaitFamilyProvider](),
 	"IdleWaitProvider":                reflect.TypeFor[runtime.IdleWaitProvider](),
 	"ImmediateNudgeProvider":          reflect.TypeFor[runtime.ImmediateNudgeProvider](),
 	"InputClearProvider":              reflect.TypeFor[runtime.InputClearProvider](),
@@ -215,7 +216,8 @@ func execV2Pack(t *testing.T) string {
 // sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
 // fencing, response fencing, local transcripts, a steer mode, observable
 // identity, v2 readiness, an available inventory, an attested listing, a
-// process-table scan), or no backend checked.
+// process-table scan, the families its idle wait reads), or no backend
+// checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
 	for p := runtime.ProfileTmux; p <= runtime.ProfileExecV2; p++ {
@@ -240,7 +242,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -286,6 +288,15 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.ConditionalProcessTableScanner); ok {
 		out[14] = strconv.FormatBool(f.CanScanProcessTable())
+	}
+	if f, ok := p.(runtime.IdleWaitFamilyProvider); ok {
+		var read []string
+		for _, family := range []string{"", "claude", "codex", "gemini", "grok", "opencode"} {
+			if f.IdleWaitReadsFamily(family) {
+				read = append(read, family)
+			}
+		}
+		out[15] = "[" + strings.Join(read, ",") + "]"
 	}
 	return strings.Join(out, " ")
 }

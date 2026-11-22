@@ -138,6 +138,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			sleepTrait:                    sleepTrait{SessionSleepCapabilityFull},
 			localTranscriptTrait:          localTranscriptTrait{},
 			steerTrait:                    steerTrait{SteerKeystroke},
+			tmuxIdleWaitTrait:             tmuxIdleWaitTrait{},
 		}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
@@ -170,6 +171,9 @@ type (
 	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
 	// agent runs on this host.
 	localTranscriptTrait struct{}
+	// tmuxIdleWaitTrait is tmux's idle wait: it reads the turn of the
+	// families whose busy reading the leaf trusts, grok's footer included.
+	tmuxIdleWaitTrait struct{}
 	// execHostFSTrait is exec's local-transcript answer and its
 	// process-table scanner, both of which its pack's handshake decides
 	// (fs.host with locality local): the profiled pack declares neither, so
@@ -188,6 +192,10 @@ func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 func (freshTrait) LivenessReadsFresh() bool { return true }
 
 func (localTranscriptTrait) LocalTranscripts() bool { return true }
+
+func (tmuxIdleWaitTrait) IdleWaitReadsFamily(family string) bool {
+	return slices.Contains([]string{"claude", "codex", "grok"}, family)
+}
 
 func (execHostFSTrait) LocalTranscripts() bool { return false }
 
@@ -281,6 +289,7 @@ type (
 		sleepTrait
 		localTranscriptTrait
 		steerTrait
+		tmuxIdleWaitTrait
 	}
 	acpProfile struct {
 		Provider

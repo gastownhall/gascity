@@ -2,6 +2,8 @@ package config
 
 import (
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -511,8 +513,8 @@ func TestBuiltinProvidersGrokPreset(t *testing.T) {
 	if p.Command != "grok" {
 		t.Errorf("Command = %q, want %q", p.Command, "grok")
 	}
-	if p.PromptMode != "none" {
-		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	if p.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
 	}
 	if p.InstructionsFile != "AGENTS.md" {
 		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
@@ -532,9 +534,6 @@ func TestBuiltinProvidersGrokPreset(t *testing.T) {
 	if p.ResumeFlag != "--resume" {
 		t.Errorf("ResumeFlag = %q, want %q", p.ResumeFlag, "--resume")
 	}
-	if p.TitleModel != "grok-composer-2.5-fast" {
-		t.Errorf("TitleModel = %q, want %q", p.TitleModel, "grok-composer-2.5-fast")
-	}
 	if p.ReadyDelayMs != 12000 {
 		t.Errorf("ReadyDelayMs = %d, want 12000", p.ReadyDelayMs)
 	}
@@ -543,14 +542,56 @@ func TestBuiltinProvidersGrokPreset(t *testing.T) {
 	if got := rp.ProviderSessionCreateTransport(); got != "" {
 		t.Fatalf("ProviderSessionCreateTransport() = %q, want \"\" (no ACP)", got)
 	}
-	if p.OptionDefaults["model"] != "grok-composer-2.5-fast" {
-		t.Errorf("OptionDefaults[model] = %q, want grok-composer-2.5-fast", p.OptionDefaults["model"])
+	// No launch model is pinned: Grok Build 1.0.50 dropped the builtin
+	// composer default, so the CLI's own default (Grok 4.7) applies — the
+	// same unpinned shape claude, codex and gemini launch with.
+	if _, ok := p.OptionDefaults["model"]; ok {
+		t.Errorf("OptionDefaults[model] = %q, want no launch model pin", p.OptionDefaults["model"])
 	}
-	if got, want := rp.ResolveDefaultArgs(), []string{"--permission-mode", "bypassPermissions", "--model", "grok-composer-2.5-fast"}; !reflect.DeepEqual(got, want) {
+	if got, want := rp.ResolveDefaultArgs(), []string{"--permission-mode", "bypassPermissions"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
 	}
-	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "grok-composer-2.5-fast"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
+	// No title model either: title calls run on the CLI default and fall
+	// back to truncation on failure, instead of pinning an id that ages out.
+	if p.TitleModel != "" {
+		t.Errorf("TitleModel = %q, want \"\" (no pin)", p.TitleModel)
+	}
+	if got := rp.TitleModelFlagArgs(); got != nil {
+		t.Errorf("TitleModelFlagArgs() = %v, want nil", got)
+	}
+	// No retired composer id survives in a default or a curated choice.
+	for key, def := range p.OptionDefaults {
+		if strings.Contains(def, "grok-composer-") {
+			t.Errorf("OptionDefaults[%s] = %q names a retired composer id", key, def)
+		}
+	}
+	for _, opt := range p.OptionsSchema {
+		if opt.Key != "model" {
+			continue
+		}
+		var choices []string
+		for _, c := range opt.Choices {
+			if strings.Contains(c.Value, "grok-composer-") {
+				t.Errorf("curated model choice %q names a retired composer id", c.Value)
+			}
+			if c.Value != "" {
+				choices = append(choices, c.Value)
+			}
+		}
+		for _, want := range []string{"grok-4.7", "grok-4.6", "grok-build"} {
+			if !slices.Contains(choices, want) {
+				t.Errorf("curated model choices %v missing %q", choices, want)
+			}
+		}
+	}
+	// An explicit option_defaults model still renders through the open option.
+	pinned, err := ResolveProvider(&Agent{Name: "worker", Provider: "grok", OptionDefaults: map[string]string{"model": "grok-4.7"}}, nil,
+		BuiltinProviders(), func(s string) (string, error) { return s, nil })
+	if err != nil {
+		t.Fatalf("ResolveProvider(grok with pinned model): %v", err)
+	}
+	if got, want := pinned.ResolveDefaultArgs(), []string{"--permission-mode", "bypassPermissions", "--model", "grok-4.7"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDefaultArgs() with a pinned model = %v, want %v", got, want)
 	}
 }
 
@@ -975,7 +1016,7 @@ func TestProviderSessionCreateTransportBuiltinGolden(t *testing.T) {
 		"copilot":     {"", "copilot --yolo --no-ask-user"},
 		"cursor":      {"", "cursor-agent -f --trust"},
 		"gemini":      {"", "gemini --approval-mode yolo"},
-		"grok":        {"", "grok --permission-mode bypassPermissions --model grok-composer-2.5-fast"},
+		"grok":        {"", "grok --permission-mode bypassPermissions"},
 		"groq":        {"acp", "opencode acp --model groq/openai/gpt-oss-120b"},
 		"kimi":        {"acp", "kimi --yolo --no-thinking acp"},
 		"kiro":        {"", "kiro-cli chat --no-interactive --agent gascity --trust-all-tools"},

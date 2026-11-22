@@ -92,3 +92,76 @@ func TestChatWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 		}
 	}
 }
+
+// The manager's wait-idle nudges serve the sessions whose idle boundary the
+// runtime can wait on (runtime.WaitIdleLiveOn) and only those: a grok session
+// on a runtime whose idle wait reads grok's footer (tmux) is waited for and
+// typed into live on both paths, while the same grok session on the exec
+// runtime, whose family-blind wait reads a working grok pane as idle, and a
+// codex or gemini session anywhere, are reported undelivered without waiting
+// and without typing. claude, whose indicator every wait reads, still goes
+// live on exec (AC-6).
+func TestChatWaitIdleNudgeDeliversOnlyWaitIdleFamilies(t *testing.T) {
+	rows := []struct {
+		family    string
+		runtime   runtime.Profile
+		delivered bool
+	}{
+		{family: "grok", runtime: runtime.ProfileTmux, delivered: true},
+		{family: "grok", runtime: runtime.ProfileExec},
+		{family: "claude", runtime: runtime.ProfileExec, delivered: true},
+		{family: "codex", runtime: runtime.ProfileTmux},
+		{family: "gemini", runtime: runtime.ProfileTmux},
+	}
+	for _, tc := range rows {
+		for path, deliver := range map[string]func(*Manager, Info, runtime.Config) (bool, error){
+			"TryWaitIdleNudge": func(m *Manager, i Info, h runtime.Config) (bool, error) {
+				return m.TryWaitIdleNudge(context.Background(), testActor(m, ActorBackground), i.ID, "mail", "check deploy status", BuildResumeCommand(i), h)
+			},
+			"TryWaitIdleNudgeLiveOnly": func(m *Manager, i Info, h runtime.Config) (bool, error) {
+				return m.TryWaitIdleNudgeLiveOnly(context.Background(), i.ID, "mail", "check deploy status", h.ProcessNames)
+			},
+		} {
+			t.Run(path+"/"+tc.family+" on "+tc.runtime.String(), func(t *testing.T) {
+				fake := runtime.NewFake()
+				sp := runtime.NewFakeProfile(tc.runtime, runtime.FullFake{Fake: fake})
+				mgr := NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, WithCityPath(t.TempDir()))
+				info, err := mgr.CreateSession(context.Background(), CreateOptions{
+					Template: "helper", Command: tc.family, WorkDir: t.TempDir(), Provider: tc.family,
+					ExtraMeta: map[string]string{"session_origin": "manual"},
+				})
+				if err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
+				fake.WaitForIdleErrors[info.SessionName] = nil
+				before := len(fake.SnapshotCalls())
+
+				delivered, err := deliver(mgr, info, runtime.Config{WorkDir: info.WorkDir})
+				if err != nil {
+					t.Fatalf("%s: %v", path, err)
+				}
+				if delivered != tc.delivered {
+					t.Fatalf("%s delivered = %t, want %t", path, delivered, tc.delivered)
+				}
+				var waited, typed bool
+				for _, call := range fake.SnapshotCalls()[before:] {
+					if call.Name != info.SessionName {
+						continue
+					}
+					switch call.Method {
+					case "WaitForIdle":
+						waited = true
+					case "Nudge", "NudgeNow":
+						typed = true
+					}
+				}
+				if waited != tc.delivered {
+					t.Fatalf("waited for idle = %t, want %t", waited, tc.delivered)
+				}
+				if typed != tc.delivered {
+					t.Fatalf("typed = %t, want %t", typed, tc.delivered)
+				}
+			})
+		}
+	}
+}

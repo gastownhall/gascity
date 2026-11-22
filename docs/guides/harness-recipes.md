@@ -144,7 +144,7 @@ Reads `XAI_API_KEY` (key only — no standard base-URL var).
 
 ```toml
 provider        = "grok"
-option_defaults = { model = "grok-4.6" }  # grok-4.7 · grok-4.6 · grok-build · grok-composer-2.5 · grok-composer-2.5-fast
+option_defaults = { model = "grok-4.6" }  # grok-4.7 · grok-4.6 · grok-build (no `model` pin: the CLI default, Grok 4.7, applies)
 # `model` and `effort` are open: an id not listed above is passed through to the
 # CLI rather than dropped, so a newly released model works without a gc upgrade.
 

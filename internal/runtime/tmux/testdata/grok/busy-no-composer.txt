@@ -1,0 +1,3 @@
+● Running bash: make test
+  ok  ./...
+  ⠋ Working  Ctrl+c:cancel
