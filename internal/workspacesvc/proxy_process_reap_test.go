@@ -215,6 +215,47 @@ func TestProxyProcessReportsUnreachableDegradedGenerationAsBadGateway(t *testing
 	}
 }
 
+// TestProxyProcessRefusesWithoutLiveStartedProcess: an instance whose process
+// has exited and been reaped, one that is closed, and one still starting each
+// answer 503 with the reason.
+func TestProxyProcessRefusesWithoutLiveStartedProcess(t *testing.T) {
+	serve := func(inst *proxyProcessInstance) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		inst.HandleHTTP(rec, httptest.NewRequest(http.MethodGet, "/hooks/example", nil), "/hooks/example")
+		return rec
+	}
+
+	t.Run("exited", func(t *testing.T) {
+		inst, _ := startReadyReapTestInstance(t, processgroup.ReleaseCommand)
+		first, firstDone := currentGeneration(inst)
+		killLeader(t, first)
+		awaitClosed(t, firstDone, "the reaper to retire the generation")
+		if rec := serve(inst); rec.Code != http.StatusServiceUnavailable || !strings.HasPrefix(rec.Body.String(), "service unavailable: process exited") {
+			t.Fatalf("response = %d %q, want 503 naming the exit", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("closed", func(t *testing.T) {
+		inst, _ := startReadyReapTestInstance(t, processgroup.ReleaseCommand)
+		if err := inst.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if rec := serve(inst); rec.Code != http.StatusServiceUnavailable || strings.TrimSpace(rec.Body.String()) != "service unavailable: service_closed" {
+			t.Fatalf("response = %d %q, want 503 service_closed", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("starting", func(t *testing.T) {
+		inst := &proxyProcessInstance{
+			cmd:    &exec.Cmd{},
+			status: Status{State: "starting", LocalState: "starting"},
+		}
+		if rec := serve(inst); rec.Code != http.StatusServiceUnavailable || strings.TrimSpace(rec.Body.String()) != "service unavailable" {
+			t.Fatalf("response = %d %q, want 503 while starting", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestProxyProcessWithholdsRestartUntilTheReapIsConfirmed(t *testing.T) {
 	var failing atomic.Bool
 	failing.Store(true)
