@@ -72,16 +72,17 @@ func evictUncommittedLiveStartIfDue(e evictUncommittedStart) {
 	}
 	// Row guards: a committed start owns its runtime, pending-create rows
 	// keep their own repair arms (#2081), a row an operator suspends or
-	// holds (the typed Disposition projection covers the sleep intent; a
-	// live held_until covers a hold) is never the controller's to restart,
-	// and a template that renders no prompt has nothing stranded to recover.
+	// holds (the typed Disposition projection: an operator suspend keeps the
+	// slot, a live heartbeat hold keeps the row up) is never the controller's
+	// to restart, and a template that renders no prompt has nothing stranded
+	// to recover.
 	if strings.TrimSpace(e.info.StartedConfigHash) != "" {
 		return
 	}
 	if shouldRollbackPendingCreateInfo(e.info) {
 		return
 	}
-	if sessionpkg.DispositionOfInfo(e.info).KeepsSlot() || metadataTimeInFuture(e.info.HeldUntil, now) {
+	if disp := sessionpkg.DispositionOfInfo(e.info); disp.KeepsSlot() || disp.Heartbeat.After(now) {
 		return
 	}
 	if strings.TrimSpace(e.tp.Prompt) == "" {
