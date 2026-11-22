@@ -22,7 +22,7 @@ import (
 // root members (created with no edges, so they are never reached). Tests
 // drive the finalizer with ProcessControl and assert on the closed root.
 type workflowFinalizeFixture struct {
-	store     *beads.MemStore
+	store     beads.Store
 	root      beads.Bead
 	finalizer beads.Bead
 	blockers  []beads.Bead
@@ -47,7 +47,13 @@ type finalizeSpec struct {
 // what differs.
 func newWorkflowFinalizeFixture(t *testing.T, spec finalizeSpec) *workflowFinalizeFixture {
 	t.Helper()
-	store := beads.NewMemStore()
+	return newWorkflowFinalizeFixtureOn(t, beads.NewMemStore(), spec)
+}
+
+// newWorkflowFinalizeFixtureOn builds the fixture on a caller-supplied store,
+// so a test can wrap the store (callCountingStore) without changing shape.
+func newWorkflowFinalizeFixtureOn(t *testing.T, store beads.Store, spec finalizeSpec) *workflowFinalizeFixture {
+	t.Helper()
 	meta := map[string]string{
 		"gc.kind":             "workflow",
 		"gc.formula_contract": "graph.v2",
@@ -397,6 +403,35 @@ func TestProcessFanoutSkippedChildCarriesNoSkippedBlockers(t *testing.T) {
 	}
 	if _, ok := control.Metadata["gc.skipped_blockers"]; ok {
 		t.Fatalf("fanout control carries gc.skipped_blockers = %q, want the key absent: the marker is a workflow-root close record", control.Metadata["gc.skipped_blockers"])
+	}
+}
+
+// TestProcessWorkflowFinalizeSkippedBlockerAddsNoStoreCalls pins the cost
+// contract: recording gc.skipped_blockers adds no store call. Two otherwise
+// identical finalize fixtures behind callCountingStore — every blocker passed
+// versus one closed skipped — make the same number of reads and writes,
+// because the marker's IDs ride the blocker rows the scan already fetched
+// and the key rides the root close the pass path already makes.
+func TestProcessWorkflowFinalizeSkippedBlockerAddsNoStoreCalls(t *testing.T) {
+	t.Parallel()
+
+	runCounted := func(rightBlockerOutcome string) (int, int) {
+		t.Helper()
+		counting := &callCountingStore{Store: beads.NewMemStore()}
+		f := newWorkflowFinalizeFixtureOn(t, counting, finalizeSpec{blockers: []beads.Bead{
+			{Title: "left", Status: "closed", Metadata: map[string]string{"gc.outcome": "pass"}},
+			{Title: "right", Status: "closed", Metadata: map[string]string{"gc.outcome": rightBlockerOutcome}},
+		}})
+		if result := f.drive(t); !result.Processed || result.Action != "workflow-pass" {
+			t.Fatalf("result = %+v, want processed workflow-pass", result)
+		}
+		return counting.reads, counting.writes
+	}
+
+	passReads, passWrites := runCounted("pass")
+	skipReads, skipWrites := runCounted("skipped")
+	if skipReads != passReads || skipWrites != passWrites {
+		t.Fatalf("store calls with a skipped blocker = %d reads/%d writes, want identical to the all-pass finalize (%d reads/%d writes): a second blocker scan or an extra root write would show here", skipReads, skipWrites, passReads, passWrites)
 	}
 }
 
