@@ -358,3 +358,54 @@ enabled = false
 		t.Fatalf("write order \"off\": %v", err)
 	}
 }
+
+func TestLoadActiveOrdersSkipsFileDisabledOrder(t *testing.T) {
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	writeFileDisabledOffOrder(t, cityDir)
+
+	var stderr bytes.Buffer
+	aa, code := loadActiveOrdersForCity(cityDir, cfg, &stderr, "gc order list")
+	if code != 0 {
+		t.Fatalf("loadActiveOrdersForCity returned code %d; stderr: %s", code, stderr.String())
+	}
+	requireOrderNames(t, aa, "keep")
+}
+
+func TestLoadAllOrdersIncludesFileDisabledOrder(t *testing.T) {
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	writeFileDisabledOffOrder(t, cityDir)
+
+	var stderr bytes.Buffer
+	aa, code := loadAllOrders(cityDir, cfg, &stderr, "gc order show")
+	if code != 0 {
+		t.Fatalf("loadAllOrders returned code %d; stderr: %s", code, stderr.String())
+	}
+	requireOrderEnabledState(t, aa, "off", false)
+	requireOrderEnabledState(t, aa, "keep", true)
+}
+
+func TestControllerStateOrdersSkipsFileDisabledOrder(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	writeFileDisabledOffOrder(t, cityDir)
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	requireOrderNames(t, cs.Orders(), "keep")
+	requireOrderEnabledState(t, cs.OrdersAll(), "off", false)
+}
+
+func TestControllerStateEnableOrderEnablesFileDisabledOrder(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir, cfg := newPersistedOrderEnabledFilterCity(t)
+	writeFileDisabledOffOrder(t, cityDir)
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	requireOrderEnabledState(t, cs.OrdersAll(), "off", false)
+	requireOrderAbsent(t, cs.Orders(), "off")
+
+	if err := cs.EnableOrder("off", ""); err != nil {
+		t.Fatalf("EnableOrder: %v", err)
+	}
+	requireOrderEnabledState(t, cs.Orders(), "off", true)
+	requireOrderEnabledState(t, cs.OrdersAll(), "off", true)
+}
