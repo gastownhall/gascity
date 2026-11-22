@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -23,6 +26,10 @@ const (
 	productMetricsClassAnnotation  = "gc.productmetrics.class"
 	packCommandClassificationValue = "pack-command"
 )
+
+// nativeHelpTimeout bounds a delegated --help run so a hung script cannot
+// stall help; it is not a security control.
+var nativeHelpTimeout = 5 * time.Second
 
 type commandClassification string
 
@@ -207,6 +214,14 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 			return executeProductMetricsPackAction(cmd, action).err()
 		},
 	}
+	if entry.NativeHelp {
+		renderHelp := leaf.HelpFunc()
+		leaf.SetHelpFunc(func(c *cobra.Command, args []string) {
+			if !printNativeHelp(c.OutOrStdout(), entry, cityPath, cityName) {
+				renderHelp(c, args)
+			}
+		})
+	}
 	parent.AddCommand(leaf)
 }
 
@@ -366,6 +381,31 @@ func discoveredHelpRequested(args []string) bool {
 }
 
 func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName string, args []string, stdinR io.Reader, stdout, stderr io.Writer) int {
+	cmd, err := newDiscoveredCommandExec(context.Background(), entry, cityPath, cityName, args, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc %s %s: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
+		return 1
+	}
+	cmd.Stdin = stdinR
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	disableProductMetricsForChild(cmd)
+
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		fmt.Fprintf(stderr, "gc %s %s: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
+		return 1
+	}
+	return 0
+}
+
+// newDiscoveredCommandExec builds the process for a pack command script with
+// the pack-runtime environment every pack command runs under. The caller
+// wires stdio and starts it.
+func newDiscoveredCommandExec(ctx context.Context, entry config.DiscoveredCommand, cityPath, cityName string, args []string, stderr io.Writer) (*exec.Cmd, error) {
 	packDir := entry.PackDir
 	if packDir == "" {
 		packDir = packRootFromEntryDir(entry.SourceDir, "commands")
@@ -375,10 +415,7 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		scriptPath = filepath.Join(entry.SourceDir, scriptPath)
 	}
 
-	cmd := exec.Command(scriptPath, args...)
-	cmd.Stdin = stdinR
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+	cmd := exec.CommandContext(ctx, scriptPath, args...)
 	cmd.Env = append(os.Environ(), citylayout.PackRuntimeEnv(cityPath, entry.PackName)...)
 	// The resolved scope supersedes an ambient rig from another city and
 	// carries root --rig to scripts without consuming the leaf's own argv.
@@ -397,24 +434,48 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 	// (or falling back to a different `gc` on PATH).
 	exe, err := resolveInvokingExecutable()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc %s %s: resolving invoking gc executable: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
-		return 1
+		return nil, fmt.Errorf("resolving invoking gc executable: %w", err)
 	}
 	cmd.Env = pinInvokingGCBinary(cmd.Env, exe)
 	cmd.Env = pinSupervisorURL(cmd.Env, cityPath, stderr)
 	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
 	cmd.Env = applyCityDoltSettingsEnv(cmd.Env, cityPath)
-	disableProductMetricsForChild(cmd)
+	return cmd, nil
+}
 
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode()
-		}
-		fmt.Fprintf(stderr, "gc %s %s: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
-		return 1
+// printNativeHelp writes the output of entry's own script run with exactly
+// "--help" and reports whether it did. It is false, and writes nothing, when
+// the command has not opted in or the run fails, times out, or prints nothing,
+// so the caller falls back to the static help.
+func printNativeHelp(w io.Writer, entry config.DiscoveredCommand, cityPath, cityName string) bool {
+	if !entry.NativeHelp {
+		return false
 	}
-	return 0
+	ctx, cancel := context.WithTimeout(context.Background(), nativeHelpTimeout)
+	defer cancel()
+	cmd, err := newDiscoveredCommandExec(ctx, entry, cityPath, cityName, []string{"--help"}, io.Discard)
+	if err != nil {
+		return false
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	// A script's child can outlive the killed script holding the pipe open;
+	// WaitDelay stops Run from waiting on it.
+	cmd.WaitDelay = time.Second
+	disableProductMetricsForChild(cmd)
+	if cmd.Run() != nil || strings.TrimSpace(out.String()) == "" {
+		return false
+	}
+	_, _ = w.Write(out.Bytes())
+	return true
+}
+
+// printCommandHelp renders help for a lazily resolved command: the script's own
+// help when the command opted in, else the static help.
+func printCommandHelp(w io.Writer, entry config.DiscoveredCommand, cityPath, cityName string) {
+	if !printNativeHelp(w, entry, cityPath, cityName) {
+		printDiscoveredCommandHelp(w, entry)
+	}
 }
 
 func pinInvokingGCBinary(env []string, executable string) []string {
@@ -635,7 +696,7 @@ func resolveDiscoveredCommandFallback(args []string, cfg *config.City, cityPath 
 		for _, entry := range matching {
 			if slices.Equal(prefix, entry.Command) {
 				return resolvedPackCommandAction(func() int {
-					printDiscoveredCommandHelp(stdout, entry)
+					printCommandHelp(stdout, entry, cityPath, cityName)
 					return 0
 				})
 			}
@@ -655,7 +716,7 @@ func resolveDiscoveredCommandFallback(args []string, cfg *config.City, cityPath 
 			commandArgs := slices.Clone(args[1+len(entry.Command):])
 			if discoveredHelpRequested(commandArgs) {
 				return resolvedPackCommandAction(func() int {
-					printDiscoveredCommandHelp(stdout, entry)
+					printCommandHelp(stdout, entry, cityPath, cityName)
 					return 0
 				})
 			}

@@ -12,6 +12,7 @@ go_library(
         "proxy_process_other.go",
         "proxy_process_windows.go",
         "publication.go",
+        "reap_key_darwin.go",
         "reap_key_other.go",
         "reap_key_windows.go",
         "registry.go",

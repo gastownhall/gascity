@@ -89,6 +89,10 @@ type bdBinaryID struct {
 
 // statBdBinary resolves bdPath's symlinks and identifies the file.
 func statBdBinary(bdPath string) (bdBinaryID, error) {
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. The verdict cache identifies the physical binary file, so
+	// a missing, broken-link or looping bd path must fail here instead of
+	// falling back to its lexical spelling (TestBdBinaryIdentityStillRejectsUnresolvablePaths).
 	abs, err := filepath.EvalSymlinks(bdPath)
 	if err != nil {
 		return bdBinaryID{}, fmt.Errorf("resolving bd binary %s: %w", bdPath, err)

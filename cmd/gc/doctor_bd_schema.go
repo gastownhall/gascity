@@ -85,7 +85,7 @@ func (c *bdSchemaDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult 
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("%d bd database(s) not at %s, the schema of the beads library linked into gc", len(report.gaps), linked)
 		r.Details = append(append([]string{}, report.notices...), unreadable...)
-		r.FixHint = "once every client of a database is ready, an operator migrates it with the command its detail names (see \"Upgrading an Existing City\" in the docs)"
+		r.FixHint = "once every client of a database is ready, an operator migrates it with the command its detail names, then reruns this check, which reads both migration lanes (see \"Upgrading an Existing City\" in the docs)"
 	case checked == 0:
 		r.Message = fmt.Sprintf("none of %d bd database(s) could be read; schema not checked", len(scopes))
 		r.Details = unreadable

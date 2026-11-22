@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // bdInventoryCheck is the doctor check behind the split-city bd trust policy
@@ -90,10 +90,7 @@ func (c *bdInventoryCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			bad = append(bad, fmt.Sprintf("%s: %v", target.ScopeRoot, err))
 			continue
 		}
-		key := bdPath
-		if abs, err := filepath.EvalSymlinks(bdPath); err == nil {
-			key = abs
-		}
+		key := pathutil.NormalizePathForCompare(bdPath)
 		if seen[key] {
 			continue
 		}

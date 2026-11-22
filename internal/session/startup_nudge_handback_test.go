@@ -621,15 +621,17 @@ func TestAStartThatFailsAfterItsLaunchQueuesTheTurn(t *testing.T) {
 		}
 		wantOneStartupTurn(t, mgr, info.ID, liveToken(t, sp.Fake, info.SessionName))
 	})
-	t.Run("runtime-only stale-key relaunch refused by the launch that stands", func(t *testing.T) {
+	t.Run("runtime-only stale-key recovery that cannot read the runtime", func(t *testing.T) {
 		stubSubmitPoller(t)
 		store := openLeaseStore(t, t.TempDir())
 		b := mintRow(t, store, "session_key", "key-1", "resume_flag", "--resume")
 		sp := &blindAfterStartProvider{handbackStartProvider: &handbackStartProvider{Fake: runtime.NewFake(), nudge: handbackStartNudge}}
 		mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 		err := startRuntimeOnly(t, mgr, b.ID, "claude --resume key-1", runtime.Config{})
-		if !errors.Is(err, runtime.ErrSessionExists) {
-			t.Fatalf("StartRuntimeOnly = %v; want the relaunch refused by the runtime up", err)
+		// The recovery's liveness read is unanswerable: it stops there rather than
+		// relaunch over a runtime that may be up, and the turn stays queued for it.
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("StartRuntimeOnly = %v; want the recovery's unanswerable read", err)
 		}
 		wantOneStartupTurn(t, mgr, b.ID, liveToken(t, sp.Fake, "s-mint"))
 	})

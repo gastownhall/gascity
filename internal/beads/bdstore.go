@@ -3149,6 +3149,7 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	if bdListShouldIncludeTemplates(query) {
 		args = append(args, "--include-templates")
 	}
+	args = append(args, bdListSortArgs(serverQuery, limit)...)
 	args = append(args, "--limit", fmt.Sprintf("%d", limit))
 	if serverQuery.ParentID != "" {
 		args = append(args, "--parent", serverQuery.ParentID)
@@ -3187,6 +3188,18 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	return result, nil, nil
 }
 
+// bdListSortArgs returns the bd list ordering flags for a bounded read. bd
+// orders priority-first by default, so a bare --limit on a created-desc query
+// keeps the N best-priority rows, not the N newest; ask bd for created_at DESC
+// so its page is the newest population. Only a caller that opted into a
+// backing limit reaches here with one (see bdListRequiresClientLimit).
+func bdListSortArgs(serverQuery ListQuery, limit int) []string {
+	if limit > 0 && serverQuery.Sort == SortCreatedDesc {
+		return []string{"--sort", "created"}
+	}
+	return nil
+}
+
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
 	// TierWisps always merges two independently-fetched legs (this bd-list
 	// leg plus the ephemeral leg in listWispsTier) and needs full candidates
@@ -3213,6 +3226,15 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	// has no --id flag, so a bd-side limit could truncate before the
 	// matching IDs are even fetched.
 	if len(serverQuery.IDs) > 0 {
+		return true
+	}
+	// A bounded created-desc read is exact only when Go cuts it: bd list breaks
+	// created_at ties by id ASC where the canonical order (and cursor
+	// continuation) breaks them by id DESC, so a bd-side limit can drop the
+	// larger-id ties at the boundary. Only a caller that opted into a bounded
+	// newest-by-created_at sample (AllowBackingCreatedLimit) takes the bd-side
+	// limit, as the native stores do (nativeCreatedLimitPushdown).
+	if serverQuery.Sort == SortCreatedDesc && !serverQuery.AllowBackingCreatedLimit {
 		return true
 	}
 	return false
