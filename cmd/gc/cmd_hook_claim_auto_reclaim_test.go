@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -151,10 +152,13 @@ func (f *fakeAutoReclaimBD) install(t *testing.T) {
 						errors.New("exit status 1: Error updating work-1: issue not claimable: status in_progress")
 				}
 				return []byte(autoReclaimClaimedRow), nil
-			case cmd == "show --json work-1",
-				strings.HasPrefix(cmd, "update --json work-1"):
+			// bd show answers a JSON array; update answers the mutated bead.
+			case cmd == "show --json work-1":
+				return []byte("[" + autoReclaimClaimedRow + "]"), nil
+			case strings.HasPrefix(cmd, "update --json work-1"):
 				return []byte(autoReclaimClaimedRow), nil
-			case strings.HasPrefix(cmd, "query") || strings.HasPrefix(cmd, "list") || strings.HasPrefix(cmd, "sql"):
+			case strings.HasPrefix(cmd, "query") || strings.HasPrefix(cmd, "list") ||
+				strings.HasPrefix(cmd, "sql") || strings.HasPrefix(cmd, "dep list"):
 				return []byte("[]"), nil
 			default:
 				t.Errorf("unexpected bd command: %s", cmd)
@@ -209,19 +213,8 @@ func TestHookClaimAttemptsStaleReclaimWhenAgentOptsIn(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
-	cityDir := writeAutoReclaimCity(t, autoReclaimWorkQuery, "auto_reclaim_stale_claims = true\n", "")
-	sessionID := newAutoReclaimSessionBead(t, cityDir, map[string]string{
-		"session_name":   "worker-1",
-		"template":       "worker",
-		"alias":          "worker-1",
-		"agent_name":     "worker",
-		"session_origin": "named",
-		"state":          string(session.StateActive),
-		"instance_token": "live-token",
-	})
-	setAutoReclaimClaimEnv(t, cityDir, sessionID)
 	bd := &fakeAutoReclaimBD{reclaimReply: `{"reclaimed":[],"count":0}`}
-	bd.install(t)
+	arrangeAutoReclaimClaim(t, autoReclaimWorkQuery, "auto_reclaim_stale_claims = true\n", "", bd)
 
 	result, code := runAutoReclaimClaim(t)
 	// The hook's own contract: a no-work drain is exit 1.
@@ -239,6 +232,84 @@ func TestHookClaimAttemptsStaleReclaimWhenAgentOptsIn(t *testing.T) {
 	}
 	if result.Action != "drain" || result.Reason != "no_work" {
 		t.Fatalf("result = %+v, want a no_work drain", result)
+	}
+}
+
+// autoReclaimSessionMetadata is the live named session row the claim fence
+// verifies: active, alias holder of worker-1, instance token matching the env.
+func autoReclaimSessionMetadata() map[string]string {
+	return map[string]string{
+		"session_name":   "worker-1",
+		"template":       "worker",
+		"alias":          "worker-1",
+		"agent_name":     "worker",
+		"session_origin": "named",
+		"state":          string(session.StateActive),
+		"instance_token": "live-token",
+	}
+}
+
+// arrangeAutoReclaimClaim writes the city, creates the live session bead, sets
+// the named-session claim env, and installs the fake bd boundary. It returns
+// the city dir (whose .gc/events.jsonl carries the claim's events).
+func arrangeAutoReclaimClaim(t *testing.T, workQuery, agentExtra, patchExtra string, bd *fakeAutoReclaimBD) string {
+	t.Helper()
+	cityDir := writeAutoReclaimCity(t, workQuery, agentExtra, patchExtra)
+	sessionID := newAutoReclaimSessionBead(t, cityDir, autoReclaimSessionMetadata())
+	setAutoReclaimClaimEnv(t, cityDir, sessionID)
+	bd.install(t)
+	return cityDir
+}
+
+// TestHookClaimReclaimsStaleRouteMatchedBeadInSameInvocation is AC-2: when the
+// scoped reclaim reports the bead recovered from its previous owner and the
+// retried claim wins it, the SAME `gc hook --claim --json` invocation returns
+// action=work with the bead's id — the reclaim preceding the claim mutation —
+// and the city event log records hook.claim.reclaimed_stale naming the
+// previous owner.
+func TestHookClaimReclaimsStaleRouteMatchedBeadInSameInvocation(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	bd := &fakeAutoReclaimBD{reclaimReply: `{"reclaimed":[{"id":"work-1","previous_owner":"worker-dead"}],"count":1}`}
+	cityDir := arrangeAutoReclaimClaim(t, autoReclaimWorkQuery, "auto_reclaim_stale_claims = true\n", "", bd)
+
+	result, code := runAutoReclaimClaim(t)
+	if code != 0 {
+		t.Fatalf("gc hook --claim exited %d, want 0 for a served claim", code)
+	}
+	if got := bd.reclaimArgv(); len(got) != 1 {
+		t.Fatalf("bd reclaim ran %q, want exactly one scoped reclaim of work-1", got)
+	}
+	if got := bd.claimArgv(); len(got) != 1 {
+		t.Fatalf("claim ran %q, want the claim retried on work-1 in the same cycle", got)
+	}
+	if reclaimAt, claimAt := slices.Index(bd.argv, "reclaim --id work-1 --json"), slices.Index(bd.argv, "update work-1 --claim --json"); reclaimAt < 0 || claimAt < 0 || reclaimAt > claimAt {
+		t.Fatalf("bd ran %q, want the reclaim to precede the claim", bd.argv)
+	}
+	if result.Action != "work" || result.BeadID != "work-1" {
+		t.Fatalf("result = %+v, want action=work bead_id=work-1", result)
+	}
+	logBytes, err := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("reading city event log: %v", err)
+	}
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(string(logBytes)), "\n") {
+		var ev events.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil || ev.Type != events.HookClaimReclaimedStale {
+			continue
+		}
+		var payload events.HookClaimReclaimedStalePayload
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("decoding %s payload: %v", ev.Type, err)
+		}
+		if payload.BeadID == "work-1" && payload.PreviousOwner == "worker-dead" && payload.NewAssignee == "worker-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no %s event naming work-1 recovered from worker-dead in the city event log:\n%s", events.HookClaimReclaimedStale, logBytes)
 	}
 }
 
@@ -282,22 +353,11 @@ func TestHookClaimReclaimEligibilityGatesAreHonored(t *testing.T) {
 			clearGCEnv(t)
 			disableManagedDoltRecoveryForTest(t)
 			t.Setenv("GC_BEADS", "file")
-			cityDir := writeAutoReclaimCity(t, autoReclaimWorkQueryFor(tc.metadata), "auto_reclaim_stale_claims = true\n", "")
-			sessionID := newAutoReclaimSessionBead(t, cityDir, map[string]string{
-				"session_name":   "worker-1",
-				"template":       "worker",
-				"alias":          "worker-1",
-				"agent_name":     "worker",
-				"session_origin": "named",
-				"state":          string(session.StateActive),
-				"instance_token": "live-token",
-			})
-			setAutoReclaimClaimEnv(t, cityDir, sessionID)
 			bd := &fakeAutoReclaimBD{
 				reclaimReply: `{"reclaimed":[],"count":0}`,
 				reclaimErr:   "exit status 1: Error: no stale claims",
 			}
-			bd.install(t)
+			arrangeAutoReclaimClaim(t, autoReclaimWorkQueryFor(tc.metadata), "auto_reclaim_stale_claims = true\n", "", bd)
 
 			result, code := runAutoReclaimClaim(t)
 			if code != 1 {
