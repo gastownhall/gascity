@@ -7066,6 +7066,80 @@ exit 0
 	}
 }
 
+// TestSpawnStormDetectIgnoresEmptyRejectionMetadata pins that a metadata key
+// left set to the empty string is not a reset signal: only a non-empty
+// rejection_reason or recovered value counts toward a spawn storm. A bead
+// whose cleared key is the only marker gets no ledger entry and no
+// SPAWN_STORM mail; a non-empty marker beside an empty one still counts.
+func TestSpawnStormDetectIgnoresEmptyRejectionMetadata(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"SPAWN_STORM_READY_JSON": `[
+{"id":"ga-cleared-rr","status":"open","metadata":{"rejection_reason":""}},
+{"id":"ga-cleared-rec","status":"open","metadata":{"recovered":""}},
+{"id":"ga-both-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}},
+{"id":"ga-recovered-false","status":"open","metadata":{"recovered":false}},
+{"id":"ga-null-metadata","status":"open","metadata":null},
+{"id":"ga-marked-rr","status":"open","metadata":{"rejection_reason":"Conflicts with main"}},
+{"id":"ga-mixed-empty-rr","status":"open","metadata":{"rejection_reason":"","recovered":"true"}}
+]`,
+		"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	counts := readSpawnStormLedger(t, filepath.Join(stateDir, "spawn-storm-counts.json"))
+	for _, id := range []string{"ga-cleared-rr", "ga-cleared-rec", "ga-both-empty", "ga-recovered-false", "ga-null-metadata"} {
+		if _, ok := counts[id]; ok {
+			t.Fatalf("ledger counted %s, whose reset markers are empty, false or absent\nledger: %v", id, counts)
+		}
+	}
+	if got := counts["ga-marked-rr"]; got != 1 {
+		t.Fatalf("ledger count for ga-marked-rr = %d, want 1\nledger: %v", got, counts)
+	}
+	if got := counts["ga-mixed-empty-rr"]; got != 1 {
+		t.Fatalf("ledger count for ga-mixed-empty-rr = %d, want 1; an empty rejection_reason must not drop the non-empty recovered beside it\nledger: %v", got, counts)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	for _, id := range []string{"ga-cleared-rr", "ga-cleared-rec", "ga-both-empty", "ga-recovered-false", "ga-null-metadata"} {
+		if strings.Contains(string(gcData), id) {
+			t.Fatalf("%s, whose reset markers are empty, false or absent, was named in a gc call\ngc log:\n%s", id, gcData)
+		}
+	}
+	if n := strings.Count(string(gcData), "SPAWN_STORM: bead ga-marked-rr reset 1x"); n != 1 {
+		t.Fatalf("SPAWN_STORM mail for ga-marked-rr sent %d times, want 1\ngc log:\n%s", n, gcData)
+	}
+	if n := strings.Count(string(gcData), "SPAWN_STORM: bead ga-mixed-empty-rr reset 1x"); n != 1 {
+		t.Fatalf("SPAWN_STORM mail for ga-mixed-empty-rr sent %d times, want 1\ngc log:\n%s", n, gcData)
+	}
+}
+
 // TestSpawnStormDetectCountsResetBeadsInEveryStore pins where the sweep reads.
 // gc bd list answers from one store, the city store for this city-scoped order,
 // and bd leaves the wisp plane out of a plain list. A bead reset in a rig
