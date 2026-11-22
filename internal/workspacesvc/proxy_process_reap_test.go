@@ -676,3 +676,48 @@ func TestProxyProcessReportsUnreachableDegradedGenerationAsBadGateway(t *testing
 		t.Fatalf("body = %q, want it to name the exited process", body)
 	}
 }
+
+// TestProxyProcessRefusesWithoutLiveStartedProcess guards the refusals the
+// routing predicate keeps: an instance that is closed, whose process has
+// exited and been reaped, or that is still in its readiness window answers
+// 503 naming the reason, as before the predicate change.
+func TestProxyProcessRefusesWithoutLiveStartedProcess(t *testing.T) {
+	inst, _ := startReadyReapTestInstance(t, processgroup.ReleaseCommand)
+
+	// The process exits and the reaper clears the generation.
+	first, firstDone := currentGeneration(inst)
+	killLeader(t, first)
+	awaitClosed(t, firstDone, "the reaper to retire the generation")
+	rec := httptest.NewRecorder()
+	inst.HandleHTTP(rec, httptest.NewRequest(http.MethodPost, "/hooks/example", strings.NewReader(`{}`)), "/hooks/example")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d once the process has exited; body=%q", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.HasPrefix(body, "service unavailable: process exited") {
+		t.Fatalf("body = %q, want it to name the exited process", body)
+	}
+
+	if err := inst.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	inst.HandleHTTP(rec, httptest.NewRequest(http.MethodPost, "/hooks/example", strings.NewReader(`{}`)), "/hooks/example")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d once the instance is closed; body=%q", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != "service unavailable: service_closed" {
+		t.Fatalf("body = %q, want %q", body, "service unavailable: service_closed")
+	}
+
+	// An instance still in its readiness window has no socket to serve
+	// from yet; nothing is spawned for this case.
+	starting := &proxyProcessInstance{cmd: &exec.Cmd{}, status: Status{State: "starting", LocalState: "starting"}}
+	rec = httptest.NewRecorder()
+	starting.HandleHTTP(rec, httptest.NewRequest(http.MethodPost, "/hooks/example", nil), "/hooks/example")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d while still starting; body=%q", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.HasPrefix(body, "service unavailable") {
+		t.Fatalf("body = %q, want it to name the service as unavailable", body)
+	}
+}
