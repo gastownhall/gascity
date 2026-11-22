@@ -4046,33 +4046,27 @@ flatten_database() {
   verify_counts_rc=0
   verify_counts "$db" "$preflight_tmp" "$flatten_read_db" || verify_counts_rc=$?
 
-  # Writer-race gate (local-verify HEAD-stability). A normal MVCC writer (the
-  # beads/mail workload) can commit to this db inside the flatten window, which
-  # legitimately adds rows and changes value hashes versus the pre-flight
-  # snapshot. That is a benign, self-healing condition — the next scheduled run
-  # retries — and must NOT be quarantined (a quarantine marker blocks all future
-  # GC of the db and is the production memory-exhaustion bug).
+  # Writer-race gate. A normal MVCC writer (the beads/mail workload) can commit
+  # to this db inside the residual window between the stable pre-flight
+  # snapshot and the flatten's DOLT_RESET; the flatten's -Am then absorbs that
+  # writer's rows into F, which legitimately adds rows and changes value hashes
+  # versus the snapshot. That is a benign, self-healing condition — the next
+  # scheduled run retries — and must NOT be quarantined (a quarantine marker
+  # blocks all future GC of the db and is the production memory-exhaustion
+  # bug).
   #
-  # We distinguish a writer commit from the flatten's OWN commit using two
-  # independent signals, both anchored so the flatten's own commit never trips
-  # them:
-  #   * head_before_reset != head  — HEAD moved between the stable pre-flight
-  #     snapshot and the pre-reset probe. That probe runs before the flatten
-  #     mutates anything, so only an external writer can have moved HEAD.
-  #   * post_verify_head != flatten_head — HEAD moved past the flatten's own
-  #     commit during/after verify_counts. The script issues no commit between
-  #     the flatten and this probe, so only an external writer can have moved it.
-  # Either signal proves a concurrent writer. If a HEAD probe fails/returns
-  # empty we leave the corresponding value empty and the equality below cannot
-  # become true, so an unprovable race safely falls through to quarantine.
+  # The proof is head_before_reset != head: that probe runs before the flatten
+  # mutates anything, so only an external writer can have moved HEAD. A writer
+  # that commits after F is NOT evidence here: verification reads F itself, so
+  # such a writer cannot change what is verified, and any drift inside F is
+  # the flatten's own. An empty/failed probe leaves head_before_reset empty, so
+  # an unprovable race safely falls through to quarantine. post_verify_head is
+  # recorded only as quarantine-marker diagnostics.
   post_verify_head=$(head_commit "$db" || true)
   writer_race_detected=0
   if [ -n "$head" ] && [ -n "$head_before_reset" ] && [ "$head_before_reset" != "$head" ]; then
     writer_race_detected=1
     compacted_from_head="$head_before_reset"
-  fi
-  if [ -n "$flatten_head" ] && [ -n "$post_verify_head" ] && [ "$post_verify_head" != "$flatten_head" ]; then
-    writer_race_detected=1
   fi
 
   if [ "$verify_counts_rc" -ne 0 ]; then
@@ -4203,7 +4197,6 @@ flatten_database() {
     rm -f "$preflight_tmp"
     return 1
   fi
-  pre_db_hash_head=$(head_commit "$db" || true)
   if ! postflight_hash=$(db_value_hash "$flatten_read_db"); then
     printf 'compact: db=%s post-flatten value hash probe failed — quarantine and investigate before GC\n' \
       "$db" >&2
@@ -4228,40 +4221,7 @@ flatten_database() {
     rm -f "$preflight_tmp"
     return 1
   fi
-  post_db_hash_head=$(head_commit "$db" || true)
-  db_hash_writer_race_detected=0
-  if [ -n "$flatten_head" ] && [ -n "$pre_db_hash_head" ] && [ "$pre_db_hash_head" != "$flatten_head" ]; then
-    db_hash_writer_race_detected=1
-  fi
-  if [ -n "$flatten_head" ] && [ -n "$post_db_hash_head" ] && [ "$post_db_hash_head" != "$flatten_head" ]; then
-    db_hash_writer_race_detected=1
-  fi
-  if [ -n "$pre_db_hash_head" ] && [ -n "$post_db_hash_head" ] && [ "$post_db_hash_head" != "$pre_db_hash_head" ]; then
-    db_hash_writer_race_detected=1
-  fi
-  if [ "$db_hash_writer_race_detected" = "1" ]; then
-    writer_race_detected=1
-  fi
   if [ "$postflight_hash" != "$preflight_hash" ]; then
-    if [ "$db_hash_writer_race_detected" = "1" ]; then
-      # The DB hash probe runs after table-level verification has already
-      # passed. HEAD movement across this probe means an external writer may
-      # have changed any value without changing the checked table row counts.
-      db_hash_drift_detail="database value hash drift"
-      if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
-        db_hash_drift_detail="database value hash drift with row-count increase"
-      fi
-      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s pre_db_hash_HEAD=%s post_db_hash_HEAD=%s) — %s is concurrent-writer data, not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "${pre_db_hash_head:-<empty>}" "${post_db_hash_head:-<empty>}" "$db_hash_drift_detail" >&2
-      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
-        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
-        "$compacted_from_head" "$local_branch" "$remote_branch"; then
-        rm -f "$preflight_tmp"
-        return 1
-      fi
-      rm -f "$preflight_tmp"
-      return 0
-    fi
     if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
       # Same writer-race downgrade as the per-table gain+drift case above: a
       # proven concurrent writer that added rows also shifts the whole-database
