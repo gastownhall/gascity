@@ -1084,6 +1084,33 @@ head_commit() {
     "SELECT HASHOF('HEAD')"
 }
 
+# flatten_commit_hash FILE — print the commit hash DOLT_COMMIT reported in the
+# flatten call's tabular output FILE: the value of its `hash` result set.
+# DOLT_RESET's status set is ignored. Output with no hash value prints nothing
+# and returns 1.
+flatten_commit_hash() {
+  LC_ALL=C awk '
+    function cell(line) {
+      sub(/^\| */, "", line)
+      sub(/ *\|$/, "", line)
+      return line
+    }
+    BEGIN { state = 0; in_hash = 0; value = "" }
+    /^\+[-+]*\+$/ {
+      if (state == 0) { state = 1 } else if (state == 2) { state = 3 } else if (state == 3) { state = 0; in_hash = 0 }
+      next
+    }
+    /^\|.*\|$/ {
+      if (state == 1) { in_hash = (cell($0) == "hash"); state = 2 } else if (state == 3 && in_hash) { value = cell($0) }
+      next
+    }
+    END {
+      if (value == "") { exit 1 }
+      print value
+    }
+  ' "$1"
+}
+
 # user_tables — emit one user-table name per line (excludes dolt_*
 # system tables and information_schema views).
 user_tables() {
@@ -1220,7 +1247,9 @@ db_value_hash() {
   # dolt_ignore'd tables, whose concurrent churn drifts it with no HEAD
   # movement — a guaranteed false quarantine on a busy db. The flatten only
   # rewrites committed history, so the committed root is the surface whose
-  # preservation this hash must prove.
+  # preservation this hash must prove. Given a revision database <db>/<commit>,
+  # HEAD resolves to that commit, so the post-flatten probe reads the flatten
+  # commit's root rather than whatever a later writer committed.
   query_single_cell "$db" "database value hash probe failed" \
     "SELECT DOLT_HASHOF_DB('HEAD')"
 }
@@ -1511,8 +1540,10 @@ preflight_counts() {
   return "$preflight_failed"
 }
 
-# verify_counts — re-count/re-hash and compare against the pre-flight file.
-# Row-count decreases fail. Row-count increases are recorded as concurrent
+# verify_counts DB PREFLIGHT READ_DB — re-count/re-hash and compare against
+# the pre-flight file. READ_DB is the revision database pinned to the flatten
+# commit (<db>/<commit>); every post-flatten probe reads it, while DB names
+# the base database in diagnostics. Row-count decreases fail. Row-count increases are recorded as concurrent
 # writer evidence only when the table value hash stays stable. Any table hash
 # drift is quarantined before full GC because row-count gain alone cannot prove
 # pre-flight rows remain reachable. Sets category flags plus
@@ -1520,6 +1551,7 @@ preflight_counts() {
 verify_counts() {
   db="$1"
   preflight="$2"
+  verify_read_db="$3"
   fail=0
   verify_counts_saw_gain=0
   verify_counts_saw_gain_hash_drift=0
@@ -1541,7 +1573,7 @@ verify_counts() {
     rest=${line#* }
     expected=${rest%% *}
     expected_hash=${rest#* }
-    if ! actual=$(row_count "$db" "$t"); then
+    if ! actual=$(row_count "$verify_read_db" "$t"); then
       printf 'compact: db=%s post-flatten row count failed for table=%s\n' "$db" "$t" >&2
       verify_counts_saw_probe_failure=1
       if [ "$fail" -eq 0 ]; then
@@ -1563,7 +1595,7 @@ verify_counts() {
         continue
         ;;
     esac
-    if ! actual_hash=$(table_value_hash "$db" "$t"); then
+    if ! actual_hash=$(table_value_hash "$verify_read_db" "$t"); then
       printf 'compact: db=%s post-flatten table value hash failed for table=%s\n' "$db" "$t" >&2
       verify_counts_saw_probe_failure=1
       if [ "$fail" -eq 0 ]; then
@@ -3421,6 +3453,7 @@ flatten_database() {
   head=""
   head_before_reset=""
   flatten_head=""
+  flatten_read_db=""
   post_verify_head=""
   final_verify_head=""
   preflight_hash=""
@@ -3949,33 +3982,37 @@ flatten_database() {
   # the USE selection across the two CALLs. History at or before the watermark
   # is never rewritten.
   reset_rc=0
+  reset_out_tmp=$(mktemp)
   reset_err_tmp=$(mktemp)
   dolt_query "$db" "
     CALL DOLT_RESET('--soft', '$flatten_base');
     CALL DOLT_COMMIT('-Am', '$compact_flatten_message');
-  " >/dev/null 2>"$reset_err_tmp" || reset_rc=$?
+  " >"$reset_out_tmp" 2>"$reset_err_tmp" || reset_rc=$?
 
   if [ "$reset_rc" -ne 0 ]; then
     printf 'compact: db=%s flatten failed rc=%s — restoring pre-flatten HEAD=%s\n' \
       "$db" "$reset_rc" "$head" >&2
     emit_error_file "$db" "$reset_err_tmp"
-    rm -f "$preflight_tmp"
-    rm -f "$reset_err_tmp"
+    rm -f "$preflight_tmp" "$reset_out_tmp" "$reset_err_tmp"
     restore_head_after_flatten_failure "$db" "$head" "$flatten_base" || true
     live_gate_check "$db" "flatten" || return 1
     return 1
   fi
   rm -f "$reset_err_tmp"
+
+  # The flatten commit F is DOLT_COMMIT's own result row, never a later HEAD
+  # sample: a writer that commits right after the flatten would otherwise
+  # become "the flatten" and its changes would read as damage (#8502).
+  flatten_head=$(flatten_commit_hash "$reset_out_tmp" || true)
+  rm -f "$reset_out_tmp"
   if ! live_gate_check "$db" "flatten"; then
     rm -f "$preflight_tmp"
     return 1
   fi
-
-  flatten_head=$(head_commit "$db" || true)
   if [ -z "$flatten_head" ]; then
-    printf 'compact: db=%s post-flatten HEAD probe failed — quarantine and investigate before GC\n' \
+    printf 'compact: db=%s flatten succeeded but its DOLT_COMMIT result carried no single valid commit hash — quarantine and investigate before GC\n' \
       "$db" >&2
-    write_quarantine_marker "$db" "post-flatten HEAD probe failed" || {
+    write_quarantine_marker "$db" "post-flatten commit hash unavailable" || {
       rm -f "$preflight_tmp"
       return 1
     }
@@ -3983,8 +4020,11 @@ flatten_database() {
     return 1
   fi
 
+  # Verification reads the read-only revision database pinned to F, so later
+  # writes to the live database can neither fake nor mask damage inside F.
+  flatten_read_db="$db/$flatten_head"
   verify_counts_rc=0
-  verify_counts "$db" "$preflight_tmp" || verify_counts_rc=$?
+  verify_counts "$db" "$preflight_tmp" "$flatten_read_db" || verify_counts_rc=$?
 
   # Writer-race gate (local-verify HEAD-stability). A normal MVCC writer (the
   # beads/mail workload) can commit to this db inside the flatten window, which
@@ -4144,7 +4184,7 @@ flatten_database() {
     return 1
   fi
   pre_db_hash_head=$(head_commit "$db" || true)
-  if ! postflight_hash=$(db_value_hash "$db"); then
+  if ! postflight_hash=$(db_value_hash "$flatten_read_db"); then
     printf 'compact: db=%s post-flatten value hash probe failed — quarantine and investigate before GC\n' \
       "$db" >&2
     write_quarantine_marker "$db" "post-flatten value hash probe failed" || {

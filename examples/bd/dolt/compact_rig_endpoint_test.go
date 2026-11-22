@@ -101,9 +101,10 @@ exit 0
 }
 
 // serveOnlyCompactDatabases wraps the fixture's fake dolt so it answers like a
-// sql-server that serves only the named databases. A query that selects any
-// other database is logged like a served one and fails with the error the
-// city's managed server returns for a database that lives on another endpoint.
+// sql-server that serves only the named databases and their revision
+// databases. A query that selects any other database is logged like a served
+// one and fails with the error the city's managed server returns for a
+// database that lives on another endpoint.
 func serveOnlyCompactDatabases(t *testing.T, fixture compactScriptFixture, served ...string) {
 	t.Helper()
 	inner := filepath.Join(fixture.binDir, "dolt-served")
@@ -122,8 +123,9 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+# A server that serves a database also serves its <db>/<commit> revisions.
 case " %s " in
-  *" $db "*) exec %s "${args[@]}" ;;
+  *" ${db%%%%/*} "*) exec %s "${args[@]}" ;;
 esac
 # The live-session probe selects no database and reads the server-wide
 # processlist, which any sql-server answers whatever it serves.

@@ -547,6 +547,10 @@ func assertCompactBeadsQuarantineAlert(t *testing.T, fixture compactScriptFixtur
 	}
 }
 
+// compactFakeFlattenCommit is the commit the fake dolt's flatten DOLT_COMMIT
+// reports: a valid 32-character Dolt hash (digits and a-v).
+const compactFakeFlattenCommit = "compactcommit0000000000000000000"
+
 func writeCompactFakeDolt(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "dolt.log")
@@ -577,6 +581,23 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 printf 'db=%%s query=%%s\n' "$db" "$query" >> "$log"
+# The flatten's DOLT_COMMIT reports this commit; it is a valid Dolt hash.
+flatten_commit=%s
+# --use-db <db>/<rev> selects the read-only revision database pinned to <rev>.
+# Only the flatten commit exists as a revision here; anything else is unknown,
+# exactly as Dolt rejects it. Reads through it see the state at that commit
+# (current_head reports rev), never the live HEAD a later writer moved.
+rev=""
+case "$db" in
+  */*)
+    rev="${db#*/}"
+    db="${db%%%%/*}"
+    if [ "$rev" != "$flatten_commit" ]; then
+      printf 'database not found: %%s/%%s\n' "$db" "$rev" >&2
+      exit 1
+    fi
+    ;;
+esac
 # Live-database faults. A file <live_fault_dir>/after-<gc|flatten>-<db> holding
 # vanish, unserved, or transient:<n> fires once, after the next DOLT_GC or
 # flatten DOLT_RESET on <db> finishes, whatever its exit status: vanish removes
@@ -638,6 +659,10 @@ print_remote_rows() {
   printf '+------+-----+\n'
 }
 current_head() {
+  if [ -n "$rev" ]; then
+    printf '%%s\n' "$rev"
+    return 0
+  fi
   if [ "$mode" = "head_changes_before_flatten" ]; then
     calls_file="$state_file.head-calls"
     calls=0
@@ -1032,20 +1057,7 @@ case "$query" in
     if { [ "$mode" = "pending_gc_marker_disappears" ] || [ "$mode" = "pending_gc_marker_disappears_remote" ]; } && [ -n "$pending_gc_marker" ]; then
       rm -f "$pending_gc_marker"
     fi
-    if [ "$mode" = "second_db_post_flatten_head_empty" ] && [ "$db" = "zed" ]; then
-      calls_file="$state_file.$db-head-calls"
-      calls=0
-      if [ -f "$calls_file" ]; then
-        calls="$(cat "$calls_file")"
-      fi
-      calls=$((calls + 1))
-      printf '%%s\n' "$calls" > "$calls_file"
-      if [ "$calls" -eq 4 ]; then
-        print_cell ""
-        exit 0
-      fi
-    fi
-    if [ "$mode" = "writer_race_db_hash_empty_pre_probe" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "writer_race_db_hash_empty_pre_probe" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       calls_file="$state_file.compact-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -1053,7 +1065,7 @@ case "$query" in
       fi
       calls=$((calls + 1))
       printf '%%s\n' "$calls" > "$calls_file"
-      if [ "$calls" -eq 3 ]; then
+      if [ "$calls" -eq 2 ]; then
         print_cell ""
         exit 0
       fi
@@ -1079,7 +1091,7 @@ case "$query" in
     # flatten's DOLT_RESET. The pre-flight loop stabilizes at headcommit, so the
     # pre-reset HEAD probe (the 3rd HEAD probe taken while still at headcommit)
     # reports writercommit. State stays at headcommit so the flatten still
-    # advances HEAD to compactcommit and verify still observes the gain+drift.
+    # advances HEAD to the flatten commit and verify still observes the gain+drift.
     # This advance lives in the HEAD-probe arm (not current_head) so the
     # "$(current_head)" gate-checks in other arms keep seeing the real state.
     if { [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ]; } && [ "$(current_head)" = "headcommit" ]; then
@@ -1096,12 +1108,14 @@ case "$query" in
       fi
     fi
     # writer_race_during_verify: a writer commits during/after the post-flatten
-    # verify. The flatten advances HEAD to compactcommit; the 1st HEAD probe at
-    # compactcommit is the flatten_head probe and the 2nd is the post-verify
-    # probe, which reports writercommit so HEAD has moved past the flatten's own
-    # commit. verify_counts still sees compactcommit (gain+drift) because it does
-    # not probe HEAD and the "$(current_head)" gates read the real state.
-    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ] || [ "$mode" = "writer_race_after_db_hash" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    # verify. The flatten advances HEAD to the flatten commit; the 1st live HEAD
+    # probe after it is the post-verify probe, which reports writercommit, so
+    # HEAD has moved past the flatten's own commit. writer_after_flatten moves
+    # HEAD the same way; writer_race_after_db_hash moves it only at the 4th
+    # probe (the final pre-GC fence). verify_counts still sees the flatten
+    # commit because it does not probe HEAD and the "$(current_head)" gates
+    # read the real state.
+    if { [ "$mode" = "writer_after_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ] || [ "$mode" = "writer_race_after_db_hash" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       calls_file="$state_file.postverify-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -1109,11 +1123,11 @@ case "$query" in
       fi
       calls=$((calls + 1))
       printf '%%s\n' "$calls" > "$calls_file"
-      if [ "$mode" = "writer_race_after_db_hash" ] && [ "$calls" -ge 5 ]; then
+      if [ "$mode" = "writer_race_after_db_hash" ] && [ "$calls" -ge 4 ]; then
         print_cell writercommit
         exit 0
       fi
-      if [ "$mode" != "writer_race_after_db_hash" ] && [ "$calls" -ge 2 ]; then
+      if [ "$mode" != "writer_race_after_db_hash" ] && [ "$calls" -ge 1 ]; then
         print_cell writercommit
         exit 0
       fi
@@ -1137,7 +1151,7 @@ case "$query" in
         # never moves and every per-table working-set hash stays stable. The
         # first_commit_* modes drift the same way because the flatten
         # first-commits a never-committed table.
-        if [ "$(current_head)" = "compactcommit" ]; then
+        if [ "$(current_head)" = "$flatten_commit" ]; then
           print_cell hash-root-after-absorb
         else
           print_cell hash-root-before
@@ -1178,11 +1192,11 @@ case "$query" in
       print_cell ""
       exit 0
     fi
-    if [ "$mode" = "db_hash_empty_after_flatten" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "db_hash_empty_after_flatten" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell ""
       exit 0
     fi
-    if { [ "$mode" = "writer_race_after_postverify_before_db_hash" ] || [ "$mode" = "writer_race_db_hash_empty_pre_probe" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "writer_race_after_postverify_before_db_hash" ] || [ "$mode" = "writer_race_db_hash_empty_pre_probe" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       set_head writercommit
       set_hash hash-after-writer
       print_cell hash-after-writer
@@ -1199,15 +1213,21 @@ case "$query" in
       print_cell ""
       exit 0
     fi
-    if [ "$mode" = "table_hash_empty_after_flatten" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "table_hash_empty_after_flatten" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell ""
       exit 0
     fi
-    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
-    if { [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
+      print_cell hash-beads-after-writer
+      exit 0
+    fi
+    # writer_after_flatten: the later writer's same-count UPDATE is visible in
+    # the live database only; the flatten commit itself is unchanged.
+    if [ "$mode" = "writer_after_flatten" ] && [ -z "$rev" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
@@ -1215,7 +1235,7 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_TABLE('notes')"*)
-    if { [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "same_count_hash_drift_then_probe_failure" ] || [ "$mode" = "probe_failure_then_same_count_hash_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "same_count_hash_drift_then_probe_failure" ] || [ "$mode" = "probe_failure_then_same_count_hash_drift" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell hash-notes-after-writer
       exit 0
     fi
@@ -1227,7 +1247,7 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_TABLE('wisps')"*)
-    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell hash-wisps-after-churn
       exit 0
     fi
@@ -1333,7 +1353,7 @@ case "$query" in
       printf 'information_schema unavailable\n' >&2
       exit 43
     fi
-    if [ "$mode" = "post_flatten_table_list_failure" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "post_flatten_table_list_failure" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       printf 'information_schema unavailable after flatten\n' >&2
       exit 43
     fi
@@ -1341,11 +1361,11 @@ case "$query" in
       print_cell 'bad/name'
       exit 0
     fi
-    if [ "$mode" = "post_flatten_table_appears" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "post_flatten_table_appears" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cells beads notes
       exit 0
     fi
-    if [ "$mode" = "post_flatten_invalid_table_name" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "post_flatten_invalid_table_name" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cells beads 'bad/name'
       exit 0
     fi
@@ -1439,7 +1459,7 @@ case "$query" in
     exit 0
     ;;
   *"SELECT COUNT(*) FROM"*"wisps"*)
-    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell 11
       exit 0
     fi
@@ -1566,13 +1586,21 @@ case "$query" in
     if [ "$mode" = "gc_read_timeout_after_slow_flatten" ]; then
       sleep 3
     fi
-    set_head compactcommit
+    set_head "$flatten_commit"
     if [ "$mode" = "same_row_count_writer" ]; then
       set_hash hash-after-writer
     fi
     if [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "same_count_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "writer_race_db_hash_during_verify" ]; then
       set_hash hash-after-writer
     fi
+    # Real Dolt prints one result set per CALL: DOLT_RESET's status, then
+    # DOLT_COMMIT's hash.
+    printf '+--------+\n| status |\n+--------+\n| 0      |\n+--------+\n\n'
+    if [ "$mode" = "second_db_flatten_hash_missing" ] && [ "$db" = "zed" ]; then
+      exit 0
+    fi
+    printf '+----------------------------------+\n| hash                             |\n+----------------------------------+\n'
+    printf '| %%s |\n+----------------------------------+\n\n' "$flatten_commit"
     exit 0
     ;;
   *"DOLT_GC"*)
@@ -1641,7 +1669,7 @@ case "$query" in
 esac
 printf 'unexpected query: %%s\n' "$query" >&2
 exit 64
-`, shellQuote(logPath)))
+`, shellQuote(logPath), compactFakeFlattenCommit))
 	return logPath
 }
 
@@ -3914,11 +3942,14 @@ func TestCompactScriptDoesNotCarryQuarantineEvidenceAcrossDatabases(t *testing.T
 		t.Fatalf("mkdir second dolt db: %v", err)
 	}
 
-	out, err := fixture.run(t, "second_db_post_flatten_head_empty", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	out, err := fixture.run(t, "second_db_flatten_hash_missing", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
-		t.Fatalf("compact succeeded despite second database HEAD probe failure:\n%s", out)
+		t.Fatalf("compact succeeded despite second database flatten commit hash missing:\n%s", out)
 	}
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "zed")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten commit hash unavailable" {
+		t.Fatalf("second database quarantine reason = %q, want post-flatten commit hash unavailable", reason)
+	}
 	if got := compactMarkerValue(t, marker, "postflight_db_value_hash"); got != "" {
 		t.Fatalf("second database marker inherited postflight hash %q from the first database", got)
 	}

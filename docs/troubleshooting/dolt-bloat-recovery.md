@@ -558,7 +558,7 @@ should treat these strings as the current vocabulary:
 
 | Reason | Meaning |
 |--------|---------|
-| `post-flatten HEAD probe failed` | The compactor could not read the database HEAD after flatten. |
+| `post-flatten commit hash unavailable` | The flatten's `DOLT_COMMIT` result did not carry exactly one valid commit hash. The compactor never substitutes the current HEAD, so it skips verification and full GC. |
 | `post-flatten integrity check failed` | A post-flatten integrity check failed before recording a more specific reason. |
 | `post-flatten row count decreased` | A table lost rows after flatten. |
 | `post-flatten row count probe failed` | The post-flatten row-count query failed or returned a non-number. |
@@ -572,6 +572,15 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
 | `live database unavailable after compaction` | After a flatten or GC, the database's data-dir entry was gone or the server no longer served it with a resolvable HEAD. *(never auto-cleared — see below)* |
+
+Post-flatten checks read the flatten commit itself, through its read-only
+revision database (`<database>/<flatten-commit>`), never the live database. A
+bead write that commits after the flatten cannot fake or hide a change inside
+the flatten commit, so drift there quarantines even when HEAD has since moved.
+When the flatten commit verifies cleanly but HEAD has moved past it before full
+GC starts, compact keeps the later commit, writes a
+`compact-pending-gc/<database>` marker, and skips full GC. The next run retries
+the GC without flattening again.
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
