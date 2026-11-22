@@ -39,6 +39,7 @@ import (
 //     alert and pass-record dedupe window
 //   - the external-reads lane's pace and its sources' freshness
 //   - the order-dispatch-floor doctor check's patrol-pass length
+//   - the hold an async start's failed preparation puts on its session
 //
 // Durations that go through neither keep their real periods; among them are
 // the supervisor's patrol, the proxied guard tick, the managed Dolt scope

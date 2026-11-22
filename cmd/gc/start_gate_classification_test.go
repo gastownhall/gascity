@@ -63,6 +63,7 @@ var startOutcomeClassification = map[string]startOutcomeClass{
 
 	"blocked_on_dependencies":       {reason: "clause (a): the candidate's own dependencies are not alive"},
 	"deferred_by_on_death_hook":     {reason: "clause (a): its own runtime name's on_death hook is pending"},
+	"deferred_by_prepare_failure":   {reason: "clause (a): its own last async preparation failed, so its session sits out a hold"},
 	"deferred_by_runtime_lease":     {reason: "clause (a): its own runtime name is leased by another holder"},
 	"deferred_by_endpoint_capacity": {reason: "own hold: endpointCapacityGuard.HoldsPendingCreate already keeps the row"},
 	"user_held":                     {reason: "clause (a): the session's own state, held by the user"},

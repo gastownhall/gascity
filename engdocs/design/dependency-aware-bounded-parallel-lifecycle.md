@@ -136,6 +136,12 @@ The start pipeline is:
    dependent never starts against an older incarnation of a dependency
    whose replacement start is still preparing
    (SESSION-RUNTIME-036).
+9. An async start whose preparation fails holds its session out of
+   async admission for one patrol interval and then requests a
+   follow-up pass. That pass runs the rest of a wave whose
+   dependency-sensitive batch yielded on the failed start, and the
+   starts its wake or slot deferred, without admitting the failed
+   session again (`deferred_by_prepare_failure`; SESSION-RUNTIME-036).
 
 This matches current semantics for both singleton and pool dependencies:
 dependents only need “an alive instance” of the dependency template.
@@ -370,6 +376,7 @@ operator-visible outcome:
 - `skipped_due_to_failed_dependency`
 - `deferred_by_wake_budget`
 - `deferred_by_prepare_budget`
+- `deferred_by_prepare_failure`
 - `already_satisfied`
 - `stop_failed`
 - `stop_slow_survivor`

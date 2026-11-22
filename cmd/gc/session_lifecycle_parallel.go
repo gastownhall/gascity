@@ -790,6 +790,12 @@ type asyncStartTracker struct {
 	// admitted counts the starts handed out by start and not yet finished, for
 	// busy. It is read without mu, from the controller's tick.
 	admitted atomic.Int64
+	// holdMu guards preparationHolds, which maps the bead ID of each session
+	// whose async preparation failed to the time its hold ends
+	// (holdFailedPreparation): until then an async pass does not admit it
+	// (preparationHeldUntil).
+	holdMu           sync.Mutex
+	preparationHolds map[string]time.Time
 }
 
 func (t *asyncStartTracker) start() (func(), bool) {
@@ -822,7 +828,8 @@ func (t *asyncStartTracker) busy() bool {
 // under name, so dependency liveness (startInFlight) can see a start that has
 // not PreWoken yet — its in-flight marker does not exist until PreWake. The
 // returned func removes this admission's record and nothing else: a start
-// unmarks when it counts done, after its runtime lease is released, so a
+// unmarks late (a start that ran once its commit returns or its bound gives
+// up on it, before its follow-up pass; any other when it counts done), so a
 // later admission of the same name may already have replaced the record, and
 // that admission's record must survive the earlier start's unmark. The
 // returned func is idempotent.
@@ -856,6 +863,83 @@ func (t *asyncStartTracker) startInFlight(name string) bool {
 	}
 	_, ok := t.startNames.Load(name)
 	return ok
+}
+
+// asyncPrepareFailureHold is how long a session whose async preparation
+// failed is held out of async admission: one patrol interval, the cadence the
+// patrol retries a start at. The failure requests a follow-up pass, which the
+// controller runs at once; the hold keeps that pass from admitting the failed
+// start again, so it runs the candidates behind it instead.
+func asyncPrepareFailureHold(cfg *config.City) time.Duration {
+	if cfg == nil {
+		var daemon config.DaemonConfig
+		return daemon.PatrolIntervalDuration()
+	}
+	return cfg.Daemon.PatrolIntervalDuration()
+}
+
+// holdFailedPreparation holds the session with bead ID id out of async
+// admission until until, because its async preparation failed, and forgets
+// the holds that ended by now. It reports whether it recorded the hold: a nil
+// tracker or an empty id records none.
+func (t *asyncStartTracker) holdFailedPreparation(id string, now, until time.Time) bool {
+	id = strings.TrimSpace(id)
+	if t == nil || id == "" {
+		return false
+	}
+	t.holdMu.Lock()
+	defer t.holdMu.Unlock()
+	for heldID, end := range t.preparationHolds {
+		if !now.Before(end) {
+			delete(t.preparationHolds, heldID)
+		}
+	}
+	if t.preparationHolds == nil {
+		t.preparationHolds = make(map[string]time.Time)
+	}
+	t.preparationHolds[id] = until
+	return true
+}
+
+// preparationHeldUntil reports whether the session with bead ID id is held out
+// of async admission at now (holdFailedPreparation), and when the hold ends. A
+// hold that has ended is forgotten. A nil tracker holds nothing.
+func (t *asyncStartTracker) preparationHeldUntil(id string, now time.Time) (time.Time, bool) {
+	if t == nil {
+		return time.Time{}, false
+	}
+	id = strings.TrimSpace(id)
+	t.holdMu.Lock()
+	defer t.holdMu.Unlock()
+	until, ok := t.preparationHolds[id]
+	if !ok {
+		return time.Time{}, false
+	}
+	if !now.Before(until) {
+		delete(t.preparationHolds, id)
+		return time.Time{}, false
+	}
+	return until, true
+}
+
+// deferHeldAsyncStart defers candidate when its session is held out of async
+// admission because its last async preparation failed less than a hold ago
+// (asyncPrepareFailureHold): it logs and traces the deferral and reports
+// true. The deferral happens before any slot, lease, ticket, wake, breaker
+// accounting or write, and records no start-gate deferral: the hold is the
+// candidate's own state.
+func deferHeldAsyncStart(tracker *asyncStartTracker, candidate startCandidate, now time.Time, wave int, cfg *config.City, stderr io.Writer, trace *sessionReconcilerTraceCycle) bool {
+	until, held := tracker.preparationHeldUntil(candidate.info.ID, now)
+	if !held {
+		return false
+	}
+	logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByPrepareFailure), time.Time{}, time.Time{}, nil)
+	if trace != nil {
+		trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonPrepareFailureHold, TraceOutcomeDeferredByPrepareFailure, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
+			"held_until": until.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return true
 }
 
 func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
@@ -949,10 +1033,6 @@ func (t *asyncStartTracker) waitUntil(timeout time.Duration, shouldStop func() b
 	}
 }
 
-// asyncAdmittedStart is one async start the pass has admitted — slot
-// reserved, runtime lease taken, capacity ticket held, restart recorded — and
-// handed to its own goroutine before preparation: the goroutine prepares it
-// off the reconciler tick and runs it to its commit.
 // admittedStartLookup reports whether an admitted async start is preparing or
 // running under the session name. Dependency liveness consults it before the
 // runtime liveness probe, so a dependent waits for a dependency whose start
@@ -966,6 +1046,10 @@ func (l admittedStartLookup) inFlight(name string) bool {
 	return l != nil && l(name)
 }
 
+// asyncAdmittedStart is one async start the pass has admitted — slot
+// reserved, runtime lease taken, capacity ticket held, restart recorded — and
+// handed to its own goroutine before preparation: the goroutine prepares it
+// off the reconciler tick and runs it to its commit.
 type asyncAdmittedStart struct {
 	// candidate carries the admission's runtime lease (candidate.lease) and
 	// the row identity preparation re-reads.
@@ -974,7 +1058,7 @@ type asyncAdmittedStart struct {
 	// prepared start, and undoPrepared returns it when preparation fails.
 	ticket *capacityTicket
 	// undoPrepared rolls back an admission whose preparation failed with err:
-	// a superseded PreWake restores the breaker snapshot (no restart
+	// a superseded PreWake takes the breaker restart back (no restart
 	// happened), anything else clears the row's in-flight marker, then the
 	// admission's ticket, lease and slot are released, the start counted
 	// done, and the failed outcome logged with the preparation's phases.
@@ -990,6 +1074,12 @@ type asyncAdmittedStart struct {
 	// release gives back the start's async slot. It does no store I/O, so the
 	// start goroutine can run it whatever state the store is in.
 	release func()
+	// unmark removes the admission from the tracker's admitted-start registry
+	// (markStartInFlight); nil when the admission took no runtime lease. done
+	// removes it as well, for a start that ends before provider Start; a start
+	// that ran calls unmark before it requests its follow-up pass, so that
+	// pass reads the committed start, not an admitted one.
+	unmark  func()
 	done    func()
 	tracker *asyncStartTracker // counts the start's goroutine; nil counts nothing
 }
@@ -2676,6 +2766,7 @@ func enqueuePreparedStartWaveForCity(
 				sessFront = sessionFrontDoor(store)
 			}
 			var item *preparedStart
+			held := false
 			if ctx != nil && ctx.Err() != nil {
 				// The record and its durable flush precede the undo: the
 				// undo's done count is what waits on this start, so every
@@ -2684,6 +2775,11 @@ func enqueuePreparedStartWaveForCity(
 				recordFailure(TraceOutcomeContextCanceled, ctx.Err(), startPhaseTimings{})
 				reserved.drop("context_canceled", ctx.Err())
 			} else if prepared, timings, err := prepareAsyncStart(prepare, reserved.candidate); err != nil {
+				// The hold lands before the undo gives back the lease, slot
+				// and registry entry, so a pass that can admit the session
+				// again finds it held.
+				failedAt := prepareClockNow(clk)
+				held = reserved.tracker.holdFailedPreparation(reserved.candidate.info.ID, failedAt, failedAt.Add(asyncPrepareFailureHold(cfg)))
 				if errors.Is(err, errPreparePanicked) {
 					// Preparation stopped between its own writes, so its
 					// row gets the marker clear a failed prepare gets (a
@@ -2710,7 +2806,16 @@ func enqueuePreparedStartWaveForCity(
 				item = prepared
 			}
 			if item == nil {
-				if asyncFollowUp != nil {
+				// Nothing launched: the undo restored or cleared the row and
+				// released the admission. A failed preparation then requests
+				// the follow-up pass that runs what its admission held back:
+				// the rest of a dependency-sensitive batch's wave, which
+				// yielded on it, and the starts its wake or slot deferred.
+				// The hold keeps that pass from admitting this session again,
+				// so a preparation that fails every time is retried once a
+				// patrol interval, never by a pass it asked for. A canceled
+				// start requests none.
+				if held && asyncFollowUp != nil {
 					asyncFollowUp()
 				}
 				return
@@ -2741,8 +2846,14 @@ func enqueuePreparedStartWaveForCity(
 				})
 			// The commit is done or abandoned: the lease is released, or its
 			// flock abandoned, or held by the commit that is still running, so
-			// give the slot back before the follow-up.
+			// give the slot back before the follow-up. The registry entry goes
+			// too: the pass the follow-up runs reads the committed start, and
+			// an entry left until done would keep this session's dependents
+			// blocked in it.
 			releaseStart()
+			if reserved.unmark != nil {
+				reserved.unmark()
+			}
 			if asyncFollowUp != nil {
 				asyncFollowUp()
 			}
@@ -5314,6 +5425,11 @@ func executePlannedStartsTraced(
 			if ctx != nil && ctx.Err() != nil {
 				return wakeCount
 			}
+			// A session whose async preparation failed sits out its hold, so
+			// the follow-up pass its failure requested runs the rest instead.
+			if startOpts.async && deferHeldAsyncStart(startOpts.asyncTracker, candidate, clk.Now(), wave, cfg, stderr, trace) {
+				continue
+			}
 			if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk, admittedLookup) {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 				continue
@@ -5420,12 +5536,15 @@ func executePlannedStartsTraced(
 						release = dropLease
 					}
 				}
+				var unmark func()
 				if startOpts.async && leased {
 					// The admission is visible to dependency liveness from
-					// here until the start counts done: a dependent must wait
-					// for a dependency whose start was admitted but has not
-					// PreWoken (its marker does not exist until PreWake).
-					unmark := startOpts.asyncTracker.markStartInFlight(startLeaseName(candidate))
+					// here until the start ends: a dependent must wait for a
+					// dependency whose start was admitted but has not PreWoken
+					// (its marker does not exist until PreWake). done removes
+					// the entry for a start that ends before provider Start; a
+					// start that ran removes it before its follow-up pass.
+					unmark = startOpts.asyncTracker.markStartInFlight(startLeaseName(candidate))
 					countDone := done
 					done = func() {
 						unmark()
@@ -5509,11 +5628,15 @@ func executePlannedStartsTraced(
 						continue
 					}
 				}
-				var cbBefore sessionCircuitBreakerEntrySnapshot
-				var cbAfter sessionCircuitBreakerEntrySnapshot
+				// cbRestart is the restart this admission recorded, for the undo
+				// of a PreWake refused because the row moved: no restart
+				// happened. The undo takes it back only while the identity's
+				// restart accounting is unchanged since the record, so a
+				// progress observation or Reset that lands before it wins; an
+				// async start's refusal lands a whole prepare later.
+				var cbRestart sessionCircuitBreakerRestart
 				if identity != "" {
-					cbBefore = cb.entrySnapshot(identity)
-					state, err := recordSessionCircuitBreakerRestart(sessFront, candidate.info.ID, cb, identity, cbNow)
+					state, restart, err := recordSessionCircuitBreakerRestart(sessFront, candidate.info.ID, cb, identity, cbNow)
 					if err != nil {
 						fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 						drop("circuit_metadata_failed", err)
@@ -5529,11 +5652,7 @@ func executePlannedStartsTraced(
 						}
 						continue
 					}
-					// An async start's prepare failure undoes the restart a
-					// whole prepare later: the undo is conditional on the
-					// entry still matching this post-record snapshot, so a
-					// progress observation or Reset landing in between wins.
-					cbAfter = cb.entrySnapshot(identity)
+					cbRestart = restart
 				}
 				if startOpts.async {
 					// An async start prepares on its own goroutine, under its
@@ -5543,10 +5662,9 @@ func executePlannedStartsTraced(
 						// A PreWake refused because the row moved (or the lease
 						// was taken over) is no restart and leaves the row's
 						// in-flight marker to whoever moved it; the next pass
-						// decides again. The restore is conditional: the
-						// refusal lands a whole prepare after the record.
+						// decides again.
 						if errors.Is(err, errPreWakeSuperseded) {
-							cb.restoreEntrySnapshotIfUnchanged(sessFront, candidate.info.ID, identity, cbBefore, cbAfter, cbNow, stderr)
+							cb.undoRestart(sessFront, candidate.info.ID, cbRestart, cbNow, stderr)
 						} else {
 							clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
 						}
@@ -5564,6 +5682,7 @@ func executePlannedStartsTraced(
 						undoPrepared: undoPrepared,
 						drop:         drop,
 						release:      slotRelease,
+						unmark:       unmark,
 						done:         done,
 						tracker:      startOpts.asyncTracker,
 					})
@@ -5579,7 +5698,7 @@ func executePlannedStartsTraced(
 					// taken over) is no restart and leaves the row's in-flight
 					// marker to whoever moved it; the next pass decides again.
 					if errors.Is(err, errPreWakeSuperseded) {
-						cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
+						cb.undoRestart(sessFront, candidate.info.ID, cbRestart, cbNow, stderr)
 					} else {
 						clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
 					}
@@ -5681,7 +5800,11 @@ func executePlannedStartsTraced(
 		logLifecycleWave(stderr, "start", wave, waveStarted, len(waveCandidates))
 		if startOpts.async && asyncFollowUpRequired {
 			// Dependency-sensitive async batches yield after enqueueing so the
-			// next batch observes committed dependency and pending-create state.
+			// next batch observes committed dependency and pending-create
+			// state. Each start of the batch requests the follow-up pass that
+			// runs the rest: a start that reached provider Start once its
+			// commit returns, a failed preparation once its session is held
+			// (SESSION-RUNTIME-036); a canceled start requests none.
 			return wakeCount
 		}
 	}

@@ -12,19 +12,23 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/resilience"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // prepareFailingStore fails every Get made from inside
-// prepareStartCandidateForCity with err.
+// prepareStartCandidateForCity with err: every row's, or only the rows whose
+// ids are in only when it is set.
 type prepareFailingStore struct {
 	beads.Store
-	err error
+	err  error
+	only map[string]bool
 }
 
 func (s *prepareFailingStore) Get(id string) (beads.Bead, error) {
-	if inPrepare() {
+	if inPrepare() && (s.only == nil || s.only[id]) {
 		return beads.Bead{}, s.err
 	}
 	return s.Store.Get(id)
@@ -139,12 +143,91 @@ func assertAsyncStartReservationsReleased(t *testing.T, e *capacityEnv, tracker 
 	}
 }
 
+// waitAsyncStartGoroutines waits for every start goroutine tracker launched to
+// return, past its done count: a follow-up request comes after it.
+func waitAsyncStartGoroutines(t *testing.T, tracker *asyncStartTracker) {
+	t.Helper()
+	if err := tracker.waitLaunchedStarts(context.Background(), hangBudget); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// followUpProbe stands in for the controller's follow-up request. It counts
+// the requests and records, at each, what the pass it asks for would find of
+// the start's session: whether it is held out of admission, and what the start
+// has not given back yet (its admitted-start registry entry, its async slot,
+// its runtime name's flock).
+type followUpProbe struct {
+	tracker  *asyncStartTracker
+	limiter  *asyncStartLimiter
+	clk      clock.Clock
+	city, id string
+	name     string
+
+	mu         sync.Mutex
+	requests   int
+	held       bool
+	unreleased []string
+}
+
+func (p *followUpProbe) request() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.requests++
+	_, p.held = p.tracker.preparationHeldUntil(p.id, p.clk.Now())
+	if p.tracker.startInFlight(p.name) {
+		p.unreleased = append(p.unreleased, "its admitted-start registry entry")
+	}
+	if release, ok, _ := p.limiter.reserve(context.Background()); ok {
+		release()
+	} else {
+		p.unreleased = append(p.unreleased, "its async start slot")
+	}
+	if _, release, err := tryRuntimeLease(nil, p.city, p.name, "", 0); err == nil {
+		release()
+	} else {
+		p.unreleased = append(p.unreleased, "its runtime name's flock")
+	}
+}
+
+// assertFollowUps checks the start requested want follow-up passes, and that
+// each came after it gave everything back, with its session held out of
+// admission so that pass cannot admit it again.
+func (p *followUpProbe) assertFollowUps(t *testing.T, want int) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.requests != want {
+		t.Fatalf("follow-up passes requested = %d, want %d", p.requests, want)
+	}
+	if want == 0 {
+		return
+	}
+	if !p.held {
+		t.Fatal("the session was not held out of admission when its failed start requested its follow-up pass: that pass would admit it again")
+	}
+	if len(p.unreleased) > 0 {
+		t.Fatalf("the failed start requested its follow-up pass before it gave back %s", strings.Join(p.unreleased, ", "))
+	}
+}
+
+// assertPreparationHold checks whether the session with bead ID id is held
+// out of async admission now.
+func assertPreparationHold(t *testing.T, tracker *asyncStartTracker, id string, now time.Time, want bool) {
+	t.Helper()
+	if _, held := tracker.preparationHeldUntil(id, now); held != want {
+		t.Fatalf("session %s held out of admission = %t, want %t", id, held, want)
+	}
+}
+
 // TestAsyncPrepareFailureReleasesReservations: an admitted async start whose
 // preparation fails, or whose context ends before provider Start, records no
 // Start, releases its slot, flock, ticket, tracker count and registry entry,
-// clears the row's in-flight marker (except a superseded refusal), and leaves
-// a failed (or context_canceled) lifecycle line plus a durable
-// reconciler.start.execute record.
+// clears the row's in-flight marker (except a superseded refusal), and leaves a
+// failed (or context_canceled) lifecycle line plus a durable
+// reconciler.start.execute record. A failed preparation holds its session out
+// of async admission and then, with everything given back, requests one
+// follow-up pass; a canceled start holds nothing and requests none.
 func TestAsyncPrepareFailureReleasesReservations(t *testing.T) {
 	for _, sub := range []string{"store_error", "user_held", "superseded", "canceled_after_prepare"} {
 		t.Run(sub, func(t *testing.T) {
@@ -154,11 +237,14 @@ func TestAsyncPrepareFailureReleasesReservations(t *testing.T) {
 
 			limiter := newAsyncStartLimiter(1)
 			var tracker asyncStartTracker
+			probe := &followUpProbe{tracker: &tracker, limiter: limiter, clk: e.clk, city: e.city, id: c.info.ID, name: "worker-a"}
 			opts := append([]startExecutionOption(nil), e.startOptions...)
-			opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker), withAsyncStartLimiter(limiter))
+			opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker), withAsyncStartLimiter(limiter),
+				withAsyncStartFollowUp(probe.request))
 
 			wantOutcome := "failed"
 			wantCode := TraceOutcomeFailed
+			wantFollowUps := 1
 			store := e.store
 			var release func()
 			var gate chan struct{}
@@ -206,6 +292,7 @@ func TestAsyncPrepareFailureReleasesReservations(t *testing.T) {
 				case "canceled_after_prepare":
 					wantOutcome = "context_canceled"
 					wantCode = TraceOutcomeContextCanceled
+					wantFollowUps = 0
 					cancel()
 				}
 				release()
@@ -216,7 +303,10 @@ func TestAsyncPrepareFailureReleasesReservations(t *testing.T) {
 			if !tracker.wait(hangBudget) {
 				t.Fatal("async start did not finish within the hang budget")
 			}
+			waitAsyncStartGoroutines(t, &tracker)
 			assertAsyncStartReservationsReleased(t, e, &tracker, limiter, "worker-a", c.info.ID)
+			probe.assertFollowUps(t, wantFollowUps)
+			assertPreparationHold(t, &tracker, c.info.ID, e.clk.Now(), wantFollowUps == 1)
 
 			if got := e.log.String(); !strings.Contains(got, "session=worker-a") || !strings.Contains(got, "outcome="+wantOutcome) {
 				t.Fatalf("lifecycle log lacks the %s outcome line:\n%s", wantOutcome, got)
@@ -256,6 +346,8 @@ func TestAsyncPrepareFailureReleasesReservations(t *testing.T) {
 			t.Fatal("prepare ran though the context was already done")
 		}
 		assertAsyncStartReservationsReleased(t, e, d.tracker, d.limiter, "worker-a", d.candidate.info.ID)
+		d.probe.assertFollowUps(t, 0)
+		assertPreparationHold(t, d.tracker, d.candidate.info.ID, e.clk.Now(), false)
 		if got := e.log.String(); !strings.Contains(got, "outcome=context_canceled") {
 			t.Fatalf("lifecycle log lacks the context_canceled outcome line:\n%s", got)
 		}
@@ -275,6 +367,8 @@ func TestAsyncPrepareFailureReleasesReservations(t *testing.T) {
 		})
 		d.assertDropOutcome(t, "panic_recovered", false)
 		assertAsyncStartReservationsReleased(t, e, d.tracker, d.limiter, "worker-a", d.candidate.info.ID)
+		d.probe.assertFollowUps(t, 1)
+		assertPreparationHold(t, d.tracker, d.candidate.info.ID, e.clk.Now(), true)
 		if got := e.log.String(); !strings.Contains(got, "session=worker-a") || !strings.Contains(got, "outcome=panic_recovered") {
 			t.Fatalf("lifecycle log lacks the panic_recovered outcome line:\n%s", got)
 		}
@@ -294,6 +388,8 @@ type directAdmission struct {
 	// dropped receives drop's outcome; undone is closed if undoPrepared runs.
 	dropped chan string
 	undone  chan struct{}
+	// probe is the start's follow-up request.
+	probe *followUpProbe
 }
 
 func newDirectAdmission(t *testing.T, e *capacityEnv, name string) *directAdmission {
@@ -324,6 +420,7 @@ func newDirectAdmission(t *testing.T, e *capacityEnv, name string) *directAdmiss
 		limiter:   limiter,
 		dropped:   make(chan string, 1),
 		undone:    make(chan struct{}),
+		probe:     &followUpProbe{tracker: tracker, limiter: limiter, clk: e.clk, city: e.city, id: c.info.ID, name: name},
 	}
 	d.admitted = asyncAdmittedStart{
 		candidate: c,
@@ -346,16 +443,17 @@ func newDirectAdmission(t *testing.T, e *capacityEnv, name string) *directAdmiss
 }
 
 // enqueue hands the admission to the enqueue with prepare, checks it was
-// reported start_enqueued, and waits for its goroutine to finish.
+// reported start_enqueued, and waits for its goroutine to return.
 func (d *directAdmission) enqueue(ctx context.Context, t *testing.T, e *capacityEnv, tr *asyncPrepareTrace, prepare func(startCandidate) (*preparedStart, prepareTimings, error)) {
 	t.Helper()
-	results := enqueuePreparedStartWaveForCity(ctx, []asyncAdmittedStart{d.admitted}, e.city, e.sp, e.store, e.cfg, e.clk, e.rec, prepare, 0, 1, io.Discard, &e.log, tr.cycle, nil, nil, nil, nil)
+	results := enqueuePreparedStartWaveForCity(ctx, []asyncAdmittedStart{d.admitted}, e.city, e.sp, e.store, e.cfg, e.clk, e.rec, prepare, 0, 1, io.Discard, &e.log, tr.cycle, d.probe.request, nil, nil, nil)
 	if len(results) != 1 || results[0].outcome != TraceOutcomeStartEnqueued {
 		t.Fatalf("results = %+v, want one start_enqueued result", results)
 	}
 	if !d.tracker.wait(hangBudget) {
 		t.Fatal("async start did not finish within the hang budget")
 	}
+	waitAsyncStartGoroutines(t, d.tracker)
 }
 
 // assertDropOutcome checks drop ran with outcome, and whether undoPrepared ran.
@@ -394,27 +492,102 @@ func (d *directAdmission) assertTraced(t *testing.T, tr *asyncPrepareTrace, want
 
 // TestAsyncPrepareSupersededBreakerUndo: an async start's superseded-PreWake
 // refusal lands a whole prepare after the restart was recorded, so the undo
-// restores the pre-restart entry only while nothing else has touched the
-// identity's breaker since; a progress observation or a manual Reset in
-// between wins.
+// takes the restart back only while the identity's restart accounting is
+// unchanged since the record: a progress observation or a manual Reset in
+// between wins. A pass that observes no progress there (no assigned work, a
+// first signature, an unchanged one) and a trim of restarts that aged out of
+// the window do not block the undo. The row's breaker metadata follows.
 func TestAsyncPrepareSupersededBreakerUndo(t *testing.T) {
-	for _, sub := range []string{"restores_without_interference", "keeps_newer_observation", "keeps_after_reset"} {
-		t.Run(sub, func(t *testing.T) {
+	const identity = "rig-a/session-a"
+	for _, tc := range []struct {
+		name string
+		// seed runs before the admission; interfere runs in the window after
+		// the admission recorded its restart and before the refusal. now is
+		// the admission's time.
+		seed, interfere func(cb *sessionCircuitBreaker, now time.Time)
+		// wantRestarts is the identity's restart count once the start ended,
+		// read 2s after the admission; -1 wants no entry at all.
+		wantRestarts int
+		// wantKept wants the admission's restart to stay counted.
+		wantKept bool
+	}{
+		{name: "restores_without_interference", wantRestarts: -1},
+		{
+			// A pass over an identity with no assigned work observes "".
+			name: "restores_after_no_progress_pass",
+			interfere: func(cb *sessionCircuitBreaker, now time.Time) {
+				cb.ObserveProgressSignature(identity, "", now.Add(time.Second))
+			},
+			wantRestarts: -1,
+		},
+		{
+			// A first signature primes the comparison and is no progress.
+			name: "restores_after_first_signature",
+			interfere: func(cb *sessionCircuitBreaker, now time.Time) {
+				cb.ObserveProgressSignature(identity, "sig-1", now.Add(time.Second))
+			},
+			wantRestarts: -1,
+		},
+		{
+			name: "restores_after_unchanged_signature",
+			seed: func(cb *sessionCircuitBreaker, now time.Time) {
+				cb.ObserveProgressSignature(identity, "sig-1", now.Add(-time.Minute))
+			},
+			interfere: func(cb *sessionCircuitBreaker, now time.Time) {
+				cb.ObserveProgressSignature(identity, "sig-1", now.Add(time.Second))
+			},
+			wantRestarts: 0,
+		},
+		{
+			// A read in the window (here a status snapshot) trims a restart
+			// that aged out of the rolling window off the history; that is
+			// no new restart.
+			name: "restores_after_expired_restart_trimmed",
+			seed: func(cb *sessionCircuitBreaker, now time.Time) {
+				cb.RecordRestart(identity, now.Add(-30*time.Minute+time.Second))
+			},
+			interfere: func(cb *sessionCircuitBreaker, now time.Time) {
+				cb.Snapshot(now.Add(2 * time.Second))
+			},
+			wantRestarts: 0,
+		},
+		{
+			// Two different signatures: the first only primes the breaker's
+			// expectation, the second is the progress it records.
+			name: "keeps_newer_observation",
+			interfere: func(cb *sessionCircuitBreaker, now time.Time) {
+				cb.ObserveProgressSignature(identity, "sig-1", now)
+				cb.ObserveProgressSignature(identity, "sig-2", now)
+			},
+			wantRestarts: 1,
+			wantKept:     true,
+		},
+		{
+			// One restart from before the admission, so an undo that ignored
+			// the Reset would show it coming back.
+			name: "keeps_after_reset",
+			seed: func(cb *sessionCircuitBreaker, now time.Time) {
+				cb.RecordRestart(identity, now.Add(-time.Minute))
+			},
+			interfere: func(cb *sessionCircuitBreaker, _ time.Time) {
+				cb.Reset(identity)
+			},
+			wantRestarts: -1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			e := newCapacityEnv(t, false, "template-a")
 			e.cfg.Daemon.SessionCircuitBreaker = true
 			e.cfg.Daemon.SessionCircuitBreakerMaxRestarts = intPtrCircuit(5)
 			e.cfg.Daemon.SessionCircuitBreakerWindow = "30m"
 			cb := breakerAt(30*time.Minute, 5)
 			setSessionCircuitBreakerForTest(t, cb)
-			if sub == "keeps_after_reset" {
-				// One restart from before the admission, so an undo that
-				// ignored the Reset would show it coming back.
-				cb.mu.Lock()
-				cb.recordRestartLocked("rig-a/session-a", e.clk.Now().UTC())
-				cb.mu.Unlock()
+			now := e.clk.Now().UTC()
+			if tc.seed != nil {
+				tc.seed(cb, now)
 			}
 
-			named := createCircuitTestNamedSessionWithIdentity(t, e.reconcilerTestEnv, "session-a", "template-a", "rig-a/session-a", "asleep")
+			named := createCircuitTestNamedSessionWithIdentity(t, e.reconcilerTestEnv, "session-a", "template-a", identity, "asleep")
 			c := startCandidate{info: e.sessionInfo(named.ID), tp: TemplateParams{Command: "test-cmd", SessionName: "session-a", TemplateName: "template-a"}}
 			moved := &prepareMoveStore{Store: e.store, id: named.ID, mintRead: make(chan struct{}), unblock: make(chan struct{})}
 			var unblockOnce sync.Once
@@ -437,14 +610,9 @@ func TestAsyncPrepareSupersededBreakerUndo(t *testing.T) {
 			}
 			// The admission has recorded the restart, and the refusal is one
 			// fresh read away: this window is after the record and before the
-			// undo. Two different signatures: the first only primes the
-			// breaker's expectation, the second is the progress it records.
-			switch sub {
-			case "keeps_newer_observation":
-				cb.ObserveProgressSignature("rig-a/session-a", "sig-1", e.clk.Now().UTC())
-				cb.ObserveProgressSignature("rig-a/session-a", "sig-2", e.clk.Now().UTC())
-			case "keeps_after_reset":
-				cb.Reset("rig-a/session-a")
+			// undo.
+			if tc.interfere != nil {
+				tc.interfere(cb, now)
 			}
 			if err := sessionFrontDoor(e.store).ApplyPatch(c.info.ID, sessionpkg.MetadataPatch{"generation": "99"}); err != nil {
 				t.Fatalf("moving the row: %v", err)
@@ -460,37 +628,335 @@ func TestAsyncPrepareSupersededBreakerUndo(t *testing.T) {
 				t.Fatalf("Start calls = %d, want 0", n)
 			}
 			var snap *CircuitBreakerSnapshot
-			for _, s := range cb.Snapshot(e.clk.Now().UTC()) {
-				if s.Identity == "rig-a/session-a" {
+			for _, s := range cb.Snapshot(now.Add(2 * time.Second)) {
+				if s.Identity == identity {
 					s := s
 					snap = &s
 				}
 			}
-			switch sub {
-			case "restores_without_interference":
-				// The identity had no entry before the admission, so the undo
-				// removes the phantom restart entirely.
-				if snap != nil {
-					t.Fatalf("breaker entry survived the superseded refusal: %+v", *snap)
-				}
-			case "keeps_after_reset":
-				// The Reset's cleared entry stands: neither the phantom
-				// restart nor the one seeded before the admission returns.
-				if snap != nil {
-					t.Fatalf("a restore undid the operator's Reset: %+v", *snap)
-				}
-			case "keeps_newer_observation":
-				if snap == nil {
-					t.Fatal("no breaker entry for rig-a/session-a after the superseded refusal")
-				}
-				if snap.RestartCount != 1 {
-					t.Fatalf("restart count = %d, want 1 (the phantom restart stays counted when an observation interfered)", snap.RestartCount)
-				}
-				if snap.LastProgress.IsZero() {
-					t.Fatal("the progress observation that landed between admission and refusal was reverted")
-				}
+			switch {
+			case tc.wantRestarts < 0 && snap != nil:
+				t.Fatalf("breaker entry %+v after the superseded refusal, want none: the undo took back the admission's restart, or the Reset stands", *snap)
+			case tc.wantRestarts >= 0 && snap == nil:
+				t.Fatalf("no breaker entry after the superseded refusal, want one with %d restart(s)", tc.wantRestarts)
+			case tc.wantRestarts >= 0 && snap.RestartCount != tc.wantRestarts:
+				t.Fatalf("restart count = %d, want %d", snap.RestartCount, tc.wantRestarts)
+			}
+			if tc.wantKept && snap.LastProgress.IsZero() {
+				t.Fatal("the progress observation that landed between admission and refusal was reverted")
+			}
+			// The row's breaker metadata follows the entry the undo left.
+			persisted := e.bead(t, named.ID).Metadata[sessionCircuitRestartsMetadata]
+			if kept := strings.Contains(persisted, formatCircuitTime(now)); kept != tc.wantKept {
+				t.Fatalf("persisted restart history %q holds the admission's restart = %t, want %t", persisted, kept, tc.wantKept)
 			}
 		})
+	}
+}
+
+// TestAsyncPrepareFailingEveryTimeIsNotReadmittedByItsFollowUp: a preparation
+// that fails on every attempt requests one follow-up pass per failure, and
+// that pass does not admit it again: its session is held out of async
+// admission for one patrol interval. The controller runs a pass at once for
+// each follow-up a start requests (a key-less Enqueue; tick_debounce defaults
+// to 0), so a failure re-admitted by the pass it requested would fail again
+// and request the next: a tight loop of reconcile passes, each with lease
+// writes and a durable trace flush, that with the session circuit breaker on
+// also spends the named session's restart window on a transient store error.
+// The loop below is that controller, bounded so a regression fails instead of
+// spinning. The first pass once the hold has ended admits it again.
+func TestAsyncPrepareFailingEveryTimeIsNotReadmittedByItsFollowUp(t *testing.T) {
+	e := newCapacityEnv(t, false, "worker-a")
+	c := e.pendingCreate(t, "worker-a", "", nil)
+	store := &prepareFailingStore{Store: e.store, err: errors.New("store unreachable during prepare")}
+
+	var tracker asyncStartTracker
+	var requested atomic.Int64
+	opts := append([]startExecutionOption(nil), e.startOptions...)
+	opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker),
+		withAsyncStartFollowUp(func() { requested.Add(1) }))
+	pass := func() int {
+		t.Helper()
+		woken := executePlannedStartsTraced(context.Background(), []startCandidate{e.refreshed(c)}, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, e.trace, opts...)
+		// The tracker stays open for the next pass: wait on the goroutines,
+		// not on wait, which stops the tracker admitting.
+		waitAsyncStartGoroutines(t, &tracker)
+		return woken
+	}
+
+	const maxPasses = 4
+	admissions, passes := 0, 0
+	for passes < maxPasses {
+		passes++
+		before := requested.Load()
+		admissions += pass()
+		if requested.Load() == before {
+			break
+		}
+	}
+	log := e.log.String()
+	if admissions != 1 {
+		t.Fatalf("admissions = %d over the controller's passes, want 1: the failed preparation's own follow-up re-admitted it\n%s", admissions, log)
+	}
+	if got := requested.Load(); got != 1 || passes != 2 {
+		t.Fatalf("follow-up passes requested = %d over %d passes, want 1 over 2: the failure requests one, and the pass it runs requests none\n%s", got, passes, log)
+	}
+	if n := e.sp.CountCalls("Start", "worker-a"); n != 0 {
+		t.Fatalf("Start calls = %d, want 0", n)
+	}
+	if got := strings.Count(log, "session=worker-a template=worker-a outcome=failed"); got != 1 {
+		t.Fatalf("failed outcome lines = %d, want 1\n%s", got, log)
+	}
+	if got := strings.Count(log, "session=worker-a template=worker-a outcome="+string(TraceOutcomeDeferredByPrepareFailure)); got != 1 {
+		t.Fatalf("%s lines = %d, want 1 (the follow-up pass)\n%s", TraceOutcomeDeferredByPrepareFailure, got, log)
+	}
+
+	// Until the hold ends, every pass leaves the session alone.
+	hold := e.cfg.Daemon.PatrolIntervalDuration()
+	e.clk.Advance(hold - time.Second)
+	if woken := pass(); woken != 0 {
+		t.Fatalf("pass inside the hold woken = %d, want 0", woken)
+	}
+	e.clk.Advance(time.Second)
+	if woken := pass(); woken != 1 {
+		t.Fatalf("pass once the hold ended woken = %d, want 1\n%s", woken, e.log.String())
+	}
+	if got := strings.Count(e.log.String(), "session=worker-a template=worker-a outcome=failed"); got != 2 {
+		t.Fatalf("failed outcome lines = %d, want 2 once the hold ended\n%s", got, e.log.String())
+	}
+	if got := requested.Load(); got != 2 {
+		t.Fatalf("follow-up passes requested = %d, want 2: the second failure requests its own", got)
+	}
+}
+
+// TestAsyncPrepareFailedDependencyBatchDoesNotStrandTheWave: an async pass
+// yields after a batch holding a candidate whose template has depends_on, and
+// counts on the batch's starts to request the follow-up pass that runs the
+// rest of the wave. When every admitted start of that batch fails its
+// preparation, the failures request that pass, and it starts the healthy
+// candidate behind them without admitting the failed ones again. The loop is
+// the controller, which runs a pass for each follow-up a start requests,
+// bounded so a regression fails instead of spinning.
+func TestAsyncPrepareFailedDependencyBatchDoesNotStrandTheWave(t *testing.T) {
+	e := newCapacityEnv(t, false, "db", "app1", "app2", "app3", "w1")
+	for i := range e.cfg.Agents {
+		if strings.HasPrefix(e.cfg.Agents[i].Name, "app") {
+			e.cfg.Agents[i].DependsOn = []string{"db"}
+		}
+	}
+	// db is alive, so every candidate is in one wave; the apps are created
+	// first, so wake fairness (creation time) puts all three in the first
+	// batch and w1 in the next.
+	if err := e.sp.Start(context.Background(), "db", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatal(err)
+	}
+	failing := map[string]bool{}
+	var candidates []startCandidate
+	for _, name := range []string{"app1", "app2", "app3", "w1"} {
+		c := e.pendingCreate(t, name, "", nil)
+		if name != "w1" {
+			failing[c.info.ID] = true
+		}
+		candidates = append(candidates, c)
+	}
+	store := &prepareFailingStore{Store: e.store, err: errors.New("work_dir unreadable during prepare"), only: failing}
+
+	var tracker asyncStartTracker
+	var requested atomic.Int64
+	opts := append([]startExecutionOption(nil), e.startOptions...)
+	opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker),
+		withAsyncStartFollowUp(func() { requested.Add(1) }))
+
+	const maxPasses = 4
+	var woken []int
+	for pass := 1; pass <= maxPasses; pass++ {
+		before := requested.Load()
+		// The controller offers what is still not running.
+		var offered []startCandidate
+		for _, c := range candidates {
+			if !e.sp.IsRunning(c.name()) {
+				offered = append(offered, e.refreshed(c))
+			}
+		}
+		woken = append(woken, executePlannedStartsTraced(context.Background(), offered, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, e.trace, opts...))
+		waitAsyncStartGoroutines(t, &tracker)
+		if requested.Load() == before {
+			break
+		}
+	}
+	log := e.log.String()
+	if len(woken) == 0 || woken[0] != defaultStartDependencyRecheckBatchSize {
+		t.Fatalf("first pass woken = %v, want the %d dependency-sensitive admissions it yields after\n%s", woken, defaultStartDependencyRecheckBatchSize, log)
+	}
+	if n := e.sp.CountCalls("Start", "w1"); n != 1 {
+		t.Fatalf("w1 Start calls = %d over passes woken %v, want 1: the failed batch stranded the rest of its wave\n%s", n, woken, log)
+	}
+	for _, name := range []string{"app1", "app2", "app3"} {
+		if n := e.sp.CountCalls("Start", name); n != 0 {
+			t.Fatalf("%s Start calls = %d, want 0", name, n)
+		}
+		if got := strings.Count(log, "session="+name+" template="+name+" outcome=failed"); got != 1 {
+			t.Fatalf("%s failed outcome lines = %d, want 1: the pass its failure requested admitted it again\n%s", name, got, log)
+		}
+		if !strings.Contains(log, "session="+name+" template="+name+" outcome="+string(TraceOutcomeDeferredByPrepareFailure)) {
+			t.Fatalf("no deferred_by_prepare_failure line for %s, held after its failed preparation\n%s", name, log)
+		}
+	}
+}
+
+// TestAsyncPrepareFailureHoldKeepsTheWakeBudgetForOthers: an async admission
+// spends a wake before it prepares, and a failed preparation leaves its
+// session at the front of wake-fairness order. Its hold keeps it out of the
+// passes that follow the failure, so the candidate its admission deferred by
+// the wake budget starts on the next pass instead of losing the budget to it
+// on every pass; the next pass after the hold ends admits it again.
+func TestAsyncPrepareFailureHoldKeepsTheWakeBudgetForOthers(t *testing.T) {
+	e := newCapacityEnv(t, false, "f1", "h1")
+	e.limitToOneWake()
+	f1 := e.pendingCreate(t, "f1", "", nil)
+	h1 := e.pendingCreate(t, "h1", "", nil)
+	store := &prepareFailingStore{Store: e.store, err: errors.New("work_dir unreadable during prepare"), only: map[string]bool{f1.info.ID: true}}
+
+	var tracker asyncStartTracker
+	opts := append([]startExecutionOption(nil), e.startOptions...)
+	opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker))
+	pass := func(candidates ...startCandidate) int {
+		t.Helper()
+		var offered []startCandidate
+		for _, c := range candidates {
+			offered = append(offered, e.refreshed(c))
+		}
+		woken := executePlannedStartsTraced(context.Background(), offered, e.cfg, e.desiredState, e.sp, store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, e.trace, opts...)
+		waitAsyncStartGoroutines(t, &tracker)
+		return woken
+	}
+
+	if woken := pass(f1, h1); woken != 1 {
+		t.Fatalf("first pass woken = %d, want 1 (f1 spends the one wake)", woken)
+	}
+	if got := e.log.String(); !strings.Contains(got, "session=h1 template=h1 outcome=deferred_by_wake_budget") {
+		t.Fatalf("h1 was not deferred by the wake budget f1's admission spent:\n%s", got)
+	}
+	// The next pass, whatever runs it, finds f1 held.
+	if woken := pass(f1, h1); woken != 1 {
+		t.Fatalf("second pass woken = %d, want 1 (h1)", woken)
+	}
+	log := e.log.String()
+	if n := e.sp.CountCalls("Start", "h1"); n != 1 {
+		t.Fatalf("h1 Start calls = %d, want 1: the failing f1 took the wake budget again\n%s", n, log)
+	}
+	if got := strings.Count(log, "session=f1 template=f1 outcome=failed"); got != 1 {
+		t.Fatalf("f1 failed outcome lines = %d, want 1 while it is held\n%s", got, log)
+	}
+	if !strings.Contains(log, "session=f1 template=f1 outcome="+string(TraceOutcomeDeferredByPrepareFailure)) {
+		t.Fatalf("no deferred_by_prepare_failure line for the held f1:\n%s", log)
+	}
+
+	// One patrol interval after the failure the hold has ended.
+	e.clk.Advance(e.cfg.Daemon.PatrolIntervalDuration())
+	if woken := pass(f1); woken != 1 {
+		t.Fatalf("pass after the hold woken = %d, want 1: f1 is admitted again once its hold ends\n%s", woken, e.log.String())
+	}
+	if got := strings.Count(e.log.String(), "session=f1 template=f1 outcome=failed"); got != 2 {
+		t.Fatalf("f1 failed outcome lines = %d, want 2 after the hold ended\n%s", got, e.log.String())
+	}
+}
+
+// TestAsyncStartTrackerPreparationHold: a failed preparation's hold is keyed
+// by the session's bead ID and holds until its end, exclusive. A hold that
+// ended is forgotten by the next read of it or the next hold recorded, and a
+// nil tracker or an empty ID records and holds nothing.
+func TestAsyncStartTrackerPreparationHold(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	end := now.Add(time.Minute)
+	var tracker asyncStartTracker
+	if tracker.holdFailedPreparation(" ", now, end) {
+		t.Fatal("an empty id recorded a hold")
+	}
+	if !tracker.holdFailedPreparation("gc-1", now, end) {
+		t.Fatal("the hold of gc-1 was not recorded")
+	}
+	if until, held := tracker.preparationHeldUntil("gc-1", end.Add(-time.Nanosecond)); !held || !until.Equal(end) {
+		t.Fatalf("gc-1 just before its end: held = %t until %s, want held until %s", held, until, end)
+	}
+	if _, held := tracker.preparationHeldUntil("gc-2", now); held {
+		t.Fatal("gc-2 is held by gc-1's hold")
+	}
+	if _, held := tracker.preparationHeldUntil("gc-1", end); held {
+		t.Fatal("gc-1 is still held at its end")
+	}
+	if n := len(tracker.preparationHolds); n != 0 {
+		t.Fatalf("holds kept = %d after the read of an ended one, want 0", n)
+	}
+	// A hold recorded later forgets the ones that ended by then, read or not.
+	tracker.holdFailedPreparation("gc-1", now, end)
+	tracker.holdFailedPreparation("gc-3", end, end.Add(time.Minute))
+	if _, kept := tracker.preparationHolds["gc-1"]; kept || len(tracker.preparationHolds) != 1 {
+		t.Fatalf("holds after a later one = %v, want only gc-3's", tracker.preparationHolds)
+	}
+	var none *asyncStartTracker
+	if none.holdFailedPreparation("gc-1", now, end) {
+		t.Fatal("a nil tracker recorded a hold")
+	}
+	if _, held := none.preparationHeldUntil("gc-1", now); held {
+		t.Fatal("a nil tracker holds a session")
+	}
+}
+
+// TestAsyncPrepareFailureHoldIsOnePatrolInterval: the hold is the city's
+// patrol interval, the patrol default without a config.
+func TestAsyncPrepareFailureHoldIsOnePatrolInterval(t *testing.T) {
+	if got := asyncPrepareFailureHold(nil); got != 30*time.Second {
+		t.Fatalf("hold without a config = %s, want the 30s patrol default", got)
+	}
+	cfg := &config.City{Daemon: config.DaemonConfig{PatrolInterval: "15s"}}
+	if got := asyncPrepareFailureHold(cfg); got != 15*time.Second {
+		t.Fatalf("hold = %s, want the city's 15s patrol interval", got)
+	}
+}
+
+// TestAsyncStartLeavesTheRegistryBeforeItsFollowUp: a start that ran removes
+// its admitted-start registry entry before it requests its follow-up pass, so
+// the pass it asks for sees the committed dependency as it is: an entry still
+// in place would read the dependency as in flight and keep its dependents
+// blocked_on_dependencies until a later patrol or event.
+func TestAsyncStartLeavesTheRegistryBeforeItsFollowUp(t *testing.T) {
+	e := newCapacityEnv(t, false, "db", "app")
+	for i := range e.cfg.Agents {
+		if e.cfg.Agents[i].Name == "app" {
+			e.cfg.Agents[i].DependsOn = []string{"db"}
+		}
+	}
+	db := e.pendingCreate(t, "db", "", nil)
+
+	var tracker asyncStartTracker
+	var registered, dependencyAlive bool
+	followedUp := make(chan struct{})
+	opts := append([]startExecutionOption(nil), e.startOptions...)
+	opts = append(opts, withAsyncStartExecution(), withAsyncStartTracker(&tracker),
+		withAsyncStartFollowUp(func() {
+			// What the requested pass's dependency check reads.
+			registered = tracker.startInFlight("db")
+			dependencyAlive = allDependenciesAliveForTemplateWithClock("app", e.cfg, e.desiredState, e.sp, "", e.store, e.clk, tracker.startInFlight)
+			close(followedUp)
+		}))
+	if woken := executePlannedStartsTraced(context.Background(), []startCandidate{db}, e.cfg, e.desiredState, e.sp, e.store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, e.trace, opts...); woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+	select {
+	case <-followedUp:
+	case <-time.After(hangBudget):
+		t.Fatal("the start requested no follow-up within the hang budget")
+	}
+	waitAsyncStartGoroutines(t, &tracker)
+	if n := e.sp.CountCalls("Start", "db"); n != 1 {
+		t.Fatalf("db Start calls = %d, want 1", n)
+	}
+	if registered {
+		t.Fatal("db was still in the admitted-start registry when its follow-up was requested")
+	}
+	if !dependencyAlive {
+		t.Fatalf("the follow-up pass would find app's dependency db not alive after db committed\n%s", e.log.String())
 	}
 }
 

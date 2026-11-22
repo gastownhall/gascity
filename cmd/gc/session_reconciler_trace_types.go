@@ -214,6 +214,7 @@ const (
 	TraceReasonStartGateDeferred     TraceReasonCode = "start_gate_deferred"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
+	TraceReasonPrepareFailureHold    TraceReasonCode = "prepare_failure_hold"
 	TraceReasonInterruptedClose      TraceReasonCode = "interrupted_close"
 )
 
@@ -321,6 +322,10 @@ const (
 	// TraceOutcomeDeferredByPrepareBudget marks a start deferred before any
 	// write because the planner call's cumulative prepare time spent its budget.
 	TraceOutcomeDeferredByPrepareBudget TraceOutcomeCode = "deferred_by_prepare_budget"
+	// TraceOutcomeDeferredByPrepareFailure marks an async start deferred
+	// before any write because its session's last async preparation failed
+	// less than a hold ago (asyncPrepareFailureHold).
+	TraceOutcomeDeferredByPrepareFailure TraceOutcomeCode = "deferred_by_prepare_failure"
 	// TraceOutcomeSkippedPresent marks an on_death hook skipped because its
 	// name was listed again when the hook was due.
 	TraceOutcomeSkippedPresent TraceOutcomeCode = "skipped_present"

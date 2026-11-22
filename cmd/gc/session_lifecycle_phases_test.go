@@ -7,10 +7,6 @@ import (
 	"time"
 )
 
-// TestStartPhaseTimingsFormatLog covers the formatLog helper that gc-67o
-// uses to emit per-phase wall-clock segments in the session lifecycle log.
-// Zero-valued phases must elide entirely so a healthy synchronous start
-// without session_key still produces a single duration field.
 // TestAddPrepareTimingFieldsReportsPhasesThatRan: a preparation phase that
 // ran is on the record even when it took under a millisecond, and a phase
 // that did not run is absent.
@@ -36,6 +32,10 @@ func TestAddPrepareTimingFieldsReportsPhasesThatRan(t *testing.T) {
 	}
 }
 
+// TestStartPhaseTimingsFormatLog covers the formatLog helper that gc-67o
+// uses to emit per-phase wall-clock segments in the session lifecycle log.
+// Zero-valued phases must elide entirely so a healthy synchronous start
+// without session_key still produces a single duration field.
 func TestStartPhaseTimingsFormatLog(t *testing.T) {
 	cases := []struct {
 		name   string
