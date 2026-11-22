@@ -704,11 +704,7 @@ func currentDrainCheckTarget() (sessionRuntimeTarget, string, error) {
 		return sessionRuntimeTarget{}, "", err
 	}
 	target.sessionID = strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
-	rowName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
-	if rowName == "" {
-		rowName = target.display
-	}
-	return target, rowName, nil
+	return target, target.rowName, nil
 }
 
 // drainCheckOpenSessionLeg is a mutable global test seam over
@@ -959,13 +955,13 @@ func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, 
 	}
 	cfg, strict := drainAckCityMode(target.cityPath)
 	if !strict {
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, caller, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.durableName(), target.sessionID, caller, jsonOutput, stdout, stderr)
 	}
-	commit, code := checkDrainAckRowAt(target.cityPath, cfg, target.sessionName, target.sessionID, operator, envToken, stderr)
+	commit, code := checkDrainAckRowAt(target.cityPath, cfg, target.durableName(), target.sessionID, operator, envToken, stderr)
 	if code != 0 {
 		return code
 	}
-	if refusal := drainAckReleaseHeldClaims(target.cityPath, target.sessionName, caller, stderr); refusal != "" {
+	if refusal := drainAckReleaseHeldClaims(target.cityPath, target.durableName(), caller, stderr); refusal != "" {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", refusal) //nolint:errcheck // best-effort stderr
 		return drainAckRefused
 	}
@@ -975,7 +971,7 @@ func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, 
 			return drainAckRefused
 		}
 	}
-	return finishRuntimeDrainAck(rowAckedDrainOps{drainOps: dops, stderr: stderr}, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+	return finishRuntimeDrainAck(rowAckedDrainOps{drainOps: dops, stderr: stderr}, target.cityPath, target.display, target.sessionName, target.durableName(), target.sessionID, jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -1358,17 +1354,22 @@ const drainAckReleaseBudget = 15 * time.Second
 // tells the controller it may stop this session, so acknowledging first opens a
 // window in which the session dies still holding exactly the claim this release
 // exists to clear.
-func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, caller drainAckCaller, jsonOutput bool, stdout, stderr io.Writer) int {
-	if refusal := drainAckReleaseHeldClaims(cityPath, sn, caller, stderr); refusal != "" {
+//
+// sn is the runtime session name the ack flag is written to; rowName is the
+// durable session name the held claims and the poke resolve by. They differ
+// in a container, whose runtime name is the tmux session inside it.
+func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, rowName, sessionID string, caller drainAckCaller, jsonOutput bool, stdout, stderr io.Writer) int {
+	if refusal := drainAckReleaseHeldClaims(cityPath, rowName, caller, stderr); refusal != "" {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", refusal) //nolint:errcheck // best-effort stderr
 		return drainAckRefused
 	}
-	return finishRuntimeDrainAck(persistedAckDrainOps{drainOps: dops}, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
+	return finishRuntimeDrainAck(persistedAckDrainOps{drainOps: dops}, cityPath, targetName, sn, rowName, sessionID, jsonOutput, stdout, stderr)
 }
 
-// finishRuntimeDrainAck is the ack after the release: the env flag, the poke
-// and the report.
-func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
+// finishRuntimeDrainAck is the ack after the release: the env flag on the
+// runtime session sn, the poke for the durable session rowName, and the
+// report, which names sn.
+func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, rowName, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if err := dops.setDrainAck(sn); err != nil {
 		if !runtime.OnlyMetadataNotMirrored(err) {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1378,7 +1379,7 @@ func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID st
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	workerSite := false
-	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
+	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, rowName)); err != nil {
 		if workerSite = noteWorkerSitePoke(stderr, "gc runtime drain-ack", err); !workerSite {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}

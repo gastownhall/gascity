@@ -1355,7 +1355,7 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1372,7 +1372,7 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -1399,7 +1399,7 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", drainAckCaller{}, true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "worker", "", drainAckCaller{}, true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1432,7 +1432,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	// of the three adjacent string params in the new signature.
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", "gc-42", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", "session-name", "gc-42", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1462,7 +1462,7 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -1478,7 +1478,7 @@ func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
 	}
@@ -2361,7 +2361,7 @@ func (unpersistedAckDrainOps) setDrainAck(string) error { return nil }
 func TestDoRuntimeDrainAckFailsWhenAckDidNotPersist(t *testing.T) {
 	pokes := stubDrainAckSideEffects(t)
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(unpersistedAckDrainOps{newFakeDrainOps()}, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(unpersistedAckDrainOps{newFakeDrainOps()}, t.TempDir(), "worker", "worker-sess", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -2409,7 +2409,7 @@ func TestDoRuntimeDrainAckFailsWhenTheFlagWriteFindsNoSession(t *testing.T) {
 			pokes := stubDrainAckSideEffects(t)
 			dops := newDrainOps(cityTmuxProviderAnswering(t, tc.script))
 			var stdout, stderr bytes.Buffer
-			code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+			code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker-sess", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
 			if code != 1 {
 				t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
@@ -2433,7 +2433,7 @@ func TestDoRuntimeDrainAckFailsUnverifiedWhenTheReadBackFindsNoServer(t *testing
 	pokes := stubDrainAckSideEffects(t)
 	dops := newDrainOps(cityTmuxProviderAnswering(t, `case "$*" in *show-environment*) echo "no server running on /tmp/tmux-1000/bright-lights" >&2; exit 1 ;; esac`))
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker-sess", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -2481,7 +2481,7 @@ func TestDoRuntimeDrainAckGoneMirrorStaysAcknowledged(t *testing.T) {
 	pokes := stubDrainAckSideEffects(t)
 	dops := newDrainOps(goneMirrorProvider{Fake: runtime.NewFake()})
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
 	}
@@ -2518,7 +2518,7 @@ func TestDoRuntimeDrainAckReadBackGoneStaysAcknowledged(t *testing.T) {
 	gone := fmt.Errorf("reading GC_DRAIN_ACK: %w", fmt.Errorf("reading GC_DRAIN_ACK from session %q: %w: %w", "worker", runtime.ErrSessionNotFound, errors.New("session not found")))
 	dops := scriptedAckDrainOps{fakeDrainOps: newFakeDrainOps(), t: t, readErr: gone}
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
 	}
@@ -2536,7 +2536,7 @@ func TestDoRuntimeDrainAckMirrorOnlyErrorSkipsReadBack(t *testing.T) {
 	pokes := stubDrainAckSideEffects(t)
 	dops := scriptedAckDrainOps{fakeDrainOps: newFakeDrainOps(), t: t, writeErr: t3OutageMirrorFailure("worker", "GC_DRAIN_ACK"), noRead: true}
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
 	}

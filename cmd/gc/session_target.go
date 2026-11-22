@@ -16,6 +16,29 @@ type sessionRuntimeTarget struct {
 	display     string
 	sessionName string
 	sessionID   string // resolved session bead ID; empty for the env-derived current session
+	// rowName is the durable session name the session row, its held claims
+	// and its reconcile reference resolve by. It differs from sessionName in
+	// a container, whose GC_TMUX_SESSION names the tmux session inside it
+	// ("main"), not the row. Empty means sessionName names the row too.
+	rowName string
+}
+
+// durableName is the name target's session row resolves by: rowName, else
+// sessionName.
+func (t sessionRuntimeTarget) durableName() string {
+	if t.rowName != "" {
+		return t.rowName
+	}
+	return t.sessionName
+}
+
+// currentSessionRowName is the current session's durable row name:
+// GC_SESSION_NAME, else the display identity; never GC_TMUX_SESSION.
+func currentSessionRowName(display string) string {
+	if rowName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")); rowName != "" {
+		return rowName
+	}
+	return display
 }
 
 func defaultSessionDisplayIdentity() string {
@@ -55,6 +78,7 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 		cityPath:    cityPath,
 		display:     display,
 		sessionName: sessionName,
+		rowName:     currentSessionRowName(display),
 	}, nil
 }
 
@@ -98,5 +122,6 @@ func sessionRuntimeTargetFromNudge(target nudgeTarget) sessionRuntimeTarget {
 		display:     display,
 		sessionName: target.sessionName,
 		sessionID:   target.sessionID,
+		rowName:     target.sessionName,
 	}
 }
