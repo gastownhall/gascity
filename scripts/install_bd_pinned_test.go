@@ -76,6 +76,7 @@ case "$1" in
     done
     ;;
   install)
+    [ -n "$BD_STUB_LOG" ] && printf 'GOBIN %s\n' "$GOBIN" >> "$BD_STUB_LOG"
     if [ "$BD_STUB_INSTALL_FAIL" = "1" ]; then
       echo 'go: build failed: no C toolchain' >&2
       exit 1
@@ -206,6 +207,67 @@ func fileSHA(t *testing.T, path string) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// stubInstallGOBINs returns the GOBIN directory of every `go install` the
+// stub served.
+func stubInstallGOBINs(t *testing.T, stub *bdStubGo) []string {
+	t.Helper()
+	var bins []string
+	for _, line := range stubArgv(t, stub) {
+		if after, ok := strings.CutPrefix(line, "GOBIN "); ok {
+			bins = append(bins, after)
+		}
+	}
+	return bins
+}
+
+// assertNoLeftovers fails when the install dir holds a temporary file or the
+// run's TMPDIR holds anything at all: staging files must never outlive a run.
+func assertNoLeftovers(t *testing.T, stub *bdStubGo) {
+	t.Helper()
+	entries, err := os.ReadDir(stub.installDir())
+	if err == nil {
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".bd.tmp") || strings.Contains(entry.Name(), "install-bd.") {
+				t.Errorf("leftover temporary file in the install dir: %s", entry.Name())
+			}
+		}
+	}
+	if tmpEntries, err := os.ReadDir(stub.tmp); err == nil && len(tmpEntries) > 0 {
+		names := make([]string, 0, len(tmpEntries))
+		for _, entry := range tmpEntries {
+			names = append(names, entry.Name())
+		}
+		t.Errorf("leftover staging files in TMPDIR: %v", names)
+	}
+}
+
+// TestInstallBdPinnedReplacesASkewedBdThroughStaging is AC-3: a bd embedding
+// some other beads version is replaced by the pinned build. The build stages
+// outside the install dir and lands through tmp + rename, so the install dir
+// never holds a half-written bd, and no staging or tmp file survives the run.
+func TestInstallBdPinnedReplacesASkewedBdThroughStaging(t *testing.T) {
+	stub := writeBdStubGo(t)
+	if err := os.MkdirAll(stub.installDir(), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", stub.installDir(), err)
+	}
+	bd := filepath.Join(stub.installDir(), "bd")
+	writeStubBd(t, bd, "v1.2.0")
+
+	out, err := runInstallBdPinned(t, stub, "")
+	if err != nil {
+		t.Fatalf("install-bd-pinned.sh over a skewed bd: %v\n%s", err, out)
+	}
+	if got := stubBdVersionOf(t, stub, bd); got != bdStubPin {
+		t.Fatalf("the skewed bd was not replaced: `go version -m` reports %q, want %q:\n%s", got, bdStubPin, out)
+	}
+	for _, gobin := range stubInstallGOBINs(t, stub) {
+		if gobin == stub.installDir() {
+			t.Errorf("the build wrote straight into the install dir (GOBIN=%s); it must stage elsewhere and land by rename:\n%s", gobin, out)
+		}
+	}
+	assertNoLeftovers(t, stub)
 }
 
 // TestInstallBdPinnedFreshInstallEmbedsThePin is AC-1: with no bd installed,

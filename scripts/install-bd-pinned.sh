@@ -79,19 +79,35 @@ if [ -f "$installed" ]; then
 fi
 
 echo "install-bd: building bd from github.com/steveyegge/beads/cmd/bd@$pin"
-mkdir -p "$INSTALL_DIR"
+
+# Stage the build in a scratch directory: `go install` writes its output to
+# GOBIN, and a build that wrote into the install dir could leave a truncated
+# bd there when it fails. The exit trap removes the staging dir and the tmp
+# file, and only those.
+staging=$(mktemp -d "${TMPDIR:-/tmp}/install-bd.XXXXXX")
+tmpfile=""
+trap 'rm -rf "$staging"; rm -f ${tmpfile:+"$tmpfile"}' EXIT INT TERM HUP
+
 # CGO_ENABLED=1 + gms_pure_go is the embedded-storage-capable bd build; a
 # `pkg@version` install ignores the surrounding module, so it cannot touch
 # this repo's go.mod or go.sum.
-if ! (cd "$repo_root" && GOFLAGS= GOWORK=off CGO_ENABLED=1 GOBIN="$INSTALL_DIR" \
+if ! (cd "$staging" && GOFLAGS= GOWORK=off CGO_ENABLED=1 GOBIN="$staging" \
 	go install -tags gms_pure_go "github.com/steveyegge/beads/cmd/bd@$pin"); then
 	echo "ERROR: building bd@$pin failed; embedded storage needs a C toolchain (install gcc or clang and retry)" >&2
 	exit 1
 fi
-if [ ! -f "$installed" ]; then
-	echo "ERROR: the build produced no $installed" >&2
+staged="$staging/bd"
+if [ ! -f "$staged" ]; then
+	echo "ERROR: the build produced no bd in $staging" >&2
 	exit 1
 fi
+
+mkdir -p "$INSTALL_DIR"
+tmpfile="$INSTALL_DIR/.bd.tmp.$$"
+cp -f "$staged" "$tmpfile"
+chmod 0755 "$tmpfile"
+mv -f "$tmpfile" "$installed"
+tmpfile=""
 
 # Migrate from the old install location: replace a stale binary or symlink
 # with one to the installed bd, the way make install does for gc.
