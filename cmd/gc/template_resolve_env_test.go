@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
+	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 )
 
 func TestResolveTemplatePrependsGCBinDirToPATH(t *testing.T) {
@@ -593,5 +594,53 @@ func TestResolveTemplateAgentEnvWithholdsOpenCodePermissionDefault(t *testing.T)
 				t.Fatalf("OPENCODE_PERMISSION = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A local session template never carries the k8s pod session marker: every
+// configurable layer that writes it is overridden by an explicit empty value,
+// so an inherited or config-authored marker cannot make a local session's gc
+// commands serve the pod-local provider.
+func TestResolveTemplateClearsK8sPodSessionMarker(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	t.Setenv(sessionk8s.PodSessionEnv, "inherited-session")
+
+	params := &agentBuildParams{
+		cityName: "city",
+		cityPath: cityPath,
+		city: &config.City{Upstreams: map[string]config.UpstreamSpec{
+			"gateway": {Env: map[string]string{sessionk8s.PodSessionEnv: "upstream-literal"}},
+		}},
+		workspace: &config.Workspace{
+			Provider: "test",
+			Env:      map[string]string{sessionk8s.PodSessionEnv: "workspace-literal"},
+		},
+		providers: map[string]config.ProviderSpec{"test": {
+			Command: "echo", PromptMode: "none",
+			Env: map[string]string{sessionk8s.PodSessionEnv: "provider-literal"},
+		}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:     "worker",
+		Upstream: "gateway",
+		Env:      map[string]string{sessionk8s.PodSessionEnv: "agent-literal"},
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	val, ok := tp.Env[sessionk8s.PodSessionEnv]
+	if !ok {
+		t.Fatalf("Env omits %s; want present and empty so the session cannot inherit a marker", sessionk8s.PodSessionEnv)
+	}
+	if val != "" {
+		t.Fatalf("Env[%s] = %q; want empty", sessionk8s.PodSessionEnv, val)
 	}
 }

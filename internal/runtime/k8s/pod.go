@@ -165,7 +165,7 @@ func buildAgentLaunchCommand(cfg runtime.Config, tmuxCommand string, keepAlive b
 // The respawned agent's environment is the tmux server's, not this command's:
 // respawn-pane starts the pane from the server's global and session
 // environment. The server got the remote-stage variables when the entrypoint
-// started it (suRemoteStageExports for LINUX_USERNAME), and Relaunch writes the
+// started it (suPodExports for LINUX_USERNAME), and Relaunch writes the
 // on-disk record before respawning, which covers a pod created without them.
 func buildRespawnCommand(cfg runtime.Config) []string {
 	script := buildAgentLaunchCommand(cfg, fmt.Sprintf("tmux respawn-pane -k -t %s", tmuxSession), false, "")
@@ -352,15 +352,16 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		// Run tmux as the dynamic user via su. userSetup already created and
 		// chowned podWorkDir as root; enterWorkDir is idempotent and keeps
 		// pre_start in the same directory as the historical path. su - clears
-		// the pod environment, so re-export the remote-stage identity inside
-		// the login-shell command before starting tmux.
+		// the pod environment, so re-export the remote-stage identity and the
+		// pod session marker inside the login-shell command before starting
+		// tmux.
 		entrypointPrefix = userSetup + entrypointPrefix
 	}
 	tmuxCmd := entrypointPrefix + buildAgentLaunchCommand(
 		cfg,
 		fmt.Sprintf("tmux new-session -d -s %s", tmuxSession),
 		true,
-		suRemoteStageExports(p.cityName, ctrlCity),
+		suPodExports(p.cityName, ctrlCity, name),
 	)
 
 	// Build environment, remapping K8s-specific vars.
@@ -375,6 +376,10 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	// environment and the launch re-exports them), can run storage genesis
 	// before the on-disk record exists.
 	env = append(env, remoteStageEnv(p.cityName, controllerCityPath(cfg.Env))...)
+	// The provider owns the session marker: buildPodEnv dropped any
+	// config-supplied copy, and the pod gets exactly this one, so gc commands
+	// in the pod serve their k8s/hybrid selection client-free (PodLocal).
+	env = append(env, podSessionEnvVar(name))
 
 	// Build volume mounts for the main container.
 	// When prebaked, skip the ws EmptyDir — it would shadow baked image content.
@@ -529,6 +534,7 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 	skip := map[string]bool{
 		"GC_BEADS":               true,
 		"GC_SESSION":             true,
+		PodSessionEnv:            true,
 		"GC_EVENTS":              true,
 		"GC_K8S_DOLT_HOST":       true,
 		"GC_K8S_DOLT_PORT":       true,
@@ -668,13 +674,21 @@ func buildResources(p *Provider) (corev1.ResourceRequirements, error) {
 
 func boolPtr(b bool) *bool { return &b }
 
-// suRemoteStageExports returns shell statements that restore the remote-stage
-// variables inside the login-shell command passed to `su - <user> -c`. Values
-// are quoted as shell data so spaces and metacharacters remain unchanged.
-func suRemoteStageExports(cityName, ctrlCity string) string {
+// suPodExports returns shell statements that restore the remote-stage
+// variables and the pod session marker inside the login-shell command passed
+// to `su - <user> -c`. The marker is exported even without a controller city
+// path. Values are quoted as shell data so spaces and metacharacters remain
+// unchanged.
+func suPodExports(cityName, ctrlCity, session string) string {
 	var out strings.Builder
-	for _, e := range remoteStageEnv(cityName, ctrlCity) {
+	for _, e := range append(remoteStageEnv(cityName, ctrlCity), podSessionEnvVar(session)) {
 		fmt.Fprintf(&out, "export %s=%s; ", e.Name, shellquote.Quote(e.Value))
 	}
 	return out.String()
+}
+
+// podSessionEnvVar is the authoritative PodSessionEnv entry for a pod hosting
+// session.
+func podSessionEnvVar(session string) corev1.EnvVar {
+	return corev1.EnvVar{Name: PodSessionEnv, Value: session}
 }
