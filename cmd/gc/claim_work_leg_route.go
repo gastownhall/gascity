@@ -52,11 +52,12 @@ type hookClaimWorkLegRoute struct {
 }
 
 // newHookClaimWorkLegRoute is the work-leg route for an agent whose claim is
-// scoped to its primary leg. The frame is resolved on the first probe, so a
-// claim the primary resolves pays nothing for it.
-func newHookClaimWorkLegRoute(cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) *hookClaimWorkLegRoute {
+// scoped to the primary leg primaryRef names (primaryHookStoreRef). The frame
+// is resolved on the first probe, so a claim the primary resolves pays nothing
+// for it.
+func newHookClaimWorkLegRoute(cityPath string, cfg *config.City, a *config.Agent, primaryRef string, identityOverrides map[string]string) *hookClaimWorkLegRoute {
 	return newHookClaimWorkLegRouteOver(func() ([]hookClaimWorkLeg, error) {
-		return hookClaimWorkLegFrame(cityPath, cfg, a, identityOverrides)
+		return hookClaimWorkLegFrame(cityPath, cfg, a, primaryRef, identityOverrides)
 	})
 }
 
@@ -70,17 +71,32 @@ func newHookClaimWorkLegRouteOver(frame func() ([]hookClaimWorkLeg, error)) *hoo
 }
 
 // hookClaimWorkLegFrame is the work legs a primary-scoped claim may find a
-// bead the reader served in: every serving rig.
-func hookClaimWorkLegFrame(cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) ([]hookClaimWorkLeg, error) {
+// bead the reader served in: the city work store, then every serving rig. The
+// leg primaryRef names is the primary itself, which has already answered, so
+// it is left out; the class binding is the class route's to consult.
+func hookClaimWorkLegFrame(cityPath string, cfg *config.City, a *config.Agent, primaryRef string, identityOverrides map[string]string) ([]hookClaimWorkLeg, error) {
 	serving, err := readyServingRigs(cfg, cityPath)
 	if err != nil {
 		return nil, err
 	}
 	var legs []hookClaimWorkLeg
+	cityRef := "city:" + hookStoreCityName(cityPath, loadedCityName(cfg, cityPath))
+	if cityRef != primaryRef {
+		legs = append(legs, hookClaimWorkLeg{
+			ref: cityRef,
+			build: func() (hookStore, error) {
+				return cityHookStore(cityPath, cfg, a, identityOverrides)
+			},
+		})
+	}
 	for _, rig := range serving {
 		name := strings.TrimSpace(rig.Name)
+		ref := "rig:" + name
+		if ref == primaryRef {
+			continue
+		}
 		legs = append(legs, hookClaimWorkLeg{
-			ref: "rig:" + name,
+			ref: ref,
 			build: func() (hookStore, error) {
 				return rigHookStore(cityPath, cfg, a, name, identityOverrides)
 			},

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -160,6 +161,30 @@ func (f *workLegFixture) claim(primary hookStore, route *hookClaimWorkLegRoute, 
 	return code, result, stderr.String()
 }
 
+// route is the work-leg route production builds for an agent whose primary
+// leg is the named rig's, or the city's for "".
+func (f *workLegFixture) route(primaryRig string) *hookClaimWorkLegRoute {
+	identity := f.agent.Name
+	if primaryRig != "" {
+		identity = primaryRig + "/" + f.agent.Name
+	}
+	primary := f.primary(primaryRig)
+	ref := primaryHookStoreRef(f.cityPath, f.cfg, identity, primary.dir, primary.env)
+	return newHookClaimWorkLegRoute(f.cityPath, f.cfg, &f.agent, ref, nil)
+}
+
+// callsIn is the ops the fixture served against the named leg's dir, in order.
+func (f *workLegFixture) callsIn(rig string) []string {
+	var ops []string
+	for _, call := range f.calls {
+		op, dir, _ := strings.Cut(call, " ")
+		if dir == f.dirOf(rig) {
+			ops = append(ops, op)
+		}
+	}
+	return ops
+}
+
 // routedRow is the reader's row for an open bead routed to the fixture agent.
 func (f *workLegFixture) routedRow(beadID string) string {
 	return fmt.Sprintf(`[{"id":%q,"status":"open","metadata":{"gc.routed_to":%q}}]`, beadID, f.agent.Name)
@@ -186,20 +211,44 @@ func (f *workLegFixture) assertClaimedIn(rig, beadID string) {
 	}
 }
 
-// TestHookClaimWorkLegRouteClaimsInTheLegThatHoldsIt pins AC-1: on the
-// primary-scoped branch the federated reader serves a city-scoped agent a bead
-// only a rig store holds, and the claim lands in that rig store instead of
-// draining claims_errored on the primary's not-found.
+// TestHookClaimWorkLegRouteClaimsInTheLegThatHoldsIt pins AC-1 and AC-2: on
+// the primary-scoped branch the federated reader serves an agent a bead only
+// another work leg holds, and the claim lands in that leg's store instead of
+// draining claims_errored on the primary's not-found. The primary has already
+// answered, so the route never reads it again.
 func TestHookClaimWorkLegRouteClaimsInTheLegThatHoldsIt(t *testing.T) {
 	t.Run("city agent, rig bead", func(t *testing.T) {
 		f := newWorkLegFixture(t, "alpha")
 		bead := f.mint("alpha")
-		route := newHookClaimWorkLegRoute(f.cityPath, f.cfg, &f.agent, nil)
-
-		code, result, stderr := f.claim(f.primary(""), route, f.routedRow(bead))
+		code, result, stderr := f.claim(f.primary(""), f.route(""), f.routedRow(bead))
 		if code != 0 || result.Action != "work" || result.BeadID != bead {
 			t.Fatalf("claim = exit %d %+v, want exit 0 action=work for %s; stderr=%q", code, result, bead, stderr)
 		}
 		f.assertClaimedIn("alpha", bead)
+	})
+	t.Run("rig agent, city bead", func(t *testing.T) {
+		f := newWorkLegFixture(t, "alpha")
+		f.agent = config.Agent{Name: "worker", Dir: "alpha"}
+		bead := f.mint("")
+
+		code, result, stderr := f.claim(f.primary("alpha"), f.route("alpha"), f.routedRow(bead))
+		if code != 0 || result.Action != "work" || result.BeadID != bead {
+			t.Fatalf("claim = exit %d %+v, want exit 0 action=work for %s; stderr=%q", code, result, bead, stderr)
+		}
+		f.assertClaimedIn("", bead)
+	})
+	t.Run("rig agent, other rig's bead", func(t *testing.T) {
+		f := newWorkLegFixture(t, "alpha", "beta")
+		f.agent = config.Agent{Name: "worker", Dir: "alpha"}
+		bead := f.mint("beta")
+
+		code, result, stderr := f.claim(f.primary("alpha"), f.route("alpha"), f.routedRow(bead))
+		if code != 0 || result.Action != "work" || result.BeadID != bead {
+			t.Fatalf("claim = exit %d %+v, want exit 0 action=work for %s; stderr=%q", code, result, bead, stderr)
+		}
+		f.assertClaimedIn("beta", bead)
+		if got := f.callsIn("alpha"); len(got) != 1 || got[0] != "claim" {
+			t.Fatalf("ops on the primary leg = %v, want only its own claim: the route must not probe the primary again", got)
+		}
 	})
 }
