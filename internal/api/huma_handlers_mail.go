@@ -196,9 +196,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 
@@ -217,8 +218,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	status := input.Status
 	rig := input.Rig
-	index := s.latestIndex()
-	cacheAge := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(work)
 
 	switch status {
 	case "", "unread":
@@ -226,9 +226,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			mp := s.state.MailProvider(rig)
 			if mp == nil {
 				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: []mail.Message{}, Total: 0},
+					Index:        index,
+					CacheAgeS:    freshness.ageS,
+					CacheRefresh: freshness.refresh,
+					Body:         MailListBody{Items: []mail.Message{}, Total: 0},
 				}, nil
 			}
 			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
@@ -242,9 +243,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			}
 			msgs = tagRig(msgs, rig)
 			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      mailKeysetBody(msgs, seek, limit, false, nil),
+				Index:        index,
+				CacheAgeS:    freshness.ageS,
+				CacheRefresh: freshness.refresh,
+				Body:         mailKeysetBody(msgs, seek, limit, false, nil),
 			}, nil
 		}
 
@@ -270,9 +272,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			allMsgs = []mail.Message{}
 		}
 		return &MailListOutput{
-			Index:     index,
-			CacheAgeS: cacheAge,
-			Body:      mailKeysetBody(allMsgs, seek, limit, len(partialErrs) > 0, partialErrs),
+			Index:        index,
+			CacheAgeS:    freshness.ageS,
+			CacheRefresh: freshness.refresh,
+			Body:         mailKeysetBody(allMsgs, seek, limit, len(partialErrs) > 0, partialErrs),
 		}, nil
 
 	case "all":
@@ -280,9 +283,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			mp := s.state.MailProvider(rig)
 			if mp == nil {
 				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: []mail.Message{}, Total: 0},
+					Index:        index,
+					CacheAgeS:    freshness.ageS,
+					CacheRefresh: freshness.refresh,
+					Body:         MailListBody{Items: []mail.Message{}, Total: 0},
 				}, nil
 			}
 			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
@@ -296,9 +300,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			}
 			msgs = tagRig(msgs, rig)
 			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      mailKeysetBody(msgs, seek, limit, false, nil),
+				Index:        index,
+				CacheAgeS:    freshness.ageS,
+				CacheRefresh: freshness.refresh,
+				Body:         mailKeysetBody(msgs, seek, limit, false, nil),
 			}, nil
 		}
 
@@ -324,9 +329,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			allMsgs = []mail.Message{}
 		}
 		return &MailListOutput{
-			Index:     index,
-			CacheAgeS: cacheAge,
-			Body:      mailKeysetBody(allMsgs, seek, limit, len(partialErrs) > 0, partialErrs),
+			Index:        index,
+			CacheAgeS:    freshness.ageS,
+			CacheRefresh: freshness.refresh,
+			Body:         mailKeysetBody(allMsgs, seek, limit, len(partialErrs) > 0, partialErrs),
 		}, nil
 
 	default:
@@ -336,8 +342,9 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 
 // humaHandleMailGet is the Huma-typed handler for GET /v0/mail/{id}.
 func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*IndexOutput[mail.Message], error) {
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	index := s.latestIndex()
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 	id := input.ID
@@ -366,10 +373,12 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 		return nil, apierr.MailNotFound.Msg("message " + id + " not found")
 	}
 	result.Message.Rig = result.Rig
+	freshness := cacheAgeSeconds(work)
 	return &IndexOutput[mail.Message]{
-		Index:     s.latestIndex(),
-		CacheAgeS: cacheAgeSeconds(cityStore),
-		Body:      result.Message,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         result.Message,
 	}, nil
 }
 
@@ -377,6 +386,10 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 // Body validation (To and Subject required, minLength:"1") is enforced by
 // the framework from MailSendInput's struct tags.
 func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (*IndexOutput[mail.Message], error) {
+	index := s.latestIndex()
+	if err := s.refuseUnconfiguredMailSender(ctx, input.Body.From); err != nil {
+		return nil, err
+	}
 	resolved, resolveErr := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errMailNoBeadStore) {
@@ -392,8 +405,9 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 
 	// Idempotency: send at most once per Idempotency-Key. On replay the closure
 	// is skipped entirely, so no duplicate Send, telemetry op, or MailSent event
-	// fires. The helper guarantees the reservation is released on a send error.
-	msg, err := withIdempotency(s.idem, "/v0/mail", input.IdempotencyKey, input.Body,
+	// fires, and the index cached with the message is returned, not the current
+	// head. The helper guarantees the reservation is released on a send error.
+	res, err := withIndexedIdempotency(s.idem, "/v0/mail", input.IdempotencyKey, input.Body, index,
 		func() (mail.Message, error) {
 			sent, sendErr := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
 			telemetry.RecordMailOp(ctx, "send", sendErr)
@@ -409,25 +423,25 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 	}
 
 	return &IndexOutput[mail.Message]{
-		Index: s.latestIndex(),
-		Body:  msg,
+		Index: res.Index,
+		Body:  res.Body,
 	}, nil
 }
 
 // humaHandleMailCount is the Huma-typed handler for GET /v0/mail/count.
 func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput) (*MailCountOutput, error) {
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	rig := input.Rig
-	cacheAge := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(work)
 
 	if rig != "" {
 		mp := s.state.MailProvider(rig)
 		if mp == nil {
-			resp := &MailCountOutput{CacheAgeS: cacheAge}
+			resp := &MailCountOutput{CacheAgeS: freshness.ageS, CacheRefresh: freshness.refresh}
 			resp.Body.Total = 0
 			resp.Body.Unread = 0
 			return resp, nil
@@ -439,7 +453,7 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 		if err != nil {
 			return nil, mailReadAPIError(err)
 		}
-		resp := &MailCountOutput{CacheAgeS: cacheAge}
+		resp := &MailCountOutput{CacheAgeS: freshness.ageS, CacheRefresh: freshness.refresh}
 		resp.Body.Total = counts.Total
 		resp.Body.Unread = counts.Unread
 		return resp, nil
@@ -468,7 +482,7 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 	if len(partialErrs) == len(providers) && len(providers) > 0 {
 		return nil, allMailProvidersFailedError(partialErrs, partialStoreSlow)
 	}
-	resp := &MailCountOutput{CacheAgeS: cacheAge}
+	resp := &MailCountOutput{CacheAgeS: freshness.ageS, CacheRefresh: freshness.refresh}
 	resp.Body.Total = totalAll
 	resp.Body.Unread = unreadAll
 	resp.Body.Partial = len(partialErrs) > 0
@@ -478,9 +492,9 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 
 // humaHandleMailThread is the Huma-typed handler for GET /v0/mail/thread/{id}.
 func (s *Server) humaHandleMailThread(ctx context.Context, input *MailThreadInput) (*MailListOutput, error) {
+	index := s.latestIndex()
 	threadID := input.ID
 	rig := input.Rig
-	index := s.latestIndex()
 
 	if rig != "" {
 		mp := s.state.MailProvider(rig)
@@ -640,8 +654,12 @@ func (s *Server) humaHandleMailArchive(ctx context.Context, input *MailArchiveIn
 
 // humaHandleMailReply is the Huma-typed handler for POST /v0/mail/{id}/reply.
 func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput) (*IndexOutput[mail.Message], error) {
+	index := s.latestIndex()
 	id := input.ID
 	rig := input.Rig
+	if err := s.refuseUnconfiguredMailSender(ctx, input.Body.From); err != nil {
+		return nil, err
+	}
 
 	// Idempotency: reply at most once per Idempotency-Key. The message ID is
 	// folded into the cache path because it lives in the URL, not the body —
@@ -649,8 +667,9 @@ func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput)
 	// PathEscape keeps a crafted ID (%2F-encoded slash) from forging the
 	// "/reply:" boundary and aliasing another (id, key) pair's scope. The
 	// provider lookup stays INSIDE the closure so a replay still succeeds
-	// after the original message was archived (the closure is skipped).
-	msg, err := withIdempotency(s.idem, "/v0/mail/"+url.PathEscape(id)+"/reply", input.IdempotencyKey, input.Body,
+	// after the original message was archived (the closure is skipped). A
+	// replay returns the index cached with the reply, not the current head.
+	res, err := withIndexedIdempotency(s.idem, "/v0/mail/"+url.PathEscape(id)+"/reply", input.IdempotencyKey, input.Body, index,
 		func() (mail.Message, error) {
 			mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
 			if mpErr != nil {
@@ -674,8 +693,8 @@ func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput)
 	}
 
 	return &IndexOutput[mail.Message]{
-		Index: s.latestIndex(),
-		Body:  msg,
+		Index: res.Index,
+		Body:  res.Body,
 	}, nil
 }
 

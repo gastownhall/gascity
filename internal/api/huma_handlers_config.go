@@ -12,6 +12,7 @@ import (
 
 // humaHandleConfigGet is the Huma-typed handler for GET /v0/config.
 func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*IndexOutput[configResponse], error) {
+	index := s.latestIndex()
 	cfg := s.state.Config()
 	name := strings.TrimSpace(s.state.CityName())
 	if name == "" {
@@ -76,7 +77,7 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 	}
 
 	return &IndexOutput[configResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }
@@ -96,6 +97,7 @@ func effectiveWorkspacePrefix(cfg *config.City, name string) string {
 
 // humaHandleConfigExplain is the Huma-typed handler for GET /v0/config/explain.
 func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInput) (*IndexOutput[configExplainResponse], error) {
+	index := s.latestIndex()
 	cfg := s.state.Config()
 	builtins := config.BuiltinProviders()
 
@@ -166,7 +168,7 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 	}
 
 	return &IndexOutput[configExplainResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }
@@ -183,6 +185,9 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		errors = append(errors, err.Error())
 	}
+	if err := config.ValidateRigFederationLayout(s.state.CityPath(), cfg); err != nil {
+		errors = append(errors, err.Error())
+	}
 	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
 		errors = append(errors, err.Error())
 	}
@@ -194,6 +199,7 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 
 	warnings := config.ValidateSemantics(cfg, "city.toml")
 	warnings = append(warnings, config.ValidateDurations(cfg, "city.toml")...)
+	warnings = append(warnings, config.RigFederationWarnings(cfg.Rigs)...)
 
 	valid := len(errors) == 0
 
@@ -221,6 +227,7 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 // derived from the city name, the baseline is computed against the
 // requested city scope, not a static global document.
 func (s *Server) humaHandleConfigDefaults(_ context.Context, _ *ConfigDefaultsInput) (*IndexOutput[configResponse], error) {
+	index := s.latestIndex()
 	cfg := s.state.Config()
 	name := strings.TrimSpace(s.state.CityName())
 	if name == "" {
@@ -244,7 +251,7 @@ func (s *Server) humaHandleConfigDefaults(_ context.Context, _ *ConfigDefaultsIn
 	}
 
 	return &IndexOutput[configResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }

@@ -52,9 +52,9 @@ func inFlightDeferrals(trace *sessionReconcilerTraceCycle) int {
 // runSlowStart starts a pending create of "worker" on a runtimeFirstStartProvider
 // over store, then runs a second reconciler tick advance later, while the
 // start is still creating the box, and releases the start once that tick
-// returns or blocks. It returns the env, the provider, the row and the second
-// tick's trace.
-func runSlowStart(t *testing.T, store beads.Store, advance time.Duration) (*reconcilerTestEnv, *runtimeFirstStartProvider, beads.Bead, *sessionReconcilerTraceCycle) {
+// returns or blocks. meta, when given, is added to the row before the first
+// tick. It returns the env, the provider, the row and the second tick's trace.
+func runSlowStart(t *testing.T, store beads.Store, advance time.Duration, meta ...map[string]string) (*reconcilerTestEnv, *runtimeFirstStartProvider, beads.Bead, *sessionReconcilerTraceCycle) {
 	t.Helper()
 	env := newReconcilerTestEnv(t)
 	if store != nil {
@@ -82,6 +82,9 @@ func runSlowStart(t *testing.T, store beads.Store, advance time.Duration) (*reco
 		"pending_create_claim":      "true",
 		"pending_create_started_at": pendingCreateStartedAtNow(env.clk.Now()),
 	})
+	for _, m := range meta {
+		env.setSessionMetadata(&session, m)
+	}
 
 	tick := func(trace *sessionReconcilerTraceCycle) {
 		got, err := env.store.Get(session.ID)

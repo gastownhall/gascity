@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -442,12 +443,13 @@ func TestSessionRespondFailureReleasesKey(t *testing.T) {
 // concurrent same-key request observes the in-flight claim.
 type blockingRespondProvider struct {
 	*runtime.Fake
-	entered chan struct{}
-	release chan struct{}
+	enterOnce sync.Once
+	entered   chan struct{}
+	release   chan struct{}
 }
 
 func (p *blockingRespondProvider) Respond(name string, response runtime.InteractionResponse) error {
-	close(p.entered)
+	p.enterOnce.Do(func() { close(p.entered) })
 	<-p.release
 	return p.Fake.Respond(name, response)
 }
@@ -468,7 +470,7 @@ func TestSessionRespondInFlightReturnsConflict(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- postSessionAction(t, h, url, "respond-1", body) }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 
 	inFlight := postSessionAction(t, h, url, "respond-1", body)
 	if inFlight.Code != http.StatusConflict || !strings.Contains(inFlight.Body.String(), "idempotency-in-flight") {

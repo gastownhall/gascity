@@ -28,6 +28,7 @@ func TestDecideRowStartGates(t *testing.T) {
 		desired  desire
 		meta     []string
 		episode  time.Time // the startup-health episode's quarantine end
+		backoff  time.Time // the startup-health episode's retry backoff end
 		health   map[string]bool
 		want     string
 		wantKind string
@@ -40,6 +41,9 @@ func TestDecideRowStartGates(t *testing.T) {
 		{name: "an expired quarantine heals in the start's CAS", liveness: livenessGone, desired: desireWake, meta: []string{"quarantined_until", woke}, want: decideStart, wantKind: intentStart},
 		{name: "SESS-607 the startup-health episode (#46)", liveness: livenessGone, desired: desireWake, episode: soon, want: decideStartEpisode, next: soon},
 		{name: "an expired episode starts", liveness: livenessGone, desired: desireWake, episode: gatherNow.Add(-time.Second), want: decideStart, wantKind: intentStart},
+		{name: "a pending backoff-only episode holds the start", liveness: livenessGone, desired: desireWake, backoff: soon, want: decideStartEpisode, next: soon},
+		{name: "an expired backoff-only episode starts", liveness: livenessGone, desired: desireWake, backoff: gatherNow.Add(-time.Second), want: decideStart, wantKind: intentStart},
+		{name: "a backoff later than the episode quarantine holds to the backoff", liveness: livenessGone, desired: desireWake, episode: soon, backoff: soon.Add(time.Hour), want: decideStartEpisode, next: soon.Add(time.Hour)},
 		{name: "SESS-610 a red provider", liveness: livenessGone, desired: desireWake, health: map[string]bool{"claude": false}, want: decideStartProviderRed},
 		{name: "GUAR-034 unknown health fails open", liveness: livenessGone, desired: desireWake, health: map[string]bool{}, want: decideStart, wantKind: intentStart},
 		{name: "a green provider starts", liveness: livenessGone, desired: desireWake, health: map[string]bool{"claude": true}, want: decideStart, wantKind: intentStart},
@@ -55,8 +59,8 @@ func TestDecideRowStartGates(t *testing.T) {
 			e := c.a.Snapshot.Entries[c.k]
 			e.Endpoint = "provider:claude"
 			info := c.w.Census.Rows[c.k].Info
-			if !tc.episode.IsZero() {
-				c.w.Episodes = map[string]session.StartupHealthEpisode{startupHealthEpisodeKey(info, "s-heal"): {QuarantinedUntil: tc.episode}}
+			if !tc.episode.IsZero() || !tc.backoff.IsZero() {
+				c.w.Episodes = map[string]session.StartupHealthEpisode{startupHealthEpisodeKey(info, "s-heal"): {QuarantinedUntil: tc.episode, BackoffUntil: tc.backoff}}
 			}
 			if tc.health != nil {
 				c.w.ProviderHealth = &providerHealthSnapshot{present: true, entries: tc.health}
@@ -197,6 +201,109 @@ func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 	c.w.Env = &reconcileEnv{Cfg: &config.City{Session: config.SessionConfig{Provider: "subprocess"}}}
 	if it := c.decide(); it.Kind != intentStart || it.folded()["wake_attempts"] != "" {
 		t.Fatalf("subprocess exit: decideRow = (%q, %q, %v), want a same-pass start with no accrual", it.Kind, it.Reason, it.folded())
+	}
+}
+
+// Kills a dead seat's quarantining accrual that shortens a live quarantine
+// (the #7706 review): A6's crash or churn accrual at the limit writes the
+// later of its deadline and the row's unexpired quarantined_until, so it
+// extends a shorter one and keeps an operator's longer one, as legacy's;
+// and so does its rate-limit quarantine.
+func TestDeadRuntimeAccrualNeverShortensAQuarantine(t *testing.T) {
+	at := func(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339) }
+	accrued := at(defaultQuarantineDuration)
+	for _, death := range []struct {
+		name string
+		meta []string
+	}{
+		{"a rapid crash", []string{"last_woke_at", at(-10 * time.Second), "wake_attempts", "4"}},
+		{"churn", []string{"last_woke_at", at(-2 * time.Minute), "churn_count", "2"}},
+	} {
+		for existing, want := range map[string]string{at(time.Minute): accrued, at(24 * time.Hour): at(24 * time.Hour)} {
+			c := newHealCase(t, livenessGone, desireWake, append([]string{"state", "active", "session_key", "k-1", "quarantined_until", existing}, death.meta...)...)
+			it := c.decide()
+			got, wrote := it.folded()["quarantined_until"]
+			if !wrote {
+				got = existing
+			}
+			if got != want {
+				t.Errorf("%s over quarantined_until %s: it is %s (patch %v), want %s", death.name, existing, got, it.folded(), want)
+			}
+		}
+	}
+	// So does the start-failure abandon's accrual (S3's otherFailurePatch,
+	// the #7726 review's o1).
+	for existing, want := range map[string]string{at(time.Minute): at(defaultQuarantineDuration), at(24 * time.Hour): at(24 * time.Hour)} {
+		row := session.Info{ID: "gc-1", MetadataState: string(session.StateCreating), WakeAttemptsMetadata: "4", QuarantinedUntil: existing}
+		patch, class, quarantined := otherFailurePatch(row, map[string]string{"quarantined_until": existing}, startFailureRead{}, gatherNow)
+		got, wrote := class.Into(row.ID, patch)["quarantined_until"]
+		if !wrote {
+			got = existing
+		}
+		if !quarantined || got != want {
+			t.Errorf("start-failure abandon over quarantined_until %s: it is %s (quarantined %t), want %s", existing, got, quarantined, want)
+		}
+	}
+	// So does v2's rate-limit quarantine (the abandon and recycle paths').
+	for existing, want := range map[string]string{at(time.Minute): at(defaultRateLimitQuarantineDuration), at(24 * time.Hour): at(24 * time.Hour)} {
+		row := session.Info{ID: "gc-1", QuarantinedUntil: existing}
+		_, class := rateLimitQuarantine(row, gatherNow)
+		got, wrote := class.Into(row.ID, nil)["quarantined_until"]
+		if !wrote {
+			got = existing
+		}
+		if got != want {
+			t.Errorf("rate limit over quarantined_until %s: it is %s, want %s", existing, got, want)
+		}
+	}
+}
+
+// TestAccrualKeepsALiveQuarantinesReason (CONTRACT v5.9z; seed 499). Kills
+// a v2 accrual that overwrites a live quarantine's reason: A6's rapid-crash
+// and churn accruals and the start-failure abandon's, reaching their
+// threshold during a live quarantine whose reason is the quarantine's,
+// leave sleep_reason as it is; with no quarantine they write their own.
+func TestAccrualKeepsALiveQuarantinesReason(t *testing.T) {
+	at := func(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339) }
+	for _, death := range []struct {
+		name, own string
+		meta      []string
+	}{
+		{"a rapid crash", string(session.SleepReasonQuarantine), []string{"last_woke_at", at(-10 * time.Second), "wake_attempts", "4"}},
+		{"churn", string(session.SleepReasonContextChurn), []string{"last_woke_at", at(-2 * time.Minute), "churn_count", "2"}},
+	} {
+		for _, live := range []bool{true, false} {
+			meta := append([]string{"state", "active", "session_key", "k-1"}, death.meta...)
+			if live {
+				meta = append(meta, "quarantined_until", at(time.Minute), "sleep_reason", string(session.SleepReasonRateLimit))
+			}
+			it := newHealCase(t, livenessGone, desireWake, meta...).decide()
+			got, wrote := it.folded()["sleep_reason"]
+			switch {
+			case live && wrote:
+				t.Errorf("%s over a live rate-limit quarantine: sleep_reason written %q, want rate_limit kept", death.name, got)
+			case !live && got != death.own:
+				t.Errorf("%s with no quarantine: sleep_reason %q, want %q", death.name, got, death.own)
+			}
+		}
+	}
+	for _, live := range []bool{true, false} {
+		row := session.Info{ID: "gc-1", MetadataState: string(session.StateCreating), WakeAttemptsMetadata: "4"}
+		meta := map[string]string{}
+		if live {
+			row.QuarantinedUntil, row.SleepReason = at(time.Minute), string(session.SleepReasonRateLimit)
+			meta = map[string]string{"quarantined_until": row.QuarantinedUntil, "sleep_reason": row.SleepReason}
+		}
+		patch, _, quarantined := otherFailurePatch(row, meta, startFailureRead{}, gatherNow)
+		got, wrote := patch["sleep_reason"]
+		switch {
+		case !quarantined:
+			t.Errorf("start-failure abandon (live %t): not quarantined, patch %v", live, patch)
+		case live && wrote:
+			t.Errorf("start-failure abandon over a live rate-limit quarantine: sleep_reason written %q, want rate_limit kept", got)
+		case !live && got != string(session.SleepReasonQuarantine):
+			t.Errorf("start-failure abandon with no quarantine: sleep_reason %q, want quarantine", got)
+		}
 	}
 }
 

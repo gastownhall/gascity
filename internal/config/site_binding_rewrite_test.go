@@ -246,12 +246,39 @@ func TestWriteCityAndRigSiteBindingsForEditRestoresSymlinkOnBindingFailure(t *te
 	}
 }
 
-// The funnel's rollback must also preserve a symlinked .gc/site.toml: the
-// snapshot records the resolved target persistSiteBinding writes to, so a
-// site-binding failure after the city.toml rewrite restores the target's
-// contents instead of renaming over (or removing) the link itself.
-func TestWriteCityAndRigSiteBindingsForEditPreservesSiteTomlSymlinkOnBindingFailure(t *testing.T) {
-	originalCity := []byte("[workspace]\nname = \"test-city\"\n")
+// Every city edit's rollback must also preserve a symlinked .gc/site.toml:
+// the snapshot records the resolved target persistSiteBinding writes to, so
+// a site-binding failure after the city.toml write restores the target's
+// contents instead of renaming over (or removing) the link itself (#3470).
+func TestCityEditWritersPreserveSiteTomlSymlinkOnBindingFailure(t *testing.T) {
+	originalCity := []byte("[workspace]\nname = \"test-city\"\n\n[[rigs]]\nname = \"frontend\"\n\n[[rigs]]\nname = \"backend\"\n")
+
+	// Each writer changes city.toml and then a rig binding, so the
+	// site-binding write each case below makes fail is a real write.
+	writers := []struct {
+		name  string
+		write func(cityPath, dir string) error
+	}{
+		{name: "WriteCityAndRigSiteBindingsForEdit", write: func(cityPath, dir string) error {
+			return WriteCityAndRigSiteBindingsForEdit(fsys.OSFS{}, cityPath, &City{
+				Workspace: Workspace{Name: "renamed-city"},
+				Rigs:      []Rig{{Name: "frontend", Path: filepath.Join(dir, "frontend")}},
+			})
+		}},
+		{name: "AppendRigAndWriteSiteBindingsForEdit", write: func(cityPath, dir string) error {
+			docs := Rig{Name: "docs", Path: filepath.Join(dir, "docs")}
+			return AppendRigAndWriteSiteBindingsForEdit(fsys.OSFS{}, cityPath, &City{
+				Workspace: Workspace{Name: "test-city"},
+				Rigs:      []Rig{{Name: "frontend", Path: "/srv/frontend"}, {Name: "backend", Path: "/srv/backend"}, docs},
+			}, docs)
+		}},
+		{name: "RemoveRigAndWriteSiteBindingsForEdit", write: func(cityPath, _ string) error {
+			return RemoveRigAndWriteSiteBindingsForEdit(fsys.OSFS{}, cityPath, &City{
+				Workspace: Workspace{Name: "test-city"},
+				Rigs:      []Rig{{Name: "backend", Path: "/srv/backend"}},
+			}, "frontend")
+		}},
+	}
 
 	// setupCity creates a writable city dir with a regular city.toml and a
 	// writable .gc dir, and links .gc/site.toml to linkTarget.
@@ -271,13 +298,6 @@ func TestWriteCityAndRigSiteBindingsForEditPreservesSiteTomlSymlinkOnBindingFail
 			t.Fatal(err)
 		}
 		return cityPath, link
-	}
-
-	editCfg := func(dir string) *City {
-		return &City{
-			Workspace: Workspace{Name: "renamed-city"},
-			Rigs:      []Rig{{Name: "frontend", Path: filepath.Join(dir, "frontend")}},
-		}
 	}
 
 	assertLinkAndCityRestored := func(t *testing.T, link, linkTarget, cityPath string) {
@@ -305,105 +325,108 @@ func TestWriteCityAndRigSiteBindingsForEditPreservesSiteTomlSymlinkOnBindingFail
 		}
 	}
 
-	t.Run("write fails at read-only link target", func(t *testing.T) {
-		dir := t.TempDir()
-		checkoutDir := filepath.Join(dir, "checkout")
-		if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		target := filepath.Join(checkoutDir, "site.toml")
-		originalSite := []byte("[[rig]]\nname = \"backend\"\npath = \"/srv/backend\"\n")
-		if err := os.WriteFile(target, originalSite, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		// The link target's directory is read-only, so the forward
-		// site-binding write fails there — while the link-side .gc stays
-		// writable, which is exactly where a rollback at the unresolved
-		// path would "succeed" by renaming over the link.
-		if err := os.Chmod(checkoutDir, 0o555); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(checkoutDir, 0o755) })
-		cityPath, link := setupCity(t, dir, target)
+	for _, w := range writers {
+		t.Run(w.name, func(t *testing.T) {
+			t.Run("write fails at read-only link target", func(t *testing.T) {
+				dir := t.TempDir()
+				checkoutDir := filepath.Join(dir, "checkout")
+				if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(checkoutDir, "site.toml")
+				originalSite := []byte("[[rig]]\nname = \"backend\"\npath = \"/srv/backend\"\n\n[[rig]]\nname = \"frontend\"\npath = \"/srv/frontend\"\n")
+				if err := os.WriteFile(target, originalSite, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				// The link target's directory is read-only, so the forward
+				// site-binding write fails there — while the link-side .gc
+				// stays writable, which is exactly where a rollback at the
+				// unresolved path would "succeed" by renaming over the link.
+				if err := os.Chmod(checkoutDir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(checkoutDir, 0o755) })
+				cityPath, link := setupCity(t, dir, target)
 
-		err := WriteCityAndRigSiteBindingsForEdit(fsys.OSFS{}, cityPath, editCfg(dir))
-		if err == nil {
-			t.Fatal("WriteCityAndRigSiteBindingsForEdit succeeded, want site-binding write failure")
-		}
+				if err := w.write(cityPath, dir); err == nil {
+					t.Fatalf("%s succeeded, want site-binding write failure", w.name)
+				}
 
-		assertLinkAndCityRestored(t, link, target, cityPath)
-		data, err := os.ReadFile(target)
-		if err != nil {
-			t.Fatalf("ReadFile target: %v", err)
-		}
-		if !bytes.Equal(data, originalSite) {
-			t.Fatalf("target content = %q, want untouched original %q", data, originalSite)
-		}
-	})
+				assertLinkAndCityRestored(t, link, target, cityPath)
+				data, err := os.ReadFile(target)
+				if err != nil {
+					t.Fatalf("ReadFile target: %v", err)
+				}
+				if !bytes.Equal(data, originalSite) {
+					t.Fatalf("target content = %q, want untouched original %q", data, originalSite)
+				}
+			})
 
-	t.Run("load failure restores target through link", func(t *testing.T) {
-		dir := t.TempDir()
-		checkoutDir := filepath.Join(dir, "checkout")
-		if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		target := filepath.Join(checkoutDir, "site.toml")
-		// Unparsable content makes persistRigSiteBindings fail after the
-		// city.toml rewrite, so rollback must rewrite these exact bytes at
-		// the resolved target, not rename over the link.
-		originalSite := []byte("not toml [\n")
-		if err := os.WriteFile(target, originalSite, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		cityPath, link := setupCity(t, dir, target)
+			t.Run("load failure restores target through link", func(t *testing.T) {
+				dir := t.TempDir()
+				checkoutDir := filepath.Join(dir, "checkout")
+				if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(checkoutDir, "site.toml")
+				// Unparsable content makes persistRigSiteBindings fail after
+				// the city.toml write, so rollback must rewrite these exact
+				// bytes at the resolved target, not rename over the link.
+				originalSite := []byte("not toml [\n")
+				if err := os.WriteFile(target, originalSite, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				cityPath, link := setupCity(t, dir, target)
 
-		err := WriteCityAndRigSiteBindingsForEdit(fsys.OSFS{}, cityPath, editCfg(dir))
-		if err == nil {
-			t.Fatal("WriteCityAndRigSiteBindingsForEdit succeeded, want site-binding load failure")
-		}
-		if !strings.Contains(err.Error(), "restored city.toml") {
-			t.Fatalf("error = %v, want restore confirmation", err)
-		}
+				err := w.write(cityPath, dir)
+				if err == nil {
+					t.Fatalf("%s succeeded, want site-binding load failure", w.name)
+				}
+				if !strings.Contains(err.Error(), "restored city.toml") {
+					t.Fatalf("error = %v, want restore confirmation", err)
+				}
 
-		assertLinkAndCityRestored(t, link, target, cityPath)
-		data, err := os.ReadFile(target)
-		if err != nil {
-			t.Fatalf("ReadFile target: %v", err)
-		}
-		if !bytes.Equal(data, originalSite) {
-			t.Fatalf("target content = %q, want restored original %q", data, originalSite)
-		}
-	})
+				assertLinkAndCityRestored(t, link, target, cityPath)
+				data, err := os.ReadFile(target)
+				if err != nil {
+					t.Fatalf("ReadFile target: %v", err)
+				}
+				if !bytes.Equal(data, originalSite) {
+					t.Fatalf("target content = %q, want restored original %q", data, originalSite)
+				}
+			})
 
-	t.Run("dangling link is not removed by rollback", func(t *testing.T) {
-		dir := t.TempDir()
-		checkoutDir := filepath.Join(dir, "checkout")
-		if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		// The dangling target's parent cannot be created, so the forward
-		// write fails; the !existed rollback branch must remove the
-		// (missing) target, never the link itself.
-		if err := os.Chmod(checkoutDir, 0o555); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(checkoutDir, 0o755) })
-		target := filepath.Join(checkoutDir, "sub", "site.toml")
-		cityPath, link := setupCity(t, dir, target)
+			t.Run("dangling link is not removed by rollback", func(t *testing.T) {
+				dir := t.TempDir()
+				checkoutDir := filepath.Join(dir, "checkout")
+				if err := os.MkdirAll(checkoutDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				// The dangling target's parent cannot be created, so the
+				// forward write fails; the !existed rollback branch must
+				// remove the (missing) target, never the link itself.
+				if err := os.Chmod(checkoutDir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(checkoutDir, 0o755) })
+				target := filepath.Join(checkoutDir, "sub", "site.toml")
+				cityPath, link := setupCity(t, dir, target)
 
-		err := WriteCityAndRigSiteBindingsForEdit(fsys.OSFS{}, cityPath, editCfg(dir))
-		if err == nil {
-			t.Fatal("WriteCityAndRigSiteBindingsForEdit succeeded, want site-binding write failure")
-		}
-		if !strings.Contains(err.Error(), "restored city.toml") {
-			t.Fatalf("error = %v, want restore confirmation", err)
-		}
+				err := w.write(cityPath, dir)
+				if err == nil {
+					t.Fatalf("%s succeeded, want site-binding write failure", w.name)
+				}
+				if !strings.Contains(err.Error(), "restored city.toml") {
+					t.Fatalf("error = %v, want restore confirmation", err)
+				}
 
-		assertLinkAndCityRestored(t, link, target, cityPath)
-		if _, err := os.Lstat(target); !os.IsNotExist(err) {
-			t.Fatalf("Lstat target = %v, want not-exist after rollback", err)
-		}
-	})
+				assertLinkAndCityRestored(t, link, target, cityPath)
+				if _, err := os.Lstat(target); !os.IsNotExist(err) {
+					t.Fatalf("Lstat target = %v, want not-exist after rollback", err)
+				}
+			})
+		})
+	}
 }
 
 // A brand-new city.toml (no existing file) must still be writable: the

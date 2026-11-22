@@ -31,10 +31,12 @@ const (
 	// SessionObjectRenamed means the id names a session under another name.
 	SessionObjectRenamed
 	// SessionObjectLive means a corpse kill was refused, because a pane is
-	// live or the session has more than one window or pane.
+	// live, a client is attached, or the session has more than one window or
+	// pane.
 	SessionObjectLive
 	// SessionObjectChanged means a zombie kill was refused, because the pane
-	// died, its pid changed, or the session has more than one window or pane.
+	// died, its pid changed, a client is attached, or the session has more
+	// than one window or pane.
 	SessionObjectChanged
 )
 
@@ -45,11 +47,12 @@ const (
 // read and the kill is refused.
 type SessionObjectKiller interface {
 	// KillCorpseObject kills objectID only while it was created at created,
-	// is named name and has one window with one pane, which is dead.
+	// is named name, has no client attached and has one window with one
+	// pane, which is dead.
 	KillCorpseObject(name, objectID, created string) (SessionObjectKillResult, error)
 	// KillZombieObject kills objectID only while it was created at created,
-	// is named name and has one window with one live pane whose pid is
-	// panePID (Liveness.PanePID).
+	// is named name, has no client attached and has one window with one live
+	// pane whose pid is panePID (Liveness.PanePID).
 	KillZombieObject(name, objectID, created, panePID string) (SessionObjectKillResult, error)
 }
 
@@ -58,6 +61,19 @@ type SessionObjectKiller interface {
 // subprocess probe their control socket), so that read is already fresh.
 type FreshByConstruction interface {
 	LivenessReadsFresh() bool
+}
+
+// FreshReadable reports a leaf whose liveness read reports errors and is
+// fresh: it implements the fresh read, or reads fresh by construction (acp,
+// subprocess). Any other leaf (a bool-only one: herdr, k8s, exec) proves
+// neither presence nor absence.
+func FreshReadable(leaf Provider) bool {
+	if _, ok := leaf.(LivenessObserverWithError); !ok {
+		return false
+	}
+	_, fresh := leaf.(FreshLivenessObserver)
+	m, byConstruction := leaf.(FreshByConstruction)
+	return fresh || byConstruction && m.LivenessReadsFresh()
 }
 
 // FreshLivenessObserver is the optional capability for a liveness read that

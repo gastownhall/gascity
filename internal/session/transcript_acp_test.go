@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -33,7 +34,7 @@ func newACPDiscoveryFixture(t *testing.T, withCity bool) acpDiscoveryFixture {
 	if withCity {
 		opts = append(opts, WithCityPath(f.city))
 	}
-	f.mgr = NewManagerWithOptions(f.store, runtime.NewFake(), opts...)
+	f.mgr = NewManagerWithOptions(beadstest.Sessions(f.store), runtime.NewFake(), opts...)
 	return f
 }
 
@@ -115,6 +116,53 @@ func TestTranscriptPathKeyedNativeBeatsACPCapture(t *testing.T) {
 	}
 	if path != keyed {
 		t.Fatalf("TranscriptPath = %q, want the keyed native transcript %q", path, keyed)
+	}
+}
+
+// The lookup resolves an ACP session's capture right after its keyed
+// transcript, so while that transcript is missing the capture wins over the
+// keyed wait, over another session in the work directory, and over the absent
+// window of a start that has no key yet (SESSION-HISTORY-EXACT-KEY,
+// SESSION-HISTORY-CONVERSATION-EPOCH).
+func TestTranscriptPathACPCaptureBeatsKeyedWaitAndKeylessStart(t *testing.T) {
+	keyed := ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
+	for _, tc := range []struct {
+		name    string
+		state   State
+		keepKey bool
+		sibling bool
+	}{
+		{name: "keyless start", state: StateCreating},
+		{name: "keyless start beside another session in its work dir", state: StateCreating, sibling: true},
+		{name: "keyed session whose transcript is missing, beside another session in its work dir", state: StateAsleep, keepKey: true, sibling: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newACPDiscoveryFixture(t, true)
+			info := f.create(t, "claude", "acp", keyed)
+			if info.SessionKey == "" {
+				t.Fatal("session has no session key")
+			}
+			if tc.sibling {
+				f.create(t, "claude", "acp", keyed)
+			}
+			meta := map[string]string{"state": string(tc.state)}
+			if !tc.keepKey {
+				meta["session_key"] = ""
+			}
+			if err := f.store.SetMetadataBatch(info.ID, meta); err != nil {
+				t.Fatalf("SetMetadataBatch: %v", err)
+			}
+			capture := f.writeCapture(t, info.ID, "1")
+			f.writeWorkDirTranscript(t, "previous.jsonl")
+
+			path, lookup, err := f.mgr.TranscriptPathClassified(info.ID, []string{f.searchBase})
+			if err != nil {
+				t.Fatalf("TranscriptPathClassified: %v", err)
+			}
+			if path != capture || lookup != TranscriptFound {
+				t.Fatalf("TranscriptPathClassified = %q, %v; want the capture %q", path, lookup, capture)
+			}
+		})
 	}
 }
 
@@ -243,7 +291,7 @@ func TestTranscriptPathACPCaptureForControllerBeadWithoutTransport(t *testing.T)
 		if err := autoSP.Start(context.Background(), b.Metadata["session_name"], runtime.Config{}); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		mgr := NewManagerWithOptions(store, autoSP, WithCityPath(city))
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), autoSP, WithCityPath(city))
 		capture := writeCityCapture(t, city, b.ID)
 
 		path, lookup, err := mgr.TranscriptPathClassified(b.ID, []string{t.TempDir()})
@@ -258,7 +306,7 @@ func TestTranscriptPathACPCaptureForControllerBeadWithoutTransport(t *testing.T)
 		city := t.TempDir()
 		store := beads.NewMemStore()
 		b := controllerShapedACPBead(t, store)
-		mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(city),
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), WithCityPath(city),
 			WithTransportResolver(func(template, _ string) string {
 				if template == "worker" {
 					return "acp"
@@ -279,7 +327,7 @@ func TestTranscriptPathACPCaptureForControllerBeadWithoutTransport(t *testing.T)
 		city := t.TempDir()
 		store := beads.NewMemStore()
 		b := controllerShapedACPBead(t, store)
-		mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(city))
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), WithCityPath(city))
 		writeCityCapture(t, city, b.ID)
 
 		path, err := mgr.TranscriptPath(b.ID, []string{t.TempDir()})

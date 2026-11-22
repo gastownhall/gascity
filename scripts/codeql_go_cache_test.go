@@ -84,8 +84,9 @@ func TestCodeQLGoLegCaches(t *testing.T) {
 			t.Errorf("Save Go build cache with %v: runs %v, want %v", c.ctx, got, c.save)
 		}
 	}
-	// Only the go leg autobuilds.
-	if got := byKey["Autobuild"].If; got != "matrix.build-mode == 'autobuild'" {
+	// Only the go leg autobuilds, and never in a merge group
+	// (codeql_merge_group_test.go).
+	if got := byKey["Autobuild"].If; got != "matrix.build-mode == 'autobuild' && github.event_name != 'merge_group'" {
 		t.Errorf("Autobuild if %q", got)
 	}
 	var include []map[string]string

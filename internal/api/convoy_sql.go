@@ -428,6 +428,13 @@ func workflowSQLDepFromRow(issueID, dependsOnID, depType sql.NullString) beads.D
 // quiet while still surfacing genuine fast-path failures (gascity#2940).
 var errNoSQLWorkflowStores = errors.New("no sql workflow stores")
 
+// errNoDirectSQLEndpoint marks a scope gc must not dial: a bd-owned
+// proxied-local store, whose proxy and Dolt bd owns. The contract returns its
+// target with no host, port or socket on purpose, and native SQL over the
+// proxy is deliberately not done (engdocs/design/beads-proxied-local-default.md),
+// so for the workflow fast path such a scope is not a SQL store.
+var errNoDirectSQLEndpoint = errors.New("scope has no direct SQL endpoint")
+
 func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScopeRef string, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
 	candidates := workflowSQLCandidatesForWorkflowID(
 		s.state,
@@ -450,8 +457,13 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 	// needs to be actionable. A clean miss (ok == false, err == nil) is not a
 	// failure: the workflow simply isn't in that store.
 	var firstProbeErr error
+	sqlStores := 0
 	for _, candidate := range candidates {
 		host, port, database, user, password, err := resolveDoltConnection(s.state.CityPath(), candidate.path)
+		if errors.Is(err, errNoDirectSQLEndpoint) {
+			continue
+		}
+		sqlStores++
 		if err != nil {
 			if firstProbeErr == nil {
 				firstProbeErr = fmt.Errorf("resolve dolt connection for %s: %w", candidate.info.ref, err)
@@ -469,6 +481,9 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 			continue
 		}
 		matches = append(matches, sqlWorkflowRootMatch{candidate: candidate, root: root})
+	}
+	if sqlStores == 0 {
+		return nil, errNoSQLWorkflowStores
 	}
 	if len(matches) == 0 {
 		if firstProbeErr != nil {
@@ -831,6 +846,13 @@ func resolveDoltConnection(cityRoot, scopeRoot string) (string, int, string, str
 	if err != nil {
 		return "", 0, "", "", "", err
 	}
+	// The contract returns a proxied-local target with no endpoint on purpose:
+	// bd owns that proxy and its Dolt. A proxied scope with an external
+	// upstream carries one and is dialed as before.
+	if strings.EqualFold(strings.TrimSpace(target.DoltMode), "proxied-server") &&
+		strings.TrimSpace(target.Host) == "" && strings.TrimSpace(target.Port) == "" && strings.TrimSpace(target.Socket) == "" {
+		return "", 0, "", "", "", fmt.Errorf("%s: %w", scopeRoot, errNoDirectSQLEndpoint)
+	}
 	port, err := strconv.Atoi(strings.TrimSpace(target.Port))
 	if err != nil {
 		return "", 0, "", "", "", fmt.Errorf("parse dolt port %q: %w", target.Port, err)
@@ -861,11 +883,10 @@ func buildDoltDSN(user, password, host string, port int, database string) string
 	return cfg.FormatDSN()
 }
 
-// prefetchedDepStore wraps a pre-fetched dep map to satisfy the beads.Store
-// interface for collectWorkflowDeps, which calls store.DepList().
+// prefetchedDepStore wraps a pre-fetched dep map as the DepList
+// collectWorkflowDeps reads (workflowDepLister).
 type prefetchedDepStore struct {
-	beads.Store // embed nil Store — only DepList is called
-	deps        map[string][]beads.Dep
+	deps map[string][]beads.Dep
 }
 
 func (s *prefetchedDepStore) DepList(id, direction string) ([]beads.Dep, error) {

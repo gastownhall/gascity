@@ -14,6 +14,7 @@ go_library(
         "runtime_helpers.go",
         "scanner.go",
         "store.go",
+        "store_legs.go",
         "store_reads.go",
         "trigger_exec_unix.go",
         "trigger_exec_windows.go",
@@ -22,12 +23,14 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/orders",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/clock",
         "//internal/convergence",
         "//internal/events",
         "//internal/execenv",
         "//internal/fsys",
+        "//internal/runtime",
         "@com_github_burntsushi_toml//:toml",
     ] + select({
         "@rules_go//go/platform:aix": [
@@ -75,6 +78,9 @@ go_library(
         "@rules_go//go/platform:solaris": [
             "//internal/processgroup",
         ],
+        "@rules_go//go/platform:windows": [
+            "//internal/processgroup",
+        ],
         "//conditions:default": [],
     }),
 )
@@ -82,15 +88,20 @@ go_library(
 go_test(
     name = "orders_test",
     srcs = [
+        "condition_windows_test.go",
         "discovery_test.go",
         "env_test.go",
         "exec_outcome_test.go",
         "filenames_test.go",
         "filter_test.go",
+        "order_requires_backend_test.go",
         "order_test.go",
         "override_test.go",
+        "run_record_test.go",
         "runtime_helpers_test.go",
         "scanner_test.go",
+        "store_legs_reference_test.go",
+        "store_legs_test.go",
         "store_reads_bounded_test.go",
         "store_reads_test.go",
         "store_test.go",
@@ -116,7 +127,10 @@ go_test(
         "//internal/execenv",
         "//internal/fsys",
         "//internal/processgroup/processgrouptest",
+        "//internal/sourceworkflow",
         "//internal/testenv",
+        "@com_github_steveyegge_beads//:beads",
+        "@com_github_steveyegge_beads//issueops",
     ] + select({
         "@rules_go//go/platform:aix": [
             "//internal/processgroup",

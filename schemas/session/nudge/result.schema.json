@@ -10,7 +10,10 @@
     "session_name": { "type": "string" },
     "delivery": { "type": "string", "enum": ["immediate", "wait-idle", "queue"] },
     "queued": { "type": "boolean" },
-    "outcome": { "type": "string", "enum": ["delivered", "queued"] }
+    "outcome": { "type": "string", "enum": ["delivered", "queued"] },
+    "op_id": { "type": "string", "minLength": 1 },
+    "key": { "type": "string", "minLength": 1 },
+    "replayed": { "type": "boolean" }
   },
   "additionalProperties": true
 }

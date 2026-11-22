@@ -193,7 +193,20 @@ const (
 	// alongside the dead-lettered ones, so the caller dead-letters work the
 	// queue is about to redeliver — the partial-result defect.
 	NudgesDefectRecordFailureReportsEveryItem
+	// NudgesDefectClaimBatchSplits resumes a pinned batch in part: it hands
+	// back all but one of the batch's members and leaves the last one queued,
+	// so the runtime commits the partial text under the batch key and later
+	// replays that receipt for the member it never saw.
+	NudgesDefectClaimBatchSplits
+	// NudgesDefectClaimIgnoresLaunch judges no startup turn by its launch:
+	// its reader vouches for every turn, so a turn whose launch is gone is
+	// delivered, or superseded as a duplicate, instead of dropped as stale.
+	NudgesDefectClaimIgnoresLaunch
 )
+
+// vouchedLaunch is the one launch NudgesDefectClaimIgnoresLaunch binds every
+// startup turn to.
+const vouchedLaunch = "vouched-launch"
 
 // NewBrokenNudgeFrontDoors wraps base's queue with exactly one Nudges-class
 // defect, leaving the shadow projection intact.
@@ -209,9 +222,46 @@ type brokenNudgeQueue struct {
 	defect NudgesDefect
 }
 
+// EnqueueDeferred rebinds a startup turn to vouchedLaunch under
+// NudgesDefectClaimIgnoresLaunch.
+func (q *brokenNudgeQueue) EnqueueDeferred(item nudgequeue.Item) error {
+	if q.defect == NudgesDefectClaimIgnoresLaunch && nudgequeue.IsStartupTurn(item) {
+		item.Reference = nudgequeue.StartupTurnReference(vouchedLaunch)
+	}
+	return q.NudgeQueue.EnqueueDeferred(item)
+}
+
+// vouching is target with a reader that, under NudgesDefectClaimIgnoresLaunch,
+// answers vouchedLaunch whenever the target's own reader names a launch.
+func (q *brokenNudgeQueue) vouching(target storebinding.ClaimTarget) storebinding.ClaimTarget {
+	if q.defect != NudgesDefectClaimIgnoresLaunch || target.LiveLaunch == nil {
+		return target
+	}
+	read := target.LiveLaunch
+	target.LiveLaunch = func() (string, bool) {
+		if _, ok := read(); !ok {
+			return "", false
+		}
+		return vouchedLaunch, true
+	}
+	return target
+}
+
 func (q *brokenNudgeQueue) ClaimDue(target storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
 	if q.defect != NudgesDefectClaimIgnoresFence {
-		return q.NudgeQueue.ClaimDue(target, now)
+		return q.NudgeQueue.ClaimDue(q.vouching(target), now)
+	}
+	// While a startup turn of the target's session stands, the claim is the
+	// reference's own judgement, so this fake carries the fence defect and
+	// nothing else.
+	pending, inFlight, _, err := q.ListFor(target, now)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range append(append([]nudgequeue.Item(nil), pending...), inFlight...) {
+		if nudgequeue.IsStartupTurn(item) && (item.SessionID == "" || item.SessionID == target.SessionID) {
+			return q.NudgeQueue.ClaimDue(target, now)
+		}
 	}
 	unfenced := target
 	unfenced.SessionID = ""
@@ -221,19 +271,46 @@ func (q *brokenNudgeQueue) ClaimDue(target storebinding.ClaimTarget, now time.Ti
 	}
 	// The fence is dropped a second time: every DUE item still pending for
 	// these keys is claimed regardless of the session it was pinned to. Items
-	// that are not yet deliverable stay put, so this fake carries the fence
-	// defect and nothing else.
-	pending, _, _, err := q.ListFor(target, now)
+	// that are not yet deliverable stay put, and so does another session's
+	// startup turn.
+	pending, _, _, err = q.ListFor(target, now)
 	if err != nil {
 		return claimed, err
 	}
 	for _, item := range pending {
-		if item.DeliverAfter.After(now) {
+		if item.DeliverAfter.After(now) || nudgequeue.IsStartupTurn(item) {
 			continue
 		}
 		claimed = append(claimed, item)
 	}
 	return claimed, nil
+}
+
+func (q *brokenNudgeQueue) ClaimBatch(target storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
+	if q.defect != NudgesDefectClaimBatchSplits {
+		return q.NudgeQueue.ClaimBatch(q.vouching(target), now)
+	}
+	pending, _, _, err := q.ListFor(target, now)
+	if err != nil {
+		return nil, err
+	}
+	pinned := map[string]bool{}
+	for _, item := range pending {
+		if item.DeliveryBatch != "" {
+			pinned[item.DeliveryBatch] = true
+		}
+	}
+	claimed, err := q.NudgeQueue.ClaimBatch(target, now)
+	if err != nil || len(claimed) < 2 || !pinned[claimed[0].DeliveryBatch] {
+		return claimed, err
+	}
+	// A resumed batch: one member goes back to the queue and the rest are
+	// delivered under the batch key.
+	last := claimed[len(claimed)-1]
+	if err := q.ReleaseClaims([]string{last.ID}, time.Time{}); err != nil {
+		return nil, err
+	}
+	return claimed[:len(claimed)-1], nil
 }
 
 func (q *brokenNudgeQueue) RecordFailure(ids []string, cause error, now time.Time) ([]nudgequeue.Item, error) {

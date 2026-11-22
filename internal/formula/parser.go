@@ -276,6 +276,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Requires:    cloneRequirements(formula.Requires),
 		Type:        formula.Type,
 		Source:      formula.Source,
+		ContentHash: formula.ContentHash,
 		Phase:       formula.Phase,
 		Pour:        formula.Pour,
 		Vars:        make(map[string]*VarDef),
@@ -370,6 +371,9 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	setFormulaCompilerConstraints(merged, compilerConstraints)
 
 	if err := merged.Validate(); err != nil {
+		return nil, err
+	}
+	if err := validateScopeMembership(merged); err != nil {
 		return nil, err
 	}
 	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {
@@ -716,6 +720,7 @@ func collectVarValidationErrors(defs map[string]*VarDef, values map[string]strin
 		names = append(names, name)
 	}
 	slices.Sort(names)
+	effective := ApplyVarDefaults(defs, values)
 
 	for _, name := range names {
 		def := defs[name]
@@ -731,9 +736,9 @@ func collectVarValidationErrors(defs map[string]*VarDef, values map[string]strin
 			continue
 		}
 
-		// Use default if not provided
+		// Use the resolved default if not provided
 		if !provided && def.Default != nil {
-			val = *def.Default
+			val = effective[name]
 		}
 
 		// Skip further validation if no value
@@ -779,23 +784,110 @@ func formatVarValidationErrors(errs []string) error {
 	return fmt.Errorf("%w:\n  - %s", ErrVarValidation, strings.Join(errs, "\n  - "))
 }
 
-// ApplyDefaults returns a new map with default values filled in.
+// ApplyDefaults returns a new map with default values filled in. See
+// ApplyVarDefaults for how a default that references other vars resolves.
 func ApplyDefaults(formula *Formula, values map[string]string) map[string]string {
-	result := make(map[string]string)
+	if formula == nil {
+		return ApplyVarDefaults(nil, values)
+	}
+	return ApplyVarDefaults(formula.Vars, values)
+}
 
-	// Copy provided values
+// ApplyVarDefaults returns values overlaid on the declared defaults in defs.
+// Caller values win and are copied verbatim: they are never re-expanded. A
+// default is a template: each {{name}} placeholder in it is replaced by the
+// resolved value of name, which may be a caller value (an explicit --var, a
+// rig formula_vars entry, an injected routing or runtime var) or another
+// default. A placeholder naming no resolved var stays literal, and so does the
+// placeholder that would close a reference cycle, so the residual-var checks
+// still report it by name.
+func ApplyVarDefaults(defs map[string]*VarDef, values map[string]string) map[string]string {
+	result := make(map[string]string, len(values))
 	for k, v := range values {
 		result[k] = v
 	}
+	pending := pendingVarDefaults(defs, values)
+	const (
+		resolving = 1
+		resolved  = 2
+	)
+	state := make(map[string]int, len(pending))
+	var resolve func(name string) (string, bool)
+	resolve = func(name string) (string, bool) {
+		raw, isDefault := pending[name]
+		if !isDefault {
+			value, ok := result[name]
+			return value, ok
+		}
+		switch state[name] {
+		case resolved:
+			return result[name], true
+		case resolving:
+			return "", false
+		}
+		state[name] = resolving
+		value := varPattern.ReplaceAllStringFunc(raw, func(match string) string {
+			if ref, ok := resolve(match[2 : len(match)-2]); ok {
+				return ref
+			}
+			return match
+		})
+		result[name] = value
+		state[name] = resolved
+		return value, true
+	}
+	names := make([]string, 0, len(pending))
+	for name := range pending {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		resolve(name)
+	}
+	return result
+}
 
-	// Apply defaults for missing values
-	for name, def := range formula.Vars {
-		if _, exists := result[name]; !exists && def.Default != nil {
-			result[name] = *def.Default
+// DefaultsReferencing returns the names of the vars ApplyVarDefaults fills
+// from a default whose template references one of names, directly or through
+// another default it fills. A var that values supplies is never included: its
+// value is used verbatim, so it references nothing.
+func DefaultsReferencing(defs map[string]*VarDef, values map[string]string, names ...string) map[string]bool {
+	pending := pendingVarDefaults(defs, values)
+	found := make(map[string]bool, len(pending))
+	references := func(raw string) bool {
+		for _, match := range varPattern.FindAllStringSubmatch(raw, -1) {
+			if found[match[1]] || slices.Contains(names, match[1]) {
+				return true
+			}
+		}
+		return false
+	}
+	for grew := true; grew; {
+		grew = false
+		for name, raw := range pending {
+			if !found[name] && references(raw) {
+				found[name] = true
+				grew = true
+			}
 		}
 	}
+	return found
+}
 
-	return result
+// pendingVarDefaults returns the default template of every var in defs that
+// values does not supply.
+func pendingVarDefaults(defs map[string]*VarDef, values map[string]string) map[string]string {
+	pending := make(map[string]string, len(defs))
+	for name, def := range defs {
+		if def == nil || def.Default == nil {
+			continue
+		}
+		if _, provided := values[name]; provided {
+			continue
+		}
+		pending[name] = *def.Default
+	}
+	return pending
 }
 
 // resolveDescriptionFiles walks all steps and replaces DescriptionFile

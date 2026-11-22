@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
@@ -136,7 +137,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	tmuxCfg.SocketName = socketName
 
 	provider := runtimetmux.NewProviderWithConfig(tmuxCfg)
-	manager := sessionpkg.NewManagerWithOptions(store, provider, sessionpkg.WithCityPath(root))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), provider, sessionpkg.WithCityPath(root))
 	city, err := sessionpkg.NewCityDir(root)
 	if err != nil {
 		return nil, err
@@ -232,8 +233,8 @@ func installLiveHandleProviderHooks(workDir, gcHome string, profile workerpkg.Pr
 // the overlay command (`python3 .kimi/hooks/gascity-session-start.py`) is
 // workdir-relative and hooks.Install above still materializes the script
 // into the work dir. Production appends `--config-file .kimi/config.toml`
-// to the kimi launch command (appendKimiHookConfigArg in
-// cmd/gc/template_resolve.go) and relies on kimi's managed OAuth for auth;
+// to the kimi launch command (config.ProviderTemplateCommand, via
+// appendKimiHookConfigArg) and relies on kimi's managed OAuth for auth;
 // the harness instead stages auth as providers/models in the share-dir
 // config (stageKimiAuth), which a hooks-only --config-file would replace
 // wholesale. Appending the overlay [[hooks]] block to the staged share

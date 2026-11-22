@@ -88,7 +88,29 @@ exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten 
   (`GC_HERDR_STARTUP_DELIVERY_UNCONFIRMED`, cleared unconditionally by the next
   `Start`) and stderr. Every bound here is the shared boot budget
   (`startupBootBudgetMS`, 60s), not the 15s shell-prompt bounds. Mid-session
-  nudges keep the fast un-waited form.
+  nudges keep the fast un-waited form. The first turn's paste fallback is for
+  raw and bare-shell panes only: a kind launch's pane with no named agent is
+  one whose agent exited, and the shell that outlived it would run the turn as
+  commands, so that turn is recorded as undelivered instead.
+- **Startup dialogs** (`startup_dialogs.go`, #7027): when
+  `runtime.ShouldAcceptStartupDialogs` holds, Start runs the shared
+  startup-dialog matcher on the launch's own pane, mirroring tmux's
+  `launchOrchestration`: one pass before the readiness wait, and one after it
+  for dialogs drawn after the first prompt. herdr ≥0.8.2's `agent start` exits
+  `agent_not_ready` once it reads the new agent as blocked on such a dialog;
+  that counts as a launch only while herdr's registry still lists an agent on
+  the pane. The readiness wait names `blocked` too (`--until idle/done/blocked`),
+  so an agent parked on a dialog ends it at once instead of holding it past
+  Start's deadline. A trust dialog the last pass could not confirm withholds
+  the first turn, recorded on the marker, because its submit Enter would
+  answer the dialog. A ctx that has ended by the end of a pass fails Start,
+  except a deadline in the readiness wait or the pass after it on a session
+  that is still up: like tmux's `ignoreDeadlineIfSessionAlive`, Start then
+  returns nil and records the undelivered first turn. After the passes Start
+  checks that the session survived them (tmux's Step 5): a dialog answer can
+  end the agent (the rate-limit step selects Stop), so a kind launch whose
+  agent herdr no longer lists, or a raw launch whose pane is gone, fails Start
+  with `runtime.ErrSessionDiedDuringStartup`.
 
 ### Operational gotchas (learned in production, 2026-07-26)
 
@@ -117,7 +139,7 @@ by conformance: some herdr verbs return an empty body on success, so `run()` tre
 whitespace-only output as a no-payload success.
 
 **Layout — one space per agent (2026-06-29):** `Start` places each agent in its **own tab** under a
-**per-rig (or per-town) workspace** — workspace = the rig (`<rig>--…`) or town (`<town>__…`), tab =
+**per-rig (or per-town) workspace** — workspace = the rig (`<rig>--…`), else the town (`<town>__…`, or a bare agent name, which takes the city name), tab =
 the agent (segment after the last `__`); see `workspaceTabFor`. herdr auto-spawns a stray shell pane
 on `workspace`/`tab create`, so `Start` closes it, leaving the tab holding only the agent. Find-or-
 create of the shared rig workspace is mutex-serialized so concurrent same-rig Starts don't race to

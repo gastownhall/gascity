@@ -49,15 +49,15 @@ import (
 //
 // A re-pin needs a fresh library handle against the new generation's port, and
 // opening one means the hermetic env window: a process-global environment
-// mutation under nativeDoltOpenEnvMu. While the native leaf is still serving the
-// tick deliberately does NOT perform it. It re-runs ADMISSION (file reads plus
-// one probe session — no library, no fork) and then marks the native handle's
-// pool stale, so the next READ reconnects through the injected reopen hook on
-// the CALLER's goroutine, which is where every other library open in this
-// package already happens. A background goroutine that mutated the process
-// environment at an arbitrary moment would be a new class of hazard for every
-// concurrent scope open and bd-child env build in the process, to save a re-pin
-// a few milliseconds.
+// mutation inside the execenv projection window. While the native leaf is
+// still serving the tick deliberately does NOT perform it. It re-runs
+// ADMISSION (file reads plus one probe session — no library, no fork) and then
+// marks the native handle's pool stale, so the next READ reconnects through
+// the injected reopen hook on the CALLER's goroutine, which is where every
+// other library open in this package already happens. A background goroutine
+// that mutated the process environment at an arbitrary moment would be a new
+// class of hazard for every concurrent scope open and bd-child env build in
+// the process, to save a re-pin a few milliseconds.
 //
 // There is exactly one state where that argument does not hold, and the tick
 // does open the library there: a handle that has ALREADY stood down
@@ -289,6 +289,9 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 	if err := ctx.Err(); err != nil {
 		return proxiedGuardStopped
 	}
+	// Every tick that runs refreshes the events-journal activation, whichever
+	// step it ends at; see step 3.
+	g.store.forgetJournalActivation()
 	pin, native, terminal := g.store.guardState()
 	if native == nil {
 		if terminal {
@@ -327,11 +330,13 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 		return step
 	}
 
-	// Step 3 — the events-journal slot. Deliberately a no-op: journal
-	// activation is applied once per open (openNativeDoltStorage) and gates no
-	// read, so there is nothing for a tick to keep consistent. The slot is named
-	// here rather than dropped so the next reader finds the answer instead of
-	// the question.
+	// Step 3 — the events journal. Activation gates the journal read, and bd's
+	// CLI re-resolves it on every write, so a scope that turns the journal off
+	// stops journaling at once. The tick forgets the cached answer before step
+	// 1, so a tick that ends early (an undecided record or cursors, a
+	// stand-down, a recovery) refreshes it too; the next journal question
+	// re-resolves it. Forgetting costs no I/O, so a scope nobody tails reads no
+	// config here.
 
 	// Step 4 — the socket-owner join, every ownerEvery-th tick.
 	if g.opts.ownerEvery > 0 && n%g.opts.ownerEvery == 0 {
@@ -576,8 +581,9 @@ func cursorDriftAgainst(pinned, observed proxyendpoint.Cursors) (lane, dir strin
 // There is no reader to hand the work to — every read is on the bd leaf, and
 // the native reopen hook is unreachable — so the choice is not "which
 // goroutine" but "recovery or none". The window is still the hermetic one
-// under nativeDoltOpenEnvMu, so a concurrent scope open or bd-child env build
-// blocks on it rather than reading a transient value.
+// inside the projection window, so a concurrent bd-child env build reads the
+// environment the window found rather than a transient value, and a concurrent
+// scope open waits for the window until its own context ends.
 //
 // It spends NO provider verb. The reopener admission runs with nil Ops, so the
 // tick's "never forks bd" invariant survives: a recovery that needs bd to make
@@ -804,5 +810,6 @@ func (s *ProxiedStore) adoptPin(pin Pin) bool {
 	s.root = pin.Root()
 	s.database = pin.Database()
 	s.verdict = nil
+	s.journal.forget()
 	return true
 }

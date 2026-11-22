@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MAX_VISIBLE_ACTIVE_LANES } from 'gas-city-dashboard-shared';
 import type { RunLane, RunSummary, SourceState } from 'gas-city-dashboard-shared';
@@ -78,7 +78,7 @@ function makeLanes(count: number): RunLane[] {
 
 function renderHistory(historicalLanes: RunLane[], totalHistorical?: number) {
   return render(
-    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+    <MemoryRouter>
       <RunMap
         source={runsSource(historicalLanes, totalHistorical)}
         now={Date.parse('2026-05-24T12:01:00Z')}
@@ -156,7 +156,7 @@ function makeActiveLanes(count: number): RunLane[] {
 
 function renderActive(lanes: RunLane[]) {
   return render(
-    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+    <MemoryRouter>
       <RunMap
         source={{
           source: 'runs',
@@ -214,7 +214,7 @@ describe('RunMap active expand-in-place (lane-cap expander)', () => {
     // that disagrees with the lane count to prove the dependency is gone.
     const lanes = makeActiveLanes(MAX_VISIBLE_ACTIVE_LANES + 2);
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <RunMap
           source={{
             source: 'runs',

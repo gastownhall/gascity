@@ -32,6 +32,11 @@ type CreateOptions struct {
 // not set one explicitly. Started sessions default to "manual"; bead-only
 // (deferred) sessions default to "ephemeral". This reproduces the per-path
 // defaulting that the retired Create* wrappers each applied.
+//
+// The "manual" default is reserved for human- or client-driven sessions, and it
+// is not inert: a manual session of a provider's implicit agent is primed as a
+// client's chat, with no worker persona, so a caller that starts a worker must
+// stamp its origin ("ephemeral" or "named") explicitly.
 func (o CreateOptions) defaultSessionOrigin() string {
 	if o.BeadOnly {
 		return "ephemeral"

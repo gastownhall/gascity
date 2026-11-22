@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-const packV1MigrationDocsURL = "https://docs.gascityhall.com/guides/shareable-packs"
+const packV1MigrationDocsURL = "https://docs.gascity.com/guides/shareable-packs"
 
 // DiagnosticLocator provides best-effort line numbers for TOML diagnostics.
 // It intentionally stays lightweight and line-oriented because it is used

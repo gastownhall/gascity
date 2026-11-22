@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -294,14 +295,14 @@ func runCallBudgetMolecule(t *testing.T, workOutcome, failFirstAttemptOf string)
 		t.Fatalf("writing formula: %v", err)
 	}
 	inner := newBdClosePolicyStore()
-	cooked, err := molecule.Cook(context.Background(), inner, "call-budget", []string{dir}, molecule.Options{})
+	cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(inner), "call-budget", []string{dir}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
 	rootID := cooked.RootID
 	// Production decorates every graph bead with the store ref of its root,
 	// which arms ProcessControl's root gate; the cooked fixture has none.
-	members, err := molecule.ListSubtree(inner, rootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(inner), rootID)
 	if err != nil {
 		t.Fatalf("listing cooked members: %v", err)
 	}
@@ -328,13 +329,13 @@ max_active_sessions = 1
 `), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	opts := ProcessOptions{CityPath: cityPath}
+	opts := ProcessOptions{Work: beadstest.Work(counting), CityPath: cityPath}
 
 	var calls []controlCalls
 	failed := false
 	const maxRounds = 80
 	for round := 0; round < maxRounds; round++ {
-		members, err := molecule.ListSubtree(inner, rootID)
+		members, err := molecule.ListSubtree(beadstest.GraphMolecule(inner), rootID)
 		if err != nil {
 			t.Fatalf("listing molecule members: %v", err)
 		}
@@ -359,7 +360,7 @@ max_active_sessions = 1
 				}
 				if servingControls {
 					counting.reset()
-					result, err := ProcessControl(counting, current, opts)
+					result, err := ProcessControl(beadstest.Graph(counting), current, opts)
 					if errors.Is(err, ErrControlPending) {
 						continue
 					}
@@ -377,7 +378,7 @@ max_active_sessions = 1
 				}
 				if !failed && failFirstAttemptOf != "" && strings.HasSuffix(current.Metadata[beadmeta.StepRefMetadataKey], failFirstAttemptOf+".attempt.1") {
 					failed = true
-					if err := updateMetadataAndClose(inner, current.ID, map[string]string{
+					if err := updateMetadataAndClose(beadstest.Graph(inner), current.ID, map[string]string{
 						beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 						beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassTransient,
 						beadmeta.FailureReasonMetadataKey: "flaky",
@@ -479,18 +480,22 @@ var (
 		// write.
 		"scope-check/scope-pass@implement": {reads: 6, writes: 2},
 		"retry/retry@cleanup-worktree":     {reads: 8, writes: 5},
-		"retry/pass@cleanup-worktree":      {reads: 2, writes: 1},
+		"retry/pass@cleanup-worktree":      {reads: 3, writes: 1},
 		// DepList + one exact batch for the blockers, one subtree read
 		// (Get(root), ListByMetadata, one batched children read per level),
-		// one batched close-order read.
-		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 11, writes: 3},
+		// one batched close-order read. Plus the Get(root) closeWorkflowRoot
+		// makes just before a pass close: a control quarantine that lands
+		// after the outcome resolved must not be overwritten with pass
+		// (ga-3wlbcj). Only the finalizer closes a root, so no other control
+		// pays the read.
+		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 12, writes: 3},
 	}
 	controlCallBudgetsFail = map[string]callBudget{
 		"retry/hard-fail@setup":                                         {reads: 8, writes: 5},
 		"scope-check/scope-fail@setup":                                  {reads: 8, writes: 3},
 		"retry/hard-fail@report":                                        {reads: 2, writes: 1},
 		"retry/retry@cleanup-worktree":                                  {reads: 8, writes: 5},
-		"retry/pass@cleanup-worktree":                                   {reads: 2, writes: 1},
+		"retry/pass@cleanup-worktree":                                   {reads: 3, writes: 1},
 		"workflow-finalize/workflow-fail@call-budget.workflow-finalize": {reads: 10, writes: 3},
 	}
 	controlCallBudgetsRetry = map[string]callBudget{
@@ -502,8 +507,8 @@ var (
 		"scope-check/scope-pass@implement":                              {reads: 6, writes: 2},
 		"retry/pass@report":                                             {reads: 2, writes: 1},
 		"retry/retry@cleanup-worktree":                                  {reads: 8, writes: 5},
-		"retry/pass@cleanup-worktree":                                   {reads: 2, writes: 1},
-		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 11, writes: 3},
+		"retry/pass@cleanup-worktree":                                   {reads: 3, writes: 1},
+		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 12, writes: 3}, // see controlCallBudgetsPass
 	}
 )
 
@@ -541,12 +546,12 @@ func callBudgetCrashScenario(name, formulaDir, workOutcome string) crashScenario
 		name: name,
 		build: func(t *testing.T, wrap func(beads.Store) beads.Store) crashFixture {
 			store := newBdClosePolicyStore()
-			cooked, err := molecule.Cook(context.Background(), store, "call-budget", []string{formulaDir}, molecule.Options{})
+			cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "call-budget", []string{formulaDir}, molecule.Options{})
 			if err != nil {
 				t.Fatalf("Cook: %v", err)
 			}
 			rootID := cooked.RootID
-			members, err := molecule.ListSubtree(store, rootID)
+			members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 			if err != nil {
 				t.Fatalf("listing cooked members: %v", err)
 			}
@@ -562,7 +567,7 @@ func callBudgetCrashScenario(name, formulaDir, workOutcome string) crashScenario
 				ledger:   []*beads.MemStore{store.MemStore},
 				dispatch: wrap(store),
 				work: func(t *testing.T) bool {
-					members, err := molecule.ListSubtree(store, rootID)
+					members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 					if err != nil {
 						t.Fatalf("listing molecule members: %v", err)
 					}

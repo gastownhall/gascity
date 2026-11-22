@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"time"
 
@@ -104,7 +105,7 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 // launchWorkDir is the work dir prepare launches row in: the task's, the
 // row's, the template's.
 func launchWorkDir(r effectReads, w *World, row session.Info, tp TemplateParams) string {
-	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w)); dir != "" {
+	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), legsTriggerResolver(r.legs)); dir != "" {
 		return dir
 	}
 	if dir := preparedStartSessionWorkDir(row); dir != "" {
@@ -121,8 +122,14 @@ var errTemplateUnresolved = errors.New("v2 start: the row's template is unresolv
 // work dir resolver over the pass's assigned work: it writes nothing.
 func prepareRow(r effectReads, w *World, row session.Info, tp TemplateParams, transcript sessTranscriptState) (*preparedStart, error) {
 	// The claimed-work probe reads the seat's work through the city work
-	// legs (NEW2-1), never the sessions store.
-	sources := dispatchOptionSources{claimedWork: reachableClaimedWorkProbe(seatWorkFor(r.legs, releaseScope(row, w.Env.Cfg)))}
+	// legs (NEW2-1), never the sessions store. The trigger, its root and its
+	// drain source are read by id through the same legs (legsTriggerResolver),
+	// as legacy's start reads them through withTriggerBeadResolver: r.city is
+	// the sessions store, which on a split city holds none of them.
+	sources := dispatchOptionSources{
+		claimedWork: reachableClaimedWorkProbe(seatWorkFor(r.legs, releaseScope(row, w.Env.Cfg))),
+		trigger:     legsTriggerResolver(r.legs),
+	}
 	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), sources, &transcript)
 	return prepared, err
 }
@@ -170,7 +177,7 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 // still finds the runtime absent, on which every such heal rests.
 func healInstead(v txView, refuse txStep) txStep {
 	heal := v.It.Heal
-	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {
+	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent || healDrifted(v) {
 		return refuse
 	}
 	patch := heal.Patch
@@ -182,6 +189,22 @@ func healInstead(v txView, refuse txStep) txStep {
 		step.Facts.Events = append(step.Facts.Events, *heal.Event)
 	}
 	return step
+}
+
+// healDrifted reports that the A6 timer heal v's start carries no longer
+// re-derives on v.Row, the fresh read (STALE-READ-ARCH): the timers the pass
+// read expired are not what the row holds now (an agent's heartbeat
+// re-armed its hold). The pass's derivation may only veto (C-lite): the
+// start refuses held and writes no heal, and the next pass decides. Both
+// derivations are at the pass's time, so only the row's move counts.
+func healDrifted(v txView) bool {
+	heal := v.It.Heal
+	if heal == nil || heal.Reason != decideTimerHeal {
+		return false
+	}
+	stalePatch, staleClass, _ := timerHealPatch(v.World.Census.Rows[v.It.Key].Info, v.World.Now)
+	freshPatch, freshClass, _ := timerHealPatch(v.Row, v.World.Now)
+	return !maps.Equal(stalePatch, freshPatch) || !maps.Equal(staleClass.Fold(), freshClass.Fold())
 }
 
 // runtimeCause is S1's table's refusal for row's fresh runtime read rt, ""
