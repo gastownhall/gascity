@@ -3149,13 +3149,7 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	if bdListShouldIncludeTemplates(query) {
 		args = append(args, "--include-templates")
 	}
-	if limit > 0 && serverQuery.Sort == SortCreatedDesc {
-		// bd list orders priority-first by default, so a bare --limit keeps the
-		// N best-priority rows, not the N newest. Only an opted-in caller reaches
-		// here with a limit (see bdListRequiresClientLimit); ask bd for
-		// created_at DESC so its page is the newest population.
-		args = append(args, "--sort", "created")
-	}
+	args = append(args, bdListSortArgs(serverQuery, limit)...)
 	args = append(args, "--limit", fmt.Sprintf("%d", limit))
 	if serverQuery.ParentID != "" {
 		args = append(args, "--parent", serverQuery.ParentID)
@@ -3192,6 +3186,18 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 		return result, &PartialResultError{Op: "bd list", Err: parseErr}, nil
 	}
 	return result, nil, nil
+}
+
+// bdListSortArgs returns the bd list ordering flags for a bounded read. bd
+// orders priority-first by default, so a bare --limit on a created-desc query
+// keeps the N best-priority rows, not the N newest; ask bd for created_at DESC
+// so its page is the newest population. Only a caller that opted into a
+// backing limit reaches here with one (see bdListRequiresClientLimit).
+func bdListSortArgs(serverQuery ListQuery, limit int) []string {
+	if limit > 0 && serverQuery.Sort == SortCreatedDesc {
+		return []string{"--sort", "created"}
+	}
+	return nil
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
