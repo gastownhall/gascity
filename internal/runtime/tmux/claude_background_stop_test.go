@@ -52,6 +52,9 @@ type fakeClaudeTaskPane struct {
 	shells int
 	// draft is the text in the input box.
 	draft string
+	// placeholder is what an empty input box shows, drawn as Claude draws
+	// it: dim, the cursor reverse video on its first letter.
+	placeholder string
 	// dropX is how many x presses the view drops before it takes one.
 	dropX int
 	// ignoreX makes the view take no x at all.
@@ -107,7 +110,11 @@ func (f *fakeClaudeTaskPane) render() []string {
 		return append(lines, claudeRule, "  Shell details", "", "  Status:   running", "  Runtime:  6s",
 			"  Command:  sleep 90 && touch /tmp/cbg-0", "", "  Output:", "  No output available", "", claudeDetailsHint)
 	}
-	lines = append(lines, claudeRule, "❯ "+f.draft, claudeRule)
+	box := f.draft
+	if box == "" {
+		box = f.placeholder
+	}
+	lines = append(lines, claudeRule, "❯ "+box, claudeRule)
 	switch {
 	case f.shells > 0 && busy:
 		return append(lines, fmt.Sprintf(claudeBusyShellsFooter, f.shells, shellsWord(f.shells)))
@@ -343,6 +350,28 @@ func TestClaudeStopBackgroundWorkLeavesADraftAlone(t *testing.T) {
 	}
 	if got := pane.keys(); len(got) != 0 {
 		t.Fatalf("keys reaching a Claude input box holding a draft = %q, want none", got)
+	}
+}
+
+// TestClaudeStopBackgroundWorkReadsThePlaceholderUnderTheCursorAsEmpty: an
+// idle input box shows Claude's start-up placeholder dim, with the cursor
+// drawn reverse video on its first letter. The box is empty, so the stop
+// opens the background-task view and stops the shell, as it does for a bare
+// cursor, rather than reading the cursor's letter as a draft and leaving the
+// shell running.
+func TestClaudeStopBackgroundWorkReadsThePlaceholderUnderTheCursorAsEmpty(t *testing.T) {
+	pane := newFakeClaudeTaskPane(1)
+	pane.placeholder = "\x1b[7mT\x1b[0;2mry \"write a test for <filepath>\""
+	tm := newClaudeStopTmux(pane)
+
+	if err := tm.StopBackgroundWork(context.Background(), "claude-bg-stop-p"); err != nil {
+		t.Fatalf("StopBackgroundWork: %v", err)
+	}
+	if got, want := pane.keys(), []string{"key:Down", "key:Enter", "key:x"}; !slices.Equal(got, want) {
+		t.Fatalf("keys reaching a Claude input box showing its placeholder = %q, want %q", got, want)
+	}
+	if pane.shells != 0 || pane.view != "" || len(pane.stray) != 0 {
+		t.Fatalf("after the stop: shells %d, view %q, keys in the input box %q; want 0, closed, none", pane.shells, pane.view, pane.stray)
 	}
 }
 

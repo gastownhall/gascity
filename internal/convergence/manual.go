@@ -216,7 +216,8 @@ func (h *Handler) IterateHandler(_ context.Context, beadID, username, _ string) 
 //  1. Validate state (active or waiting_manual)
 //  2. Drain completed iteration — if active wisp is already closed, process it
 //     through HandleWispClosed first to avoid discarding a legitimate iteration
-//  3. Force-close active wisp — if still open after drain, force-close it
+//  3. Force-close active wisp — if still open after drain, force-close it:
+//     its open descendants, then the wisp root
 //  4. Derive iteration count (after force-close so count is accurate)
 //  5. Clear stale verdicts — prevent interrupted wisp's verdict from leaking
 //  6. Write terminal state metadata
@@ -324,8 +325,8 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 			}
 		}
 		if activeWisp != "" && wispInfo.Status != "closed" {
-			if err := h.Store.CloseBead(activeWisp, CloseReasonManualSupersede); err != nil {
-				return HandlerResult{}, fmt.Errorf("force-closing active wisp %q: %w", activeWisp, err)
+			if err := h.forceCloseWisp(activeWisp); err != nil {
+				return HandlerResult{}, err
 			}
 			forceClosedWisp = true
 		}
@@ -433,6 +434,22 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 		Action:    ActionStopped,
 		Iteration: iterationCount,
 	}, nil
+}
+
+// forceCloseWisp closes an open wisp for a stop: its open descendants
+// first, then the wisp root, both with CloseReasonManualSupersede. The root
+// closes only after every descendant has, so a failure part-way leaves the
+// wisp open and the loop active, and re-running stop converges. A closed
+// wisp with open steps would instead be replayed as a completed iteration
+// by the drain step or the reconciler.
+func (h *Handler) forceCloseWisp(wispID string) error {
+	if err := h.Store.CloseOpenDescendants(wispID, CloseReasonManualSupersede); err != nil {
+		return fmt.Errorf("force-closing steps of active wisp %q: %w", wispID, err)
+	}
+	if err := h.Store.CloseBead(wispID, CloseReasonManualSupersede); err != nil {
+		return fmt.Errorf("force-closing active wisp %q: %w", wispID, err)
+	}
+	return nil
 }
 
 func (h *Handler) recoverCurrentActiveWisp(beadID, lastProcessedWisp string) (BeadInfo, bool, error) {

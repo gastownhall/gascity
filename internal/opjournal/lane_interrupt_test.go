@@ -89,8 +89,10 @@ func TestLaneInterruptTwoClicksAreOneOpOnlyForAResolvedTurn(t *testing.T) {
 		t.Fatalf("resolved-turn op %+v, want succeeded{t1, unfenced_interrupt}", got.Outcome)
 	}
 	for _, id := range []string{a.ID, b.ID} {
-		if got := h.get(t, id); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonStale {
-			t.Fatalf("late click %s %+v, want skipped{stale}", id, got.Outcome)
+		// The executor ran it and found no turn: the scope rule did not
+		// fence it off.
+		if got := h.get(t, id); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonStale || FencedOff(got) {
+			t.Fatalf("late click %s %+v, want skipped{stale}, not fenced off", id, got.Outcome)
 		}
 	}
 	if n := len(exec.interrupts); n != 3 {

@@ -95,8 +95,11 @@ type HeartbeatEvent struct {
 
 // SessionActivityEvent reports the current activity state of a session stream.
 // Emitted whenever the session transitions between idle and in-turn states.
+// It is derived from the transcript whatever the city's program_status switch
+// says; the session program's own status reaches the stream as the
+// program_status frame (SessionProgramStatusEvent).
 type SessionActivityEvent struct {
-	Activity string `json:"activity" doc:"Session activity state: 'idle' or 'in-turn'." example:"idle"`
+	Activity string `json:"activity" doc:"Session activity state: 'idle' or 'in-turn', derived from the transcript under every program_status switch. The session program's own status arrives in the program_status frame." example:"idle"`
 }
 
 // SessionPendingClearedEvent reports that a previously pending interaction is
