@@ -73,6 +73,29 @@ KUBECTL+=(-n "$NS")
 # sanitize_name converts a session name to a valid K8s resource name.
 # K8s names: lowercase, alphanumeric, '-', max 63 chars, must start/end
 # with alphanumeric.
+# remote_stage_city_name prints the controller city's name: its city.toml's
+# [workspace] name when readable, else the directory's base name.
+remote_stage_city_name() {
+  local dir="$1" name=""
+  if [ -f "$dir/city.toml" ]; then
+    name=$(awk '
+      /^\[/ { in_ws = ($0 ~ /^\[workspace\][[:space:]]*$/) ; next }
+      in_ws && /^[[:space:]]*name[[:space:]]*=/ {
+        sub(/^[^=]*=[[:space:]]*/, ""); gsub(/^"|"[[:space:]]*$/, ""); print; exit
+      }' "$dir/city.toml")
+  fi
+  if [ -z "$name" ]; then
+    name=$(basename "$dir")
+  fi
+  printf '%s' "$name"
+}
+
+# remote_stage_record prints the TOML record cmd/gc/remote_stage.go reads.
+remote_stage_record() {
+  jq -rn --arg city "$1" --arg path "$2" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '"controller_city = \($city | tojson)\ncontroller_path = \($path | tojson)\nstaged_at = \($at | tojson)"'
+}
+
 sanitize_name() {
   echo "$1" \
     | tr '[:upper:]' '[:lower:]' \
@@ -283,7 +306,19 @@ case "$op" in
       end
     ')
 
-    env_array=$(echo "$env_json" | jq       --argjson dolt_env "$dolt_env_json"       --arg mcp_mail_url "http://${MCP_MAIL_HOST}:${MCP_MAIL_PORT}"       --arg mcp_mail_project "$mail_project"       --arg tmux_session "$TMUX_SESSION"       --arg pod_dir "$pod_work_dir" '
+    # Remote stage (S5-A): processes started from the pod's environment (the
+    # entrypoint, the agent and its tmux server, kubectl exec'd commands) are
+    # a remote stage of the controller's city from the container's first
+    # instruction, so none of them can create a pod-local storage binding
+    # before the on-disk record below exists. This script never switches
+    # users, so the agent inherits the environment. Names match
+    # cmd/gc/remote_stage.go.
+    stage_city_name=""
+    if [ -n "$ctrl_city" ]; then
+      stage_city_name=$(remote_stage_city_name "$ctrl_city")
+    fi
+
+    env_array=$(echo "$env_json" | jq       --arg stage_ctrl "$ctrl_city"       --arg stage_city "$stage_city_name"       --argjson dolt_env "$dolt_env_json"       --arg mcp_mail_url "http://${MCP_MAIL_HOST}:${MCP_MAIL_PORT}"       --arg mcp_mail_project "$mail_project"       --arg tmux_session "$TMUX_SESSION"       --arg pod_dir "$pod_work_dir" '
       del(.BEADS_DOLT_SERVER_HOST, .BEADS_DOLT_SERVER_PORT,
           .GC_BEADS, .GC_SESSION, .GC_EVENTS,
           .GC_DOLT_HOST, .GC_DOLT_PORT, .GC_DOLT_MANAGED_LOCAL,
@@ -298,6 +333,10 @@ case "$op" in
          {name: "GC_MAIL", value: "exec:gc-mail-mcp-agent-mail"},
          {name: "GC_TMUX_SESSION", value: $tmux_session},
          {name: "CLAUDE_CONFIG_DIR", value: "/home/gcagent/.claude"}]
+      + (if $stage_ctrl != "" then
+           [{name: "GC_REMOTE_STAGE_CONTROLLER", value: $stage_ctrl},
+            {name: "GC_REMOTE_STAGE_CITY", value: $stage_city}]
+         else [] end)
     ')
     # Determine the working directory for the main container.
     # Use the work_dir from config (host path) so that $GC_CITY and $GC_DIR
@@ -558,6 +597,19 @@ case "$op" in
       "${KUBECTL[@]}" exec "$pod" -- gc init --from /tmp/city-src /workspace || \
         echo "start: warning: gc init failed" >&2
       "${KUBECTL[@]}" exec "$pod" -- rm -rf /tmp/city-src 2>/dev/null || true
+    fi
+
+    # Record the pod as a remote stage of the controller's city (S5-A), as
+    # the native k8s provider does: a plain shell write (temp file, rename),
+    # whatever gc the image carries. Before the ready sentinel, and fatal on
+    # failure: a pod that cannot be marked is removed, not run unmarked.
+    if [ -n "$ctrl_city" ]; then
+      if ! remote_stage_record "$stage_city_name" "$ctrl_city" | \
+          "${KUBECTL[@]}" exec -i "$pod" -- sh -c 'mkdir -p /workspace/.gc && cat > /workspace/.gc/remote-stage.toml.tmp && mv -f /workspace/.gc/remote-stage.toml.tmp /workspace/.gc/remote-stage.toml'; then
+        echo "start: recording pod $pod as a remote stage of city $stage_city_name ($ctrl_city) failed; removing the pod rather than running it unmarked" >&2
+        "${KUBECTL[@]}" delete pod "$pod" --wait=false >/dev/null 2>&1 || true
+        exit 1
+      fi
     fi
 
     # Signal the entrypoint to proceed with tmux creation. The entrypoint

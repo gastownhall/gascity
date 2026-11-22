@@ -86,6 +86,26 @@ func TestMonitorOutputResetsIdle(t *testing.T) {
 	})
 }
 
+// TestMonitorNilClockUsesRealTime proves a nil Clock means the real clock, so
+// NewMonitor callers keep their behavior: silence still cancels with ErrIdle
+// after the idle window. Runs in a synctest bubble, whose virtual clock is what
+// the real clock reads inside it.
+func TestMonitorNilClockUsesRealTime(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := NewMonitorWithClock(context.Background(), 100*time.Millisecond, 0, nil)
+		defer m.Stop()
+		select {
+		case <-m.Context().Done():
+			if cause := context.Cause(m.Context()); !errors.Is(cause, ErrIdle) {
+				t.Fatalf("cause = %v, want ErrIdle", cause)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("idle timeout never fired with a nil clock")
+		}
+	})
+}
+
 // TestMonitorCeiling proves the runaway backstop: continuous output does not
 // save a command from the absolute ceiling.
 func TestMonitorCeiling(t *testing.T) {

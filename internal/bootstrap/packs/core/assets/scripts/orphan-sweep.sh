@@ -13,6 +13,9 @@
 # vouch for -- another city's agent on a shared rig store, a person, an agent
 # whose config and session records are gone -- is never released; it is
 # counted, named, and declared as a partial outcome (gastownhall/gascity#5955).
+# A local claim left in place because its holder could not be verified dead,
+# or because it could not be re-read or released, is declared the same way,
+# one scope per claim.
 #
 # Does NOT do worktree salvage — cities that staff a work-health patrol role
 # (e.g. the gastown pack's witness) handle that separately.
@@ -39,6 +42,16 @@ ESCALATION_TARGET="${GC_ESCALATION_TARGET:-human}"
 # liveness can be determined.
 # `gc bd list` without --rig is HQ-scoped from the city cwd, so per-rig
 # beads are invisible to a bare query — walk every rig explicitly.
+# The scope walk keeps per-rig failure isolation and leaves single-store
+# behavior as it was, but `gc bd list` reads one work store and leaves out
+# the wisp plane, so the HQ scope also stages the federated read
+# (read_federated_claims): class-binding rows on a split city, and wisp-plane
+# rows everywhere. `gc session list` is city-wide and every row is judged
+# against all liveness reads this pass made, so a rig skipped for a failed
+# rig-context liveness read can still contribute rows through the federated
+# read, judged with the city's liveness bracket.
+# Every exit after collection writes the outcome, so a declared failed read is
+# not lost when no claim is left to judge.
 TMP=$(mktemp) || exit 0
 SESSION_TMP=$(mktemp) || {
     rm -f "$TMP"
@@ -79,20 +92,85 @@ append_session_list() {
     return 1
 }
 
+# read_federated_claims writes every in-progress bead the federated reader
+# returns to $1. `gc bd list` answers from one work store: on a city whose
+# [storage.classes] serves the graph class from a binding, molecule roots,
+# steps and control beads live in that binding and no gc bd scope lists them
+# (exit 0, empty), and bd also leaves wisp-plane rows out of a plain list.
+# gc ready --status in_progress reads the city store, every serving rig store
+# and every class binding across both storage tiers. It fails on a store it
+# cannot read rather than answer short; that failure sets FEDERATED_READ_ERROR
+# and is declared after the scope walk, never staged as "no claims".
+FEDERATED_READ_ERROR=""
+read_federated_claims() {
+    local out="$1"
+    local err_tmp
+    local rc=0
+    err_tmp=$(mktemp) || {
+        FEDERATED_READ_ERROR="gc ready --status in_progress was not run: mktemp failed"
+        return 1
+    }
+    gc ready --status in_progress --json >"$out" 2>"$err_tmp" || rc=$?
+    if [ "$rc" -eq 0 ] && jq -e 'type == "array"' "$out" >/dev/null 2>&1; then
+        rm -f "$err_tmp"
+        return 0
+    fi
+    local why=""
+    why=$(<"$err_tmp") || why=""
+    why="${why//$'\t'/ }"
+    FEDERATED_READ_ERROR="gc ready --status in_progress failed (exit $rc): ${why//$'\n'/ }"
+    rm -f "$err_tmp"
+    : >"$out"
+    return 1
+}
+
+# append_scope_rows tags every row of a bead listing with the scope it came
+# from ("" for HQ, else the rig name) and appends it to $TMP. The scope decides
+# which store a claim is released in, so a listing that cannot be tagged (text
+# that does not parse, or JSON that is not an array) is dropped for this pass
+# (its claims kept) rather than stopping the sweep of every other scope. A
+# third argument "federated" marks the rows as the federated read's
+# (read_federated_claims): that read names no scope, so a row a scope read also
+# listed is judged under that scope's tag (Step 1c).
+append_scope_rows() {
+    local scope="$1"
+    local listing="$2"
+    local federated="false"
+    local tagged
+    [ "${3:-}" = federated ] && federated="true"
+    if ! tagged=$(jq -c --arg scope "$scope" --argjson federated "$federated" '
+        if type == "array" then map(if type == "object" then . + {_gc_scope: $scope} + (if $federated then {_gc_federated: true} else {} end) else . end) else error("not a listing") end
+    ' "$listing" 2>/dev/null); then
+        echo "orphan-sweep: could not read the in-progress listing of ${scope:-HQ}; its claims are kept this pass" >&2
+        return 0
+    fi
+    [ -z "$tagged" ] || printf '%s\n' "$tagged" >>"$TMP"
+}
+
 append_hq_scope() {
     local bead_fetch_tmp
+    local federated_tmp
     bead_fetch_tmp=$(mktemp) || return 1
-    append_session_list gc session list --json || {
+    federated_tmp=$(mktemp) || {
         rm -f "$bead_fetch_tmp"
+        return 1
+    }
+    append_session_list gc session list --json || {
+        rm -f "$bead_fetch_tmp" "$federated_tmp"
         return 1
     }
     gc bd list --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
+    # The city's scope also stages the claims only the federated reader
+    # returns, between the same two liveness reads. Its rows overlap the scope
+    # reads' rows; a scope read's row for an id wins (Step 1c).
+    read_federated_claims "$federated_tmp" || true
     append_session_list gc session list --json || {
-        rm -f "$bead_fetch_tmp"
+        rm -f "$bead_fetch_tmp" "$federated_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" >>"$TMP"
-    rm -f "$bead_fetch_tmp"
+    append_scope_rows "" "$bead_fetch_tmp"
+    append_scope_rows "" "$federated_tmp" federated
+    rm -f "$bead_fetch_tmp" "$federated_tmp"
 }
 
 append_rig_scope() {
@@ -108,7 +186,7 @@ append_rig_scope() {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" >>"$TMP"
+    append_scope_rows "$rig" "$bead_fetch_tmp"
     rm -f "$bead_fetch_tmp"
 }
 
@@ -126,8 +204,23 @@ while IFS= read -r rig; do
     fi
 done <<<"$RIG_NAMES"
 
-IN_PROGRESS=$(jq -c -s 'add // []' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
+# Step 1c: a federated read that did not complete is declared: this pass
+# judged only the claims the gc bd scope reads returned, and on a split city
+# that leaves out every graph-class claim.
+if [ -n "$FEDERATED_READ_ERROR" ]; then
+    echo "orphan-sweep: $FEDERATED_READ_ERROR; this pass considered only the claims gc bd list returned scope by scope" >&2
+    order_outcome_scope_skipped "every store (gc ready)" "$FEDERATED_READ_ERROR; only the claims gc bd list returned scope by scope were considered"
+fi
+
+# A scope read's row for an id wins over the federated read's, so a rig's claim
+# keeps the rig scope its release needs.
+IN_PROGRESS=$(jq -c -s 'add // []
+    | map(select((type == "object" and ._gc_federated == true) | not)) + map(select(type == "object" and ._gc_federated == true))
+    | reduce .[] as $b ({seen: {}, out: []};
+    ($b.id // "") as $id
+    | if $id != "" and .seen[$id] then . else .seen[$id] = true | .out += [$b] end) | .out' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
 if [ "$IN_PROGRESS" = "[]" ]; then
+    order_outcome_write
     exit 0
 fi
 
@@ -136,9 +229,13 @@ fi
 # and rig scope. Fall back to the older config-show parser for older binaries.
 AGENTS=$(gc config explain 2>/dev/null | awk '/^Agent: /{print $2}') || AGENTS=""
 if [ -z "$AGENTS" ]; then
-    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^[[:space:]]*name[[:space:]]*=/{print; a=0}' | sed 's/.*=[[:space:]]*"\(.*\)"/\1/') || exit 0
+    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^[[:space:]]*name[[:space:]]*=/{print; a=0}' | sed 's/.*=[[:space:]]*"\(.*\)"/\1/') || {
+        order_outcome_write
+        exit 0
+    }
 fi
 if [ -z "$AGENTS" ]; then
+    order_outcome_write
     exit 0
 fi
 
@@ -151,9 +248,10 @@ fi
 # it cannot see bead-only fields such as configured_named_identity or
 # alias_history unless the CLI starts exporting them.
 #
-# The default CLI path already omits closed sessions. The closed/state guards
-# below keep explicit or future session-list producers from making terminal
-# rows live while preserving any non-closed row the CLI reports.
+# The default CLI path already omits closed sessions. On every route, a row
+# from --state closed or --state all carries state "closed" and closed true;
+# the closed/state guards below keep such rows from counting as live while
+# preserving any non-closed row the CLI reports.
 #
 # This shell sweep ran without a live-session guard before ga-nvx: an ephemeral
 # assignee whose template-stripped form did not match any agent name was
@@ -187,7 +285,10 @@ LIVE_SESSION_IDS=$(jq -r -s '
       | .[]
       | select(. != null and . != "")
     ] | unique | .[]
-' "$SESSION_TMP" 2>/dev/null) || exit 0
+' "$SESSION_TMP" 2>/dev/null) || {
+    order_outcome_write
+    exit 0
+}
 
 agent_exists() {
     local candidate="$1"
@@ -233,8 +334,7 @@ session_bead_candidates() {
     printf '%s\n' "$work_json" | jq -r "$first_bead_jq | [
         .metadata[\"gc.session_id\"],
         .metadata[\"gc.session_bead_id\"],
-        .metadata[\"session_id\"],
-        .metadata[\"gc.session_name\"]
+        .metadata[\"session_id\"]
     ] | .[]? | select(. != null and . != \"\")" 2>/dev/null || true
 
     printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
@@ -288,33 +388,39 @@ session_probe_failure_is_unverifiable() {
     return 1
 }
 
-session_bead_shows_live_assignment() {
-    local assignee="$1"
-    local work_json="$2"
-    local session_id
+# probe_session_candidate reads one session-bead candidate for an assignee.
+# It returns 0 when the candidate is a live session that answers to the
+# assignee, 2 when the read could not establish anything about it, and 1
+# otherwise. PROBED_SESSION_TERMINAL is 1 when the read returned the
+# candidate's own session bead in a terminal state.
+PROBED_SESSION_TERMINAL=0
+SESSION_PROBE_UNREADABLE=""
+probe_session_candidate() {
+    local session_id="$1"
+    local assignee="$2"
     local session_json
-    local live_match
-    local probe_failed=0
-
-    while IFS= read -r session_id; do
-        [ -n "$session_id" ] || continue
-        if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
-            if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
-                probe_failed=1
-            fi
-            continue
+    local verdict
+    PROBED_SESSION_TERMINAL=0
+    if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
+        if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
+            note_unreadable_session_candidate "$session_id"
+            return 2
         fi
-        # Any live session bead at a probed candidate preserves the work. The
-        # CLI does not expose every Go-side identity field, so the fail-safe
-        # direction is to treat candidate liveness as sufficient.
-        if ! live_match=$(printf '%s\n' "$session_json" | jq -r --arg assignee "$assignee" --arg session_id "$session_id" "
-            $first_bead_jq
-            | select((.issue_type // \"\") == \"session\")
-            | select((.status // \"\") != \"closed\")
-            | ((.metadata.state // \"\") | ascii_downcase) as \$state
-            | select(\$state != \"closed\" and \$state != \"orphaned\" and \$state != \"failed-create\" and \$state != \"failed_create\")
-            | select(((.metadata.closed // \"\") | tostring | ascii_downcase) != \"true\")
-            | select(
+        return 1
+    fi
+    # Any live session bead at a probed candidate preserves the work. The
+    # CLI does not expose every Go-side identity field, so the fail-safe
+    # direction is to treat candidate liveness as sufficient.
+    if ! verdict=$(printf '%s\n' "$session_json" | jq -r --arg assignee "$assignee" --arg session_id "$session_id" "
+        $first_bead_jq
+        | select((.issue_type // \"\") == \"session\")
+        | ((.metadata.state // \"\") | ascii_downcase) as \$state
+        | ((.status // \"\") != \"closed\"
+            and \$state != \"closed\" and \$state != \"orphaned\" and \$state != \"failed-create\" and \$state != \"failed_create\"
+            and ((.metadata.closed // \"\") | tostring | ascii_downcase) != \"true\") as \$open
+        | if \$open
+            and (.id // \"\") != \"\"
+            and (
                 (.id // \"\") == \$assignee
                 or (.id // \"\") == \$session_id
                 or (.metadata.session_name // \"\") == \$assignee
@@ -322,32 +428,120 @@ session_bead_shows_live_assignment() {
                 or (.metadata.agent_name // \"\") == \$assignee
                 or (\$assignee | contains(\$session_id))
             )
-            | .id // empty
-        " 2>/dev/null); then
-            probe_failed=1
-            continue
-        fi
-        if [ -n "$live_match" ]; then
-            return 0
-        fi
+          then \"live\"
+          elif (\$open | not) and (.id // \"\") == \$session_id then \"terminal\"
+          else empty end
+    " 2>/dev/null); then
+        note_unreadable_session_candidate "$session_id (unparseable)"
+        return 2
+    fi
+    case "$verdict" in
+        live) return 0 ;;
+        terminal) PROBED_SESSION_TERMINAL=1 ;;
+    esac
+    return 1
+}
+
+# session_bead_shows_live_assignment returns 0 when a session bead shows the
+# assignee live, 2 when a candidate could not be read, and 1 when every
+# candidate was read and none is live. On 2, SESSION_PROBE_UNREADABLE names the
+# candidates that could not be read. It must be called directly, not in $(...),
+# so that survives.
+#
+# The stamped gc.session_name is a runtime name, not a bead id: an unaliased
+# pool session is named "<template>-<session bead id>" (PoolSessionName). It
+# is decided after the bead-id candidates. A name that is a candidate, or that
+# is the runtime name of a session bead read here as terminal, adds nothing
+# and is not probed. Any other name is probed: a legacy pool seat's session
+# bead id can be its runtime name, and an unresolvable name stays
+# unverifiable.
+session_bead_shows_live_assignment() {
+    local assignee="$1"
+    local work_json="$2"
+    local session_id
+    local probe_rc
+    local probed=""
+    local terminal_sessions=""
+    local stamped_name=""
+    local probe_failed=0
+    SESSION_PROBE_UNREADABLE=""
+
+    while IFS= read -r session_id; do
+        [ -n "$session_id" ] || continue
+        probed="${probed}${session_id}"$'\n'
+        probe_rc=0
+        probe_session_candidate "$session_id" "$assignee" || probe_rc=$?
+        case "$probe_rc" in
+            0) return 0 ;;
+            2) probe_failed=1 ;;
+            *)
+                if [ "$PROBED_SESSION_TERMINAL" -eq 1 ]; then
+                    terminal_sessions="${terminal_sessions}${session_id}"$'\n'
+                fi
+                ;;
+        esac
     done < <(session_bead_candidates "$assignee" "$work_json")
+
+    stamped_name=$(printf '%s\n' "$work_json" | jq -r "$first_bead_jq | .metadata[\"gc.session_name\"] // empty" 2>/dev/null) || stamped_name=""
+    if [ -n "$stamped_name" ] && ! grep -Fxq -- "$stamped_name" <<<"$probed" \
+        && ! stamped_name_is_runtime_name_of "$stamped_name" "$terminal_sessions"; then
+        probe_rc=0
+        probe_session_candidate "$stamped_name" "$assignee" || probe_rc=$?
+        case "$probe_rc" in
+            0) return 0 ;;
+            2) probe_failed=1 ;;
+        esac
+    fi
 
     [ "$probe_failed" -eq 0 ] || return 2
     return 1
 }
 
+# note_unreadable_session_candidate adds a candidate to SESSION_PROBE_UNREADABLE.
+note_unreadable_session_candidate() {
+    SESSION_PROBE_UNREADABLE="${SESSION_PROBE_UNREADABLE:+$SESSION_PROBE_UNREADABLE, }$1"
+}
+
+# stamped_name_is_runtime_name_of reports whether name is "<template>-<id>"
+# for one of the newline-separated session bead ids.
+stamped_name_is_runtime_name_of() {
+    local name="$1"
+    local ids="$2"
+    local id
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        [[ "$name" == *-"$id" ]] && return 0
+    done <<<"$ids"
+    return 1
+}
+
+# reset_orphan_if_current releases bead_id from expected_assignee in the store
+# the claim was listed from: scope is "" for HQ, else the rig. A rig claim's
+# release names the rig with --rig, so it runs in that rig's store whatever
+# the prefixes of its arguments say.
 reset_orphan_if_current() {
     local bead_id="$1"
     local expected_assignee="$2"
+    local scope="${3:-}"
     local reset_output
     local reset_state
+    local -a scope_args=()
+    if [ -n "$scope" ]; then
+        scope_args=(--rig "$scope")
+    fi
 
-    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
+    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" ${scope_args[@]+"${scope_args[@]}"} 2>/dev/null) || return 1
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
         released)
-            if ! gc bd update "$bead_id" --append-notes "orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
-                echo "orphan-sweep: failed to record cause note on $bead_id" >&2
+            # The cause rides metadata, not notes: a claim on a graph step of a
+            # city whose [storage.classes] serves the graph class from a binding
+            # is updated in process by gc bd, which refuses --notes and
+            # --append-notes whole (notes have no representation in the class
+            # store contract), while every store serves --set-metadata. The
+            # value is text, so bd and the class store both keep a string.
+            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" ${scope_args[@]+"${scope_args[@]}"} >/dev/null 2>&1; then
+                echo "orphan-sweep: failed to record the reset cause on $bead_id" >&2
             fi
             return 0
             ;;
@@ -558,25 +752,51 @@ record_protected_claim() {
 }
 
 # protected_claims_json groups the spool by identity, sorted, with each
-# identity's gate reason when the gate gave one.
+# identity's reasons (the gate's, or why its row was never asked about) when
+# there are any.
 protected_claims_json() {
     jq -R -s -c --arg reasons "$GATE_REASONS" '
-        ($reasons | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: (.[1] // "")}) | from_entries) as $why
+        ($reasons | split("\n") | map(select(length > 0) | split("\t") | {identity: .[0], reason: (.[1] // "")})
+            | group_by(.identity) | map({key: .[0].identity, value: (map(.reason) | map(select(. != "")) | unique | join("; "))}) | from_entries) as $why
         | split("\n") | map(select(length > 0) | split("\t") | {identity: .[0], bead: (.[1] // "")})
         | group_by(.identity)
         | map({identity: .[0].identity, beads: map(.bead), reason: ($why[.[0].identity] // "")})
     ' <<<"$PROTECTED_ROWS"
 }
 
-# The claims to consider, one "<bead>\t<assignee>" row each: those whose
-# holder neither the roster nor a live session recognizes. Each claim is
-# classified once, here; a recognized holder's claim is never released, so it
-# needs no gate answer and no probe.
-CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null) || CLAIM_ROWS=""
+# A row carries its scope through the tab-separated claim rows as a token,
+# "hq" for HQ and "rig:<name>" for a rig, so the field is never empty (read
+# collapses empty tab-separated fields). token_scope turns a token back into
+# the scope.
+token_scope() {
+    case "$1" in
+        rig:*) printf '%s' "${1#rig:}" ;;
+        *) printf '' ;;
+    esac
+}
+
+# The claims to consider, one "<bead>\t<scope token>\t<assignee>" row each:
+# those whose holder neither the roster nor a live session recognizes. Each
+# claim is classified once, here; a recognized holder's claim is never
+# released, so it needs no gate answer and no probe. A row without a scope tag
+# is skipped: there is no telling which store it would be released in.
+#
+# The rows are re-read line by line, so a bead id or assignee carrying a tab,
+# newline or carriage return could forge a row of its own: an assignee
+# "x\n<bead>\thq\t<agent>" would name another claim under another holder.
+# Such a row gets the scope token "untrusted" and that text replaced by
+# spaces: it is never asked about or released, only protected and named.
+CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[]
+    | select(type == "object" and (._gc_scope | type) == "string")
+    | select(.assignee != null and .assignee != "")
+    | ([.id, .assignee] | map(tostring | test("[\\t\\n\\r]")) | any) as $untrusted
+    | "\(.id | tostring | gsub("[\\t\\n\\r]"; " "))\t\(if $untrusted then "untrusted" elif ._gc_scope == "" then "hq" else "rig:" + ._gc_scope end)\t\(.assignee | tostring | gsub("[\\t\\n\\r]"; " "))"' 2>/dev/null) || CLAIM_ROWS=""
 UNRECOGNIZED_ROWS=""
 if [ -n "$CLAIM_ROWS" ]; then
-    UNRECOGNIZED_ROWS=$(while IFS=$'\t' read -r _bead _assignee; do
-        is_known_agent "$_assignee" || printf '%s\t%s\n' "$_bead" "$_assignee"
+    UNRECOGNIZED_ROWS=$(while IFS=$'\t' read -r _bead _scope _assignee; do
+        if [ "$_scope" = untrusted ] || ! is_known_agent "$_assignee"; then
+            printf '%s\t%s\t%s\n' "$_bead" "$_scope" "$_assignee"
+        fi
     done <<<"$CLAIM_ROWS")
 fi
 
@@ -587,7 +807,8 @@ UNRECOGNIZED=()
 if [ -n "$UNRECOGNIZED_ROWS" ]; then
     while IFS= read -r _identity; do
         [ -n "$_identity" ] && UNRECOGNIZED+=("$_identity")
-    done < <(while IFS=$'\t' read -r _bead _assignee; do
+    done < <(while IFS=$'\t' read -r _bead _scope _assignee; do
+        [ "$_scope" = untrusted ] && continue
         printf '%s\n' "$_assignee"
     done <<<"$UNRECOGNIZED_ROWS" | jq -R -s -r 'split("\n") | map(select(length > 0)) | unique | .[]' 2>/dev/null)
 fi
@@ -610,7 +831,13 @@ UNVERIFIABLE=0
 FAILED=0
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
-while IFS=$'\t' read -r bead_id assignee; do
+while IFS=$'\t' read -r bead_id scope_tok assignee; do
+    if [ "$scope_tok" = untrusted ]; then
+        gate_record_reason "$assignee" "its bead id or assignee contains a tab or line break; never asked about or released"
+        record_protected_claim "$assignee" "$bead_id"
+        continue
+    fi
+    scope=$(token_scope "$scope_tok")
     claim_gate_verdict "$assignee"
     if [ "$GATE_VERDICT" != "local" ]; then
         record_protected_claim "$assignee" "$bead_id"
@@ -622,6 +849,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         recheck_status=$?
         if [ "$recheck_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "kept: the work bead could not be re-read as still in_progress under $assignee"
         fi
         continue
     fi
@@ -631,15 +859,17 @@ while IFS=$'\t' read -r bead_id assignee; do
         session_status=$?
         if [ "$session_status" = "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "kept: holder $assignee is not verifiably dead; could not read ${SESSION_PROBE_UNREADABLE:-a session candidate}"
             continue
         fi
     fi
-    if reset_orphan_if_current "$bead_id" "$assignee"; then
+    if reset_orphan_if_current "$bead_id" "$assignee" "$scope"; then
         ORPHANED=$((ORPHANED + 1))
     else
         reset_status=$?
         if [ "$reset_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "kept: the conditional release under $assignee failed"
         fi
     fi
 done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
@@ -674,6 +904,13 @@ orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted;
     fi
 fi
 
+# Local skips extend the declaration rather than replace it: the outcome stays
+# partial and the gate's reason, when there is one, leads. A later
+# order_outcome_set skipped would overwrite the gate's partial declaration.
+if [ "$UNVERIFIABLE" -gt 0 ]; then
+    order_outcome_set partial "${ORDER_OUTCOME_REASON:+$ORDER_OUTCOME_REASON; }left $UNVERIFIABLE local claim(s) in place because the holder could not be verified dead or the claim could not be re-read or released; each bead scope names the claim and why"
+fi
+
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
     SUMMARY="orphan-sweep: reset $ORPHANED orphaned beads"
     if [ "$UNVERIFIABLE" -gt 0 ]; then
@@ -695,9 +932,9 @@ $PROTECTED_DETAIL}
 orphan-sweep resets in-progress beads whose assignee has no live session or
 known agent, and only once gc agent is-foreign vouches for the assignee as
 this city's own; claims it cannot vouch for are kept, and any kept this pass
-are listed above. Each reset bead now carries a one-line cause note (see its
-history). Repeated resets of the same bead may indicate a stuck or
-misidentified live session -- inspect via gc bd show <id> --json." \
+are listed above. Each reset bead records the cause in its
+gc.orphan_sweep_reason metadata. Repeated resets of the same bead may indicate
+a stuck or misidentified live session -- inspect via gc bd show <id> --json." \
             2>/dev/null; then
             # Do not swallow an undeliverable summary — a vanished escalation
             # is invisible. Surfacing it requires a non-zero exit (see below).
@@ -707,10 +944,11 @@ misidentified live session -- inspect via gc bd show <id> --json." \
     fi
 fi
 
-# Declare protected claims as a partial outcome: the controller logs an exit-0
-# run's output nowhere, but turns this declaration into a typed order.skipped
-# event naming each protected identity (order_outcome.sh). A no-op when nothing
-# was protected or when run by hand without GC_ORDER_OUTCOME_FILE.
+# Declare protected and skipped claims as a partial outcome: the controller
+# logs an exit-0 run's output nowhere, but turns this declaration into a typed
+# order.skipped event naming each protected identity and each skipped local
+# claim (order_outcome.sh). A no-op when nothing was protected or skipped, or
+# when run by hand without GC_ORDER_OUTCOME_FILE.
 order_outcome_write
 
 # Loud-fail: the summary has been printed above, so a non-zero exit now

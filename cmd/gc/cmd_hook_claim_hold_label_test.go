@@ -25,10 +25,9 @@ import (
 // it is pinned separately by internal/config/workquery_inprogress_hold_test.go.
 //
 // Scope note (ga-5736js): this is the hook's WORK-SERVING decision, not
-// demand/liveness accounting. The assignee-scoped tiers that answer "does a
-// session still need to exist" (filterReadyByAssignee,
-// ephemeralAssignedReadyProbeScript) stay hold-transparent by design and are
-// deliberately left untouched.
+// demand/liveness accounting. The assignee-scoped tier that answers "does a
+// session still need to exist" (filterReadyByAssignee) stays hold-transparent
+// by design and is deliberately left untouched.
 
 const holdTestIdentity = "gastown__polecat-az-wisp-ak1hw"
 

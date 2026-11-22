@@ -114,16 +114,35 @@ func DismissMidSessionDialogs(
 	if err != nil {
 		return false, err
 	}
+	dialog, ok := activeMidSessionDialog(content)
+	if !ok {
+		return false, nil
+	}
+	if err := sendDialogKeys(ctx, sendKeys, dialog.keys, bypassDialogConfirmDelay); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// MidSessionDialogShowing reports whether content, a pane's visible screen,
+// shows a dialog [DismissMidSessionDialogs] would dismiss, by the same
+// active-bottom-block rule. It sends nothing, so a caller can look before it
+// takes a lock to dismiss.
+func MidSessionDialogShowing(content string) bool {
+	_, ok := activeMidSessionDialog(content)
+	return ok
+}
+
+// activeMidSessionDialog returns the mid-session dialog that is content's
+// active bottom-most rendered block, as [DismissMidSessionDialogs] documents.
+func activeMidSessionDialog(content string) (midSessionDialog, bool) {
 	tail := lastNonBlankLine(content)
 	for _, dialog := range midSessionDialogs {
 		if dialog.match(lastNonBlankLines(content, dialog.tailSpan)) && strings.Contains(tail, dialog.tailAnchor) {
-			if err := sendDialogKeys(ctx, sendKeys, dialog.keys, bypassDialogConfirmDelay); err != nil {
-				return false, err
-			}
-			return true, nil
+			return dialog, true
 		}
 	}
-	return false, nil
+	return midSessionDialog{}, false
 }
 
 // lastNonBlankLine returns the final line of content that is not blank after
