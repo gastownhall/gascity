@@ -116,17 +116,27 @@ func blockedRepairReady(t *testing.T, run *helpers.TopologyRun, rig string) []st
 }
 
 // overBlockScope seeds B <- A (blocks), A <- C (relates-to), A <- F
-// (discovered-from), then flags C and F blocked the way migration 0059 does,
-// and returns C and F.
+// (discovered-from), with C and F children of an open parent P, then flags C
+// and F blocked the way migration 0059 does, and returns C and F.
+//
+// P stands for a molecule root. The parent-child edge does not block C or F,
+// but it is a ready-affecting edge of their own: since beads 1.4.0
+// (beads#3268) `bd ready` trusts a set is_blocked flag only on a row that is
+// the source of a blocks, parent-child, conditional-blocks or waits-for edge,
+// and reads around it on any other row. Without P, the damage would not hide
+// C and F from `bd ready` under bd 1.4.0; with it, it hides them under every bd.
 func overBlockScope(t *testing.T, run *helpers.TopologyRun, rig string) []string {
 	t.Helper()
 	b := blockedRepairCreate(t, run, rig, "blocker")
 	a := blockedRepairCreate(t, run, rig, "blocked")
 	c := blockedRepairCreate(t, run, rig, "relates to blocked")
 	f := blockedRepairCreate(t, run, rig, "discovered from blocked")
+	p := blockedRepairCreate(t, run, rig, "parent")
 	blockedRepairScopeBD(t, run, rig, "dep", "add", a, b)
 	blockedRepairScopeBD(t, run, rig, "dep", "add", c, a, "--type", "relates-to")
 	blockedRepairScopeBD(t, run, rig, "dep", "add", f, a, "--type", "discovered-from")
+	blockedRepairScopeBD(t, run, rig, "dep", "add", c, p, "--type", "parent-child")
+	blockedRepairScopeBD(t, run, rig, "dep", "add", f, p, "--type", "parent-child")
 	hidden := []string{c, f}
 	ready := blockedRepairReady(t, run, rig)
 	for _, id := range hidden {

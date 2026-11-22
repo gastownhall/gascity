@@ -10,7 +10,7 @@ permissions:
 
 env:
   DOLT_VERSION: "2.6.0"
-  BD_VERSION: "v1.3.4"
+  BD_VERSION: "v1.4.0-rc.4"
 
 jobs:
   tier-b:
@@ -30,6 +30,16 @@ jobs:
         # TestSplitStorageMigratedFormulaCompletes builds gc from this tag; the
         # checkout above is shallow and tagless.
         run: git fetch --no-tags --depth=1 origin +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1
+
+      - name: Install the bd v1.5.0-rc1 shipped with for the split-storage upgrade scenario
+        # That gc links beads v1.3.1 and refuses a store a bd >= 1.4.0 created
+        # or migrated, so the scenario runs its half on bd v1.3.1 (the tag's
+        # deps.env BD_VERSION), then upgrades the store for BD_VERSION with
+        # `bd migrate schema` when it hands the city to this build.
+        run: |
+          bin_dir="${RUNNER_TEMP}/bd-split-rc1"
+          BD_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-bd-archive.sh v1.3.1
+          echo "GC_ACCEPTANCE_SPLIT_RC1_BD_BIN=${bin_dir}/bd" >> "$GITHUB_ENV"
 
       - name: Tier B lifecycle tests
         env:

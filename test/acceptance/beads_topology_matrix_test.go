@@ -372,15 +372,26 @@ func assertTopologyDoctor(t *testing.T, run *helpers.TopologyRun, allowedFailure
 // says less there: what that shape contributes is that turning the flag on
 // changes nothing off its own lane, which is a claim about the first assertion
 // and not about the second.
+//
+// A shape whose city proxy serves its data port to bd alone (a bd from beads
+// v1.4.0 on, proved by proxiedDataPortBdOnly from the record and the port) is
+// held to CityStoreNativeLaneBdOnly instead: the lane cannot serve that proxy,
+// and the pair is then BdStore twice, the flag-on one carrying the verdict.
 func assertTopologyNativeLane(t *testing.T, run *helpers.TopologyRun) {
 	t.Helper()
 	topo := run.Topology
 	lane := run.NativeLaneEnv()
 
+	want := *topo.CityStoreNativeLane
+	if topo.CityStoreNativeLaneBdOnly != nil &&
+		proxiedDataPortBdOnly(t, proxiedScopeProxyRoot(t, run.City.Dir), topo.Name+" city") {
+		want = *topo.CityStoreNativeLaneBdOnly
+	}
+
 	out, _ := helpers.RunGC(lane, run.City.Dir, "doctor", "--json", "--check-timeout", topologyDoctorCheckTimeout)
 	var report doctorReport
 	lastJSONLine(t, out, &report)
-	assertTopologyBeadsStore(t, report, *topo.CityStoreNativeLane, topo.Name+" city, flag on")
+	assertTopologyBeadsStore(t, report, want, topo.Name+" city, flag on")
 
 	out, _ = run.City.GC("doctor", "--json", "--check-timeout", topologyDoctorCheckTimeout)
 	var offReport doctorReport

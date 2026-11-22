@@ -106,6 +106,10 @@ func TestProxiedVerdictTerminalTable(t *testing.T) {
 		ProxiedVerdictNotOurs,
 		ProxiedVerdictNoOwnershipRecord,
 		ProxiedVerdictLegacySchema,
+		// data_auth_required is a fact about the PROXY bd runs: its data port
+		// accepts only bd's BDPROXY1 handshake, and no retry teaches this
+		// binary to speak it.
+		ProxiedVerdictDataAuthRequired,
 		ProxiedVerdictIdlePolicyFinite,
 		ProxiedVerdictPrefixMismatch,
 		ProxiedVerdictAccessDenied,

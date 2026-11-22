@@ -95,7 +95,7 @@ func TestSchemaCursorsMatchPinnedBeads(t *testing.T) {
 //     replay floors and order; beads v1.3.1);
 //   - ignoredSource.sentinelColumns is exactly the one column gc reads, with
 //     the same replay floor;
-//   - cursorRealityFloor's missing-table arm floors at gc's table floor.
+//   - the clamp's missing-table arm floors at gc's table floor.
 //
 // And, since council pr2 E-S5 / E-I3, the shapes that version still skipped:
 //
@@ -105,10 +105,10 @@ func TestSchemaCursorsMatchPinnedBeads(t *testing.T) {
 //   - a sentinel field other than the three gc reads is an error, and
 //     migrationSource's field set is pinned, so a new sentinel KIND cannot
 //     arrive unread;
-//   - a reference to a sentinel field outside cursorRealityFloor (an init()
-//     append, a reassignment) is a problem, because it changes the set without
-//     changing the literal;
-//   - cursorRealityFloor itself is pinned by a digest of its tokens, so a new
+//   - a reference to a sentinel field outside the clamp's functions
+//     (cursorRealityFunctions; an init() append, a reassignment) is a problem,
+//     because it changes the set without changing the literal;
+//   - the clamp's functions are pinned by a digest of their tokens, so a new
 //     clamp arm fails the pin even when every literal is unchanged.
 func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 	dir := filepath.Join(beadstest.PinnedBeadsModuleDir(t), filepath.FromSlash("internal/storage/schema"))
@@ -126,7 +126,7 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 
 	floor, err := sentinelTableFloor(sources)
 	if err != nil {
-		t.Fatalf("read cursorRealityFloor's missing-table arm under %s: %v", dir, err)
+		t.Fatalf("read the clamp's missing-table arm under %s: %v", dir, err)
 	}
 	if floor != proxyendpoint.IgnoredSentinelTableFloor {
 		t.Errorf("the pinned library floors a missing sentinel table at %d, gc at %d", floor, proxyendpoint.IgnoredSentinelTableFloor)
@@ -138,22 +138,25 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 	}
 	digest, err := cursorRealityFloorDigest(parsed)
 	if err != nil {
-		t.Fatalf("digest cursorRealityFloor under %s: %v", dir, err)
+		t.Fatalf("digest %s under %s: %v", strings.Join(cursorRealityFunctions, ", "), dir, err)
 	}
 	if digest != pinnedCursorRealityFloorDigest {
-		t.Errorf("cursorRealityFloor changed at the pinned beads (token digest %s, pinned %s).\n"+
+		t.Errorf("the clamp (%s) changed at the pinned beads (token digest %s, pinned %s).\n"+
 			"A new clamp arm or a read of a new field changes which ignored cursor the library acts on, and "+
-			"proxyendpoint's reality derivation (readIgnoredReality, ReadPostOpen) mirrors this function by hand. "+
-			"Re-read it under %s, bring the mirror and the sentinel constants into line, then update "+
-			"pinnedCursorRealityFloorDigest.", digest, pinnedCursorRealityFloorDigest, dir)
+			"proxyendpoint's reality derivation (readIgnoredReality, ReadPostOpen, CursorReality.EffectiveIgnored) mirrors these functions by hand. "+
+			"Re-read them under %s, bring the mirror and the sentinel constants into line, then update "+
+			"pinnedCursorRealityFloorDigest.", strings.Join(cursorRealityFunctions, ", "), digest, pinnedCursorRealityFloorDigest, dir)
 	}
 }
 
 // pinnedCursorRealityFloorDigest is cursorRealityFloorDigest at the pinned
-// beads (v1.3.1, internal/storage/schema/schema.go: sentinel tables floor at 0
-// and short-circuit, then floored tables and columns clamp to the lowest
-// replayFloor of anything absent).
-const pinnedCursorRealityFloorDigest = "309a20318eea0f78e6e33fd76c9ca0dfe5fd0f3da6b48371cda7102648b4843d"
+// beads (v1.4.0-rc.4, internal/storage/schema/schema.go: readCursor clamps the
+// read cursor to cursorReality's floor when it is limited and lower, and
+// collects the absent floored tables that carry a lossNotice for migrate's
+// warning; cursorRealityFloor wraps cursorReality; cursorReality floors at 0
+// and short-circuits on a missing sentinel table, then clamps floored tables
+// and columns to the lowest replayFloor of anything absent).
+const pinnedCursorRealityFloorDigest = "28d90a1fac7a683d6adb2859a1add5faf2ad88434de71a129a5d718acaad3271"
 
 // TestSentinelDriftPinSeesEveryDirection proves the pin above is structural by
 // feeding it the library shapes the old substring pin could not see, and one it
@@ -161,8 +164,9 @@ const pinnedCursorRealityFloorDigest = "309a20318eea0f78e6e33fd76c9ca0dfe5fd0f3d
 // same function the real pin runs.
 func TestSentinelDriftPinSeesEveryDirection(t *testing.T) {
 	const header = "package schema\n\ntype schemaSentinelColumn struct{ table, column string; replayFloor int }\n" +
-		"type schemaSentinelTable struct{ table string; replayFloor int }\n" +
-		"type migrationSource struct{ cursorTable string; sentinelTables []string; sentinelFlooredTables []schemaSentinelTable; sentinelColumns []schemaSentinelColumn }\n"
+		"type schemaSentinelTable struct{ table string; replayFloor int; lossNotice string }\n" +
+		"type migrationSource struct{ cursorTable string; sentinelTables []string; sentinelFlooredTables []schemaSentinelTable; sentinelColumns []schemaSentinelColumn }\n" +
+		"const wispIDTombstonesLossNotice = \"WARNING: wisp_id_tombstones was missing and is being re-created EMPTY.\"\n"
 	const pinned = `var (
 	mainSource    = migrationSource{cursorTable: "schema_migrations"}
 	ignoredSource = migrationSource{
@@ -172,6 +176,7 @@ func TestSentinelDriftPinSeesEveryDirection(t *testing.T) {
 			{table: "events", replayFloor: 18},
 			{table: "bd_events_journal", replayFloor: 21},
 			{table: "bd_events_seq", replayFloor: 21},
+			{table: "wisp_id_tombstones", replayFloor: 29, lossNotice: wispIDTombstonesLossNotice},
 		},
 		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node", replayFloor: 11}},
 	}
@@ -237,6 +242,14 @@ var doltIgnorePatterns = []string{"wisps", "wisp_dependencies"}
 			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
 				`{table: "events", replayFloor: 18},`, `{table: "events", replayFloor: 17},`, 1)},
 			want: "sentinelFlooredTables",
+		},
+		{
+			// lossNotice (beads v1.4.0) is read and set aside because it moves
+			// no floor; any other new field on a floored table is still unread.
+			name: "an unknown field on a floored sentinel table",
+			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
+				`lossNotice: wispIDTombstonesLossNotice}`, `lossNotice: wispIDTombstonesLossNotice, replayCeiling: 31}`, 1)},
+			want: "unknown schemaSentinelTable field replayCeiling",
 		},
 		{
 			name: "a moved replay floor",
@@ -308,21 +321,48 @@ var doltIgnorePatterns = []string{"wisps", "wisp_dependencies"}
 // TestCursorRealityFloorDigestSeesAClampArm proves the digest half of the pin
 // (council pr2 E-S5): a new clamp arm changes it, and a comment or a reflow does
 // not, so it fails on the beads bumps that matter and not on the ones that do
-// not.
+// not. The base is the beads v1.4.0 shape: readCursor applies the floor that
+// cursorReality computes, and cursorRealityFloor wraps cursorReality.
 func TestCursorRealityFloorDigestSeesAClampArm(t *testing.T) {
 	const base = `package schema
 
+func (m migrationSource) readCursor(ctx context.Context, db DBConn) (int, []schemaSentinelTable, error) {
+	current, err := m.rawCursor(ctx, db)
+	if err != nil || current == 0 {
+		return 0, nil, err
+	}
+	floor, limited, missing, err := m.cursorReality(ctx, db)
+	if err != nil {
+		return 0, nil, err
+	}
+	var lost []schemaSentinelTable
+	for _, st := range missing {
+		if st.lossNotice != "" && current > st.replayFloor {
+			lost = append(lost, st)
+		}
+	}
+	if limited && floor < current {
+		current = floor
+	}
+	return current, lost, nil
+}
+
 func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int, bool, error) {
+	floor, limited, _, err := m.cursorReality(ctx, db)
+	return floor, limited, err
+}
+
+func (m migrationSource) cursorReality(ctx context.Context, db DBConn) (int, bool, []schemaSentinelTable, error) {
 	for _, table := range m.sentinelTables {
 		present, err := sentinelTableExists(ctx, db, table)
 		if err != nil {
-			return 0, false, err
+			return 0, false, nil, err
 		}
 		if !present {
-			return 0, true, nil
+			return 0, true, nil, nil
 		}
 	}
-	return 0, false, nil
+	return 0, false, nil, nil
 }
 `
 	digestOf := func(t *testing.T, body string) string {
@@ -339,8 +379,8 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 	}
 	pinned := digestOf(t, base)
 
-	reflowed := strings.Replace(base, "\t\tif !present {\n\t\t\treturn 0, true, nil\n\t\t}",
-		"\t\t// A comment the digest must not see.\n\t\tif !present { return 0, true, nil }", 1)
+	reflowed := strings.Replace(base, "\t\tif !present {\n\t\t\treturn 0, true, nil, nil\n\t\t}",
+		"\t\t// A comment the digest must not see.\n\t\tif !present { return 0, true, nil, nil }", 1)
 	if reflowed == base {
 		t.Fatal("the reflow row edited nothing")
 	}
@@ -348,13 +388,23 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 		t.Errorf("a comment and a reflow changed the digest (%s -> %s); it would fail on edits that change nothing", pinned, got)
 	}
 
-	clamped := strings.Replace(base, "\treturn 0, false, nil\n}",
-		"\tif m.cursorTable == \"ignored_schema_migrations\" {\n\t\treturn 20, true, nil\n\t}\n\treturn 0, false, nil\n}", 1)
+	clamped := strings.Replace(base, "\treturn 0, false, nil, nil\n}",
+		"\tif m.cursorTable == \"ignored_schema_migrations\" {\n\t\treturn 20, true, nil, nil\n\t}\n\treturn 0, false, nil, nil\n}", 1)
 	if clamped == base {
 		t.Fatal("the clamp row edited nothing")
 	}
 	if got := digestOf(t, clamped); got == pinned {
 		t.Error("a new clamp arm left the digest unchanged; the pin cannot see the library clamping a database gc admits")
+	}
+
+	// The floor is applied in readCursor, so a change to how it is applied is
+	// a change to the cursor the library acts on.
+	applied := strings.Replace(base, "\tif limited && floor < current {", "\tif limited {", 1)
+	if applied == base {
+		t.Fatal("the application row edited nothing")
+	}
+	if got := digestOf(t, applied); got == pinned {
+		t.Error("a changed clamp application in readCursor left the digest unchanged")
 	}
 }
 
@@ -599,8 +649,42 @@ func migrationSourceFieldProblems(parsed parsedSources) []string {
 	return problems
 }
 
+// cursorRealityFunctions are the functions the pinned library computes and
+// applies the ignored lane's reality floor in, in digest order. Through beads
+// v1.3.x cursorRealityFloor held the whole clamp. beads v1.4.0 (#7931) moved
+// that body into cursorReality, which also returns the floored tables it found
+// absent, kept cursorRealityFloor as a wrapper over it, and applies the floor
+// (`if limited && floor < current`) in readCursor, which also collects the
+// lost tables migrate warns about. They are the only functions that may read a
+// sentinel field, and the digest covers all of them.
+var cursorRealityFunctions = []string{"cursorRealityFloor", "cursorReality", "readCursor"}
+
+// cursorRealityFunc returns the one declaration named name in the parsed
+// package and the file it is in. None, or two, is an error: the pin would
+// otherwise read some other shape than the one it names.
+func cursorRealityFunc(parsed parsedSources, name string) (string, *ast.FuncDecl, error) {
+	var fileName string
+	var found *ast.FuncDecl
+	for _, candidate := range parsed.names {
+		for _, decl := range parsed.files[candidate].Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if !ok || function.Name.Name != name || function.Body == nil {
+				continue
+			}
+			if found != nil {
+				return "", nil, fmt.Errorf("two %s functions; the pin cannot tell which one the clamp runs", name)
+			}
+			fileName, found = candidate, function
+		}
+	}
+	if found == nil {
+		return "", nil, fmt.Errorf("no %s function", name)
+	}
+	return fileName, found, nil
+}
+
 // sentinelMutationProblems finds every reference to a sentinel field outside
-// cursorRealityFloor, which is the only place the pinned library reads them.
+// cursorRealityFunctions, the only places the pinned library reads them.
 // Anywhere else it is a write the literal pin cannot see — an init() that
 // appends a table, a helper that reassigns the list — so it is a problem to
 // re-read, not a detail (council pr2 E-S5).
@@ -610,7 +694,7 @@ func sentinelMutationProblems(parsed parsedSources) []string {
 		file := parsed.files[fileName]
 		var allowed []*ast.BlockStmt
 		for _, decl := range file.Decls {
-			if function, ok := decl.(*ast.FuncDecl); ok && function.Name.Name == "cursorRealityFloor" && function.Body != nil {
+			if function, ok := decl.(*ast.FuncDecl); ok && slices.Contains(cursorRealityFunctions, function.Name.Name) && function.Body != nil {
 				allowed = append(allowed, function.Body)
 			}
 		}
@@ -625,55 +709,53 @@ func sentinelMutationProblems(parsed parsedSources) []string {
 				}
 			}
 			position := parsed.fileSet.Position(selector.Pos())
-			problems = append(problems, fmt.Sprintf("%s:%d references .%s outside cursorRealityFloor; a write there "+
+			problems = append(problems, fmt.Sprintf("%s:%d references .%s outside %s; a write there "+
 				"changes the sentinel set without changing the literal this pin reads",
-				filepath.Base(position.Filename), position.Line, selector.Sel.Name))
+				filepath.Base(position.Filename), position.Line, selector.Sel.Name, strings.Join(cursorRealityFunctions, ", ")))
 			return true
 		})
 	}
 	return problems
 }
 
-// cursorRealityFloorDigest is a digest of cursorRealityFloor's TOKENS, comments
-// and layout excluded. The literal pin cannot see a new clamp arm
-// (`return 20, true, nil` on some new condition) or a read of a field it does
-// not know, and both change which cursor the library acts on; the digest
-// changes with any of them, and with nothing a gofmt or a comment edit does.
+// cursorRealityFloorDigest is a digest of the TOKENS of cursorRealityFunctions,
+// in that order, comments and layout excluded. The literal pin cannot see a
+// new clamp arm (`return 20, true, nil, nil` on some new condition), a change
+// to how the floor is applied, or a read of a field it does not know, and each
+// changes which cursor the library acts on; the digest changes with any of
+// them, and with nothing a gofmt or a comment edit does.
 func cursorRealityFloorDigest(parsed parsedSources) (string, error) {
-	for _, fileName := range parsed.names {
-		for _, decl := range parsed.files[fileName].Decls {
-			function, ok := decl.(*ast.FuncDecl)
-			if !ok || function.Name.Name != "cursorRealityFloor" || function.Body == nil {
+	var tokens strings.Builder
+	for _, name := range cursorRealityFunctions {
+		fileName, function, err := cursorRealityFunc(parsed, name)
+		if err != nil {
+			return "", err
+		}
+		start := parsed.fileSet.Position(function.Pos()).Offset
+		end := parsed.fileSet.Position(function.End()).Offset
+		source := parsed.bodies[fileName][start:end]
+		var scan scanner.Scanner
+		scanFiles := token.NewFileSet()
+		scan.Init(scanFiles.AddFile(fileName, -1, len(source)), source, nil, 0)
+		for {
+			_, tok, literal := scan.Scan()
+			if tok == token.EOF {
+				break
+			}
+			if tok == token.SEMICOLON {
+				// Automatic semicolons follow line breaks, so they are
+				// layout, not logic: `if c { return x }` and its three-line
+				// form must digest alike.
 				continue
 			}
-			start := parsed.fileSet.Position(function.Pos()).Offset
-			end := parsed.fileSet.Position(function.End()).Offset
-			source := parsed.bodies[fileName][start:end]
-			var tokens strings.Builder
-			var scan scanner.Scanner
-			scanFiles := token.NewFileSet()
-			scan.Init(scanFiles.AddFile(fileName, -1, len(source)), source, nil, 0)
-			for {
-				_, tok, literal := scan.Scan()
-				if tok == token.EOF {
-					break
-				}
-				if tok == token.SEMICOLON {
-					// Automatic semicolons follow line breaks, so they are
-					// layout, not logic: `if c { return x }` and its three-line
-					// form must digest alike.
-					continue
-				}
-				tokens.WriteString(tok.String())
-				tokens.WriteByte(' ')
-				tokens.WriteString(literal)
-				tokens.WriteByte('\n')
-			}
-			sum := sha256.Sum256([]byte(tokens.String()))
-			return hex.EncodeToString(sum[:]), nil
+			tokens.WriteString(tok.String())
+			tokens.WriteByte(' ')
+			tokens.WriteString(literal)
+			tokens.WriteByte('\n')
 		}
 	}
-	return "", errors.New("no cursorRealityFloor function")
+	sum := sha256.Sum256([]byte(tokens.String()))
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // sentinelsOf reads the sentinel fields of one migrationSource literal. A
@@ -722,6 +804,12 @@ func sentinelsOf(literal *ast.CompositeLit) (sentinelDecl, error) {
 						f.table, err = stringLit(kv.Value)
 					case "replayFloor":
 						f.floor, err = intLit(kv.Value)
+					case "lossNotice":
+						// beads v1.4.0 (#7931): the warning migrate prints
+						// when the replay re-creates this table empty. It
+						// moves no floor (readCursor clamps on cursorReality's
+						// floor alone, and the digest pins both), so gc's
+						// probe has nothing to mirror.
 					default:
 						err = fmt.Errorf("unknown schemaSentinelTable field %s", keyName(kv.Key))
 					}
@@ -815,52 +903,57 @@ func sentinelDrift(declared map[string]sentinelDecl) []string {
 	return problems
 }
 
-// sentinelTableFloor reads the value cursorRealityFloor returns for a missing
-// sentinel TABLE: the first result of the `return <n>, true, nil` inside its
-// range over m.sentinelTables.
+// sentinelTableFloor reads the value the clamp returns for a missing sentinel
+// TABLE: the first result of the `return <n>, true, ...` (one result per
+// declared result) inside the range over m.sentinelTables, in the first of
+// cursorRealityFunctions that has one. Through beads v1.3.x that is
+// cursorRealityFloor's `return 0, true, nil`; from beads v1.4.0 it is
+// cursorReality's `return 0, true, nil, nil`.
 func sentinelTableFloor(sources map[string][]byte) (int, error) {
-	fileSet := token.NewFileSet()
-	for name, body := range sources {
-		parsed, err := parser.ParseFile(fileSet, name, body, 0)
+	parsed, err := parseSources(sources)
+	if err != nil {
+		return 0, err
+	}
+	for _, name := range cursorRealityFunctions {
+		_, function, err := cursorRealityFunc(parsed, name)
 		if err != nil {
 			return 0, err
 		}
-		for _, decl := range parsed.Decls {
-			function, ok := decl.(*ast.FuncDecl)
-			if !ok || function.Name.Name != "cursorRealityFloor" || function.Body == nil {
-				continue
+		results := 0
+		if function.Type.Results != nil {
+			for _, field := range function.Type.Results.List {
+				results += max(1, len(field.Names))
 			}
-			floor, found := 0, false
-			var walkErr error
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				loop, ok := node.(*ast.RangeStmt)
-				if !ok || found {
+		}
+		floor, found := 0, false
+		var walkErr error
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			loop, ok := node.(*ast.RangeStmt)
+			if !ok || found {
+				return !found
+			}
+			if selector, ok := loop.X.(*ast.SelectorExpr); !ok || selector.Sel.Name != "sentinelTables" {
+				return true
+			}
+			ast.Inspect(loop.Body, func(inner ast.Node) bool {
+				ret, ok := inner.(*ast.ReturnStmt)
+				if !ok || found || len(ret.Results) < 3 || len(ret.Results) != results || !isIdent(ret.Results[1], "true") {
 					return !found
 				}
-				if selector, ok := loop.X.(*ast.SelectorExpr); !ok || selector.Sel.Name != "sentinelTables" {
-					return true
-				}
-				ast.Inspect(loop.Body, func(inner ast.Node) bool {
-					ret, ok := inner.(*ast.ReturnStmt)
-					if !ok || found || len(ret.Results) != 3 || !isIdent(ret.Results[1], "true") {
-						return !found
-					}
-					floor, walkErr = intLit(ret.Results[0])
-					found = true
-					return false
-				})
+				floor, walkErr = intLit(ret.Results[0])
+				found = true
 				return false
 			})
-			if walkErr != nil {
-				return 0, walkErr
-			}
-			if !found {
-				return 0, errors.New("cursorRealityFloor has no `return <floor>, true, nil` inside its range over sentinelTables")
-			}
+			return false
+		})
+		if walkErr != nil {
+			return 0, walkErr
+		}
+		if found {
 			return floor, nil
 		}
 	}
-	return 0, errors.New("no cursorRealityFloor function")
+	return 0, fmt.Errorf("none of %s has a `return <floor>, true, ...` inside a range over sentinelTables", strings.Join(cursorRealityFunctions, ", "))
 }
 
 func isIdent(expr ast.Expr, name string) bool {
@@ -897,7 +990,9 @@ func intLit(expr ast.Expr) (int, error) {
 // The old residual said the library's CheckForwardDrift, run at every open,
 // covered a database that moved inside the memo window. It covers one lane in
 // one direction: CurrentVersion is the MAIN source's cursor, and
-// checkSchemaSkew returns nil unless that cursor is AHEAD. So the ignored lane
+// checkSchemaSkew returns nil unless that cursor is AHEAD (since beads v1.4.0,
+// #7912, through forwardDriftError, the verdict it shares with
+// CheckReadableDrift). So the ignored lane
 // — the one A-F2 exists for — gets no library check before the open migrates it,
 // and gc's own gate is the only one. A beads release that teaches the drift
 // check the ignored lane breaks this test, which is the prompt to re-read the
@@ -931,8 +1026,15 @@ func TestForwardDriftSeesOnlyTheMainLane(t *testing.T) {
 	if !strings.Contains(skew, "CurrentVersion(ctx, db)") || strings.Contains(skew, "Ignored") {
 		t.Errorf("checkSchemaSkew now reads something other than the main cursor; the residual says it does not:\n%s", skew)
 	}
-	if !strings.Contains(skew, "currentVersion <= LatestVersion()") {
-		t.Errorf("checkSchemaSkew no longer passes a database at or behind the binary; the residual says it refuses AHEAD only:\n%s", skew)
+	if !strings.Contains(skew, "return forwardDriftError(currentVersion)") {
+		t.Errorf("checkSchemaSkew no longer hands the main cursor it read to forwardDriftError; re-read the residual:\n%s", skew)
+	}
+	verdict := bodyOf("forwardDriftError")
+	if strings.Contains(verdict, "Ignored") {
+		t.Errorf("forwardDriftError now reads something other than the cursor it is handed; the residual says it does not:\n%s", verdict)
+	}
+	if !strings.Contains(verdict, "currentVersion <= LatestVersion()") {
+		t.Errorf("forwardDriftError no longer passes a database at or behind the binary; the residual says it refuses AHEAD only:\n%s", verdict)
 	}
 	if got := bodyOf("CurrentVersion"); !strings.Contains(got, "return mainSource.currentVersion(ctx, db)") {
 		t.Errorf("CurrentVersion is no longer the MAIN source's cursor:\n%s", got)
