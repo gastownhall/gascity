@@ -442,8 +442,8 @@ func probeObserveFreshOnly(ctx context.Context, r *runner, hs runtime.ProtocolIn
 		return StatusFail, "a fresh_only start over a held name succeeded"
 	case again.unsupported:
 		return StatusFail, "a fresh_only start returned exit 2"
-	case again.exitCode != 73 && !collisionPhrase(again.err.Error()):
-		return StatusFail, fmt.Sprintf("a fresh_only start over a held name exited %d without the collision phrase; want 73 or already exists/already running", again.exitCode)
+	case again.exitCode != runtime.ExitCodeFreshCollision && !collisionPhrase(again.err.Error()):
+		return StatusFail, fmt.Sprintf("a fresh_only start over a held name exited %d without the collision phrase; want %d or already exists/already running", again.exitCode, runtime.ExitCodeFreshCollision)
 	}
 	after, s, d := presentObserve(ctx, r, name, "running")
 	if s != StatusPass {
@@ -619,8 +619,18 @@ func probeObserveCityScoped(ctx context.Context, r *runner, hs runtime.ProtocolI
 	if !hs.Has(observeCityToken) {
 		return StatusSkip, observeCityToken + " not declared"
 	}
-	cityA := []string{"GC_EXEC_CITY_NAME=rpp-a", "GC_EXEC_CITY_PATH=/gc-rpp/city-a"}
-	cityB := []string{"GC_EXEC_CITY_NAME=rpp-b", "GC_EXEC_CITY_PATH=/gc-rpp/city-b"}
+	// Two private cities: a final server-stop ends each one's server before
+	// it is removed, which a fixed path shared by concurrent runs could not.
+	cityA, removeA, err := newPrivateCity(ctx, r, hs)
+	if err != nil {
+		return StatusFail, err.Error()
+	}
+	defer removeA()
+	cityB, removeB, err := newPrivateCity(ctx, r, hs)
+	if err != nil {
+		return StatusFail, err.Error()
+	}
+	defer removeB()
 	name := r.nextName()
 	if s, d := startOrFail(ctx, r, cityA, name); s != StatusPass {
 		return s, d
@@ -671,4 +681,38 @@ func probeObserveInventoryActivity(ctx context.Context, r *runner, hs runtime.Pr
 		return StatusFail, "inventory last_activity is null or not RFC3339 for a running session although report-activity is declared"
 	}
 	return StatusPass, "last_activity on every running session"
+}
+
+// probeObservePeekNoScreen: v2 reads a dead box's screen through `peek` to
+// tell why it died before recycling it, so "no screen" must be an answer
+// (exit 66, runtime.ExitCodeNoScreen) and never an empty success: a name
+// never started, and one stopped, answer it; a running box's peek
+// succeeds.
+func probeObservePeekNoScreen(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if s, d, ok := observeDeclared(hs); !ok {
+		return s, d
+	}
+	name := r.nextName()
+	noScreen := func(when string) (Status, string, bool) {
+		res := r.op(ctx, "peek", name, "10")
+		if res.unsupported || res.ok() || res.exitCode != runtime.ExitCodeNoScreen {
+			return StatusFail, fmt.Sprintf("peek of %s: exit %d (exit 2: %v), want %d, no screen", when, res.exitCode, res.unsupported, runtime.ExitCodeNoScreen), false
+		}
+		return StatusPass, "", true
+	}
+	if s, d, ok := noScreen("a never-started name"); !ok {
+		return s, d
+	}
+	if s, d := startOrFail(ctx, r, nil, name); s != StatusPass {
+		return s, d
+	}
+	if res := r.op(ctx, "peek", name, "10"); !res.ok() {
+		r.stop(ctx, name)
+		return StatusFail, fmt.Sprintf("peek of a running box failed: %v (exit 2: %v)", res.err, res.unsupported)
+	}
+	r.stop(ctx, name)
+	if s, d, ok := noScreen("a stopped name"); !ok {
+		return s, d
+	}
+	return StatusPass, "a running box's screen; exit 66 for no box"
 }

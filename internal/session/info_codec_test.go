@@ -148,6 +148,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		ConfigDriftDeferredKey:         b.Metadata["config_drift_deferred_key"],
 		AttachedConfigDriftDeferredAt:  b.Metadata["attached_config_drift_deferred_at"],
 		AttachedConfigDriftDeferredKey: b.Metadata["attached_config_drift_deferred_key"],
+		ConfigDriftEscalatedAt:         b.Metadata["config_drift_escalated_at"],
 		StrandedEventEmittedAt:         b.Metadata["stranded_event_emitted_at"],
 		UnknownStateFirstSeen:          b.Metadata["unknown_state_first_seen"],
 		UnknownStateValue:              b.Metadata["unknown_state_value"],

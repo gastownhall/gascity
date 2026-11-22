@@ -106,11 +106,26 @@ func (cr *CityRuntime) enterBeadsQuiescenceIfDue(ctx context.Context) bool {
 		return false
 	}
 	// Store work dispatched before the city went quiescent (an autoclose run
-	// for a drained session's wisp) may still be reading; work dispatched
-	// from now on defers itself. The pairs go once none has been in flight
-	// for a whole tick, so no straggler read restarts them.
-	cr.retireSuspendedScopes(ctx, suspended, func(string) bool { return !cr.cs.storeWorkInFlight() })
+	// for a drained session's wisp, a cache reconcile past its gate, the bead
+	// event watcher's backlog) may still be reading, and so may a
+	// session start or stop the tick handed to its own goroutine; work
+	// dispatched from now on defers itself. The pairs go once none has been
+	// in flight for a whole tick, so no straggler read or write restarts them.
+	cr.retireSuspendedScopes(ctx, suspended, func(string) bool { return !cr.offTickStoreWorkInFlight() })
 	return true
+}
+
+// offTickStoreWorkInFlight reports whether the controller has store work running
+// outside its tick: dispatched store work (autoclose runs, completion facts), a
+// cache's background read (reconcile, prime), the bead event watcher still
+// applying events the log holds, or an async session start or drain-ack stop.
+// Those last two hold a runtime lease
+// from dispatch until they return, and a drain-ack stop confirms its runtime
+// dead, which empties the provider's session list, before its lease release
+// writes the session store; so a city can read quiescent while either still has
+// a write to make.
+func (cr *CityRuntime) offTickStoreWorkInFlight() bool {
+	return cr.cs.storeWorkInFlight() || cr.cs.beadEventsPending() || cr.asyncStarts.busy() || cr.asyncStops.busy()
 }
 
 // resumeRepairBlockedFlags and resumeRepairCandidates are the resume path's
@@ -148,6 +163,9 @@ func (cr *CityRuntime) repairResumedScopes(suspended beadsScopeSuspension) {
 // sessions have drained. It runs after the session reconcile, which is what
 // stops a suspended rig's sessions. The city scope is left to
 // enterBeadsQuiescenceIfDue: it is retired only once nothing runs at all.
+// It checks session drain only: off-tick store work (offTickStoreWorkInFlight)
+// is not consulted for a rig suspended on its own, so a late read that restarts
+// the rig's pair is undone by convergence on a later tick.
 func (cr *CityRuntime) tickRetireSuspendedRigScopes(p *tickPass) bool {
 	suspended := suspendedBeadsScopes(cr.cityPath, cr.cfg)
 	cr.retiredScopes.forgetResumed(suspended)

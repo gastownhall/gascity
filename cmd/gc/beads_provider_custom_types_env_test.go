@@ -353,3 +353,77 @@ func TestInitAndHookDirNeverWritesCustomTypesToABoundScope(t *testing.T) {
 		}
 	}
 }
+
+// TestInitAndHookDirNeverWritesCustomTypesToABdOwnedDirectScope: a store bd
+// bound to a dolt sql-server gc does not run, hosted or on loopback, is a store
+// gc does not serve, so init gives it hooks and nothing else, as it does a
+// complete storage binding, including one that still carries bd's legacy
+// host and port. Its bead types are the operator's to register with
+// `gc doctor --fix`; the provider's init op never runs, and bd's files stay as
+// found.
+func TestInitAndHookDirNeverWritesCustomTypesToABdOwnedDirectScope(t *testing.T) {
+	const legacyBinding = `"dolt_mode":"server","dolt_server_port":17333,"dolt_database":"hv"`
+	for name, metadata := range map[string]string{
+		"hosted": `{"database":"dolt","backend":"dolt",` + legacyBinding + `,"dolt_server_host":"db.example"}`,
+		"loopback with no gc record": `{"database":"dolt","backend":"dolt",` + legacyBinding +
+			`,"dolt_server_host":"127.0.0.1"}`,
+		"complete storage binding with a legacy host and port": `{"database":"beads","backend":"mysql",` +
+			`"storage_endpoint":"opaque-remote","storage_database":"someone_elses",` + legacyBinding +
+			`,"dolt_server_host":"db.example"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearInheritedBeadsEnv(t)
+			city := normalizePathForCompare(t.TempDir())
+			marker := filepath.Join(city, "bd-calls")
+			stub := filepath.Join(city, "pinned-bd")
+			if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+marker+"\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			providerCalls := filepath.Join(city, "provider-calls")
+			provider := filepath.Join(city, "gc-beads-bd")
+			if err := os.WriteFile(provider, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+providerCalls+"\nif [ \"$1\" = init ]; then exit 1; fi\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			rig := filepath.Join(city, "rigs", "hv")
+			cityToml := "[workspace]\nname = \"bdowned\"\n\n[workspace.env]\nBD_BIN = \"" + stub + "\"\n\n[beads]\nprovider = \"exec:" + provider + "\"\n\n[[rigs]]\nname = \"webapp\"\npath = \"" + rig + "\"\nprefix = \"hv\"\n"
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityToml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			beadsDir := filepath.Join(rig, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: hv\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			metaBefore, _ := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+			cfgBefore, _ := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+			logs := captureStdLog(t)
+
+			if err := initAndHookDir(city, rig, "hv"); err != nil {
+				t.Fatalf("initAndHookDir(bd-owned rig): %v", err)
+			}
+			// A registration that fails before it reaches bd only logs.
+			if strings.Contains(logs.String(), "custom bead types") {
+				t.Fatalf("init attempted a custom-types registration:\n%s", logs)
+			}
+			calls, _ := os.ReadFile(marker)
+			for _, forbidden := range []string{"config set", "types.custom", "custom_types"} {
+				if strings.Contains(string(calls), forbidden) {
+					t.Fatalf("bd-owned rig received a custom-types call (%q); calls:\n%s", forbidden, calls)
+				}
+			}
+			if pc, _ := os.ReadFile(providerCalls); strings.Contains(string(pc), "init") {
+				t.Fatalf("provider init op ran for a store gc does not serve; calls:\n%s", pc)
+			}
+			metaAfter, _ := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+			cfgAfter, _ := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+			if string(metaAfter) != string(metaBefore) || string(cfgAfter) != string(cfgBefore) {
+				t.Fatalf("init rewrote bd's files:\nmetadata %q -> %q\nconfig %q -> %q", metaBefore, metaAfter, cfgBefore, cfgAfter)
+			}
+		})
+	}
+}

@@ -56,6 +56,10 @@
       "type": "string",
       "description": "Absolute city root path."
     },
+    "api_url": {
+      "type": "string",
+      "description": "Base URL of the HTTP API that serves this city, derived from configuration the way the CLI resolves its own API endpoint: the supervisor's address from supervisor.toml for a supervisor-hosted city, otherwise the city's [api] endpoint. City routes live under {api_url}/v0/city/{city_name}. Absent when configuration names no usable endpoint. It does not report whether anything is listening; see controller."
+    },
     "controller": {
       "type": "object",
       "additionalProperties": false,

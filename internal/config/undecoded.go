@@ -129,7 +129,26 @@ func validateCityAuthoringSurface(md toml.MetaData) error {
 	if err := validateDoltModeAuthoringSurface(md); err != nil {
 		return err
 	}
+	if err := validateRigFederationPatchSurface(md); err != nil {
+		return err
+	}
 	return validateStorageAuthoringSurface(md)
+}
+
+// validateRigFederationPatchSurface refuses federation settings in
+// [[patches.rigs]]. RigPatch deliberately has no such fields, so without this
+// the keys would decode to nothing and a rig an operator meant to guard would
+// stay unguarded behind a mere unknown-field warning.
+func validateRigFederationPatchSurface(md toml.MetaData) error {
+	for _, key := range md.Undecoded() {
+		// The decoder matches struct fields case-insensitively, so any
+		// spelling of the key counts.
+		switch strings.ToLower(key.String()) {
+		case "patches.rigs." + rigFederationKey, "patches.rigs." + rigNamespaceKey:
+			return fmt.Errorf("[[patches.rigs]] cannot set %q; set it on the rig's own [[rigs]] entry", key[len(key)-1])
+		}
+	}
+	return nil
 }
 
 func validateDoltModeAuthoringSurface(md toml.MetaData) error {

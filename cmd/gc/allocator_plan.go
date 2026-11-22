@@ -265,8 +265,10 @@ func (p *decidePass) computePoolDesired() {
 	if len(standIns) > 0 {
 		rows = append(slices.Clip(p.decidable), standIns...)
 	}
-	p.poolWork = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
+	var poolWorkRefs []string
+	p.poolWork, poolWorkRefs = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
 		rows, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs, p.in.Now.UTC())
+	poolWorkReady := readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, p.poolWork, poolWorkRefs)
 	poolCfg := p.cfg
 	if len(p.in.SuspendedRigPaths) > 0 {
 		clone := *p.cfg
@@ -279,7 +281,7 @@ func (p *decidePass) computePoolDesired() {
 		poolCfg = &clone
 	}
 	p.parked = p.parkSeats(standIns)
-	p.poolStates = computePoolDesiredStatesParkedAt(poolCfg, p.poolWork, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, p.parked, nil)
+	p.poolStates = computePoolDesiredStatesParkedAt(poolCfg, p.poolWork, poolWorkReady, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, p.parked, nil)
 	p.poolDesired = retainScaleCheckPartialPoolDesired(p.cfg, PoolDesiredCounts(p.poolStates),
 		p.decidableSnapshot(), p.merged.PoolPartialRetention)
 	if p.poolDesired == nil {
@@ -581,7 +583,17 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 			return
 		}
 		patch := poolSeatBindingPatch(info, request, workDir)
-		if kept := parkedWorkDirKept(info, request, workDir); len(patch) > 0 || kept != "" {
+		kept := parkedWorkDirKept(info, request, workDir)
+		// The plan-only work dir is "" for work with worktree evidence, so a
+		// same-trigger row recording another dir compares against the spec's
+		// path, which the PreWake's verify reports. Stale, it is bound even
+		// with an empty patch: the PreWake verifies the worktree and stamps
+		// its path as the row's work dir.
+		stale := request.WorktreeSpec != nil && sameTriggerWorkDirStale(p.in.CityPath, info, request, strings.TrimSpace(request.WorktreeSpec.Path))
+		if stale {
+			kept = ""
+		}
+		if len(patch) > 0 || kept != "" || stale {
 			sel.binding = bindingOf(request, workDir)
 			sel.binding.Patch, sel.binding.KeptWorkDir = patch, kept
 		}

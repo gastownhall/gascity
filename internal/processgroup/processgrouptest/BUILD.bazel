@@ -2,9 +2,18 @@ load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "processgrouptest",
-    srcs = ["testproc.go"],
+    srcs = [
+        "descendant_windows.go",
+        "testproc.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/processgroup/processgrouptest",
     visibility = ["//:__subpackages__"],
+    deps = select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
