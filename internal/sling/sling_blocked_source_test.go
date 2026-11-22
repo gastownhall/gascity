@@ -145,3 +145,39 @@ func TestFormulaOnBlockedBeadWaitsForBlocker(t *testing.T) {
 		t.Errorf("WaitingOn = %v, want [%s]", result.WaitingOn, blocker.ID)
 	}
 }
+
+// TestFormulaOnBlockedBeadReleasesWhenBlockerCloses is AC-2: once the blocker
+// closes, the entry step is Ready and routed to the target, and a later step
+// still waits on its in-recipe predecessor.
+func TestFormulaOnBlockedBeadReleasesWhenBlockerCloses(t *testing.T) {
+	deps := blockedSourceSlingDeps(t)
+	store := deps.Store
+	blocker, source := newBlockedSource(t, store, "blocks")
+
+	result, err := DoSling(SlingOpts{Target: config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}, BeadOrFormula: source.ID, OnFormula: "graph-chain"}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if ready := readyWorkflowBeads(t, store, result.WorkflowID); len(ready) > 0 {
+		t.Fatalf("workflow beads Ready before %s closed: %v", blocker.ID, beadTitles(ready))
+	}
+	if err := store.Close(blocker.ID); err != nil {
+		t.Fatalf("Close(blocker): %v", err)
+	}
+	ready := readyWorkflowBeads(t, store, result.WorkflowID)
+	var first *beads.Bead
+	for i := range ready {
+		switch ready[i].Title {
+		case "First step":
+			first = &ready[i]
+		case "Second step":
+			t.Errorf("second step %s is Ready before its in-recipe predecessor closed", ready[i].ID)
+		}
+	}
+	if first == nil {
+		t.Fatalf("entry step not Ready after %s closed; ready workflow beads = %v", blocker.ID, beadTitles(ready))
+	}
+	if got := first.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Errorf("entry step gc.routed_to = %q, want %q", got, "worker")
+	}
+}
