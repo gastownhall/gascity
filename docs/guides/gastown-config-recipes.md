@@ -112,12 +112,16 @@ name = "gastown.boot"
 suspended = true
 ```
 
-Add the patch to `city.toml` yourself. `boot` is defined by the Gastown pack,
-so on a city the supervisor runs (no `[api]` port in `city.toml`),
-`gc agent suspend gastown.boot` does not write the patch: it exits with
-`agent "gastown.boot" is defined by a pack — use [[patches]] to override`.
-Suspending `boot` turns off its deacon check. To turn it back on, delete the
-patch.
+Add the patch to `city.toml` yourself, or run `gc agent suspend gastown.boot`,
+which sets `suspended = true` in an existing `[[patches.agent]]` block for
+`gastown.boot` or appends one, keeping the rest of `city.toml` as written. For a
+pack agent stamped per rig, if a `[[rigs.patches]]` or `[[rigs.overrides]]`
+entry in `city.toml` already sets its `suspended`, the command changes that
+entry instead.
+
+Suspending `boot` turns off its deacon check. To turn it back on, run
+`gc agent resume gastown.boot`, which sets `suspended = false` in the same
+patch, or delete the patch.
 
 ### Add a named crew agent
 
