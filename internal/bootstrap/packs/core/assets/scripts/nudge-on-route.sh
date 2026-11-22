@@ -47,9 +47,10 @@ CITY="${GC_CITY:-.}"
 # the previous run's high-water seq sits just below the log head, so this
 # short read is enough and the run costs one gc events call.
 LOOKBACK="${GC_NUDGE_ON_ROUTE_WINDOW:-${GC_NUDGE_ON_ROUTE_LOOKBACK:-2m}}"
-# Catch-up window: the lookback on the very first run (no mark yet) and on
-# the re-read after an event-log reset. Bounds how far back any run reads;
-# the real cut is always the persisted high-water seq.
+# Catch-up window: the lookback on the very first run (no mark yet), and
+# the re-read whenever the fast window cannot be trusted to reach back to
+# the mark. Bounds how far back any run reads; the real cut is always the
+# persisted high-water seq.
 MAX_LOOKBACK="${GC_NUDGE_ON_ROUTE_MAX_LOOKBACK:-1h}"
 # Dedup entries older than this are pruned so the state file stays bounded.
 # Must comfortably exceed MAX_LOOKBACK so an active routing — which keeps
@@ -74,6 +75,15 @@ duration_to_seconds() {
         *)  echo "$1" ;;
     esac
 }
+
+# A retention shorter than the catch-up window lets a catch-up read re-nudge
+# a pair it still sees. Warn but keep going: the combination costs at most a
+# duplicate nudge, not a missed routing.
+RETENTION_S="$(duration_to_seconds "$RETENTION")"
+MAX_LOOKBACK_S="$(duration_to_seconds "$MAX_LOOKBACK")"
+if [ "$RETENTION_S" -lt "$MAX_LOOKBACK_S" ] 2>/dev/null; then
+    echo "nudge-on-route: GC_NUDGE_ON_ROUTE_RETENTION ($RETENTION) is shorter than GC_NUDGE_ON_ROUTE_MAX_LOOKBACK ($MAX_LOOKBACK); a catch-up read can re-nudge pruned pairs" >&2
+fi
 
 # Nudge the session(s) named by a routed_to target. A multi-session pool
 # routes to the pool BASE (NormalizePoolRouteTarget collapses slot -> base),
@@ -102,11 +112,15 @@ MEMBERS
 }
 
 # Pull recent events. Best-effort: a read failure (API down) must not crash
-# the controller's order loop. One unfiltered read: `gc events --type` takes
-# a single exact type and both bead.created and bead.updated are needed.
-# A run with no usable mark reads the catch-up window; a run with a mark
-# reads the fast window, and re-reads the catch-up window when the log head
-# fell below the mark (the log was reset or rebuilt).
+# the controller's order loop. One unfiltered read per window: `gc events
+# --type` takes a single exact type and both bead.created and bead.updated
+# are needed. City seqs are assigned latest+1 under the recorder's mutex, so
+# they are contiguous across types: a read whose lowest seq sits at or below
+# MARK+1 reached back to the previous run. The fast window is used only when
+# that holds and its head covers the mark; anything else — no usable mark,
+# an empty or unparseable fast read, a gap older than the fast window, or a
+# log head below the mark (the log was reset or rebuilt) — re-reads the
+# catch-up window and uses only that read.
 LAST_SEQ="$(cat "$SEQ_FILE" 2>/dev/null || true)"
 case "$LAST_SEQ" in ''|*[!0-9]*) LAST_SEQ=0 ;; esac
 
@@ -114,26 +128,47 @@ read_events() {
     EVENTS="$(gc events --since "$1" 2>/dev/null)" || exit 0
 }
 
-# Newest event seq in $EVENTS (the next high-water mark), 0 when none parse.
-head_seq() {
-    _h="$(printf '%s\n' "$EVENTS" | jq -r '.seq // 0' 2>/dev/null | sort -n | tail -1)" || _h=""
-    case "$_h" in ''|*[!0-9]*) _h=0 ;; esac
-    echo "$_h"
+# Lowest (LOW_SEQ) and newest (HEAD_SEQ) event seq in $EVENTS; 0 when none
+# parse. HEAD_SEQ is the next high-water mark.
+seq_bounds() {
+    _b="$(printf '%s\n' "$EVENTS" | jq -r '.seq // empty' 2>/dev/null | sort -n)" || _b=""
+    LOW_SEQ="$(printf '%s\n' "$_b" | sed -n '1p')"
+    HEAD_SEQ="$(printf '%s\n' "$_b" | sed -n '$p')"
+    case "$LOW_SEQ" in ''|*[!0-9]*) LOW_SEQ=0 ;; esac
+    case "$HEAD_SEQ" in ''|*[!0-9]*) HEAD_SEQ=0 ;; esac
+}
+
+# Widen to the catch-up window. Nothing usable even there: leave the mark
+# untouched and end the run (today's best-effort contract).
+catch_up() {
+    read_events "$MAX_LOOKBACK"
+    seq_bounds
+    [ "$HEAD_SEQ" -gt 0 ] || exit 0
+    if [ "$LAST_SEQ" -gt 0 ] && [ "$HEAD_SEQ" -lt "$LAST_SEQ" ]; then
+        echo "nudge-on-route: event seq went backwards ($HEAD_SEQ < $LAST_SEQ); resetting mark" >&2
+        LAST_SEQ=0
+    fi
+    # The catch-up read has no wider fallback. When even it starts above the
+    # mark — the gap was longer than MAX_LOOKBACK, or the events walk ran
+    # out of its budget and returned only the newest pages — name the
+    # skipped span and evaluate what was read: holding the mark instead
+    # would livelock every later run on the same gap.
+    if [ "$LAST_SEQ" -gt 0 ] && [ "$LOW_SEQ" -gt $((LAST_SEQ + 1)) ]; then
+        echo "nudge-on-route: catch-up read starts at seq $LOW_SEQ above mark $LAST_SEQ; $((LOW_SEQ - LAST_SEQ - 1)) older event(s) not evaluated" >&2
+    fi
 }
 
 if [ "$LAST_SEQ" -gt 0 ]; then
     read_events "$LOOKBACK"
-    HEAD_SEQ="$(head_seq)"
-    if [ "$HEAD_SEQ" -gt 0 ] && [ "$HEAD_SEQ" -lt "$LAST_SEQ" ]; then
-        echo "nudge-on-route: event seq went backwards ($HEAD_SEQ < $LAST_SEQ); resetting mark" >&2
-        LAST_SEQ=0
-        read_events "$MAX_LOOKBACK"
+    seq_bounds
+    if [ "$HEAD_SEQ" -gt 0 ] && [ "$LOW_SEQ" -le $((LAST_SEQ + 1)) ] && [ "$HEAD_SEQ" -ge "$LAST_SEQ" ]; then
+        :
+    else
+        catch_up
     fi
 else
-    read_events "$MAX_LOOKBACK"
+    catch_up
 fi
-[ -n "$EVENTS" ] || exit 0
-HEAD_SEQ="$(head_seq)"
 
 # Reduce to unique "<bead_id>\t<routed_to>" pairs from events newer than the
 # previous run's high-water seq. Only events that actually carry a non-empty
@@ -195,7 +230,6 @@ EOF
 advance_seq
 
 # Prune entries older than RETENTION so the state file stays bounded.
-RETENTION_S="$(duration_to_seconds "$RETENTION")"
 STATE="$(echo "$STATE" | jq --argjson keep "$RETENTION_S" \
     'with_entries(select((now - (.value | fromdateiso8601)) <= $keep))')" || true
 
