@@ -1887,6 +1887,7 @@ go_test(
         "json_runtime_schema_test.go",
         "json_schema_test.go",
         "jsonl_archive_doctor_check_test.go",
+        "k8s_pod_dispatch_recycle_test.go",
         "k8s_pod_session_provider_test.go",
         "kiro_agents_md_staging_drift_test.go",
         "ledger_feed_test.go",
