@@ -175,8 +175,32 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 	// no benefit (the counters only need tick-granularity, not per-item).
 	skipCounts := make(map[string]int64)
 	snapshotCensus := nudgeFenceCensusFromSnapshot(sessionBeads)
-	for _, info := range sessionBeads.OpenInfos() {
-		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+	infos := sessionBeads.OpenInfos()
+	targets := make([]nudgeTarget, len(infos))
+	for i, info := range infos {
+		targets[i] = resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+	}
+	// A due key that no open session lists reaches no branch of the loop
+	// below. Each one is counted orphaned once per pass. A pass whose every
+	// due key is matched reads nothing more.
+	if orphanKeys := unmatchedNudgeQueueKeys(dueKeys, targets); len(orphanKeys) > 0 {
+		// A fenced session the snapshot does not list (a closed row) is read
+		// through the session front door, which returns closed rows too.
+		var lookup func(id string) (sessionpkg.Info, error)
+		if sessStore != nil {
+			lookup = sessionFrontDoor(sessStore).Get
+		}
+		decided, err := resolveNudgeOrphanKeysForPass(queue, orphanKeys, infos, lookup, now)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		for _, k := range decided {
+			skipCounts["orphaned"]++
+			logNudgeDispatchSkip(debugOut, "orphaned", k.Key, k.Fence, fmt.Sprintf("resolution=%s items=%d", k.Resolution, k.Items))
+		}
+	}
+	for i, info := range infos {
+		target := targets[i]
 		if target.sessionName == "" {
 			skipCounts["no-target"]++
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
