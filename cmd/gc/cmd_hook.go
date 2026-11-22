@@ -942,12 +942,10 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// views see a claim within a poll (hook_claim_bead_events.go). They are
 	// wrapped before both routes, so a write the work-leg route sends to
 	// another leg is announced too; the class route's binding writes announce
-	// themselves. The work-leg route sits under the class route, so the
-	// binding is still consulted last.
+	// themselves.
 	base := city.claimOps()
 	base.ProvisionWorktree = provisionWorktree
-	work := workLegRoutedHookClaimOps(withHookClaimBeadEvents(base, city.path), legRoute, hookClaimClassesRelocated(opened, err))
-	ops, proceed := routedHookClaimOps(work, opened, err, city.recorder, stderr)
+	ops, proceed := composeHookClaimOps(withHookClaimBeadEvents(base, city.path), legRoute, opened, err, city.recorder, stderr)
 	if !proceed {
 		return 1
 	}
@@ -957,6 +955,19 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	defer ops.announceBeadEvents()
 	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnv)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
+}
+
+// composeHookClaimOps layers both claim routes over work, the work-store ops:
+// the work-leg route (legRoute; nil off the primary-scoped branch) first, then
+// the class route one resolution (opened, err) yields over it, and reports
+// whether the claim may proceed (routedHookClaimOps). The order is the
+// contract: the class route consults the binding only after the work-leg
+// route has had every work leg prove a work-shaped id absent, so an id a work
+// leg and the binding both hold is claimed in the work leg, whose copy the
+// reader served.
+func composeHookClaimOps(work hookClaimOps, legRoute *hookClaimWorkLegRoute, opened *hookClaimClassRoute, err error, recorder func() events.Recorder, stderr io.Writer) (hookClaimOps, bool) {
+	work = workLegRoutedHookClaimOps(work, legRoute, hookClaimClassesRelocated(opened, err))
+	return routedHookClaimOps(work, opened, err, recorder, stderr)
 }
 
 // routedHookClaimOps is the claim ops one class-route resolution (opened, err)

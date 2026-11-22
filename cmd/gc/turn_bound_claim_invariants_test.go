@@ -25,8 +25,8 @@ import (
 //     then immediately executes the work in the same process — it has no turn to
 //     outlive, which is why the hook fences do not apply to it.
 //
-// Two entries are not pull paths and are here for a different reason: both
-// FORWARD a claim rather than originate one.
+// The remaining entries are not pull paths and are here for a different
+// reason: each FORWARDS a claim rather than originates one.
 //
 //   - class_store_emit.go FORWARDS a claim; it cannot originate one. It is the
 //     relocated class store's emission wrapper, and it holds no id, no assignee
@@ -48,6 +48,13 @@ import (
 //     the landed claim to the city event log; it holds no candidate, no
 //     assignee and no policy of its own, and claimHookWork (the fenced worker
 //     pull path above) is the only place it is composed.
+//   - claim_work_leg_route.go FORWARDS the hook's own claim seam to the work
+//     leg that holds the bead. Its wrapper calls the hookClaimOps.Claim it was
+//     handed, against the primary leg and then, once the primary proved the
+//     bead absent, against the first work leg a read found it in; the
+//     candidate and the assignee are the caller's, it holds no policy of its
+//     own, and composeHookClaimOps, on the same fenced pull path, is the only
+//     place it is composed.
 //
 // Adding a file here is a design decision about pull semantics; make it
 // deliberately.
@@ -59,6 +66,7 @@ var claimCASAllowedFiles = map[string]bool{
 	"class_store_emit.go":       true,
 	"bead_policy_store.go":      true,
 	"hook_claim_bead_events.go": true,
+	"claim_work_leg_route.go":   true,
 }
 
 // claimCASMarkers are the two shapes a claim compare-and-swap takes in this

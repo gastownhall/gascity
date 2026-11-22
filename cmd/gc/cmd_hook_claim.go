@@ -357,7 +357,9 @@ type hookClaimOps struct {
 	// WorkLegRoute is the route to the work leg that holds a bead the primary
 	// leg proved absent, or nil off the primary-scoped claim branch. Like
 	// ClassRoute it is not a seam: the started key reads its memo to key a
-	// claim by the leg it landed in (hookStartedKeyFor). See
+	// claim by the leg it landed in (hookStartedKeyFor), and the workflow stop
+	// gate and the continuation pin to read the claimed bead's workflow there
+	// (hookClaimWorkflowStop, preassignHookContinuationGroup). See
 	// claim_work_leg_route.go.
 	WorkLegRoute *hookClaimWorkLegRoute
 	// ClassesRelocated reports that the city relocates its coordination
@@ -1378,11 +1380,19 @@ func hookClaimWorkflowLinked(candidate beads.Bead) bool {
 // probe makes: one store hiccup must not idle every seat, and the claim CAS
 // that follows runs against the same store. A failed close still withholds the
 // bead; it stays visible to the next poll, which re-runs this gate.
+//
+// A candidate the work-leg route proved another work leg holds is read and
+// closed in that leg (claim_work_leg_route.go). The route proves a home only
+// once an op on the candidate missed in the primary, so the gate before such a
+// claim still reads the primary, which holds neither the candidate nor, as a
+// rule, its workflow, and the re-check after the claim reads the leg it
+// landed in, as the class route's re-check reads the binding.
 func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
 	if !hookClaimWorkflowLinked(candidate) || ops.WorkflowStore == nil {
 		return false
 	}
-	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
+	storeDir, storeEnv := ops.WorkLegRoute.at(dir, opts.Env, candidate.ID)
+	store := ops.WorkflowStore(ctx, storeDir, storeEnv, candidate.ID, actor)
 	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
 	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
 	if err != nil {
@@ -2275,7 +2285,8 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	// under a stopped root, and its group siblings are ordinary work under that
 	// same root. Siblings share the bead's root, so one ancestry read, made only
 	// once there is a sibling to pin, answers for all of them; a failed read
-	// fails open like the gate itself.
+	// fails open like the gate itself. The read runs where the bead's own claim
+	// landed: in another work leg when the work-leg route took it there.
 	var workflowStore beads.MoleculeTarget
 	var ancestorStop molecule.WorkflowStop
 	ancestorRead := false
@@ -2285,8 +2296,9 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		}
 		if !ancestorRead {
 			ancestorRead = true
-			// ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "") may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-			workflowStore = beads.GraphMolecule(beads.GraphStore{Store: ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")})
+			storeDir, storeEnv := ops.WorkLegRoute.at(dir, opts.Env, bead.ID)
+			// ops.WorkflowStore(ctx, storeDir, storeEnv, bead.ID, "") may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			workflowStore = beads.GraphMolecule(beads.GraphStore{Store: ops.WorkflowStore(ctx, storeDir, storeEnv, bead.ID, "")})
 			if stop, err := molecule.StoppedWorkflowAncestor(workflowStore, bead); err == nil {
 				ancestorStop = stop
 			}

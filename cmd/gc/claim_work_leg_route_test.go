@@ -120,6 +120,15 @@ func (f *workLegFixture) get(dir, beadID string) (*beads.MemStore, beads.Bead, e
 	return store, b, nil
 }
 
+// storeAt is the store a bd context rooted in dir reaches: the leg's store,
+// or an empty one for a dir that roots no leg.
+func (f *workLegFixture) storeAt(dir string) *beads.MemStore {
+	if store := f.stores[filepath.Clean(dir)]; store != nil {
+		return store
+	}
+	return beads.NewMemStore()
+}
+
 // record notes one op served against dir with env.
 func (f *workLegFixture) record(op, dir string, env []string) {
 	leg := ""
@@ -180,6 +189,28 @@ func (f *workLegFixture) ops() hookClaimOps {
 		EmitExecutionStepStarted: func(_ beads.Bead, dir string, env []string, _ string) {
 			f.record("started", dir, env)
 		},
+		ListContinuation: func(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {
+			f.record("list", dir, env)
+			return f.storeAt(dir).List(beads.ListQuery{
+				Status:   "open",
+				Metadata: map[string]string{"gc.root_bead_id": rootID, "gc.continuation_group": group},
+			})
+		},
+		AssignContinuation: func(_ context.Context, dir string, env []string, beadID, assignee string) error {
+			f.record("assign", dir, env)
+			store, _, err := f.get(dir, beadID)
+			if err != nil {
+				return err
+			}
+			return store.Update(beadID, beads.UpdateOpts{Assignee: &assignee})
+		},
+		InputVerdict: func(ctx context.Context, dir string, _ []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputDone(ctx, beads.WorkStore{Store: f.storeAt(dir)}, candidate, identityCandidates, prove)
+		},
+		WorkflowStore: func(_ context.Context, dir string, env []string, _, _ string) beads.Store {
+			f.record("workflow", dir, env)
+			return f.storeAt(dir)
+		},
 		StoreRef: func(dir string) string {
 			return claimStoreRefAt(f.cityPath, f.cfg, dir)
 		},
@@ -231,6 +262,54 @@ func (f *workLegFixture) route(primaryRig string) *hookClaimWorkLegRoute {
 	primary := f.primary(primaryRig)
 	ref := primaryHookStoreRef(f.cityPath, f.cfg, identity, primary.dir, primary.env)
 	return newHookClaimWorkLegRoute(f.cityPath, f.cfg, &f.agent, ref, nil)
+}
+
+// composed is the fixture's ops in the production composition
+// (composeHookClaimOps): route under a class route over binding.
+func (f *workLegFixture) composed(route *hookClaimWorkLegRoute, binding beads.Store) hookClaimOps {
+	f.t.Helper()
+	ops, proceed := composeHookClaimOps(f.ops(), route, newClaimRouteFor(f.t, binding), nil, nil, io.Discard)
+	if !proceed {
+		f.t.Fatal("composeHookClaimOps refused a class route that opened")
+	}
+	return ops
+}
+
+// mintCanceledRoot creates, under id in the named leg's store, a graph.v2
+// workflow root closed gc.outcome=canceled.
+func (f *workLegFixture) mintCanceledRoot(rig, id string) {
+	f.t.Helper()
+	store := f.stores[f.dirOf(rig)]
+	if _, err := store.Create(beads.Bead{
+		ID:       id,
+		Title:    "canceled run",
+		Type:     "molecule",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	if _, err := store.CloseAll([]string{id}, map[string]string{"gc.outcome": "canceled"}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// mintStep creates, under id in the named leg's store, an open step of rootID
+// routed to the agent, carrying extra metadata besides.
+func (f *workLegFixture) mintStep(rig, id, rootID string, extra map[string]string) {
+	f.t.Helper()
+	meta := map[string]string{"gc.routed_to": f.agent.Name, "gc.root_bead_id": rootID}
+	for k, v := range extra {
+		meta[k] = v
+	}
+	if _, err := f.stores[f.dirOf(rig)].Create(beads.Bead{ID: id, Title: "workflow step", Type: "task", Metadata: meta}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// workflowRow is the reader's row for an open step of rootID routed to the
+// fixture agent.
+func (f *workLegFixture) workflowRow(beadID, rootID string) string {
+	return fmt.Sprintf(`[{"id":%q,"status":"open","metadata":{"gc.routed_to":%q,"gc.root_bead_id":%q}}]`, beadID, f.agent.Name, rootID)
 }
 
 // callsIn is the ops the fixture served against the named leg's dir, in order.
@@ -392,7 +471,7 @@ func TestHookClaimWorkLegRoutePrimaryHitBuildsNoOtherLeg(t *testing.T) {
 		binding := newClaimRouteClassStore(t)
 		mintClaimRouteBead(t, binding, "gcg-100", nil)
 		primary := f.primary("")
-		ops := classRoutedHookClaimOps(workLegRoutedHookClaimOps(f.ops(), f.route(""), true), newClaimRouteFor(t, binding))
+		ops := f.composed(f.route(""), binding)
 
 		if _, ok, err := ops.Claim(ctx, primary.dir, primary.env, "gcg-100", "worker"); !ok || err != nil {
 			t.Fatalf("Claim(gcg-100) = ok %v err %v, want the class route to land it in the binding", ok, err)
@@ -442,47 +521,73 @@ func (b workLegRecordingBinding) Claim(id, assignee string) (beads.Bead, bool, e
 	return claimer.Claim(id, assignee)
 }
 
-// TestHookClaimWorkLegRouteWorkLegsBeforeBinding pins AC-5: a work-shaped id
-// only the class binding holds is read, once, through every other serving
-// work leg, each proving absence, before the class route consults the
-// binding; and the claim lands in the binding as it does without the route.
+// TestHookClaimWorkLegRouteWorkLegsBeforeBinding pins AC-5 on the production
+// composition (composeHookClaimOps, the work-leg route under the class route):
+// a work-shaped id only the class binding holds is read, once, through every
+// other serving work leg, each proving absence, before the class route
+// consults the binding, and the claim lands in the binding as it does without
+// the route; and an id a work leg and the binding both hold (a co-resident
+// relic) is claimed in the work leg, the copy the reader served, with the
+// binding untouched.
 func TestHookClaimWorkLegRouteWorkLegsBeforeBinding(t *testing.T) {
-	f := newWorkLegFixture(t, "alpha", "beta")
-	stored := newClaimRouteClassStore(t)
-	mintClaimRouteBead(t, stored, "wk-77", map[string]string{"gc.routed_to": f.agent.Name})
-	primary := f.primary("")
-	ops := classRoutedHookClaimOps(workLegRoutedHookClaimOps(f.ops(), f.route(""), true), newClaimRouteFor(t, workLegRecordingBinding{Store: stored, f: f}))
+	t.Run("only the binding holds it", func(t *testing.T) {
+		f := newWorkLegFixture(t, "alpha", "beta")
+		stored := newClaimRouteClassStore(t)
+		mintClaimRouteBead(t, stored, "wk-77", map[string]string{"gc.routed_to": f.agent.Name})
+		ops := f.composed(f.route(""), workLegRecordingBinding{Store: stored, f: f})
 
-	code, result, stderr := f.claimWith(primary, ops, f.routedRow("wk-77"))
-	if code != 0 || result.Action != "work" || result.BeadID != "wk-77" {
-		t.Fatalf("claim = exit %d %+v, want exit 0 action=work for wk-77; stderr=%q", code, result, stderr)
-	}
-	if held, err := stored.Get("wk-77"); err != nil || held.Assignee != f.agent.Name {
-		t.Fatalf("binding holds wk-77 as %+v (err %v), want it claimed by %s", held, err, f.agent.Name)
-	}
+		code, result, stderr := f.claimWith(f.primary(""), ops, f.routedRow("wk-77"))
+		if code != 0 || result.Action != "work" || result.BeadID != "wk-77" {
+			t.Fatalf("claim = exit %d %+v, want exit 0 action=work for wk-77; stderr=%q", code, result, stderr)
+		}
+		if held, err := stored.Get("wk-77"); err != nil || held.Assignee != f.agent.Name {
+			t.Fatalf("binding holds wk-77 as %+v (err %v), want it claimed by %s", held, err, f.agent.Name)
+		}
 
-	firstBinding := -1
-	for i, call := range f.calls {
-		fields := strings.Fields(call)
-		switch {
-		case strings.HasPrefix(fields[0], "binding-"):
-			if firstBinding < 0 {
-				firstBinding = i
-			}
-		case fields[1] == f.dirOf("alpha") || fields[1] == f.dirOf("beta"):
-			if firstBinding >= 0 {
-				t.Fatalf("calls = %v: work leg op %q after the binding was consulted", f.calls, call)
+		firstBinding := -1
+		for i, call := range f.calls {
+			fields := strings.Fields(call)
+			switch {
+			case strings.HasPrefix(fields[0], "binding-"):
+				if firstBinding < 0 {
+					firstBinding = i
+				}
+			case fields[1] == f.dirOf("alpha") || fields[1] == f.dirOf("beta"):
+				if firstBinding >= 0 {
+					t.Fatalf("calls = %v: work leg op %q after the binding was consulted", f.calls, call)
+				}
 			}
 		}
-	}
-	if firstBinding < 0 {
-		t.Fatalf("calls = %v: the binding was never consulted", f.calls)
-	}
-	for _, rig := range []string{"alpha", "beta"} {
-		if got := f.callsIn(rig); len(got) != 1 || got[0] != "read" {
-			t.Fatalf("ops on rig %s = %v, want exactly one read proving absence", rig, got)
+		if firstBinding < 0 {
+			t.Fatalf("calls = %v: the binding was never consulted", f.calls)
 		}
-	}
+		for _, rig := range []string{"alpha", "beta"} {
+			if got := f.callsIn(rig); len(got) != 1 || got[0] != "read" {
+				t.Fatalf("ops on rig %s = %v, want exactly one read proving absence", rig, got)
+			}
+		}
+	})
+	t.Run("a work leg and the binding both hold it", func(t *testing.T) {
+		f := newWorkLegFixture(t, "alpha", "beta")
+		stored := newClaimRouteClassStore(t)
+		mintClaimRouteBead(t, stored, "wk-78", map[string]string{"gc.routed_to": f.agent.Name})
+		f.mintAs("wk-78", "alpha")
+		ops := f.composed(f.route(""), workLegRecordingBinding{Store: stored, f: f})
+
+		code, result, stderr := f.claimWith(f.primary(""), ops, f.routedRow("wk-78"))
+		if code != 0 || result.Action != "work" || result.BeadID != "wk-78" {
+			t.Fatalf("claim = exit %d %+v, want exit 0 action=work for wk-78; stderr=%q", code, result, stderr)
+		}
+		f.assertClaimedIn("alpha", "wk-78")
+		if held, err := stored.Get("wk-78"); err != nil || held.Status != "open" || held.Assignee != "" {
+			t.Fatalf("binding holds wk-78 as %+v (err %v), want its copy untouched: the work leg holds the copy the reader served", held, err)
+		}
+		for _, call := range f.calls {
+			if strings.HasPrefix(call, "binding-claim") {
+				t.Fatalf("calls = %v: the class route claimed in the binding an id a work leg holds", f.calls)
+			}
+		}
+	})
 }
 
 // mintAs creates an open bead routed to the agent in each named leg's store,
@@ -580,7 +685,7 @@ func TestHookClaimWorkLegRouteUnreadableLegSkipsWithoutWriting(t *testing.T) {
 				}
 				rows += "]"
 				stored := newClaimRouteClassStore(t)
-				ops := classRoutedHookClaimOps(workLegRoutedHookClaimOps(f.ops(), f.route(""), true), newClaimRouteFor(t, workLegRecordingBinding{Store: stored, f: f}))
+				ops := f.composed(f.route(""), workLegRecordingBinding{Store: stored, f: f})
 
 				code, result, stderr := f.claimWith(f.primary(""), ops, rows)
 				switch {
@@ -676,5 +781,100 @@ func TestHookClaimWorkLegRouteNotInstalledOffTheScopedBranch(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHookClaimWorkLegRouteStopGateReadsTheHomeLeg pins the workflow stop gate
+// on a routed claim. A step only rig alpha holds, under a root alpha holds that
+// was canceled, is closed canceled in alpha and never handed out, as it is when
+// alpha is the agent's own primary leg. Before the claim lands the gate cannot
+// know the step's home, so the routed claim takes the step and the post-claim
+// re-check, reading the root in alpha, closes it; the hook then drains no_work.
+// The class route over the work-leg route changes none of it.
+func TestHookClaimWorkLegRouteStopGateReadsTheHomeLeg(t *testing.T) {
+	workLegOnly := func(f *workLegFixture, primary string) hookClaimOps {
+		return workLegRoutedHookClaimOps(f.ops(), f.route(primary), false)
+	}
+	underClassRoute := func(f *workLegFixture, primary string) hookClaimOps {
+		return f.composed(f.route(primary), newClaimRouteClassStore(f.t))
+	}
+	for _, tc := range []struct {
+		name    string
+		primary string
+		compose func(*workLegFixture, string) hookClaimOps
+	}{
+		{name: "claimed in its own leg", primary: "alpha", compose: workLegOnly},
+		{name: "routed through the city primary", compose: workLegOnly},
+		{name: "routed through the city primary, under the class route", compose: underClassRoute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWorkLegFixture(t, "alpha")
+			if tc.primary != "" {
+				f.agent = config.Agent{Name: "worker", Dir: tc.primary}
+			}
+			f.mintCanceledRoot("alpha", "wk-10")
+			f.mintStep("alpha", "wk-11", "wk-10", nil)
+
+			code, result, stderr := f.claimWith(f.primary(tc.primary), tc.compose(f, tc.primary), f.workflowRow("wk-11", "wk-10"))
+			if code != 0 || result.Action != "drain" || result.Reason != "no_work" {
+				t.Fatalf("claim = exit %d %+v, want exit 0 drain no_work: a step under a canceled root is never handed out; stderr=%q", code, result, stderr)
+			}
+			step, err := f.stores[f.dirOf("alpha")].Get("wk-11")
+			if err != nil || step.Status != "closed" || step.Metadata["gc.outcome"] != "canceled" {
+				t.Fatalf("rig alpha's wk-11 = %+v (err %v), want it closed gc.outcome=canceled so no later poll offers it", step, err)
+			}
+			if _, err := f.stores[f.cityPath].Get("wk-11"); err == nil {
+				t.Fatal("the city store holds a copy of wk-11; the gate must not write a leg that lacked it")
+			}
+		})
+	}
+}
+
+// TestHookClaimWorkLegRouteContinuationPinReadsTheHomeLeg pins the stop check
+// of the continuation pin on a routed claim. The teardown step of a canceled
+// root rig alpha holds is claimed through the city primary (teardown runs
+// under a stopped root, so the gate lets it through), and its group sibling,
+// ordinary work under the same root, stays unpinned: the pin reads the root in
+// alpha, where the claim landed, not in the primary, which lacks it. The
+// done-workflow check every candidate passes before its claim
+// (retireDoneWorkflowCandidates) is what proves the root's home on a city that
+// relocates a class, so the group is listed where it lives.
+func TestHookClaimWorkLegRouteContinuationPinReadsTheHomeLeg(t *testing.T) {
+	ctx := context.Background()
+	f := newWorkLegFixture(t, "alpha")
+	f.mintCanceledRoot("alpha", "wk-10")
+	f.mintStep("alpha", "wk-11", "wk-10", map[string]string{"gc.continuation_group": "cleanup", "gc.scope_role": "teardown"})
+	f.mintStep("alpha", "wk-12", "wk-10", map[string]string{"gc.continuation_group": "cleanup"})
+	primary := f.primary("")
+	ops := f.composed(f.route(""), newClaimRouteClassStore(t))
+	opts := hookClaimOptions{
+		Assignee:           f.agent.Name,
+		IdentityCandidates: []string{f.agent.Name},
+		RouteTargets:       []string{f.agent.Name},
+		Env:                primary.env,
+	}
+
+	teardown, err := f.stores[f.dirOf("alpha")].Get("wk-11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ops.InputVerdict(ctx, primary.dir, primary.env, teardown, opts.IdentityCandidates, nil); err != nil {
+		t.Fatalf("InputVerdict(wk-11): %v", err)
+	}
+	claimed, ok, err := ops.Claim(ctx, primary.dir, primary.env, "wk-11", f.agent.Name)
+	if !ok || err != nil {
+		t.Fatalf("Claim(wk-11) = ok %v err %v, want the route to land it in rig alpha", ok, err)
+	}
+	f.calls = nil
+
+	assigned, err := preassignHookContinuationGroup(claimed, opts, ops, primary.dir)
+	if err != nil || len(assigned) != 0 {
+		t.Fatalf("preassign = %v, %v; want no sibling pinned under the canceled root", assigned, err)
+	}
+	if got := f.callsIn("alpha"); len(got) == 0 || got[0] != "list" {
+		t.Fatalf("ops on rig alpha = %v, want the group listed there first: a pin with no sibling to decide proves nothing", got)
+	}
+	if sibling, err := f.stores[f.dirOf("alpha")].Get("wk-12"); err != nil || sibling.Status != "open" || sibling.Assignee != "" {
+		t.Fatalf("rig alpha's wk-12 = %+v (err %v), want it open and unpinned", sibling, err)
 	}
 }

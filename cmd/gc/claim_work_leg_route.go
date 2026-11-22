@@ -13,9 +13,9 @@ package main
 // the op re-runs in the first leg that holds it.
 //
 // It sits on the hookClaimOps seam UNDER the class route
-// (claim_class_route.go), so the relocated binding is still consulted last:
-// the class route's not-found escalation only sees an absence the whole work
-// axis has proved.
+// (claim_class_route.go; composeHookClaimOps composes the two), so the
+// relocated binding is still consulted last: the class route's not-found
+// escalation only sees an absence the whole work axis has proved.
 
 import (
 	"context"
@@ -47,8 +47,10 @@ type hookClaimWorkLeg struct {
 // hookClaimWorkLegRoute routes a claim-time op for a bead the primary leg
 // proved absent to the work leg that holds it.
 //
-// home and nowhere are per-invocation memos, like the class route's: one
-// `gc hook --claim` is one process, and the claim path is sequential.
+// home and the built leg contexts are per-invocation memos, like the class
+// route's: one `gc hook --claim` is one process, and the claim path is
+// sequential. Only a found home is memoized; an id no work leg holds is probed
+// again by the next op that misses on the primary.
 type hookClaimWorkLegRoute struct {
 	// frame lists the work legs other than the primary, in the reader's order.
 	// It is resolved once, on the first probe; each leg's bd context is built
@@ -240,7 +242,7 @@ func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute, c
 	base := ops
 	route.readLeg = base.ReadWorkMeta
 	if classesRelocated {
-		route.reserved = bdIDIsClassReserved
+		route.reserved = bdIDIsClassReserved // residency:allow — reserved ids are the class route's to answer; this only declines to probe work legs for them and resolves no bead
 	}
 	ops.WorkLegRoute = route
 
@@ -317,9 +319,10 @@ func workLegRoutedHookClaimOps(ops hookClaimOps, route *hookClaimWorkLegRoute, c
 
 	// The ops that only ever act on a claim already made: the home leg, or
 	// the caller's dir unchanged. They never probe; the claim they act on
-	// proved where the bead lives. WorkflowStore is not among them: a seam
-	// that hands back a raw beads.Store is storeclass debt, so it keeps the
-	// caller's dir.
+	// proved where the bead lives. WorkflowStore is not wrapped: a seam that
+	// hands back a raw beads.Store is storeclass debt, so its callers, the
+	// stop gate and the continuation pin, open it with the dir and env at
+	// gives them (hookClaimWorkflowStop, preassignHookContinuationGroup).
 	ops.Release = func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
 		dir, env = route.at(dir, env, beadID)
 		return base.Release(ctx, dir, env, beadID, assignee)
