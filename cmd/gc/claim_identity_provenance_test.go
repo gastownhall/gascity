@@ -280,3 +280,30 @@ func TestUnqualifiedAgentNameInLocalRoster(t *testing.T) {
 		}
 	}
 }
+
+// TestClaimIdentityProvenance_QuarantinedRigCannotAnswer pins that while a
+// rig's packs are quarantined, this city can neither vouch for nor disavow any
+// identity on that rig: the roster that would answer was withheld with the
+// rig's packs (#6656). The verdict is unknown, so a caller that releases
+// claims protects them until the rig loads again, and the session store is
+// never consulted — a record answering for the quarantined rig's names is not
+// evidence the roster agrees.
+func TestClaimIdentityProvenance_QuarantinedRigCannotAnswer(t *testing.T) {
+	cfg := claimProvenanceTestCity(t)
+	cfg.QuarantinedRigs = []config.RigQuarantine{{Rig: "repo", Err: errors.New("cached import has local worktree changes")}}
+
+	verdict := claimIdentityProvenance(cfg, "test", "repo/backend_dev", func() (beads.Store, error) {
+		return nil, errors.New("the store must not be opened for a quarantined rig")
+	})
+	if verdict.Verdict != claimVerdictUnknown || verdict.Reason != claimReasonRigQuarantined {
+		t.Fatalf("verdict = %+v, want unknown/rig_quarantined", verdict)
+	}
+
+	// A rig that loaded normally still answers through the roster, without
+	// the store.
+	if verdict := claimIdentityProvenance(claimProvenanceTestCity(t), "test", "repo/backend_dev", func() (beads.Store, error) {
+		return nil, errors.New("roster hits never open the store")
+	}); verdict.Verdict != claimVerdictLocal {
+		t.Fatalf("unquarantined verdict = %+v, want local", verdict)
+	}
+}

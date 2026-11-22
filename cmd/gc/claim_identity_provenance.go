@@ -33,6 +33,9 @@ const (
 	claimReasonAbsentFromRoster claimProvenanceReason = "absent_from_roster"
 	// claimReasonNoConfig: the resolved config carries no roster to ask.
 	claimReasonNoConfig claimProvenanceReason = "no_config"
+	// claimReasonRigQuarantined: the identity's rig is quarantined, so this
+	// city's roster for it is unknown, not empty. Detail is the rig.
+	claimReasonRigQuarantined claimProvenanceReason = "rig_quarantined"
 	// claimReasonLookupFailed: the session-record lookup failed before it
 	// could answer. Detail is the error.
 	claimReasonLookupFailed claimProvenanceReason = "lookup_failed"
@@ -75,6 +78,12 @@ func claimIdentityProvenance(cfg *config.City, cityName, identity string, openSe
 	identity = strings.TrimSpace(identity)
 	if cfg == nil || len(cfg.Agents) == 0 {
 		return claimProvenance{Verdict: claimVerdictUnknown, Reason: claimReasonNoConfig}
+	}
+	// Before the roster and record tests: a quarantined rig contributed no
+	// agents, so a roster miss proves nothing, and a record match would vouch
+	// for an identity whose config this city cannot read.
+	if rig, _ := config.ParseQualifiedName(identity); rig != "" && cfg.RigQuarantined(rig) {
+		return claimProvenance{Verdict: claimVerdictUnknown, Reason: claimReasonRigQuarantined, Detail: rig}
 	}
 	if identity != "" && (poolIdentityInLocalRoster(cfg, cityName, identity) || unqualifiedAgentNameInLocalRoster(cfg, identity)) {
 		return claimProvenance{Verdict: claimVerdictLocal, Reason: claimReasonRoster}
