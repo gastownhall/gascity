@@ -111,3 +111,94 @@ suspended = true # paused by operator
 	}
 	assertOnlyLinesChanged(t, before, after, []string{"suspended = true"}, []string{"suspended = false"})
 }
+
+// cityImportCity writes a schema-2 city importing pack binding "base", whose
+// city-scoped agent "worker" (qualified "base.worker") defaults to
+// suspended = true. cityTail is appended after the import table.
+func cityImportCity(t *testing.T, cityTail string) string {
+	t.Helper()
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "packs", "base")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(`[pack]
+name = "base"
+schema = 2
+
+[[agent]]
+name = "worker"
+scope = "city"
+provider = "claude"
+suspended = true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return writeTOML(t, dir, `# City rationale: keep this comment.
+[workspace]
+name = "test-city"
+
+# Shared base pack.
+[imports.base]
+source = "./packs/base"
+`+cityTail)
+}
+
+func TestResumeAgent_SetsExistingAgentPatchInPlace(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		patch       string
+		wantRemoved []string
+	}{
+		{
+			name: "patch without suspended key",
+			patch: `
+# Operator tuning for the worker.
+[[patches.agent]]
+name = "base.worker"
+nudge = "check the queue" # tuned 10-30
+`,
+		},
+		{
+			name: "patch with suspended true",
+			patch: `
+# Operator tuning for the worker.
+[[patches.agent]]
+name = "base.worker"
+nudge = "check the queue" # tuned 10-30
+suspended = true # held for the migration
+`,
+			wantRemoved: []string{"suspended = true"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := cityImportCity(t, tc.patch)
+			if !effectiveSuspended(t, path, "base.worker") {
+				t.Fatal("fixture: worker should start suspended")
+			}
+			before := string(mustReadFile(t, path))
+
+			ed := configedit.NewEditor(fsys.OSFS{}, path)
+			if err := ed.ResumeAgent("base.worker"); err != nil {
+				t.Fatalf("ResumeAgent: %v", err)
+			}
+
+			if effectiveSuspended(t, path, "base.worker") {
+				t.Fatal("worker still suspended after resume")
+			}
+			after := string(mustReadFile(t, path))
+			for _, comment := range []string{"# City rationale: keep this comment.", "# Shared base pack.", "# Operator tuning for the worker.", "# tuned 10-30"} {
+				if !strings.Contains(after, comment) {
+					t.Errorf("resume dropped comment %q; city.toml now:\n%s", comment, after)
+				}
+			}
+			if tc.wantRemoved != nil && !strings.Contains(after, "suspended = false # held for the migration") {
+				t.Errorf("resume did not keep the suspended line's trailing comment; city.toml now:\n%s", after)
+			}
+			if strings.Count(after, "[[patches.agent]]") != 1 {
+				t.Errorf("resume must update the existing patch, not add one; city.toml now:\n%s", after)
+			}
+			assertOnlyLinesChanged(t, before, after, tc.wantRemoved, []string{"suspended = false"})
+		})
+	}
+}

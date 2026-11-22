@@ -333,9 +333,6 @@ func AddOrUpdateRigPatch(cfg *config.City, name string, fn func(p *config.RigPat
 	return nil
 }
 
-// boolPtr returns a pointer to a bool value.
-func boolPtr(b bool) *bool { return &b }
-
 // SuspendAgent suspends an agent, using inline edit, agent.toml write,
 // or [[patches.agent]] depending on provenance. Writes desired state
 // to durable config (not ephemeral session metadata).
@@ -365,9 +362,10 @@ func (e *Editor) ResumeAgent(name string) error {
 //     [[rigs.patches]] entry that sets suspended: that rig setter decides
 //     the composed value (rig setters apply after city patches), so set its
 //     bool surgically in place.
-//   - OriginDerived + pack-declared: surgically append a [[patches.agent]]
-//     block on disk, falling back to the in-memory patch (and the generic
-//     lossy writeback) only when the surgical append refuses.
+//   - OriginDerived + pack-declared: surgically set suspended explicitly on
+//     the existing exact [[patches.agent]] block, or append one when none
+//     exists. A block that cannot be located unambiguously is refused rather
+//     than rewritten lossily.
 //
 // Returns [ErrUnmodified] whenever the on-disk city.toml was already
 // written surgically (or the change lives entirely in agent.toml), so
@@ -424,14 +422,19 @@ func mutateAgentSuspended(fs fsys.FS, tomlPath string, raw, expanded *config.Cit
 			}
 			return ErrUnmodified
 		}
-		dir, base := config.ParseQualifiedName(name)
-		if err := config.AppendAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base, suspended); err != nil {
-			if !errors.Is(err, config.ErrSurgicalAgentEditUnsupported) {
+		qualified := name
+		if agent, ok := findAgentByIdentity(expanded, name); ok {
+			qualified = agent.QualifiedName()
+		}
+		dir, base := config.ParseQualifiedName(qualified)
+		if hasAgentPatch(raw, qualified) {
+			if err := config.SetAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base, suspended); err != nil {
 				return err
 			}
-			return AddOrUpdateAgentPatch(raw, name, func(p *config.AgentPatch) {
-				p.Suspended = boolPtr(suspended)
-			})
+			return ErrUnmodified
+		}
+		if err := config.AppendAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base, suspended); err != nil {
+			return err
 		}
 		return ErrUnmodified
 	case OriginNotFound:
@@ -508,6 +511,17 @@ func rigSuspensionSetter(raw, expanded *config.City, name string) (rigAgentSette
 		return rigAgentSetter{}, false, fmt.Errorf("%w: agent %q: rigs %s all set suspended for %q; the owning rig is ambiguous",
 			config.ErrSurgicalAgentEditUnsupported, name, strings.Join(rigs, ", "), agent.Name)
 	}
+}
+
+// hasAgentPatch reports whether raw declares a [[patches.agent]] entry whose
+// target is exactly the qualified agent identity.
+func hasAgentPatch(raw *config.City, qualified string) bool {
+	for i := range raw.Patches.Agents {
+		if raw.Patches.Agents[i].TargetQualifiedName() == qualified {
+			return true
+		}
+	}
+	return false
 }
 
 // findAgentByIdentity returns the first agent in cfg matching identity.

@@ -46,6 +46,41 @@ func SetRigAgentSuspendedForEdit(fs fsys.FS, tomlPath string, cfg *City, rigName
 	})
 }
 
+// SetAgentPatchSuspendedForEdit sets suspended to an explicit true or false
+// on the single existing [[patches.agent]] block targeting (dir, name),
+// directly in the on-disk city.toml bytes, preserving every other byte. An
+// existing suspended line keeps its spacing and trailing comment; otherwise a
+// "suspended = <bool>" line is added after the block's last non-blank line.
+// Unlike the inline [[agent]] toggle it never deletes the key: a patch's
+// suspended is a pointer, so absence means "inherit" and only an explicit
+// false overrides a suspended lower layer. cfg is the raw config, used only
+// to keep rig site bindings in sync.
+//
+// It returns an error wrapping ErrSurgicalAgentEditUnsupported when the
+// block cannot be unambiguously located (missing, duplicated, keyed by rig
+// instead of dir, or declared outside city.toml).
+func SetAgentPatchSuspendedForEdit(fs fsys.FS, tomlPath string, cfg *City, dir, name string, suspended bool) error {
+	return writeCityBytesForEdit(fs, tomlPath, cfg, func(existing []byte) ([]byte, error) {
+		lines := strings.Split(string(existing), "\n")
+		start, end, ok := findTOMLArrayBlock(lines, "[[patches.agent]]", name, dir)
+		if !ok {
+			return nil, fmt.Errorf("%w: [[patches.agent]] block for dir %q name %q could not be unambiguously located in %s; set suspended in it by hand", ErrSurgicalAgentEditUnsupported, dir, name, tomlPath)
+		}
+		for i := start; i < end; i++ {
+			if tomlSuspendedLineRe.MatchString(lines[i]) {
+				lines[i] = setSuspendedLine(lines[i], suspended)
+				return []byte(strings.Join(lines, "\n")), nil
+			}
+		}
+		insertAt := lastNonBlankLineIndex(lines, start, end)
+		out := make([]string, 0, len(lines)+1)
+		out = append(out, lines[:insertAt+1]...)
+		out = append(out, fmt.Sprintf("suspended = %t", suspended))
+		out = append(out, lines[insertAt+1:]...)
+		return []byte(strings.Join(out, "\n")), nil
+	})
+}
+
 // findRigSetterSuspendedLine returns the index of the suspended line inside
 // the single [[rigs.<table>]] block with agent = agent that belongs to the
 // single [[rigs]] entry named rigName.
