@@ -14,6 +14,7 @@ go_library(
         "//internal/convoy",
         "//internal/formula",
         "//internal/molecule",
+        "//internal/sourceworkflow",
     ],
 )
 
@@ -27,6 +28,7 @@ go_test(
     ],
     embed = [":graphv2"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/convoy",

@@ -5,7 +5,10 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // SourceBlockers returns the beads a workflow launched from sourceID must wait
@@ -16,6 +19,13 @@ import (
 // source bead's edges hold nothing once the workflow is launched. Copying
 // these ids onto every workflow bead (molecule.Options.BlockedBy) holds the
 // workflow by the same readiness rule that holds the source bead.
+//
+// A target the store's readiness rule already judges satisfied
+// (beads.DependencySatisfied) is dropped, and so is one of sourceID's own
+// workflow roots: a replacement workflow never waits on the one it replaces.
+// Every other target is kept as written, including an external ref and a
+// target work does not hold, so the store judges it as it judges sourceID's
+// own edge.
 func SourceBlockers(work beads.WorkStore, sourceID string) ([]string, error) {
 	sourceID = strings.TrimSpace(sourceID)
 	if sourceID == "" {
@@ -36,6 +46,71 @@ func SourceBlockers(work beads.WorkStore, sourceID string) ([]string, error) {
 		}
 		targets = append(targets, target)
 	}
-	slices.Sort(targets)
-	return targets, nil
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	held, err := beads.GetMany(work, targets)
+	if err != nil {
+		return nil, fmt.Errorf("reading blockers of %s: %w", sourceID, err)
+	}
+	own := ownWorkflowRoots{work: work, sourceID: sourceID}
+	blockers := make([]string, 0, len(targets))
+	for _, target := range targets {
+		b, ok := held[target]
+		if ok && beads.DependencySatisfied(b.Status, beads.ReadinessWorkOutcome(b.Metadata)) {
+			continue
+		}
+		if ok {
+			isOwn, err := own.contains(b)
+			if err != nil {
+				return nil, err
+			}
+			if isOwn {
+				continue
+			}
+		}
+		blockers = append(blockers, target)
+	}
+	slices.Sort(blockers)
+	if len(blockers) == 0 {
+		return nil, nil
+	}
+	return blockers, nil
+}
+
+// ownWorkflowRoots recognizes the workflow roots launched from sourceID: a
+// root naming it in gc.source_bead_id, or a root whose input convoy is a
+// synthetic convoy tracking it (the convoy-first --on launch). The tracking
+// convoys are read once, on first need.
+type ownWorkflowRoots struct {
+	work      beads.WorkStore
+	sourceID  string
+	convoys   []string
+	convoysOK bool
+}
+
+func (o *ownWorkflowRoots) contains(b beads.Bead) (bool, error) {
+	if !sourceworkflow.IsWorkflowRoot(b) {
+		return false, nil
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.SourceBeadIDMetadataKey]) == o.sourceID {
+		return true, nil
+	}
+	inputConvoy := strings.TrimSpace(b.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	if inputConvoy == "" {
+		return false, nil
+	}
+	if !o.convoysOK {
+		tracking, err := convoycore.TrackingConvoysForItem(o.work, o.sourceID)
+		if err != nil {
+			return false, fmt.Errorf("reading convoys tracking %s: %w", o.sourceID, err)
+		}
+		for _, c := range tracking {
+			if c.Metadata[beadmeta.SyntheticMetadataKey] == "true" {
+				o.convoys = append(o.convoys, c.ID)
+			}
+		}
+		o.convoysOK = true
+	}
+	return slices.Contains(o.convoys, inputConvoy), nil
 }
