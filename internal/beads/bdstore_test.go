@@ -4022,12 +4022,14 @@ esac
 
 // --- ListByLabel ---
 
+// ListByLabel is an exact created-desc read: bd list --limit would keep
+// priority-ordered rows, so the limit is applied Go-side (--limit 0, #9415).
 func TestBdStoreListByLabel(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:digest --include-infra --include-gates --limit 5`: {
+		`bd list --json --label=order-run:digest --include-infra --include-gates --limit 0`: {
 			out: []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`),
 		},
 	})
@@ -4080,7 +4082,7 @@ func TestBdStoreListByLabelEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:none --include-infra --include-gates --limit 1`: {out: []byte(`[]`)},
+		`bd list --json --label=order-run:none --include-infra --include-gates --limit 0`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.ListByLabel("order-run:none", 1)

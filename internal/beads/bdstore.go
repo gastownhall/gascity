@@ -3149,6 +3149,13 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	if bdListShouldIncludeTemplates(query) {
 		args = append(args, "--include-templates")
 	}
+	if limit > 0 && serverQuery.Sort == SortCreatedDesc {
+		// bd list orders priority-first by default, so a bare --limit keeps the
+		// N best-priority rows, not the N newest. Only an opted-in caller reaches
+		// here with a limit (see bdListRequiresClientLimit); ask bd for
+		// created_at DESC so its page is the newest population.
+		args = append(args, "--sort", "created")
+	}
 	args = append(args, "--limit", fmt.Sprintf("%d", limit))
 	if serverQuery.ParentID != "" {
 		args = append(args, "--parent", serverQuery.ParentID)
@@ -3213,6 +3220,15 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	// has no --id flag, so a bd-side limit could truncate before the
 	// matching IDs are even fetched.
 	if len(serverQuery.IDs) > 0 {
+		return true
+	}
+	// A bounded created-desc read is exact only when Go cuts it: bd list breaks
+	// created_at ties by id ASC where the canonical order (and cursor
+	// continuation) breaks them by id DESC, so a bd-side limit can drop the
+	// larger-id ties at the boundary. Only a caller that opted into a bounded
+	// newest-by-created_at sample (AllowBackingCreatedLimit) takes the bd-side
+	// limit, as the native stores do (nativeCreatedLimitPushdown).
+	if serverQuery.Sort == SortCreatedDesc && !serverQuery.AllowBackingCreatedLimit {
 		return true
 	}
 	return false
