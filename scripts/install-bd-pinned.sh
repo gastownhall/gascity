@@ -62,7 +62,22 @@ pinned_beads_version() {
 	printf '%s\n' "$version"
 }
 
+# embedded_beads_version prints the beads version a bd binary was built
+# from: the version of its main module when that module is beads, as `go
+# version -m` reports it. It prints nothing for a file that is missing, not a
+# Go binary, or built from some other main module.
+embedded_beads_version() {
+	[ -f "$1" ] || return 0
+	go version -m "$1" 2>/dev/null |
+		awk -v m="$beads_module" '$1 == "mod" && $2 == m { print $3; exit }'
+}
+
 pin=$(pinned_beads_version)
+
+if [ "$(embedded_beads_version "$dest")" = "$pin" ]; then
+	echo "bd at $dest is already built from $beads_module $pin; nothing to do"
+	exit 0
+fi
 
 mkdir -p "$install_dir"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/gc-install-bd.XXXXXX")
