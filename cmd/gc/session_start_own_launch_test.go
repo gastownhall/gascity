@@ -32,15 +32,15 @@ func uncommittedStartRowMeta(sessionName string) map[string]string {
 	}
 }
 
-func createUncommittedStartRow(t *testing.T, store beads.Store, id, sessionName string, meta map[string]string) beads.Bead {
+func createUncommittedStartRow(t *testing.T, store beads.Store, id string, meta map[string]string) beads.Bead {
 	t.Helper()
-	m := uncommittedStartRowMeta(sessionName)
+	m := uncommittedStartRowMeta("worker")
 	for k, v := range meta {
 		m[k] = v
 	}
 	b, err := store.Create(beads.Bead{
 		ID:       id,
-		Title:    sessionName,
+		Title:    "worker",
 		Type:     sessionBeadType,
 		Labels:   []string{sessionBeadLabel},
 		Metadata: m,
@@ -88,7 +88,7 @@ func TestStartPreparedStartCandidate_UncommittedPromptRowRefusesLiveOccupant(t *
 			t.Fatalf("stamping occupant %s: %v", key, err)
 		}
 	}
-	item := ownLaunchTestItem(t, createUncommittedStartRow(t, beads.NewMemStore(), "gc-uncommitted", "worker", nil), "rendered startup prompt")
+	item := ownLaunchTestItem(t, createUncommittedStartRow(t, beads.NewMemStore(), "gc-uncommitted", nil), "rendered startup prompt")
 	item.ownLaunchRequired = true
 
 	starts, stops := sp.CountCalls("Start", "worker"), sp.CountCalls("Stop", "worker")
@@ -115,7 +115,7 @@ func TestStartPreparedStartCandidate_UncommittedPromptRowRefusesLiveOccupant(t *
 func TestRunPreparedStartCandidate_SessionExistsUncommittedOtherIncarnationDefers(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
-	row := createUncommittedStartRow(t, store, "gc-uncommitted", "worker", map[string]string{"state": "active", "session_key": "key-1"})
+	row := createUncommittedStartRow(t, store, "gc-uncommitted", map[string]string{"state": "active", "session_key": "key-1"})
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), row.Metadata["session_name"], runtime.Config{}); err != nil {
 		t.Fatalf("planting occupant runtime: %v", err)
@@ -209,7 +209,7 @@ func TestPrepareStartCandidateForCity_OwnLaunchRequiredRecordsPreWakeRow(t *test
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
 			clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
-			row := createUncommittedStartRow(t, store, "gc-own", "worker", tc.meta)
+			row := createUncommittedStartRow(t, store, "gc-own", tc.meta)
 			tp := ownLaunchTestItem(t, row, tc.prompt).candidate.tp
 
 			prepared, err := prepareStartCandidateForCity(

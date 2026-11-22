@@ -2246,7 +2246,14 @@ func runPreparedStartCandidate(
 	case errors.Is(err, runtime.ErrSessionExists):
 		switch {
 		case sessionExistsObservationErr != nil || !runtimeObservationLive(sessionExistsObservation):
-			outcome = TraceOutcomeProviderError
+			// The colliding runtime cannot be read or is already gone: the
+			// start converges on nothing and the failure accounting counts
+			// nothing. Deferring leaves the row for the next tick's decision
+			// (#6417: a terminal provider_error left the row neither
+			// started nor retrying).
+			outcome = TraceOutcomeDeferred
+			unattributedErr = err
+			err = nil
 		case item.ownLaunchRequired && (!identityRead || identity.token != runtimeTokenMatch):
 			// The runtime under the name is not one this attempt launched
 			// (an unreadable identity included, #6417): commit nothing and
