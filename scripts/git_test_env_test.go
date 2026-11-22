@@ -250,3 +250,45 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 		t.Fatalf("probe job did not confirm GIT_CONFIG_GLOBAL; probe log:\n%s\nharness output:\n%s", probeOut, out)
 	}
 }
+
+// TestSeededGitConfigDisablesBackgroundMaintenance pins the seeded global
+// gitconfig's auto-maintenance switch. git 2.47 and later follow a fetch,
+// commit or merge with `git maintenance run --auto --detach`: a background
+// process that takes objects/maintenance.lock after the command exits, so a
+// test's t.TempDir cleanup can race it ("unlinkat .../.git: directory not
+// empty"). The seed reaches only the git processes that read the test env's
+// GIT_CONFIG_GLOBAL. A script that replaces it, as the rbe-worker fetch.sh
+// does, passes the switch on its own git calls
+// (TestRBEWorkerFetchScriptInvariants). The seed is a literal heredoc, read
+// here rather than run. Its name carries a version, because a host keeps an
+// older seed (created once, never rewritten) until the name changes, so both
+// of the script's path assignments, the temp dir's and the sandbox
+// fallback's, must carry it.
+func TestSeededGitConfigDisablesBackgroundMaintenance(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "test-gitconfig-path"))
+	if err != nil {
+		t.Fatalf("read test-gitconfig-path: %v", err)
+	}
+	script := string(data)
+	_, seed, ok := strings.Cut(script, "cat > \"$tmp\" <<'EOF'\n")
+	if ok {
+		seed, _, ok = strings.Cut(seed, "\nEOF\n")
+	}
+	if !ok {
+		t.Fatal("test-gitconfig-path has no seed heredoc")
+	}
+	for _, want := range []string{"[maintenance]\n\tauto = false", "[gc]\n\tauto = 0"} {
+		if !strings.Contains(seed, want) {
+			t.Errorf("seeded gitconfig lacks %q:\n%s", want, seed)
+		}
+	}
+	names := regexp.MustCompile(`(?m)^\s*path="\$temp_root/(gc-test-gitconfig-[^"]*)"$`).FindAllStringSubmatch(script, -1)
+	if len(names) != 2 {
+		t.Fatalf("test-gitconfig-path assigns the seed path %d times, want 2 (the temp dir and the sandbox fallback)", len(names))
+	}
+	for _, name := range names {
+		if !strings.HasPrefix(name[1], "gc-test-gitconfig-v2-") {
+			t.Errorf("test-gitconfig-path's seed name %s does not carry the version v2: a host with the older seed would keep it", name[1])
+		}
+	}
+}

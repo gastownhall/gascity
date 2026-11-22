@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -54,9 +53,13 @@ var nqCharVerbs = struct {
 	dispatchSkips func(city string) map[string]int64
 	rekey         func(city string, items []queuedNudge, bookkeepErr error) ([]queuedNudge, error)
 }{
-	enqueue:       enqueueQueuedNudgeWithStore,
-	claimDue:      claimDueQueuedNudgesForTarget,
-	claimBatch:    claimDueQueuedNudgeBatchForTarget,
+	enqueue: enqueueQueuedNudgeWithStore,
+	claimDue: func(city string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+		return claimDueQueuedNudgesForTarget(city, target, nil, now)
+	},
+	claimBatch: func(city string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+		return claimDueQueuedNudgeBatchForTarget(city, target, nil, now)
+	},
 	release:       releaseQueuedNudgeClaimsUntil,
 	recordFailure: recordQueuedNudgeFailureDetailed,
 	ack:           ackQueuedNudgesWithOutcome,
@@ -124,21 +127,6 @@ func (s nqLockProbeStore) SetMetadata(id, key, value string) error {
 func (s nqLockProbeStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	s.h.probe("store SetMetadataBatch " + id)
 	return s.Store.SetMetadataBatch(id, kvs)
-}
-
-// nudgeQueueLockHeldForTest reports whether some descriptor holds the queue's
-// flock, by trying it on a fresh one.
-func nudgeQueueLockHeldForTest(city string) bool {
-	f, err := os.OpenFile(nudgequeue.LockPath(city), os.O_RDWR, 0)
-	if err != nil {
-		return false
-	}
-	defer f.Close() //nolint:errcheck
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.Is(err, syscall.EWOULDBLOCK)
-	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return false
 }
 
 // probe fails the test when what is a store call, store open or census made
@@ -289,14 +277,6 @@ func (h *nqCharHarness) item(id, agent string, created time.Duration, opts queue
 
 func (h *nqCharHarness) target(sessionID, epoch string, aliasHistory ...string) nudgeTarget {
 	return nudgeTarget{cityPath: h.city, alias: "alpha", aliasHistory: aliasHistory, sessionID: sessionID, continuationEpoch: epoch}
-}
-
-func statIno(path string) (uint64, bool) {
-	var st syscall.Stat_t
-	if err := syscall.Stat(path, &st); err != nil {
-		return 0, false
-	}
-	return st.Ino, true
 }
 
 // step runs fn and records what it did. state.json is replaced by rename, so

@@ -51,9 +51,18 @@ func (s state) doObserve(op, name string, stdin io.Reader) (out string, code int
 		return out, 0, true, err
 	case "is-attached":
 		return "false\n", 0, true, nil
+	case "peek":
+		// A box has an empty screen; no box is exit 66, no screen.
+		if !exists(s.path("box", name)) {
+			return "", exitNoScreen, true, nil
+		}
+		return "", 0, true, nil
 	}
 	return "", 0, false, nil
 }
+
+// exitNoScreen is `peek`'s "no screen" (runtime.ExitCodeNoScreen).
+const exitNoScreen = 66
 
 // startFresh is start under the profile: a held name is exit 73 under
 // fresh_only; the identity keys of the start env are seeded as metadata

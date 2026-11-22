@@ -1,0 +1,19 @@
+# workladder_test's property sims (seconds: the median of about 110 timed
+# runs each, gate unit phases on rbe-west and local gate hosts, 2026-11-04 to
+# 2026-11-20). Each checks 5k to 100k seeded sequences on up to eight
+# goroutines, so it is CPU-bound and a loaded worker stretches it: the slowest
+# runs seen are 269 s (TestPropertyProgressNeedsService) and 253 s
+# (TestPropertyNoNudgeWhileMarked). rules_go shards a go_test round-robin over
+# its tests in source order, so two of these in one shard can pass the medium
+# timeout (300 s): with two sims in one shard the 6-shard split timed out at
+# 300.2 s and 300.3 s (ga-9yad1bw0). The guard
+# scripts/workladder_shards_test.go fails when shard_count in BUILD.bazel
+# would put two of them in the same shard, and prints the counts that do not.
+# Add a test here when it takes more than about 10 s.
+TestPropertyProgressNeedsService 106
+TestPropertyNoNudgeWhileMarked 105
+TestLadderInvariants 80
+TestRateLimitInvariants 51
+TestRateLimitInvariantsAcrossSeats 44
+TestPropertyAWaitIsOnlyNudged 30
+TestNoDrainWave 10

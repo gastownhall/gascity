@@ -37,7 +37,7 @@ const (
 	managedPiHookVersion       = 10
 	managedOpenCodeHookVersion = 8
 	managedMimoCodeHookVersion = 4
-	managedOmpHookVersion      = 2
+	managedOmpHookVersion      = 3
 )
 
 // hookSource is a managed hook file in the normalized form its upgrade markers
@@ -340,12 +340,19 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
+		data = overlay.AdaptSettingsForPlatform(filepath.FromSlash(rel), data)
 		dst := filepath.Join(workDir, filepath.FromSlash(rel))
 		if provider == "antigravity" && rel == path.Join(".agents", "hooks.json") {
 			return writeJSONOverlayManaged(fs, dst, data)
 		}
+		if provider == "gemini" && rel == path.Join(".gemini", "settings.json") {
+			return writeJSONOverlayManaged(fs, dst, data)
+		}
 		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
 			return writeCodexHooksManaged(fs, cityDir, dst, data)
+		}
+		if provider == "kiro" && rel == overlay.KiroAgentsMDPath {
+			return writeKiroAgentsMDManaged(fs, dst, data)
 		}
 		if overlay.IsMergeablePath(filepath.FromSlash(rel)) {
 			if normalized, normErr := overlay.CanonicalJSON(data); normErr == nil {
@@ -354,6 +361,26 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 		}
 		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel, data))
 	})
+}
+
+// writeKiroAgentsMDManaged writes the Kiro fallback AGENTS.md when dst is
+// absent, and otherwise keeps the existing file — it sits at the workspace
+// root, where it is usually the repository's own instructions — unless it is
+// exactly a body an earlier gc release wrote that says plain `gc hook` claims
+// work (overlay.IsReleasedKiroAgentsMD). That body is replaced without a
+// backup: it is reproducible byte for byte, and a .bak beside a repository's
+// AGENTS.md would only be litter. Overlay staging applies the same rule
+// (overlay.providerPreserveExisting), so the two writers agree.
+func writeKiroAgentsMDManaged(fs fsys.FS, dst string, data []byte) error {
+	if existing, err := fs.ReadFile(dst); err == nil {
+		if !overlay.IsReleasedKiroAgentsMD(existing) {
+			return nil
+		}
+	} else if _, statErr := fs.Stat(dst); statErr == nil {
+		// File exists but isn't readable. Preserve it rather than clobbering it.
+		return nil
+	}
+	return writeManagedData(fs, dst, data)
 }
 
 func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {
@@ -591,6 +618,9 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 		!hookContains(src, "gascityOmpExtension") ||
 		!hookContains(src, "GC_PROVIDER_SESSION_ID") ||
 		!hookContains(src, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!hookContains(src, "GC_MANAGED_SESSION_HOOK") ||
+		!hookContains(src, "GC_HOOK_EVENT_NAME") ||
+		!hookContains(src, "pendingPrimeContext") ||
 		!hookContains(src, `pi.on("session_start"`) ||
 		!hookContains(src, `pi.on("session_compact"`) ||
 		!hookContains(src, `pi.on("before_agent_start"`) ||

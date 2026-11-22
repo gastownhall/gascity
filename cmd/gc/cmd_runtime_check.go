@@ -39,6 +39,40 @@ One exception: when the argument resolves to a pack-declared runtime whose
 nudge probe is reported as "required: nudge" and an absent or broken nudge
 op fails the run — the declaration is smoke-tested, not trusted.
 
+A runtime whose handshake declares carrier.ops is driven only through its
+nudge, peek, send-keys, interrupt and clear-scrollback operations, so each
+is reported as "capability carrier.ops: <op>" and an absent or broken one
+fails the run; this naming takes precedence over "required: nudge". With
+idle-boundary declared as well, "capability carrier.ops: ready-prompt
+metadata" requires set-meta and get-meta to round-trip a non-default ready
+prompt byte for byte, because gc keeps each session's prompt there.
+
+Every operation runs in a city, as gc's own operations do. With
+GC_EXEC_CITY_PATH set, the check runs in the city GC_EXEC_CITY_NAME and
+GC_EXEC_CITY_PATH name, and never sends that city server-stop. With it
+unset or empty, as in a shell outside any city, the check runs in a
+private city: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh
+temporary directory, removed when the check ends or is interrupted.
+
+A runtime whose handshake declares server-lifecycle is sent server-stop,
+which ends every session of the city it runs in, twice. The check runs
+it, and the session it checks it against, in a private city of their
+own, never the city the rest of the check runs in. Before it removes a
+private city, the check, an interrupted one too, sends that city a final
+server-stop; one that does not exit 0 is reported as a warning, as the
+server it was to end may still be running. A runtime that does not scope
+its server by GC_EXEC_CITY_PATH ends every session the server holds, so
+check it only against a backend that no live city uses.
+
+A runtime whose handshake un-welds start (proc.provision with
+proc.launch, or with proc.exec and without carrier.ops) is sent
+provision, which must leave is-running false, and with proc.launch a
+launch into that box, which must leave is-running true, and a fresh_only
+launch over the running agent, which must exit 73. They run in a private
+city of their own, as server-stop does. Such a runtime must also keep
+metadata, since gc publishes each launch's identity with set-meta: a
+set-meta that exits 2 fails the metadata round-trip instead of skipping it.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.<name>] entry from the current
 city's packs, the check runs against that pack's declared command.
@@ -85,6 +119,7 @@ The protocol contract is docs/reference/exec-session-provider.md.`,
 			}
 			fmt.Fprintf(stdout, "\n%d checks: %d passed, %d failed, %d skipped\n", //nolint:errcheck // best-effort stdout
 				len(res.Checks), pass, fail, skip)
+			printRuntimeRunWarnings(stderr, "gc runtime check", res.Warnings)
 
 			if res.Failed() {
 				return errExit
@@ -95,6 +130,14 @@ The protocol contract is docs/reference/exec-session-provider.md.`,
 	cmd.Flags().StringVar(&command, "command", "", `session command sent in the start config (default "sleep 300")`)
 	cmd.Flags().StringVar(&sessionName, "session-name", "", "session name for the conformance round-trip (default: generated unique name)")
 	return cmd
+}
+
+// printRuntimeRunWarnings writes each warning of a runtime check or
+// conformance run to stderr, as gc stop reports a failed server teardown.
+func printRuntimeRunWarnings(stderr io.Writer, cmdName string, warnings []string) {
+	for _, w := range warnings {
+		fmt.Fprintf(stderr, "%s: warning: %s\n", cmdName, w) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // resolveRuntimeCheckTarget maps a pack-declared runtime name to its
