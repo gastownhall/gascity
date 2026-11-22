@@ -1212,6 +1212,37 @@ func TestBuiltinProviders_OpenCodeHasModelOptions(t *testing.T) {
 	}
 }
 
+// TestResolveProviderChain_OpenCodeLegacyModelArgFoldsCuratedChoice checks
+// that a provider layered on builtin:opencode with the legacy "-m <id>" arg
+// for a curated Zen model launches with "--model <id>" and no raw args.
+func TestResolveProviderChain_OpenCodeLegacyModelArgFoldsCuratedChoice(t *testing.T) {
+	for _, model := range []string{
+		"opencode/deepseek-v4.1-flash-free",
+		"opencode/nemotron-3.5-super-vl-free",
+	} {
+		t.Run(model, func(t *testing.T) {
+			leaf := ProviderSpec{Base: basePtr("builtin:opencode"), Args: []string{"-m", model}}
+			resolved, err := ResolveProviderChain("opencode-free", leaf, map[string]ProviderSpec{})
+			if err != nil {
+				t.Fatalf("ResolveProviderChain: %v", err)
+			}
+			if len(resolved.Args) != 0 {
+				t.Errorf("resolved Args = %v, want empty: the legacy -m flag must fold into option_defaults", resolved.Args)
+			}
+			if resolved.EffectiveDefaults["model"] != model {
+				t.Errorf("resolved EffectiveDefaults[model] = %q, want %q", resolved.EffectiveDefaults["model"], model)
+			}
+			args, _, err := ResolveOptions(resolved.OptionsSchema, nil, resolved.EffectiveDefaults)
+			if err != nil {
+				t.Fatalf("ResolveOptions: %v", err)
+			}
+			if want := []string{"--model", model}; !reflect.DeepEqual(args, want) {
+				t.Errorf("ResolveOptions args = %v, want %v", args, want)
+			}
+		})
+	}
+}
+
 func TestValidateOptionDefaults_Valid(t *testing.T) {
 	schema := []ProviderOption{
 		{Key: "permission_mode", Choices: []OptionChoice{
