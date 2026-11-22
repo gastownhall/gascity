@@ -8,10 +8,12 @@
 # is newly set or changed sits unclaimed against any worker that is not
 # currently in an active turn cycle.
 #
-# This order is exactly that workaround, shipped. It subscribes to
-# bead.updated events; whenever a bead carries a gc.routed_to target it
-# runs `gc session nudge <target> "<message>"`. Idempotent: a given
-# (bead, routed_to) pair is nudged at most once. Dedup state lives in
+# This order is exactly that workaround, shipped. It reads the
+# bead.created and bead.updated events; whenever a bead carries a
+# gc.routed_to target it runs `gc session nudge <target> "<message>"` —
+# once per target per run, so a batch of several beads for one target
+# costs that target one wake-up. Idempotent: a given (bead, routed_to)
+# pair is nudged at most once. Dedup state lives in
 # $GC_PACK_STATE_DIR/nudge-on-route-state.json, so it is both city- and
 # pack-scoped — multi-city installs never cross-pollinate.
 #

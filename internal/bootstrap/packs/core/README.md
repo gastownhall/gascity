@@ -39,9 +39,15 @@ set"*). Without that nudge, a bead whose `metadata.gc.routed_to` is newly set
 or changed sits unclaimed against any worker not currently in an active turn
 cycle. This order ships that workaround.
 
-**Event contract.** Triggers on `bead.updated`. For each event whose bead
-carries a non-empty `metadata.gc.routed_to`, nudges that target with
-`check for assigned work`.
+**Event contract.** Triggers on `bead.updated` and reads both `bead.created`
+and `bead.updated` events: routing is often stamped in the CREATE payload
+(`gc order run`, formula pours, poured step beads), and such a bead emits no
+`bead.updated` before it is claimed. A created-only routing is picked up on
+the next fire, so its wake-up lands one dispatch cadence later than an
+updated one. For each event whose bead carries a non-empty
+`metadata.gc.routed_to`, nudges that target with `check for assigned work` —
+once per target per run, so a batch of several beads for one hot lane costs
+that lane one wake-up, not one per bead.
 
 `routed_to` may be a concrete session **or** a pool base. Sling collapses a
 multi-session slot to the pool base (`NormalizePoolRouteTarget`), so a
@@ -53,22 +59,37 @@ has no members (a single-session agent or an explicit slot). Without this,
 nudges to a pool base silently no-op — defeating the warm-idle pool wake this
 order exists to provide.
 
+**Event coverage.** Each run processes every event with seq above the
+high-water seq mark persisted by the previous run, so a dispatch gap —
+routine under `max_dispatches_per_tick` — drops no routing. Two windows keep
+that cheap: a run with a mark first reads the short fast window and trusts it
+only when it is seq-contiguous with the mark; otherwise (and on the first
+run) it re-reads the wider catch-up window and uses only that read. When even
+the catch-up window starts above the mark, the run names the skipped span on
+stderr and evaluates what it read, rather than wedging on the gap.
+
 **Idempotence.** A `(bead, routed_to)` pair is nudged at most once. The
 reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup
 state's last-seen timestamp is refreshed on every sighting and the pair is
-never pruned-then-renudged while the routing is live.
+never pruned-then-renudged while the routing is live. A nudge that fails
+(usually a pool with no live member yet) records nothing; the next
+`bead.updated` re-emit retries it.
 
-**Dedup state.** `$GC_PACK_STATE_DIR/nudge-on-route-state.json` — a JSON object
-mapping `"<bead>|<routed_to>"` to an ISO timestamp. `GC_PACK_STATE_DIR`
-resolves per city + pack, so multi-city installs never cross-pollinate. Entries
+**State.** `$GC_PACK_STATE_DIR/nudge-on-route-state.json` — a JSON object
+mapping `"<bead>|<routed_to>"` to an ISO timestamp — and
+`$GC_PACK_STATE_DIR/nudge-on-route-seq` — the bare high-water seq. The dedup
+state is written before the seq mark, so a crash between the two re-evaluates
+the batch and dedup absorbs the repeats. `GC_PACK_STATE_DIR` resolves per
+city + pack, so multi-city installs never cross-pollinate. Dedup entries
 older than the retention window are pruned on each run.
 
 **Configuration** (all optional, via `[order.env]` or the controller env):
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `GC_NUDGE_ON_ROUTE_LOOKBACK` | `2m` | Event lookback window |
-| `GC_NUDGE_ON_ROUTE_RETENTION` | `1h` | Dedup-entry retention (Ns/Nm/Nh) |
+| `GC_NUDGE_ON_ROUTE_LOOKBACK` (alias `GC_NUDGE_ON_ROUTE_WINDOW`) | `2m` | Fast window, read first on every run that has a mark |
+| `GC_NUDGE_ON_ROUTE_MAX_LOOKBACK` | `1h` | Catch-up window: the first run's lookback and the re-read whenever the fast window cannot be trusted to cover the mark |
+| `GC_NUDGE_ON_ROUTE_RETENTION` | `2h` | Dedup-entry retention (Ns/Nm/Nh); keep it above `MAX_LOOKBACK` or a catch-up read can re-nudge pruned pairs (warns on stderr) |
 | `GC_NUDGE_ON_ROUTE_MESSAGE` | `check for assigned work` | Nudge text |
 
 ## `cascade-nudge-on-blocker-close`
