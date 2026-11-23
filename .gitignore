@@ -49,6 +49,11 @@ internal/api/dashboardspa/web/frontend/.playwright/
 !/.claude/
 /.claude/*
 !/.claude/skills/
+# Only the repo-owned skill is committed. When this checkout runs as a rig,
+# gc materializes every other skill (and .gc-skill-ownership.json) into the
+# same tree; those entries are machine-written and must not show as untracked.
+/.claude/skills/*
+!/.claude/skills/gascity-docs/
 
 # sync-project-agents writes local migration backups here; don't commit them.
 .agents/migration/
