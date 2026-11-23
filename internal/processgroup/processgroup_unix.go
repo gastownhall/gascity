@@ -8,17 +8,50 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 )
 
 const defaultPollPeriod = 25 * time.Millisecond
 
+// defaultEPERMSettle is how long a signal that keeps answering EPERM for a
+// group with a live member is retried. A member that has begun to exit on its
+// own (an agent that reads EOF on its stdin as the stop closes it) is not yet a
+// zombie, and Darwin answers EPERM until the exit finishes: milliseconds on an
+// idle host, longer under load.
+const defaultEPERMSettle = 2 * time.Second
+
+// ManagedStopSignalRetryBudget is the most TerminateManagedCommand can add to
+// its stop and reap graces by retrying EPERM: one settle window at SIGTERM and
+// one at SIGKILL.
+const ManagedStopSignalRetryBudget = 2 * defaultEPERMSettle
+
 // Options configures process-group cleanup.
 type Options struct {
 	Kill           func(pid int, sig syscall.Signal) error
 	CurrentGroupID func() int
 	PollPeriod     time.Duration
+
+	// LiveMembers reports how many members of process group pgid are not
+	// zombies. It is how an EPERM from kill(-pgid, ...) is told apart: on
+	// Darwin it means either "every member is a zombie" or "a live member we
+	// may not signal".
+	LiveMembers func(pgid int) (int, error)
+
+	// MemberStates lists the members of process group pgid with their states,
+	// for the error of a persistent EPERM.
+	MemberStates func(pgid int) ([]MemberState, error)
+
+	// EPERMSettle bounds how long a signal that keeps answering EPERM for a
+	// group with a live member is retried before it is reported.
+	EPERMSettle time.Duration
+}
+
+// MemberState is one member of a process group and its kernel state.
+type MemberState struct {
+	Pid   int
+	State string
 }
 
 func (o Options) kill(pid int, sig syscall.Signal) error {
@@ -33,6 +66,120 @@ func (o Options) currentGroupID() int {
 		return o.CurrentGroupID()
 	}
 	return syscall.Getpgrp()
+}
+
+func (o Options) liveMembers(pgid int) (int, error) {
+	if o.LiveMembers != nil {
+		return o.LiveMembers(pgid)
+	}
+	return defaultLiveMembers(pgid)
+}
+
+// groupGone reports whether err, returned by kill(-pgid, ...), means pgid has
+// no member left to signal. ESRCH always does. EPERM does only when the member
+// reader finds no live member: on Darwin kill(2) skips zombies, so a group of
+// nothing but zombies answers EPERM, indistinguishable by errno from a live
+// member this process may not signal. When the members cannot be read the
+// answer stays "not gone", the safe reading.
+func groupGone(pgid int, err error, opts Options) bool {
+	if errors.Is(err, syscall.ESRCH) {
+		return true
+	}
+	if !errors.Is(err, syscall.EPERM) {
+		return false
+	}
+	live, rerr := opts.liveMembers(pgid)
+	return rerr == nil && live == 0
+}
+
+// signalGroup delivers sig to every member of process group pgid and returns nil
+// once it has, or once the group has nothing left to signal.
+//
+// An EPERM for a group the member reader shows to hold a live member is retried
+// for the settle window before it is believed: on Darwin a member that is
+// exiting is neither a zombie nor signalable, so a stop that races the agent's
+// own exit sees EPERM for a moment and then ESRCH or a zombie. An EPERM that
+// outlasts the window is a member this process may not signal. One for a group
+// that cannot be read at all (no reader on this platform, or the read failed) is
+// not retried, since waiting would not tell it apart. Either is returned,
+// wrapped, with what the member reader saw.
+func signalGroup(pgid int, sig syscall.Signal, opts Options) error {
+	settle := opts.epermSettle()
+	deadline := time.Now().Add(settle)
+	retried := false
+	for {
+		err := opts.kill(-pgid, sig)
+		if err == nil || errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if !errors.Is(err, syscall.EPERM) {
+			return err
+		}
+		live, rerr := opts.liveMembers(pgid)
+		if rerr == nil && live == 0 {
+			return nil
+		}
+		if rerr != nil {
+			return unreadableMembersError(pgid, err, retried, rerr, opts)
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("%w: signal still refused (EPERM) after %s: %s", err, settle, memberOutcome(pgid, live, rerr, opts))
+		}
+		retried = true
+		time.Sleep(opts.pollPeriod())
+	}
+}
+
+// unreadableMembersError reports an EPERM from kill(-pgid, ...) whose members
+// could not be read, saying whether earlier attempts had already retried it.
+func unreadableMembersError(pgid int, err error, retried bool, rerr error, opts Options) error {
+	if !retried {
+		return fmt.Errorf("%w: signal refused (EPERM); members unreadable, not retried: %s", err, memberOutcome(pgid, 0, rerr, opts))
+	}
+	return fmt.Errorf("%w: signal refused (EPERM); members became unreadable after retrying: %s", err, memberOutcome(pgid, 0, rerr, opts))
+}
+
+// memberOutcome describes what the member reader says about process group pgid
+// (live and rerr are the answer of liveMembers), for the error of an EPERM that
+// persisted.
+func memberOutcome(pgid, live int, rerr error, opts Options) string {
+	var b strings.Builder
+	if rerr != nil {
+		fmt.Fprintf(&b, "member query failed: %v", rerr)
+	} else {
+		fmt.Fprintf(&b, "live members=%d", live)
+	}
+	members, err := opts.memberStates(pgid)
+	if err != nil {
+		fmt.Fprintf(&b, "; member states unavailable: %v", err)
+		return b.String()
+	}
+	if len(members) == 0 {
+		b.WriteString("; no members listed")
+		return b.String()
+	}
+	b.WriteString("; members:")
+	for i, m := range members {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, " pid %d %s", m.Pid, m.State)
+	}
+	return b.String()
+}
+
+func (o Options) memberStates(pgid int) ([]MemberState, error) {
+	if o.MemberStates != nil {
+		return o.MemberStates(pgid)
+	}
+	return defaultMemberStates(pgid)
+}
+
+func (o Options) epermSettle() time.Duration {
+	if o.EPERMSettle > 0 {
+		return o.EPERMSettle
+	}
+	return defaultEPERMSettle
 }
 
 func (o Options) pollPeriod() time.Duration {
@@ -137,13 +284,13 @@ func Terminate(pgid int, timeout time.Duration, opts Options) error {
 	if unsafeGroup(pgid, opts) {
 		return fmt.Errorf("refusing to signal unsafe process group %d", pgid)
 	}
-	if err := opts.kill(-pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := signalGroup(pgid, syscall.SIGTERM, opts); err != nil {
 		return err
 	}
 	if err := waitForExit(pgid, timeout, opts); err == nil {
 		return nil
 	}
-	if err := opts.kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := signalGroup(pgid, syscall.SIGKILL, opts); err != nil {
 		return err
 	}
 	return waitForExit(pgid, timeout, opts)
@@ -176,7 +323,8 @@ func TerminateCommand(cmd *exec.Cmd, knownPGID int, timeout time.Duration, opts 
 // nothing to shut down politely, and the caller is about to return an error to
 // someone waiting on it.
 //
-// ESRCH is success — the group is already gone.
+// A group that is already gone is success: ESRCH, or on Darwin an EPERM from a
+// group whose members are all zombies.
 func KillCommandGroup(cmd *exec.Cmd, knownPGID int, opts Options) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
@@ -191,7 +339,7 @@ func KillCommandGroup(cmd *exec.Cmd, knownPGID int, opts Options) error {
 	if unsafeGroup(pgid, opts) {
 		return fmt.Errorf("refusing to signal unsafe process group %d", pgid)
 	}
-	if err := opts.kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := signalGroup(pgid, syscall.SIGKILL, opts); err != nil {
 		return killDirect(cmd.Process, fmt.Errorf("kill process group %d: %w", pgid, err))
 	}
 	return nil
@@ -214,7 +362,7 @@ func InterruptCommand(cmd *exec.Cmd, knownPGID int, opts Options) error {
 	if unsafeGroup(pgid, opts) {
 		return fmt.Errorf("refusing to signal unsafe process group %d", pgid)
 	}
-	if err := opts.kill(-pgid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := signalGroup(pgid, syscall.SIGINT, opts); err != nil {
 		return err
 	}
 	return nil
@@ -243,7 +391,7 @@ func terminateManagedCommandGraces(cmd *exec.Cmd, knownPGID int, done <-chan str
 		}
 	}
 	if pgid > 0 && !unsafeGroup(pgid, opts) {
-		if termErr := opts.kill(-pgid, syscall.SIGTERM); termErr != nil && !errors.Is(termErr, syscall.ESRCH) {
+		if termErr := signalGroup(pgid, syscall.SIGTERM, opts); termErr != nil {
 			return fmt.Errorf("request stop of process group %d: %w", pgid, termErr)
 		}
 	}
@@ -275,7 +423,7 @@ func terminateManagedCommandGraces(cmd *exec.Cmd, knownPGID int, done <-chan str
 }
 
 // groupGoneBefore polls process group pgid until it has no members (true) or
-// expired fires (false). A member this process may not signal still counts.
+// expired fires (false). A live member this process may not signal still counts.
 func groupGoneBefore(pgid int, expired <-chan time.Time, opts Options) bool {
 	ticker := time.NewTicker(opts.pollPeriod())
 	defer ticker.Stop()
@@ -309,7 +457,7 @@ func alive(pgid int, opts Options) bool {
 		return false
 	}
 	err := opts.kill(-pgid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return err == nil || (errors.Is(err, syscall.EPERM) && !groupGone(pgid, err, opts))
 }
 
 func killDirect(process *os.Process, cause error) error {

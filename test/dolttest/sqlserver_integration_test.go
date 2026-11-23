@@ -188,6 +188,13 @@ func TestStartSQLServerWithoutSocketTablesStillRejectsALostPort(t *testing.T) {
 // check passes and its bind then fails with "bind: address already in use".
 // It returns the port and the client connection, which stays open until the
 // test ends.
+//
+// Only a kernel that refuses a listener an address a connected socket holds,
+// as Linux does, fails that bind. Darwin lets a listener with SO_REUSEADDR
+// (Go sets it on every listener, dolt's included) bind an address that only a
+// connected socket of the same user holds, so dolt keeps the port there and no
+// lost port is left to retry from. The test is skipped wherever a listener can
+// still bind the held port.
 func holdPortWithClientSocket(t *testing.T) (client net.Conn, port int) {
 	t.Helper()
 	sink, err := net.Listen("tcp", "127.0.0.1:0")
@@ -214,6 +221,11 @@ func holdPortWithClientSocket(t *testing.T) (client net.Conn, port int) {
 		t.Fatalf("holding port %d with a client socket: %v", port, err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err == nil {
+		_ = listener.Close()
+		t.Skipf("a listener can still bind 127.0.0.1:%d beside the client socket that holds it (BSD SO_REUSEADDR semantics, as on darwin): dolt keeps the port there, so there is no lost port to retry from", port)
+	}
 	return client, port
 }
 

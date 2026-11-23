@@ -341,6 +341,9 @@ func rel(base, path string) string {
 // cityTOMLFile is city.toml as a file, through a symlink.
 func cityTOMLFile(cityPath string) (string, error) {
 	p := filepath.Join(cityPath, "city.toml")
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. The snapshot reads the physical city.toml, so a missing or
+	// broken link must stay an error (TestCityConfigPathProbesStillRequireResolvableFile).
 	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
 		return "", fmt.Errorf("resolving %s: %w", p, err)

@@ -214,6 +214,10 @@ func resolveBdInvokingGCBinary() (string, error) {
 	if !filepath.IsAbs(executable) {
 		return "", fmt.Errorf("invoking gc executable %q is not absolute", executable)
 	}
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. GC_BIN pins the physical executable bd re-invokes, so an
+	// unresolvable path must be an error, never a lexical fallback
+	// (TestLoadBearingGCBinPinsStayStrict).
 	canonical, err := filepath.EvalSymlinks(executable)
 	if err != nil {
 		return "", fmt.Errorf("canonicalize invoking gc executable: %w", err)

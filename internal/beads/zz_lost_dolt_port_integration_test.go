@@ -18,6 +18,13 @@ import (
 // local end is port, the way a loopback connect() draws a source port. Nothing
 // listens on it, so dolt's own pre-bind check passes and its bind then fails
 // with "bind: address already in use". The socket is closed with the test.
+//
+// Only a kernel that refuses a listener an address a connected socket holds,
+// as Linux does, fails that bind. Darwin lets a listener with SO_REUSEADDR
+// (Go sets it on every listener, dolt's included) bind an address that only a
+// connected socket of the same user holds, so dolt keeps the port there and no
+// lost port is left to give up. The test is skipped wherever a listener can
+// still bind the held port.
 func holdPortWithClientSocket(t *testing.T, port int) {
 	t.Helper()
 	sink, err := net.Listen("tcp", "127.0.0.1:0")
@@ -30,6 +37,11 @@ func holdPortWithClientSocket(t *testing.T, port int) {
 		t.Fatalf("hold port %d with a client socket: %v", port, err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err == nil {
+		_ = listener.Close()
+		t.Skipf("a listener can still bind 127.0.0.1:%d beside the client socket that holds it (BSD SO_REUSEADDR semantics, as on darwin): dolt keeps the port there, so there is no lost port to give up", port)
+	}
 }
 
 // A probe-and-close port can be taken before dolt binds it, by a socket that is

@@ -391,7 +391,7 @@ func TestConvergeTestGateUsesRigStorePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading gate output: %v", err)
 	}
-	if got, want := string(data), filepath.Join(rigDir, ".beads"); got != want {
+	if got, want := string(data), canonicalTestPath(filepath.Join(rigDir, ".beads")); got != want {
 		t.Fatalf("BEADS_DIR = %q, want %q\nstdout:\n%s", got, want, stdout.String())
 	}
 }
