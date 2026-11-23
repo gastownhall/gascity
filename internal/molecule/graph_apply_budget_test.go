@@ -186,3 +186,35 @@ func TestIsTransientGraphApplyErrorRejectsBudgetExhaustedButNotItsText(t *testin
 		t.Errorf("isTransientGraphApplyError(plain text budget exhaustion) = false, want true (the substring classifier is untouched)")
 	}
 }
+
+// TestInstantiateStillRetriesAnUntypedStatementDeadlineWhileBothContextsLive
+// pins the other direction of the typed gate: an apply failing with an
+// untyped deadline error — a statement timing out while both the caller's
+// context and the store's budget are still live — keeps its single retry,
+// and a retry that lands instantiates the workflow atomically.
+func TestInstantiateStillRetriesAnUntypedStatementDeadlineWhileBothContextsLive(t *testing.T) {
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	store := &graphApplySpyStore{
+		MemStore: beads.NewMemStore(),
+		errs: []error{
+			fmt.Errorf("native graph apply: adding edge a->b: failed to check for dependency cycle: context deadline exceeded"),
+		},
+	}
+
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), twoStepBudgetRecipe(), Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if store.calls != 2 {
+		t.Errorf("ApplyGraphPlan calls = %d, want 2 (an untyped deadline still gets its single retry)", store.calls)
+	}
+	if result.Created != 2 {
+		t.Errorf("Created = %d, want 2", result.Created)
+	}
+	if result.RootID != "bd-1" {
+		t.Errorf("RootID = %q, want bd-1", result.RootID)
+	}
+}
