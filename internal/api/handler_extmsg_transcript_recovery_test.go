@@ -271,3 +271,42 @@ func TestExtMsgInboundTranscriptRecoveryRecoverableFault(t *testing.T) {
 		}
 	}
 }
+
+// TestExtMsgInboundTranscriptRecoveryPersistentFault posts a normalized
+// inbound whose head advance fails on every attempt: the request answers 5xx
+// with a contextual error and notifies nobody, and a later retry of the same
+// message publishes the entry the failed request stored, without a duplicate.
+func TestExtMsgInboundTranscriptRecoveryPersistentFault(t *testing.T) {
+	h := newTranscriptRecoveryHarness(t)
+	h.fault.set(func(f *transcriptRecoveryFaultStore) { f.failNextSequenceWrites = 1000 })
+
+	rec := h.postInbound(t, "m1", "hello persistent")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "appending transcript") {
+		t.Fatalf("error body = %s, want the transcript append's context", rec.Body.String())
+	}
+	if notified := h.notifications("hello persistent"); len(notified) != 0 {
+		t.Fatalf("failed inbound notified %v, want nobody", notified)
+	}
+	if n := h.inboundEvents(t); n != 0 {
+		t.Fatalf("ExtMsgInbound events = %d after a failed inbound, want 0", n)
+	}
+
+	h.fault.set(func(f *transcriptRecoveryFaultStore) { f.failNextSequenceWrites = 0 })
+	rec = h.postInbound(t, "m1", "hello persistent")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if n := h.storedEntries(t); n != 1 {
+		t.Fatalf("stored %d transcript entries after the retry, want 1 (no duplicate)", n)
+	}
+	if got := h.transcript(t); len(got) != 1 || got[0].ProviderMessageID != "m1" {
+		t.Fatalf("transcript after the retry = %#v, want the stored m1 entry published", got)
+	}
+	notified := h.notifications("hello persistent")
+	if notified[h.peerSessionName(t)] != 1 {
+		t.Fatalf("peer notifications after the retry = %v, want one for %q", notified, h.peerSessionName(t))
+	}
+}
