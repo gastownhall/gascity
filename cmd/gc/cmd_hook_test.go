@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +57,7 @@ name = "test-city"
 
 [[agent]]
 name = "worker"
-work_query = "printf '[]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[]`)) + `
 ` + builtinImportsTOML("core", "bd")
 	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
@@ -243,7 +245,7 @@ name = "test-city"
 
 [[agent]]
 name = "polecat"
-work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\"}]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[{"id":"ga-pool1","status":"open","title":"work item"}]`)) + `
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
@@ -1119,15 +1121,21 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 	}
 }
 
-// TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors is the
+// TestClaimHookWorkReportsFederatedStoreErrorAfterPrimaryLosesRace is the
 // post-merge regression for the primary-store error contract: once the agent's
 // own (primary) store loses its claim race and is dropped from the working set,
-// a later federated store that errors must stay a best-effort skip. The claim
-// must drain as "no work" rather than surface that federated store's error as a
-// fatal claim failure (the bug: bestStoreWithWork keyed "own store" on slice
-// position, so the federated store became index 0 after the primary was removed
-// and wedged the hook).
-func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *testing.T) {
+// a later federated store must not inherit the primary's semantics — its error
+// is not emitted as this session's work-query failure (the original bug:
+// bestStoreWithWork keyed "own store" on slice position, so the federated store
+// became index 0 after the primary was removed). It is recorded under that
+// store's own name instead (hookStoreFailureReport).
+//
+// It used to also pin that the claim then drained as "no work". That half is
+// gone: the only store left could not be read, so "no work" was never
+// established, and draining retired a seat on a read that did not happen. The
+// claim now exits 1 with no drain and names the store.
+func TestClaimHookWorkReportsFederatedStoreErrorAfterPrimaryLosesRace(t *testing.T) {
+	zeroClaimRetryPacing(t)
 	stores := []hookStore{
 		{dir: "city", env: []string{"GC_STORE=city"}}, // primary (own) store
 		{dir: "riga", env: []string{"GC_STORE=riga"}}, // best-effort federated store
@@ -1162,21 +1170,21 @@ func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *test
 		JSON:               true,
 	}
 
-	emitted := false
+	var emitted []error
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) { emitted = true }, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("claimHookWorkWithRunner = %d, want 0 (clean drain); stderr=%s", code, stderr.String())
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(_ string, err error) { emitted = append(emitted, err) }, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 1 (failed read, no drain); stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if emitted {
-		t.Fatal("a federated-store error after the primary lost its race must not emit a work-query failure")
+	var store *hookStoreReadError
+	if len(emitted) != 1 || !errors.As(emitted[0], &store) || store.dir != "riga" {
+		t.Fatalf("emitted %v; a federated-store error after the primary lost its race must be recorded once as that store's, not as this session's own work-query failure", emitted)
 	}
-	var result hookClaimJSONResult
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no drain result over an unread store", stdout.String())
 	}
-	if result.Action != "drain" || result.Reason != "no_work" {
-		t.Fatalf("claim result = %+v, want drain/no_work", result)
+	if !strings.Contains(stderr.String(), "riga") {
+		t.Fatalf("stderr = %q, want the unread federated store named", stderr.String())
 	}
 }
 
@@ -1308,8 +1316,9 @@ func TestHookCommandError(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
 	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
-	if code != 1 {
-		t.Errorf("doHook(error) = %d, want 1", code)
+	// A failed query is not the no-work exit 1.
+	if code != hookExitWorkQueryFailed {
+		t.Errorf("doHook(error) = %d, want %d", code, hookExitWorkQueryFailed)
 	}
 	if !strings.Contains(stderr.String(), "command failed") {
 		t.Errorf("stderr = %q, want to contain %q", stderr.String(), "command failed")
@@ -1326,8 +1335,10 @@ func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
-	if code != 1 {
-		t.Errorf("doHook(error with output) = %d, want 1", code)
+	// The partial stdout may read "[]"; the exit code is what keeps a timeout
+	// from reading as an empty queue.
+	if code != hookExitWorkQueryFailed {
+		t.Errorf("doHook(error with output) = %d, want %d", code, hookExitWorkQueryFailed)
 	}
 	if got := stdout.String(); got != "[]" {
 		t.Errorf("stdout = %q, want partial JSON output", got)
@@ -1343,9 +1354,13 @@ func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 func TestShellWorkQueryWithEnvTimeoutReportsPartialOutput(t *testing.T) {
 	oldTimeout := hookWorkQueryTimeout
 	hookWorkQueryTimeout = 200 * time.Millisecond
+	if goruntime.GOOS == "windows" {
+		// PowerShell takes longer than that to start, so it would print nothing.
+		hookWorkQueryTimeout = 10 * time.Second
+	}
 	t.Cleanup(func() { hookWorkQueryTimeout = oldTimeout })
 
-	out, err := shellWorkQueryWithEnv("printf '[]\\n'; sleep 1", "", nil)
+	out, err := shellWorkQueryWithEnv(platformCommand("printf '[]\\n'; sleep 1", "Write-Output '[]'; Start-Sleep -Seconds 60"), "", nil)
 	if err == nil {
 		t.Fatal("shellWorkQueryWithEnv() error = nil, want timeout")
 	}
@@ -1633,7 +1648,7 @@ name = "test-city"
 
 [[agent]]
 name = "worker"
-work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[{"id":"hw-1","title":"Fix the bug"}]`)) + `
 ` + builtinImportsTOML("core", "bd")
 	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
@@ -2087,7 +2102,7 @@ name = "test-city"
 [[agent]]
 name = "builder"
 max_active_sessions = 3
-work_query = "printf '[{\"id\":\"ga-frpt4k\",\"status\":\"in_progress\",\"assignee\":\"builder\",\"metadata\":{\"gc.routed_to\":\"builder\"}}]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[{"id":"ga-frpt4k","status":"in_progress","assignee":"builder","metadata":{"gc.routed_to":"builder"}}]`)) + `
 
 [[named_session]]
 template = "builder"
@@ -2097,17 +2112,15 @@ mode = "on_demand"
 		t.Fatal(err)
 	}
 
-	fakeBin := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "bd.log")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 printf '[]'
 `, logPath)
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	if recorded := installFakeBdOnPath(t, script, map[string]nativeFakeBdReply{"": {Stdout: "[]"}}); recorded != "" {
+		logPath = recorded
 	}
 
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY", cityDir)
 	// Suffixed pool worker: GC_TEMPLATE is the bare pool binding, GC_ALIAS and
 	// GC_SESSION_NAME are this instance's own suffixed runtime identity.
@@ -2165,7 +2178,7 @@ name = "test-city"
 [[agent]]
 name = "builder"
 max_active_sessions = 3
-work_query = "printf '[{\"id\":\"ga-frpt4k\",\"status\":\"in_progress\",\"assignee\":\"builder\",\"metadata\":{\"gc.routed_to\":\"builder\"}}]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[{"id":"ga-frpt4k","status":"in_progress","assignee":"builder","metadata":{"gc.routed_to":"builder"}}]`)) + `
 
 [[named_session]]
 template = "builder"
@@ -2175,12 +2188,8 @@ mode = "on_demand"
 		t.Fatal(err)
 	}
 
-	fakeBin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte("#!/bin/sh\nprintf '[]'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installFakeBdOnPath(t, "#!/bin/sh\nprintf '[]'\n", map[string]nativeFakeBdReply{"": {Stdout: "[]"}})
 
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY", cityDir)
 	// Named holder / canonical slot: GC_ALIAS IS the bare template.
 	t.Setenv("GC_TEMPLATE", "builder")
@@ -2672,7 +2681,6 @@ func TestCmdHookExpandsTemplateCommandsWithCityFallback(t *testing.T) {
 	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := filepath.Join(t.TempDir(), "demo-city")
 	rigDir := filepath.Join(cityDir, "frontend")
-	fakeBin := t.TempDir()
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2693,13 +2701,9 @@ work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
 		t.Fatal(err)
 	}
 
-	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'args=%s\\n' \"$*\"\n"
-	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installFakeBdOnPath(t, "#!/bin/sh\nprintf 'args=%s\\n' \"$*\"\n", map[string]nativeFakeBdReply{
+		"demo-city frontend worker": {Stdout: "args=demo-city frontend worker\n"},
+	})
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_DIR", rigDir)
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -103,8 +104,9 @@ recorded config hash is updated to the hash the freshly reloaded
 config produces for it, the matching hash breakdown is refreshed, and
 any already queued config-drift drain for that session is canceled. The
 immediately-following reconcile tick sees no drift and no config-drift
-drains fire. Useful when editing a running city's .gc/settings.json
-without disrupting in-flight work. Sessions whose template no longer
+drains fire. Useful when editing a running city's .claude/settings.json
+without disrupting in-flight work. The .gc/settings.json file is generated
+from the selected settings source. Sessions whose template no longer
 maps to a configured agent are NOT updated; normal orphan/suspended
 drain handles them on the next tick.`,
 		Args:              cobra.MaximumNArgs(1),
@@ -164,6 +166,9 @@ func cmdReload(args []string, async bool, soft bool, jsonOut bool, timeoutValue 
 
 	switch reply.Outcome {
 	case reloadOutcomeAccepted, reloadOutcomeApplied, reloadOutcomeNoChange:
+		// The stage-1 MCP warnings come last, on stderr, in --json mode too,
+		// as gc start's do.
+		defer warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
 		message := strings.TrimSpace(reply.Message)
 		if jsonOut {
 			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc reload", lifecycleActionJSON{

@@ -134,6 +134,44 @@ func ListRunningAttested(sp Provider) bool {
 	return ok && a.ListRunningComplete()
 }
 
+// SharedListing is an optional capability of a provider whose ListRunning
+// lists sessions beyond one city's: k8s lists every gc-agent pod in a
+// namespace that other cities may share. A name in such a listing does not
+// show that this city's session is running.
+type SharedListing interface {
+	ListRunningShared() bool
+}
+
+// ListRunningShared reports whether sp's listing, or any backend's of a
+// composite ([BackendsProvider], at any depth), is shared across cities.
+func ListRunningShared(sp Provider) bool {
+	if s, ok := sp.(SharedListing); ok && s.ListRunningShared() {
+		return true
+	}
+	if c, ok := sp.(BackendsProvider); ok {
+		for _, b := range c.Backends() {
+			if ListRunningShared(b.Provider) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ListRunningWithAttestation lists sp under prefix and reports whether that
+// listing may be read as proof of absence. Attestation is read before the
+// listing and after it, and only both count: a provider's attestation can
+// turn on while it lists (an exec pack whose failed handshake recovers
+// during the call), and the listing it returned is then the unattested one.
+// Attestation never turns off, so the read before is the one that can be
+// stale in the safe direction only. Every caller that reads absence from a
+// listing reads attestation through this, never after its own listing.
+func ListRunningWithAttestation(sp Provider, prefix string) (names []string, attested bool, err error) {
+	before := ListRunningAttested(sp)
+	names, err = sp.ListRunning(prefix)
+	return names, before && ListRunningAttested(sp), err
+}
+
 // BackendListingProvider is an optional capability of composite providers
 // that exposes each backend's ListRunning result separately, so callers can
 // judge each backend's listing on its own (its error, its [PartialListError]

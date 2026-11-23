@@ -31,11 +31,11 @@ func TestSweep(t *testing.T) {
 	now := e.clk.Now().Add(time.Second)
 
 	stats, err := Sweep(e.st, now, 2, "controller:op-sweep")
-	if err != nil || stats.Closed != 2 || stats.Truncated {
-		t.Fatalf("bounded pass = %+v, %v; want 2 closed", stats, err)
+	if err != nil || stats.Closed != 2 || !stats.Full || stats.Truncated {
+		t.Fatalf("bounded pass = %+v, %v; want 2 closed, full", stats, err)
 	}
 	stats, err = Sweep(e.st, now, 100, "controller:op-sweep")
-	if err != nil || stats.Closed != 3 || stats.Pending != 1 || stats.Truncated || len(stats.Undecodable) != 1 || stats.Undecodable[0] != "gc-op-bogus" {
+	if err != nil || stats.Closed != 3 || stats.Pending != 1 || stats.Full || stats.Truncated || len(stats.Undecodable) != 1 || stats.Undecodable[0] != "gc-op-bogus" {
 		t.Fatalf("full pass = %+v, %v", stats, err)
 	}
 	for _, op := range expired {
@@ -90,6 +90,36 @@ func TestSweepReportsATruncatedRead(t *testing.T) {
 	}
 }
 
+// limit counts expired ops, not ops read: older ops an adopter gave a later
+// finish_by do not starve the expired op behind them, and count Pending.
+func TestSweepPagesPastPendingOps(t *testing.T) {
+	e := newEnv(t)
+	var adopted []opjournal.Op
+	for i := range 3 {
+		adopted = append(adopted, e.seed(t, msg(fmt.Sprint("adopted-", i), "x"), ExecutorAPI))
+	}
+	expired := e.seed(t, msg("expired", "x"), ExecutorCLI)
+	e.clk.Advance(ExecutionBound)
+	for _, op := range adopted {
+		if _, err := e.st.Adopt(op.ID, op.Attempt, string(ExecutorAPI), e.clk.Now().Add(ExecutionBound)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, err := Sweep(e.st, expired.FinishBy.Add(time.Second), 2, "controller:op-sweep")
+	if err != nil || stats.Listed != 4 || stats.Closed != 1 || stats.Pending != 3 || stats.Full || stats.Truncated {
+		t.Fatalf("pass = %+v, %v; want the expired op closed past 3 pending", stats, err)
+	}
+	if got, _ := e.st.Get(expired.ID); got.Status != opjournal.StatusClosed {
+		t.Fatalf("expired op %s behind the adopted ops", got.Status)
+	}
+	for _, op := range adopted {
+		if got, _ := e.st.Get(op.ID); got.Status != opjournal.StatusSubmitted {
+			t.Fatalf("adopted op %s swept: %s", op.ID, got.Status)
+		}
+	}
+}
+
 // A sweep racing an executor's close loses cleanly to it.
 func TestSweepLosesToAnExecutor(t *testing.T) {
 	e := newEnv(t)
@@ -132,18 +162,22 @@ func newHookEnv(t *testing.T) (*hookStore, *opjournal.Store, *clock.Fake) {
 	return hs, st, clk
 }
 
-// An API retry that adopts an expired op after the sweeper listed it keeps
+// An API retry that adopts an op after the sweeper listed it as expired keeps
 // its op: the sweeper re-decides on the row it writes, and the adopted
-// execution's Finish closes the op with its own outcome (I7).
+// execution's Finish closes the op with its own outcome (I7). The API adopts
+// only an op not past its finish_by, so the race needs the API's clock behind
+// the sweeper's.
 func TestSweepSparesAnOpAdoptedMidPass(t *testing.T) {
 	hs, st, clk := newHookEnv(t)
 	open := func() (*opjournal.Store, error) { return st, nil }
-	api := &Recorder{Mode: gate.Auto, Executor: ExecutorAPI, Open: open, Inflight: NewInflight(), Clock: clk, sleep: func(time.Duration) {}}
+	apiClk := &clock.Fake{Time: t0}
+	api := &Recorder{Mode: gate.Auto, Executor: ExecutorAPI, Open: open, Inflight: NewInflight(), Clock: apiClk, sleep: func(time.Duration) {}}
 	first, err := api.Admit(msg("k1", "hello"))
 	if err != nil || first.Decision != Execute {
 		t.Fatalf("first = %+v, %v", first, err)
 	}
 	api.Inflight = NewInflight() // the API restarted: nothing in flight
+	apiClk.Advance(ExecutionBound - time.Minute)
 	clk.Advance(ExecutionBound + time.Minute)
 
 	var adopted *Admission
@@ -167,11 +201,13 @@ func TestSweepSparesAnOpAdoptedMidPass(t *testing.T) {
 }
 
 // The CLI's expiry rule loses the same race: an op the API adopts between
-// the CLI's read and its close stays open, and the CLI answers busy.
+// the CLI's read and its close, its clock behind the CLI's, stays open, and
+// the CLI answers busy.
 func TestAdmitCLIExpirySparesAnOpAdoptedMidAdmit(t *testing.T) {
 	hs, st, clk := newHookEnv(t)
 	open := func() (*opjournal.Store, error) { return st, nil }
-	api := &Recorder{Mode: gate.Auto, Executor: ExecutorAPI, Open: open, Inflight: NewInflight(), Clock: clk, sleep: func(time.Duration) {}}
+	apiClk := &clock.Fake{Time: t0}
+	api := &Recorder{Mode: gate.Auto, Executor: ExecutorAPI, Open: open, Inflight: NewInflight(), Clock: apiClk, sleep: func(time.Duration) {}}
 	cli := &Recorder{Mode: gate.Auto, Executor: ExecutorCLI, Open: open, Clock: clk, sleep: func(time.Duration) {}}
 	req := msg("k1", "hello")
 	req.Principal = PrincipalOperator
@@ -180,6 +216,7 @@ func TestAdmitCLIExpirySparesAnOpAdoptedMidAdmit(t *testing.T) {
 		t.Fatal(err)
 	}
 	api.Inflight = NewInflight()
+	apiClk.Advance(ExecutionBound - time.Minute)
 	clk.Advance(ExecutionBound + time.Minute)
 	hs.beforeUpdate = func() {
 		if adm, err := api.Admit(req); err != nil || !adm.Adopted {

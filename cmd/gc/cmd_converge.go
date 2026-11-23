@@ -286,7 +286,7 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 				Title     string `json:"title"`
 			}
 			var entries []convEntry
-			appendEntries := func(scopeRig string, store beads.Store) error {
+			appendEntries := func(scopeRig string, store convergeScopeReader) error {
 				query := beads.ListQuery{Type: "convergence"}
 				if all {
 					query.IncludeClosed = true
@@ -335,13 +335,12 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 				// openConvergeStore, so it needs the same graph-class routing;
 				// otherwise `gc converge list --all-rigs` is the one surface that
 				// still reads the city's retained work-store copies.
-				store, err := openStoreAtForCity(rctx.CityPath, rctx.CityPath)
+				cityStore, err := openStoreAtForCity(rctx.CityPath, rctx.CityPath)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
 					return errExit
 				}
-				store = scopeGraphStore(rctx.CityPath, rctx.CityPath, nil, store)
-				if err := appendEntries("", store); err != nil {
+				if err := appendEntries("", convergeScopeStore(rctx.CityPath, "", rctx.CityPath, cityStore)); err != nil {
 					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
 					return errExit
 				}
@@ -361,17 +360,18 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 				}
 				sort.Strings(rigs)
 				for _, rig := range rigs {
-					// Rig scopes stay on their rig work store, matching
-					// buildConvergenceScopes and controlScopeTakesGraphClass:
-					// class routing is city-keyed, so routing rig scopes to the
-					// one graph binding would merge every rig's loops into it.
-					store, err := openStoreAtForCity(rigPathByName[rig], rctx.CityPath)
+					// Each rig reads its scope through the same rule the
+					// controller writes it by (buildConvergenceScopes): on a split
+					// city the binding filtered to rig:<name>, plus the rig's own
+					// store while it may hold pre-S4 loops; otherwise the rig
+					// store alone.
+					rigStore, err := openStoreAtForCity(rigPathByName[rig], rctx.CityPath)
 					if err != nil {
 						fmt.Fprintf(stderr, "gc converge list: rig %q: %v\n", rig, err) //nolint:errcheck
 						hadScopeError = true
 						continue
 					}
-					if err := appendEntries(rig, store); err != nil {
+					if err := appendEntries(rig, convergeScopeStore(rctx.CityPath, rig, rigPathByName[rig], rigStore)); err != nil {
 						fmt.Fprintf(stderr, "gc converge list: rig %q: %v\n", rig, err) //nolint:errcheck
 						hadScopeError = true
 						continue
@@ -655,7 +655,7 @@ func newConvergeTestTriggerCmd(stdout, stderr io.Writer) *cobra.Command {
 // uses it to compute the next iteration the trigger gates. The store error is
 // propagated rather than swallowed so the dry-run fails loudly instead of
 // silently reporting iteration 1, matching the live HandleTrigger path.
-func convergeClosedIterations(store beads.Store, beadID string) (int, error) {
+func convergeClosedIterations(store convergeScopeReader, beadID string) (int, error) {
 	children, err := store.Children(beadID, beads.IncludeClosed)
 	if err != nil {
 		return 0, fmt.Errorf("listing children of %s: %w", beadID, err)
@@ -827,7 +827,7 @@ type convergeTestGateJSONResult struct {
 // empty, at exit 0, about a loop that is running. storePath is returned
 // unrouted on purpose; it is the scope root, and every caller that passes it
 // to a gate command wants the directory, not the database.
-func openConvergeStore(stderr io.Writer, cmdName string) (beads.Store, resolvedContext, string, int) {
+func openConvergeStore(stderr io.Writer, cmdName string) (convergeScopeReader, resolvedContext, string, int) {
 	rctx, err := resolveContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck
@@ -848,25 +848,75 @@ func openConvergeStore(stderr io.Writer, cmdName string) (beads.Store, resolvedC
 	return convergeScopeStore(rctx.CityPath, rctx.RigName, storePath, store), rctx, storePath, 0
 }
 
-// convergeScopeStore returns the store a converge scope reads and writes.
+// convergeScopeReader is what the converge CLI reads one convergence scope
+// through: by-id reads and the scope's lists.
+type convergeScopeReader interface {
+	Get(id string) (beads.Bead, error)
+	List(query beads.ListQuery) ([]beads.Bead, error)
+	Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error)
+}
+
+// convergeScopeStore returns the reader for one converge scope, following the
+// same S4 placement rule the controller writes by (buildConvergenceScopes), so
+// the CLI and the controller cannot disagree about where a scope's loops are.
 //
-// Convergence roots are ClassGraph, so a city scope goes through the city's
-// graph binding while a rig scope keeps its own work ledger. The routing itself
-// is scopeGraphStore's, shared with control dispatch, so the two coordination
-// surfaces cannot drift apart.
+// On a city that relocates nothing a rig scope reads its own store and the
+// city scope reads the store graphPlacementForScope names — the store it was
+// handed — exactly as before S4.
 //
-// The rig short-circuit is not redundant with scopeGraphStore's own city test.
-// That test is by PATH, and nothing forbids registering a rig at the city root,
-// where its path IS the city path. The controller's convergence scope map keys
-// on rig NAME (buildConvergenceScopes), so such a rig's roots are written to its
-// own store; routing this leg by path would send the CLI to a binding the
-// controller never writes for that rig — the read/write asymmetry this whole
-// change exists to remove.
-func convergeScopeStore(cityPath, rigName, storePath string, store beads.Store) beads.Store {
+// On a split city every scope reads the graph binding, filtered to its own
+// gc.root_store_ref, and a rig that may still hold pre-S4 loops in its own
+// store reads that store too, behind the binding: lists union it and by-id
+// reads fall back to it. Once the rig is imported or proven empty, its store
+// is not read.
+//
+// The rig is selected by NAME, not path: nothing forbids registering a rig at
+// the city root, where its path IS the city path, and the controller's scope
+// map keys on the rig name.
+func convergeScopeStore(cityPath, rigName, storePath string, store beads.Store) convergeScopeReader {
+	routes := cliStorageRoutes(cityPath)
+	scope := cityGraphScope()
 	if rigName != "" {
-		return store
+		scope = rigGraphScope(rigName)
 	}
-	return scopeGraphStore(cityPath, storePath, nil, store)
+	if _, relocated := graphClassBinding(routes); !relocated { // residency:allow — S4 placement rule: asks only whether the graph class is relocated (and refused); resolves no bead
+		if scope.isRig() {
+			return store
+		}
+		return graphPlacementForScope(routes, nil, cityPath, scope, store)
+	}
+	adapter := newConvergenceStoreAdapter(graphPlacementForScope(routes, nil, cityPath, scope, store), nil, true)
+	adapter.scopeRef = scope.rootStoreRef("")
+	// storePath is the scope's root directory. A rig registered at the city
+	// root has the city's store, whose rows are the city's retained copies,
+	// so it gets no relic leg (as buildConvergenceScopes).
+	if graphRelicLegForScope(routes, scope) && !scopeIsCity(cityPath, storePath) {
+		adapter.relic = store
+	}
+	return convergeAdapterReader{adapter: adapter}
+}
+
+// convergeAdapterReader reads a scope through the controller's own adapter
+// logic: scope filter on lists, relic leg behind the binding.
+type convergeAdapterReader struct {
+	adapter *convergenceStoreAdapter
+}
+
+func (r convergeAdapterReader) Get(id string) (beads.Bead, error) {
+	b, _, err := r.adapter.get(id)
+	return b, err
+}
+
+func (r convergeAdapterReader) List(query beads.ListQuery) ([]beads.Bead, error) {
+	return r.adapter.list(query)
+}
+
+func (r convergeAdapterReader) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	store, err := r.adapter.storeHolding(parentID)
+	if err != nil {
+		return nil, err
+	}
+	return store.Children(parentID, opts...)
 }
 
 func convergeStorePathForContext(rctx resolvedContext) (string, error) {

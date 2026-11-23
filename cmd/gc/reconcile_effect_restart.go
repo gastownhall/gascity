@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -190,8 +191,8 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 	switch {
 	case err != nil:
 		out.Err = err
-	case prepared.coreHash != runtime.CoreFingerprint(p.hash) || prepared.provisionHash != p.row.StartedProvisionHash ||
-		prepared.launchHash == p.row.StartedLaunchHash: // the core partitions into provision and launch: a matching core is the hash form's launch too
+	case prepared.coreHash != runtime.CoreFingerprint(p.hash) || !prepared.provisionMatches(p.row.StartedProvisionHash) ||
+		prepared.launchMatches(p.row.StartedLaunchHash): // the core partitions into provision and launch: a matching core is the hash form's launch too
 		out.Err = errors.New(causeRelaunchSkew)
 	case strings.TrimSpace(p.row.SessionKey) == "" && p.tp.ResolvedProvider != nil && strings.TrimSpace(p.tp.ResolvedProvider.SessionIDFlag) != "":
 		out.Err = errors.New("relaunch would mint a speculative resume key") // legacy's preparation mints one here, then falls back
@@ -200,6 +201,14 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 			return out, nil
 		}
 		out.Err = r.Relaunch(ctx, p.name, prepared.cfg)
+		// A startup nudge the runtime handed back (one held behind a dialog
+		// under program_status = "on", row A20, or an un-welded exec launch's
+		// first turn) is queued, never typed or failed.
+		// A warm relaunch keeps the box's token, never the config's, so the
+		// turn binds to the live token alone (else it is queued untagged).
+		if err := queueStartupNudgeHandback(p.w.CityPath, launchCityConfig(p.w), p.leaf, p.row, p.name, "", out.Err == nil, p.now); err != nil {
+			log.Printf("v2 relaunch %s: %v", p.row.ID, err)
+		}
 	}
 	out.OK = out.Err == nil
 	return out, nil
@@ -283,7 +292,7 @@ func driftRestartPatch(tp TemplateParams, row session.Info, now time.Time) sessi
 	if preserve {
 		patch["started_config_hash"] = hash
 	}
-	for _, k := range []string{namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, sessionAttachedConfigDriftDeferredAtMetadata, sessionAttachedConfigDriftDeferredKeyMetadata} {
+	for _, k := range []string{namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, sessionAttachedConfigDriftDeferredAtMetadata, sessionAttachedConfigDriftDeferredKeyMetadata, configDriftEscalatedAtMetadata} {
 		patch[k] = ""
 	}
 	return patch

@@ -21,14 +21,17 @@ import (
 // It runs after session beads have been synced for the tick so a respawned
 // session's replacement bead is already visible. Errors are logged and
 // swallowed so a binding-store hiccup never stalls the reconciler loop.
-func reapStaleExtmsgBindings(ctx context.Context, store beads.SessionStore, now time.Time, stderr io.Writer) {
-	if store.Store == nil {
+//
+// The bindings are read and written in messaging, the city's messaging-class
+// store; session identity and liveness are read from sessions.
+func reapStaleExtmsgBindings(ctx context.Context, messaging beads.MailStore, sessions beads.SessionStore, now time.Time, stderr io.Writer) {
+	if messaging == (beads.MailStore{}) || sessions == (beads.SessionStore{}) {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	stats, err := extmsg.ReapStaleBindings(ctx, store.Store, now)
+	stats, err := extmsg.ReapStaleBindings(ctx, messaging, sessions, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reaping stale extmsg bindings: %v\n", err) //nolint:errcheck
 		return
@@ -47,15 +50,17 @@ func reapStaleExtmsgBindings(ctx context.Context, store beads.SessionStore, now 
 // reached by no other backstop, so without this sweep its membership would stay
 // stranded on the retired session bead. It runs on the same tick and after
 // session beads have been synced. Errors are logged and swallowed so a
-// participant-store hiccup never stalls the reconciler loop.
-func reapStaleExtmsgParticipants(ctx context.Context, store beads.SessionStore, stderr io.Writer) {
-	if store.Store == nil {
+// participant-store hiccup never stalls the reconciler loop. Like
+// reapStaleExtmsgBindings it reads participants from messaging and session
+// identity from sessions.
+func reapStaleExtmsgParticipants(ctx context.Context, messaging beads.MailStore, sessions beads.SessionStore, stderr io.Writer) {
+	if messaging == (beads.MailStore{}) || sessions == (beads.SessionStore{}) {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	stats, err := extmsg.ReapStaleParticipants(ctx, store.Store)
+	stats, err := extmsg.ReapStaleParticipants(ctx, messaging, sessions)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reaping stale extmsg participants: %v\n", err) //nolint:errcheck
 		return
@@ -64,4 +69,16 @@ func reapStaleExtmsgParticipants(ctx context.Context, store beads.SessionStore, 
 		fmt.Fprintf(stderr, "session reconciler: extmsg participants reaped (reassigned=%d scanned=%d)\n", //nolint:errcheck
 			stats.Reassigned, stats.Scanned)
 	}
+}
+
+// extmsgStoreOverSessions is the sessions store as the messaging store, for
+// the session-retirement paths that still read and write extmsg's
+// (messaging-class) bindings and participants through the sessions store they
+// hold: one store on a single-store city, and one binding on the split city
+// the routes serve, which relocates every class together. Two classes on two
+// stores part them, as they did the controller's reapers before those took
+// the city's messaging handle, so each use is a typed-store follow-up
+// (mc-b4jn5.3) to route through that handle instead.
+func extmsgStoreOverSessions(sessions beads.SessionStore) beads.MailStore {
+	return beads.MailStore{Store: sessions}
 }

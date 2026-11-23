@@ -29,8 +29,15 @@ import (
 //   - nudgePollCityStopped lets a poller that still survives notice that its
 //     city is down and exit before its next store read.
 //
-// Neither touches the nudge queue: queued nudges stay queued and deliver once
-// a poller runs again after the next start.
+// A suspended city is quiescent too (beads_quiescence.go), but its controller
+// keeps running, so nudgePollCityStopped never fires for it.
+// nudgePollCitySuspendedDrained covers it: once the suspension has stopped the
+// poller's session, the poller exits before its next store read, which would
+// restart the pair the controller retired, for as long as a queued nudge kept
+// the poller waiting out its missing-session grace (ga-5uties7y).
+//
+// None of them touches the nudge queue: queued nudges stay queued and deliver
+// once a poller runs again after the next start or resume.
 
 const (
 	// nudgePollerStopGrace bounds how long stopCityNudgePoller waits for a
@@ -57,6 +64,22 @@ var nudgePollControllerAlive = controllerAlive
 // wake in progress, which the missing-session grace in the poll loop covers.
 func nudgePollCityStopped(target nudgeTarget, sp runtime.Provider) bool {
 	if nudgePollControllerAlive(target.cityPath) != 0 {
+		return false
+	}
+	return !sp.IsRunning(target.sessionName)
+}
+
+// nudgePollCitySuspendedDrained reports whether the poller's city is
+// suspended and the target session's runtime is not running. It reads the
+// suspension state file and the city config the poller loaded, never the bead
+// store or the nudge queue, and probes the runtime only for a suspended city.
+//
+// Both conditions are required. A session still running in a suspended city
+// is one the suspension has not drained yet; its poller keeps delivering. A
+// suspended city wakes no session, so once the session is gone nothing will
+// claim the poller's queued nudges before the resume.
+func nudgePollCitySuspendedDrained(target nudgeTarget, sp runtime.Provider) bool {
+	if !effectiveCitySuspended(target.cfg, loadSuspensionStateBestEffort(target.cityPath)) {
 		return false
 	}
 	return !sp.IsRunning(target.sessionName)
@@ -91,6 +114,47 @@ func stopCityNudgePollers(cityPath string) error {
 	return errors.Join(errs...)
 }
 
+// liveCityNudgePollers counts cityPath's live nudge pollers: the PID files
+// under the city's pollers directory whose PID is live with this city's
+// poller command line for that file, as stopCityNudgePollers finds them. It
+// signals nothing and takes no lock. A missing pollers directory counts
+// none.
+func liveCityNudgePollers(cityPath string) (int, error) {
+	pollersDir := citylayout.RuntimePath(cityPath, "nudges", "pollers")
+	entries, err := os.ReadDir(pollersDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading nudge pollers dir: %w", err)
+	}
+	live := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pid") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(pollersDir, entry.Name()))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return live, fmt.Errorf("read nudge poller pid %q: %w", entry.Name(), err)
+		}
+		var pid int
+		if n, parseErr := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); parseErr != nil || n != 1 || pid <= 0 {
+			continue
+		}
+		alive, err := pidutil.AliveWithCmdline(pid, nudgepoller.FileStemMatcher(cityPath, strings.TrimSuffix(entry.Name(), ".pid")))
+		if err != nil {
+			return live, fmt.Errorf("checking nudge poller pid %d (%s): %w", pid, entry.Name(), err)
+		}
+		if alive {
+			live++
+		}
+	}
+	return live, nil
+}
+
 // stopCityNudgePoller terminates the poller pidPath names, if it is live and
 // is cityPath's poller for that file. It holds the per-file lock the spawn
 // and lease paths take, so no replacement poller starts for the same key
@@ -111,7 +175,8 @@ func stopCityNudgePoller(cityPath, pidPath string) error {
 			return nil
 		}
 		isPoller := nudgepoller.FileStemMatcher(cityPath, strings.TrimSuffix(filepath.Base(pidPath), ".pid"))
-		if !pidutil.AliveWithCmdline(pid, isPoller) {
+		// An unreadable identity is not proof this is the poller: leave it.
+		if alive, _ := pidutil.AliveWithCmdline(pid, isPoller); !alive {
 			return nil
 		}
 		if err := signalNudgePollerAndWait(pid, isPoller); err != nil {
@@ -127,21 +192,24 @@ func stopCityNudgePoller(cityPath, pidPath string) error {
 // signalNudgePollerAndWait sends SIGTERM, escalating to SIGKILL after
 // nudgePollerStopGrace. Identity is re-checked right before the SIGKILL: if
 // the poller exited and its PID was reused during the grace period, the
-// forced kill would land on an unrelated process.
+// forced kill would land on an unrelated process. Where SIGTERM cannot be
+// delivered (Windows), it goes straight to the identity check and SIGKILL.
 func signalNudgePollerAndWait(pid int, isPoller func([]string) bool) error {
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
+	err := platformKill(pid, syscall.SIGTERM)
+	switch {
+	case err == nil:
+		if waitForNudgePollerExit(pid) {
 			return nil
 		}
+	case errors.Is(err, syscall.ESRCH):
+		return nil
+	case !errors.Is(err, errSignalUnsupported):
 		return fmt.Errorf("SIGTERM: %w", err)
 	}
-	if waitForNudgePollerExit(pid) {
+	if alive, _ := pidutil.AliveWithCmdline(pid, isPoller); !alive {
 		return nil
 	}
-	if !pidutil.AliveWithCmdline(pid, isPoller) {
-		return nil
-	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+	if err := platformKill(pid, syscall.SIGKILL); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}

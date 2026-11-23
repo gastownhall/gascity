@@ -70,6 +70,37 @@ func TestSessionProviderContextForCityUsesTargetCityAndEnvOverride(t *testing.T)
 	}
 }
 
+func TestSessionProviderContextForCityUsesOnlyThePassedOverride(t *testing.T) {
+	t.Setenv("GC_SESSION", "subprocess")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "bright-lights"},
+		Session:   config.SessionConfig{Provider: "tmux"},
+	}
+	ctx := sessionProviderContextForCity(cfg, "/tmp/city-a", "")
+	if ctx.providerName != "tmux" {
+		t.Fatalf("providerName = %q, want configured provider without rereading ambient GC_SESSION", ctx.providerName)
+	}
+
+	cfg.Session.Provider = ""
+	ctx = sessionProviderContextForCity(cfg, "/tmp/city-a", "")
+	if ctx.providerName != sessionProviderRuntimeDefault {
+		t.Fatalf("providerName = %q, want platform default %q", ctx.providerName, sessionProviderRuntimeDefault)
+	}
+}
+
+func TestEffectiveProviderNamePreservesWhitespaceSelections(t *testing.T) {
+	t.Setenv("GC_SESSION", " subprocess ")
+	if got := effectiveProviderName("tmux"); got != " subprocess " {
+		t.Fatalf("effectiveProviderName with ambient override = %q, want whitespace preserved", got)
+	}
+
+	t.Setenv("GC_SESSION", "")
+	if got := effectiveProviderName(" tmux "); got != " tmux " {
+		t.Fatalf("effectiveProviderName with configured provider = %q, want whitespace preserved", got)
+	}
+}
+
 func TestRawBeadsProviderNormalizesManagedExecEnv(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityPath))

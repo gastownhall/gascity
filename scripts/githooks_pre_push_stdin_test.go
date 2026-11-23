@@ -68,6 +68,8 @@ printf '%s\n' "$*" >> "$MAKE_RECORD"
 		}
 		writeExecutable(t, filepath.Join(repo, rel), string(body))
 	}
+	// Hooks must be independent of the test host's installed ICU version.
+	installLocalRuntimeProbe(t, root, repo, "ok", "")
 	// The ownership guard talks to a live bead store; stub it so this test
 	// isolates the hook's stdin composition.
 	writeExecutable(t, filepath.Join(repo, "scripts", "push-ownership-guard.sh"), `#!/usr/bin/env bash

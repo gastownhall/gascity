@@ -167,7 +167,8 @@ const (
 	// projection that reads explicitly false, which is bd's own answer, computed
 	// through the ready-projection enrichment's `bd sql`/`bd blocked` door.
 	demandRowClaimable demandRowClaimability = "claimable"
-	// demandRowDeferred: defer_until, or bd's indefinite deferral, gates the row
+	// demandRowDeferred: a future defer_until, or bd's deferred status (dated or
+	// not, until the store wakes the row), gates the row
 	// (beads.IsDeferred). Both are FRESH bead-local fields — never stale — so this
 	// is proof that no worker could have claimed the row.
 	demandRowDeferred demandRowClaimability = "deferred"
@@ -178,6 +179,14 @@ const (
 	// held assigned work drained correctly; reporting it as a strand is what
 	// accompanied the hold-label wake/drain loop.
 	demandRowHeld demandRowClaimability = "held"
+	// demandRowStatusBlocked: bd itself parked the row with status "blocked". A bd
+	// read folds that status to "open" and keeps the raw value in
+	// Bead.SourceStatus, which is how the row is told apart. The status is a
+	// fresh bead-local column, and the seat's ready query excludes a blocked
+	// status whatever the row's dependencies say, so this is PROOF of
+	// non-claimability like a deferral or a hold, never settled against
+	// dependencies.
+	demandRowStatusBlocked demandRowClaimability = "status_blocked"
 	// demandRowBlockednessUnproven: the bead alone cannot settle whether the row is
 	// blocked, so each consumer re-derives it from live dependencies
 	// (beadHasUnmetPlainBlocksDep). Two readings land here, and neither is proof:
@@ -218,14 +227,23 @@ const (
 // single-bead predicate holds no deps, so it names what it does not know and
 // leaves the derivation to the consumer that can make it.
 //
-// Both callers pass a row already constrained to status=="open", so a raw
-// "blocked" status string never reaches here.
+// Both callers pass a row already constrained to status=="open" — the status
+// bd's read FOLDS every non-closed, non-in_progress status into — so bd's own
+// "blocked" status never arrives as b.Status. It survives only in
+// b.SourceStatus, which is what the status-blocked check reads. An empty
+// SourceStatus means the store reported no raw status (memstore, sqlite, exec,
+// or a row patched after a status change) and is not read as blocked.
 func classifyDemandRowClaimability(b beads.Bead, now time.Time) demandRowClaimability {
 	if beads.IsDeferred(b, now) {
 		return demandRowDeferred
 	}
 	if beadmeta.HasDispatchHold(b.Labels) {
 		return demandRowHeld
+	}
+	// Ahead of the is_blocked clause: the status is bead-local and fresh, so an
+	// explicit is_blocked=false (or an absent projection) cannot mask it.
+	if b.SourceStatus == "blocked" {
+		return demandRowStatusBlocked
 	}
 	if b.IsBlocked == nil || *b.IsBlocked {
 		return demandRowBlockednessUnproven

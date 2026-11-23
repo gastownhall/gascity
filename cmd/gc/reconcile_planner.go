@@ -154,6 +154,9 @@ type planner struct {
 	// not yet synced (A7's runtime-alias sync): set by the write's fact,
 	// cleared when the sync settles.
 	aliasOwed map[rowKey]bool
+	// claimsSeen is when the planner first saw each open work assignment
+	// (claimsSeenAt), for the scale_check pairing guard.
+	claimsSeen map[workClaim]time.Time
 	// idle is A15's memory (idleState), lost on restart as legacy's
 	// trackers are.
 	idle idleMemory
