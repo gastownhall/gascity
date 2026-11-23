@@ -112,9 +112,9 @@ func countBeads(t *testing.T, s *SQLiteStore) int {
 	return len(all)
 }
 
-// within runs fn and fails the test, instead of hanging it, when fn does not
+// returnsWithinPersistDeadline runs fn and fails the test, instead of hanging it, when fn does not
 // return inside sequenceFloorPersistDeadline.
-func within(t *testing.T, what string, fn func() error) error {
+func returnsWithinPersistDeadline(t *testing.T, what string, fn func() error) error {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() { done <- fn() }()
@@ -189,7 +189,7 @@ func TestSQLiteCreateTopUpWaitsOutsideTheTransaction(t *testing.T) {
 	// Create is parked mid-wait. An Update needs the writer connection and
 	// SQLite's write lock: it completes only if Create holds neither.
 	description := "updated while the create waits"
-	if err := within(t, "Update during the create's lock wait", func() error {
+	if err := returnsWithinPersistDeadline(t, "Update during the create's lock wait", func() error {
 		return store.Update(seed, UpdateOpts{Description: &description})
 	}); err != nil {
 		t.Fatalf("Update during the wait: %v", err)
@@ -218,7 +218,7 @@ func TestSQLiteCreateWithHeadroomTakesNoFlock(t *testing.T) {
 		setBlockHeadroom(t, store, remaining)
 		probe := installFlockProbe(t, false)
 		holdForeignSequenceLock(t, dir)
-		if err := within(t, "Create with headroom", func() error {
+		if err := returnsWithinPersistDeadline(t, "Create with headroom", func() error {
 			_, err := store.Create(Bead{Title: "has headroom"})
 			return err
 		}); err != nil {
@@ -279,7 +279,7 @@ func TestSQLiteTxMintAtBlockBoundaryMakesOneAttempt(t *testing.T) {
 	probe := installFlockProbe(t, false)
 	holdForeignSequenceLock(t, dir)
 
-	err := within(t, "Tx with an in-transaction mint at the block boundary", func() error {
+	err := returnsWithinPersistDeadline(t, "Tx with an in-transaction mint at the block boundary", func() error {
 		return store.Tx("", func(tx Tx) error {
 			_, err := tx.Create(Bead{Title: "in tx"})
 			return err
@@ -312,12 +312,12 @@ func TestSQLiteSequenceFloorWritersGiveUpOnAHeldLock(t *testing.T) {
 	release := holdForeignSequenceLock(t, dir)
 	sidecar := readSidecar(t, store)
 
-	err := within(t, "RaiseSQLiteSequenceFloor under a held lock", func() error {
+	err := returnsWithinPersistDeadline(t, "RaiseSQLiteSequenceFloor under a held lock", func() error {
 		_, err := RaiseSQLiteSequenceFloor(dir, sqliteGraphPrefix, 5000)
 		return err
 	})
 	requireStoreTimeout(t, err)
-	err = within(t, "SetSequenceFloor under a held lock", func() error {
+	err = returnsWithinPersistDeadline(t, "SetSequenceFloor under a held lock", func() error {
 		return store.SetSequenceFloor(6000)
 	})
 	requireStoreTimeout(t, err)
@@ -326,13 +326,13 @@ func TestSQLiteSequenceFloorWritersGiveUpOnAHeldLock(t *testing.T) {
 	}
 
 	release()
-	if err := within(t, "RaiseSQLiteSequenceFloor with a free lock", func() error {
+	if err := returnsWithinPersistDeadline(t, "RaiseSQLiteSequenceFloor with a free lock", func() error {
 		_, err := RaiseSQLiteSequenceFloor(dir, sqliteGraphPrefix, 5000)
 		return err
 	}); err != nil {
 		t.Fatalf("RaiseSQLiteSequenceFloor with a free lock: %v", err)
 	}
-	if err := within(t, "SetSequenceFloor with a free lock", func() error {
+	if err := returnsWithinPersistDeadline(t, "SetSequenceFloor with a free lock", func() error {
 		return store.SetSequenceFloor(6000)
 	}); err != nil {
 		t.Fatalf("SetSequenceFloor with a free lock: %v", err)
@@ -410,7 +410,7 @@ func TestSQLiteApplyGraphPlanPass1GivesUpOnAHeldLock(t *testing.T) {
 		before := countBeads(t, store)
 		setSequenceLockWait(t, 50*time.Millisecond)
 		holdForeignSequenceLock(t, dir)
-		err := within(t, "ApplyGraphPlan Pass 1 under a held lock", func() error {
+		err := returnsWithinPersistDeadline(t, "ApplyGraphPlan Pass 1 under a held lock", func() error {
 			_, err := store.ApplyGraphPlan(context.Background(), plan)
 			return err
 		})
@@ -533,7 +533,7 @@ func TestSQLiteAutoIDCreateKeepsItsErrorsWhenMintingIsRefused(t *testing.T) {
 		setBlockHeadroom(t, store, 0)
 		probe := installFlockProbe(t, false)
 		holdForeignSequenceLock(t, dir)
-		if err := within(t, "pinned-id create", func() error {
+		if err := returnsWithinPersistDeadline(t, "pinned-id create", func() error {
 			_, err := store.CreateWithForeignID(Bead{ID: "gcg-session-feedface", Title: "pinned"})
 			return err
 		}); err != nil {
@@ -557,7 +557,7 @@ func TestSQLiteNonMintingTxIgnoresTheDirectoryLock(t *testing.T) {
 	holdForeignSequenceLock(t, dir)
 
 	description := "committed by a non-minting tx"
-	if err := within(t, "non-minting Tx", func() error {
+	if err := returnsWithinPersistDeadline(t, "non-minting Tx", func() error {
 		return store.Tx("", func(tx Tx) error {
 			return tx.Update(seed, UpdateOpts{Description: &description})
 		})
