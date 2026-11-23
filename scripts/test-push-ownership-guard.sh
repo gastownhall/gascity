@@ -1457,7 +1457,7 @@ test_pushed_ref_unreadable_bead_blocks() {
     write_fake_bd "$fbd"
     printf '1' > "$fbd/fake-bd-state/show-exit"
     out="$(run_guard_refs "$repo" "$fbd" "agent-x" "tmpl-x" "builder/ga-tioxl6" 2>&1)"; rc=$?
-    if [[ $rc -ne 0 ]] && grep -q "bd show ga-tioxl6 unreachable" <<<"$out"; then
+    if [[ $rc -ne 0 ]] && grep -q "bd show ga-tioxl6 failed after" <<<"$out"; then
         record_pass "resolve/pushed-ref-unreadable-bead-blocks (rc!=0, names ga-tioxl6)"
     else
         record_fail "resolve/pushed-ref-unreadable-bead-blocks" "expected a block naming ga-tioxl6, got rc=$rc, output: $out"
