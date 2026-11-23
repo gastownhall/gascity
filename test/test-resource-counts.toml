@@ -2879,6 +2879,11 @@ resource = "http_test_server"
 calls = 1
 
 [[count]]
+path = "internal/runtime/t3bridge/write_deadline_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "internal/runtime/tmux/activity_poke_integration_test.go"
 resource = "fixed_sleep"
 calls = 4
@@ -3330,6 +3335,11 @@ calls = 4
 path = "scripts/makefile_cgo_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "scripts/makefile_go_list_guard_test.go"
+resource = "subprocess"
+calls = 2
 
 [[count]]
 path = "scripts/makefile_install_test.go"
