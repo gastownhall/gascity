@@ -192,7 +192,7 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 			Provider:  key.Provider,
 			AccountID: key.AccountID,
 		}
-		entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+		entry, err := appendTranscriptWithRetry(ctx, deps.Services.Transcript, AppendTranscriptInput{
 			Caller:            caller,
 			Conversation:      msg.Conversation,
 			Kind:              TranscriptMessageInbound,
@@ -255,7 +255,7 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 	// Step 3: Append to transcript.
 	if result.routed() {
 		caller := Caller{Kind: CallerController, ID: "inbound-normalized"}
-		entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+		entry, err := appendTranscriptWithRetry(ctx, deps.Services.Transcript, AppendTranscriptInput{
 			Caller:            caller,
 			Conversation:      msg.Conversation,
 			Kind:              TranscriptMessageInbound,

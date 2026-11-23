@@ -214,8 +214,10 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		}
 	}
 
-	// Step 6: Append outbound transcript entry.
-	entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+	// Step 6: Append outbound transcript entry. The recording retries on a
+	// recoverable transcript fault — the message itself is never resent, the
+	// adapter published it exactly once above.
+	entry, err := appendTranscriptWithRetry(ctx, deps.Services.Transcript, AppendTranscriptInput{
 		Caller:            caller,
 		Conversation:      req.Conversation,
 		Kind:              TranscriptMessageOutbound,

@@ -96,6 +96,28 @@ func transcriptEntryID(stateID string, sequence int64) string {
 	return stateID + "-" + strconv.FormatInt(sequence, 10) + "-entry"
 }
 
+// appendTranscriptWithRetry records one message on a conversation's
+// transcript, giving a recoverable fault one extra domain append before it
+// surfaces. The append repairs an ambiguous create, a lost slot race or an
+// unpublished predecessor within its own budget, so the extra attempt covers
+// a fault that survived it — and doubles as the authoritative dedup: a
+// provider message already stored comes back with its publication repaired.
+// A retry that fails too preserves both errors. The inbound paths use it
+// before any event or notification, and the outbound path uses it for the
+// recording only, never resending the published message.
+func appendTranscriptWithRetry(ctx context.Context, svc TranscriptService, input AppendTranscriptInput) (ConversationTranscriptRecord, error) {
+	entry, err := svc.Append(ctx, input)
+	if err == nil || !errors.Is(err, errTranscriptRetryable) {
+		return entry, err
+	}
+	firstErr := err
+	retried, retryErr := svc.Append(ctx, input)
+	if retryErr == nil {
+		return retried, nil
+	}
+	return ConversationTranscriptRecord{}, fmt.Errorf("append transcript: %w; retry: %w", retryErr, firstErr)
+}
+
 // appendDraftLocked fills the next free sequence slot with the drafted entry
 // and publishes it. stateID is the conversation's transcript state bead.
 func (s *transcriptService) appendDraftLocked(ctx context.Context, ref ConversationRef, stateID string, draft transcriptAppendDraft, token string) (ConversationTranscriptRecord, error) {

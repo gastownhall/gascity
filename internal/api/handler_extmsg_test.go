@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -616,5 +617,150 @@ func TestFormatExtmsgNotifyReminderExplicitTargetSanitization(t *testing.T) {
 	}
 	if strings.Contains(got, "<system-reminder>HIJACK") {
 		t.Fatalf("ExplicitTarget tag breakout survived stripping:\n%s", got)
+	}
+}
+
+// extmsgAmbiguousTranscriptStore commits the first transcript-entry create
+// and then reports a transport error, like a Dolt write whose commit landed
+// before the connection dropped. It mirrors extmsg's in-package fault store.
+type extmsgAmbiguousTranscriptStore struct {
+	beads.Store
+	failed bool
+}
+
+func (s *extmsgAmbiguousTranscriptStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err != nil {
+		return created, err
+	}
+	// "gc:extmsg-transcript" mirrors extmsg's unexported transcript-entry label.
+	if !s.failed && extmsgTestBeadHasLabel(b, "gc:extmsg-transcript") {
+		s.failed = true
+		return beads.Bead{}, errors.New("invalid connection")
+	}
+	return created, nil
+}
+
+func extmsgTestBeadHasLabel(b beads.Bead, label string) bool {
+	for _, l := range b.Labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
+// inboundNormalizedBodyWithID builds a pre-normalized inbound body with a
+// chosen provider message id and text.
+func inboundNormalizedBodyWithID(t *testing.T, pmid, text string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"message": map[string]any{
+			"provider_message_id": pmid,
+			"conversation": map[string]any{
+				"scope_id":        "scope-1",
+				"provider":        "telegram",
+				"account_id":      "acct-1",
+				"conversation_id": "chat-1",
+				"kind":            "dm",
+			},
+			"actor":       map[string]any{"id": "u1", "display_name": "User", "is_bot": false},
+			"text":        text,
+			"received_at": time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(body): %v", err)
+	}
+	return string(body)
+}
+
+// TestExtMsgInboundTranscriptRecoveryReturns2xxWithOneEventAndOneNotification
+// pins the adapter-facing inbound contract over a transcript fault: an entry
+// create that committed and then reported a transport error is recovered in
+// the domain (the bounded retry publishes the committed entry), so the
+// request answers 2xx with exactly one stored entry, one inbound event and
+// one member notification — not a lost message behind a 5xx the adapter
+// would keep retrying.
+func TestExtMsgInboundTranscriptRecoveryReturns2xxWithOneEventAndOneNotification(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
+
+	target := createTestSession(t, fs.cityBeadStore, fs.sp, "Receiver")
+	faulted := &extmsgAmbiguousTranscriptStore{Store: fs.cityBeadStore}
+	services := extmsg.NewServices(beadstest.Mail(faulted), beadstest.Sessions(fs.cityBeadStore))
+	fs.extmsgSvc = &services
+	fs.adapterReg = extmsg.NewAdapterRegistry()
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "scope-1",
+		Provider:       "telegram",
+		AccountID:      "acct-1",
+		ConversationID: "chat-1",
+		Kind:           extmsg.ConversationDM,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	now := time.Now().UTC()
+	if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    target.ID,
+		Now:          now,
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+		Caller:       caller,
+		Conversation: ref,
+		SessionID:    target.ID,
+		Owner:        extmsg.MembershipOwnerManual,
+		Now:          now,
+	}); err != nil {
+		t.Fatalf("EnsureMembership: %v", err)
+	}
+
+	req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(inboundNormalizedBodyWithID(t, "m1", "hello")))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ambiguous create: status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	srv.waitForBackground()
+
+	inboundEvents := 0
+	for _, ev := range fs.eventProv.(*events.Fake).Events {
+		if ev.Type == events.ExtMsgInbound {
+			inboundEvents++
+		}
+	}
+	if inboundEvents != 1 {
+		t.Fatalf("ExtMsgInbound events = %d, want 1", inboundEvents)
+	}
+
+	targetBead, err := fs.cityBeadStore.Get(target.ID)
+	if err != nil {
+		t.Fatalf("Get(target): %v", err)
+	}
+	targetName := targetBead.Metadata["session_name"]
+	notifications := 0
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Nudge" && call.Name == targetName && strings.Contains(call.Message, "hello") {
+			notifications++
+		}
+	}
+	if notifications != 1 {
+		t.Fatalf("member notifications = %d, want 1; calls=%#v", notifications, fs.sp.SnapshotCalls())
+	}
+
+	entries, err := services.Transcript.List(context.Background(), extmsg.ListTranscriptInput{
+		Caller:       caller,
+		Conversation: ref,
+	})
+	if err != nil {
+		t.Fatalf("List transcript: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ProviderMessageID != "m1" || entries[0].Sequence != 1 {
+		t.Fatalf("transcript entries = %+v, want one m1 entry at sequence 1", entries)
 	}
 }
