@@ -1091,3 +1091,35 @@ func TestReconcileSessionBeads_ResetOfAsleepCityStopStartsSession(t *testing.T) 
 		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
 	}
 }
+
+// TestReconcileSessionBeads_ResetOfIdleAsleepWaitsForDemand pins #2345 next to
+// SESSION-RECON-024: a fresh restart of a row parked for any reason other than
+// city-stop consumes restart_requested, records no wake and leaves the row
+// asleep until demand arrives.
+func TestReconcileSessionBeads_ResetOfIdleAsleepWaitsForDemand(t *testing.T) {
+	env, session, sessionName := newCityStopResetScenario(t, string(sessionpkg.SleepReasonIdle))
+
+	env.reconcile([]beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q started on the reset tick; an idle-asleep reset must wait for demand (#2345)", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["wake_request"] != "" || got.Metadata["wake_requested_at"] != "" {
+		t.Fatalf("wake_request = %q, wake_requested_at = %q; want no wake recorded for an idle row",
+			got.Metadata["wake_request"], got.Metadata["wake_requested_at"])
+	}
+
+	// A later tick finds the same dormant row: still no demand, still asleep.
+	// This pins the wait for demand beyond the one-tick reset deferral.
+	env.reconcile([]beads.Bead{got})
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q started on a later tick; an idle-asleep reset must wait for demand (#2345)", sessionName)
+	}
+}
