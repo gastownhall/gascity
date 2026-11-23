@@ -898,3 +898,44 @@ func TestHookClaimReserveRetriesThenDelivers(t *testing.T) {
 		t.Fatalf("stderr = %q, want no diagnostic for a reserve that answered on retry", stderr.String())
 	}
 }
+
+// TestHookClaimAdoptedReserveConflictDeliversNothing is AC-7: a run serving a
+// bead already assigned to it (adopted, not minted) whose reserve finds another
+// claim holding the session's pointer hands the turn nothing — no result line,
+// no step_started, no drain-ack — and keeps the bead, which this run did not
+// take and so must not give back.
+func TestHookClaimAdoptedReserveConflictDeliversNothing(t *testing.T) {
+	rec := &turnBoundClaimRecorder{}
+	ops := rec.ops(t, `[{"id":"hw-adopt","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`)
+	sessSpy := &sessionClaimSpy{outcomes: []session.CurrentClaimOutcome{session.CurrentClaimConflict}}
+	ops.ReserveSessionClaim = sessSpy.reserve
+	opts := currentClaimHookOptions()
+	opts.CurrentClaimExpected = hookClaimExpected{Value: "X", Known: true}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", opts, ops, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookClaim = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(rec.claims) != 0 {
+		t.Fatalf("claims = %v, want none (the bead was adopted)", rec.claims)
+	}
+	if sessSpy.calls != 1 || sessSpy.beadID != "hw-adopt" {
+		t.Fatalf("reserve = {calls:%d bead:%q}, want {1 hw-adopt}", sessSpy.calls, sessSpy.beadID)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no result line", stdout.String())
+	}
+	if len(rec.releases) != 0 || len(rec.claimReleased) != 0 {
+		t.Fatalf("releases = %v claim_released = %+v, want the adopted bead kept", rec.releases, rec.claimReleased)
+	}
+	if len(rec.stepsStarted) != 0 {
+		t.Fatalf("step_started = %v, want none", rec.stepsStarted)
+	}
+	if rec.drainAcked {
+		t.Fatal("consumed --drain-ack")
+	}
+	if !strings.Contains(stderr.String(), "hw-adopt") {
+		t.Fatalf("stderr = %q, want the cause naming hw-adopt", stderr.String())
+	}
+}

@@ -1719,12 +1719,20 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		}
 		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	}
+	// The current-claim reserve: before the step-started event and the
+	// result line, so a claim that lost the session's pointer to another run
+	// emits neither. A minted one is given back; an adopted one is this
+	// session's assignment, kept for the next claim to serve again.
+	if !reserveHookSessionCurrentClaim(bead, opts, ops, stderr) {
+		cause := fmt.Sprintf("another claim of session %s took its current claim while %s was being claimed", hookClaimSessionID(opts.Env), bead.ID)
+		if minted {
+			return unwindUndeliveredHookClaim(hookClaimReleaseReasonCurrentClaimLost, cause+"; giving it back", bead, opts, ops, dir, started, stderr)
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: %s; leaving it assigned\n", cause) //nolint:errcheck
+		return 1
+	}
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
-	}
-	if !reserveHookSessionCurrentClaim(bead, opts, ops, stderr) && minted {
-		cause := fmt.Sprintf("another claim of session %s took its current claim while %s was being claimed; giving it back", hookClaimSessionID(opts.Env), bead.ID)
-		return unwindUndeliveredHookClaim(hookClaimReleaseReasonCurrentClaimLost, cause, bead, opts, ops, dir, started, stderr)
 	}
 	publishHookClaimRunMap(bead, opts, ops, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
