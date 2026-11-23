@@ -207,6 +207,53 @@ func TestInstallClaudeKeepsCityPromptSuggestionOptIn(t *testing.T) {
 	}
 }
 
+// TestInstallClaudeUpgradeAddsPromptSuggestionDefault: a city upgraded from a
+// release whose generated .gc/settings.json predates the prompt-suggestion
+// default (and carries custom data) gains Boolean false on install, keeps its
+// custom data, and a second install leaves the file unchanged (gh-7973).
+func TestInstallClaudeUpgradeAddsPromptSuggestionDefault(t *testing.T) {
+	const runtimePath = "/city/.gc/settings.json"
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	var old map[string]any
+	if err := json.Unmarshal(current, &old); err != nil {
+		t.Fatalf("decoding embedded Claude settings: %v", err)
+	}
+	delete(old, "promptSuggestionEnabled")
+	old["customTopLevel"] = map[string]any{"keep": "me"}
+	oldData, err := overlay.MarshalCanonicalJSON(old)
+	if err != nil {
+		t.Fatalf("encoding previous generated settings: %v", err)
+	}
+
+	fs := fsys.NewFake()
+	fs.Files[runtimePath] = oldData
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	first := append([]byte(nil), fs.Files[runtimePath]...)
+	if got, ok := claudeTopLevelSetting(t, first, "promptSuggestionEnabled"); !ok || got != false {
+		t.Fatalf("promptSuggestionEnabled after upgrade = %#v (present %v), want Boolean false:\n%s", got, ok, first)
+	}
+	custom, ok := claudeTopLevelSetting(t, first, "customTopLevel")
+	if m, isMap := custom.(map[string]any); !ok || !isMap || m["keep"] != "me" {
+		t.Fatalf("customTopLevel after upgrade = %#v (present %v), want the city's custom data preserved:\n%s", custom, ok, first)
+	}
+	if got, ok := claudeTopLevelSetting(t, first, "awaySummaryEnabled"); !ok || got != false {
+		t.Fatalf("awaySummaryEnabled after upgrade = %#v (present %v), want Boolean false", got, ok)
+	}
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if second := fs.Files[runtimePath]; !bytes.Equal(second, first) {
+		t.Fatalf("second Install changed %s:\nfirst:\n%s\nsecond:\n%s", runtimePath, first, second)
+	}
+}
+
 func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	fs := fsys.NewFake()
 	current, err := readEmbedded("config/claude.json")
