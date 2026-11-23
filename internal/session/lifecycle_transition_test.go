@@ -798,6 +798,17 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 				"sleep_reason":          "",
 			},
 		},
+		{
+			name:        "city-stop reason is cleared",
+			state:       StateAsleep,
+			sleepReason: string(SleepReasonCityStop),
+			want: MetadataPatch{
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"sleep_reason":          "",
+			},
+		},
 	}
 
 	for _, tt := range tests {
