@@ -106,14 +106,14 @@ func TestNamepoolAliasClaimBlocksDrainAndReuse(t *testing.T) {
 
 	store := beads.NewMemStore()
 	mustCreateInProgressWork(t, store, "rig/furiosa")
-	has, err := sessionHasOpenAssignedWorkForConfigInfo("", cfg, store, nil, info)
+	has, err := sessionHasOpenAssignedWorkForConfigInfo(testSeatWork("", cfg, store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForConfigInfo: %v", err)
 	}
 	if !has {
 		t.Fatal("drain guard missed alias-form work held by a namepool seat")
 	}
-	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate("", cfg, store, nil, info)
+	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(testSeatWork("", cfg, store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStoreForCloseGate: %v", err)
 	}

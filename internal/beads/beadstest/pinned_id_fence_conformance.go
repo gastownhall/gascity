@@ -21,6 +21,7 @@ package beadstest
 // work bead under an operator-configured prefix — stop working.
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -450,6 +451,54 @@ func RunPinnedIDFenceConformance(t *testing.T, openFenced func(t *testing.T, min
 		}
 	})
 
+	// The fence covers the guarded batch too: a beads.GuardedBatcher is a third
+	// door into the same table, and every create it carries pins its id. One
+	// foreign create refuses the whole batch before anything is written, the
+	// in-namespace create riding with it included, and the refusal is the
+	// batch's validation refusal: it matches ErrInvalidGuardedBatch, which tells
+	// the caller the batch wrote nothing, as well as the sentinel that routes
+	// the id to a sibling binding.
+	//
+	// GuardedBatcher is optional, so a store without one skips this row.
+	t.Run("TheFenceCoversTheGuardedBatch", func(t *testing.T) {
+		s := fenced(t)
+		batcher, ok := beads.GuardedBatcherFor(s)
+		if !ok {
+			t.Skip("store has no guarded batcher")
+		}
+		held, id := aux+"-in-a-batch", foreign+"-42"
+		_, err := batcher.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{
+			{Create: &beads.Bead{ID: held, Title: "held by this binding, batched with a foreign create"}},
+			{Create: &beads.Bead{ID: id, Title: "another binding's id, pinned through the batch door"}},
+		}})
+		if err == nil {
+			t.Fatal("ApplyGuarded accepted a foreign pinned id; a batch is not an exemption from the namespace claim")
+		}
+		if !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+			t.Errorf("refusal is %v, which does not wrap ErrPinnedIDOutsideNamespace", err)
+		}
+		if !errors.Is(err, beads.ErrInvalidGuardedBatch) {
+			t.Errorf("refusal is %v, which does not wrap ErrInvalidGuardedBatch; the fence refuses before any write, and any other error tells the caller the batch may have committed", err)
+		}
+		for _, absent := range []string{held, id} {
+			if _, err := s.Get(absent); !errors.Is(err, beads.ErrNotFound) {
+				t.Errorf("after the refusal Get(%q) = %v, want ErrNotFound; a refused batch writes none of its items", absent, err)
+			}
+		}
+
+		// The must-be-silent counterpart: the in-namespace create, batched
+		// alone, goes through under the id it pins. Without it a store
+		// conforms by refusing every guarded batch.
+		if _, err := batcher.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{
+			{Create: &beads.Bead{ID: held, Title: "held by this binding"}},
+		}}); err != nil {
+			t.Fatalf("ApplyGuarded refused an in-namespace pinned id: %v", err)
+		}
+		if _, err := s.Get(held); err != nil {
+			t.Errorf("Get(%q) after the batch created it: %v", held, err)
+		}
+	})
+
 	// Fence before existence. A relic under a foreign id can already be
 	// resident, and a later create pinning that id must still be told the store
 	// does not serve the namespace — not that the row is a duplicate. The
@@ -471,6 +520,34 @@ func RunPinnedIDFenceConformance(t *testing.T, openFenced func(t *testing.T, min
 		}
 		if !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
 			t.Errorf("refusal is %v, want ErrPinnedIDOutsideNamespace; answering with a duplicate-id error tells the caller this store holds the row, which is exactly what a disclaimed namespace must not reveal", err)
+		}
+	})
+
+	// The same ordering through the guarded batch, whose creates are
+	// create-only: a batch pinning the relic's id must be told the namespace is
+	// not served here, not that the id already names a row.
+	t.Run("TheGuardedBatchChecksTheNamespaceBeforeExistence", func(t *testing.T) {
+		s := fenced(t)
+		batcher, ok := beads.GuardedBatcherFor(s)
+		if !ok {
+			t.Skip("store has no guarded batcher")
+		}
+		creator, ok := s.(beads.ForeignIDCreator)
+		if !ok {
+			t.Skip("store is not a ForeignIDCreator")
+		}
+		id := foreign + "-42"
+		if _, err := creator.CreateWithForeignID(beads.Bead{ID: id, Title: "relic"}); err != nil {
+			t.Fatalf("CreateWithForeignID: %v", err)
+		}
+		_, err := batcher.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{
+			{Create: &beads.Bead{ID: id, Title: "a guarded create pinning the relic's foreign id"}},
+		}})
+		if err == nil {
+			t.Fatal("ApplyGuarded accepted a foreign pinned id")
+		}
+		if !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) || errors.Is(err, beads.ErrAlreadyExists) {
+			t.Errorf("refusal is %v, want ErrPinnedIDOutsideNamespace and not ErrAlreadyExists; a duplicate-id answer tells the caller this store holds the row, which is exactly what a disclaimed namespace must not reveal", err)
 		}
 	})
 }

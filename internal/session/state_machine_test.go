@@ -22,6 +22,7 @@ func TestTransitionLegalMoves(t *testing.T) {
 		{StateActive, CmdSuspend, StateSuspended},
 		{StateAsleep, CmdSuspend, StateSuspended},
 		{StateQuarantined, CmdSuspend, StateSuspended},
+		{StateDrained, CmdSuspend, StateSuspended},
 
 		{StateAsleep, CmdWake, StateActive},
 		{StateSuspended, CmdWake, StateActive},

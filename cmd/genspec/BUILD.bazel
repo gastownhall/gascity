@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "genspec_lib",
@@ -14,6 +15,38 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# Fails when the committed OpenAPI spec or events schema differs from what
+# genspec generates (the Go half of `make spec-ci`; the client half is
+# //internal/api/genclient:genclient_test).
+sh_test(
+    name = "genspec_in_sync_test",
+    srcs = ["//scripts:check-generated-in-sync.sh"],
+    args = [
+        "'make spec-ci'",
+        "openapi-freshness.patch",
+        "$(rootpath :genspec)",
+        "--",
+        "internal/api/openapi.json",
+        "$(rootpath //internal/api:openapi.json)",
+        "docs/reference/schema/openapi.json",
+        "$(rootpath //docs:reference/schema/openapi.json)",
+        "docs/reference/schema/openapi.txt",
+        "$(rootpath //docs:reference/schema/openapi.txt)",
+        "docs/reference/schema/events.json",
+        "$(rootpath //docs:reference/schema/events.json)",
+        "docs/reference/schema/events.txt",
+        "$(rootpath //docs:reference/schema/events.txt)",
+    ],
+    data = [
+        ":genspec",
+        "//docs:reference/schema/events.json",
+        "//docs:reference/schema/events.txt",
+        "//docs:reference/schema/openapi.json",
+        "//docs:reference/schema/openapi.txt",
+        "//internal/api:openapi.json",
+    ],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -22,6 +55,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,8 +69,8 @@ type driftCheckResult struct {
 // All twelve flag×outcome combinations from the designer brief
 // (§ "Flag-combination matrix") are pinned by table tests, so
 // behavioral changes here will surface as test diffs.
-func decideDriftAction(localBuildID string, sv SupervisorStatus, packDrift []string, flags driftFlags) driftCheckResult {
-	binaryDrift := DetectBinaryDrift(localBuildID, sv)
+func decideDriftAction(local gcBinaryIdentity, sv SupervisorStatus, packDrift []string, flags driftFlags) driftCheckResult {
+	binaryDrift := detectGCBinaryDrift(local, sv)
 	hasDrift := binaryDrift || len(packDrift) > 0
 	if !hasDrift {
 		return driftCheckResult{ProceedNormally: true}
@@ -89,6 +90,28 @@ func decideDriftAction(localBuildID string, sv SupervisorStatus, packDrift []str
 		res.Restart = true
 	}
 	return res
+}
+
+// detectGCBinaryDrift reports whether the supervisor runs a different gc
+// build than local. Build identities decide when both sides report one.
+// Builds that carry no commit (homebrew-core sets only the version, so
+// both sides report "unknown") fall back to comparing release versions, so
+// an in-place `brew upgrade` is still detected. Callers only reach this for
+// a supervisor that runs the same installation as local: a different
+// installation is refused earlier (checkSupervisorBinaryBeforeRegister).
+func detectGCBinaryDrift(local gcBinaryIdentity, sv SupervisorStatus) bool {
+	if knownGCBuildID(local.BuildID) && knownGCBuildID(sv.BuildID) {
+		return DetectBinaryDrift(local.BuildID, sv)
+	}
+	if knownGCVersion(local.Version) && knownGCVersion(sv.Version) {
+		return normalizeGCVersion(local.Version) != normalizeGCVersion(sv.Version)
+	}
+	return DetectBinaryDrift(local.BuildID, sv)
+}
+
+// localGCBinaryIdentity is the invoking binary's build identity.
+func localGCBinaryIdentity() gcBinaryIdentity {
+	return gcBinaryIdentity{Version: version, BuildID: commit}
 }
 
 // supervisorIdentity is the data printSupervisorIdentity needs to
@@ -146,10 +169,12 @@ func humanizeAge(d time.Duration) string {
 
 // driftReport collects what printDriftReport renders.
 type driftReport struct {
-	BinaryDrift  bool
-	LocalBuildID string
-	SupervisorID string
-	PackDrifted  []string
+	BinaryDrift       bool
+	LocalBuildID      string
+	SupervisorID      string
+	LocalVersion      string
+	SupervisorVersion string
+	PackDrifted       []string
 }
 
 // printDriftReport writes the `Drift detected:` block. Wording is
@@ -165,6 +190,12 @@ func printDriftReport(w io.Writer, r driftReport) {
 		sup := r.SupervisorID
 		if sup == "" {
 			sup = "(unknown)"
+		}
+		if !knownGCBuildID(r.LocalBuildID) || !knownGCBuildID(r.SupervisorID) {
+			// Builds without a commit stamp drift by release version.
+			if knownGCVersion(r.LocalVersion) && knownGCVersion(r.SupervisorVersion) {
+				local, sup = "version "+r.LocalVersion, "version "+r.SupervisorVersion
+			}
 		}
 		fmt.Fprintf(w, "  binary: local=%s supervisor=%s\n", local, sup) //nolint:errcheck // best-effort stderr
 	}
@@ -187,8 +218,14 @@ var driftVerifyProbeTimeout = 2 * time.Second
 // the production kill+spawn (or systemctl) side effects.
 var restartHelpersHook = defaultRestartHelpers
 
-// readSupervisorExePathHook lets tests avoid platform-specific /proc lookups.
+// readSupervisorExePathHook lets tests avoid platform-specific process image lookups.
 var readSupervisorExePathHook = readSupervisorExePath
+
+// readProcExeLinkHook reads the raw /proc/<pid>/exe link target.
+// Overridable for tests.
+var readProcExeLinkHook = func(pid int) (string, error) {
+	return os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+}
 
 // driftRestartLoopMax / driftRestartLoopWindow define the loop-guard
 // budget: at most 3 supervisor auto-restarts may occur within any
@@ -256,26 +293,30 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		NoAutoRestart:    noAutoRestartMode,
 		KillSwitchActive: !readDaemonAutoRestart(cityPath),
 	}
-	res := decideDriftAction(commit, status, nil, flags)
+	res := decideDriftAction(localGCBinaryIdentity(), status, nil, flags)
 
 	switch {
 	case res.ProceedNormally:
 		return 0, true
 	case res.DryRun:
 		printDriftReport(stdout, driftReport{
-			BinaryDrift:  res.BinaryDrift,
-			LocalBuildID: commit,
-			SupervisorID: status.BuildID,
-			PackDrifted:  res.PackDrift,
+			BinaryDrift:       res.BinaryDrift,
+			LocalBuildID:      commit,
+			SupervisorID:      status.BuildID,
+			LocalVersion:      version,
+			SupervisorVersion: status.Version,
+			PackDrifted:       res.PackDrift,
 		})
 		fmt.Fprintln(stdout, "(would auto-restart; --dry-run)") //nolint:errcheck // best-effort stdout
 		return 0, false
 	case res.Error:
 		printDriftReport(stderr, driftReport{
-			BinaryDrift:  res.BinaryDrift,
-			LocalBuildID: commit,
-			SupervisorID: status.BuildID,
-			PackDrifted:  res.PackDrift,
+			BinaryDrift:       res.BinaryDrift,
+			LocalBuildID:      commit,
+			SupervisorID:      status.BuildID,
+			LocalVersion:      version,
+			SupervisorVersion: status.Version,
+			PackDrifted:       res.PackDrift,
 		})
 		if flags.KillSwitchActive {
 			fmt.Fprintf(stderr, "error: supervisor binary drift; auto-restart disabled by [daemon].auto_restart_on_drift in city.toml. Restart manually with '%s'.\n", supervisorRestartGuidance()) //nolint:errcheck // best-effort stderr
@@ -285,10 +326,12 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		return 1, false
 	case res.Restart:
 		printDriftReport(stdout, driftReport{
-			BinaryDrift:  res.BinaryDrift,
-			LocalBuildID: commit,
-			SupervisorID: status.BuildID,
-			PackDrifted:  res.PackDrift,
+			BinaryDrift:       res.BinaryDrift,
+			LocalBuildID:      commit,
+			SupervisorID:      status.BuildID,
+			LocalVersion:      version,
+			SupervisorVersion: status.Version,
+			PackDrifted:       res.PackDrift,
 		})
 		delegation, delegated, derr := supervisorSystemdDelegation()
 		if derr != nil {
@@ -382,7 +425,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 
 		// Re-print the Supervisor: line so the operator's last memory
 		// is of the post-restart state, not the drift report.
-		newPID := supervisorAliveHook()
+		newPID, newStatus, identityErr := awaitRestartedSupervisorIdentity(baseURL, driftReadyTimeout)
 		if newPID != 0 {
 			// Record the just-restarted PID so the downstream
 			// registerCityWithSupervisorNamed → ensureNoStandaloneController
@@ -390,18 +433,17 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			// competing standalone during the brief window before the
 			// registry catches up.
 			justRestartedSupervisorPID = newPID
+		}
+		if identityErr != nil {
+			fmt.Fprintf(stderr, "gc start: warning: restarted supervisor not confirmed within %s: %v; skipping the post-restart Supervisor: line\n", driftReadyTimeout, identityErr) //nolint:errcheck // best-effort stderr
+		} else {
 			newExe, _ := readSupervisorExePathHook(newPID)
-			ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel2()
-			newStatus, statusErr2 := newHTTPSupervisorClient(baseURL).Status(ctx2)
-			if statusErr2 == nil {
-				printSupervisorIdentity(stdout, supervisorIdentity{
-					PID:     newPID,
-					ExePath: newExe,
-					BuildID: newStatus.BuildID,
-					Started: time.Now().Add(-time.Duration(newStatus.UptimeSec) * time.Second),
-				}, time.Now())
-			}
+			printSupervisorIdentity(stdout, supervisorIdentity{
+				PID:     newPID,
+				ExePath: newExe,
+				BuildID: newStatus.BuildID,
+				Started: time.Now().Add(-time.Duration(newStatus.UptimeSec) * time.Second),
+			}, time.Now())
 		}
 		// Successful auto-restart is non-terminal: the caller continues
 		// into normal supervisor registration / start so the requested
@@ -444,7 +486,7 @@ func pollDelegatedRestartVerified(baseURL string, oldPID int, oldBuildID, localB
 			switch {
 			case verifyPID == oldPID && verifyStatus.BuildID == oldBuildID:
 				lastMsg = fmt.Sprintf("error: supervisor was not replaced by '%s': PID %d still serving build %s; it is not managed by delegated unit %s — stop it with 'gc supervisor stop' (%s unset), or fix the delegation env", d.commandHint("try-restart"), verifyPID, verifyStatus.BuildID, d.Unit, supervisorSystemdUnitEnv)
-			case DetectBinaryDrift(localBuildID, verifyStatus):
+			case detectGCBinaryDrift(gcBinaryIdentity{BuildID: localBuildID, Version: version}, verifyStatus):
 				lastMsg = fmt.Sprintf("error: supervisor restarted by '%s' but still serves drifted build %s (local build %s); unit %s's ExecStart does not launch the updated gc binary — point the unit at the new binary, or fix the delegation env", d.commandHint("try-restart"), verifyStatus.BuildID, localBuildID, d.Unit)
 			default:
 				// Replaced and drift cleared.
@@ -458,30 +500,53 @@ func pollDelegatedRestartVerified(baseURL string, oldPID int, oldBuildID, localB
 	}
 }
 
-func printUnreadableSupervisorRestartError(stderr io.Writer, pid int, exeErr error) {
-	if supervisorRuntimeGOOS == "darwin" {
-		fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: macOS cannot resolve the executable path for a direct supervisor (%v). If the supervisor is launchd-managed, rerun 'gc supervisor install' and then 'gc start'; otherwise stop the supervisor manually and rerun 'gc start', or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", exeErr) //nolint:errcheck // best-effort stderr
-		return
+// awaitRestartedSupervisorIdentity waits up to timeout for a just-restarted
+// supervisor to answer on its control socket and serve a decodable /health,
+// and returns its PID and status for the post-restart Supervisor: line.
+//
+// PollReady's 2xx is not enough: runSupervisor starts serving /health before
+// it binds its control socket, so the first socket probe after that 2xx can
+// find nothing listening yet (ga-ai1gn9p5). The returned PID is non-zero
+// whenever the socket answered, even when /health could not then be read
+// within timeout; the error names the last obstacle.
+func awaitRestartedSupervisorIdentity(baseURL string, timeout time.Duration) (int, SupervisorStatus, error) {
+	client := newHTTPSupervisorClient(baseURL)
+	deadline := time.Now().Add(timeout)
+	pid := 0
+	for {
+		var lastErr error
+		if pid == 0 {
+			pid = supervisorAliveHook()
+		}
+		if pid == 0 {
+			lastErr = errors.New("its control socket did not answer")
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), driftVerifyProbeTimeout)
+			status, err := client.Status(ctx)
+			cancel()
+			if err == nil {
+				return pid, status, nil
+			}
+			lastErr = fmt.Errorf("reading its /health: %w", err)
+		}
+		if !time.Now().Before(deadline) {
+			return pid, SupervisorStatus{}, lastErr
+		}
+		time.Sleep(supervisorReadyPollInterval)
 	}
-	fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: /proc/%d/exe is owned by a different user (permission denied: %v). Either rerun gc start as the supervisor's uid, or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", pid, exeErr) //nolint:errcheck // best-effort stderr
 }
 
-// readSupervisorExePath returns the resolved path of the supervisor's
-// executable via /proc/<pid>/exe. The kernel readlink resolves
-// symlinks for us — no extra realpath layer needed.
-//
-// When the binary on disk has been replaced (the typical drift case:
-// `go install` writes a new file at the same path, unlinking the
-// original inode the supervisor still has open), the kernel decorates
-// the link target with a literal " (deleted)" suffix. We strip that
-// suffix because the on-disk path is what the auto-restart needs to
-// spawn — the new bytes already live at the un-suffixed path.
-func readSupervisorExePath(pid int) (string, error) {
-	target, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+// readSupervisorExeLink resolves the supervisor's executable through
+// readProcExeLinkHook and reports whether the kernel marked the link target
+// " (deleted)": the file the process was started from has since been
+// unlinked or replaced.
+func readSupervisorExeLink(pid int) (string, bool, error) {
+	target, err := readProcExeLinkHook(pid)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return strings.TrimSuffix(target, " (deleted)"), nil
+	path, deleted := strings.CutSuffix(target, " (deleted)")
+	return path, deleted, nil
 }
 
 // readDaemonAutoRestart loads city.toml's [daemon].auto_restart_on_drift
@@ -504,13 +569,12 @@ func defaultRestartHelpers() restartHelpers {
 	return restartHelpers{
 		Systemctl: supervisorSystemctlRun,
 		Launchctl: supervisorLaunchctlRun,
-		Kill: func(pid int) error {
-			return syscall.Kill(pid, syscall.SIGTERM)
-		},
+		Kill:      platformDriftRestartKill,
 		WaitExit: func(pid int) error {
 			return waitForPIDExit(pid, driftKillTimeout, driftKillEscalateTimeout)
 		},
-		Spawn: spawnDetachedSupervisor,
+		Spawn:           spawnDetachedSupervisor,
+		KeepTmuxSockets: refuseSupervisorRestartTmuxSocketDirMove,
 	}
 }
 
@@ -547,7 +611,7 @@ func waitForPIDExit(pid int, timeout, escalate time.Duration) error {
 	// the only failure mode here is that the process already exited
 	// between our last probe and the signal call, which is not a real
 	// error from the caller's perspective.
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	_ = platformKill(pid, syscall.SIGKILL)
 	deadline = time.Now().Add(escalate)
 	for time.Now().Before(deadline) {
 		if pidGone(pid) {
@@ -591,7 +655,7 @@ func spawnDetachedSupervisor(exe string, argv ...string) error {
 	// The supervisor is Setpgid and outlives this `gc start`, so it reparents
 	// to init; inheriting an agent shell's session identity would make it that
 	// session's orphan-sweep target once the session closes (#6316).
-	child.Env = withoutSessionIdentityEnv(os.Environ())
+	child.Env = driftRestartSupervisorEnv(os.Environ())
 	disableProductMetricsForChild(child)
 	return child.Start()
 }

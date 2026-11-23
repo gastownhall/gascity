@@ -62,6 +62,28 @@ func waitActivity(t *testing.T, p *Provider, name string, timeout time.Duration,
 	}
 }
 
+// assertWorkingContinuouslyActive is the working leg of the activity contract,
+// run once name has been reported working: wait for a poll to observe the
+// transition, then require successive reads to keep advancing. preTransition is
+// the stamp name held before the report, and the wait requires the read to move
+// past it. Recency alone cannot tell the two apart: a just-seeded idle stamp is
+// only microseconds old, and accepting it let both reads return that one frozen
+// stamp whenever the next poll landed after the 30ms window (ga-8nndgz).
+// TestActivityLive and its hermetic reproduction share this leg so the two
+// cannot drift apart.
+func assertWorkingContinuouslyActive(t *testing.T, p *Provider, name string, preTransition time.Time) {
+	t.Helper()
+	waitActivity(t, p, name, 5*time.Second, func(got time.Time) bool {
+		return got.After(preTransition) && time.Since(got) < 100*time.Millisecond
+	})
+	w1 := lastActivity(t, p, name)
+	time.Sleep(30 * time.Millisecond)
+	w2 := lastActivity(t, p, name)
+	if !w2.After(w1) {
+		t.Fatalf("working must read continuously active: %v then %v (pre-transition stamp %v)", w1, w2, preTransition)
+	}
+}
+
 func TestActivityCapabilities(t *testing.T) {
 	f, sock := newFakeHerdrServer(t)
 	_ = f
@@ -119,6 +141,28 @@ func TestActivityWorkingIsContinuouslyActive(t *testing.T) {
 	if age := time.Since(second); age > time.Second {
 		t.Fatalf("working session activity age %v; want ~now", age)
 	}
+}
+
+// TestActivityWorkingLegWaitsForObservedTransition reproduces TestActivityLive's
+// working-leg flake deterministically (ga-8nndgz). The working report lands
+// right after the idle seed, but no poll observes it until well past the leg's
+// 30ms continuity window, as the live tracker does on a loaded host (measured
+// up to ~100ms against herdr 0.8.0). A readiness wait that accepts any recent
+// stamp returns the just-seeded idle stamp itself, and both continuity reads
+// then compare that one frozen value.
+func TestActivityWorkingLegWaitsForObservedTransition(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setAgents(agentInfo{Name: "a", PaneID: "%1", AgentStatus: "idle", Revision: 1})
+	p := activityTestProvider(t, sock)
+	// Hold every poll at least 200ms past the seed: the fallback ticker's first
+	// tick, and the debounced poll the subscription's opening resync triggers.
+	// activityTestProvider restores both knobs.
+	activityPollInterval = 200 * time.Millisecond
+	activityEventDebounce = 200 * time.Millisecond
+
+	seeded := lastActivity(t, p, "a")
+	f.setAgents(agentInfo{Name: "a", PaneID: "%1", AgentStatus: "working", Revision: 1})
+	assertWorkingContinuouslyActive(t, p, "a", seeded)
 }
 
 // When a session leaves working, the stamp freezes at the observed transition
@@ -320,5 +364,32 @@ func TestActivityReconcileLoopPollsOnAnyEventKind(t *testing.T) {
 				t.Fatalf("kind %q did not accelerate a poll; the tracker must treat any event as a hint", kind)
 			}
 		})
+	}
+}
+
+// TestActivityIgnoresUnnamedPanes pins the tracker's keys to registered names:
+// a pane herdr detected claude in but nobody named is no session, so it must
+// not seed an entry under the kind that a session named like the kind would
+// then read as its own activity.
+func TestActivityIgnoresUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setRawAgents(
+		`{"agent":"claude","name":"alpha","pane_id":"w1:p1","agent_status":"working","revision":1}`,
+		unnamedClaudePane,
+	)
+	p := activityTestProvider(t, sock)
+	if got := lastActivity(t, p, "alpha"); got.IsZero() {
+		t.Fatal("alpha: want a seeded activity stamp, got zero")
+	}
+	if got := lastActivity(t, p, "claude"); !got.IsZero() {
+		t.Errorf("claude: want zero (no session is named claude), got %v", got)
+	}
+	p.act.mu.Lock()
+	defer p.act.mu.Unlock()
+	if len(p.act.entries) != 1 {
+		t.Errorf("activity entries = %v; want only alpha", p.act.entries)
+	}
+	if _, ok := p.act.entries["alpha"]; !ok {
+		t.Errorf("activity entries = %v; want alpha", p.act.entries)
 	}
 }

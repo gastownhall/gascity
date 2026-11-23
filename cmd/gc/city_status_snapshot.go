@@ -62,6 +62,7 @@ type cityStatusSnapshot struct {
 	CityName        string
 	CityPath        string
 	EffectiveAPIURL string
+	APIURL          string // config-derived api_url for --json (cityStatusAPIURL)
 	Controller      ControllerJSON
 	Suspended       bool
 	Beads           *beads.BeadsDiagnostic
@@ -126,16 +127,20 @@ func cityStatusStorePresent(cityPath string) bool {
 // read the latest gc.store.maintenance.{done,failed} event for the
 // StoreHealth block. Tests replace this with a fake provider; the
 // default opens the city's JSONL event log directly (nil on failure so
-// the block still reports size/row data).
+// the block still reports size/row data, and nil on a worker site,
+// whose log holds only what the box wrote).
 var openStoreHealthEvents = defaultOpenStoreHealthEvents
 
 func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) events.Provider {
+	if onWorkerSite(cityPath) {
+		return nil
+	}
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
 	providerName := os.Getenv("GC_EVENTS")
 	if providerName == "" {
 		providerName = peekEventsProvider(filepath.Join(cityPath, "city.toml"))
 	}
-	p, err := newEventsProviderForName(providerName, eventsPath, stderr)
+	p, err := newEventsReaderForName(providerName, eventsPath, stderr)
 	if err != nil {
 		return nil
 	}
@@ -175,6 +180,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		Controller:      controllerStatusForCity(cityPath),
 		Suspended:       suspended,
 	}
+	snapshot.APIURL = cityStatusAPIURL(cfg, snapshot.Controller, stderr)
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
 	if snapshot.Controller.Running && cityPath != "" {
@@ -490,6 +496,7 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 		CityName:          snapshot.CityName,
 		Workspace:         WorkspaceJSON{Name: snapshot.CityName, Path: snapshot.CityPath},
 		CityPath:          snapshot.CityPath,
+		APIURL:            snapshot.APIURL,
 		Controller:        snapshot.Controller,
 		Running:           running,
 		Suspended:         snapshot.Suspended,

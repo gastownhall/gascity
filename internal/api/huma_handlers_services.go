@@ -10,8 +10,8 @@ import (
 
 // humaHandleServiceList is the Huma-typed handler for GET /v0/services.
 func (s *Server) humaHandleServiceList(_ context.Context, _ *ServiceListInput) (*ListOutput[workspacesvc.Status], error) {
-	reg := s.state.ServiceRegistry()
 	index := s.latestIndex()
+	reg := s.state.ServiceRegistry()
 	if reg == nil {
 		return &ListOutput[workspacesvc.Status]{
 			Index: index,
@@ -27,6 +27,7 @@ func (s *Server) humaHandleServiceList(_ context.Context, _ *ServiceListInput) (
 
 // humaHandleServiceGet is the Huma-typed handler for GET /v0/service/{name}.
 func (s *Server) humaHandleServiceGet(_ context.Context, input *ServiceGetInput) (*IndexOutput[workspacesvc.Status], error) {
+	index := s.latestIndex()
 	reg := s.state.ServiceRegistry()
 	if reg == nil {
 		return nil, apierr.ServiceNotFound.Msg("service " + input.Name + " not found")
@@ -36,7 +37,7 @@ func (s *Server) humaHandleServiceGet(_ context.Context, input *ServiceGetInput)
 		return nil, apierr.ServiceNotFound.Msg("service " + input.Name + " not found")
 	}
 	return &IndexOutput[workspacesvc.Status]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  item,
 	}, nil
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -917,6 +919,151 @@ func TestBuildAwakeInputFromReconciler_RigNamedWorkQueryDemandWakesCanonicalSess
 	}
 }
 
+// TestBuildAwakeInputFromReconciler_RigNamedSessionExplicitWakeResolvesDirlessRigAgent
+// pins an explicit wake on a rig's named session backed by a scope="rig"
+// agent with no dir: the bead template is rig-qualified ("rig-a/worker")
+// while the agent's qualified name is bare ("worker"), and the wake must
+// still start the session.
+func TestBuildAwakeInputFromReconciler_RigNamedSessionExplicitWakeResolvesDirlessRigAgent(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "gc-test",
+		Rigs:                  []config.Rig{{Name: "rig-a"}},
+		Agents:                []config.Agent{{Name: "worker", Scope: "rig"}},
+		NamedSessions: []config.NamedSession{
+			{Template: "worker", Mode: "on_demand", Scope: "rig", Dir: "rig-a"},
+		},
+	}
+	identity := "rig-a/worker"
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	sessionBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"configured_named_session":  "true",
+			"state":                     "asleep",
+			"session_name":              runtimeName,
+			"template":                  "rig-a/worker",
+			"configured_named_identity": identity,
+			"configured_named_mode":     "on_demand",
+			"wake_request":              "explicit",
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"", // cityPath: empty exercises zero suspension state
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	decisions := ComputeAwakeSet(input)
+	got, ok := decisions[runtimeName]
+	if !ok {
+		t.Fatal("decision for rig named session missing from awake set")
+	}
+	if !got.ShouldWake {
+		t.Fatalf("decision = %+v, want wake", got)
+	}
+	if got.Reason != "explicit-wake" {
+		t.Fatalf("Reason = %q, want explicit-wake", got.Reason)
+	}
+}
+
+// TestRigQualifiedExplicitWakeVerdictAgreesWithAwakeSet pins the wake
+// verdict `gc session wake` and the API wake give (WakeStartRefusal) to the
+// controller's decision on the wake they record (the awake set, built as the
+// reconciler builds it), for an asleep named session of rig "rig-a" with a
+// pending explicit wake. Both resolve the row's template the way the session
+// was built (findSessionAgentByTemplate), so a scope="rig" agent with no dir
+// backs "rig-a/worker" through its rig-stamped copy and its rig's suspension
+// holds the session; both refuse a template whose rig is not configured; and
+// a rig-bound agent of the same base name neither hides the generic agent
+// nor stands in for another rig's session.
+// Kills an awake set that resolved the template by base name: it woke the
+// session on a suspended rig (the verdict refuses, so the legacy controller
+// retried a refused start every tick), and left it asleep beside a same-named
+// rig-bound agent (the verdict says it starts, so the wake stranded silently).
+func TestRigQualifiedExplicitWakeVerdictAgreesWithAwakeSet(t *testing.T) {
+	generic := config.Agent{Name: "worker", Scope: "rig"}
+	suspendedGeneric := config.Agent{Name: "worker", Scope: "rig", Suspended: true}
+	bound := config.Agent{Name: "worker", Dir: "rig-a"}
+	liveRig := config.Rig{Name: "rig-a"}
+	suspendedRig := config.Rig{Name: "rig-a", SuspendedOnStart: true}
+	for _, tc := range []struct {
+		name     string
+		agents   []config.Agent
+		rigs     []config.Rig
+		template string
+		wake     bool
+	}{
+		{name: "rig-bound agent on a live rig", agents: []config.Agent{bound}, rigs: []config.Rig{liveRig}, template: "rig-a/worker", wake: true},
+		{name: "rig-bound agent on a suspended rig", agents: []config.Agent{bound}, rigs: []config.Rig{suspendedRig}, template: "rig-a/worker"},
+		{name: "dirless rig agent on a live rig", agents: []config.Agent{generic}, rigs: []config.Rig{liveRig}, template: "rig-a/worker", wake: true},
+		{name: "dirless rig agent on a suspended rig", agents: []config.Agent{generic}, rigs: []config.Rig{suspendedRig}, template: "rig-a/worker"},
+		{name: "suspended dirless rig agent", agents: []config.Agent{suspendedGeneric}, rigs: []config.Rig{liveRig}, template: "rig-a/worker"},
+		{
+			name:   "dirless rig agent beside a rig-bound agent of the same name",
+			agents: []config.Agent{generic, {Name: "worker", Dir: "rig-b"}}, rigs: []config.Rig{liveRig, {Name: "rig-b"}},
+			template: "rig-a/worker", wake: true,
+		},
+		{name: "dirless rig agent under a rig that is not configured", agents: []config.Agent{generic}, rigs: []config.Rig{liveRig}, template: "r9/worker"},
+		{
+			name:   "only rig-bound agents of the name, under a third rig",
+			agents: []config.Agent{bound, {Name: "worker", Dir: "rig-b"}}, rigs: []config.Rig{liveRig, {Name: "rig-b"}, {Name: "rig-c"}},
+			template: "rig-c/worker",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			cfg := &config.City{
+				ResolvedWorkspaceName: "gc-test",
+				Rigs:                  tc.rigs,
+				Agents:                tc.agents,
+				NamedSessions:         []config.NamedSession{{Template: "worker", Mode: "on_demand", Scope: "rig", Dir: "rig-a"}},
+			}
+			name := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, tc.template)
+			info := sessiontest.SeedBead(t, beads.Bead{
+				ID:     "mc-session-1",
+				Status: "open",
+				Type:   "session",
+				Metadata: map[string]string{
+					"configured_named_session":  "true",
+					"state":                     "asleep",
+					"session_name":              name,
+					"template":                  tc.template,
+					"configured_named_identity": tc.template,
+					"configured_named_mode":     "on_demand",
+					"wake_request":              "explicit",
+				},
+			})
+
+			cs := &controllerState{cityPath: cityPath, cfg: cfg, cityBeadStore: beads.NewMemStore(), sp: runtime.NewFake()}
+			refusal, _ := cs.WakeStartRefusal(info)
+			if willStart := refusal == ""; willStart != tc.wake {
+				t.Errorf("wake verdict: refusal %q, want will-start %t", refusal, tc.wake)
+			}
+
+			input := buildAwakeInputFromReconciler(cfg, cityPath, []session.Info{info},
+				nil, nil, nil, nil, nil, nil, nil, nil, runtime.NewFake(), time.Now().UTC())
+			got := ComputeAwakeSet(input)[name]
+			if woke := got.ShouldWake && got.Reason == "explicit-wake"; woke != tc.wake {
+				t.Errorf("awake decision = %+v, want an explicit-wake wake %t", got, tc.wake)
+			}
+		})
+	}
+}
+
 // TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes pins the
 // contract for a mode=always named session that was put to sleep after churn:
 // if named-session metadata survives, the next awake-set pass must re-wake it.
@@ -980,5 +1127,73 @@ func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) 
 	}
 	if got.Reason != "named-always" {
 		t.Errorf("wake reason = %q, want named-always", got.Reason)
+	}
+}
+
+func pendingProbeAwakeBead() beads.Bead {
+	return beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":        "asleep",
+			"session_name": "s-worker",
+			"template":     "worker",
+		},
+	}
+}
+
+// Only a live runtime can raise an interaction. Probing a dead target lets an
+// outage (a failing probe reads as "unknown", which counts as pending) turn an
+// asleep session into a wake candidate.
+func TestAwakeInputSkipsPendingProbeForNonAliveTargets(t *testing.T) {
+	sp := runtime.NewFake()
+	sp.PendingErrors["s-worker"] = fmt.Errorf("capture-pane timed out: %w", runtime.ErrRuntimeUnavailable)
+	sessionBead := pendingProbeAwakeBead()
+
+	input, observationErrors := buildAwakeInputFromReconcilerWithObservationErrors(
+		&config.City{Agents: []config.Agent{{Name: "worker"}}},
+		"",
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+		nil, nil, nil, nil, nil, nil, nil,
+		[]wakeTarget{{info: sessiontest.SeedBead(t, sessionBead), alive: false}},
+		sp,
+		time.Now().UTC(),
+	)
+
+	if input.PendingSessions["s-worker"] {
+		t.Fatal("PendingSessions[s-worker] = true for a dead target, want false")
+	}
+	if err, ok := observationErrors["s-worker"]; ok {
+		t.Fatalf("observationErrors[s-worker] = %v for a dead target, want none", err)
+	}
+	if n := sp.CountCalls("Pending", "s-worker"); n != 0 {
+		t.Fatalf("Pending probed %d times for a dead target, want 0", n)
+	}
+}
+
+// An unknown pending answer on a live target marks the session pending and
+// records an observation error, so its lifecycle is deferred this tick.
+func TestAwakeInputDefersLifecycleOnPendingUnknown(t *testing.T) {
+	sp := runtime.NewFake()
+	sp.PendingErrors["s-worker"] = errors.New("capture-pane: fork failed")
+	sessionBead := pendingProbeAwakeBead()
+	sessionBead.Metadata["state"] = "active"
+
+	input, observationErrors := buildAwakeInputFromReconcilerWithObservationErrors(
+		&config.City{Agents: []config.Agent{{Name: "worker"}}},
+		"",
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+		nil, nil, nil, nil, nil, nil, nil,
+		[]wakeTarget{{info: sessiontest.SeedBead(t, sessionBead), alive: true}},
+		sp,
+		time.Now().UTC(),
+	)
+
+	if !input.PendingSessions["s-worker"] {
+		t.Fatal("PendingSessions[s-worker] = false on an unknown pending answer, want true")
+	}
+	if err := observationErrors["s-worker"]; !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("observationErrors[s-worker] = %v, want an error wrapping ErrRuntimeUnavailable", err)
 	}
 }

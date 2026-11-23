@@ -79,14 +79,16 @@ func TestReconcileSessionBeadsFastPathGetBudget(t *testing.T) {
 
 			// Count only the reconcile tick itself, not the harness setup above.
 			counting.reset()
-			reconcileSessionBeads(
+			reconcileSessionBeadsAtPath(
 				context.Background(),
+				env.city,
 				[]beads.Bead{session},
 				env.desiredState,
 				cfgNames,
 				env.cfg,
 				env.sp,
 				counting,
+				nil,
 				nil,
 				nil,
 				nil,
@@ -102,6 +104,7 @@ func TestReconcileSessionBeadsFastPathGetBudget(t *testing.T) {
 				0,
 				&env.stdout,
 				&env.stderr,
+				withAsyncDrainAckStopTracker(env.stops),
 			)
 
 			// If a future change reintroduces a re-Get on this path, this

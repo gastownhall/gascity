@@ -11,7 +11,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//examples:all_examples",
         "//examples/bd/dolt:pack_files",
         "//examples/gastown:pack_files",
         "//examples/hyperscale:pack_files",
@@ -27,6 +27,24 @@ go_test(
     ],
 )
 
+# Every example city and pack, for tests that enumerate or walk examples/
+# (gc init --from, config validation, pack lint). Each example is its own
+# package, so a glob here cannot reach them.
+filegroup(
+    name = "all_examples",
+    srcs = [
+        "//examples/bd:pack_files",
+        "//examples/bd/dolt:pack_files",
+        "//examples/gastown:pack_files",
+        "//examples/hyperscale:pack_files",
+        "//examples/lifecycle:pack_files",
+        "//examples/storage:pack_files",
+        "//examples/swarm:pack_files",
+        "//examples/t3bridge-gastown:pack_files",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -35,6 +53,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

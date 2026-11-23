@@ -264,7 +264,9 @@ func newRemoteHTTPClients(opts RemoteOptions) (rest, stream *http.Client, err er
 				Timeout:   remoteDialTimeout,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			TLSClientConfig:       tlsCfg,
+			// Each transport needs its own config: a Transport writes NextProtos
+			// into it on first use while a sibling would clone it to dial.
+			TLSClientConfig:       tlsCfg.Clone(),
 			TLSHandshakeTimeout:   remoteTLSHandshakeTimeout,
 			ResponseHeaderTimeout: remoteResponseHeaderTimeout,
 			ForceAttemptHTTP2:     true,

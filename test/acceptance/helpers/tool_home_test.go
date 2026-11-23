@@ -2,7 +2,9 @@ package acceptancehelpers
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -176,6 +178,9 @@ func assertBdSawNoHostHome(t *testing.T, canary string, envs []map[string]string
 	}
 }
 
+// newCanaryEnv builds an Env whose gc side keeps the (canary) host HOME, the
+// way the real-provider tiers run (WithHostHome), so these tests prove the bd
+// and dolt re-homing on its own rather than through NewEnv's isolated HOME.
 func newCanaryEnv(t *testing.T) *Env {
 	t.Helper()
 	root := t.TempDir()
@@ -186,7 +191,7 @@ func newCanaryEnv(t *testing.T) *Env {
 			t.Fatal(err)
 		}
 	}
-	return NewEnv("", gcHome, runtimeDir)
+	return NewEnv("", gcHome, runtimeDir).WithHostHome()
 }
 
 // The TestMain schema probe runs before any Env exists, on the test process's
@@ -208,7 +213,7 @@ func TestProvisionBeadsDatabaseNeverSeesTheHostHome(t *testing.T) {
 	bd, logDir := envRecordingBD(t)
 	env := newCanaryEnv(t)
 	if env.Get("HOME") != canary {
-		t.Fatalf("Env HOME = %q, want the (canary) host HOME gc needs", env.Get("HOME"))
+		t.Fatalf("Env HOME = %q, want the (canary) host HOME WithHostHome gives gc", env.Get("HOME"))
 	}
 	up := &ExternalDolt{Host: "127.0.0.1", Port: "1", Database: "canary_db"}
 	up.ProvisionBeadsDatabase(t, env, bd, filepath.Join(t.TempDir(), "provision"), "hosted")
@@ -223,7 +228,7 @@ func TestProvisionBeadsDatabaseNeverSeesTheHostHome(t *testing.T) {
 	untouched()
 }
 
-// gc forks bd with the Env's real HOME. The bd it finds on a topology's PATH
+// A gc on the operator's HOME (WithHostHome) forks bd with it. The bd it finds on a topology's PATH
 // must re-home itself.
 func TestTopologyPathBdNeverSeesTheHostHome(t *testing.T) {
 	canary, untouched := hostCanary(t)
@@ -234,10 +239,10 @@ func TestTopologyPathBdNeverSeesTheHostHome(t *testing.T) {
 	if found == "" {
 		t.Fatal("no bd on the topology PATH")
 	}
-	cmd := exec.Command(found, "list") //nolint:gosec // resolved test wrapper
+	cmd, _ := boundedToolCommand(t, acceptanceToolCommandTimeout, found, "list")
 	cmd.Env = env.List()
 	if env.Get("HOME") != canary {
-		t.Fatalf("the gc-side env should keep the (canary) host HOME, got %q", env.Get("HOME"))
+		t.Fatalf("the gc-side env should hold the (canary) host HOME from WithHostHome, got %q", env.Get("HOME"))
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd via PATH: %v\n%s", err, out)
@@ -259,7 +264,7 @@ func TestEnvPathBdNeverSeesTheHostHome(t *testing.T) {
 	if found == "" || found == bd {
 		t.Fatalf("bd on the Env PATH = %q, want the tool-home wrapper around %s", found, bd)
 	}
-	cmd := exec.Command(found, "list") //nolint:gosec // resolved test wrapper
+	cmd, _ := boundedToolCommand(t, acceptanceToolCommandTimeout, found, "list")
 	cmd.Env = env.List()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd via PATH: %v\n%s", err, out)
@@ -279,9 +284,9 @@ func TestToolHomeHonoursExplicitUserLevelLayers(t *testing.T) {
 		With("XDG_CONFIG_HOME", seeded).
 		With(bdSharedServerConfigEnv, "")
 
-	direct := exec.Command(bd, "list") //nolint:gosec // test stub
+	direct, _ := boundedToolCommand(t, acceptanceToolCommandTimeout, bd, "list")
 	direct.Env = env.ToolList()
-	viaPath := exec.Command(findInPath(env.Get("PATH"), "bd"), "list") //nolint:gosec // resolved test wrapper
+	viaPath, _ := boundedToolCommand(t, acceptanceToolCommandTimeout, findInPath(env.Get("PATH"), "bd"), "list")
 	viaPath.Env = env.List()
 	for _, cmd := range []*exec.Cmd{direct, viaPath} {
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -321,16 +326,18 @@ func TestRealBdProvisionLeavesTheHostHomeAlone(t *testing.T) {
 	}
 	env := newCanaryEnv(t)
 	env.With("PATH", doltDir+string(os.PathListSeparator)+env.Get("PATH"))
-
 	workspace := filepath.Join(t.TempDir(), "provision")
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	up := &ExternalDolt{Host: "127.0.0.1", Port: "1", Database: "canary_db"}
-	cmd := up.provisionCommand(env, realBD, workspace, "hosted")
+	cmd, ctx := up.provisionCommand(t, env, realBD, workspace, "hosted")
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	_ = cmd.Run() // nothing listens on port 1; only what bd touched on the way matters
+	_ = cmd.Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("bd provision exceeded %s:\n%s", acceptanceToolCommandTimeout, out.String())
+	}
 
 	if calls, err := os.ReadFile(doltLog); err == nil && strings.Contains(string(calls), canary) {
 		t.Errorf("bd ran dolt against the host home:\n%s\nbd output:\n%s", calls, out.String())
@@ -339,4 +346,22 @@ func TestRealBdProvisionLeavesTheHostHomeAlone(t *testing.T) {
 		t.Errorf("bd created the host's shared-server root\nbd output:\n%s", out.String())
 	}
 	untouched()
+}
+
+// TestToolCommandDoesNotInheritTheTestCwd pins that a bare probe runs from its
+// own tool home. bd walks up from its working directory looking for a .beads,
+// and an inherited cwd (the package directory, under the developer's home on
+// a dev box) made `bd init --help` read the real ~/.beads/config.yaml.
+func TestToolCommandDoesNotInheritTheTestCwd(t *testing.T) {
+	cmd := ToolCommand(t, "/bin/true")
+	if cmd.Dir == "" {
+		t.Fatal("ToolCommand left Dir empty, so the probe inherits the test process's cwd")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel, err := filepath.Rel(cmd.Dir, cwd); err == nil && !strings.HasPrefix(rel, "..") {
+		t.Fatalf("ToolCommand Dir %s contains the test cwd %s", cmd.Dir, cwd)
+	}
 }

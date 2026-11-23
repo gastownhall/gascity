@@ -171,10 +171,10 @@ func TestStateCache_SupersededRefreshKeepsSessionEvictedMidFetch(t *testing.T) {
 }
 
 // TestStateCache_SupersededRefreshDoesNotOverwriteNewerPublish covers the
-// overlap a dirty read allows: currentState forgets the in-flight singleflight
-// when dirty, so a newer fetch can start and publish while an older one is
-// still running. The older one, superseded and finishing last, must not
-// overwrite the newer observation.
+// overlap an invalidation allows: refreshes are keyed by cache generation, so
+// a newer fetch can start and publish while an older one is still running.
+// The older one, superseded and finishing last, must not overwrite the newer
+// observation.
 func TestStateCache_SupersededRefreshDoesNotOverwriteNewerPublish(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})

@@ -5,9 +5,13 @@ go_library(
     srcs = [
         "capability.go",
         "doc.go",
+        "flag_beads_allow_schema_behind_migrate.go",
         "flag_beads_conditional_writes.go",
         "flag_beads_guarded_release.go",
         "flag_daemon_formula_v2.go",
+        "flag_ops_content.go",
+        "flag_ops_control.go",
+        "flag_ops_lifecycle.go",
         "flags.go",
         "fortest.go",
         "mode.go",
@@ -30,6 +34,7 @@ go_test(
         "boundary_test.go",
         "capability_test.go",
         "flag_beads_guarded_release_test.go",
+        "flag_ops_test.go",
         "flags_test.go",
         "fortest_test.go",
         "graduation_test.go",
@@ -45,10 +50,12 @@ go_test(
         ":gate_srcs",
         "//:deps.env",
         "//:go.mod",
+        "//internal/opjournal/legacyop:bazel_go_srcs",
     ],
     embed = [":rollout"],
     deps = [
         "//internal/config",
+        "//internal/fsys",
         "//internal/testenv",
     ],
 )
@@ -67,6 +74,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

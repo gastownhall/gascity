@@ -1,0 +1,26 @@
+diff -ruN a/unused/unused.go b/unused/unused.go
+--- a/unused/unused.go	2026-10-10 05:00:00.231373148 +0000
++++ b/unused/unused.go	2026-10-10 05:00:00.258562610 +0000
+@@ -263,6 +263,13 @@
+ }
+ 
+ type graph struct {
++	// enc memoizes objectpath's traversal of each package across
++	// objectToObject calls. objectpath.For uses a fresh Encoder per call, so
++	// every exported field or method re-walks its whole package: quadratic
++	// in package size (gascity third_party/patches; ~220 s of a 1500-file
++	// test package's analysis, 4 s with the shared Encoder).
++	enc objectpath.Encoder
++
+ 	pkg        *types.Package
+ 	info       *types.Info
+ 	files      []*ast.File
+@@ -336,7 +343,7 @@
+ 
+ 	var path ObjectPath
+ 	if relevant {
+-		objPath, _ := objectpath.For(obj)
++		objPath, _ := g.enc.For(obj)
+ 		if objPath != "" {
+ 			path = ObjectPath{
+ 				PkgPath: obj.Pkg().Path(),

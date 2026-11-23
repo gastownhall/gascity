@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
@@ -81,7 +86,7 @@ STUB_ENV = "present"
 	if err != nil {
 		t.Fatalf("workerHandleForSessionWithConfig: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testActorIn(t, session.ActorAgent, cityDir)); err != nil {
 		t.Fatalf("handle.Start: %v", err)
 	}
 
@@ -1301,7 +1306,7 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, cityDir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1311,8 +1316,9 @@ session_id_flag = "--session-id"
 	}
 
 	sp.Calls = nil
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("handle.Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
+		t.Fatalf("handle.Attach: %v", err)
 	}
 
 	start := sp.LastStartConfig(info.SessionName)
@@ -1325,6 +1331,99 @@ session_id_flag = "--session-id"
 	}
 	if strings.Contains(start.Command, "--old-resume") {
 		t.Fatalf("start command = %q, still used stale resume flag", start.Command)
+	}
+}
+
+// TestWorkerHandleAttachStartsDeadSessionWithStartupPrompt pins the
+// `gc session attach` path: with no controller running, a session bead that is
+// still awake but has no runtime is started by Attach itself, through the worker
+// factory's resolved hints. With no session key the launch is a fresh
+// conversation, so the hints must carry the startup prompt and the delivered
+// marker, or the agent comes up without its prompt.
+func TestWorkerHandleAttachStartsDeadSessionWithStartupPrompt(t *testing.T) {
+	cityDir := t.TempDir()
+	// After TempDir: cleanups run LIFO, so the memoized events recorder closes
+	// before the city directory is removed (Windows cannot remove an open file).
+	resetCLIFactoryRecorders(t)
+	// The fake runtime never executes the command, but the resolver LookPaths
+	// it, so use a path that exists on every OS.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	writePhase0InterfaceCity(t, cityDir, fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+prompt_template = "prompts/worker.template.md"
+
+[providers.stub]
+command = %q
+resume_flag = "--resume"
+resume_style = "flag"
+`, filepath.ToSlash(exe)))
+	if err := os.MkdirAll(filepath.Join(cityDir, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "prompts", "worker.template.md"), []byte(contractPromptBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	// gc session attach hands the session manager and the worker handle the
+	// session-class store (cliSessionStore), not the city work store.
+	store = cliSessionStore(store, cfg, cityDir)
+
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "worker", Title: "Probe", Command: filepath.ToSlash(exe), WorkDir: t.TempDir(), Provider: "stub",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// The host rebooted: the runtime is gone, the bead still says awake, and the
+	// provider never reported a session key to resume.
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "session_key", ""); err != nil {
+		t.Fatalf("SetMetadata(session_key): %v", err)
+	}
+
+	handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSessionWithConfig: %v", err)
+	}
+	sp.Calls = nil
+	if err := handle.Attach(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
+		t.Fatalf("handle.Attach: %v", err)
+	}
+
+	start := sp.LastStartConfig(info.SessionName)
+	if start == nil {
+		t.Fatalf("Attach did not start %q", info.SessionName)
+	}
+	if strings.Contains(start.Command, "--resume") {
+		t.Fatalf("start command = %q, want a fresh launch with no session key", start.Command)
+	}
+	if !strings.Contains(start.Nudge, contractPromptBody) {
+		t.Errorf("start Nudge = %q, want it to carry the startup prompt", abbreviate(start.Nudge))
+	}
+	if got := start.Env[startupPromptDeliveredEnv]; got != "1" {
+		t.Errorf("start Env[%s] = %q, want 1", startupPromptDeliveredEnv, got)
 	}
 }
 
@@ -1355,6 +1454,10 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
@@ -1368,7 +1471,7 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("workerHandleForSessionTargetWithConfig: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
 		t.Fatalf("handle.Kill: %v", err)
 	}
 	// The live event recorder now wired into the CLI factory (#5859) makes
@@ -1423,6 +1526,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	backing = cliSessionStore(backing, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, backing, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "/bin/echo", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{Command: "/bin/echo"}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -1447,6 +1554,67 @@ command = "/bin/echo"
 	}
 	if hits > 2 {
 		t.Fatalf("store.Get(%q) called %d times, want at most 2; all Get IDs: %v", info.ID, hits, store.getIDs)
+	}
+}
+
+// TestWorkerObserveSessionTargetWithConfigNameTargetIssuesOneExactIDGet pins
+// the fallout of the duplicate exact-id probe removed from
+// workerHandleForSessionTargetWithRuntimeHintsWithConfig: a session_name
+// target is never a bead ID, so the exact-id probe for it always misses, and
+// before this it missed twice — once in ResolveSessionRecordByExactID, once
+// again inside the ResolveSessionID fallback it fed into. Now it misses
+// once; the name lookup proceeds straight to ResolveLiveSessionIDByName.
+// `gc nudge poll` repeats this resolve every few seconds per live session,
+// each miss a `bd show` CLI fork on a non-mem store.
+func TestWorkerObserveSessionTargetWithConfigNameTargetIssuesOneExactIDGet(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	backing, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	backing = cliSessionStore(backing, cfg, cityDir)
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, backing, sp, cfg)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "/bin/echo", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{Command: "/bin/echo"}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	store := &sessionGetSpyStore{Store: backing}
+	obs, err := workerObserveSessionTargetWithConfig(cityDir, store, sp, cfg, info.SessionName)
+	if err != nil {
+		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("obs.Running = false, want true after Create started runtime")
+	}
+
+	var hits int
+	for _, id := range store.getIDs {
+		if id == info.SessionName {
+			hits++
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("store.Get(%q) called %d times, want exactly 1; all Get IDs: %v", info.SessionName, hits, store.getIDs)
 	}
 }
 
@@ -1521,6 +1689,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "stub", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -2292,6 +2464,7 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedRuntimeOnInco
 			"stub": {
 				ReadyPromptPrefix: "resolved-ready>",
 				ReadyDelayMs:      321,
+				NotReadyMarkers:   []string{"resolved-not-ready"},
 			},
 		},
 	}
@@ -2344,6 +2517,9 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedRuntimeOnInco
 	}
 	if got, want := runtimeCfg.Hints.ReadyDelayMs, 321; got != want {
 		t.Fatalf("Hints.ReadyDelayMs = %d, want %d", got, want)
+	}
+	if got, want := runtimeCfg.Hints.NotReadyMarkers, []string{"resolved-not-ready"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Hints.NotReadyMarkers = %q, want %q", got, want)
 	}
 }
 
@@ -2398,6 +2574,15 @@ func TestWorkerSessionCreateHintsEnablesMouse(t *testing.T) {
 	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"})
 	if !hints.MouseOn {
 		t.Error("workerSessionCreateHints().MouseOn = false, want true (gc session new unmanaged-direct wheel→scrollback, ga-c4w)")
+	}
+}
+
+// `gc session new` starts the session from these hints, so the provider's
+// not_ready_markers must reach the runtime that delivers its first turn.
+func TestWorkerSessionCreateHintsCarriesNotReadyMarkers(t *testing.T) {
+	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub", NotReadyMarkers: []string{"still loading"}})
+	if want := []string{"still loading"}; !reflect.DeepEqual(hints.NotReadyMarkers, want) {
+		t.Fatalf("NotReadyMarkers = %q, want %q", hints.NotReadyMarkers, want)
 	}
 }
 
@@ -2695,6 +2880,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
@@ -2718,7 +2907,7 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("factory.SessionByID: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
 		t.Fatalf("handle.Kill: %v", err)
 	}
 
@@ -2746,5 +2935,149 @@ command = "/bin/echo"
 	}
 	if !strings.Contains(string(found.Payload), info.SessionName) {
 		t.Fatalf("%q payload = %s, want it to name session %q", events.WorkerOperation, string(found.Payload), info.SessionName)
+	}
+}
+
+// An attachment probe that cannot tell answers attached with an unavailable
+// error, so the awake input and the detached-at clock defer instead of reading
+// "detached". A probe error that does not itself wrap the sentinel is still
+// "unknown".
+func TestWorkerSessionTargetAttachedReportsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		probeErr error
+	}{
+		{name: "unavailable", probeErr: fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)},
+		{name: "untyped", probeErr: fmt.Errorf("attach probe: unparsable client count")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start(worker): %v", err)
+			}
+			sp.AttachedErrors["worker"] = tc.probeErr
+
+			attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, "worker")
+			if !attached || !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, tc.probeErr) {
+				t.Fatalf("workerSessionTargetAttachedWithConfig = (%v, %v), want (true, unavailable wrapping %v)", attached, err, tc.probeErr)
+			}
+		})
+	}
+}
+
+// attachmentHolds owns the classification every destructive gate shares: only
+// runtime.ErrSessionNotFound reads as "not attached". An unavailable probe
+// whose text happens to match runtime.IsSessionGone still holds.
+func TestAttachmentHoldsClassifiesWithErrorsIs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		attached  bool
+		probeErr  error
+		wantHolds bool
+		wantErr   bool
+	}{
+		{name: "attached", attached: true, wantHolds: true},
+		{name: "confirmed detached"},
+		{name: "session not found", probeErr: fmt.Errorf("probe: %w", runtime.ErrSessionNotFound)},
+		{name: "unavailable", probeErr: fmt.Errorf("probe timed out: %w", runtime.ErrRuntimeUnavailable), wantHolds: true, wantErr: true},
+		{name: "unavailable text that IsSessionGone matches", probeErr: fmt.Errorf("exec: \"tmux\": executable file not found in $PATH: %w", runtime.ErrRuntimeUnavailable), wantHolds: true, wantErr: true},
+		{name: "untyped", probeErr: errors.New("probe: unparsable client count"), wantHolds: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			sp.SetAttached("worker", tc.attached)
+			if tc.probeErr != nil {
+				sp.AttachedErrors["worker"] = tc.probeErr
+			}
+
+			holds, err := attachmentHolds(sp, "worker")
+			if holds != tc.wantHolds || (err != nil) != tc.wantErr {
+				t.Fatalf("attachmentHolds = (%v, %v), want holds=%v err=%v", holds, err, tc.wantHolds, tc.wantErr)
+			}
+			if err != nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("attachmentHolds error = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
+			}
+		})
+	}
+}
+
+// TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch is the
+// #8539 end-to-end guard: a bead reconciled from a provider with an explicit
+// resume command to one that resumes by flag/style must resolve a worker
+// runtime with an EMPTY resume command. Pre-fix, the reconciler left the old
+// provider's resume_command pinned on the bead, and the resolver's fallback
+// (firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand)) replayed
+// the old provider's command on every resume.
+func TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "true old-exec"})
+
+	// Tick 1: the bead is created on a provider whose resume story is an
+	// explicit resume command alone.
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName:     "worker",
+			Command:          "true old-exec",
+			ResolvedProvider: &config.ResolvedProvider{Name: "oldprov", ResumeCommand: "true old-resume {{.SessionKey}}"},
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	created := allSessionBeads(t, store)
+	if len(created) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(created))
+	}
+	if got := created[0].Metadata["resume_command"]; got == "" {
+		t.Fatal("tick 1: resume_command was not stamped at creation")
+	}
+
+	// Tick 2: the agent's provider becomes one that resumes by flag/style
+	// with no resume command; reconciliation clears the stale command.
+	ds["worker"] = TemplateParams{
+		TemplateName: "worker",
+		Command:      "true new-exec",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name: "newprov", ResumeFlag: "--continue", ResumeStyle: "flag",
+		},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if got := allSessionBeads(t, store)[0].Metadata["resume_command"]; got != "" {
+		t.Fatalf("tick 2: reconciled resume_command = %q, want empty", got)
+	}
+
+	// Reread the refreshed session information and resolve the runtime from
+	// it, as the resume path does.
+	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(created[0].ID)
+	if err != nil {
+		t.Fatalf("rereading session %s: %v", created[0].ID, err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "newprov"}},
+		Providers: map[string]config.ProviderSpec{
+			"newprov": {Command: "true", Args: []string{"new-exec"}, ResumeFlag: "--continue", ResumeStyle: "flag"},
+		},
+	}
+	resolved, err := resolvedWorkerRuntimeWithConfig("", cfg, info, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if got := resolved.Resume.ResumeCommand; got != "" {
+		t.Fatalf("Resume.ResumeCommand = %q, want empty (the stale oldprov command must not survive the switch)", got)
+	}
+	if got := resolved.Resume.ResumeFlag; got != "--continue" {
+		t.Fatalf("Resume.ResumeFlag = %q, want --continue", got)
+	}
+	if got := resolved.Resume.ResumeStyle; got != "flag" {
+		t.Fatalf("Resume.ResumeStyle = %q, want flag", got)
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
 }

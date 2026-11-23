@@ -1,0 +1,247 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
+)
+
+// postStartObservationBound is the longest runPreparedStartCandidate waits for
+// any one observation it makes after provider.Start has returned: the
+// ErrStateSync recovery, the ErrSessionExists collision check, the
+// post-stability liveness check and the pane read of a resume that check finds
+// dead (postStartDeathPane). The call under the wait can hang on a wedged
+// tmux subprocess or a stalled store and nothing cancels it, so on expiry the
+// wait is abandoned instead of holding the async start slot. An abandoned
+// observation defers the start as runtime-unavailable (SESSION-RUNTIME-009);
+// an abandoned pane read reads empty, and the death the liveness check already
+// found still counts.
+const postStartObservationBound = 10 * time.Second
+
+// startFailureProbeBudget is the total time a failed start spends on the two
+// probes it makes to classify the failure, the rate-limit screen peek and the
+// pending-create identity reads, together. A peek that does not answer reads as
+// "no rate-limit screen". A read that does not answer leaves the attribution
+// unknown, so the start defers instead of rolling the create back.
+const startFailureProbeBudget = 10 * time.Second
+
+// commitPhaseBound is the longest the async start goroutine waits for the
+// commit and settle phase that follows runPreparedStartCandidate while it holds
+// its start slot. The phase reads and writes the session store and can stop or
+// probe the runtime, none of it cancellable, so on expiry the wait is abandoned
+// and the slot is released (SESSION-RUNTIME-035). The bound covers the whole
+// phase, so it is wider than one post-start observation.
+const commitPhaseBound = 30 * time.Second
+
+// postStartObservationKey names what ObserveBounded keeps at one in-flight
+// observation: one session in one city. The city is part of it because two
+// cities run sessions of the same name, and one city's wedged runtime must not
+// defer the other's. A path and a session name never contain NUL, so the
+// joined key is unambiguous.
+func postStartObservationKey(cityPath, sessionName string) string {
+	return cityPath + "\x00" + sessionName
+}
+
+// observeSessionBounded runs observe, an observation of the session sessionName
+// in cityPath, for no longer than ctx allows. It goes through
+// worker.ObserveBounded, so at most one observation of the session is in flight
+// and an expired wait is an error wrapping runtime.ErrRuntimeUnavailable. A
+// blank session name is not bounded: it never reaches the runtime (the
+// unbounded observation answers runtime.ErrSessionNotFound without any I/O), so
+// there is no call to wedge.
+func observeSessionBounded[T any](ctx context.Context, cityPath, sessionName string, observe func() (T, error)) (T, error) {
+	if strings.TrimSpace(sessionName) == "" {
+		return observe()
+	}
+	return worker.ObserveBounded(ctx, postStartObservationKey(cityPath, sessionName), func(context.Context) (T, error) {
+		return observe()
+	})
+}
+
+// workerObserveSessionTargetBounded is
+// workerObserveSessionTargetWithRuntimeHintsWithConfig held to
+// postStartObservationBound. The bound is derived from ctx, so it also ends
+// when the controller does, and it covers the handle's store reads as well as
+// the runtime probes behind them.
+func workerObserveSessionTargetBounded(ctx context.Context, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.LiveObservation, error) {
+	ctx, cancel := context.WithTimeout(ctx, postStartObservationBound)
+	defer cancel()
+	return observeSessionBounded(ctx, cityPath, target, func() (worker.LiveObservation, error) {
+		return workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, processNames)
+	})
+}
+
+// observeRuntimeProviderLivenessBounded is observeRuntimeProviderLiveness held
+// to postStartObservationBound, for a start with no session bead to resolve a
+// handle from.
+func observeRuntimeProviderLivenessBounded(ctx context.Context, cityPath string, sp runtime.Provider, name string, processNames []string) (running bool, alive bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, postStartObservationBound)
+	defer cancel()
+	type liveness struct{ running, alive bool }
+	got, err := observeSessionBounded(ctx, cityPath, name, func() (liveness, error) {
+		isRunning, isAlive, observeErr := observeRuntimeProviderLiveness(sp, name, processNames)
+		return liveness{running: isRunning, alive: isAlive}, observeErr
+	})
+	return got.running, got.alive, err
+}
+
+// readPendingCreateIdentityBounded is readPendingCreateIdentity with every
+// metadata read held to ctx. A read that does not answer in time is
+// unverifiable like any other failed read, so the attribution comes out
+// unknown unless the reads that did answer already decide it.
+func readPendingCreateIdentityBounded(ctx context.Context, cityPath string, info sessionpkg.Info, sessionName string, sp runtime.Provider) pendingCreateIdentity {
+	return readPendingCreateIdentityVia(info, sp, func(key string) (string, error) {
+		return observeSessionBounded(ctx, cityPath, sessionName, func() (string, error) {
+			return sp.GetMeta(sessionName, key)
+		})
+	})
+}
+
+// commitHandoff is the one word that decides who ends a start's runtime lease
+// once the commit phase is bounded: the waiter (the start goroutine, which
+// holds the async slot) or the commit closure. It starts waiter-owned and
+// moves out of that state exactly once:
+//   - claim, the closure's first instruction, takes the lease for the commit;
+//     the closure then commits, and releases the lease when it returns;
+//   - abandon, the waiter's move once the bound has returned, gives the lease
+//     up instead: it drops the name's flock and nothing else
+//     (session.RuntimeLease.Abandon), and any closure that starts afterwards
+//     finds it lost and returns at once.
+//
+// Whoever moves it first wins, so a commit that never started cannot land
+// against a lease the waiter has dropped (a lease's record still satisfies
+// HoldsMeta after Abandon), and a commit that is running keeps its lease.
+type commitHandoff struct{ state atomic.Int32 }
+
+const (
+	handoffWaiter    int32 = iota // initial: nobody has taken the lease
+	handoffCommit                 // the commit closure took the lease
+	handoffAbandoned              // the waiter abandoned the lease
+)
+
+// claim reports whether the commit closure won the lease. A false return means
+// the waiter abandoned it first and the closure must do nothing.
+func (h *commitHandoff) claim() bool {
+	return h.state.CompareAndSwap(handoffWaiter, handoffCommit)
+}
+
+// abandon reports whether the waiter won the lease, and if so abandons it. It
+// makes no store call, runs from any goroutine, and is a no-op that returns
+// false once the commit closure has claimed the lease.
+func (h *commitHandoff) abandon(lease *sessionpkg.RuntimeLease) bool {
+	if !h.state.CompareAndSwap(handoffWaiter, handoffAbandoned) {
+		return false
+	}
+	lease.Abandon()
+	return true
+}
+
+// runHandedOffCommit is the commit closure of commitAsyncStartBounded. It
+// claims the lease first and returns at once, committing and touching nothing,
+// if the waiter abandoned it. A closure that wins releases the lease whatever
+// the commit does, a panic included, after it ends the lease watch.
+func runHandedOffCommit(h *commitHandoff, lease *sessionpkg.RuntimeLease, unwatch func(), commit func() bool) (bool, error) {
+	if !h.claim() {
+		return false, nil
+	}
+	defer lease.Release()
+	if unwatch != nil {
+		unwatch()
+	}
+	return commit(), nil
+}
+
+// Dispositions of the runtime lease the log line of an unavailable commit
+// names.
+const (
+	leaseRetainedByCommit = "runtime lease retained by the running commit"
+	leaseAbandoned        = "runtime lease abandoned (flock released, record left to lapse)"
+)
+
+// commitAsyncStartBounded runs commit, the start's
+// commitAsyncStartResultWithContext call, held to commitPhaseBound, under the same per-session key as the post-start
+// observations. It returns whether the commit succeeded. When the commit does
+// not answer in time, or an observation of the session is already outstanding
+// so it is refused without running, it logs commit_unavailable and returns
+// false. The waiter makes no store or runtime call at all: a commit that was
+// started keeps running on the controller's ctx and finishes on its own, and the
+// pending claim stays as it is for the reconciler's repair paths.
+//
+// lease is the runtime lease the start holds (nil when it holds none); this
+// function and the commit closure share it through a commitHandoff, and exactly
+// one of them ends it:
+//   - the commit ran to its end: the closure releases the lease (clearing its
+//     record) before it returns, so a commit that lands late does so under the
+//     lease that fences it and is not refused as stale;
+//   - the commit was refused, or has not started when the bound ends, or is
+//     still running: the waiter abandons the lease only if the closure has not
+//     claimed it, dropping the flock and leaving the record to lapse. A closure
+//     that already claimed it keeps it, flock included, until it returns, and
+//     the log line says so.
+//
+// unwatch ends the lease watch of the start. It moves into the commit closure,
+// after it claims the lease and before it commits: stopping the watch waits for
+// a read of the lease in flight, which the waiter must never wait on. The
+// waiter never calls it; the watch also ends when the lease is abandoned.
+//
+// The wait ends on the bound only, never on ctx: controller shutdown must not
+// abandon a commit, whose shutdown branch settles the row on ctx. The commit
+// itself runs on ctx unchanged.
+func commitAsyncStartBounded(
+	ctx context.Context,
+	cityPath string,
+	result startResult,
+	wave int,
+	stderr io.Writer,
+	lease *sessionpkg.RuntimeLease,
+	unwatch func(),
+	commit func() bool,
+) (committed bool) {
+	name := result.prepared.candidate.name()
+	template := result.prepared.candidate.tp.TemplateName
+	// The commit owns result from here on. The waiter keeps its own copies of
+	// the two fields it logs, so the two sides share no state after expiry.
+	started := result.started
+	phases := result.phases
+	base := ctx
+	if base == nil {
+		base = context.Background()
+	}
+	var handoff commitHandoff
+	waiterDone := false
+	defer func() {
+		// A panic out of the wait (the commit's own is recovered inside it)
+		// must not strand the flock. Abandon, as the waiter does: no store call.
+		if !waiterDone {
+			handoff.abandon(lease)
+		}
+	}()
+	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(base), commitPhaseBound)
+	defer cancel()
+	committed, err := observeSessionBounded(waitCtx, cityPath, name, func() (bool, error) {
+		return runHandedOffCommit(&handoff, lease, unwatch, commit)
+	})
+	abandoned := handoff.abandon(lease)
+	waiterDone = true
+	if err == nil {
+		return committed
+	}
+	if lease != nil {
+		disposition := leaseRetainedByCommit
+		if abandoned {
+			disposition = leaseAbandoned
+		}
+		err = fmt.Errorf("%w; %s", err, disposition)
+	}
+	logLifecycleOutcome(stderr, "start", wave, name, template, "commit_unavailable", started, time.Now(), err, phases)
+	return false
+}

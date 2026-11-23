@@ -94,7 +94,7 @@ func (p *retainedDeadPaneProvider) Stop(name string) error {
 
 func alwaysNamedDeadPaneEnv(t *testing.T, suspended bool) (*reconcilerTestEnv, string) {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.rec = events.NewFake()
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city", SuspendedOnStart: suspended},
@@ -120,9 +120,9 @@ func (e *reconcilerTestEnv) reconcileWithProvider(sessions []beads.Bead, sp runt
 		}
 	}
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
-	reconcileSessionBeads(
-		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, sp,
-		e.store, nil, nil, nil, e.dt, poolDesired, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), e.city, sessions, e.desiredState, cfgNames, e.cfg, sp,
+		e.store, nil, nil, nil, nil, e.dt, poolDesired, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 		e.startOptions...,
 	)
@@ -142,7 +142,7 @@ func openAlwaysNamedBead(env *reconcilerTestEnv, sessionName, state string) bead
 	return session
 }
 
-func eventTypes(rec *events.Fake) []string {
+func fakeRecorderEventTypes(rec *events.Fake) []string {
 	out := make([]string, 0, len(rec.Events))
 	for _, ev := range rec.Events {
 		out = append(out, ev.Type)
@@ -180,6 +180,7 @@ func crashReasonIsDeadPane(rec *events.Fake) bool {
 // and must not close the bead: the named row is the durable identity.
 func TestCleanupDeadRuntimeSessionCorpsesReapsNamedAlwaysModeDeadPaneWithoutClosing(t *testing.T) {
 	const name = "city-worker"
+	testCity := t.TempDir()
 	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
 		"session_name":                       name,
 		"template":                           "worker",
@@ -197,7 +198,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReapsNamedAlwaysModeDeadPaneWithoutClos
 
 	var stderr strings.Builder
 	rec := events.NewFake()
-	got := cleanupDeadRuntimeSessionCorpsesWithRecorder(store, nil, nil, snapshot, nil, sp, nil, rec, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(testCity, store, testSeatWork(testCity, nil, store, nil), snapshot, nil, sp, nil, nil, rec, &stderr)
 	if got != 1 || sp.stopCalls[name] != 1 {
 		t.Fatalf("cleanup = %d (Stop %q calls = %d), want the named corpse reaped once; stderr=%q", got, name, sp.stopCalls[name], stderr.String())
 	}
@@ -215,18 +216,19 @@ func TestCleanupDeadRuntimeSessionCorpsesReapsNamedAlwaysModeDeadPaneWithoutClos
 		t.Fatalf("named bead was closed as a pool corpse: state=%q close_reason=%q", after.Metadata["state"], after.Metadata["close_reason"])
 	}
 	if !crashReasonIsDeadPane(rec) {
-		t.Fatalf("cleanup events = %v, want session.crashed reason dead pane (the pane is gone before reconcile)", eventTypes(rec))
+		t.Fatalf("cleanup events = %v, want session.crashed reason dead pane (the pane is gone before reconcile)", fakeRecorderEventTypes(rec))
 	}
 }
 
 func TestCleanupThenReconcileRecordsDeadPaneBeforeWake(t *testing.T) {
 	env, name := alwaysNamedDeadPaneEnv(t, false)
+	testCity := env.city
 	p := newRetainedDeadPaneProvider(name)
 	p.presenceMeansRunning = true
 	row := openAlwaysNamedBead(env, name, string(session.StateActive))
 	snap := newSessionBeadSnapshot([]beads.Bead{row})
 
-	got := cleanupDeadRuntimeSessionCorpsesWithRecorder(env.store, nil, nil, snap, nil, p, env.clk, env.rec, &env.stderr)
+	got := cleanupDeadRuntimeSessionCorpses(testCity, env.store, testSeatWork(testCity, nil, env.store, nil), snap, nil, p, nil, env.clk, env.rec, &env.stderr)
 	if got != 1 || p.corpses[name] {
 		t.Fatalf("cleanup = %d corpse=%v, want the named pane reaped before reconcile; stderr=%q", got, p.corpses[name], env.stderr.String())
 	}
@@ -241,7 +243,7 @@ func TestCleanupThenReconcileRecordsDeadPaneBeforeWake(t *testing.T) {
 		}
 	}
 	if crashes != 1 || !crashedBeforeWoke(rec) || !crashReasonIsDeadPane(rec) {
-		t.Fatalf("events = %v, want one session.crashed (dead pane) before session.woke", eventTypes(rec))
+		t.Fatalf("events = %v, want one session.crashed (dead pane) before session.woke", fakeRecorderEventTypes(rec))
 	}
 	if p.startCalls < 1 {
 		final, _ := env.store.Get(row.ID)
@@ -266,11 +268,11 @@ func TestReconcileAlwaysNamedSessionOverDeadRetainedPane(t *testing.T) {
 		if p.startCalls < 1 || p.corpses[name] {
 			final, _ := env.store.Get(row.ID)
 			t.Fatalf("always-mode named session over a dead pane must fresh-start; startCalls=%d corpse=%v state=%q stderr=%q events=%v",
-				p.startCalls, p.corpses[name], final.Metadata["state"], env.stderr.String(), eventTypes(env.rec.(*events.Fake)))
+				p.startCalls, p.corpses[name], final.Metadata["state"], env.stderr.String(), fakeRecorderEventTypes(env.rec.(*events.Fake)))
 		}
 		rec := env.rec.(*events.Fake)
 		if !crashedBeforeWoke(rec) || !crashReasonIsDeadPane(rec) {
-			t.Fatalf("recovery events = %v, want session.crashed (reason dead pane) before session.woke", eventTypes(rec))
+			t.Fatalf("recovery events = %v, want session.crashed (reason dead pane) before session.woke", fakeRecorderEventTypes(rec))
 		}
 		final, _ := env.store.Get(row.ID)
 		if final.Status != "open" {
@@ -297,7 +299,7 @@ func TestReconcileAlwaysNamedSessionOverDeadRetainedPane(t *testing.T) {
 		}
 		rec := env.rec.(*events.Fake)
 		if !crashedBeforeWoke(rec) || !crashReasonIsDeadPane(rec) {
-			t.Fatalf("recovery events = %v, want session.crashed (reason dead pane) before session.woke", eventTypes(rec))
+			t.Fatalf("recovery events = %v, want session.crashed (reason dead pane) before session.woke", fakeRecorderEventTypes(rec))
 		}
 	})
 
@@ -327,11 +329,11 @@ func TestReconcileAlwaysNamedSessionOverDeadRetainedPane(t *testing.T) {
 		}
 		rec := env.rec.(*events.Fake)
 		if !crashReasonIsDeadPane(rec) {
-			t.Fatalf("events = %v, want a session.crashed dead-pane record even when start fails", eventTypes(rec))
+			t.Fatalf("events = %v, want a session.crashed dead-pane record even when start fails", fakeRecorderEventTypes(rec))
 		}
 		for _, ev := range rec.Events {
 			if ev.Type == events.SessionWoke {
-				t.Fatalf("session.woke recorded for a start that failed: events=%v", eventTypes(rec))
+				t.Fatalf("session.woke recorded for a start that failed: events=%v", fakeRecorderEventTypes(rec))
 			}
 		}
 	})

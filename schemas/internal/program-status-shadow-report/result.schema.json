@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "total",
+    "dropped",
+    "rows"
+  ],
+  "properties": {
+    "total": {
+      "type": "integer"
+    },
+    "dropped": {
+      "type": "integer"
+    },
+    "rows": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "required": [
+          "point",
+          "family",
+          "count",
+          "valid",
+          "agree",
+          "agree_pct",
+          "time_weighted_agree_pct",
+          "disagree_by_validity",
+          "timed",
+          "latency_p50_ms",
+          "latency_p95_ms",
+          "dropped"
+        ],
+        "properties": {
+          "point": {
+            "type": "string"
+          },
+          "family": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "valid": {
+            "type": "integer"
+          },
+          "agree": {
+            "type": "integer"
+          },
+          "agree_pct": {
+            "type": "number"
+          },
+          "time_weighted_agree_pct": {
+            "type": "number"
+          },
+          "disagree_by_validity": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "timed": {
+            "type": "integer"
+          },
+          "latency_p50_ms": {
+            "type": "integer"
+          },
+          "latency_p95_ms": {
+            "type": "integer"
+          },
+          "dropped": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

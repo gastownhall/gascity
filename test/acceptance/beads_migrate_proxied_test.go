@@ -14,7 +14,7 @@
 //
 // Two real binaries are required and the test skips typed without either:
 //   - GC_ACCEPTANCE_BD_BIN — a bd >= 1.3.0 with proxied-server support
-//     (plus a real dolt on PATH), same as TestBeadsProxiedDefault.
+//     (plus a real dolt on PATH), same as the TestBeadsProxiedDefault* tests.
 //   - GC_ACCEPTANCE_LEGACY_GC_BIN — a gc built from a revision that still
 //     initialises the legacy GC-managed direct topology. The migration cannot
 //     be proved against a fixture the current binary writes: the point is that
@@ -212,8 +212,8 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 	})
 
 	t.Run("topology", func(t *testing.T) {
-		assertProxiedScope(t, cityRoot, "migrated city")
-		assertProxiedScope(t, rigDir, "migrated rig")
+		assertProxiedScope(t, newEnv, cityRoot, "migrated city")
+		assertProxiedScope(t, newEnv, rigDir, "migrated rig")
 
 		// The rig shares the city's proxy root, so its metadata has to name it
 		// — and relatively, because beads drops an absolute dolt_data_dir on
@@ -299,8 +299,8 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 		}
 		// One shared proxy root, one proxy, one Dolt child — the old topology's
 		// process count, preserved.
-		assertProxiedScope(t, cityRoot, "started city")
-		assertProxiedScope(t, rigDir, "started rig")
+		assertProxiedScope(t, newEnv, cityRoot, "started city")
+		assertProxiedScope(t, newEnv, rigDir, "started rig")
 	})
 
 	t.Run("stop-and-restart", func(t *testing.T) {
@@ -319,7 +319,7 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 			t.Fatalf("gc stop is not re-runnable: %v\n%s", err, out)
 		}
 		city.StartWithSupervisor()
-		assertProxiedScope(t, cityRoot, "restarted city")
+		assertProxiedScope(t, newEnv, cityRoot, "restarted city")
 		assertSeededScope(t, city, "", cityIDs)
 	})
 

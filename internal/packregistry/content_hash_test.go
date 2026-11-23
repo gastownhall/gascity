@@ -102,3 +102,58 @@ func manifestHash(entries ...string) string {
 	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
 	return fmt.Sprintf("sha256:%x", sum[:])
 }
+
+// PackDirContentHash must agree with PackContentHash byte for byte on the same
+// content: it is how a registry release hash is verified for a pack that has no
+// git history on disk (the synthetic cache gc materializes from its binary).
+func TestPackDirContentHashMatchesGitTreeHash(t *testing.T) {
+	repo := initContentHashRepo(t)
+	writeContentHashFile(t, repo, "packs/demo/pack.toml", "[pack]\nname = \"demo\"\nschema = 2\n", 0o644)
+	writeContentHashFile(t, repo, "packs/demo/commands/run.sh", "#!/bin/sh\nexit 0\n", 0o755)
+	writeContentHashFile(t, repo, "packs/demo/nested/sub/pack.toml", "[pack]\nname = \"sub\"\n", 0o644)
+	if err := os.Symlink("../commands/run.sh", filepath.Join(repo, "packs", "demo", "nested", "run-link")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	runContentHashGit(t, repo, "add", "packs/demo")
+	runContentHashGit(t, repo, "commit", "-m", "add demo pack")
+	commit := strings.TrimSpace(outputContentHashGit(t, repo, "rev-parse", "HEAD"))
+
+	want, err := PackContentHash(repo, commit, "packs/demo")
+	if err != nil {
+		t.Fatalf("PackContentHash: %v", err)
+	}
+	// The pack directory itself holds no .git (that sits at the repository
+	// root), so it presents exactly as a synthetic cache does.
+	plain := filepath.Join(repo, "packs", "demo")
+	got, err := PackDirContentHash(plain)
+	if err != nil {
+		t.Fatalf("PackDirContentHash: %v", err)
+	}
+	if got != want {
+		t.Fatalf("PackDirContentHash = %s, want git tree hash %s", got, want)
+	}
+	if err := VerifyPackDirContentHash(plain, want); err != nil {
+		t.Fatalf("VerifyPackDirContentHash(matching): %v", err)
+	}
+
+	// A one-byte content change and an exec-bit flip each change the hash.
+	writeContentHashFile(t, plain, "pack.toml", "[pack]\nname = \"demo\"\nschema = 3\n", 0o644)
+	if err := VerifyPackDirContentHash(plain, want); err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("VerifyPackDirContentHash(content edit) = %v, want hash mismatch", err)
+	}
+	writeContentHashFile(t, plain, "pack.toml", "[pack]\nname = \"demo\"\nschema = 2\n", 0o644)
+	if err := os.Chmod(filepath.Join(plain, "commands", "run.sh"), 0o644); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	if err := VerifyPackDirContentHash(plain, want); err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("VerifyPackDirContentHash(mode flip) = %v, want hash mismatch", err)
+	}
+}
+
+func TestPackDirContentHashRequiresPackToml(t *testing.T) {
+	dir := t.TempDir()
+	writeContentHashFile(t, dir, "readme.md", "hello\n", 0o644)
+	if _, err := PackDirContentHash(dir); err == nil || !strings.Contains(err.Error(), "pack.toml") {
+		t.Fatalf("PackDirContentHash err = %v, want missing pack.toml", err)
+	}
+}

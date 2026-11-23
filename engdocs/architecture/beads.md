@@ -154,7 +154,9 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
    reasonable window of the current time.
 
 5. **Get returns ErrNotFound for missing IDs.** The error must wrap
-   `beads.ErrNotFound` so callers can use `errors.Is`.
+   `beads.ErrNotFound` so callers can use `errors.Is`. ErrNotFound
+   asserts confirmed absence: a lookup that failed for infrastructure
+   reasons must surface the underlying error, not ErrNotFound.
 
 6. **Close is idempotent.** Closing an already-closed bead succeeds
    without error. The bead remains closed.

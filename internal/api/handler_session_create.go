@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -35,8 +37,8 @@ type sessionCreateRequest struct {
 }
 
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
@@ -95,10 +97,9 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "provider_unavailable", err.Error())
 			return
 		}
-		// Agent track stores a transport-aligned base command only.
-		// Do NOT inject OptionsSchema defaults or explicit overrides here.
-		// Options are stored as template_overrides and applied at start time
-		// by the session lifecycle via ResolveExplicitOptions.
+		// Persist the resolved template defaults as the controller startup
+		// command baseline. Explicit session options stay in template_overrides
+		// and are applied at launch without changing that drift baseline.
 		if len(body.Options) > 0 {
 			if len(resolved.OptionsSchema) == 0 {
 				s.idem.unreserve(idemKey)
@@ -139,6 +140,13 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	// This route defers agent creates to the reconciler (below), which never
+	// starts a demand-only singleton's session on request (#6858).
+	if msg := demandOnlySingletonCreateRefusal(s.state.Config(), createCtx.Agent); msg != "" {
+		s.idem.unreserve(idemKey)
+		writeError(w, apierr.DemandOnlySingleton.Status, apierr.DemandOnlySingleton.Code, msg)
+		return
+	}
 	alias = createCtx.Alias
 	workDir = createCtx.WorkDir
 
@@ -149,13 +157,12 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	launchCommand, err := config.BuildProviderLaunchCommandWithoutOptions(s.state.CityPath(), resolved, transport)
+	command, err := s.agentTemplateLaunchCommand(createCtx.Agent, resolved, transport)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	command := launchCommand.Command
 
 	// Build template_overrides metadata. Includes schema overrides AND
 	// the initial message (as "initial_message" key). The reconciler
@@ -176,13 +183,13 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// starts the agent process on the next tick. This avoids blocking the
 	// HTTP response for 10-30s while the agent boots in tmux, and lets real-world apps
 	// show the session in the sidebar immediately via optimistic UI.
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), configuredProgramStatusMode(s.state.Config()), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
 		return
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -195,15 +202,15 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		reservationIDs = append(reservationIDs, createCtx.Identity)
 	}
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		if reserveConcreteIdentity && createCtx.Identity != alias {
-			if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), createCtx.Identity, ""); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), createCtx.Identity, ""); err != nil {
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfig(store.Store, s.state.Config(), createCtx.ExplicitName, ""); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), createCtx.ExplicitName, ""); err != nil {
 			return err
 		}
 		var createErr error
@@ -232,12 +239,12 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "agent"
-	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
+	if catalog, catErr := s.workerSessionCatalog(store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
 			resp.SubmissionCapabilities = caps
 		}
 	}
-	if handle, handleErr := s.workerHandleForSession(store.Store, info.ID); handleErr == nil {
+	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
 		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true, 0)
 	}
 	statusCode := http.StatusAccepted // always async for agent sessions
@@ -310,6 +317,11 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusBadRequest, "invalid", "async session creation is only supported for configured agent templates")
 		return
 	}
+	if err := s.checkInitialMessage(body.Message); err != nil {
+		s.idem.unreserve(idemKey)
+		writeHumaStatusError(w, err)
+		return
+	}
 
 	workDir := s.state.CityPath()
 
@@ -363,13 +375,13 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		}
 	}
 
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), configuredProgramStatusMode(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
 		return
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -377,7 +389,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		var createErr error
@@ -404,7 +416,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+		if sendErr := s.deliverInitialMessage(r.Context(), store, info.ID, msg); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
@@ -420,13 +432,13 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 
 	resp := sessionToResponse(info, s.state.Config())
-	resp.Kind = "provider"
-	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
+	asProviderSession(&resp)
+	if catalog, catErr := s.workerSessionCatalog(store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
 			resp.SubmissionCapabilities = caps
 		}
 	}
-	if handle, handleErr := s.workerHandleForSession(store.Store, info.ID); handleErr == nil {
+	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
 		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true, 0)
 	}
 	statusCode := http.StatusCreated
@@ -453,10 +465,10 @@ func sessionTemplateOverridesMetadata(options map[string]string, message string)
 }
 
 func (s *Server) rollbackCreatedSession(store beads.SessionStore, sessionID string) error {
-	if store.Store == nil || strings.TrimSpace(sessionID) == "" {
+	if store == (beads.SessionStore{}) || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	if err := s.sessionManager(store.Store).Close(sessionID); err != nil {
+	if err := s.sessionManager(store).Close(context.Background(), s.actor(session.ActorOperator), sessionID); err != nil {
 		return fmt.Errorf("close created session: %w", err)
 	}
 	if err := store.Delete(sessionID); err != nil {

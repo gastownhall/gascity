@@ -280,6 +280,7 @@ func TestBeadsOrdersAdapterBindGraphUsesSelectedSplitGraph(t *testing.T) {
 func TestBeadsOrdersAdapterConsumesPartialGraphRows(t *testing.T) {
 	partial := partialGraph{items: []beads.Bead{{
 		ID:        "partial",
+		Type:      "molecule", // a run's root: only a run record counts (the #7766 review)
 		CreatedAt: time.Now(),
 		Labels:    []string{"order-run:partial", "seq:7"},
 	}}, err: errors.New("partial graph read")}
@@ -374,3 +375,85 @@ type partialGraph struct {
 }
 
 func (g partialGraph) List(beads.ListQuery) ([]beads.Bead, error) { return g.items, g.err }
+
+// claimCapableStore wraps beads.NewMemStore() with a minimal two-argument
+// Claim so beadsGraphAdapter.Claim's forwarding can be exercised without a
+// live NativeDoltStore.
+type claimCapableStore struct {
+	beads.Store
+	claimCalls int
+}
+
+func (c *claimCapableStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	c.claimCalls++
+	current, err := c.Get(id)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	if current.Assignee != "" && current.Assignee != assignee {
+		return beads.Bead{}, false, nil
+	}
+	status := "in_progress"
+	if err := c.Update(id, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		return beads.Bead{}, false, err
+	}
+	claimed, err := c.Get(id)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	return claimed, true, nil
+}
+
+// TestBeadsGraphAdapterClaimRefusesAnUnsupportedStore pins the capability
+// refusal: a resolved store without the two-argument Claim capability (e.g. a
+// plain beads.Store) is refused as an unavailable capability of the store,
+// before any server is asked.
+func TestBeadsGraphAdapterClaimRefusesAnUnsupportedStore(t *testing.T) {
+	graph := &beadsGraphAdapter{store: beads.NewMemStore()}
+	if _, claimed, err := graph.Claim("gc-1", "worker-1"); claimed || err == nil {
+		t.Fatalf("Claim over an unsupported store = (claimed=%v, err=%v), want a capability refusal", claimed, err)
+	}
+}
+
+// TestBeadsGraphAdapterClaimForwardsToAClaimCapableStore pins the other side
+// of beadsGraphAdapter.Claim's type assertion: a resolved store that
+// implements the two-argument Claim (as NativeDoltStore does over
+// IssueClaimer) is claimed through via plain Go structural typing, with no
+// adapter-side registration.
+func TestBeadsGraphAdapterClaimForwardsToAClaimCapableStore(t *testing.T) {
+	leaf := &claimCapableStore{Store: beads.NewMemStore()}
+	bead, err := leaf.Create(beads.Bead{Title: "claimable"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	graph := &beadsGraphAdapter{store: leaf}
+
+	claimed, ok, err := graph.Claim(bead.ID, "worker-1")
+	if err != nil || !ok {
+		t.Fatalf("Claim = (claimed=%v, ok=%v, err=%v), want a landed claim", claimed, ok, err)
+	}
+	if claimed.Assignee != "worker-1" {
+		t.Fatalf("claimed bead assignee = %q, want worker-1", claimed.Assignee)
+	}
+	if leaf.claimCalls != 1 {
+		t.Fatalf("backing Claim calls = %d, want 1", leaf.claimCalls)
+	}
+}
+
+// TestBeadsOrdersAdapterIgnoresAForgedGraphRunLabel (the #7766 review): a
+// plain bead on the graph leg carrying an order's run label, newer than the
+// order's real root, moves neither its LastRun nor its Cursor.
+func TestBeadsOrdersAdapterIgnoresAForgedGraphRunLabel(t *testing.T) {
+	t0 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	graph := beads.NewMemStoreFrom(2, []beads.Bead{
+		{ID: "root", Type: "molecule", Status: "closed", CreatedAt: t0, Labels: []string{"order-run:digest", "seq:3"}},
+		{ID: "forged", Type: "task", Status: "open", CreatedAt: t0.Add(time.Hour), Labels: []string{"order-run:digest", "seq:999"}},
+	}, nil)
+	adapter := newBeadsOrdersAdapter(beads.OrdersStore{Store: beads.NewMemStore()}, &beadsGraphAdapter{store: graph})
+	if got := adapter.Cursor("digest"); got != 3 {
+		t.Fatalf("Cursor() = %d, want the root's 3", got)
+	}
+	if got, err := adapter.LastRun("digest"); err != nil || !got.Equal(t0) {
+		t.Fatalf("LastRun() = %v, %v; want the root's %v", got, err, t0)
+	}
+}

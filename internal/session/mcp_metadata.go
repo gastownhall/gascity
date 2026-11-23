@@ -18,7 +18,7 @@ const (
 	// be materialized.
 	MCPServersSnapshotMetadataKey = "mcp_servers_snapshot"
 
-	redactedMCPSnapshotValue = "__redacted__"
+	redactedMCPSnapshotValue = runtime.RedactedMCPValue
 )
 
 // EncodeMCPServersSnapshot returns the normalized metadata value for a
@@ -103,94 +103,7 @@ func WithStoredMCPMetadata(meta map[string]string, identity string, servers []ru
 }
 
 func normalizeMCPServersSnapshotForMetadata(servers []runtime.MCPServerConfig) []runtime.MCPServerConfig {
-	normalized := runtime.NormalizeMCPServerConfigs(servers)
-	for i := range normalized {
-		normalized[i].Args = redactMCPMetadataArgs(normalized[i].Args)
-		normalized[i].Env = redactMCPMetadataMap(normalized[i].Env)
-		normalized[i].URL = redactMCPMetadataURL(normalized[i].URL)
-		normalized[i].Headers = redactMCPMetadataMap(normalized[i].Headers)
-	}
-	return normalized
-}
-
-func redactMCPMetadataArgs(args []string) []string {
-	if len(args) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(args))
-	redactNext := false
-	for _, arg := range args {
-		if redactNext {
-			out = append(out, redactedMCPSnapshotValue)
-			redactNext = false
-			continue
-		}
-		if isSensitiveMCPMetadataValue(arg) {
-			out = append(out, redactedMCPSnapshotValue)
-			continue
-		}
-		if redactedURL := redactMCPMetadataURL(arg); redactedURL != arg {
-			out = append(out, redactedURL)
-			continue
-		}
-		if key, value, ok := strings.Cut(arg, "="); ok && isSensitiveMCPMetadataToken(key) {
-			if strings.TrimSpace(value) == "" {
-				out = append(out, key+"=")
-			} else {
-				out = append(out, key+"="+redactedMCPSnapshotValue)
-			}
-			continue
-		}
-		if isSensitiveMCPMetadataToken(arg) && strings.HasPrefix(strings.TrimSpace(arg), "-") {
-			out = append(out, arg)
-			redactNext = true
-			continue
-		}
-		out = append(out, arg)
-	}
-	return out
-}
-
-func redactMCPMetadataMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key := range in {
-		out[key] = redactedMCPSnapshotValue
-	}
-	return out
-}
-
-func redactMCPMetadataURL(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return raw
-	}
-	changed := false
-	if parsed.User != nil {
-		if _, hasPassword := parsed.User.Password(); hasPassword {
-			parsed.User = url.UserPassword(redactedMCPSnapshotValue, redactedMCPSnapshotValue)
-		} else {
-			parsed.User = url.User(redactedMCPSnapshotValue)
-		}
-		changed = true
-	}
-	if query := parsed.Query(); len(query) > 0 {
-		for key := range query {
-			query.Set(key, redactedMCPSnapshotValue)
-		}
-		parsed.RawQuery = query.Encode()
-		changed = true
-	}
-	if !changed {
-		return raw
-	}
-	return parsed.String()
+	return runtime.RedactMCPServerConfigs(servers)
 }
 
 func snapshotMapContainsRedactions(in map[string]string) bool {
@@ -220,7 +133,7 @@ func sanitizeStoredMCPMetadataArgs(args []string) []string {
 		arg := args[i]
 		trimmed := strings.TrimSpace(arg)
 		if strings.HasPrefix(trimmed, "-") &&
-			isSensitiveMCPMetadataToken(trimmed) &&
+			runtime.IsSensitiveMCPName(trimmed) &&
 			i+1 < len(args) &&
 			strings.Contains(args[i+1], redactedMCPSnapshotValue) {
 			i++
@@ -231,7 +144,7 @@ func sanitizeStoredMCPMetadataArgs(args []string) []string {
 			continue
 		}
 		if key, value, ok := strings.Cut(arg, "="); ok &&
-			isSensitiveMCPMetadataToken(key) &&
+			runtime.IsSensitiveMCPName(key) &&
 			strings.Contains(value, redactedMCPSnapshotValue) {
 			continue
 		}
@@ -294,26 +207,4 @@ func sanitizeStoredMCPMetadataURL(raw string) string {
 		return ""
 	}
 	return parsed.String()
-}
-
-func isSensitiveMCPMetadataToken(value string) bool {
-	value = strings.ToLower(strings.TrimSpace(value))
-	return strings.Contains(value, "token") ||
-		strings.Contains(value, "secret") ||
-		strings.Contains(value, "password") ||
-		strings.Contains(value, "passwd") ||
-		strings.Contains(value, "authorization") ||
-		strings.Contains(value, "auth") ||
-		strings.Contains(value, "bearer") ||
-		strings.Contains(value, "cookie") ||
-		strings.Contains(value, "api-key") ||
-		strings.Contains(value, "apikey")
-}
-
-func isSensitiveMCPMetadataValue(value string) bool {
-	value = strings.ToLower(strings.TrimSpace(value))
-	return strings.HasPrefix(value, "authorization:") ||
-		strings.HasPrefix(value, "bearer ") ||
-		strings.HasPrefix(value, "basic ") ||
-		strings.HasPrefix(value, "token ")
 }

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"golang.org/x/sys/unix"
@@ -3978,17 +3979,10 @@ func TestParseStorageLockHolderArgsRequiresExactSuffix(t *testing.T) {
 	}
 }
 
-// shardFreeEnv returns the current environment without bazel's test-shard
-// filter variables, for re-exec'd helper binaries that select work via
-// -test.run instead of shard assignment.
+// shardFreeEnv returns the current environment without the bazel test-runner
+// state the parent owns (shard filter, coverage output, test filter), for
+// re-exec'd helper binaries that select work via -test.run instead of shard
+// assignment.
 func shardFreeEnv() []string {
-	out := make([]string, 0, len(os.Environ()))
-	for _, kv := range os.Environ() {
-		name, _, _ := strings.Cut(kv, "=")
-		if name == "TEST_SHARD_INDEX" || name == "TEST_TOTAL_SHARDS" {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
+	return bazeltest.HelperProcessEnv(os.Environ())
 }

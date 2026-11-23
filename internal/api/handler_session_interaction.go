@@ -2,14 +2,19 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type sessionMessageRequest struct {
 	Message string `json:"message"`
+	// Resume lets the message resume a held session (CONTRACT v5.9 D8);
+	// without it the message queues on one.
+	Resume bool `json:"resume,omitempty"`
 }
 
 type sessionPendingResponse struct {
@@ -25,8 +30,8 @@ type sessionRespondRequest struct {
 }
 
 func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
@@ -50,18 +55,20 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeResolveError(w, err)
 		return
 	}
 
-	if err := s.sendUserMessageToSession(r.Context(), store.Store, id, body.Message); err != nil {
+	if _, err := s.sendUserMessageToSession(r.Context(), store, id, body.Message, body.Resume); err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
 		return
 	}
+	// Publish the session.pending_cleared now rather than on the next pass.
+	s.pokePendingInteractions(id)
 
 	resp := map[string]string{"status": "accepted", "id": id}
 	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
@@ -69,24 +76,21 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	if err := handle.Kill(r.Context()); err != nil {
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	// The kill is `gc session kill`'s (Server.operatorKill), recorded as no op.
+	if _, err := s.operatorKill(r.Context(), store, id, force, nil); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -94,19 +98,19 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -119,19 +123,19 @@ func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionPending(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -158,13 +162,13 @@ func (s *Server) handleSessionPending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -189,7 +193,7 @@ func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)

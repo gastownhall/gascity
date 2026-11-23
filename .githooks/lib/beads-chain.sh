@@ -4,7 +4,7 @@
 # Only one directory can own core.hooksPath. Beads' installer claims it for
 # .beads/hooks, and those hooks exec `bd hooks run <hook>` without chaining
 # onward — so while beads owned the path, every gate in .githooks (staged-Go
-# formatting, lint-changed, the three codegen+stage steps, make vet, the
+# formatting, lint-changed (nogo lint and vet), the three codegen+stage steps, the
 # push-time suite) was silently skipped, and spec-derived drift reached the
 # mainline. .githooks is the single owner instead, and calls beads from here so
 # both keep running.

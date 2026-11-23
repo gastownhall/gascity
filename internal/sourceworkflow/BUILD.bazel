@@ -10,19 +10,26 @@ go_library(
         "//internal/beads",
         "//internal/beads/closeorder",
         "//internal/citylayout",
+        "//internal/coordclass",
         "//internal/pathutil",
+        "//internal/platform/filelock",
     ],
 )
 
 go_test(
     name = "sourceworkflow_test",
     srcs = [
+        "atomic_root_close_test.go",
+        "live_read_through_target_test.go",
+        "owned_test.go",
         "sourceworkflow_test.go",
         "testenv_import_test.go",
     ],
     embed = [":sourceworkflow"],
     deps = [
         "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/session",
         "//internal/testenv",
         "//internal/testutil",
     ],
@@ -36,6 +43,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

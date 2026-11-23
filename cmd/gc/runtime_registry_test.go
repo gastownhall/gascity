@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // assertProviderPkg verifies sp is a provider from the given package (e.g.
@@ -89,6 +93,33 @@ func TestNewSessionProviderForCityByName_ExecPrefixUsesExecProvider(t *testing.T
 		t.Fatalf("newSessionProviderForCityByName(exec:...): %v", err)
 	}
 	assertProviderPkg(t, sp, "exec")
+}
+
+// Kills (PAR-EXEC §13.5 13): an exec provider built without the city it
+// serves, by the exec: prefix or as a pack runtime.
+func TestExecProvidersCarryTheirCity(t *testing.T) {
+	script := writeRPPScript(t, `case "$1" in get-meta) echo "$GC_EXEC_CITY_NAME|$GC_EXEC_CITY_PATH" ;; *) exit 2 ;; esac
+`)
+	cityPath := t.TempDir()
+	byPrefix, err := newSessionProviderForCityByName(nil, "exec:"+script, config.SessionConfig{}, "alpha", cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := runtimeRegistryForCity(&config.City{Runtimes: map[string]config.DiscoveredRuntime{
+		"cloudpack": {Name: "cloudpack", Command: script, PackName: "cloud", PackDir: filepath.Dir(script)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPack, err := reg.New("cloudpack", config.SessionConfig{}, "alpha", cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, sp := range map[string]runtime.Provider{"exec:": byPrefix, "pack": byPack} {
+		if v, err := sp.GetMeta("s", "k"); v != "alpha|"+cityPath || err != nil {
+			t.Errorf("%s: the script saw %q, %v; want alpha|%s", name, v, err, cityPath)
+		}
+	}
 }
 
 func TestNewSessionProviderForCityByName_SSHPrefixUsesSSHProvider(t *testing.T) {
@@ -307,6 +338,115 @@ func TestPackRuntimeDeclarationChanged(t *testing.T) {
 	}
 }
 
+// registryFakeACPAgent is a minimal ACP agent: it answers initialize and
+// session/new, then waits for stdin to close.
+const registryFakeACPAgent = `exec python3 -u -c '
+import sys, json
+for line in sys.stdin:
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    m = msg.get("method", "")
+    if m == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"serverInfo": {"name": "fake"}}}), flush=True)
+    elif m == "session/new":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "fake-1"}}), flush=True)
+'`
+
+// TestRuntimeRegistryACPCapturesUnderCityTranscripts drives the real "acp"
+// registration: a session started through the provider the registry builds
+// for a city writes its capture transcript under the city's transcripts dir
+// (citylayout.ACPTranscriptsDir), not the ephemeral provider state dir.
+func TestRuntimeRegistryACPCapturesUnderCityTranscripts(t *testing.T) {
+	// Provider sockets live under the runtime dir; keep it short for the
+	// unix socket path limit and away from the real user runtime dir.
+	runtimeDir := testutil.ShortTempDir(t, "gcr-")
+	t.Setenv("GC_HOME", runtimeDir)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	cityPath := t.TempDir()
+
+	sp, err := buildRuntimeRegistry().New("acp", config.SessionConfig{}, "city", cityPath)
+	if err != nil {
+		t.Fatalf("building acp provider: %v", err)
+	}
+	const name = "registry-capture"
+	if err := sp.Start(context.Background(), name, runtime.Config{
+		Command: registryFakeACPAgent,
+		WorkDir: t.TempDir(),
+		Env: map[string]string{
+			"GC_SESSION_ID":         "s-1",
+			"GC_CONTINUATION_EPOCH": "2",
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.Stop(name); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	path, err := citylayout.ACPTranscriptPath(cityPath, "s-1", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading capture transcript: %v", err)
+	}
+	for _, want := range []string{`"gc_acp_capture":1`, `"method":"initialize"`, `"method":"session/new"`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("capture transcript lacks %s:\n%s", want, data)
+		}
+	}
+}
+
+// TestACPProviderConfigLeavesCaptureToTheCaller pins that the [session.acp]
+// mapping never enables capture on its own: the transcript root is a city
+// property the registration adds, so a city-less provider captures nothing.
+func TestACPProviderConfigLeavesCaptureToTheCaller(t *testing.T) {
+	if got := acpProviderConfig(config.ACPSessionConfig{}).TranscriptRoot; got != "" {
+		t.Fatalf("acpProviderConfig TranscriptRoot = %q, want empty", got)
+	}
+}
+
+// Kills: dropping either half of the config composition decision (explicit
+// session = "acp" agents, or ACP provider targets), and dropping the acp-base
+// guard, which would stop every session for a composition an acp base never
+// builds.
+func TestSessionTransportCompositionChanged(t *testing.T) {
+	plain := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	acpAgent := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "reviewer", Session: "acp"}}}
+	otherACPAgent := &config.City{Agents: []config.Agent{{Name: "auditor", Session: "acp"}}}
+	acpProvider := &config.City{Providers: map[string]config.ProviderSpec{
+		"opencode": {Command: "/bin/echo", PathCheck: "true", SupportsACP: boolPtr(true), ACPCommand: "/bin/echo", ACPArgs: []string{"acp"}},
+	}}
+	if !hasACPProviderTargets(acpProvider) {
+		t.Fatal("fixture: acpProvider has no ACP provider target")
+	}
+	cases := []struct {
+		name           string
+		oldCfg, newCfg *config.City
+		base           string
+		want           bool
+	}{
+		{"nil configs", nil, nil, "tmux", false},
+		{"no ACP either side", plain, plain, "tmux", false},
+		{"first ACP agent added", plain, acpAgent, "tmux", true},
+		{"last ACP agent removed", acpAgent, plain, "tmux", true},
+		{"ACP provider target added", plain, acpProvider, "tmux", true},
+		{"ACP agents swapped for others", acpAgent, otherACPAgent, "tmux", false},
+		{"ACP agent swapped for an ACP provider target", acpAgent, acpProvider, "tmux", false},
+		{"acp base never composes", plain, acpAgent, "acp", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sessionTransportCompositionChanged(tc.oldCfg, tc.newCfg, tc.base); got != tc.want {
+				t.Errorf("sessionTransportCompositionChanged = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeRegistryACPConfigCarriesStopGrace(t *testing.T) {
 	got := acpProviderConfig(config.ACPSessionConfig{StopGrace: "45s"})
 	if got.StopGrace != 45*time.Second {
@@ -318,5 +458,95 @@ func TestRuntimeRegistryACPConfigCarriesStopGrace(t *testing.T) {
 	}
 	if def.HandshakeTimeout != 30*time.Second || def.NudgeBusyTimeout != 60*time.Second || def.OutputBufferLines != 1000 {
 		t.Errorf("default acp config = %+v, want 30s handshake, 60s nudge busy, 1000 buffer lines", def)
+	}
+}
+
+func TestRuntimeRegistryACPConfigCarriesCancelTimeout(t *testing.T) {
+	got := acpProviderConfig(config.ACPSessionConfig{CancelTimeout: "2s"})
+	if got.CancelTimeout != 2*time.Second {
+		t.Errorf("acp CancelTimeout = %v, want 2s from [session.acp] cancel_timeout", got.CancelTimeout)
+	}
+	def := acpProviderConfig(config.ACPSessionConfig{})
+	if def.CancelTimeout != config.DefaultACPCancelTimeout {
+		t.Errorf("default acp CancelTimeout = %v, want config.DefaultACPCancelTimeout (%v)", def.CancelTimeout, config.DefaultACPCancelTimeout)
+	}
+	if config.DefaultACPCancelTimeout != sessionacp.DefaultCancelTimeout {
+		t.Errorf("config.DefaultACPCancelTimeout = %v, want sessionacp.DefaultCancelTimeout (%v): the documented default must match the provider's own", config.DefaultACPCancelTimeout, sessionacp.DefaultCancelTimeout)
+	}
+}
+
+// writeFSHostScript writes an exec runtime whose `protocol` answers
+// handshake; `start` records that it ran, and `is-running` answers false.
+func writeFSHostScript(t *testing.T, handshake string) (script, startedMarker string) {
+	t.Helper()
+	dir := t.TempDir()
+	script = filepath.Join(dir, "gc-runtime")
+	startedMarker = filepath.Join(dir, "started")
+	body := "#!/bin/sh\ncase \"$1\" in\n" +
+		"  protocol) echo '" + handshake + "' ;;\n" +
+		"  start) cat >/dev/null; : > '" + startedMarker + "' ;;\n" +
+		"  is-running) echo false ;;\n" +
+		"  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script, startedMarker
+}
+
+// TestExecRuntimeHostCapabilitiesReadTheHandshake pins the exec answer the
+// skill and MCP gates read: both capabilities exactly when the script's own
+// handshake shares the host filesystem (locality=local with fs.host), none
+// for a container on the host (locality alone), fs.host without locality, or
+// a handshake that cannot be read.
+func TestExecRuntimeHostCapabilitiesReadTheHandshake(t *testing.T) {
+	both := runtime.HostCapabilities{SharesHostFilesystem: true, RunsHostPreStart: true}
+	for _, tc := range []struct {
+		name, handshake string
+		want            runtime.HostCapabilities
+	}{
+		{"local with fs.host", `{"version":0,"capabilities":["fs.host"],"locality":"local"}`, both},
+		{"local without fs.host", `{"version":0,"capabilities":[],"locality":"local"}`, runtime.HostCapabilities{}},
+		{"fs.host without locality", `{"version":0,"capabilities":["fs.host"]}`, runtime.HostCapabilities{}},
+		{"unreadable handshake", `not json`, runtime.HostCapabilities{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script, _ := writeFSHostScript(t, tc.handshake)
+			if got := execRuntimeHostCapabilities(script, "city", t.TempDir()); got != tc.want {
+				t.Errorf("execRuntimeHostCapabilities = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRuntimeRegistryExecRuntimesCarryTheSetupBudget pins the [session]
+// setup budget on the exec providers the registry builds: a host pre_start
+// that outlives setup_timeout fails the start, for a pack runtime and an
+// exec: selection alike, before the start op runs.
+func TestRuntimeRegistryExecRuntimesCarryTheSetupBudget(t *testing.T) {
+	script, started := writeFSHostScript(t, `{"version":0,"capabilities":["fs.host"],"locality":"local"}`)
+	cfg := &config.City{Runtimes: map[string]config.DiscoveredRuntime{"pack-rt": {Name: "pack-rt", Command: script}}}
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := config.SessionConfig{SetupTimeout: "300ms"}
+	for _, selection := range []string{"pack-rt", "exec:" + script} {
+		t.Run(selection, func(t *testing.T) {
+			sp, err := reg.New(selection, sc, "city", t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			began := time.Now()
+			err = sp.Start(context.Background(), "s1", runtime.Config{WorkDir: t.TempDir(), PreStart: []string{"sleep 10"}, AcceptStartupDialogs: new(bool)})
+			if err == nil || !strings.Contains(err.Error(), "pre_start[0]") {
+				t.Fatalf("Start = %v, want the pre_start's setup deadline", err)
+			}
+			if took := time.Since(began); took > 5*time.Second {
+				t.Errorf("Start took %s, past setup_timeout 300ms and its kill grace", took)
+			}
+			if _, statErr := os.Stat(started); statErr == nil {
+				t.Error("the start op ran after a fatal pre_start")
+			}
+		})
 	}
 }

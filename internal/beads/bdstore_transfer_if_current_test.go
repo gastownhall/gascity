@@ -67,4 +67,9 @@ func TestTransferIfCurrentReportsAnOldBdAsUnsupported(t *testing.T) {
 	if moved || !errors.Is(err, beads.ErrConditionalTransferUnsupported) {
 		t.Fatalf("TransferIfCurrent = (%v, %v), want (false, ErrConditionalTransferUnsupported)", moved, err)
 	}
+	// The sentinel's own text is store-neutral; the operator still has to be
+	// told it is the bd on PATH that is too old.
+	if !strings.Contains(err.Error(), "bd on PATH") {
+		t.Errorf("TransferIfCurrent error = %q, want it to name the bd on PATH as the unsupported side", err)
+	}
 }

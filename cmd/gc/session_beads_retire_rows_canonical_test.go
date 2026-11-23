@@ -57,7 +57,7 @@ func TestRetireDuplicateRows_ClearsLoserCanonicalIdentity(t *testing.T) {
 		{Info: sessiontest.SeedBead(t, mustGet(t, store, loser))},
 	}
 
-	retireDuplicateConfiguredNamedSessionRows("", store, nil, runtime.NewFake(), cfg, cityName, rows, now, nil)
+	retireDuplicateConfiguredNamedSessionRows("", store, testSeatWork("", cfg, store, nil), runtime.NewFake(), cfg, cityName, rows, now, nil)
 
 	loserBead := mustGet(t, store, loser)
 	for _, key := range []string{session.CanonicalInstanceNameMetadata, session.CanonicalPoolSlotMetadata} {

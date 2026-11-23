@@ -79,7 +79,7 @@ func newTestPump(t *testing.T) (*sessionEventPump, chan struct{}, context.Cancel
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	pokeCh := make(chan struct{}, 1)
-	pump := newSessionEventPump(ctx, pokeCh, &bytes.Buffer{}, "test")
+	pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &bytes.Buffer{}, "test")
 	return pump, pokeCh, cancel
 }
 
@@ -138,7 +138,7 @@ func TestSessionEventPumpNonImplementingProviderLogsFallback(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		pokeCh := make(chan struct{}, 1)
-		pump := newSessionEventPump(ctx, pokeCh, &stderr, "test")
+		pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &stderr, "test")
 		pump.restart(runtime.NewFake()) // plain fake: no SessionEventProvider
 		if pump.streaming() {
 			t.Fatal("streaming() = true for a provider without an event stream")
@@ -163,7 +163,7 @@ func TestSessionEventPumpCompositeWithoutEventBackendLogsFallback(t *testing.T) 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		pokeCh := make(chan struct{}, 1)
-		pump := newSessionEventPump(ctx, pokeCh, &stderr, "test")
+		pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &stderr, "test")
 		pump.restart(sessionauto.New(runtime.NewFake(), runtime.NewFake()))
 		if pump.streaming() {
 			t.Fatal("streaming() = true for a composite with no event-capable backend")
@@ -448,5 +448,36 @@ func TestSessionEventPumpParentCancelDeactivates(t *testing.T) {
 		pump.restart(fp)
 		cancel()
 		waitStreaming(t, pump, false)
+	})
+}
+
+// Kills: events not shortening the inventory lane's latency. Every forwarded
+// event (an attributed death now, a resync after its trailing delay) wakes
+// the lane; unattributed pane noise does not.
+func TestSessionEventPump_WakesInventoryOnAttributedDeath(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pump, pokeCh, cancel := newTestPump(t)
+		defer cancel()
+		pump.resyncDelay = 300 * time.Millisecond
+		wakes := 0
+		pump.wakeInventory = func() { wakes++ }
+		fp := &eventedFake{Fake: runtime.NewFake()}
+		pump.restart(fp)
+
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Ref: "%42", Time: time.Now()})
+		synctest.Wait()
+		if wakes != 0 {
+			t.Fatalf("an unattributed pane event woke the lane %d times", wakes)
+		}
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "crew-1", Time: time.Now()})
+		waitPoke(t, pokeCh)
+		if wakes != 1 {
+			t.Fatalf("wakes after an attributed exit = %d, want 1", wakes)
+		}
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync, Time: time.Now()})
+		waitPoke(t, pokeCh)
+		if wakes != 2 {
+			t.Fatalf("wakes after a resync = %d, want 2", wakes)
+		}
 	})
 }

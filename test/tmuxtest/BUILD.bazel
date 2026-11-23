@@ -5,10 +5,15 @@ go_library(
     srcs = [
         "guard.go",
         "orphan_sweep.go",
+        "signal_unix.go",
+        "signal_windows.go",
     ],
     importpath = "github.com/gastownhall/gascity/test/tmuxtest",
     visibility = ["//visibility:public"],
-    deps = ["//internal/pidutil"],
+    deps = [
+        "//internal/pidutil",
+        "//internal/platform/filelock",
+    ],
 )
 
 go_test(
@@ -41,6 +46,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

@@ -30,6 +30,10 @@ func TestRunTargetRoutedToBackfillCheck(t *testing.T) {
 		{ID: "WR-2", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
 			"gc.kind": "workflow", "gc.run_target": "mayor", "gc.routed_to": "mayor",
 		}},
+		// An expanded root is no lane: routing it again resurrects it (NEW-5).
+		{ID: "WR-3", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.run_target": "mayor", "gc.workflow_expanded": "true",
+		}},
 		// Not a workflow root — must be ignored even though run_target is set.
 		{ID: "T-1", Title: "work", Type: "task", Status: "open", Metadata: map[string]string{
 			"gc.run_target": "mayor",
@@ -72,7 +76,7 @@ func TestRunTargetRoutedToBackfillCheck(t *testing.T) {
 			t.Fatalf("details missing %q:\n%s", want, details)
 		}
 	}
-	for _, notWant := range []string{"WR-2", "T-1", "CTRL-1", "CTRL-2", "TOPO-1"} {
+	for _, notWant := range []string{"WR-2", "WR-3", "T-1", "CTRL-1", "CTRL-2", "TOPO-1"} {
 		if strings.Contains(details, notWant) {
 			t.Fatalf("details should not mention %q:\n%s", notWant, details)
 		}

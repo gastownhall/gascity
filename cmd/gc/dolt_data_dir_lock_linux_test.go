@@ -335,7 +335,7 @@ func TestManagedDoltSIGKILLLockGateRefusesWhenFlockAndProcLocksDisagree(t *testi
 	if err == nil {
 		t.Fatal("expected SIGKILL gate to fail closed when flock and proc lock probes disagree")
 	}
-	if !strings.Contains(err.Error(), "could not measure lock ownership") || !strings.Contains(err.Error(), "no matching FLOCK row") {
+	if !strings.Contains(err.Error(), "could not measure lock ownership") || !strings.Contains(err.Error(), "found no holder") {
 		t.Fatalf("expected empty-holder measurement reason, got %v", err)
 	}
 }

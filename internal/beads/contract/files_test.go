@@ -292,12 +292,13 @@ func TestEnsureCanonicalConfigCollapsesDuplicateManagedKeys(t *testing.T) {
 	}
 }
 
-func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
+func TestEnsureCanonicalConfigDefaultsAutoExportOff(t *testing.T) {
 	// bd's export.auto defaults to true and triggers a full-file import-then-export
-	// cycle on every write. Managed cities never consume issues.jsonl (Dolt is the
-	// source of truth), so this must be forced off at config time — not just via
+	// cycle on every write. Managed cities that never consume issues.jsonl (Dolt is
+	// the source of truth) get it forced off at config time — not just via
 	// BD_EXPORT_AUTO env-var suppression, which leaks when bd is invoked outside
-	// the gc wrapper (agents, humans, bd setup).
+	// the gc wrapper (agents, humans, bd setup). A scope that explicitly sets
+	// export.auto: true keeps it: that is the supported JSONL-retention opt-out.
 	t.Run("sets false when key is absent", func(t *testing.T) {
 		fs := fsys.OSFS{}
 		dir := t.TempDir()
@@ -328,7 +329,7 @@ func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
 		}
 	})
 
-	t.Run("overrides explicit true", func(t *testing.T) {
+	t.Run("preserves explicit true", func(t *testing.T) {
 		fs := fsys.OSFS{}
 		dir := t.TempDir()
 		path := filepath.Join(dir, "config.yaml")
@@ -354,13 +355,157 @@ func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(data)
-		if strings.Contains(text, "export.auto: true") {
-			t.Fatalf("config should scrub export.auto: true:\n%s", text)
-		}
-		if !strings.Contains(text, "export.auto: false") {
-			t.Fatalf("config should force export.auto: false:\n%s", text)
+		if !strings.Contains(text, "export.auto: true") {
+			t.Fatalf("config should preserve explicit export.auto: true:\n%s", text)
 		}
 	})
+
+	// bd >= 1.3.1 writes the nested spelling on `bd config set`, so the
+	// opt-in an operator gets from bd itself must survive canonicalization
+	// too. The rewritten file carries gc's flat spelling.
+	t.Run("preserves explicit true in the nested spelling", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"export:",
+			"  auto: true",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.Contains(text, "export.auto: true") {
+			t.Fatalf("config should preserve nested export.auto: true:\n%s", text)
+		}
+		if strings.Contains(text, "export.auto: false") {
+			t.Fatalf("config should not scrub nested export.auto: true to false:\n%s", text)
+		}
+	})
+
+	// The malformed-config path is the one an operator following
+	// docs/runbooks/managed-city-endpoints.md is most likely to hit: they
+	// hand-edit config.yaml to add the opt-in, and a hand-edited file is
+	// exactly the population readConfigDoc rejects. The `: not yaml` line is
+	// the same parse-error shape the other fallback tests here use.
+	t.Run("preserves explicit true through the malformed-config fallback", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"export.auto: true",
+			": not yaml",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.Contains(text, ": not yaml") {
+			t.Fatalf("test no longer exercises the fallback path:\n%s", text)
+		}
+		if !strings.Contains(text, "export.auto: true") {
+			t.Fatalf("fallback should preserve explicit export.auto: true:\n%s", text)
+		}
+		if strings.Contains(text, "export.auto: false") {
+			t.Fatalf("fallback should not scrub explicit export.auto: true to false:\n%s", text)
+		}
+	})
+
+	// Every canonical file already holds export.auto: false, so the runbook
+	// says to change that line. Appending a second key is not an opt-in: bd
+	// cannot parse a duplicate key, and gc keeps the first value and drops the
+	// later copy, so the scope stays opted out. A value that is not a boolean
+	// literal is not an opt-in either; it converges to false. Both writers
+	// must agree.
+	for _, tc := range []struct {
+		name     string
+		input    string
+		fallback bool
+	}{
+		{
+			name:  "duplicate key keeps the first false",
+			input: "issue-prefix: gc\nexport.auto: false\nexport.auto: true\n",
+		},
+		{
+			name:     "duplicate key keeps the first false through the malformed-config fallback",
+			input:    "issue-prefix: gc\nexport.auto: false\nexport.auto: true\n: not yaml\n",
+			fallback: true,
+		},
+		{
+			name:  "malformed value converges to false",
+			input: "issue-prefix: gc\nexport.auto: yes\n",
+		},
+		{
+			name:     "malformed value converges to false through the malformed-config fallback",
+			input:    "issue-prefix: gc\nexport.auto: yes\n: not yaml\n",
+			fallback: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := fs.WriteFile(path, []byte(tc.input), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: EndpointOriginManagedCity,
+				EndpointStatus: EndpointStatusVerified,
+			})
+			if err != nil {
+				t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+			}
+			if !changed {
+				t.Fatal("EnsureCanonicalConfig() should report rewriting export.auto")
+			}
+
+			data, err := fs.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(data)
+			if tc.fallback && !strings.Contains(text, ": not yaml") {
+				t.Fatalf("test no longer exercises the fallback path:\n%s", text)
+			}
+			if count := countLineOccurrences(text, "export.auto: false"); count != 1 {
+				t.Fatalf("config should keep exactly one export.auto: false, found %d:\n%s", count, text)
+			}
+			if count := strings.Count(text, "export.auto:"); count != 1 {
+				t.Fatalf("no other export.auto value may survive to opt the scope in, found %d keys:\n%s", count, text)
+			}
+		})
+	}
 }
 
 func TestEnsureCanonicalConfigForcesAutoBackupOff(t *testing.T) {
@@ -1092,6 +1237,34 @@ func TestReadExportAuto(t *testing.T) {
 			wantValue: false,
 			wantOK:    true,
 		},
+		{
+			// A true appended below the canonical false is not an opt-in.
+			name:      "duplicate key resolves to the first value",
+			yaml:      "issue_prefix: zz\nexport.auto: false\nexport.auto: true\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+		{
+			name:      "unparseable config keeps a scannable value",
+			yaml:      "issue_prefix: zz\nexport.auto: true\n: not yaml\n",
+			wantValue: true,
+			wantOK:    true,
+		},
+		{
+			name:      "duplicate key in an unparseable config resolves to the first value",
+			yaml:      "issue_prefix: zz\nexport.auto: false\nexport.auto: true\n: not yaml\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+		{
+			// Errors are reserved for a file that cannot be read, which
+			// callers treat as a possible opt-in. A file that reads but does
+			// not parse, with no export.auto line, has no opt-in to protect.
+			name:      "unparseable config without the key returns absent",
+			yaml:      "issue_prefix: zz\n: not yaml\n",
+			wantValue: false,
+			wantOK:    false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1131,6 +1304,74 @@ func TestReadExportAutoOnMissingFileReturnsAbsent(t *testing.T) {
 	}
 	if gotValue {
 		t.Errorf("ReadExportAuto() value = true, want false for missing file")
+	}
+}
+
+// configReadFaultFS fails the listed ReadFile calls (1-based) of one path
+// with err and passes every other call through, so a fault can clear between
+// two reads of the same config.yaml.
+type configReadFaultFS struct {
+	fsys.FS
+	path      string
+	failCalls map[int]bool
+	err       error
+	calls     int
+}
+
+func (f *configReadFaultFS) ReadFile(name string) ([]byte, error) {
+	if name == f.path {
+		f.calls++
+		if f.failCalls[f.calls] {
+			return nil, f.err
+		}
+	}
+	return f.FS.ReadFile(name)
+}
+
+// TestReadExportAutoReturnsReadError pins the error contract the JSONL cleanup
+// gates rely on: a config.yaml that exists but cannot be read may hold an
+// explicit true, so ReadExportAuto reports the failure instead of answering
+// absent. That includes a fault that would clear on a second read: the line
+// scanner that reads an unparseable file does not unquote values, so a retry
+// through it would report a quoted true as absent. Only a file that reads but
+// does not parse is read again, and a failure of that re-read is reported too.
+func TestReadExportAutoReturnsReadError(t *testing.T) {
+	const path = "/city/.beads/config.yaml"
+	readErr := errors.New("injected read failure")
+	for _, tc := range []struct {
+		name      string
+		yaml      string
+		failCalls map[int]bool
+	}{
+		{
+			name:      "config cannot be read",
+			yaml:      "issue_prefix: zz\nexport.auto: true\n",
+			failCalls: map[int]bool{1: true, 2: true},
+		},
+		{
+			name:      "read fault clears before a retry",
+			yaml:      "issue_prefix: zz\nexport.auto: \"true\"\n",
+			failCalls: map[int]bool{1: true},
+		},
+		{
+			name:      "re-read of an unparseable config fails",
+			yaml:      "issue_prefix: zz\nexport.auto: true\n: not yaml\n",
+			failCalls: map[int]bool{2: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := fsys.NewFake()
+			fake.Files[path] = []byte(tc.yaml)
+			fs := &configReadFaultFS{FS: fake, path: path, failCalls: tc.failCalls, err: readErr}
+
+			gotValue, gotOK, err := ReadExportAuto(fs, path)
+			if !errors.Is(err, readErr) {
+				t.Fatalf("ReadExportAuto() error = %v, want %v", err, readErr)
+			}
+			if gotValue || gotOK {
+				t.Errorf("ReadExportAuto() = (%v, %v), want (false, false) with the error", gotValue, gotOK)
+			}
+		})
 	}
 }
 

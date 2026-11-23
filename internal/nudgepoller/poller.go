@@ -4,6 +4,9 @@ package nudgepoller
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -15,9 +18,115 @@ const (
 	sessionFlag = "--session"
 )
 
+// ChildEnv returns a copy of environ for a poller child, without the
+// spawning session's GC_SESSION_ID and GC_RUNTIME_EPOCH, and without the
+// spawning hook's GC_HOOK_DEADLINE. The poller names its target in argv and
+// outlives its spawner by design, so it must not read as that session's leaked
+// process to the process-table orphan sweep, nor as bound by a hook deadline
+// that passes long before it exits.
+func ChildEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		switch key, _, _ := strings.Cut(entry, "="); key {
+		case "GC_SESSION_ID", "GC_RUNTIME_EPOCH", "GC_HOOK_DEADLINE":
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // CommandArgs returns the argv tail for a nudge poller.
 func CommandArgs(cityPath, sessionName, agentName string) []string {
 	return []string{"nudge", "poll", cityFlag, cityPath, sessionFlag, sessionName, agentName}
+}
+
+// IsGoTestExecutable reports whether path names a Go test binary, and must gate
+// every spawn that re-executes this program as a poller.
+//
+// A Go test binary ignores unrecognized positional arguments, so re-executing
+// one with CommandArgs does not start a poller: it starts the whole test suite
+// again, with no -test.timeout to bound it. Each of those runs reaches the
+// spawn path again, so the fan-out is exponential rather than a single stray
+// process.
+//
+// The two answers are not equally costly, and the predicate is deliberately
+// biased. Missing a test binary ends in that fan-out; refusing a production
+// binary only means a poller does not start. So an uncertain case is refused.
+func IsGoTestExecutable(path string) bool {
+	// The authoritative answer, available whenever path names this very
+	// program — which is what both spawn paths pass, since they re-execute
+	// themselves. A Go test binary registers the testing package's flags no
+	// matter what the file is called, and no naming rule can match that:
+	// `go test -o api-tests.exe` produces a test binary with no ".test" in its
+	// name at all, and bazel produces one named <target>_test.
+	if runningGoTest() && isThisExecutable(path) {
+		return true
+	}
+
+	// Past here the path names some other file, which can only be judged by
+	// how `go test` names its output.
+	base := filepath.Base(path)
+	// A trailing ".exe" means Windows naming, where the filesystem is
+	// case-insensitive and "Api.Test.EXE" and "api.test.exe" are the same
+	// file. The ".test" suffix has to be compared the same way, or the
+	// guard misses the spellings this trimming exists to normalize. Unix
+	// filenames are case-sensitive, so an exact match is correct there.
+	if ext := filepath.Ext(base); strings.EqualFold(ext, ".exe") {
+		base = strings.TrimSuffix(base, ext)
+		if hasSuffixFold(base, ".test") {
+			return true
+		}
+	} else if strings.HasSuffix(base, ".test") {
+		return true
+	}
+	// A bazel test binary drops the .test suffix but keeps the <target>_test
+	// name and exports TEST_SRCDIR. Both markers are required so a probe that
+	// execs a renamed spy binary is not mistaken for the test binary itself.
+	return os.Getenv("TEST_SRCDIR") != "" && isThisExecutable(path) && strings.HasSuffix(base, "_test")
+}
+
+// runningGoTest reports whether this process is a Go test binary.
+//
+// The testing package registers its -test.* flags while the binary starts, so
+// their presence identifies it whatever the file on disk is called. Reading the
+// flag rather than importing testing keeps the test framework out of the
+// production binary.
+//
+// It is a variable so a test can describe the case it cannot otherwise reach:
+// every test runs inside a test binary, so the false branch is unobservable.
+var runningGoTest = func() bool { return flag.Lookup("test.v") != nil }
+
+// isThisExecutable reports whether path names the running program's own file.
+//
+// The comparison is by file identity rather than by string because the same
+// file arrives spelled differently: os.Args[0] carries whatever the caller
+// typed, os.Executable reports a resolved absolute path, and on Windows the
+// two can also differ in case or by one being a short name. Comparing the
+// spellings answered "no" for a file that was plainly the same one.
+func isThisExecutable(path string) bool {
+	self, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if path == self {
+		return true
+	}
+	selfInfo, err := os.Stat(self)
+	if err != nil {
+		return false
+	}
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(selfInfo, pathInfo)
+}
+
+// hasSuffixFold reports whether s ends in suffix under case-insensitive
+// comparison.
+func hasSuffixFold(s, suffix string) bool {
+	return len(s) >= len(suffix) && strings.EqualFold(s[len(s)-len(suffix):], suffix)
 }
 
 // CmdlineMatcher returns a predicate that recognizes the nudge poller command
@@ -42,7 +151,40 @@ func CmdlineMatcher(cityPath, sessionName, agentName string) func([]string) bool
 	}
 }
 
+// FileStemMatcher returns a predicate that recognizes the nudge poller for
+// cityPath whose session/target tuple owns fileStem, the PollerFileStem that
+// names its PID and log files. It is the identity check for callers that know
+// only a poller's PID file, such as stopping every poller of a city: a PID
+// read from the file is signaled only when its live command line is that
+// city's poller for exactly that file.
+func FileStemMatcher(cityPath, fileStem string) func([]string) bool {
+	return func(argv []string) bool {
+		if strings.TrimSpace(cityPath) == "" || fileStem == "" {
+			return false
+		}
+		sessionName, ok := argvFlagValue(argv, sessionFlag)
+		if !ok {
+			return false
+		}
+		agentName, ok := argvPollTarget(argv)
+		if !ok {
+			return false
+		}
+		if PollerFileStem(sessionName, agentName) != fileStem {
+			return false
+		}
+		return CmdlineMatcher(cityPath, sessionName, agentName)(argv)
+	}
+}
+
 func argvHasPollTarget(argv []string, expected string) bool {
+	target, ok := argvPollTarget(argv)
+	return ok && target == expected
+}
+
+// argvPollTarget returns the first positional argument after "nudge poll",
+// which is the poller's target key.
+func argvPollTarget(argv []string) (string, bool) {
 	for i := 0; i+1 < len(argv); i++ {
 		if argv[i] != "nudge" || argv[i+1] != "poll" {
 			continue
@@ -61,12 +203,26 @@ func argvHasPollTarget(argv []string, expected string) bool {
 					j++
 				}
 			default:
-				return arg == expected
+				return arg, true
 			}
 		}
-		return false
+		return "", false
 	}
-	return false
+	return "", false
+}
+
+// argvFlagValue returns the non-empty value of flag, given as "--flag value"
+// or "--flag=value".
+func argvFlagValue(argv []string, flag string) (string, bool) {
+	for i, arg := range argv {
+		if arg == flag && i+1 < len(argv) && argv[i+1] != "" {
+			return argv[i+1], true
+		}
+		if value, ok := strings.CutPrefix(arg, flag+"="); ok && value != "" {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 // PollerFileStem returns the filesystem-safe stem for poller PID and log

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -161,6 +163,115 @@ version = "^1.0"
 	after := check.Run(&doctor.CheckContext{CityPath: cityDir})
 	if after.Status != doctor.StatusOK {
 		t.Fatalf("after status = %v, want OK; result=%#v", after.Status, after)
+	}
+}
+
+// setupImportStateFixFailure writes a city whose packv2-import-state check
+// fails (no lockfile) and stubs its Fix so syncImports returns syncErr and
+// installLockedImports returns installErr.
+func setupImportStateFixFailure(t *testing.T, syncErr, installErr error) string {
+	t.Helper()
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+`)
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+		checkInstalledImports = prevCheck
+	})
+	lock := &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "1.1.0", Commit: "new"},
+		},
+	}
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		if syncErr != nil {
+			return nil, syncErr
+		}
+		return lock, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		if installErr != nil {
+			return nil, installErr
+		}
+		return lock, nil
+	}
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		return &packman.CheckReport{Issues: []packman.CheckIssue{{
+			Severity: packman.CheckSeverityError,
+			Code:     "missing-lockfile",
+		}}}, nil
+	}
+	return cityDir
+}
+
+func TestImportStateDoctorCheckFixAuthErrorReportsCredentialHint(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		matched bool
+		sync    bool
+	}{
+		{name: "sync unmatched", matched: false, sync: true},
+		{name: "sync matched", matched: true, sync: true},
+		{name: "install unmatched", matched: false},
+		{name: "install matched", matched: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			authErr := authErrorSeam(tc.matched)
+			syncErr, installErr := error(nil), authErr
+			if tc.sync {
+				syncErr, installErr = authErr, nil
+			}
+			cityDir := setupImportStateFixFailure(t, syncErr, installErr)
+			res := runDoctorFix(t, newImportStateDoctorCheck(cityDir), cityDir)
+			if res.FixError != authErr.Error() {
+				t.Errorf("FixError = %q, want the unchanged error %q", res.FixError, authErr.Error())
+			}
+			if want := wantDoctorCredentialFixHint(tc.matched); res.FixHint != want {
+				t.Errorf("FixHint = %q, want the gc import install credential hint %q", res.FixHint, want)
+			}
+		})
+	}
+}
+
+func TestImportStateDoctorCheckFixNonAuthErrorKeepsHint(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		syncErr, installErr error
+		lockErr             error
+	}{
+		{name: "sync network timeout", syncErr: fmt.Errorf("git ls-remote: %w", context.DeadlineExceeded)},
+		{name: "install non-128 git exit", installErr: errors.New("git fetch: exit status 1")},
+		{name: "lockfile write", lockErr: errors.New("writing packs.lock: permission denied")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := setupImportStateFixFailure(t, tc.syncErr, tc.installErr)
+			if tc.lockErr != nil {
+				prevWrite := writeImportLockfile
+				t.Cleanup(func() { writeImportLockfile = prevWrite })
+				writeImportLockfile = func(_ fsys.FS, _ string, _ *packman.Lockfile) error { return tc.lockErr }
+			}
+			want := errors.Join(tc.syncErr, tc.installErr, tc.lockErr).Error()
+			res := runDoctorFix(t, newImportStateDoctorCheck(cityDir), cityDir)
+			if res.FixError != want {
+				t.Errorf("FixError = %q, want %q", res.FixError, want)
+			}
+			if res.FixHint != importStateSyncFixHint {
+				t.Errorf("FixHint = %q, want the pre-fix hint %q", res.FixHint, importStateSyncFixHint)
+			}
+		})
 	}
 }
 
@@ -619,6 +730,147 @@ source = ".gc/system/packs/gastown"
 	}
 }
 
+func TestRewriteLegacyPublicPackImportsPreservesImportOptions(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.gastown]
+source = ".gc/system/packs/gastown"
+version = "old"
+export = true
+transitive = false
+shadow = "silent"
+agents_exclude = ["worker"]
+`)
+
+	changed, err := rewriteLegacyPublicPackImportsFS(fsys.OSFS{}, cityDir, map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("rewriteLegacyPublicPackImportsFS: %v", err)
+	}
+	if !changed {
+		t.Fatal("rewriteLegacyPublicPackImportsFS reported no change, want pack.toml rewrite")
+	}
+	manifest, err := loadCityPackManifestFS(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("loadCityPackManifestFS: %v", err)
+	}
+	got := manifest.Imports["gastown"]
+	if got.Source != "https://packages.example/gastown.git" || got.Version != "^1.2" {
+		t.Fatalf("migrated import = %+v, want target source and version", got)
+	}
+	if !got.Export || got.Transitive == nil || *got.Transitive || got.Shadow != "silent" {
+		t.Fatalf("migrated import options = %+v, want export=true transitive=false shadow=silent", got)
+	}
+	if len(got.AgentsExclude) != 1 || got.AgentsExclude[0] != "worker" {
+		t.Fatalf("migrated AgentsExclude = %#v, want [worker]", got.AgentsExclude)
+	}
+}
+
+func TestRewriteLegacyPublicPackImportsPreservesOptionsFromDifferentBinding(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.legacy_gastown]
+source = ".gc/system/packs/gastown"
+agents_exclude = ["worker"]
+`)
+
+	changed, err := rewriteLegacyPublicPackImportsFS(fsys.OSFS{}, cityDir, map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("rewriteLegacyPublicPackImportsFS: %v", err)
+	}
+	if !changed {
+		t.Fatal("rewriteLegacyPublicPackImportsFS reported no change, want pack.toml rewrite")
+	}
+	manifest, err := loadCityPackManifestFS(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("loadCityPackManifestFS: %v", err)
+	}
+	if _, ok := manifest.Imports["legacy_gastown"]; ok {
+		t.Fatalf("legacy_gastown import survived migration: %+v", manifest.Imports)
+	}
+	got, ok := manifest.Imports["gastown"]
+	if !ok {
+		t.Fatalf("gastown import missing after migration: %+v", manifest.Imports)
+	}
+	if got.Source != "https://packages.example/gastown.git" || got.Version != "^1.2" {
+		t.Fatalf("migrated import = %+v, want target source and version", got)
+	}
+	if len(got.AgentsExclude) != 1 || got.AgentsExclude[0] != "worker" {
+		t.Fatalf("migrated AgentsExclude = %#v, want [worker] from the legacy declaration", got.AgentsExclude)
+	}
+}
+
+func TestRewriteLegacyPublicPackImportsRejectsConflictingOptionsOnSameTarget(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.legacy_a]
+source = ".gc/system/packs/gastown"
+agents_exclude = ["worker"]
+
+[imports.legacy_b]
+source = ".gc/system/packs/gastown"
+agents_exclude = ["keeper"]
+`)
+
+	_, err := rewriteLegacyPublicPackImportsFS(fsys.OSFS{}, cityDir, map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+	})
+	if err == nil {
+		t.Fatal("rewriteLegacyPublicPackImportsFS succeeded, want conflicting-options error")
+	}
+	if !strings.Contains(err.Error(), "different options") || !strings.Contains(err.Error(), `"gastown"`) {
+		t.Fatalf("error = %v, want conflicting-options error naming gastown", err)
+	}
+}
+
+func TestSameImportComparesAllCompositionOptions(t *testing.T) {
+	base := config.Import{
+		Source:        "https://packages.example/gastown.git",
+		Version:       "^1.2",
+		Export:        true,
+		Transitive:    boolPtr(false),
+		Shadow:        "silent",
+		AgentsExclude: []string{"worker"},
+	}
+	if !sameImport(base, base) {
+		t.Fatal("sameImport should accept identical import options")
+	}
+	changed := base
+	changed.AgentsExclude = []string{"keeper"}
+	if sameImport(base, changed) {
+		t.Fatal("sameImport must distinguish AgentsExclude")
+	}
+	changed = base
+	changed.Export = false
+	if sameImport(base, changed) {
+		t.Fatal("sameImport must distinguish export")
+	}
+}
+
 // Regression for the ga-lurp5d follow-up review: the packv2 import-state
 // rewrite re-marshals pack.toml through the reduced cityPackManifest struct,
 // which would silently drop keys this gc binary does not recognize. A pack.toml
@@ -768,8 +1020,8 @@ version = "`+dummyOldPin+`"
 
 	check := newImportStateDoctorCheck(cityDir)
 	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
-	if result.Status != doctor.StatusError {
-		t.Fatalf("status = %v, want error for superseded core pin; result=%#v", result.Status, result)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (served from the built-in packs) for superseded core pin; result=%#v", result.Status, result)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
 		t.Fatalf("details = %v, want superseded-canonical-pin entry", result.Details)
@@ -813,8 +1065,8 @@ version = "`+oldContentHashPin+`"
 	}
 
 	result := newImportStateDoctorCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
-	if result.Status != doctor.StatusError {
-		t.Fatalf("status = %v, want error for superseded content-hash pin; result=%#v", result.Status, result)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (served from the built-in packs) for superseded content-hash pin; result=%#v", result.Status, result)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), oldContentHashPin) ||
 		!strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
@@ -848,8 +1100,8 @@ fetched = "2026-06-11T17:08:05Z"
 
 	check := newImportStateDoctorCheck(cityDir)
 	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
-	if result.Status != doctor.StatusError {
-		t.Fatalf("status = %v, want error for lock-only superseded pin; result=%#v", result.Status, result)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (served from the built-in packs) for lock-only superseded pin; result=%#v", result.Status, result)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), oldContentHashCommit) ||
 		!strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
@@ -972,8 +1224,8 @@ schema = 2
 
 	check := newImportStateDoctorCheck(cityDir)
 	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
-	if result.Status != doctor.StatusError {
-		t.Fatalf("status = %v, want error for superseded city-root pin; result=%#v", result.Status, result)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (served from the built-in packs) for superseded city-root pin; result=%#v", result.Status, result)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
 		t.Fatalf("details = %v, want superseded-canonical-pin entry", result.Details)

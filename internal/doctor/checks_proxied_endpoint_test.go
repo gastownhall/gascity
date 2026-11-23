@@ -278,6 +278,30 @@ func TestBeadsStorePayloadNeverProbesAnUnprovenEndpoint(t *testing.T) {
 	}
 }
 
+// A finite-idle scope with no proxy record is idle, not a gap.
+func TestBeadsStorePayloadReportsAFiniteScopeWithNoRecordAsIdle(t *testing.T) {
+	for _, tc := range []struct {
+		name, sidecar string
+		idle          bool
+	}{
+		{name: "finite", sidecar: `{"root_path":"dolt","idle_timeout":1800000000000}`, idle: true},
+		{name: "never", sidecar: `{"root_path":"dolt","idle_timeout":-1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := t.TempDir()
+			writeProxiedScope(t, scope, tc.sidecar, 0, 0)
+			stubProxyProcessTable(t, proxyendpoint.ProcessTable{})
+			ep := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{Store: beads.BeadsStoreNameBdStore}).Endpoint
+			if ep == nil || ep.Verdict != "no_record" {
+				t.Fatalf("endpoint = %+v, want no_record", ep)
+			}
+			if got := ep.Detail == ProxiedEndpointIdleDetail; got != tc.idle {
+				t.Fatalf("detail = %q, idle = %v, want %v", ep.Detail, got, tc.idle)
+			}
+		})
+	}
+}
+
 // TestBeadsStorePayloadReportsAnUnservedProbe pins the two states a live proxy
 // can be in besides serving, and that both are reported rather than smoothed
 // into "down".
@@ -514,74 +538,161 @@ func writeScopeOwnershipRows(t *testing.T, cityPath string, rows ...scopeOwnersh
 func TestProxiedIdleTimeoutCheck(t *testing.T) {
 	cases := []struct {
 		name       string
+		beads      string
+		env        string
 		sidecar    string
 		wantStatus CheckStatus
 		wantIn     string
 	}{
 		{
-			// What gc's own `bd init` produces: the script passes
-			// --proxied-server-idle-timeout 0, which bd maps to
-			// IdleTimeoutNever before persisting.
-			name:       "gc's own scope pins the proxy resident",
+			// What gc's own `bd init` produces at a "0" config: bd maps
+			// --proxied-server-idle-timeout 0 to IdleTimeoutNever.
+			name:       "never configured, never persisted",
+			beads:      "0",
 			sidecar:    `{"root_path":"dolt","idle_timeout":-1}`,
 			wantStatus: StatusOK,
-			wantIn:     "pin their proxy resident",
+			wantIn:     "carry the configured idle timeout",
+		},
+		{
+			name:       "finite configured, finite persisted",
+			beads:      "30m",
+			sidecar:    `{"root_path":"dolt","idle_timeout":1800000000000}`,
+			wantStatus: StatusOK,
+			wantIn:     "carry the configured idle timeout",
+		},
+		{
+			// An existing scope made before the value changed: bd cannot
+			// change it, so doctor names the drift and the remedy.
+			name:       "configured finite, scope pinned never",
+			beads:      "30m",
+			sidecar:    `{"root_path":"dolt","idle_timeout":-1}`,
+			wantStatus: StatusWarning,
+			wantIn:     "configured 30m0s (city), scope has never(sidecar)",
 		},
 		{
 			// bd elides a zero, so this is what a scope initialized without
 			// the flag looks like — and bd's provider substitutes 30s for it.
 			name:       "an absent key is bd's 30s default",
+			beads:      "0",
 			sidecar:    `{"root_path":"dolt"}`,
 			wantStatus: StatusWarning,
 			wantIn:     "finite(30s, bd-default)",
 		},
 		{
-			name:       "an explicit window is still a window",
-			sidecar:    `{"root_path":"dolt","idle_timeout":300000000000}`,
-			wantStatus: StatusWarning,
-			wantIn:     "finite(5m0s, sidecar)",
-		},
-		{
 			name:       "no sidecar at all",
+			beads:      "0",
 			sidecar:    "",
 			wantStatus: StatusWarning,
 			wantIn:     "bd-default",
 		},
 		{
 			name:       "an unreadable sidecar is reported, not assumed",
+			beads:      "0",
 			sidecar:    `{"root_path":`,
 			wantStatus: StatusWarning,
-			wantIn:     "could not read",
+			wantIn:     "could not compare",
+		},
+		{
+			// The scope matches what this environment resolves, so the
+			// override is named without turning the line into a warning.
+			name:       "the env override is named",
+			beads:      "30m",
+			env:        "20s",
+			sidecar:    `{"root_path":"dolt","idle_timeout":20000000000}`,
+			wantStatus: StatusOK,
+			wantIn:     config.ProxiedIdleTimeoutEnv + "=20s",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(config.ProxiedIdleTimeoutEnv, tc.env)
 			city := t.TempDir()
 			writeProxiedScope(t, city, tc.sidecar, 0, 0)
 			writeScopeOwnership(t, city, map[string]string{"city": city})
 
-			check := NewProxiedIdleTimeoutCheckForConfig(city, &config.City{}, nil)
+			check := NewProxiedIdleTimeoutCheckForConfig(city, &config.City{Beads: config.BeadsConfig{ProxiedIdleTimeout: tc.beads}}, nil)
 			if check == nil {
 				t.Fatal("the check was not registered for a city with a gc-owned proxied scope")
 			}
 			got := check.Run(&CheckContext{CityPath: city})
 			if got.Status != tc.wantStatus {
-				t.Fatalf("status = %v, want %v: %s", got.Status, tc.wantStatus, got.Message)
+				t.Fatalf("status = %v, want %v: %s %v", got.Status, tc.wantStatus, got.Message, got.Details)
 			}
 			if !strings.Contains(got.Message, tc.wantIn) && !containsAny(got.Details, tc.wantIn) {
 				t.Fatalf("message %q / details %v do not mention %q", got.Message, got.Details, tc.wantIn)
 			}
 			if got.Severity != SeverityAdvisory {
-				t.Errorf("severity = %v, want advisory — the scope works, it is only slower than gc's topology intends", got.Severity)
+				t.Errorf("severity = %v, want advisory — the scope works either way", got.Severity)
 			}
 			if got.Status != StatusOK && got.FixHint == "" {
 				t.Error("a warning with no fix hint")
+			}
+			if strings.Contains(got.Message, "do not carry") && !strings.Contains(got.FixHint, `proxied_idle_timeout = "0"`) {
+				t.Errorf("drift hint %q does not say how to keep the scopes and silence it", got.FixHint)
 			}
 			if check.CanFix() {
 				t.Error("the check offers to fix a file bd owns")
 			}
 		})
+	}
+}
+
+// The running proxy's argv is the third value: a scope whose sidecar matches
+// the config but whose live proxy was started with something else gets the
+// value at its next start, and doctor says so.
+func TestProxiedIdleTimeoutCheckComparesTheRunningProxy(t *testing.T) {
+	t.Setenv(config.ProxiedIdleTimeoutEnv, "")
+	for _, tc := range []struct {
+		name, argv string
+		wantStatus CheckStatus
+	}{
+		{name: "matching argv", argv: "30m0s", wantStatus: StatusOK},
+		{name: "older argv", argv: "-1ns", wantStatus: StatusWarning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			fixture := writeProxiedScope(t, city, `{"idle_timeout":1800000000000}`, 4242, 40000)
+			writeScopeOwnership(t, city, map[string]string{"city": city})
+			stubProxyProcess(t, fixture, tc.argv)
+			got := NewProxiedIdleTimeoutCheckForConfig(city, &config.City{Beads: config.BeadsConfig{ProxiedIdleTimeout: "30m"}}, nil).Run(&CheckContext{CityPath: city})
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %v, want %v: %s %v", got.Status, tc.wantStatus, got.Message, got.Details)
+			}
+			if tc.wantStatus == StatusWarning && !containsAny(got.Details, "running proxy has never") {
+				t.Fatalf("details %v do not name the running proxy's value", got.Details)
+			}
+		})
+	}
+}
+
+// A rig on the city's proxy root is compared against the city's value, and its
+// own override is named as ignored.
+func TestProxiedIdleTimeoutCheckSharedRootRigUsesCityValue(t *testing.T) {
+	t.Setenv(config.ProxiedIdleTimeoutEnv, "")
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "alpha")
+	writeProxiedScope(t, city, `{"idle_timeout":1800000000000}`, 0, 0)
+	writeProxiedScope(t, rig, `{"idle_timeout":1800000000000}`, 0, 0)
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"),
+		[]byte(`{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server","dolt_database":"alpha","dolt_data_dir":"../../../.beads/dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeScopeOwnershipRows(t, city,
+		scopeOwnershipRow{key: "city", path: city, state: "ready"},
+		scopeOwnershipRow{key: "rigs/alpha", path: rig, state: "ready"},
+	)
+	never := "0"
+	cfg := &config.City{
+		Beads: config.BeadsConfig{ProxiedIdleTimeout: "30m"},
+		Rigs:  []config.Rig{{Name: "alpha", Path: rig, BeadsProxiedIdleTimeout: &never}},
+	}
+	got := NewProxiedIdleTimeoutCheckForConfig(city, cfg, nil).Run(&CheckContext{CityPath: city})
+	if containsAny(got.Details, "configured never") {
+		t.Fatalf("the shared-root rig was compared against its own override: %v", got.Details)
+	}
+	if !containsAny(got.Details, "shares the city's proxy root") {
+		t.Fatalf("details %v do not name the ignored override", got.Details)
 	}
 }
 
@@ -608,7 +719,7 @@ func TestProxiedIdleTimeoutCheckUsesThePendingInitLens(t *testing.T) {
 		if got.Message != pendingScopeInitMessage {
 			t.Fatalf("message = %q, want the pending-initialisation message %q", got.Message, pendingScopeInitMessage)
 		}
-		if strings.Contains(got.Message, "do not pin") || containsAny(got.Details, "bd-default") {
+		if strings.Contains(got.Message, "do not carry") || containsAny(got.Details, "bd-default") {
 			t.Fatalf("a scope mid-initialisation was reported as a sidecar misconfiguration: %q %v", got.Message, got.Details)
 		}
 		if got.Severity != SeverityAdvisory {
@@ -639,11 +750,11 @@ func TestProxiedIdleTimeoutCheckUsesThePendingInitLens(t *testing.T) {
 			t.Fatalf("the check covers %d scope(s) (%v), want the city and the rig: a pending scope that is not covered cannot be reported beside anything", len(check.scopeRoots), check.scopeRoots)
 		}
 		got := check.Run(&CheckContext{CityPath: city})
-		if got.Status != StatusWarning || !strings.Contains(got.Message, "do not pin their proxy resident") {
+		if got.Status != StatusWarning || !strings.Contains(got.Message, "do not carry the configured idle timeout") {
 			t.Fatalf("status/message = %v / %q, want the settled scope reported", got.Status, got.Message)
 		}
 		// The offender is counted alone: a scope mid-initialisation is not one.
-		if !strings.Contains(got.Message, "1 gc-owned proxied scope(s) do not pin") {
+		if !strings.Contains(got.Message, "1 gc-owned proxied scope(s) do not carry") {
 			t.Errorf("message %q counts the pending scope as an offender", got.Message)
 		}
 		// And the pending scope is still SAID, in a detail a reader can tell

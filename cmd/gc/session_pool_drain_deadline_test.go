@@ -60,8 +60,8 @@ func stuckDrainedPoolSeat(t *testing.T, env *reconcilerTestEnv, state string, dr
 	return seat
 }
 
-func poolSeatEnv() *reconcilerTestEnv {
-	env := newReconcilerTestEnv()
+func poolSeatEnv(t testing.TB) *reconcilerTestEnv {
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
 	}
@@ -125,7 +125,7 @@ func TestPoolSlotDrainRetireDeadlineOutlastsTheOrdinaryDrainMachinery(t *testing
 func TestReconcileSessionBeads_DrainedPoolSlotIsRetiredAtTheDeadline(t *testing.T) {
 	for _, state := range []string{"drained", "awake"} {
 		t.Run("state_"+state, func(t *testing.T) {
-			env := poolSeatEnv()
+			env := poolSeatEnv(t)
 			rec := events.NewFake()
 			env.rec = rec
 			seat := stuckDrainedPoolSeat(t, env, state, poolSlotDrainRetireDeadline+time.Minute)
@@ -193,7 +193,7 @@ func TestReconcileSessionBeads_DrainedPoolSlotIsRetiredAtTheDeadline(t *testing.
 // the fix it survives every tick the controller will ever run: re-healed to
 // awake, never stopped, its runtime name held open forever.
 func TestReconcileSessionBeads_StuckDrainedPoolSlotNeverConvergesWithoutTheBound(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	seat := stuckDrainedPoolSeat(t, env, "drained", time.Minute)
 
 	// Inside the deadline the ordinary machinery gets every chance to converge.
@@ -235,7 +235,7 @@ func TestReconcileSessionBeads_StuckDrainedPoolSlotNeverConvergesWithoutTheBound
 // is nothing to route around), and once the deadline retires the bead the very
 // next availability check succeeds.
 func TestReconcileSessionBeads_RetiredDrainDeadlineSlotUnblocksPoolMinting(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
 
 	before, err := loadSessionBeadSnapshot(env.store)
@@ -260,7 +260,7 @@ func TestReconcileSessionBeads_RetiredDrainDeadlineSlotUnblocksPoolMinting(t *te
 // Pin 3 (negative). A seat holding live assigned work is never force-retired,
 // and its runtime is never stopped: that population belongs to ga-ee8eo.
 func TestReconcileSessionBeads_DrainDeadlineRetireRefusesWhenSeatHoldsAssignedWork(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
 
 	if _, err := env.store.Create(beads.Bead{
@@ -289,7 +289,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireRefusesWhenSeatHoldsAssignedWo
 // Pin 4 (negative). Inside the deadline nothing is forced, so a normal drain
 // always finalizes through the existing drain-ack path.
 func TestReconcileSessionBeads_DrainDeadlineRetireRefusesInsideTheDeadline(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	seat := stuckDrainedPoolSeat(t, env, "drained", 2*time.Minute)
 
 	env.reconcile([]beads.Bead{seat})
@@ -333,7 +333,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireRefusesWhenStopUnconfirmed(t *
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			env := poolSeatEnv()
+			env := poolSeatEnv(t)
 			rec := events.NewFake()
 			env.rec = rec
 			seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
@@ -355,6 +355,38 @@ func TestReconcileSessionBeads_DrainDeadlineRetireRefusesWhenStopUnconfirmed(t *
 	}
 }
 
+// An empty token that came with a read error must not pass the retire's kill
+// fence: no kill, the slot is kept, and the retire is re-evaluated next pass.
+func TestDrainDeadlineRetireDefersOnUnverifiableToken(t *testing.T) {
+	env := poolSeatEnv(t)
+	rec := events.NewFake()
+	env.rec = rec
+	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
+	env.setSessionMetadata(&seat, map[string]string{"instance_token": "tok-a"})
+	env.sp.GetMetaErrors[poolSeatName] = map[string]error{
+		"GC_INSTANCE_TOKEN": errors.New("show-environment: fork failed"),
+	}
+
+	env.reconcile([]beads.Bead{seat})
+
+	if !env.sp.IsRunning(poolSeatName) {
+		t.Fatalf("runtime stopped although its instance token could not be read; stderr=%q", env.stderr.String())
+	}
+	got, err := env.store.Get(seat.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", seat.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("seat retired over an unverifiable token: metadata=%v", got.Metadata)
+	}
+	if fired := drainDeadlineRetiredEvents(rec); len(fired) != 0 {
+		t.Fatalf("emitted %d retirement events, want 0", len(fired))
+	}
+	if !strings.Contains(env.stderr.String(), "token_unverifiable") {
+		t.Fatalf("stderr = %q, want token_unverifiable diagnostic", env.stderr.String())
+	}
+}
+
 // Negative — a live seat carrying a stale drain marker. drain_at is never
 // cleared once stamped, so age alone is not evidence of anything: a seat whose
 // drain was CANCELED (scale-back-up returns it to the desired set) keeps a
@@ -362,7 +394,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireRefusesWhenStopUnconfirmed(t *
 // two markers a real drain leaves behind — a wake after drain_at, and no
 // surviving drain sleep_reason — and it must never be force-retired.
 func TestReconcileSessionBeads_DrainDeadlineRetireSkipsLiveSeatWithStaleDrainMarker(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	env.addDesired(poolSeatName, "worker", false)
 	seat := env.createSessionBead(poolSeatName, "worker")
 	env.setSessionMetadata(&seat, map[string]string{
@@ -395,7 +427,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireSkipsLiveSeatWithStaleDrainMar
 // otherwise non-pool session in the same drain state keeps its bead: its
 // identity is not disposable, and nothing about it starves a pool.
 func TestReconcileSessionBeads_DrainDeadlineRetireSkipsNonPoolSession(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	seat := env.createSessionBead("worker-named", "worker")
 	env.setSessionMetadata(&seat, map[string]string{
 		"state":        "drained",
@@ -468,7 +500,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireSkipsLegacyManualSeat(t *testi
 		{name: "single_session_agent", desired: false, singleSession: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := poolSeatEnv()
+			env := poolSeatEnv(t)
 			if tc.dropAgent {
 				env.cfg.Agents = nil
 			}
@@ -548,7 +580,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireSkipsLegacyManualSeat(t *testi
 // silently disable the whole path while leaving all three legacy-manual arms
 // above green, so the narrowing needs its own guard in the build.
 func TestReconcileSessionBeads_DrainDeadlineRetiresMarkedSeatWhoseAgentLeftConfig(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	rec := events.NewFake()
 	env.rec = rec
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
@@ -599,7 +631,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetiresMarkedSeatWhoseAgentLeftConfi
 // not a conjunction — ANDing them would leave exactly this seat admitted.
 func TestReconcileSessionBeads_DrainDeadlineRetireSkipsDependencyOnlySeat(t *testing.T) {
 	const dependencySeatName = "worker-dependency"
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	seat := env.createSessionBead(dependencySeatName, "worker")
 	env.setSessionMetadata(&seat, map[string]string{
 		"state":        "drained",
@@ -654,7 +686,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireSkipsDependencyOnlySeat(t *tes
 // a bead parked in a state it has never seen. That is exactly the population
 // the skip directly beneath this call site exists to leave alone.
 func TestReconcileSessionBeads_DrainDeadlineRetireSkipsUnknownState(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	rec := events.NewFake()
 	env.rec = rec
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
@@ -695,7 +727,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireSkipsUnknownState(t *testing.T
 // it carries a pool marker — see DrainDeadlineRetireSkipsLegacyManualSeat's
 // agent_removed_from_config arm and its positive control.)
 func TestReconcileSessionBeads_DrainDeadlineRetireNamesTheSeatsOwnTemplate(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	rec := events.NewFake()
 	env.rec = rec
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
@@ -749,7 +781,7 @@ func (e *reconcilerTestEnv) reconcileAsyncSafe(sessions []beads.Bead, stderr io.
 		}
 	}
 	reconcileSessionBeadsAtPath(
-		context.Background(), "", sessions, e.desiredState,
+		context.Background(), e.city, sessions, e.desiredState,
 		configuredSessionNames(e.cfg, "", e.store), e.cfg, e.sp, e.store, nil, nil, nil, nil,
 		e.dt, poolDesired, false, nil, "", nil, e.clk, e.rec, 0, 0, io.Discard, stderr,
 		e.startOptions...,
@@ -767,7 +799,7 @@ func (e *reconcilerTestEnv) reconcilePartial(sessions []beads.Bead, storeQueryPa
 		}
 	}
 	reconcileSessionBeadsAtPath(
-		context.Background(), "", sessions, e.desiredState,
+		context.Background(), e.city, sessions, e.desiredState,
 		configuredSessionNames(e.cfg, "", e.store), e.cfg, e.sp, e.store, nil, nil, nil, nil,
 		e.dt, poolDesired, storeQueryPartial, nil, "", nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 		append(append([]startExecutionOption{}, e.startOptions...), opts...)...,
@@ -790,7 +822,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireSeesWorkClaimedUnderTheAlias(t
 		{name: "prior_alias_from_history", assignee: "worker-0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := poolSeatEnv()
+			env := poolSeatEnv(t)
 			seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
 			env.setSessionMetadata(&seat, map[string]string{
 				"alias":         "worker-1",
@@ -833,7 +865,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireDefersOnDegradedTick(t *testin
 		{name: "defer_closes_on_boot", opts: []startExecutionOption{withDeferSessionClosesOnBoot()}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := poolSeatEnv()
+			env := poolSeatEnv(t)
 			seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
 
 			env.reconcilePartial([]beads.Bead{seat}, tc.partial, tc.opts...)
@@ -878,7 +910,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireHonorsAdvisoryBlockers(t *test
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := poolSeatEnv()
+			env := poolSeatEnv(t)
 			seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
 			future := env.clk.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
 			meta := map[string]string{}
@@ -911,7 +943,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireHonorsAdvisoryBlockers(t *test
 // this every retired seat leaks a worktree — and the hand-killed-pane case
 // (runtime already absent) is the ordinary shape here.
 func TestReconcileSessionBeads_DrainDeadlineRetirePrunesTheWorktree(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
 
 	var pruned []string
@@ -938,7 +970,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetirePrunesTheWorktree(t *testing.T
 // stop counter and the session.stopped envelope, or the lifecycle timeline for
 // a retired seat ends with no stop at all.
 func TestReconcileSessionBeads_DrainDeadlineRetireEmitsTheStopEvent(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	rec := events.NewFake()
 	env.rec = rec
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
@@ -963,7 +995,7 @@ func TestReconcileSessionBeads_DrainDeadlineRetireEmitsTheStopEvent(t *testing.T
 // else clears it, so a later ordinary close would carry false provenance and
 // the greppable marker would over-count against the event.
 func TestReconcileSessionBeads_DrainDeadlineRefusedCloseLeavesNoProvenance(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	rec := events.NewFake()
 	env.rec = rec
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
@@ -997,13 +1029,14 @@ func TestReconcileSessionBeads_DrainDeadlineRefusedCloseLeavesNoProvenance(t *te
 }
 
 // workAppearsAfterProbeStore models the agent claiming a bead in the window
-// between the retirement's work probe and its next fence: the first assignee
-// query answers honestly (no work), and creating the claim as a side effect of
-// that query means every later probe sees it.
+// between the retirement's work probe and its next fence: the pre-kill
+// probe's (session ID, in_progress) list answers honestly (no work), and the
+// claim it creates on returning is seen by every later probe. The probe reads
+// its lists concurrently, so the trigger is that one query, once.
 type workAppearsAfterProbeStore struct {
 	beads.Store
 	sessionID string
-	fired     bool
+	fired     sync.Once
 }
 
 func newWorkAppearsAfterProbeStore(inner beads.Store, sessionID string) *workAppearsAfterProbeStore {
@@ -1011,18 +1044,19 @@ func newWorkAppearsAfterProbeStore(inner beads.Store, sessionID string) *workApp
 }
 
 func (s *workAppearsAfterProbeStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if !s.fired && strings.TrimSpace(q.Assignee) != "" {
-		s.fired = true
-		items, err := s.Store.List(q)
+	if q.Assignee != s.sessionID || q.Status != "in_progress" {
+		return s.Store.List(q)
+	}
+	items, err := s.Store.List(q)
+	s.fired.Do(func() {
 		if _, createErr := s.Create(beads.Bead{
 			Title: "claimed during the retirement window", Type: "task",
 			Status: "in_progress", Assignee: s.sessionID,
 		}); createErr != nil {
 			panic("seeding raced work: " + createErr.Error())
 		}
-		return items, err
-	}
-	return s.Store.List(q)
+	})
+	return items, err
 }
 
 // Scope pin for the population this bound does NOT own. A seat in
@@ -1053,7 +1087,7 @@ func TestReconcileSessionBeads_DrainingSeatsBelongToTheStopPendingHandler(t *tes
 	}
 
 	t.Run("killable_runtime_converges_without_the_bound", func(t *testing.T) {
-		env := poolSeatEnv()
+		env := poolSeatEnv(t)
 		rec := events.NewFake()
 		env.rec = rec
 		seat := newDrainingSeat(t, env)
@@ -1081,7 +1115,14 @@ func TestReconcileSessionBeads_DrainingSeatsBelongToTheStopPendingHandler(t *tes
 	})
 
 	t.Run("immortal_runtime_is_never_closed_over", func(t *testing.T) {
-		env := poolSeatEnv()
+		// Its queued stops never confirm the runtime dead, so each runs to
+		// the confirm-dead bound; a short one keeps the test (and its
+		// cleanup's wait for them) brief. Bound at queue time, so restored
+		// once the cleanup has waited them out.
+		oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+		drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = 200*time.Millisecond, 10*time.Millisecond
+		t.Cleanup(func() { drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = oldTimeout, oldPoll })
+		env := poolSeatEnv(t)
 		seat := newDrainingSeat(t, env)
 		env.sp.StopLeavesRunning = map[string]bool{poolSeatName: true}
 		logs := &syncWriter{}
@@ -1109,18 +1150,21 @@ type workAppearsAfterStopStore struct {
 	sp        *runtime.Fake
 	name      string
 	sessionID string
-	fired     bool
+	fired     sync.Once
 }
 
+// List creates the claim on the first (session ID, in_progress) list after
+// the stop, before answering it, so the probe after the stop sees it.
 func (s *workAppearsAfterStopStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if !s.fired && strings.TrimSpace(q.Assignee) != "" && !s.sp.IsRunning(s.name) {
-		s.fired = true
-		if _, err := s.Create(beads.Bead{
-			Title: "claimed after the stop", Type: "task",
-			Status: "in_progress", Assignee: s.sessionID,
-		}); err != nil {
-			panic("seeding post-stop work: " + err.Error())
-		}
+	if q.Assignee == s.sessionID && q.Status == "in_progress" && !s.sp.IsRunning(s.name) {
+		s.fired.Do(func() {
+			if _, err := s.Create(beads.Bead{
+				Title: "claimed after the stop", Type: "task",
+				Status: "in_progress", Assignee: s.sessionID,
+			}); err != nil {
+				panic("seeding post-stop work: " + err.Error())
+			}
+		})
 	}
 	return s.Store.List(q)
 }
@@ -1130,7 +1174,7 @@ func (s *workAppearsAfterStopStore) List(q beads.ListQuery) ([]beads.Bead, error
 // open bead would follow it into whatever close comes later and inflate the
 // deadline-retirement count against an event that never fired.
 func TestReconcileSessionBeads_DrainDeadlineRefusedAtFinalFenceRollsBackProvenance(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	rec := events.NewFake()
 	env.rec = rec
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
@@ -1182,7 +1226,7 @@ func (s *closeFailsStore) Tx(label string, fn func(beads.Tx) error) error {
 // emits — and "a stop invisible to the stop event and counter" is the exact gap
 // this path exists not to reintroduce.
 func TestReconcileSessionBeads_DrainDeadlineFailedCloseRollsBackProvenance(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	rec := events.NewFake()
 	env.rec = rec
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)

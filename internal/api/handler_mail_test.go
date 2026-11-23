@@ -183,12 +183,12 @@ func (f *multiProviderFakeState) MailProviders() map[string]mail.Provider {
 	return f.providers
 }
 
-func TestMailInboxForRecipientsUsesMultiRecipientProvider(t *testing.T) {
+func TestMailInboxForQueryUsesMultiRecipientProvider(t *testing.T) {
 	mp := &multiRecipientInboxMailProvider{}
 
-	msgs, err := mailInboxForRecipients(mp, []string{"sky", "mayor", "sky"})
+	msgs, err := mailInboxForQuery(mp, apiMailQuery{recipients: []string{"sky", "mayor", "sky"}})
 	if err != nil {
-		t.Fatalf("mailInboxForRecipients: %v", err)
+		t.Fatalf("mailInboxForQuery: %v", err)
 	}
 	if len(msgs) != 1 || msgs[0].ID != "multi-1" {
 		t.Fatalf("messages = %#v, want multi-recipient result", msgs)
@@ -202,15 +202,15 @@ func TestMailInboxForRecipientsUsesMultiRecipientProvider(t *testing.T) {
 	}
 }
 
-func TestMailInboxForRecipientsFallbackDedupesMessages(t *testing.T) {
+func TestMailInboxForQueryFallbackDedupesMessages(t *testing.T) {
 	mp := &exactRecipientMailProvider{messages: map[string][]mail.Message{
 		"sky":   {{ID: "msg-1", To: "sky"}, {ID: "shared", To: "sky"}},
 		"mayor": {{ID: "shared", To: "mayor"}, {ID: "msg-2", To: "mayor"}},
 	}}
 
-	msgs, err := mailInboxForRecipients(mp, []string{"sky", "mayor", "sky"})
+	msgs, err := mailInboxForQuery(mp, apiMailQuery{recipients: []string{"sky", "mayor", "sky"}})
 	if err != nil {
-		t.Fatalf("mailInboxForRecipients: %v", err)
+		t.Fatalf("mailInboxForQuery: %v", err)
 	}
 	if len(msgs) != 3 {
 		t.Fatalf("messages = %#v, want 3 deduped fallback messages", msgs)
@@ -250,7 +250,7 @@ func TestMailLifecycle(t *testing.T) {
 	h := newTestCityHandler(t, state)
 
 	// Send a message. Bare "worker" resolves to "myrig/worker" (the qualified name).
-	body := `{"from":"mayor","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
+	body := `{"from":"human","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
 	req := newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -329,7 +329,7 @@ func TestMailMarkUnread(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
-	body := `{"from":"mayor","to":"worker","subject":"Unread test","body":"check this"}`
+	body := `{"from":"human","to":"worker","subject":"Unread test","body":"check this"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body)))
 	if rec.Code != http.StatusCreated {
@@ -385,7 +385,7 @@ func TestMailSendOmittedBodyStaysEmpty(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
-	body := `{"from":"alice","to":"worker","subject":"Build is green"}`
+	body := `{"from":"human","to":"worker","subject":"Build is green"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body)))
 
@@ -1321,7 +1321,7 @@ func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
-	body := `{"rig":"test-city","from":"alice","to":"worker","subject":"Hi","body":"hello"}`
+	body := `{"rig":"test-city","from":"human","to":"worker","subject":"Hi","body":"hello"}`
 	req := newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body))
 	req.Header.Set("Idempotency-Key", "mail-send-1")
 	rec := httptest.NewRecorder()
@@ -1404,7 +1404,7 @@ func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
 	h := newTestCityHandler(t, state)
 
-	body := `{"from":"bob","subject":"Re: Hi","body":"reply"}`
+	body := `{"from":"worker","subject":"Re: Hi","body":"reply"}`
 	req := newPostRequest(cityURL(state, "/mail/")+msg.ID+"/reply", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

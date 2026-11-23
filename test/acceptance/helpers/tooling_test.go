@@ -44,9 +44,9 @@ func (r *recordingSkipOrFailer) Fatalf(format string, args ...any) {
 
 // TestMissingPreconditionFailsWhereTheRowsMustRun pins the contract the
 // proxied-native rows rely on (round4 missed low): under the require switch a
-// missing precondition is a FAILURE, and only without it a skip. The required
-// Beads / proxied-native acceptance job sets the switch, so an in-row skip can
-// no longer turn that job green without running the row.
+// missing precondition is a FAILURE, and only without it a skip. Bazel's
+// required acceptance lane sets the switch, so an in-row skip can no longer
+// turn that lane green without running the row.
 func TestMissingPreconditionFailsWhereTheRowsMustRun(t *testing.T) {
 	const reason = "bd removed its record on SIGKILL"
 	for _, tc := range []struct {

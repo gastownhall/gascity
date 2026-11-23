@@ -1,5 +1,10 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# //cmd/gc:gc_productmetrics_testhook_test builds this package with -tags
+# productmetrics_testhook; gazelle lists the tagged files in srcs, and
+# rules_go drops them again in every configuration without the tag.
+# gazelle:build_tags integration,productmetrics_testhook
+
 go_library(
     name = "productmetrics",
     srcs = [
@@ -12,6 +17,7 @@ go_library(
         "notice_content.go",
         "pause.go",
         "platform_unsupported.go",
+        "productmetrics_testhook.go",
         "quota.go",
         "release.go",
         "service.go",
@@ -48,6 +54,17 @@ go_library(
 
 go_test(
     name = "productmetrics_test",
+    # The suite is fsync-bound by design: storage syncs a directory after every
+    # entry it unlinks, so the tests make about 62,000 fsyncs, six of them
+    # 1,500 to 5,100 each. Every one waits on the disk under the sandbox's
+    # hermetic /tmp. A loaded gate host took 180 s for one 5,046-fsync test,
+    # and both shards of the old 2-shard split overran 300 s (ga-46vdxg).
+    # rules_go gives test i of the declaration order to shard i % shard_count.
+    # The six heaviest tests sit at positions 215, 224, 250, 261, 298 and 306,
+    # all different mod 10, so ten shards put each on a shard of its own and
+    # the default timeout holds. A test added or removed ahead of them shifts
+    # those positions and can put two on one shard again: recheck the split
+    # when the test set changes.
     srcs = [
         "config_state_test.go",
         "control_unix_test.go",
@@ -86,7 +103,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ),
     embed = [":productmetrics"],
-    shard_count = 2,
+    shard_count = 10,
     deps = [
         "//:gascity",
         "//internal/testenv",
@@ -98,6 +115,7 @@ go_test(
             "//internal/gchome",
         ],
         "@rules_go//go/platform:darwin": [
+            "//internal/bazeltest",
             "//internal/gchome",
             "//internal/testutil",
             "@org_golang_x_sys//unix",
@@ -118,6 +136,7 @@ go_test(
             "//internal/gchome",
         ],
         "@rules_go//go/platform:linux": [
+            "//internal/bazeltest",
             "//internal/gchome",
             "//internal/testutil",
             "@org_golang_x_sys//unix",
@@ -147,6 +166,11 @@ go_test(
     }),
 )
 
+exports_files(
+    ["command_ids_gen.go"],
+    visibility = ["//visibility:public"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -155,6 +179,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

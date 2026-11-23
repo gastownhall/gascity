@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router';
 import { isPoolWorkerSender, selectOperatorActionableUnread } from 'gas-city-dashboard-shared';
 import { formatApiError } from '../api/client';
 import { formatMailSender } from '../lib/mailSender';

@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // RequiredCustomTypes lists the bead types that Gas City requires
@@ -37,11 +39,11 @@ import (
 // unregistered one turns both the write and the scan into "invalid issue
 // type". A native-store city never noticed because its SQL path does not
 // validate.
-var RequiredCustomTypes = []string{
-	"molecule", "convoy", "message", "event", "gate",
-	"merge-request", "agent", "role", "rig", "session", "spec",
-	"convergence", "step", "startup-health-episode",
-}
+//
+// The list itself lives in internal/beads, beside the native store's typed
+// list pushdown that relies on every scope carrying it. This is a copy, so a
+// caller that appends to or edits it cannot change the pushdown's vocabulary.
+var RequiredCustomTypes = slices.Clone(beads.RequiredCustomTypes)
 
 // CustomTypesCheck verifies that all required Gas City custom bead
 // types are registered in a bd store's types.custom config.
@@ -112,7 +114,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read types.custom: %v", err)
-		r.FixHint = "run gc doctor --fix to set required custom types"
+		r.FixHint = c.readFailureHint("types.custom")
 		// Treat as all missing — fix will set the full list.
 		c.missing = RequiredCustomTypes
 		c.tableMissing = nil
@@ -126,7 +128,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read custom_types table: %v", err)
-		r.FixHint = "run gc doctor --fix to register required custom types"
+		r.FixHint = c.readFailureHint("the custom_types table")
 		c.tableMissing = RequiredCustomTypes
 		return r
 	}
@@ -147,8 +149,28 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	r.Status = StatusError
 	r.Message = strings.Join(parts, "; ")
-	r.FixHint = "run gc doctor --fix to register missing types"
+	// Name the exact one-shot repair. No boot path registers types on a store
+	// gc does not provision (an external Dolt server, an HTTP binding), so a
+	// store an older gc registered stays short of a newer required type until
+	// an operator runs this, and an operator about to write a production store
+	// needs to know the write only adds types (Fix merges row ∪ table ∪
+	// required through `bd config set types.custom`).
+	r.FixHint = fmt.Sprintf("run `%s` (additive: merges the missing types into types.custom with `bd config set`, never removes one)", c.fixCommand())
 	return r
+}
+
+// readFailureHint names the scoped repair for a store bd could not read, and
+// says it waits on that read: Fix re-reads the row and the table and refuses to
+// write a list it cannot prove is a superset, so running it before the read
+// succeeds fails the same way.
+func (c *CustomTypesCheck) readFailureHint(unread string) string {
+	return fmt.Sprintf("once bd can read %s, run `%s` (it re-reads the store and writes nothing while either read fails)", unread, c.fixCommand())
+}
+
+// fixCommand is the one-shot repair scoped to this check, quoted for pasting:
+// a rig's check name carries the rig name, which can hold a space.
+func (c *CustomTypesCheck) fixCommand() string {
+	return shellquote.Join([]string{"gc", "doctor", "--fix", "--check", c.Name()})
 }
 
 // typesNotIn returns the entries of want that are absent from have, in
@@ -220,6 +242,15 @@ func MergeRequiredCustomTypes(row, table []string) []string {
 // table whenever it is non-empty, so a complete row alone is not enough.
 func CustomTypesNeedRegistration(row, table []string) bool {
 	return len(typesNotIn(RequiredCustomTypes, row)) != 0 || len(typesNotIn(RequiredCustomTypes, table)) != 0
+}
+
+// CustomTypesStoreEnv returns the environment this check runs bd under for the
+// store at dir in the city at cityPath. Every inherited store selector is
+// replaced, so bd resolves dir's own .beads: a server target only when dir's
+// metadata records server mode, none otherwise. Code that registers the types
+// outside doctor uses it to reach the store `gc doctor --fix` would.
+func CustomTypesStoreEnv(cityPath, dir string) ([]string, error) {
+	return customTypesStoreEnv(&CheckContext{CityPath: cityPath}, dir)
 }
 
 func customTypesStoreEnv(ctx *CheckContext, dir string) ([]string, error) {

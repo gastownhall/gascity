@@ -127,7 +127,7 @@ func TestMailMutationHandlersRecordMailOpOnSuccess(t *testing.T) {
 	h := newTestCityHandler(t, state)
 
 	rec := doMailRequest(t, h, newPostRequest(cityURL(state, "/mail"),
-		bytes.NewBufferString(`{"from":"mayor","to":"worker","subject":"s","body":"b"}`)),
+		bytes.NewBufferString(`{"from":"human","to":"worker","subject":"s","body":"b"}`)),
 		http.StatusCreated)
 	var sent mail.Message
 	if err := json.NewDecoder(rec.Body).Decode(&sent); err != nil {
@@ -182,7 +182,7 @@ func TestMailMutationHandlersRecordMailOpOnError(t *testing.T) {
 	h := newTestCityHandler(t, state)
 
 	doMailRequest(t, h, newPostRequest(cityURL(state, "/mail"),
-		bytes.NewBufferString(`{"from":"mayor","to":"worker","subject":"s","body":"b"}`)),
+		bytes.NewBufferString(`{"from":"human","to":"worker","subject":"s","body":"b"}`)),
 		http.StatusInternalServerError)
 	doMailRequest(t, h, newPostRequest(cityURL(state, "/mail/")+msg.ID+"/read", nil), http.StatusInternalServerError)
 	doMailRequest(t, h, newPostRequest(cityURL(state, "/mail/")+msg.ID+"/mark-unread", nil), http.StatusInternalServerError)
@@ -215,7 +215,7 @@ func TestMailSendIdempotentReplayRecordsNoMailOp(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
-	body := `{"from":"mayor","to":"worker","subject":"s","body":"b"}`
+	body := `{"from":"human","to":"worker","subject":"s","body":"b"}`
 	for range 2 {
 		req := newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body))
 		req.Header.Set("Idempotency-Key", "mail-telemetry-replay-1")
