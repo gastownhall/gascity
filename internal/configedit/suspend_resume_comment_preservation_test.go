@@ -325,8 +325,9 @@ schema = 2
 // mutateAgentSuspended's OriginDerived branch used to swallow that error and
 // return plain nil, which EditExpanded treats as "write the raw config,"
 // silently deleting every comment in city.toml while leaving the ambiguous
-// patch blocks in place. Resuming must instead surface the refusal and
-// leave city.toml byte-for-byte untouched.
+// patch blocks in place. Resuming must instead surface the refusal, leave
+// city.toml byte-for-byte untouched, and restore agents/worker/agent.toml,
+// which the resume rewrote before the strip was refused.
 func TestResumeAgent_LocalDiscovered_AmbiguousLegacyPatch_RefusesLossyRewrite(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, `# City-level rationale: primary orchestration city for gascity.
@@ -375,5 +376,8 @@ schema = 2
 	after := string(mustReadFile(t, path))
 	if after != before {
 		t.Errorf("refused resume must leave city.toml byte-for-byte unchanged; diff:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if got := string(mustReadFile(t, filepath.Join(agentDir, "agent.toml"))); got != "suspended = true\n" {
+		t.Errorf("refused resume must restore agents/worker/agent.toml; got:\n%s", got)
 	}
 }

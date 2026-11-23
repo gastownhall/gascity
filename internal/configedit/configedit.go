@@ -55,9 +55,9 @@ var (
 
 	// ErrShadowed is returned when an agent suspend/resume edit cannot set
 	// the agent's composed suspension: the written value is overridden by a
-	// later config layer, or the deciding layer cannot be identified or
-	// edited safely. Every file the attempt changed is restored. Maps to
-	// HTTP 409.
+	// later config layer, the deciding layer cannot be identified or edited
+	// safely, or the edit would also change another agent's suspension.
+	// Every file the attempt changed is restored. Maps to HTTP 409.
 	ErrShadowed = errors.New("agent suspension is decided by another config layer")
 )
 
@@ -470,7 +470,7 @@ func (e *Editor) verifyAgentSuspended(before *config.City, name string, want boo
 			continue
 		}
 		if now, ok := afterSuspended[other]; ok && now != was {
-			return fmt.Errorf("agent %q: the suspension edit also changed agent %q (suspended %t -> %t)", qualified, other, was, now)
+			return fmt.Errorf("%w: agent %q: the suspension edit also changed agent %q (suspended %t -> %t)", ErrShadowed, qualified, other, was, now)
 		}
 	}
 	return nil
@@ -519,9 +519,10 @@ func agentSuspensionByName(cfg *config.City) map[string]bool {
 //     the composed value (rig setters apply after city patches), so set its
 //     bool surgically in place.
 //   - OriginDerived + pack-declared: surgically set suspended explicitly on
-//     the existing exact [[patches.agent]] block, or append one when none
-//     exists. A block that cannot be located unambiguously is refused rather
-//     than rewritten lossily.
+//     the existing exact dir-keyed [[patches.agent]] block, or append one
+//     when none exists (an exact rig-keyed block is kept as it is and the
+//     appended block applies after it). A block that cannot be located
+//     unambiguously is refused rather than rewritten lossily.
 //
 // Returns [ErrUnmodified] whenever the on-disk city.toml was already
 // written surgically (or the change lives entirely in agent.toml), so
@@ -611,13 +612,16 @@ type rigAgentSetter struct {
 // the expanded agent identified by name, if any. Composition applies a
 // rig's overrides, then its patches, after every city [[patches.agent]], and
 // matches them on the agent's bare Name; the last entry that sets suspended
-// therefore wins. A rig is treated as the stamping rig when the agent's Dir
-// equals the dir the rig's setters leave it with (the rig name unless a
-// setter rewrites dir). It refuses, rather than guesses, when several rigs
-// or several entries in the deciding table claim the agent.
+// therefore wins. Each entry reaches only the first agent the rig stamped
+// with that bare name, so an agent that shares its bare name with an earlier
+// binding in the same rig has no deciding rig setter. A rig is treated as the
+// stamping rig when the agent's Dir equals the dir the rig's setters leave it
+// with (the rig name unless a setter rewrites dir). It refuses, rather than
+// guesses, when several rigs or several entries in the deciding table claim
+// the agent.
 func rigSuspensionSetter(raw, expanded *config.City, name string) (rigAgentSetter, bool, error) {
 	agent, ok := findAgentByIdentity(expanded, name)
-	if !ok || agent.Dir == "" {
+	if !ok || agent.Dir == "" || sharesBareNameWithEarlierBinding(expanded, agent) {
 		return rigAgentSetter{}, false, nil
 	}
 	var found []rigAgentSetter
@@ -669,11 +673,35 @@ func rigSuspensionSetter(raw, expanded *config.City, name string) (rigAgentSette
 	}
 }
 
-// hasAgentPatch reports whether raw declares a [[patches.agent]] entry whose
-// target is exactly the qualified agent identity.
+// sharesBareNameWithEarlierBinding reports whether an agent that an import
+// binding stamped with agent's Dir and bare Name precedes agent in the
+// composed order. A rig's [[rigs.overrides]]/[[rigs.patches]] entries reach
+// only that earlier agent. Two agents in one rig share a bare name only under
+// distinct bindings, so an inline or fragment-defined agent that happens to
+// share the dir is not counted.
+func sharesBareNameWithEarlierBinding(expanded *config.City, agent config.Agent) bool {
+	qualified := agent.QualifiedName()
+	for _, a := range expanded.Agents {
+		if a.QualifiedName() == qualified {
+			return false
+		}
+		if a.BindingName != "" && a.Name == agent.Name && a.Dir == agent.Dir {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAgentPatch reports whether raw declares a dir-keyed [[patches.agent]]
+// entry whose target is exactly the qualified agent identity: the only exact
+// shape [config.SetAgentPatchSuspendedForEdit] can locate and edit in place.
+// An exact patch keyed by rig = "<rig>" is not counted, so the edit leaves it
+// as it is and appends a dir-keyed block after it, which composition applies
+// later.
 func hasAgentPatch(raw *config.City, qualified string) bool {
 	for i := range raw.Patches.Agents {
-		if raw.Patches.Agents[i].TargetQualifiedName() == qualified {
+		p := &raw.Patches.Agents[i]
+		if p.Rig == "" && p.TargetQualifiedName() == qualified {
 			return true
 		}
 	}

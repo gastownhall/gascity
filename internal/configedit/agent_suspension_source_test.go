@@ -2,6 +2,7 @@ package configedit_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // rigImportCity writes a schema-2 city whose rig "proj" imports a pack
@@ -371,7 +373,9 @@ suspended = true
 }
 
 // renameFailFS fails every rename onto target after the first, so the
-// forward write succeeds and the rollback write fails.
+// forward write succeeds and the rollback write fails. Paths are compared
+// canonically: the writers rename onto the symlink-resolved path, which
+// differs from t.TempDir()'s on macOS (/var -> /private/var).
 type renameFailFS struct {
 	fsys.OSFS
 	target  string
@@ -379,7 +383,7 @@ type renameFailFS struct {
 }
 
 func (f *renameFailFS) Rename(oldpath, newpath string) error {
-	if filepath.Clean(newpath) == filepath.Clean(f.target) {
+	if pathutil.SamePath(newpath, f.target) {
 		f.renames++
 		if f.renames > 1 {
 			return errors.New("injected rename failure")
@@ -389,18 +393,37 @@ func (f *renameFailFS) Rename(oldpath, newpath string) error {
 }
 
 func TestAgentSuspension_RollbackFailureSurfaced(t *testing.T) {
-	path := fragmentShadowCity(t)
-	fs := &renameFailFS{target: path}
+	for _, tc := range []struct {
+		name    string
+		viaLink bool
+	}{
+		{name: "direct path"},
+		// The macOS shape: t.TempDir() is under /var, a link to /private/var,
+		// so the writers rename onto a path other than the one the editor got.
+		{name: "city reached through a symlinked dir", viaLink: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := fragmentShadowCity(t)
+			if tc.viaLink {
+				link := filepath.Join(t.TempDir(), "city-link")
+				if err := os.Symlink(filepath.Dir(path), link); err != nil {
+					t.Skipf("symlink unsupported: %v", err)
+				}
+				path = filepath.Join(link, filepath.Base(path))
+			}
+			fs := &renameFailFS{target: path}
 
-	err := configedit.NewEditor(fs, path).ResumeAgent("base.worker")
-	if !errors.Is(err, configedit.ErrShadowed) {
-		t.Fatalf("ResumeAgent error = %v, want ErrShadowed", err)
-	}
-	if !strings.Contains(err.Error(), "injected rename failure") || !strings.Contains(err.Error(), "restor") {
-		t.Fatalf("error %q does not surface the failed restoration", err)
-	}
-	if strings.Contains(err.Error(), "rolled back") {
-		t.Fatalf("error %q claims a rollback that failed", err)
+			err := configedit.NewEditor(fs, path).ResumeAgent("base.worker")
+			if !errors.Is(err, configedit.ErrShadowed) {
+				t.Fatalf("ResumeAgent error = %v, want ErrShadowed", err)
+			}
+			if !strings.Contains(err.Error(), "injected rename failure") || !strings.Contains(err.Error(), "restor") {
+				t.Fatalf("error %q does not surface the failed restoration", err)
+			}
+			if strings.Contains(err.Error(), "rolled back") {
+				t.Fatalf("error %q claims a rollback that failed", err)
+			}
+		})
 	}
 }
 
@@ -503,6 +526,250 @@ func TestResumeAgent_RestoreRemovesCreatedSiteBinding(t *testing.T) {
 	}
 	if _, err := os.Stat(sitePath); !os.IsNotExist(err) {
 		t.Errorf("a site binding created by the refused edit must be removed; stat error: %v", err)
+	}
+	assertTreeUnchanged(t, dir, before)
+}
+
+// setAgentSuspended runs the editor's suspend or resume for target.
+func setAgentSuspended(t *testing.T, path, target string, suspend bool) error {
+	t.Helper()
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	if suspend {
+		return ed.SuspendAgent(target)
+	}
+	return ed.ResumeAgent(target)
+}
+
+// TestAgentSuspension_RigKeyedExactPatchAppendsDirKeyedBlock covers an exact
+// [[patches.agent]] keyed by rig = "<rig>", the key AgentPatch recommends.
+// The in-place setter only locates dir-keyed blocks, so the editor keeps the
+// rig-keyed block as it is and appends a dir-keyed block after it, which
+// composition applies later. The edit must succeed as a pure append.
+func TestAgentSuspension_RigKeyedExactPatchAppendsDirKeyedBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		suspendedKey string
+		suspend      bool
+	}{
+		{name: "resume over suspended true", suspendedKey: "suspended = true # held by the operator\n", suspend: false},
+		{name: "resume without a suspended key", suspend: false},
+		{name: "suspend over suspended false", suspendedKey: "suspended = false\n", suspend: true},
+		{name: "suspend without a suspended key", suspend: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := rigImportCity(t, `
+# Operator tuning keyed by rig.
+[[patches.agent]]
+rig = "proj"
+name = "base.worker"
+nudge = "check the queue" # tuned 10-30
+`+tc.suspendedKey)
+			before := string(mustReadFile(t, path))
+
+			if err := setAgentSuspended(t, path, "proj/base.worker", tc.suspend); err != nil {
+				t.Fatalf("setting suspended = %t: %v", tc.suspend, err)
+			}
+
+			if got := effectiveSuspended(t, path, "proj/base.worker"); got != tc.suspend {
+				t.Fatalf("composed suspended = %t, want %t", got, tc.suspend)
+			}
+			after := string(mustReadFile(t, path))
+			if !strings.HasPrefix(after, before) {
+				t.Fatalf("the edit must keep every existing byte, the rig-keyed patch included, and only append; city.toml now:\n%s", after)
+			}
+			assertOnlyLinesChanged(t, before, after, nil, []string{
+				"[[patches.agent]]", `dir = "proj"`, `name = "base.worker"`, fmt.Sprintf("suspended = %t", tc.suspend),
+			})
+		})
+	}
+}
+
+// twoBindingRigCity writes a schema-2 city whose rig "proj" imports pack
+// bindings "aa" and "bb", each stamping a rig-scoped agent with the bare name
+// "worker" ("proj/aa.worker" and "proj/bb.worker"). tail is appended inside
+// the [[rigs]] entry after its import tables.
+func twoBindingRigCity(t *testing.T, tail string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, binding := range []string{"aa", "bb"} {
+		packDir := filepath.Join(dir, "packs", binding)
+		if err := os.MkdirAll(packDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		packTOML := "[pack]\nname = \"" + binding + "\"\nschema = 2\n\n[[agent]]\nname = \"worker\"\nscope = \"rig\"\nprovider = \"claude\"\n"
+		if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(packTOML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rigPath := filepath.Join(dir, "proj")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return writeTOML(t, dir, `# City rationale: keep this comment.
+[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "proj"
+path = "`+rigPath+`"
+
+[rigs.imports.aa]
+source = "./packs/aa"
+
+[rigs.imports.bb]
+source = "./packs/bb"
+`+tail)
+}
+
+// TestAgentSuspension_RigSetterDecidesOnlyTheFirstBareNameMatch pins that a
+// rig setter decides only the agent composition applies it to: the first
+// agent the rig stamped with the setter's bare name. Editing a second binding
+// that shares the bare name takes the exact city-patch path and leaves the
+// rig setter and the first binding alone.
+func TestAgentSuspension_RigSetterDecidesOnlyTheFirstBareNameMatch(t *testing.T) {
+	const first, second = "proj/aa.worker", "proj/bb.worker"
+	probe := twoBindingRigCity(t, "\n[[rigs.patches]]\nagent = \"worker\"\nsuspended = true\n")
+	if !effectiveSuspended(t, probe, first) || effectiveSuspended(t, probe, second) {
+		t.Fatalf("fixture: a [[rigs.patches]] entry for agent \"worker\" must reach %s only", first)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		tail        string
+		target      string
+		suspend     bool
+		wantRemoved []string
+		wantAdded   []string
+	}{
+		{
+			name: "resume the second binding held by its own city patch",
+			tail: `
+[[rigs.patches]]
+agent = "worker"
+suspended = true # holds the first binding
+
+[[patches.agent]]
+dir = "proj"
+name = "bb.worker"
+suspended = true
+`,
+			target:      second,
+			wantRemoved: []string{"suspended = true"},
+			wantAdded:   []string{"suspended = false"},
+		},
+		{
+			name: "suspend the second binding while the rig setter says false",
+			tail: `
+[[rigs.patches]]
+agent = "worker"
+suspended = false
+`,
+			target:    second,
+			suspend:   true,
+			wantAdded: []string{"[[patches.agent]]", `dir = "proj"`, `name = "bb.worker"`, "suspended = true"},
+		},
+		{
+			name: "resume the running second binding while the rig setter holds the first",
+			tail: `
+[[rigs.patches]]
+agent = "worker"
+suspended = true
+`,
+			target:    second,
+			wantAdded: []string{"[[patches.agent]]", `dir = "proj"`, `name = "bb.worker"`, "suspended = false"},
+		},
+		{
+			name: "resume the first binding edits the rig setter",
+			tail: `
+[[rigs.patches]]
+agent = "worker"
+suspended = true
+`,
+			target:      first,
+			wantRemoved: []string{"suspended = true"},
+			wantAdded:   []string{"suspended = false"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := twoBindingRigCity(t, tc.tail)
+			other := first
+			if tc.target == first {
+				other = second
+			}
+			otherBefore := effectiveSuspended(t, path, other)
+			before := string(mustReadFile(t, path))
+
+			if err := setAgentSuspended(t, path, tc.target, tc.suspend); err != nil {
+				t.Fatalf("setting %s suspended = %t: %v", tc.target, tc.suspend, err)
+			}
+
+			if got := effectiveSuspended(t, path, tc.target); got != tc.suspend {
+				t.Fatalf("%s composed suspended = %t, want %t", tc.target, got, tc.suspend)
+			}
+			if got := effectiveSuspended(t, path, other); got != otherBefore {
+				t.Fatalf("%s composed suspended changed %t -> %t", other, otherBefore, got)
+			}
+			assertOnlyLinesChanged(t, before, string(mustReadFile(t, path)), tc.wantRemoved, tc.wantAdded)
+		})
+	}
+}
+
+// sideEffectRenameFS appends extra to target right after the first rename
+// onto it lands, so an otherwise exact suspension write also changes another
+// agent's composed suspension.
+type sideEffectRenameFS struct {
+	fsys.OSFS
+	target string
+	extra  string
+	fired  bool
+}
+
+func (f *sideEffectRenameFS) Rename(oldpath, newpath string) error {
+	if err := f.OSFS.Rename(oldpath, newpath); err != nil {
+		return err
+	}
+	if f.fired || !pathutil.SamePath(newpath, f.target) {
+		return nil
+	}
+	f.fired = true
+	data, err := os.ReadFile(newpath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(newpath, append(data, f.extra...), 0o644)
+}
+
+// TestAgentSuspension_EditChangingAnotherAgentRefused pins the verify step's
+// cross-agent guard: a suspension write that also changes another agent's
+// composed suspension is refused with ErrShadowed (HTTP 409), and every file
+// is restored.
+func TestAgentSuspension_EditChangingAnotherAgentRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+
+[[agent]]
+name = "worker"
+provider = "claude"
+`)
+	before := treeSnapshot(t, dir)
+	fs := &sideEffectRenameFS{target: path, extra: "\n[[patches.agent]]\nname = \"mayor\"\nsuspended = true\n"}
+
+	err := configedit.NewEditor(fs, path).SuspendAgent("worker")
+	if !fs.fired {
+		t.Fatal("fixture: the suspension write never renamed onto city.toml")
+	}
+	if !errors.Is(err, configedit.ErrShadowed) {
+		t.Fatalf("SuspendAgent error = %v, want ErrShadowed", err)
+	}
+	for _, want := range []string{`also changed agent "mayor" (suspended false -> true)`, "(the attempted edit was rolled back)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
 	}
 	assertTreeUnchanged(t, dir, before)
 }
