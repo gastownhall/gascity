@@ -370,7 +370,7 @@ func evaluatePendingPools(
 				// identical channel, which can deadlock once sem is saturated
 				// (ga-drb140 AC1).
 				var errs []error
-				d, errs = evaluatePoolFanOutSum(agentName, sp, probes, runner, sem, newDemand)
+				d, errs = evaluatePoolFanOutSum(agentName, sp, probes, runner, sem, newDemand, stderr)
 				err = errors.Join(errs...)
 			} else {
 				sem <- struct{}{}

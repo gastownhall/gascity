@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -35,7 +36,7 @@ func TestEvaluatePoolFanOutSumSumsAcrossProbes(t *testing.T) {
 	sem := make(chan struct{}, len(probes))
 	sp := scaleParams{Min: 0, Max: 100, Check: "check"}
 
-	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
+	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true, io.Discard)
 	if len(errs) != 0 {
 		t.Fatalf("errs = %v, want none", errs)
 	}
@@ -59,7 +60,7 @@ func TestEvaluatePoolFanOutSumClampsAggregateOnce(t *testing.T) {
 	sem := make(chan struct{}, len(probes))
 	sp := scaleParams{Min: 0, Max: 6, Check: "check"}
 
-	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, false)
+	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, false, io.Discard)
 	if len(errs) != 0 {
 		t.Fatalf("errs = %v, want none", errs)
 	}
@@ -82,7 +83,7 @@ func TestEvaluatePoolFanOutSumNewDemandLeavesAggregateUnclamped(t *testing.T) {
 	sem := make(chan struct{}, len(probes))
 	sp := scaleParams{Min: 0, Max: 6, Check: "check"}
 
-	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
+	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true, io.Discard)
 	if len(errs) != 0 {
 		t.Fatalf("errs = %v, want none", errs)
 	}
@@ -113,7 +114,7 @@ func TestEvaluatePoolFanOutSumBestEffortOnProbeError(t *testing.T) {
 	sem := make(chan struct{}, len(probes))
 	sp := scaleParams{Min: 0, Max: 100, Check: "check"}
 
-	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
+	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true, io.Discard)
 	if got != 7 {
 		t.Fatalf("evaluatePoolFanOutSum sum = %d, want 7 (3+0+4): one failing rig probe must "+
 			"contribute 0, not poison the whole aggregate", got)
@@ -154,7 +155,7 @@ func TestEvaluatePoolFanOutSumRunsProbesConcurrently(t *testing.T) {
 	}
 	resultCh := make(chan fanOutResult, 1)
 	go func() {
-		got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
+		got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true, io.Discard)
 		resultCh <- fanOutResult{got, errs}
 	}()
 
@@ -216,7 +217,7 @@ func TestEvaluatePoolFanOutSumSharesCallerSemaphoreNotNested(t *testing.T) {
 	}
 	resultCh := make(chan fanOutResult, 1)
 	go func() {
-		got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
+		got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true, io.Discard)
 		resultCh <- fanOutResult{got, errs}
 	}()
 
@@ -366,7 +367,7 @@ func TestEvaluatePoolFanOutSumPrefixesEachProbeWithItsOwnDoltEndpoint(t *testing
 	sem := make(chan struct{}, len(probes))
 	sp := scaleParams{Min: 0, Max: 100, Check: "count-work"}
 
-	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
+	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true, io.Discard)
 	if len(errs) != 0 {
 		t.Fatalf("errs = %v, want none", errs)
 	}

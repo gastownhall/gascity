@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync"
 	"time"
@@ -59,14 +60,17 @@ func cityScopedFanOutProbes(cityPath string, cfg *config.City, _ *config.Agent, 
 
 // evaluatePoolFanOutSum runs sp.Check via runner against every probe
 // concurrently, prefixing the check with each probe's own Dolt connection
-// coordinates (sp.Check must arrive unprefixed), sharing the caller's own sem (never a nested semaphore), and
-// sums the parsed per-probe counts -- clamping the aggregate once when
-// newDemand is false, mirroring evaluatePool/evaluatePoolNewDemand's
-// single-store clamp semantics applied to the summed total instead of one
-// value. A probe error contributes 0 to the sum (best-effort, matching
-// bestStoreWithWork's federation contract) and is returned for the caller to
-// log; it never poisons the other probes' counts.
-func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreProbe, runner ScaleCheckRunner, sem chan struct{}, newDemand bool) (int, []error) {
+// coordinates (sp.Check must arrive unprefixed), sharing the caller's own sem
+// (never a nested semaphore), and sums the parsed per-probe counts --
+// clamping the aggregate once when newDemand is false, mirroring
+// evaluatePool/evaluatePoolNewDemand's single-store clamp semantics applied
+// to the summed total instead of one value. A probe error contributes 0 to
+// the sum (best-effort, matching bestStoreWithWork's federation contract) and
+// is returned for the caller to log; it never poisons the other probes'
+// counts. A probe that panics is that probe's error too: recover works only
+// on the goroutine that panicked, so each probe goroutine defers recoverLeg
+// itself, with the stack written to stderr.
+func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreProbe, runner ScaleCheckRunner, sem chan struct{}, newDemand bool, stderr io.Writer) (int, []error) {
 	counts := make([]int, len(probes))
 	errs := make([]error, len(probes))
 	var wg sync.WaitGroup
@@ -74,6 +78,7 @@ func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreP
 		wg.Add(1)
 		go func(i int, probe poolStoreProbe) {
 			defer wg.Done()
+			defer recoverLeg(&errs[i], "scale_check fan-out "+probe.ref, stderr)
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
