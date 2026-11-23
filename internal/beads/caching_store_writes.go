@@ -34,6 +34,23 @@ func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, er
 	})
 }
 
+// CreatePinned passes a pinned create through to the backing store's
+// PinnedIDCreator and installs the created row into the cache. A backing
+// without the capability is refused with ErrPinnedCreateUnsupported before
+// anything is written.
+func (c *CachingStore) CreatePinned(b Bead) (Bead, error) {
+	if err := checkPinnedCreateID("cache pinned create", b.ID); err != nil {
+		return Bead{}, err
+	}
+	creator, ok := PinnedIDCreatorFor(c.backing)
+	if !ok {
+		return Bead{}, fmt.Errorf("cache pinned create %q: backing %T: %w", b.ID, c.backing, ErrPinnedCreateUnsupported)
+	}
+	return c.createWith(func() (Bead, error) {
+		return creator.CreatePinned(b)
+	})
+}
+
 func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
 	startSeq, endWrite := c.beginLocalCreate()
 	defer endWrite()

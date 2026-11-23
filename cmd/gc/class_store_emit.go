@@ -635,6 +635,19 @@ func (s *emittingClassStore) CreateWithForeignID(bead beads.Bead) (beads.Bead, e
 	return created, err
 }
 
+// CreatePinned forwards the engine's pinned create and emits the row it
+// stored. An engine without the capability is refused with
+// beads.ErrPinnedCreateUnsupported before anything is written.
+func (s *emittingClassStore) CreatePinned(bead beads.Bead) (beads.Bead, error) {
+	creator, ok := beads.PinnedIDCreatorFor(s.Store)
+	if !ok {
+		return beads.Bead{}, fmt.Errorf("pinned create %q: %T: %w", bead.ID, s.Store, beads.ErrPinnedCreateUnsupported)
+	}
+	created, err := creator.CreatePinned(bead)
+	s.emitCreated(created, err)
+	return created, err
+}
+
 func (s *emittingClassStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
 	writer, ok := beads.ConditionalWriterFor(s.Store)
 	if !ok {

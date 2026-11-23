@@ -23,6 +23,7 @@ go_library(
         "identity_guard.go",
         "metadata_cas_conformance.go",
         "op_recording_store.go",
+        "pinned_create_conformance.go",
         "pinned_id_duplicate_conformance.go",
         "pinned_id_fence_conformance.go",
         "pinned_module.go",
@@ -36,6 +37,7 @@ go_library(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/deps",
         "//internal/testpolicy/waiverclock",
     ],
 )

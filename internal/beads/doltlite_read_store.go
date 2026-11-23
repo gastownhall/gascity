@@ -578,6 +578,14 @@ func (s *DoltliteReadStore) Create(b Bead) (Bead, error) {
 	return created, err
 }
 
+// CreatePinned refuses with ErrPinnedCreateUnsupported. The embedded BdStore's
+// pinned create must not promote through this wrapper: its conditional writes
+// are hard-degraded (see UpdateIfMatch), so a caller could insert a pinned row
+// it can never publish with a metadata compare-and-set.
+func (s *DoltliteReadStore) CreatePinned(b Bead) (Bead, error) {
+	return Bead{}, fmt.Errorf("doltlite pinned create %q: %w", b.ID, ErrPinnedCreateUnsupported)
+}
+
 func hasOrderRunLabel(labels []string) bool {
 	for _, label := range labels {
 		if strings.HasPrefix(label, "order-run:") {

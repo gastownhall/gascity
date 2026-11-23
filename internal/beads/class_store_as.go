@@ -81,7 +81,7 @@ const classLayerMaxDepth = 8
 // store (ConditionalWriterFor, GuardedBatcherFor, GraphApplyFor,
 // MetadataCASWriterFor, AtomicConditionalCloserFor, NamespaceCensusFor,
 // DepListBatchFor, GraphOnlyReadyFor, AssignmentGuardedUpdaterFor,
-// ReadyBlockedByAbsentFor), or a plain assertion for any other T, including
+// ReadyBlockedByAbsentFor, PinnedIDCreatorFor), or a plain assertion for any other T, including
 // *CachingStore. So for every T, As[T](h) is exactly what the lookup answers
 // on h's store; TestAsRoutesEveryCapabilityHelper fails when a helper lands
 // without its case in resolveCapability.
@@ -164,6 +164,8 @@ func resolveCapability[T any](s Store) (T, bool) {
 		*p, ok = GraphApplyFor(s)
 	case *MetadataCASWriter:
 		*p, ok = MetadataCASWriterFor(s)
+	case *PinnedIDCreator:
+		*p, ok = PinnedIDCreatorFor(s)
 	case *AtomicConditionalCloser:
 		*p, ok = AtomicConditionalCloserFor(s)
 	case *NamespaceCensus:

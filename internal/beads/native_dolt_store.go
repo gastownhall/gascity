@@ -1504,6 +1504,25 @@ func (s *NativeDoltStore) CreateWithForeignID(b Bead) (Bead, error) {
 	return s.create(b, true)
 }
 
+// CreatePinned persists b at exactly b.ID inside the store's namespaces. The
+// facade's create inserts an explicit id and refuses one that already names a
+// row, leaving the row untouched; this adds the required-id contract of
+// PinnedIDCreator.
+func (s *NativeDoltStore) CreatePinned(b Bead) (Bead, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, err
+	}
+	if err := checkPinnedCreateID("native dolt pinned create", b.ID); err != nil {
+		return Bead{}, err
+	}
+	noteSessionCreate(b)
+	created, err := s.create(b, false)
+	if err != nil {
+		return Bead{}, err
+	}
+	return checkPinnedCreateResult("native dolt pinned create", b.ID, created)
+}
+
 // create is the shared body. allowForeign is the CreateWithForeignID exemption.
 //
 // The fence runs FIRST — before the bead is converted, before the storage
