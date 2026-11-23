@@ -144,3 +144,53 @@ func TestNativeApplyGraphPlanReportsItsOwnBudgetExhausted(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeApplyGraphPlanDoesNotClaimItsBudgetForOtherDeadlines(t *testing.T) {
+	t.Run("caller deadline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			start := time.Now()
+			_, err := newNativeDoltScriptedBatchStore(stallUntilDone).ApplyGraphPlanWithStorage(parent, batchBudgetPlan(), StorageDefault)
+			if elapsed := time.Since(start); elapsed != 10*time.Second {
+				t.Errorf("elapsed = %s, want the caller's 10s deadline", elapsed)
+			}
+			assertNotBudgetExhausted(t, err, "native graph apply: context deadline exceeded")
+		})
+	})
+	t.Run("caller cancel", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			time.AfterFunc(time.Second, cancel)
+			_, err := newNativeDoltScriptedBatchStore(stallUntilDone).ApplyGraphPlanWithStorage(parent, batchBudgetPlan(), StorageDefault)
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("errors.Is(%v, context.Canceled) = false, want true", err)
+			}
+			assertNotBudgetExhausted(t, err, "native graph apply: context canceled")
+		})
+	})
+	t.Run("statement deadline while the budget is live", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := newNativeDoltScriptedBatchStore(func(context.Context, issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
+				return issueops.ApplyBatchResult{}, fmt.Errorf("check cycle: %w", context.DeadlineExceeded)
+			})
+			_, err := store.ApplyGraphPlanWithStorage(context.Background(), batchBudgetPlan(), StorageDefault)
+			assertNotBudgetExhausted(t, err, "native graph apply: check cycle: context deadline exceeded")
+		})
+	})
+}
+
+func assertNotBudgetExhausted(t *testing.T, err error, wantText string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("ApplyGraphPlanWithStorage error = nil, want the apply failure")
+	}
+	var exhausted *GraphApplyBudgetExhaustedError
+	if errors.As(err, &exhausted) {
+		t.Errorf("error = %v claims the store's own budget, want the other deadline reported as is", err)
+	}
+	if err.Error() != wantText {
+		t.Errorf("error = %q, want %q", err.Error(), wantText)
+	}
+}
