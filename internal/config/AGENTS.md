@@ -41,6 +41,15 @@ field to `RigPatch` and wire the merge into `applyRigPatch` so layered
 configs (fragments, patches) can override it. No field-sync test exists for
 Rig today; the patch path must be checked manually.
 
+Exception: `federation` and `namespace` (`internal/config/rig_federation.go`)
+are deliberately absent from `RigPatch`. They decide which rows of a shared
+bead store the city may act on, so only the rig's own `[[rigs]]` entry may set
+them; a pack-level patch must not be able to drop the guard. Their checks run
+in `ValidateRigFederation` on every load and in `ValidateRigFederationLayout`
+beside each `ValidateRigs` call. Unlike `ValidateRigs`, a layout failure on
+reload is a refusal (`tryReloadConfig`), not a warning: a running city must
+not adopt a config that start would refuse.
+
 ## Adding `.gc/site.toml` fields
 
 `.gc/site.toml` holds machine-local bindings and may carry tables this binary
@@ -51,3 +60,9 @@ round-trips. When adding a field to `SiteBinding` or `RigSiteBinding`, register
 its TOML key in `siteBindingKeyOwners` / `rigSiteBindingKeyOwners` and patch it
 only in that owning writer. `TestSiteBindingFieldsHaveWriterOwner` fails on an
 unregistered field.
+
+## Implicit agents carry no prompt_template
+
+`InjectImplicitAgents` leaves `PromptTemplate` empty. The startup prompt of an
+implicit agent's session is chosen in `cmd/gc` by `startupPromptTemplate`
+through `primeBuiltinPromptFile`; do not stamp a core-pack asset path in config.

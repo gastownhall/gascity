@@ -149,6 +149,10 @@ type runtimeStateSnapshot struct {
 	// busy fleet it is marked unavailable rather than discarding the
 	// authoritative tmux liveness, and processAlive degrades optimistically.
 	ProcessesAvailable bool
+	// ProcessesAt is when the process-table scan began, when
+	// ProcessesAvailable: a tap started after it may be missing from the
+	// table without being gone (see programArmStamps).
+	ProcessesAt time.Time
 	// ProgramRead reports that the listing carried each pane's capture
 	// fields: the program-status switch was not off.
 	ProgramRead bool
@@ -969,6 +973,7 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	if snapshot == nil {
 		snapshot = fetchProcessSnapshot
 	}
+	scanned := time.Now()
 	processes, err := snapshot(ctx)
 	if err != nil {
 		// Degrade, do NOT discard: tmux list-panes above already established
@@ -988,6 +993,7 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 	state.Processes = processes
 	state.ProcessesAvailable = true
+	state.ProcessesAt = scanned
 	if program {
 		state.ProgramTaps = tapNonces(processes)
 	}

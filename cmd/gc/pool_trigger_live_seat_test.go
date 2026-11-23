@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -73,7 +75,13 @@ type liveSeatReuse struct {
 	canonical bool
 	// partial makes the session snapshot incomplete, so no fresh session can
 	// start for a reason other than a full pool.
-	partial  bool
+	partial bool
+	// oneShot makes the pool one_shot, whose seat asleep for a freeable
+	// reason is reusable (reusablePoolSessionInfo).
+	oneShot bool
+	// store wraps the store realization reads and writes, once the seat's
+	// row exists.
+	store    func(beads.Store) beads.Store
 	extra    map[string]string
 	request  func(id string) SessionRequest
 	assigned func(id string) []beads.Bead
@@ -142,6 +150,12 @@ func (r liveSeatReuse) run(t *testing.T) liveSeatReuseResult {
 	res := liveSeatReuseResult{
 		store: store, sp: runtime.NewFake(), cityPath: t.TempDir(), id: seat.ID, seatName: seatName,
 		cfg: liveSeatAgent(t, 0, maxSessions), request: r.request(seat.ID), partial: r.partial,
+	}
+	if r.oneShot {
+		res.cfg.Agents[0].Lifecycle = config.AgentLifecycleOneShot
+	}
+	if r.store != nil {
+		res.store = r.store(store)
 	}
 	res.request.Template = "worker"
 	if r.running {
@@ -612,6 +626,252 @@ func TestLegacyReuseRunningSeatWithUnusableEvidenceIsSkipped(t *testing.T) {
 	}
 	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != pathA {
 		t.Fatalf("gc.work_dir = %q; want %q untouched", got, pathA)
+	}
+}
+
+// A request that only names its seat (NameOnly) binds a reused running seat
+// unnamed when its work's worktree evidence is unusable, where the same named
+// request skips it (TestLegacyReuseRunningSeatWithUnusableEvidenceIsSkipped):
+// the seat a custom count places stays desired in the directory it runs in,
+// its trigger cleared, and the refusal is reported.
+func TestLegacyReuseNameOnlyRequestWithUnusableEvidenceBindsTheSeatUnnamed(t *testing.T) {
+	_, pathA := liveSeatManagedSpec(t, "gc-a")
+	res := liveSeatReuse{seatDir: pathA, running: true, request: newDemand(SessionRequest{
+		Tier: "new", WorkBeadID: "gc-b", WorkStoreRef: "rig:r1", WorktreeError: "spec unreadable", NameOnly: true,
+	})}.reused(t)
+	row := res.row(t)
+	if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "" {
+		t.Fatalf("trigger = %q; want the seat bound unnamed", got)
+	}
+	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != pathA {
+		t.Fatalf("gc.work_dir = %q; want %q, where its row records it runs", got, pathA)
+	}
+	if !strings.Contains(res.stderr, errPoolTriggerWorktreeEvidence.Error()) || !strings.Contains(res.stderr, "(binding the seat unnamed)") {
+		t.Fatalf("stderr = %q; want the evidence refusal and the unnamed binding", res.stderr)
+	}
+}
+
+// A live seat whose request was rebound to work that only names it
+// (NameOnly), work whose worktree fails verification (here: removed), stays:
+// no fresh session can start in that worktree, so the seat it was passed over
+// for binds unnamed where it runs instead of leaving the desired set.
+func TestLegacyLiveSeatReboundToUnverifiableNameOnlyWorkStays(t *testing.T) {
+	spec, path := liveSeatManagedSpec(t, "gc-b")
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	seatDir := t.TempDir()
+	res := liveSeatReuse{seatDir: seatDir, running: true, request: func(id string) SessionRequest {
+		return SessionRequest{Tier: "new", SessionBeadID: id, WorkBeadID: "gc-b", WorkStoreRef: "rig:r1", WorktreeSpec: &spec, NameOnly: true}
+	}}.reused(t)
+	row := res.row(t)
+	if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "" {
+		t.Fatalf("trigger = %q; want the seat bound unnamed", got)
+	}
+	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != seatDir {
+		t.Fatalf("gc.work_dir = %q; want %q, where it runs", got, seatDir)
+	}
+	if rows := res.otherRows(t); len(rows) != 0 {
+		t.Fatalf("started %d other sessions, want none for work whose worktree fails verification", len(rows))
+	}
+	if !strings.Contains(res.stderr, "verification failed") || !strings.Contains(res.stderr, "(starting the seat unnamed)") {
+		t.Fatalf("stderr = %q; want the verification refusal and the unnamed seat", res.stderr)
+	}
+}
+
+// realizeFreshRequest realizes request alone on an empty pool and returns the
+// session rows realization created, its desired set and what it printed.
+func realizeFreshRequest(t *testing.T, request SessionRequest) ([]session.Info, map[string]TemplateParams, string) {
+	t.Helper()
+	store := beads.NewMemStore()
+	cfg := liveSeatAgent(t, 0, 3)
+	snapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+	desired := map[string]TemplateParams{}
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{Template: "worker", Requests: []SessionRequest{request}}, desired, &stderr)
+	created, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return created.OpenInfos(), desired, stderr.String()
+}
+
+// A fresh request that only names its seat (NameOnly), whose work's worktree
+// fails verification (here: removed), starts the seat unnamed: the session
+// has no trigger and does not start in that worktree, and the refusal is
+// reported. The control, the same request naming its seat for good, is
+// refused and starts nothing, as before.
+func TestLegacyNameOnlyFreshRequestWithFailedVerificationStartsTheSeatUnnamed(t *testing.T) {
+	spec, path := liveSeatManagedSpec(t, "gc-b")
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	request := SessionRequest{Template: "worker", Tier: "new", WorkBeadID: "gc-b", WorkStoreRef: "rig:r1", WorktreeSpec: &spec}
+
+	rows, _, stderr := realizeFreshRequest(t, request)
+	if len(rows) != 0 || !strings.Contains(stderr, "verification failed") {
+		t.Fatalf("control: the named request created %d sessions; stderr=%s; want the verification refusal and none", len(rows), stderr)
+	}
+
+	request.NameOnly = true
+	rows, desired, stderr := realizeFreshRequest(t, request)
+	if len(rows) != 1 {
+		t.Fatalf("created %d sessions, want the seat; stderr=%s", len(rows), stderr)
+	}
+	seat := rows[0]
+	if seat.TriggerBeadID != "" || preparedStartSessionWorkDir(seat) == path {
+		t.Fatalf("seat trigger %q, work dir %q; want it unnamed, outside %s", seat.TriggerBeadID, preparedStartSessionWorkDir(seat), path)
+	}
+	if _, ok := desired[seat.SessionNameMetadata]; !ok {
+		t.Fatalf("seat %s is not desired; desired=%v", seat.SessionNameMetadata, mapKeys(desired))
+	}
+	if !strings.Contains(stderr, "verification failed") || !strings.Contains(stderr, "(starting the seat unnamed)") {
+		t.Fatalf("stderr = %q; want the verification refusal and the unnamed seat", stderr)
+	}
+}
+
+// seatLeavesUnboundWork reports whether the seat's claim, reading its row as
+// `gc hook --claim` does (hookClaimPoolSeatFor) and probing its directory as
+// the claim does (hookClaimSeatInManagedWorktree), leaves work bound to no
+// managed worktree.
+func (res liveSeatReuseResult) seatLeavesUnboundWork(t *testing.T) bool {
+	t.Helper()
+	info, err := sessionFrontDoor(res.store).Get(res.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seat := hookClaimPoolSeatFor(res.cityPath, "test-city", nil, &info, &res.cfg.Agents[0])
+	return hookClaimSeatLeaves(unboundRoutedCandidate("gc-u"), seat, func() bool {
+		managed, err := hookClaimSeatInManagedWorktree(seat.WorkDir)
+		if err != nil {
+			t.Fatalf("probing work dir %s: %v", seat.WorkDir, err)
+		}
+		return managed
+	})
+}
+
+// A seat that is not alive starts in the directory its row records, so a
+// name-only request whose work's worktree evidence is refused binds it unnamed
+// in the pool's own directory, where a fresh unnamed seat starts and its claim
+// takes the pool's unbound work. Left in the directory its last binding
+// recorded, it would start in that managed worktree and leave that work
+// (hookClaimUnboundWorkOutsideSeat), or start in the refused worktree itself.
+// A live seat stays where it runs
+// (TestLegacyReuseNameOnlyRequestWithUnusableEvidenceBindsTheSeatUnnamed).
+func TestLegacyRefusedNameMovesASeatThatIsNotAliveToThePoolDir(t *testing.T) {
+	unusable := newDemand(SessionRequest{Tier: "new", WorkBeadID: "gc-b", WorkStoreRef: "rig:r1", WorktreeError: "spec unreadable", NameOnly: true})
+	for _, tc := range []struct {
+		name string
+		seat func(t *testing.T) liveSeatReuse
+	}{
+		{name: "stopped seat", seat: func(t *testing.T) liveSeatReuse {
+			_, pathA := liveSeatManagedSpec(t, "gc-a")
+			return liveSeatReuse{seatDir: pathA, request: unusable}
+		}},
+		{name: "zombie seat", seat: func(t *testing.T) liveSeatReuse {
+			_, pathA := liveSeatManagedSpec(t, "gc-a")
+			return liveSeatReuse{seatDir: pathA, running: true, zombie: true, request: unusable}
+		}},
+		{name: "one_shot seat asleep in the worktree of the work it last served", seat: func(t *testing.T) liveSeatReuse {
+			_, pathA := liveSeatManagedSpec(t, "gc-a")
+			specB, pathB := liveSeatManagedSpec(t, "gc-b")
+			if err := os.RemoveAll(pathB); err != nil {
+				t.Fatal(err)
+			}
+			return liveSeatReuse{
+				seatDir: pathA, oneShot: true, extra: map[string]string{"state": "asleep", "sleep_reason": "idle"},
+				request: newDemand(SessionRequest{Tier: "new", WorkBeadID: "gc-b", WorkStoreRef: "rig:r1", WorktreeSpec: &specB, NameOnly: true}),
+			}
+		}},
+		{name: "seat matched by identity to the refused work", seat: func(t *testing.T) liveSeatReuse {
+			specA, pathA := liveSeatManagedSpec(t, "gc-a")
+			if err := os.RemoveAll(pathA); err != nil {
+				t.Fatal(err)
+			}
+			return liveSeatReuse{seatDir: pathA, request: func(id string) SessionRequest {
+				return SessionRequest{Tier: "new", SessionBeadID: id, WorkBeadID: "gc-a", WorkStoreRef: "rig:r1", WorktreeSpec: &specA, NameOnly: true}
+			}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := tc.seat(t).reused(t)
+			poolDir := res.cfg.Agents[0].WorkDir
+			row := res.row(t)
+			if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "" {
+				t.Fatalf("trigger = %q; want the seat bound unnamed", got)
+			}
+			for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+				if got := row.Metadata[key]; got != poolDir {
+					t.Fatalf("%s = %q; want %q, the pool's own directory, where the seat starts", key, got, poolDir)
+				}
+			}
+			if rows := res.otherRows(t); len(rows) != 0 {
+				t.Fatalf("started %d other sessions; want the seat reused", len(rows))
+			}
+			if res.seatLeavesUnboundWork(t) {
+				t.Fatalf("the seat in %s leaves the pool's unbound work", poolDir)
+			}
+			if !strings.Contains(res.stderr, errPoolTriggerWorktreeEvidence.Error()) || !strings.Contains(res.stderr, "(binding the seat unnamed)") {
+				t.Fatalf("stderr = %q; want the evidence refusal and the unnamed binding", res.stderr)
+			}
+		})
+	}
+}
+
+// writeFailingStore fails every update, as a store whose writes are down
+// does, and counts them.
+type writeFailingStore struct {
+	beads.Store
+	updates *int
+}
+
+func (s writeFailingStore) Update(string, beads.UpdateOpts) error {
+	*s.updates++
+	return errors.New("store write failed")
+}
+
+// A failed binding write skips a name-only request's seat that is not alive
+// (bindWriteFailure): the row still names the work its last binding left,
+// where a seat kept desired would start. The named bind's failed write
+// refuses no worktree evidence, so no unnamed bind retries it; the unnamed
+// bind's failed write was to move the seat to the pool's own directory.
+func TestLegacyNameOnlyBindWriteFailureSkipsTheSeat(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		request func(specB worktree.Spec) SessionRequest
+		unnamed bool
+	}{
+		{name: "named bind", request: func(specB worktree.Spec) SessionRequest {
+			return SessionRequest{Tier: "new", WorkBeadID: "gc-b", WorkStoreRef: "rig:r1", WorktreeSpec: &specB, NameOnly: true}
+		}},
+		{name: "unnamed bind of a refused name", unnamed: true, request: func(worktree.Spec) SessionRequest {
+			return SessionRequest{Tier: "new", WorkBeadID: "gc-b", WorkStoreRef: "rig:r1", WorktreeError: "spec unreadable", NameOnly: true}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, pathA := liveSeatManagedSpec(t, "gc-a")
+			specB, _ := liveSeatManagedSpec(t, "gc-b")
+			writes := 0
+			res := liveSeatReuse{
+				seatDir: pathA,
+				store:   func(s beads.Store) beads.Store { return writeFailingStore{Store: s, updates: &writes} },
+				request: newDemand(tc.request(specB)),
+			}.run(t)
+			if _, ok := res.base[res.seatName]; ok {
+				t.Fatalf("the seat whose binding write failed is desired; stderr=%s", res.stderr)
+			}
+			if writes != 1 || !strings.Contains(res.stderr, "binding write failed") || !strings.Contains(res.stderr, "(skipping)") {
+				t.Fatalf("%d writes, stderr = %q; want the one failed write, and the seat skipped", writes, res.stderr)
+			}
+			if got := strings.Contains(res.stderr, "(binding the seat unnamed)"); got != tc.unnamed {
+				t.Fatalf("stderr = %q; unnamed bind = %v, want %v", res.stderr, got, tc.unnamed)
+			}
+		})
 	}
 }
 

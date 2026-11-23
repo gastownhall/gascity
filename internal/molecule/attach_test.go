@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -111,7 +112,7 @@ func TestAttachBasic(t *testing.T) {
 
 	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
 
-	result, err := Attach(context.Background(), store, recipe, leaf.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, leaf.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -144,7 +145,7 @@ func TestAttachBasicGraphApplyPreservesWorkflowRootID(t *testing.T) {
 
 	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
 
-	result, err := Attach(context.Background(), store, recipe, leaf.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, leaf.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -163,7 +164,7 @@ func TestAttachToWorkflowRoot(t *testing.T) {
 
 	recipe := makeWorkflowRecipe("sub-work", "task-a")
 
-	result, err := Attach(context.Background(), store, recipe, root.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, root.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -210,7 +211,7 @@ func TestAttachResolvesRootFromRunChainNotOwnID(t *testing.T) {
 
 	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
 
-	result, err := Attach(context.Background(), store, recipe, wisp.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, wisp.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -267,7 +268,7 @@ func TestAttachFallsBackToSelfWhenRunChainRootIsClosed(t *testing.T) {
 
 	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
 
-	result, err := Attach(context.Background(), store, recipe, content.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, content.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -305,7 +306,7 @@ func TestAttachBlockingDepPreventsClose(t *testing.T) {
 
 	// Attach sub-DAG to B
 	recipe := makeWorkflowRecipe("sub-work", "task-x")
-	result, err := Attach(context.Background(), store, recipe, beadB.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, beadB.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -350,12 +351,12 @@ func TestAttachMultiple(t *testing.T) {
 	recipe1 := makeWorkflowRecipe("sub-1", "run-1")
 	recipe2 := makeWorkflowRecipe("sub-2", "run-2")
 
-	result1, err := Attach(context.Background(), store, recipe1, b1.ID, AttachOptions{})
+	result1, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe1, b1.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach to B1: %v", err)
 	}
 
-	result2, err := Attach(context.Background(), store, recipe2, b2.ID, AttachOptions{})
+	result2, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe2, b2.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach to B2: %v", err)
 	}
@@ -402,7 +403,7 @@ func TestAttachPropagatesStoreRef(t *testing.T) {
 	_ = store.SetMetadata(child.ID, "gc.root_store_ref", "rig:test-rig")
 
 	recipe := makeWorkflowRecipe("sub-work", "task-a")
-	result, err := Attach(context.Background(), store, recipe, child.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, child.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -422,7 +423,7 @@ func TestAttachTitleOverride(t *testing.T) {
 	child := setupWorkflowChild(t, store, root.ID, "Child")
 
 	recipe := makeWorkflowRecipe("sub-work", "task-a")
-	result, err := Attach(context.Background(), store, recipe, child.ID, AttachOptions{
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, child.ID, AttachOptions{
 		Title: "Custom Sub-Workflow Title",
 	})
 	if err != nil {
@@ -457,7 +458,7 @@ func TestAttachVarSubstitution(t *testing.T) {
 		},
 	}
 
-	result, err := Attach(context.Background(), store, recipe, child.ID, AttachOptions{
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, child.ID, AttachOptions{
 		Vars: map[string]string{"issue": "TASK-42"},
 	})
 	if err != nil {
@@ -481,7 +482,7 @@ func TestAttachNonexistentBead(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := makeWorkflowRecipe("sub-work", "task-a")
 
-	_, err := Attach(context.Background(), store, recipe, "nonexistent-id", AttachOptions{})
+	_, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, "nonexistent-id", AttachOptions{})
 	if err == nil {
 		t.Fatal("expected error for nonexistent bead, got nil")
 	}
@@ -492,7 +493,7 @@ func TestAttachNilRecipe(t *testing.T) {
 	store := beads.NewMemStore()
 	root := setupWorkflow(t, store)
 
-	_, err := Attach(context.Background(), store, nil, root.ID, AttachOptions{})
+	_, err := Attach(context.Background(), beadstest.GraphMolecule(store), nil, root.ID, AttachOptions{})
 	if err == nil {
 		t.Fatal("expected error for nil recipe, got nil")
 	}
@@ -503,7 +504,7 @@ func TestAttachEmptyBeadID(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := makeWorkflowRecipe("sub-work", "task-a")
 
-	_, err := Attach(context.Background(), store, recipe, "", AttachOptions{})
+	_, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, "", AttachOptions{})
 	if err == nil {
 		t.Fatal("expected error for empty bead ID, got nil")
 	}
@@ -532,7 +533,7 @@ func TestAttachWithInterStepDeps(t *testing.T) {
 		},
 	}
 
-	result, err := Attach(context.Background(), store, recipe, child.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, child.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -555,7 +556,7 @@ func TestAttachIdempotency(t *testing.T) {
 	recipe := makeWorkflowRecipe("attempt", "run")
 
 	// First attach
-	result1, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	result1, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		IdempotencyKey: "retry:control:attempt:1",
 	})
 	if err != nil {
@@ -569,7 +570,7 @@ func TestAttachIdempotency(t *testing.T) {
 	countBefore := len(allBefore)
 
 	// Second attach with same key — should be no-op
-	result2, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
+	result2, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
 		IdempotencyKey: "retry:control:attempt:1",
 	})
 	if err != nil {
@@ -621,7 +622,7 @@ func TestAttachIdempotencyFindsEphemeralExistingRoot(t *testing.T) {
 		t.Fatalf("create existing ephemeral child: %v", err)
 	}
 
-	result, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
 		IdempotencyKey: "attempt:1",
 	})
 	if err != nil {
@@ -645,14 +646,14 @@ func TestAttachDifferentKeysCreateSeparate(t *testing.T) {
 	root := setupWorkflow(t, store)
 	control := setupWorkflowChild(t, store, root.ID, "Control")
 
-	result1, err := Attach(context.Background(), store, makeWorkflowRecipe("a1", "run"), control.ID, AttachOptions{
+	result1, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("a1", "run"), control.ID, AttachOptions{
 		IdempotencyKey: "retry:control:attempt:1",
 	})
 	if err != nil {
 		t.Fatalf("Attach 1: %v", err)
 	}
 
-	result2, err := Attach(context.Background(), store, makeWorkflowRecipe("a2", "run"), control.ID, AttachOptions{
+	result2, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("a2", "run"), control.ID, AttachOptions{
 		IdempotencyKey: "retry:control:attempt:2",
 	})
 	if err != nil {
@@ -679,7 +680,7 @@ func TestAttachPreservesExecutableTaskRootType(t *testing.T) {
 		},
 	}
 
-	result, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -701,7 +702,7 @@ func TestAttachEpochSuccess(t *testing.T) {
 	_ = store.SetMetadata(control.ID, "gc.control_epoch", "1")
 
 	recipe := makeWorkflowRecipe("attempt", "run")
-	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	_, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		ExpectedEpoch: 1,
 	})
 	if err != nil {
@@ -723,7 +724,7 @@ func TestAttachEpochConflict(t *testing.T) {
 	_ = store.SetMetadata(control.ID, "gc.control_epoch", "3")
 
 	recipe := makeWorkflowRecipe("attempt", "run")
-	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	_, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		ExpectedEpoch: 1, // stale — current is 3
 	})
 	if err == nil {
@@ -750,7 +751,7 @@ func TestAttachEpochWithIdempotency(t *testing.T) {
 	recipe := makeWorkflowRecipe("attempt", "run")
 
 	// First attach: epoch 1, key "attempt:1"
-	result1, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	result1, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		ExpectedEpoch:  1,
 		IdempotencyKey: "attempt:1",
 	})
@@ -764,7 +765,7 @@ func TestAttachEpochWithIdempotency(t *testing.T) {
 	// Epoch is now 2. Duplicate with stale epoch 1 should still work
 	// because idempotency check happens before epoch check in the
 	// duplicate path (no new beads to create).
-	result2, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
+	result2, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
 		ExpectedEpoch:  1, // stale, but idempotency should catch it first
 		IdempotencyKey: "attempt:1",
 	})
@@ -787,7 +788,7 @@ func TestAttachDuplicateRecoveryPopulatesIDMappingAndAdvancesEpoch(t *testing.T)
 		err:   errors.New("wiring outer dep: invalid connection: i/o timeout"),
 	}
 	recipe := makeWorkflowRecipe("attempt")
-	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	_, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		ExpectedEpoch:  1,
 		IdempotencyKey: "attempt:1",
 	})
@@ -803,7 +804,7 @@ func TestAttachDuplicateRecoveryPopulatesIDMappingAndAdvancesEpoch(t *testing.T)
 		t.Fatalf("epoch after failed attach = %q, want 1", afterFailedAttach.Metadata["gc.control_epoch"])
 	}
 
-	result, err := Attach(context.Background(), base, recipe, control.ID, AttachOptions{
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(base), recipe, control.ID, AttachOptions{
 		ExpectedEpoch:  1,
 		IdempotencyKey: "attempt:1",
 	})
@@ -836,7 +837,7 @@ func TestAttachIdempotencyRejectsFailedPartialSubDAG(t *testing.T) {
 		err:   errors.New("wiring dep: lock wait timeout exceeded; try restarting transaction"),
 	}
 	recipe := makeWorkflowRecipe("attempt", "run")
-	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	_, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		IdempotencyKey: "attempt:1",
 	})
 	if err == nil {
@@ -857,7 +858,7 @@ func TestAttachIdempotencyRejectsFailedPartialSubDAG(t *testing.T) {
 		t.Fatalf("failed partial roots = %d, want 1", len(failedRoots))
 	}
 
-	_, err = Attach(context.Background(), base, recipe, control.ID, AttachOptions{
+	_, err = Attach(context.Background(), beadstest.GraphMolecule(base), recipe, control.ID, AttachOptions{
 		IdempotencyKey: "attempt:1",
 	})
 	if err == nil {
@@ -888,7 +889,7 @@ func TestAttachIdempotentDuplicateSkipsRuntimeVarValidation(t *testing.T) {
 		},
 	}
 
-	result1, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	result1, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		IdempotencyKey: "retry:control:attempt-required-vars:1",
 		Vars: map[string]string{
 			"target_id": control.ID,
@@ -902,7 +903,7 @@ func TestAttachIdempotentDuplicateSkipsRuntimeVarValidation(t *testing.T) {
 		t.Fatal("first attach should not be duplicate")
 	}
 
-	result2, err := Attach(context.Background(), store, &formula.Recipe{
+	result2, err := Attach(context.Background(), beadstest.GraphMolecule(store), &formula.Recipe{
 		Name: "attempt-required-vars",
 		Steps: []formula.RecipeStep{
 			{ID: "attempt-required-vars", Title: "Attempt {{target_id}}", Type: "task", IsRoot: true},
@@ -953,7 +954,7 @@ func TestAttachDuplicateReplayMapsStepsWithinSelectedAttachmentOnly(t *testing.T
 
 			attached := map[string]*AttachResult{}
 			for _, key := range order {
-				result, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: key})
+				result, err := Attach(ctx, beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: key})
 				if err != nil {
 					t.Fatalf("attach %s: %v", key, err)
 				}
@@ -968,7 +969,7 @@ func TestAttachDuplicateReplayMapsStepsWithinSelectedAttachmentOnly(t *testing.T
 
 			for _, key := range order {
 				want := attached[key]
-				got, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: key})
+				got, err := Attach(ctx, beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: key})
 				if err != nil {
 					t.Fatalf("replay %s: %v", key, err)
 				}
@@ -999,11 +1000,11 @@ func TestAttachDuplicateReplayLegacyAttachmentNeverAdoptsAnotherAttachmentsStep(
 			control := setupWorkflowChild(t, store, root.ID, "Control")
 			ctx := context.Background()
 
-			current, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "current"})
+			current, err := Attach(ctx, beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "current"})
 			if err != nil {
 				t.Fatalf("attach current: %v", err)
 			}
-			legacy, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "legacy"})
+			legacy, err := Attach(ctx, beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "legacy"})
 			if err != nil {
 				t.Fatalf("attach legacy: %v", err)
 			}
@@ -1017,7 +1018,7 @@ func TestAttachDuplicateReplayLegacyAttachmentNeverAdoptsAnotherAttachmentsStep(
 				}
 			}
 
-			got, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "legacy"})
+			got, err := Attach(ctx, beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "legacy"})
 			if err != nil {
 				t.Fatalf("replay legacy: %v", err)
 			}
@@ -1045,7 +1046,7 @@ func TestAttachDuplicateReplayRejectsAmbiguousStepWithinAttachment(t *testing.T)
 	control := setupWorkflowChild(t, store, root.ID, "Control")
 	ctx := context.Background()
 
-	first, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "a"})
+	first, err := Attach(ctx, beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "a"})
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -1061,7 +1062,7 @@ func TestAttachDuplicateReplayRejectsAmbiguousStepWithinAttachment(t *testing.T)
 		t.Fatalf("create stray step: %v", err)
 	}
 
-	_, err = Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "a"})
+	_, err = Attach(ctx, beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "a"})
 	if err == nil || !strings.Contains(err.Error(), "matches beads") {
 		t.Fatalf("replay with two beads for one step = %v, want ambiguity error", err)
 	}
@@ -1071,7 +1072,7 @@ func TestAttachStampsAttachRootOnEveryCreatedStep(t *testing.T) {
 	store := beads.NewMemStore()
 	root := setupWorkflow(t, store)
 	control := setupWorkflowChild(t, store, root.ID, "Control")
-	result, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "build", "run"), control.ID, AttachOptions{IdempotencyKey: "a"})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "build", "run"), control.ID, AttachOptions{IdempotencyKey: "a"})
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -1104,7 +1105,7 @@ func TestAttachGraphApplyPlanReferencesAttachRootOnEveryStep(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 	root := setupWorkflow(t, store.MemStore)
 	control := setupWorkflowChild(t, store.MemStore, root.ID, "Control")
-	if _, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "build", "run"), control.ID, AttachOptions{IdempotencyKey: "a"}); err != nil {
+	if _, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "build", "run"), control.ID, AttachOptions{IdempotencyKey: "a"}); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	if store.calls != 1 || store.plan == nil {
@@ -1179,7 +1180,7 @@ func TestAttachDoesNotNestUnderMoleculeIDAttachment(t *testing.T) {
 			source, mol, step := setupV1MoleculeAttachment(t, store, tc.withEdge)
 			molBefore, stepBefore := mol, step
 
-			result, err := Attach(context.Background(), store, makeWorkflowRecipe("sub-work", "run", "eval"), source.ID, AttachOptions{})
+			result, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("sub-work", "run", "eval"), source.ID, AttachOptions{})
 			if err != nil {
 				t.Fatalf("Attach: %v", err)
 			}
@@ -1242,7 +1243,7 @@ func TestAttachLiveRunChainBeatsMoleculeID(t *testing.T) {
 				t.Fatalf("create source: %v", err)
 			}
 
-			result, err := Attach(context.Background(), store, makeWorkflowRecipe("sub-work", "run"), source.ID, AttachOptions{})
+			result, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("sub-work", "run"), source.ID, AttachOptions{})
 			if err != nil {
 				t.Fatalf("Attach: %v", err)
 			}
@@ -1276,7 +1277,7 @@ func TestAttachClosedNestingRootSelfRoots(t *testing.T) {
 				t.Fatalf("create source: %v", err)
 			}
 
-			result, err := Attach(context.Background(), store, makeWorkflowRecipe("sub-work", "run"), source.ID, AttachOptions{})
+			result, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("sub-work", "run"), source.ID, AttachOptions{})
 			if err != nil {
 				t.Fatalf("Attach: %v", err)
 			}

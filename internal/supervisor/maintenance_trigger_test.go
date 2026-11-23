@@ -70,7 +70,7 @@ func TestTriggerNow_RunsSnapshotThenGC(t *testing.T) {
 	if run.SnapshotPath == "" {
 		t.Fatal("run.SnapshotPath is empty; want snapshot path recorded")
 	}
-	wantCalls := []string{"backup.add", "backup.sync", "gc.exec", "gc.smoke"}
+	wantCalls := []string{"backup.add", "backup.sync", "gc.probe", "gc.exec", "gc.smoke"}
 	if !slices.Equal(calls, wantCalls) {
 		t.Fatalf("calls = %v; want %v", calls, wantCalls)
 	}
@@ -183,6 +183,10 @@ type gatedDoltOps struct {
 	once    sync.Once
 	opened  chan struct{}
 	proceed chan struct{}
+}
+
+func (g *gatedDoltOps) LiveSessions(context.Context) (int, error) {
+	return 0, nil
 }
 
 func (g *gatedDoltOps) ExecGC(ctx context.Context) error {
