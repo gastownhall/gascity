@@ -687,6 +687,19 @@ func (s *Store) ReserveCurrentClaim(id, expected, beadID string) (CurrentClaimOu
 	return s.swapCurrentClaim(id, expected, beadID)
 }
 
+// ClearCurrentClaim empties the session's current-claim pointer only while it
+// still holds expected: the stamp the caller itself wrote. It is the rollback
+// half of ReserveCurrentClaim, so a claim that gives its bead back can only
+// erase its own stamp; if a later claim has since moved the pointer it returns
+// CurrentClaimConflict and writes nothing, and that later stamp stands. An empty
+// expected value is an error: a clear must name the stamp it removes.
+func (s *Store) ClearCurrentClaim(id, expected string) (CurrentClaimOutcome, error) {
+	if strings.TrimSpace(expected) == "" {
+		return "", fmt.Errorf("clearing current claim on session %q: empty expected bead id", id)
+	}
+	return s.swapCurrentClaim(id, expected, "")
+}
+
 // swapCurrentClaim is the fenced write shared by the current-claim writers: it
 // moves the pointer from expected to next.
 func (s *Store) swapCurrentClaim(id, expected, next string) (CurrentClaimOutcome, error) {

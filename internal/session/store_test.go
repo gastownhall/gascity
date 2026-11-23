@@ -956,3 +956,57 @@ func TestReserveCurrentClaimConcurrentSingleWinner(t *testing.T) {
 		t.Fatalf("pointer = %q, want the winner %s", got, winner)
 	}
 }
+
+// TestClearCurrentClaimLeavesLaterStamp is AC-2: a rollback that clears the
+// pointer against its own stamp "A" after another claim replaced it with "B" is
+// told it lost, writes nothing, and leaves the later winner's stamp in place.
+func TestClearCurrentClaimLeavesLaterStamp(t *testing.T) {
+	is, mem, rec := currentClaimFixture(t, "B")
+
+	outcome, err := is.ClearCurrentClaim("s-1", "A")
+	if err != nil {
+		t.Fatalf("ClearCurrentClaim: %v", err)
+	}
+	if outcome != CurrentClaimConflict {
+		t.Fatalf("clear = %q, want %q", outcome, CurrentClaimConflict)
+	}
+	if w := currentClaimWrites(rec); w[beadstest.OpSetMetadata] != 0 || w[beadstest.OpSetMetadataBatch] != 0 {
+		t.Errorf("losing clear wrote unconditionally: %v", w)
+	}
+	if got := currentClaimPointer(t, mem); got != "B" {
+		t.Fatalf("pointer = %q, want B (the later winner's stamp)", got)
+	}
+}
+
+// TestClearCurrentClaimClearsOwnStamp is the control for AC-2: a clear whose
+// expected value is still the pointer empties it.
+func TestClearCurrentClaimClearsOwnStamp(t *testing.T) {
+	is, mem, _ := currentClaimFixture(t, "A")
+
+	outcome, err := is.ClearCurrentClaim("s-1", "A")
+	if err != nil {
+		t.Fatalf("ClearCurrentClaim: %v", err)
+	}
+	if outcome != CurrentClaimSwapped {
+		t.Fatalf("clear = %q, want %q", outcome, CurrentClaimSwapped)
+	}
+	if got := currentClaimPointer(t, mem); got != "" {
+		t.Fatalf("pointer = %q, want empty", got)
+	}
+}
+
+// TestClearCurrentClaimRefusesEmptyExpected: a clear must name the stamp it
+// removes, or it is the unconditional clear that erases a later winner.
+func TestClearCurrentClaimRefusesEmptyExpected(t *testing.T) {
+	is, mem, rec := currentClaimFixture(t, "B")
+
+	if _, err := is.ClearCurrentClaim("s-1", " "); err == nil {
+		t.Fatal("ClearCurrentClaim with an empty expected value succeeded, want an error")
+	}
+	if w := currentClaimWrites(rec); len(w) != 0 {
+		t.Errorf("refused clear issued writes: %v", w)
+	}
+	if got := currentClaimPointer(t, mem); got != "B" {
+		t.Fatalf("pointer = %q, want B", got)
+	}
+}
