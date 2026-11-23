@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestIsStage2EligibleSession(t *testing.T) {
@@ -41,13 +42,158 @@ func TestIsStage2EligibleSession(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			agent := &config.Agent{Session: c.agentSession}
-			got := isStage2EligibleSession(c.cityProvider, agent)
+			got := isStage2EligibleSession(materializationRuntimeFor(nil, "city", "/city", c.cityProvider), agent)
 			if got != c.wantEligible {
 				t.Fatalf("isStage2EligibleSession(%q, %q) = %v, want %v",
 					c.cityProvider, c.agentSession, got, c.wantEligible)
 			}
 		})
 	}
+}
+
+func TestCanStage1Materialize(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		cityProvider string
+		agentSession string
+		wantEligible bool
+	}{
+		{"default empty → tmux (eligible)", "", "", true},
+		{"tmux eligible", "tmux", "", true},
+		{"subprocess eligible (host filesystem view)", "subprocess", "", true},
+		{"herdr eligible", "herdr", "", true},
+		{"tmux + acp agent → ineligible", "tmux", "acp", false},
+		{"k8s ineligible", "k8s", "", false},
+		{"acp city ineligible", "acp", "", false},
+		{"hybrid ineligible", "hybrid", "", false},
+		{"ssh ineligible", "ssh:host", "", false},
+		{"exec prefix ineligible (no host capability source yet)", "exec:./run.sh", "", false},
+		{"fake ineligible", "fake", "", false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			agent := &config.Agent{Session: c.agentSession}
+			got := canStage1Materialize(materializationRuntimeFor(nil, "city", "/city", c.cityProvider), agent)
+			if got != c.wantEligible {
+				t.Fatalf("canStage1Materialize(%q, %q) = %v, want %v",
+					c.cityProvider, c.agentSession, got, c.wantEligible)
+			}
+		})
+	}
+}
+
+// TestMaterializationGatesAdmitByCapability pins the regression from
+// gastownhall/gascity#9006 item (3a): the skill/MCP gates admit a runtime by
+// what it guarantees, never by its selection name. A name no gate has ever
+// heard of passes when its runtime reports the capability, and fails when it
+// does not.
+func TestMaterializationGatesAdmitByCapability(t *testing.T) {
+	t.Parallel()
+	const unknown = "runtime-no-gate-has-heard-of"
+	cases := []struct {
+		name       string
+		host       runtime.HostCapabilities
+		agent      config.Agent
+		wantStage1 bool
+		wantStage2 bool
+	}{
+		{"no capability", runtime.HostCapabilities{}, config.Agent{}, false, false},
+		{"host filesystem only", runtime.HostCapabilities{SharesHostFilesystem: true}, config.Agent{}, true, false},
+		{"host filesystem and host PreStart", runtime.HostCapabilities{SharesHostFilesystem: true, RunsHostPreStart: true}, config.Agent{}, true, true},
+		// A runtime that runs PreStart on the host but whose sessions do not
+		// read the host filesystem would materialize into files its agents
+		// never see.
+		{"host PreStart without host filesystem", runtime.HostCapabilities{RunsHostPreStart: true}, config.Agent{}, false, false},
+		{"acp agent overrides capability", runtime.HostCapabilities{SharesHostFilesystem: true, RunsHostPreStart: true}, config.Agent{Session: "acp"}, false, false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			rt := materializationRuntime{name: unknown, host: c.host}
+			if got := canStage1Materialize(rt, &c.agent); got != c.wantStage1 {
+				t.Errorf("canStage1Materialize(%+v) = %v, want %v", c.host, got, c.wantStage1)
+			}
+			if got := isStage2EligibleSession(rt, &c.agent); got != c.wantStage2 {
+				t.Errorf("isStage2EligibleSession(%+v) = %v, want %v", c.host, got, c.wantStage2)
+			}
+		})
+	}
+}
+
+// TestMaterializationGateLegacyNamesAreFrozen guards the expand/contract
+// migration of the skill/MCP gates (gastownhall/gascity#9006 item 3a). The
+// legacy name sets exist only so the capability predicate could be introduced
+// without changing which runtimes pass; they must never grow. A new runtime
+// passes by reporting runtime.HostCapabilities from its registry registration
+// (see buildRuntimeRegistry), not by adding its name here.
+func TestMaterializationGateLegacyNamesAreFrozen(t *testing.T) {
+	t.Parallel()
+	wantStage1 := []string{"", "herdr", "subprocess", "tmux"}
+	wantStage2 := []string{"", "herdr", "tmux"}
+	if got := sortedKeys(legacyStage1RuntimeNames); !reflect.DeepEqual(got, wantStage1) {
+		t.Fatalf("legacyStage1RuntimeNames = %q, want exactly %q: report the capability from the runtime's registration instead of naming it", got, wantStage1)
+	}
+	if got := sortedKeys(legacyStage2RuntimeNames); !reflect.DeepEqual(got, wantStage2) {
+		t.Fatalf("legacyStage2RuntimeNames = %q, want exactly %q: report the capability from the runtime's registration instead of naming it", got, wantStage2)
+	}
+}
+
+// TestMaterializationGateLegacyNamesPassByCapability proves the contract step
+// is safe: every legacy name already passes its gate on capability alone, so
+// deleting the name path changes no admission.
+func TestMaterializationGateLegacyNamesPassByCapability(t *testing.T) {
+	t.Parallel()
+	agent := &config.Agent{}
+	for name := range legacyStage1RuntimeNames {
+		rt := materializationRuntimeFor(nil, "city", "/city", name)
+		rt.name = "capability-only"
+		if !canStage1Materialize(rt, agent) {
+			t.Errorf("legacy stage-1 runtime %q does not pass on capability alone (host = %+v)", name, rt.host)
+		}
+	}
+	for name := range legacyStage2RuntimeNames {
+		rt := materializationRuntimeFor(nil, "city", "/city", name)
+		rt.name = "capability-only"
+		if !isStage2EligibleSession(rt, agent) {
+			t.Errorf("legacy stage-2 runtime %q does not pass on capability alone (host = %+v)", name, rt.host)
+		}
+	}
+}
+
+// TestMaterializationRuntimeForPackRuntimeReadsItsCapabilities proves a
+// pack-declared runtime and an exec: selection reach the gates through the
+// exec host-capability source, not through a name.
+func TestMaterializationRuntimeForPackRuntimeReadsItsCapabilities(t *testing.T) {
+	var calls []string
+	stubExecRuntimeHostCapabilities(t, func(script, _, _ string) runtime.HostCapabilities {
+		calls = append(calls, script)
+		return runtime.HostCapabilities{SharesHostFilesystem: true, RunsHostPreStart: true}
+	})
+	cfg := &config.City{Runtimes: map[string]config.DiscoveredRuntime{
+		"pack-rt": {Name: "pack-rt", Command: "/packs/rt/bin/gc-runtime"},
+	}}
+	agent := &config.Agent{}
+	for _, name := range []string{"pack-rt", "exec:/opt/bin/gc-session"} {
+		rt := materializationRuntimeFor(cfg, "city", "/city", name)
+		if !canStage1Materialize(rt, agent) || !isStage2EligibleSession(rt, agent) {
+			t.Errorf("runtime %q with host capabilities did not pass the gates (host = %+v)", name, rt.host)
+		}
+	}
+	want := []string{"/packs/rt/bin/gc-runtime", "/opt/bin/gc-session"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("exec host-capability source called with %q, want %q", calls, want)
+	}
+}
+
+func stubExecRuntimeHostCapabilities(t *testing.T, f func(script, cityName, cityPath string) runtime.HostCapabilities) {
+	t.Helper()
+	prev := execRuntimeHostCapabilities
+	execRuntimeHostCapabilities = f
+	t.Cleanup(func() { execRuntimeHostCapabilities = prev })
 }
 
 func TestAgentScopeRoot(t *testing.T) {
@@ -516,6 +662,89 @@ func TestBuildAssignedSkillsPromptFragmentOmitsDescriptionWhenMissing(t *testing
 	}
 	if strings.Contains(got, "`bare` — ") {
 		t.Errorf("should not render em-dash separator when description is empty:\n%s", got)
+	}
+}
+
+func TestBuildAssignedSkillsPromptFragmentShowsFrontmatterName(t *testing.T) {
+	t.Parallel()
+	city := &materialize.CityCatalog{
+		Entries: []materialize.SkillEntry{
+			{Name: "core.gc-work", Source: "/x", Origin: "core", Description: "Working with beads", FrontmatterName: "gc-work"},
+			{Name: "core.bare", Source: "/y", Origin: "core", FrontmatterName: "  bare-skill  "},
+		},
+	}
+	agentCat := materialize.AgentCatalog{
+		Entries: []materialize.SkillEntry{
+			{Name: "local-dir", Source: "/a", Origin: "agent", Description: "Local skill", FrontmatterName: "local-name"},
+			{Name: "tools.lint", Source: "/l", Origin: "agent", FrontmatterName: "lint"},
+			// No description: the annotation still renders.
+			{Name: "bare", Source: "/b", Origin: "agent", FrontmatterName: "bare-tool"},
+		},
+	}
+	got := buildAssignedSkillsPromptFragment(&config.Agent{Name: "worker", Scope: "city"}, city, agentCat)
+	for _, want := range []string{
+		"### Assigned to you\n\n- `local-dir` (SKILL.md name: `local-name`) — Local skill\n",
+		"- `tools.lint` (SKILL.md name: `lint`)\n",
+		"- `bare` (SKILL.md name: `bare-tool`)\n",
+		"- `core.gc-work` (SKILL.md name: `gc-work`) — Working with beads *(core)*\n",
+		"- `core.bare` (SKILL.md name: `bare-skill`) *(core)*\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fragment missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildAssignedSkillsPromptFragmentFrontmatterNameMatchesOrEmpty(t *testing.T) {
+	t.Parallel()
+	entries := func(clearNames bool) []materialize.SkillEntry {
+		out := []materialize.SkillEntry{
+			{Name: "plan", Source: "/a", Origin: "city", Description: "Plan the work", FrontmatterName: "plan"},
+			{Name: "padded", Source: "/b", Origin: "city", FrontmatterName: "  padded  "},
+			{Name: "unnamed", Source: "/c", Origin: "core", Description: "No name key"},
+			{Name: "blank", Source: "/d", Origin: "core", Description: "Blank name", FrontmatterName: "   "},
+		}
+		if clearNames {
+			for i := range out {
+				out[i].FrontmatterName = ""
+			}
+		}
+		return out
+	}
+	a := &config.Agent{Name: "worker", Scope: "city"}
+	got := buildAssignedSkillsPromptFragment(a,
+		&materialize.CityCatalog{Entries: entries(false)},
+		materialize.AgentCatalog{Entries: entries(false)[:2]})
+	want := buildAssignedSkillsPromptFragment(a,
+		&materialize.CityCatalog{Entries: entries(true)},
+		materialize.AgentCatalog{Entries: entries(true)[:2]})
+	if got != want {
+		t.Errorf("fragment changed for names that match or are empty:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if strings.Contains(got, "SKILL.md name") {
+		t.Errorf("fragment annotates a name that matches or is empty:\n%s", got)
+	}
+	if !strings.Contains(got, "- `plan` — Plan the work\n") || !strings.Contains(got, "- `unnamed` — No name key *(core)*\n") {
+		t.Errorf("fragment lost the existing bullet shape:\n%s", got)
+	}
+
+	// Shared entries whose name matches, is absent, or is whitespace-only
+	// keep their exact unannotated bullets.
+	shared := buildAssignedSkillsPromptFragment(&config.Agent{Name: "x", Scope: "city"},
+		&materialize.CityCatalog{Entries: []materialize.SkillEntry{
+			{Name: "plan", Source: "/p", Origin: "city", Description: "d", FrontmatterName: "plan"},
+			{Name: "blank", Source: "/b", Origin: "city", Description: "d"},
+			{Name: "spaces", Source: "/s", Origin: "city", Description: "d", FrontmatterName: "   "},
+		}},
+		materialize.AgentCatalog{})
+	for _, want := range []string{
+		"- `plan` — d *(city)*\n",
+		"- `blank` — d *(city)*\n",
+		"- `spaces` — d *(city)*\n",
+	} {
+		if !strings.Contains(shared, want) {
+			t.Errorf("shared fragment missing %q:\n%s", want, shared)
+		}
 	}
 }
 

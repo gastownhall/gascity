@@ -73,9 +73,9 @@ func (e *queuedBehindTurnExecutor) clearPresses() int {
 // TestNudgeSessionClaudeQueuedBehindTurnUnderCursor: a nudge typed into a
 // Claude turn that was running before it arrived, and stayed running, is
 // queued by Claude, which then shows its hint with the cursor on it. That is
-// the Enter reaching the pane, not a draft left in the input box: the nudge
-// must not report the submit unconfirmed, which makes every retrying caller
-// type the same message into the same turn again.
+// Claude acknowledging the submit, not a draft left in the input box: the
+// nudge is confirmed, and must not report the submit unconfirmed, which makes
+// every retrying caller type the same message into the same turn again.
 func TestNudgeSessionClaudeQueuedBehindTurnUnderCursor(t *testing.T) {
 	const session, message = "busy-claude-queued-cursor", "blocker gc-1 closed — routed dependent gc-2 may be ready to claim"
 	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
@@ -87,8 +87,8 @@ func TestNudgeSessionClaudeQueuedBehindTurnUnderCursor(t *testing.T) {
 		}
 		tm := &Tmux{cfg: DefaultConfig(), exec: ex}
 		err := tm.NudgeSession(session, message)
-		if !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
-			t.Fatalf("NudgeSession = %v, want ErrNudgeSubmitDeliveredUnobserved: Claude queued the message", err)
+		if err != nil {
+			t.Fatalf("NudgeSession = %v, want nil: Claude queued the message", err)
 		}
 		if enters := ex.submitEnters(); enters != 1 {
 			t.Fatalf("submit Enter sends = %d, want 1 (no submit into the running turn)", enters)

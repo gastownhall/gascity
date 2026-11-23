@@ -31,6 +31,8 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
@@ -243,9 +245,9 @@ func acquireSupervisorLock() (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening supervisor lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path}); err != nil {
 		f.Close() //nolint:errcheck
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, filelock.ErrBusy) {
 			return nil, errSupervisorLockHeld
 		}
 		return nil, fmt.Errorf("locking supervisor lock: %w", err)
@@ -271,19 +273,17 @@ func guardSupervisorSocketDir(dir string) {
 	}
 }
 
-// supervisorSocketPathLimit caps the canonical socket path length below the
-// platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches the
-// controllerSocketPathLimit pattern in controller.go.
-const supervisorSocketPathLimit = 100
-
+// supervisorSocketPathForDir resolves the supervisor control endpoint inside
+// dir, falling back to a deterministic short path when the canonical one would
+// exceed the platform's endpoint length limit.
 func supervisorSocketPathForDir(dir string) string {
 	guardSupervisorSocketDir(dir)
 	canonical := filepath.Join(dir, "supervisor.sock")
-	if len(canonical) <= supervisorSocketPathLimit {
+	if len(canonical) <= localsocket.PathLimit {
 		return canonical
 	}
 	sum := sha256.Sum256([]byte(dir))
-	return filepath.Join("/tmp", "gascity-supervisor", fmt.Sprintf("%x.sock", sum[:16]))
+	return filepath.Join(localsocket.FallbackDir("gascity-supervisor"), fmt.Sprintf("%x.sock", sum[:16]))
 }
 
 func supervisorSocketPathCandidates() []string {
@@ -304,9 +304,9 @@ func supervisorSocketPath() string {
 	return supervisorSocketPathCandidates()[0]
 }
 
-// startSupervisorSocket creates a Unix domain socket at the given path
-// and handles ping/stop commands. Unlike startControllerSocket (which
-// constructs its own path), this binds to the exact path provided.
+// startSupervisorSocket creates the supervisor control endpoint at the given
+// path and handles ping/stop/reload commands. Unlike startControllerSocket
+// (which constructs its own path), this binds to the exact path provided.
 type reconcileRequest struct {
 	done chan struct{}
 	// writeAuthKeys, set only by the reload-report socket verb, receives the
@@ -660,8 +660,10 @@ func (s *shutdownState) finish(err error) {
 }
 
 func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
-	os.Remove(sockPath) //nolint:errcheck // remove stale socket from previous crash
-	lis, err := net.Listen("unix", sockPath)
+	// The supervisor runtime directory is state gc creates and owns, so the
+	// endpoint asks for owner-only protection: a 0600 socket on Unix, an
+	// owner-only DACL on the directory it is bound in on Windows.
+	lis, err := localsocket.Listen(sockPath, localsocket.Options{DirMode: 0o700, SocketMode: 0o600})
 	if err != nil {
 		return nil, fmt.Errorf("listening on supervisor socket: %w", err)
 	}
@@ -687,7 +689,8 @@ func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutd
 // Supported: "stop" (shutdown), "ping" (liveness check, returns PID),
 // "reload" (trigger immediate reconciliation of all cities), and
 // "reload-report" (the same reload, answered with a JSON report that includes
-// the write-auth key outcome; see supervisorReloadReportCommand).
+// the write-auth key outcome; see supervisorReloadReportCommand), plus any
+// platform-specific command handled by handlePlatformSupervisorConnCommand.
 //
 // For "stop", the handler first sends "ok\n" (backward compatible ACK),
 // then — if the client keeps the connection open — blocks until shutdown
@@ -704,32 +707,10 @@ func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdown
 			if addr := conn.RemoteAddr(); addr != nil {
 				peer = addr.String()
 			}
-			_ = requestShutdown(supervisorShutdownDestructive, shutdownTrigger{
+			handleSupervisorShutdownConn(conn, requestShutdown, shut, supervisorShutdownDestructive, shutdownTrigger{
 				Source:     "socket_stop",
 				ClientAddr: peer,
 			})
-			if _, err := conn.Write([]byte("ok\n")); err != nil {
-				return
-			}
-			if shut == nil {
-				return
-			}
-			// Wait for shutdown to complete (or client to disconnect)
-			// so we can report the final result.
-			conn.SetWriteDeadline(time.Now().Add(5 * time.Minute)) //nolint:errcheck
-			select {
-			case <-shut.done:
-			case <-time.After(5 * time.Minute):
-				return
-			}
-			res := shut.err.Load()
-			if res == nil || res.err == nil {
-				conn.Write([]byte("done:ok\n")) //nolint:errcheck
-			} else {
-				// Collapse newlines in the error so the protocol stays line-oriented.
-				msg := strings.ReplaceAll(res.err.Error(), "\n", "; ")
-				fmt.Fprintf(conn, "done:err:%s\n", msg) //nolint:errcheck
-			}
 			// One command per connection — return explicitly instead of
 			// falling through to scanner.Scan() again. The read deadline
 			// would close us anyway, but this makes the contract explicit.
@@ -752,8 +733,38 @@ func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdown
 			}
 		case supervisorReloadReportCommand:
 			handleSupervisorReloadReport(conn, reconcileCh)
+		default:
+			if handlePlatformSupervisorConnCommand(scanner.Text(), conn, requestShutdown, shut) {
+				return
+			}
 		}
 	}
+}
+
+func handleSupervisorShutdownConn(conn net.Conn, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, shut *shutdownState, mode supervisorShutdownMode, trigger shutdownTrigger) {
+	_ = requestShutdown(mode, trigger)
+	if _, err := conn.Write([]byte("ok\n")); err != nil {
+		return
+	}
+	if shut == nil {
+		return
+	}
+	// Wait for shutdown to complete (or client to disconnect) so we can report
+	// the final result.
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Minute)) //nolint:errcheck
+	select {
+	case <-shut.done:
+	case <-time.After(5 * time.Minute):
+		return
+	}
+	res := shut.err.Load()
+	if res == nil || res.err == nil {
+		conn.Write([]byte("done:ok\n")) //nolint:errcheck
+		return
+	}
+	// Collapse newlines in the error so the protocol stays line-oriented.
+	msg := strings.ReplaceAll(res.err.Error(), "\n", "; ")
+	fmt.Fprintf(conn, "done:err:%s\n", msg) //nolint:errcheck
 }
 
 // supervisorAlive checks whether the supervisor is running by pinging
@@ -789,7 +800,7 @@ func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
 	if dialTimeout > remaining {
 		dialTimeout = remaining
 	}
-	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
+	conn, err := localsocket.Dial(sockPath, dialTimeout)
 	if err != nil {
 		return 0
 	}
@@ -873,17 +884,20 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 	if wait {
 		processAlive = supervisorProcessWatch(pid)
 	}
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := localsocket.Dial(sockPath, 2*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
 		return 1
 	}
-	defer conn.Close()                                     //nolint:errcheck
-	conn.Write([]byte("stop\n"))                           //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
-	reader := bufio.NewReader(conn)
-	ackLine, err := reader.ReadString('\n')
-	if err != nil || strings.TrimSpace(ackLine) != "ok" {
+	defer conn.Close() //nolint:errcheck
+	return stopSupervisorConnForProcessJSON(conn, sockPath, pid, processAlive, stdout, stderr, wait, waitTimeout, jsonOut)
+}
+
+// stopSupervisorConnForProcessJSON drives the stop protocol over conn; with
+// wait set it also waits for the process processAlive watches to exit.
+func stopSupervisorConnForProcessJSON(conn net.Conn, sockPath string, pid int, processAlive func() bool, stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
+	reader, err := requestSupervisorSocketCommand(conn, "stop")
+	if err != nil {
 		fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
 		return 1
 	}
@@ -992,6 +1006,33 @@ func finishSupervisorStopWait(stdout, stderr io.Writer, pid int, processAlive fu
 	return 0
 }
 
+var (
+	supervisorSocketAckTimeout        = 10 * time.Second
+	errSupervisorSocketNoAckBeforeEOF = errors.New("supervisor closed the socket without acknowledging")
+)
+
+func requestSupervisorSocketCommand(conn net.Conn, command string) (*bufio.Reader, error) {
+	if _, err := io.WriteString(conn, command+"\n"); err != nil {
+		return nil, err
+	}
+	conn.SetReadDeadline(time.Now().Add(supervisorSocketAckTimeout)) //nolint:errcheck
+	reader := bufio.NewReader(conn)
+	ackLine, err := reader.ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) && ackLine == "" {
+			return nil, errSupervisorSocketNoAckBeforeEOF
+		}
+		if ackLine != "" {
+			return nil, fmt.Errorf("reading acknowledgment %q: %w", strings.TrimSpace(ackLine), err)
+		}
+		return nil, err
+	}
+	if strings.TrimSpace(ackLine) != "ok" {
+		return nil, fmt.Errorf("unexpected acknowledgment %q", strings.TrimSpace(ackLine))
+	}
+	return reader, nil
+}
+
 // supervisorProcessWatch identifies the supervisor process pid while it is
 // alive and returns a probe that reports whether that same process is still
 // running. It returns nil — nothing to wait for — when pid is not a running
@@ -1002,9 +1043,10 @@ var supervisorProcessWatch = func(pid int) func() bool {
 	if pid <= 0 {
 		return nil
 	}
-	if !pidutil.AliveWithCmdline(pid, func(argv []string) bool {
+	matched, err := pidutil.AliveWithCmdline(pid, func(argv []string) bool {
 		return pidutil.ArgvContainsSequence(argv, "supervisor", "run")
-	}) {
+	})
+	if err != nil || !matched {
 		return nil
 	}
 	startTime, err := pidutil.StartTime(pid)
@@ -1143,6 +1185,15 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 				payload["supervisor_unit"] = ownership.Unit
 			}
 		}
+		// api_url is the supervisor API base URL from supervisor.toml — the
+		// endpoint the CLI itself dials (supervisorAPIBaseURL) — reported
+		// whether or not the supervisor is running. It is absent, with a
+		// warning on stderr, when supervisor.toml cannot be read.
+		if apiURL, err := supervisorAPIBaseURL(); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor status: warning: resolving API URL: %v\n", err) //nolint:errcheck
+		} else {
+			payload["api_url"] = apiURL
+		}
 		addSupervisorSupervisionJSON(payload, supervisionWarning)
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
@@ -1238,7 +1289,7 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
 		return 1
 	}
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := localsocket.Dial(sockPath, 2*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
 		return 1
@@ -1562,14 +1613,20 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
 	}
 
-	// Reconcile channel — triggers immediate reconciliation from SIGHUP
-	// or the "reload" socket command.
+	// Reconcile channel — triggers immediate reconciliation from the reload
+	// signal, where the platform has one, or the "reload" endpoint command.
 	reconcileCh := make(chan reconcileRequest, 1)
 
-	// Signal handler: SIGINT/SIGTERM → shutdown, SIGHUP → immediate reconcile.
+	// Signal handler: SIGINT/SIGTERM → shutdown, SIGHUP → immediate reconcile
+	// where the platform delivers it. supervisorControlSignals owns that set;
+	// the loop below stays platform-neutral because a signal it never receives
+	// costs nothing.
 	sigCh := make(chan os.Signal, 2)
-	supervisorSignalNotify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	supervisorSignalNotify(sigCh, supervisorControlSignals()...)
 	defer signal.Stop(sigCh)
+	if hint := supervisorReloadSignalHint(); hint != "" {
+		fmt.Fprintln(stderr, hint) //nolint:errcheck
+	}
 	shutdownSignalsDone := make(chan struct{})
 	defer close(shutdownSignalsDone)
 	go supervisorSignalLoop(sigCh, shutdownSignalsDone, requestShutdown, func() {
@@ -2319,7 +2376,7 @@ func startOneCity(
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
 	var reconcilerBoot strings.Builder
-	wiring, wiringErr := newControllerWiringLoggingTo(cfg, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
+	wiring, wiringErr := newControllerWiringLoggingTo(cfg, path, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
 	logSupervisorReconcilerBoot(stderr, path, cityName, reconcilerBoot.String())
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
@@ -2361,6 +2418,11 @@ func startOneCity(
 			lock.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
 		}
 	}()
+	// This process may have resolved the city through the one-shot funnel on
+	// an earlier boot, or while it was stopped and before a `gc storage
+	// migrate`. The pre-registration reads below (the provider snapshot, the
+	// v2 boot census) must not answer from that memo.
+	retireCityFunnelForBoot(path)
 
 	// Track initialization progress for the API.
 	cr.BatchUpdate(func(
@@ -2957,6 +3019,12 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		return fmt.Errorf("validate rigs: %w", err)
 	}
+	if err := config.ValidateRigFederationLayout(cityPath, cfg); err != nil {
+		return fmt.Errorf("validate rigs: %w", err)
+	}
+	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': warning: %s\n", cityName, w) //nolint:errcheck // best-effort stderr
+	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("validate services: %w", err)
 	}
@@ -3092,12 +3160,17 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	return nil
 }
 
-// effectiveProviderName returns the provider name respecting GC_SESSION env override.
+// effectiveProviderName returns the runtime provider selection after applying
+// the GC_SESSION override and the platform default.
 func effectiveProviderName(configured string) string {
+	result := configured
 	if v := os.Getenv("GC_SESSION"); v != "" {
-		return v
+		result = v
 	}
-	return configured
+	if result == "" {
+		return sessionProviderRuntimeDefault
+	}
+	return result
 }
 
 // supervisorBuildAgentsFn returns a buildFn suitable for CityRuntimeParams.

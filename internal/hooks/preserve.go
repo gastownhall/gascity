@@ -27,7 +27,8 @@ var managedOverlayHookPaths = map[string]string{
 // It is deliberately conservative: anything it does not recognize as a current
 // managed hook file returns false and is staged exactly as before.
 func PreserveManagedFile(relPath string, existing []byte) bool {
-	provider, ok := managedOverlayHookPaths[filepath.Clean(relPath)]
+	cleanRelPath := filepath.ToSlash(filepath.Clean(relPath))
+	provider, ok := managedOverlayHookPaths[cleanRelPath]
 	if !ok {
 		return false
 	}
@@ -38,7 +39,7 @@ func PreserveManagedFile(relPath string, existing []byte) bool {
 	// (overlay.IsMergeablePath), so the staging caller skips it before the
 	// preserve predicate is ever consulted — it is deliberately absent from
 	// the map above.
-	needsUpgrade := overlayManagedNeedsUpgrade(provider, filepath.Clean(relPath), nil)
+	needsUpgrade := overlayManagedNeedsUpgrade(provider, cleanRelPath, nil)
 	if needsUpgrade == nil {
 		return false
 	}

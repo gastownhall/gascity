@@ -46,7 +46,7 @@ func runLane(t *testing.T, gc *workMoleculeGC, legs WorkLegs, graph beads.Store,
 	log.SetFlags(0)
 	defer func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) }()
 	withCloseAbandonedTTL(t, 5*time.Minute, func() {
-		if _, err := gc.pass(context.Background(), legs, graph, time.Hour, now); err != nil {
+		if _, err := gc.pass(context.Background(), testWispGCRoots(graph, legs), legs, graph, time.Hour, now); err != nil {
 			t.Logf("pass: %v", err)
 		}
 	})
@@ -316,7 +316,7 @@ func TestWispGCDryRunDetailIsPrintedOnlyOnChange(t *testing.T) {
 		var out string
 		withCloseAbandonedTTL(t, 5*time.Minute, func() {
 			out = captureWispGCLog(t, func() {
-				if _, err := wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, time.Now()); err != nil {
+				if _, err := wg.runGC(testWispGCRoots(store, nil), nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, time.Now()); err != nil {
 					t.Fatal(err)
 				}
 			})

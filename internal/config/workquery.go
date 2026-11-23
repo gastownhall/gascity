@@ -236,6 +236,46 @@ func jqMeta(key string) string {
 	return `(.metadata["` + key + `"] // "")`
 }
 
+// excludedClaimantJQPredicate renders the jq boolean that is true when the row
+// in scope names this claimant in gc.exclude_claimants. It mirrors
+// beadmeta.ExcludesClaimant: comma-separated members, each trimmed, empties
+// dropped, exact match. The claimant is read from the query environment
+// (GC_SESSION_ID, GC_SESSION_NAME, GC_ALIAS, GC_AGENT), so the predicate needs
+// no per-tier variable and is inert on the reconciler's identity-free runs: an
+// excluded bead is still demand for its pool, because another seat can claim it.
+func excludedClaimantJQPredicate() string {
+	return `((` + jqMeta(beadmeta.ExcludeClaimantsMetadataKey) + ` | tostring | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $gc_ex | ` +
+		`[$ENV.GC_SESSION_ID, $ENV.GC_SESSION_NAME, $ENV.GC_ALIAS, $ENV.GC_AGENT] | any(.[]; (. // "") as $gc_id | $gc_id != "" and any($gc_ex[]; . == $gc_id)))`
+}
+
+// excludeClaimantsJQClause returns a jq select(...) clause dropping rows that
+// exclude this claimant, for the tiers whose rows already pass through a jq
+// selection of their own.
+func excludeClaimantsJQClause() string {
+	return ` | select((` + excludedClaimantJQPredicate() + `) | not)`
+}
+
+// excludeClaimantsFilterScript drops, in place, the rows of the JSON array in
+// shellVar that exclude this claimant. It runs right after a tier's read and
+// BEFORE the tier picks the row it serves, so an excluded head falls through to
+// the work behind it instead of being served, refused by `gc hook --claim`,
+// and served again on the next tick.
+//
+// The variable is rewritten only when a row was dropped, so an unaffected
+// payload stays byte-identical, and a payload jq cannot parse is left alone:
+// fail-open, like the tiers' other jq gates, so the hook's decode still
+// decides what to do with it. An empty read, the common case on most tiers,
+// costs no jq process.
+func excludeClaimantsFilterScript(shellVar string) string {
+	pred := excludedClaimantJQPredicate()
+	filter := `if type == "array" and any(.[]; ` + pred + `) then [.[] | select((` + pred + `) | not)] else empty end`
+	v := `"$` + shellVar + `"`
+	return `if [ -n ` + v + ` ] && [ ` + v + ` != "[]" ]; then ` +
+		`gc_unexcluded=$(printf "%s" ` + v + ` | jq -c ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+		`[ -n "$gc_unexcluded" ] && ` + shellVar + `="$gc_unexcluded"; ` +
+		`fi; `
+}
+
 // PoolDemandServeRules names, in Go, exactly what the generated Tier-3
 // pool-demand query will and will not serve a worker for a template.
 //
@@ -325,10 +365,6 @@ func poolDemandMigrationFilterJQ(limit int) string {
 
 func bdQueryEphemeralStatusShell(status string) string {
 	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
-}
-
-func bdQueryEphemeralInProgressQuietShell() string {
-	return bdQueryEphemeralStatusShell("in_progress") + ` 2>/dev/null`
 }
 
 // ephemeralStatusSnapshotShell emits a memoized read of one ephemeral status
@@ -486,12 +522,23 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
 		`r=$(` + routedReadyTierCommand(topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`gc_routed_window="$r"; ` +
+		excludeClaimantsFilterScript("r") +
+		// A full window that filtered to nothing may still have allowed work
+		// past it, so re-read the queue unbounded. Only this case pays for it.
+		`if [ "$r" = "[]" ] && [ "$gc_routed_window" != "[]" ] && ` +
+		`[ "$(printf "%s" "$gc_routed_window" | jq length 2>/dev/null)" = "` + strconv.Itoa(RoutedReadyClaimWindow) + `" ]; then ` +
+		`r=$(` + bdReadyPoolDemandShell("--limit=0", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("r") +
+		`fi; ` +
 		preferExecutablePoolDemandScript() +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("legacy_candidates") +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo) +
+		excludeClaimantsFilterScript("legacy_ephemeral_candidates") +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
@@ -519,6 +566,13 @@ func preferExecutablePoolDemandScript() string {
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
 
+// RoutedReadyClaimWindow is how many routed ready rows a pool worker's claim
+// tier reads (routedReadyTierCommand). A worker claims only from these rows,
+// so the controller names pool demand bound to a managed worktree only for
+// rows inside this window: a seat placed for a row behind it would be served
+// none of its own work.
+const RoutedReadyClaimWindow = 20
+
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path rides the reader's canonical
@@ -531,12 +585,12 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// live 14-seat city, 2026-08-25: 13 P0 rows parked behind 34 older wave
 	// rows — the bounded window contained zero P0s until the older rows
 	// drained). FIFO fairness survives within a priority band via the
-	// created_at term. The tier stays widened past a single row (limit=20, not
-	// limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
+	// created_at term. The tier stays widened past a single row
+	// (RoutedReadyClaimWindow, not limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
 	// routed work behind it to fall through to instead of idle-exiting; the
 	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
 	// the result.
-	return bdReadyPoolDemandShell("--limit=20", topo)
+	return bdReadyPoolDemandShell("--limit="+strconv.Itoa(RoutedReadyClaimWindow), topo)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -767,7 +821,8 @@ func assignedInProgressRead(shellVar string, topo QueryTopology, args string, li
 		args = ` --exclude-type=` + mailMessageBeadType + args
 	}
 	return `r=$(` + reader + ` --assignee="$` + shellVar + `"` + args + ` --json --limit=` + strconv.Itoa(limit) + `)` +
-		workQueryReadFailure(reader) + `; `
+		workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("r")
 }
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
@@ -947,7 +1002,8 @@ func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	return `r=$(` + reader + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
 		` --assignee="$` + shellVar + `"` + excludeLabelArgs(beadmeta.DispatchHoldLabels) +
 		` --json --limit=1)` +
-		workQueryReadFailure(reader) + `; `
+		workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("r")
 }
 
 func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
@@ -1033,7 +1089,7 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + excludeClaimantsJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
@@ -1051,7 +1107,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + excludeClaimantsJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -1089,7 +1145,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 	if topo.includeEphemeralReady() {
 		return ""
 	}
-	selector := `select((.assignee // "") == $id)` + excludeHoldLabelsJQClause()
+	selector := `select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeClaimantsJQClause()
 	fastFilter := legacyEphemeralReadyFilterJQ(selector, 1, false)
 	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(selector, 1, false)
 	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
@@ -1165,6 +1221,7 @@ func assignedGraphWorkflowAnchorReadyFunctionScript(topo QueryTopology) string {
 		`graph_anchor_id=$(printf "%s" "$gc_assigned_workflow_anchor_json" | jq -r ".[0].id // empty" 2>/dev/null); ` +
 		`[ -z "$graph_anchor_id" ] && return 1; ` +
 		`r=$(` + readyCommand + `)` + workQueryReadFailure(reader) + `; ` +
+		excludeClaimantsFilterScript("r") +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
@@ -1236,7 +1293,9 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 	if o := spec.override(a); o != "" {
 		return o
 	}
-	return spec.build(a, topo)
+	command := spec.build(a, topo)
+	noteGeneratedQuery(kind, command)
+	return command
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -1512,7 +1571,7 @@ func (a *Agent) EffectiveScaleCheck() string {
 }
 
 // RecoveryHookMarker prefixes every diagnostic the DEFAULT on_death/on_boot
-// recovery hooks print to stdout when a bd release fails. It is the contract
+// recovery hooks print to stdout when a bd read or release fails. It is the contract
 // between the generated templates (which emit it) and the controller callers
 // (which surface only marked output): a user-supplied on_death/on_boot override
 // is passed through verbatim and carries no marker, so its stdout is not
@@ -1533,24 +1592,48 @@ func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnDeath, topo)
 }
 
+// recoveryReadShell wraps one bd read of a DEFAULT recovery hook; name is the
+// read's bd subcommand and selector, reported as "bd <name>". A read that
+// exits non-zero prints one RecoveryHookMarker line on fd 3 and contributes
+// nothing to the sweep, not even rows it printed before it failed; a read that
+// succeeds feeds its output to filter and keeps its stderr dropped.
+//
+// The marker goes to fd 3, which the hook points at its real stdout BEFORE the
+// pipeline (`exec 3>&1`), so it bypasses the pipe from the reads to the release
+// loop. On that pipe it would be read as a bead id and handed to `bd update`.
+// The hook itself still exits 0: the controller drops the stdout of a hook that
+// exits non-zero, and the marker is the point.
+func recoveryReadShell(hook, name, read, filter string) string {
+	return `if r=$(` + read + ` 2>/dev/null); then printf '%s\n' "$r" | ` + filter + ` 2>/dev/null; ` +
+		`else printf '` + RecoveryHookMarker + ` ` + hook + ` read failed: bd ` + name + ` (exit %s)\n' "$?" >&3; fi; `
+}
+
+// OnDeathIsGenerated reports whether EffectiveOnDeath returns the generated
+// recovery hook, as it does when the agent sets no on_death.
+func (a *Agent) OnDeathIsGenerated() bool {
+	return queryTable[queryOnDeath].override(a) == ""
+}
+
 func buildOnDeath(a *Agent, topo QueryTopology) string {
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
-		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
+	listRead := recoveryReadShell("on_death", "list",
+		`bd list --assignee=`+a.QualifiedName()+` --status=in_progress --json`,
+		`jq -r '.[] | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
+	ephemeralRead := recoveryReadShell("on_death", "query",
+		bdQueryEphemeralStatusShell("in_progress"),
+		`jq -r --arg assignee `+shellquote.Quote(a.QualifiedName())+` '.[] | select((.assignee // "") == $assignee) | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
 	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
 	// If routed metadata is missing entirely, backfill the canonical
 	// gc.run_target route so reopened direct-assigned work does not stay
 	// invisible.
-	return `{ ` +
-		`bd list --assignee=` + a.QualifiedName() +
-		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; ` +
+	return `exec 3>&1; { ` +
+		listRead +
 		ephemeralRead +
 		`} | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
@@ -1576,20 +1659,31 @@ func (a *Agent) EffectiveOnBootFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnBoot, topo)
 }
 
+// OnBootIsGenerated reports whether EffectiveOnBoot returns the generated
+// recovery hook, as it does when the agent sets no on_boot.
+func (a *Agent) OnBootIsGenerated() bool {
+	return queryTable[queryOnBoot].override(a) == ""
+}
+
 func buildOnBoot(a *Agent, topo QueryTopology) string {
 	template := a.QualifiedName()
 	if a.PoolName != "" {
 		template = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
-		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
-	return `template=` + shellquote.Quote(template) + `; ` +
+	routedRead := recoveryReadShell("on_boot", "list "+beadmeta.RoutedToMetadataKey,
+		`bd list --metadata-field "`+beadmeta.RoutedToMetadataKey+`=$template" --status=in_progress --no-assignee --json`,
+		`jq -r '.[].id'`)
+	runTargetRead := recoveryReadShell("on_boot", "list "+beadmeta.RunTargetMetadataKey,
+		`bd list --metadata-field "`+beadmeta.RunTargetMetadataKey+`=$template" --metadata-field "`+beadmeta.KindMetadataKey+`=`+beadmeta.KindWorkflow+`" --status=in_progress --no-assignee --json`,
+		`jq -r '.[] | select(`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") | .id'`)
+	ephemeralRead := recoveryReadShell("on_boot", "query",
+		bdQueryEphemeralStatusShell("in_progress"),
+		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $template) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $template) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`"))) | .id'`)
+	return `template=` + shellquote.Quote(template) + `; exec 3>&1; ` +
 		`{ ` +
-		`bd list --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null; ` +
-		`bd list --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$template" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
+		routedRead +
+		runTargetRead +
 		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`
