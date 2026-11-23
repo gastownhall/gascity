@@ -160,10 +160,6 @@ var parityAccepted = map[string]parityEntry{
 		"CONTRACT v5 §12.2 #42 (C3 step 3, SESS-082, NEW-5; C5c1)", "an unwanted row whose agent was removed and which holds a served claim: legacy's sync close (SESS-722) refuses on the work and the reconciler's release (SESS-082) never runs for it, so seat and claim wedge; v2's A21 releases the claim (bead.dead_assignee_reopened), closes the row, and the freed demand creates a fresh seat",
 		append([]string{"status", "state", "close_reason", "closed_at", "synced_at"}, parityUsageCloseKeys...),
 	},
-	"§12.2#3 R16": {
-		"CONTRACT v5 §12.2 #3 (ruling 4)", "a resume voids a suspended drain; legacy signals, stops and restarts the row",
-		append([]string{"slept_at"}, parityStartKeys...),
-	},
 	"§12.2#58 wait-nudge-bead": {
 		"CONTRACT v5 §12.2 #58 (owner ruling at the #7612 review; C8)", "legacy delivers a ready wait's nudge with the waiter's restart; v2's waits step queues it as a nudge bead for the waiter and stamps its nudge_id on the wait",
 		nil,
@@ -1510,11 +1506,7 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "a resume voids a suspended drain (R16)",
 			Rows: []parityRow{awake()}, Work: assigned, Runtimes: []simRuntime{live}, Drains: map[string]string{"gc-1": "suspended"},
-			Explain: explain(map[string]string{
-				"row:gc-1:*r16": "§12.2#3 R16", "provider:SetMeta s-gc-1": "§12.2#3 R16", "provider:Stop s-gc-1": "§12.2#3 R16",
-				"provider:Start s-gc-1": "§12.2#3 R16", "provider:RemoveMeta s-gc-1": "§12.2#3 R16", "event:session.woke worker-1 []": "§12.2#3 R16",
-				"event:session.drain_acked_with_assigned_work worker [bead_id bead_status reason session_id template]": "§12.2#3 R16", "event:session.stopped worker [reason session_id template]": "§12.2#3 R16",
-			}),
+			Explain: explain(nil),
 		},
 		{
 			// An unwanted row woken a minute ago: both keep it for INC-003's
@@ -2304,7 +2296,7 @@ func createIntent() {}
 // Kills a step-blind Explain lookup: a key scoped to one step accounts for
 // its aspect at that step only.
 func TestTimelineExplainsAreStepScoped(t *testing.T) {
-	f := parityFixture{Explain: map[string]string{"@crash row:gc-1:*start": "§12.2#3 R16", "@crash runtime:s-gc-1": "§12.2#3 R16"}}
+	f := parityFixture{Explain: map[string]string{"@crash row:gc-1:*start": "§12.2#19 screen-parks", "@crash runtime:s-gc-1": "§12.2#19 screen-parks"}}
 	for aspect, want := range map[string]bool{
 		"@crash row:gc-1:generation": true, "@crash runtime:s-gc-1": true, "@crash row:gc-1:core_hash_breakdown.Command": true,
 		"@seed row:gc-1:generation": false, "@seed runtime:s-gc-1": false, "@crash row:gc-1:alias": false, "row:gc-1:generation": false,
