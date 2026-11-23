@@ -7375,6 +7375,205 @@ func TestRunWorkflowServeTreatsTransientControlErrorAsPending(t *testing.T) {
 	}
 }
 
+// spentGraphApplyBudgetCause is the error a drain item launch reports when the
+// native store's own budget for the item's plan ended its graph apply. The type
+// makes it terminal; its chain also reaches the store error the spent budget
+// caused, which unwraps to context.DeadlineExceeded.
+func spentGraphApplyBudgetCause(controlID string) error {
+	return fmt.Errorf("%s: instantiating drain item formula %q: %w", controlID, "drain-item",
+		fmt.Errorf("native graph apply: %w: %w",
+			&beads.GraphApplyBudgetExhaustedError{Budget: 298 * time.Second, Nodes: 29, Edges: 60},
+			fmt.Errorf("adding edge a->b: failed to check for dependency cycle: %w", context.DeadlineExceeded)))
+}
+
+// closeErrStore fails every close of failID with err, the way the control
+// dispatcher's quarantine write fails against a store that stopped answering
+// or refused it.
+type closeErrStore struct {
+	beads.Store
+	failID string
+	err    error
+}
+
+func (s closeErrStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.failID && opts.Status != nil && *opts.Status == "closed" {
+		return s.err
+	}
+	return s.Store.Update(id, opts)
+}
+
+// TestHandleControlDispatchErrorClassifiesAFailedQuarantineByItsWrite pins
+// what a sweep reports when the quarantine write after a terminal cause fails.
+// A graph apply that spent its own budget is terminal, so on a store that
+// answers, the control is quarantined. But the store that ran the budget out
+// is usually the store that then fails the quarantine write. Joined with that
+// write's failure, the budget type outranked the write's deadline: the sweep
+// read as fatal and the control dispatcher exited. A transient write failure
+// leaves the control open for the next sweep, as it does after any other hard
+// cause; a write the store refuses outright stays fatal and carries both
+// errors.
+func TestHandleControlDispatchErrorClassifiesAFailedQuarantineByItsWrite(t *testing.T) {
+	otherHardCause := func(controlID string) error {
+		return fmt.Errorf("%s: unsupported control bead kind %q", controlID, "unknown")
+	}
+	writeTimedOut := func(controlID string) error {
+		return fmt.Errorf("updating bead %q: %w", controlID, context.DeadlineExceeded)
+	}
+	writeUnanswered := func(controlID string) error {
+		return fmt.Errorf("updating bead %q: dial tcp 127.0.0.1:3306: connect: connection refused", controlID)
+	}
+	writeRefused := func(controlID string) error {
+		return fmt.Errorf("updating bead %q: exit status 1: permission denied", controlID)
+	}
+	tests := []struct {
+		name     string
+		cause    func(controlID string) error
+		writeErr func(controlID string) error // nil: the quarantine write lands
+		// want is the sweep's disposition: "quarantined" (nil, the control
+		// closed and labeled), "retry" (a transient error, the control open)
+		// or "fatal" (a non-transient error, the control open).
+		want string
+	}{
+		{name: "spent budget, store answers", cause: spentGraphApplyBudgetCause, want: "quarantined"},
+		{name: "spent budget, quarantine write timed out", cause: spentGraphApplyBudgetCause, writeErr: writeTimedOut, want: "retry"},
+		{name: "spent budget, quarantine write unanswered", cause: spentGraphApplyBudgetCause, writeErr: writeUnanswered, want: "retry"},
+		{name: "other hard cause, quarantine write timed out", cause: otherHardCause, writeErr: writeTimedOut, want: "retry"},
+		{name: "spent budget, quarantine write refused", cause: spentGraphApplyBudgetCause, writeErr: writeRefused, want: "fatal"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			base := beads.NewMemStore()
+			control, err := base.Create(beads.Bead{
+				Title:    "drain",
+				Type:     "task",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: "drain"},
+			})
+			if err != nil {
+				t.Fatalf("create control: %v", err)
+			}
+			cause := tt.cause(control.ID)
+			var store beads.Store = base
+			var writeErr error
+			if tt.writeErr != nil {
+				writeErr = tt.writeErr(control.ID)
+				store = closeErrStore{Store: base, failID: control.ID, err: writeErr}
+			}
+
+			var stderr bytes.Buffer
+			got := handleControlDispatchError(t.TempDir(), t.TempDir(), beadstest.Graph(store), control, control.ID, cause, &stderr)
+			after := mustGetBead(t, base, control.ID)
+			if tt.want == "quarantined" {
+				if got != nil {
+					t.Fatalf("handleControlDispatchError = %v, want nil: the store answered, so the control is quarantined", got)
+				}
+				if after.Status != "closed" || !slices.Contains(after.Labels, "gc:control-quarantined") {
+					t.Fatalf("control status = %q labels = %#v, want closed and gc:control-quarantined", after.Status, after.Labels)
+				}
+				if !strings.Contains(stderr.String(), "control dispatch: quarantined bead="+control.ID) {
+					t.Fatalf("stderr = %q, want the quarantine line for %s", stderr.String(), control.ID)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("handleControlDispatchError = nil, want an error: the quarantine write failed, so nothing settled the control")
+			}
+			if !errors.Is(got, writeErr) {
+				t.Fatalf("handleControlDispatchError = %v, want it to wrap the quarantine write's failure", got)
+			}
+			if !strings.Contains(got.Error(), cause.Error()) {
+				t.Fatalf("handleControlDispatchError = %q, want it to still report the cause %q", got, cause)
+			}
+			if retry := dispatch.IsTransientControllerError(got); retry != (tt.want == "retry") {
+				t.Fatalf("IsTransientControllerError(%v) = %t, want %t", got, retry, tt.want == "retry")
+			}
+			if tt.want == "fatal" && !errors.Is(got, cause) {
+				t.Fatalf("handleControlDispatchError = %v, want a fatal sweep to keep the cause's chain", got)
+			}
+			if after.Status != "open" || slices.Contains(after.Labels, "gc:control-quarantined") {
+				t.Fatalf("control status = %q labels = %#v, want open and not quarantined", after.Status, after.Labels)
+			}
+		})
+	}
+}
+
+// TestRunWorkflowServeKeepsDrainingWhenASpentBudgetCannotBeQuarantined is the
+// serve-loop half of the same case. A control whose spent-budget quarantine
+// timed out must not end the sweep: the next ready control is still
+// processed, and the sweep ends pending instead of stopping at the failed
+// control and exiting the control dispatcher.
+func TestRunWorkflowServeKeepsDrainingWhenASpentBudgetCannotBeQuarantined(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	base := beads.NewMemStore()
+	control, err := base.Create(beads.Bead{
+		Title:    "drain",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: "drain"},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	store := closeErrStore{Store: base, failID: control.ID, err: fmt.Errorf("updating bead %q: %w", control.ID, context.DeadlineExceeded)}
+
+	var attempted, processed []string
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		if calls == 1 {
+			return []hookBead{
+				{ID: control.ID, Metadata: map[string]string{"gc.kind": "drain"}},
+				{ID: "gc-ready", Metadata: map[string]string{"gc.kind": "scope-check"}},
+			}, nil
+		}
+		return nil, nil
+	}
+	controlDispatcherServe = func(cityPath, storePath, beadID string, _ io.Writer, stderr io.Writer, _ *executionEmitDeferral) error {
+		attempted = append(attempted, beadID)
+		if beadID == control.ID {
+			return handleControlDispatchError(cityPath, storePath, beadstest.Graph(store), control, control.ID, spentGraphApplyBudgetCause(control.ID), stderr)
+		}
+		processed = append(processed, beadID)
+		return nil
+	}
+
+	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v, want the control whose quarantine timed out left for the next sweep", err)
+	}
+	if !slices.Equal(attempted, []string{control.ID, "gc-ready"}) {
+		t.Fatalf("attempted beads = %#v, want the sweep to go on past %s", attempted, control.ID)
+	}
+	if !slices.Equal(processed, []string{"gc-ready"}) {
+		t.Fatalf("processed beads = %#v, want only the later ready control processed", processed)
+	}
+	if after := mustGetBead(t, base, control.ID); after.Status != "open" {
+		t.Fatalf("control status = %q, want open for the next sweep", after.Status)
+	}
+}
+
 func TestRunControlDispatcherQuarantinesMalformedControlGraph(t *testing.T) {
 	clearGCEnv(t)
 

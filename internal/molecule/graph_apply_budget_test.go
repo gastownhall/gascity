@@ -41,13 +41,6 @@ func (s *stallingGraphStorage) IssueLifecycle() (issueops.Lifecycle, error) {
 	return nil, errors.New("stallingGraphStorage: sequential fallback reached the lifecycle role")
 }
 
-func enableGraphApplyForTest(t *testing.T) {
-	t.Helper()
-	prev := IsGraphApplyEnabled()
-	SetGraphApplyEnabled(true)
-	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
-}
-
 func twoStepBudgetRecipe() *formula.Recipe {
 	return &formula.Recipe{
 		Name: "wf",
@@ -65,7 +58,7 @@ func budgetExhaustedGraphApplyError() error {
 }
 
 func TestInstantiateDoesNotReapplyANativeGraphApplyThatSpentItsOwnBudget(t *testing.T) {
-	enableGraphApplyForTest(t)
+	withGraphApply(t, true)
 	synctest.Test(t, func(t *testing.T) {
 		storage := &stallingGraphStorage{}
 		store := beads.NewNativeDoltStoreOverStorageForTest(storage)
@@ -94,7 +87,7 @@ func TestInstantiateDoesNotReapplyANativeGraphApplyThatSpentItsOwnBudget(t *test
 }
 
 func TestInstantiateReturnsBudgetExhaustedWithoutReplayOrFallback(t *testing.T) {
-	enableGraphApplyForTest(t)
+	withGraphApply(t, true)
 	synctest.Test(t, func(t *testing.T) {
 		store := &graphApplySpyStore{
 			MemStore: beads.NewMemStore(),
@@ -106,7 +99,7 @@ func TestInstantiateReturnsBudgetExhaustedWithoutReplayOrFallback(t *testing.T) 
 }
 
 func TestInstantiateReturnsBudgetExhaustedRetryWithoutFallback(t *testing.T) {
-	enableGraphApplyForTest(t)
+	withGraphApply(t, true)
 	synctest.Test(t, func(t *testing.T) {
 		store := &graphApplySpyStore{
 			MemStore: beads.NewMemStore(),
@@ -155,7 +148,7 @@ func TestIsTransientGraphApplyErrorRejectsBudgetExhausted(t *testing.T) {
 }
 
 func TestInstantiateStillRetriesAndFallsBackForUntypedTransients(t *testing.T) {
-	enableGraphApplyForTest(t)
+	withGraphApply(t, true)
 	for name, transient := range map[string]error{
 		"i/o timeout":          errors.New("native graph apply: read tcp 127.0.0.1:3307: i/o timeout"),
 		"invalid connection":   errors.New("native graph apply: invalid connection"),

@@ -4386,6 +4386,76 @@ func TestProcessDrainUnitConvoyRetireFailureKeepsDrainOpen(t *testing.T) {
 	}
 }
 
+// budgetExhaustedGraphApplyStore is a graph-apply-capable store whose every
+// apply ends the way a native apply ends when the budget its store derived for
+// the plan runs out.
+type budgetExhaustedGraphApplyStore struct {
+	*beads.MemStore
+	applies int
+}
+
+func (s *budgetExhaustedGraphApplyStore) ApplyGraphPlan(context.Context, *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	s.applies++
+	return nil, nativeGraphApplyBudgetExhaustedErr()
+}
+
+// TestProcessDrainFailsWhenAnItemGraphApplySpentItsBudget pins the drain's
+// disposition when an item's graph apply spent the budget its store derived
+// for the plan: the first sweep fails the drain with a hard controller error
+// that names the budget. A replay of the same plan derives the same budget, so
+// a pending retry would hold a transaction for the whole budget on every
+// sweep, forever.
+func TestProcessDrainFailsWhenAnItemGraphApplySpentItsBudget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	mem, drain := seedDrainWorkflow(t)
+	store := &budgetExhaustedGraphApplyStore{MemStore: mem}
+
+	_, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	if err == nil || errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl error = %v, want a hard controller error, not a pending retry", err)
+	}
+	var exhausted *beads.GraphApplyBudgetExhaustedError
+	if !errors.As(err, &exhausted) {
+		t.Fatalf("ProcessControl error = %v, want it to wrap a *beads.GraphApplyBudgetExhaustedError", err)
+	}
+	if tier := ClassifyControllerError(err); tier != TierNone {
+		t.Fatalf("ClassifyControllerError(%v) = %v, want %v: the dispatcher must not retry a spent budget as an outage", err, tier, TierNone)
+	}
+	if store.applies != 1 {
+		t.Fatalf("graph applies = %d, want 1 (the first item's apply, no replay)", store.applies)
+	}
+
+	failed := mustGetBead(t, mem, drain.ID)
+	if failed.Status != "closed" || failed.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("drain = status %q outcome %q, want closed/fail", failed.Status, failed.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if got := failed.Metadata[beadmeta.ControllerErrorClassMetadataKey]; got != beadmeta.FailureClassHard {
+		t.Fatalf("%s = %q, want %q", beadmeta.ControllerErrorClassMetadataKey, got, beadmeta.FailureClassHard)
+	}
+	if got := failed.Metadata[beadmeta.FinalDispositionMetadataKey]; got != beadmeta.DispositionControllerError {
+		t.Fatalf("%s = %q, want %q", beadmeta.FinalDispositionMetadataKey, got, beadmeta.DispositionControllerError)
+	}
+	if got := failed.Metadata[beadmeta.ControllerErrorMetadataKey]; !strings.Contains(got, exhausted.Error()) {
+		t.Fatalf("%s = %q, want it to name the spent budget %q", beadmeta.ControllerErrorMetadataKey, got, exhausted.Error())
+	}
+	roots, err := mem.ListByMetadata(map[string]string{
+		beadmeta.DrainControlIDMetadataKey: drain.ID,
+		beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+	}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByMetadata(item roots for %s): %v", drain.ID, err)
+	}
+	if len(roots) != 0 {
+		t.Fatalf("item roots = %d, want 0: a spent budget must not fall back to creating the item step by step", len(roots))
+	}
+}
+
 func TestProcessDrainRecordedCloseRetiresUnitConvoys(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()

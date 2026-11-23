@@ -25,6 +25,15 @@ func closeBlockedErr(target, blocker string) error {
 		target, target, target, blocker)
 }
 
+// nativeGraphApplyBudgetExhaustedErr is what a native graph apply returns when
+// the budget its store derived for the plan ends it: the text carries "context
+// deadline exceeded" and the error unwraps to context.DeadlineExceeded.
+func nativeGraphApplyBudgetExhaustedErr() error {
+	return fmt.Errorf("native graph apply: %w: %w",
+		&beads.GraphApplyBudgetExhaustedError{Budget: 298 * time.Second, Nodes: 29, Edges: 60},
+		fmt.Errorf("adding edge a->b: failed to check for dependency cycle: %w", context.DeadlineExceeded))
+}
+
 // TestEveryTransientNeedleDeclaresATier is the structural guard that keeps this
 // outage class from being reintroduced one needle at a time. A needle is how an
 // error message becomes "retry"; before the tier split every such answer meant
@@ -144,6 +153,12 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		// unreachable must never burn the bounded budget. Order-independence is
 		// pinned separately by TestAvailabilityTierWinsRegardlessOfTableOrder.
 		{name: "refusal during an outage", err: errors.New("cannot close blocked issue: x is blocked by [y]: bad connection"), want: TierAvailability},
+		// A graph apply that spent its store's budget for the plan reads as a
+		// deadline and unwraps to one, but a replay derives the same budget, so
+		// the type makes it terminal. The same text without the type stays a
+		// deadline.
+		{name: "graph apply budget exhausted", err: fmt.Errorf("gc-1: instantiating drain item formula %q: %w", "drain-item", nativeGraphApplyBudgetExhaustedErr()), want: TierNone},
+		{name: "graph apply budget text without the type", err: errors.New(nativeGraphApplyBudgetExhaustedErr().Error()), want: TierAvailability},
 	}
 
 	for _, tt := range tests {
