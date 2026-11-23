@@ -48,6 +48,20 @@ func TestDrainAckAnomalyReasonShapes(t *testing.T) {
 			},
 			want: "started_claim_kept",
 		},
+		{
+			name: "legacy completes a restart-request cycle: restart_requested",
+			reason: func(t *testing.T) api.SessionDrainAckedWithAssignedWorkPayload {
+				return legacyDrainAckReason(t, seedRestartCycleWithStartedClaim)
+			},
+			want: "restart_requested",
+		},
+		{
+			name: "v2 completes a restart-request cycle: restart_requested",
+			reason: func(t *testing.T) api.SessionDrainAckedWithAssignedWorkPayload {
+				return api.SessionDrainAckedWithAssignedWorkPayload{Reason: v2DrainAckReason(t, []string{"restart_requested", "true"}, v2SeedStartedClaim)}
+			},
+			want: "restart_requested",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.reason(t)
@@ -109,6 +123,17 @@ func seedStartedClaim(t *testing.T, env *reconcilerTestEnv, row *beads.Bead) bea
 		Store: "city", Bead: kept.ID, Via: session.WorkStartedViaClaim,
 	}))
 	casSetMeta(t, env.store, row.ID, session.WorkStartedKey, cell)
+	return kept
+}
+
+// seedRestartCycleWithStartedClaim plants the restart-cycle shape: a
+// started claim the row keeps, on a row that carries a pending
+// restart_requested — a stop the finalize completes the request of, so the
+// kept claim is a handoff, not a loop.
+func seedRestartCycleWithStartedClaim(t *testing.T, env *reconcilerTestEnv, row *beads.Bead) beads.Bead {
+	t.Helper()
+	kept := seedStartedClaim(t, env, row)
+	env.setSessionMetadata(row, session.MetadataPatch{"restart_requested": "true"})
 	return kept
 }
 
