@@ -262,6 +262,9 @@ func newExtMsgRouteFixture(t *testing.T, cityTOML string, identity controllerIde
 	}
 	apiRouteSupervisorGrantsHook = func() bool { return false }
 	apiRouteSupervisorWriteGrantsHook = func() bool { return false }
+	// The standalone [api] endpoint is a recorder behind http.DefaultTransport,
+	// not a bound port.
+	stubStandaloneListener(t)
 	return f
 }
 

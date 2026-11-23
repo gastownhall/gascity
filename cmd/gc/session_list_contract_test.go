@@ -128,6 +128,9 @@ func TestSessionListJSONRouteConformance(t *testing.T) {
 	}
 	writeSchema2RigCity(t, apiCity, contractCityName,
 		"[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[api]\nport = 9443\n", "")
+	// The [api] port 9443 rows are served by the harness's transport, not a
+	// bound port.
+	stubStandaloneListener(t)
 
 	// The supervisor-managed client reaches the harness's real SupervisorMux
 	// over the in-process transport.
