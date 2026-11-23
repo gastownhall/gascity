@@ -1920,7 +1920,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 8",
+		"const GC_OPENCODE_HOOK_VERSION = 9",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -1953,7 +1953,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	mimocodeHooks := string(fs.Files["/work/.mimocode/plugin/gascity.js"])
 	for _, want := range []string{
 		"Gas City hooks for MiMo Code.",
-		"const GC_MIMOCODE_HOOK_VERSION = 4",
+		"const GC_MIMOCODE_HOOK_VERSION = 5",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -2551,7 +2551,7 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 8",
+		"const GC_OPENCODE_HOOK_VERSION = 9",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -2577,7 +2577,7 @@ export default async function gascityPlugin() {
 
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 8;
+const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2595,9 +2595,13 @@ pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
+"chat.message": async (input, output) => {},
+GC_MANAGED_SESSION_HOOK: "1",
+GC_HOOK_EVENT_NAME: "SessionStart",
+synthetic: true,
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 9"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 8"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 10"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
 	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
@@ -2628,6 +2632,36 @@ if (state.userMessageIDs.has(messageID)) {}
 	if !opencodeHookNeedsUpgrade(idOrderTurnGate) {
 		t.Fatal("OpenCode hook that opens turns by message-id order did not request upgrade")
 	}
+	assertSessionStartMarkersRequired(t, "OpenCode", current, opencodeHookNeedsUpgrade)
+}
+
+// assertSessionStartMarkersRequired checks that a plugin claiming the current
+// version but missing any one of the SessionStart delivery markers is still
+// replaced: a same-numbered file without them has no chat.message part.
+func assertSessionStartMarkersRequired(t *testing.T, provider string, current []byte, needsUpgrade func([]byte) bool) {
+	t.Helper()
+	for _, marker := range sessionStartPluginMarkers {
+		line := marker + "\n"
+		if !bytes.Contains(current, []byte(line)) {
+			t.Fatalf("%s current fixture lacks marker line %q", provider, marker)
+		}
+		without := bytes.Replace(current, []byte(line), nil, 1)
+		if !needsUpgrade(without) {
+			t.Errorf("%s hook without the %s marker did not request upgrade", provider, marker)
+		}
+	}
+}
+
+// sessionStartPluginMarkers are the code-shaped lines every shipped OpenCode
+// and MiMo Code plugin carries for the one SessionStart part: the hook
+// registration, the two managed-hook environment markers on the dedicated
+// prime, and the part's synthetic flag. Each fixture line is the marker plus
+// the text that follows it in the shipped plugin.
+var sessionStartPluginMarkers = []string{
+	`"chat.message": async (input, output) => {},`,
+	`GC_MANAGED_SESSION_HOOK: "1",`,
+	`GC_HOOK_EVENT_NAME: "SessionStart",`,
+	`synthetic: true,`,
 }
 
 func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
@@ -2650,12 +2684,16 @@ func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
 
 func TestMimoCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for MiMo Code.
-const GC_MIMOCODE_HOOK_VERSION = 4;
+const GC_MIMOCODE_HOOK_VERSION = 5;
 const GC_BIN = process.env.GC_BIN || "gc";
 pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
+"chat.message": async (input, output) => {},
+GC_MANAGED_SESSION_HOOK: "1",
+GC_HOOK_EVENT_NAME: "SessionStart",
+synthetic: true,
 `)
 	versionless := []byte(`// Gas City hooks for MiMo Code.
 const GC_BIN = process.env.GC_BIN || "gc";
@@ -2663,9 +2701,13 @@ pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
+"chat.message": async (input, output) => {},
+GC_MANAGED_SESSION_HOOK: "1",
+GC_HOOK_EVENT_NAME: "SessionStart",
+synthetic: true,
 `)
-	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 3"), 1)
-	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 5"), 1)
+	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 5"), []byte("GC_MIMOCODE_HOOK_VERSION = 4"), 1)
+	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 5"), []byte("GC_MIMOCODE_HOOK_VERSION = 6"), 1)
 	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
 	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
 	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
@@ -2695,6 +2737,30 @@ if (state.userMessageIDs.has(messageID)) {}
 	if !mimocodeHookNeedsUpgrade(idOrderTurnGate) {
 		t.Fatal("MiMo Code hook that opens turns by message-id order did not request upgrade")
 	}
+	assertSessionStartMarkersRequired(t, "MiMo Code", current, mimocodeHookNeedsUpgrade)
+}
+
+// TestEmbeddedPluginOverlaysSatisfyTheirOwnUpgradePredicate guards the shipped
+// plugin files against their own needs-upgrade predicate. The predicates match
+// normalized text and keep comment text, so a marker the shipped file does not
+// carry in code would make every reconcile tick rewrite the plugin and keep a
+// fresh .bak.
+func TestEmbeddedPluginOverlaysSatisfyTheirOwnUpgradePredicate(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		path         string
+		needsUpgrade func([]byte) bool
+	}{
+		{"opencode", "overlay/per-provider/opencode/.opencode/plugins/gascity.js", opencodeHookNeedsUpgrade},
+		{"mimocode", "overlay/per-provider/mimocode/.mimocode/plugin/gascity.js", mimocodeHookNeedsUpgrade},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := readOverlayFile(t, tc.path)
+			if tc.needsUpgrade(data) {
+				t.Fatalf("the shipped %s plugin asks to be upgraded by its own predicate", tc.name)
+			}
+		})
+	}
 }
 
 func TestInstallMimoCodeHookUpgradesStaleManagedPlugin(t *testing.T) {
@@ -2714,7 +2780,7 @@ export default async function gascityPlugin() {
 	if data == string(legacy) {
 		t.Fatal("stale MiMo Code managed plugin was preserved; expected managed upgrade")
 	}
-	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 4") {
+	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 5") {
 		t.Errorf("upgraded MiMo Code plugin missing version marker:\n%s", data)
 	}
 	backup := string(fs.Files["/work/.mimocode/plugin/gascity.js.bak"])

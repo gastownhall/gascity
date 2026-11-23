@@ -24,6 +24,11 @@ const ENVIRONMENT = "AGENTS.md instructions\n\nskills";
 const HEADER = `${AGENT_PROMPT}\n\n${ENVIRONMENT}`;
 const MAIL = "You have unread mail.";
 const CLOCK_PREFIX = "Current time: tick-";
+// What the fake gc prints for the one SessionStart-marked prime: beacon and
+// handoff text with no persona, as gc does once the startup prompt is flagged
+// delivered.
+const SESSION_START = "SESSION START: beacon, step reminder, handoff.";
+const SESSION_START_LABEL = "SessionStart hook additional context:\n";
 
 // The suite deadline. The fake drain reads its stdin to EOF, so a plugin that
 // leaves the child's stdin open stalls every drain until the plugin's 30s
@@ -62,14 +67,31 @@ const plugins = [
 // prime log, and GC_FAKE_PRIME_STAMP marks the output the way the real
 // command bakes the current time into its beacon, so a test can tell a
 // refreshed prime from the cached one.
+//
+// Two more logs serve the SessionStart tests. Every gc invocation of any kind
+// appends its argv to the spawn log, and every `prime --hook` call appends
+// `session|GC_MANAGED_SESSION_HOOK|GC_HOOK_EVENT_NAME` to the prime-call log.
+// The fake honors gc's gate: a call carrying both markers prints
+// SESSION_START with no persona (GC_FAKE_SESSIONSTART overrides the payload,
+// an empty value prints nothing, GC_FAKE_SESSIONSTART_FAIL makes it exit 3),
+// and a marker-free call prints the persona.
 function writeFakeGc(dir) {
   const counter = path.join(dir, "drain-count");
   const drainLog = path.join(dir, "drain-log");
   const primeLog = path.join(dir, "prime-log");
+  const primeCallLog = path.join(dir, "prime-call-log");
+  const spawnLog = path.join(dir, "spawn-log");
   const script = `#!/bin/sh
+printf '%s\\n' "$*" >> "${spawnLog}"
 case "$1 $2" in
   "prime --hook")
     printf '%s\\n' "\${GC_PROVIDER_SESSION_ID:-<unset>}" >> "${primeLog}"
+    printf '%s|%s|%s\\n' "\${GC_PROVIDER_SESSION_ID:-}" "\${GC_MANAGED_SESSION_HOOK:-}" "\${GC_HOOK_EVENT_NAME:-}" >> "${primeCallLog}"
+    if [ "\${GC_MANAGED_SESSION_HOOK:-}" = "1" ] && [ "\${GC_HOOK_EVENT_NAME:-}" = "SessionStart" ]; then
+      if [ -n "\${GC_FAKE_SESSIONSTART_FAIL:-}" ]; then exit 3; fi
+      printf '%s' "\${GC_FAKE_SESSIONSTART-${SESSION_START}}"
+      exit 0
+    fi
     printf '%s' '${ROLE}'
     if [ -n "\${GC_FAKE_PRIME_STAMP:-}" ]; then printf ' (stamp %s)' "\${GC_FAKE_PRIME_STAMP}"; fi
     ;;
@@ -94,7 +116,7 @@ esac
 `;
   const bin = path.join(dir, "gc");
   fs.writeFileSync(bin, script, { mode: 0o755 });
-  return { bin, counter, drainLog, primeLog };
+  return { bin, counter, drainLog, primeLog, primeCallLog, spawnLog };
 }
 
 function readLines(file) {
@@ -152,6 +174,102 @@ function stagePlugin(dir, plugin) {
 
 function countOccurrences(haystack, needle) {
   return haystack.split(needle).length - 1;
+}
+
+function spawnLines() {
+  return readLines(fake.spawnLog);
+}
+
+// primeCalls lists every `prime --hook` the fake saw as
+// { session, managed, event }, in call order. Tests assert on it as a multiset
+// (primeCallKeys): the persona refresh and the SessionStart prime are
+// independent, so no ordering between them is part of the contract.
+function primeCalls() {
+  return readLines(fake.primeCallLog).map((line) => {
+    const [session, managed, event] = line.split("|");
+    return { session, managed, event };
+  });
+}
+
+function primeCallKeys(calls) {
+  return calls.map((c) => `${c.session}|${c.managed}|${c.event}`).sort();
+}
+
+function sessionStartPrimes() {
+  return primeCalls().filter((c) => c.managed === "1" && c.event === "SessionStart");
+}
+
+function resetSessionStartLogs() {
+  fs.rmSync(fake.primeCallLog, { force: true });
+  fs.rmSync(fake.spawnLog, { force: true });
+  fs.rmSync(fake.primeLog, { force: true });
+}
+
+// captureWarnings records console.warn calls made while fn runs: the plugin
+// reports every failure path through console.warn.
+async function captureWarnings(fn) {
+  const original = console.warn;
+  const calls = [];
+  console.warn = (...args) => {
+    calls.push(args);
+  };
+  try {
+    await fn();
+  } finally {
+    console.warn = original;
+  }
+  return calls;
+}
+
+// The host's user-message parts carry ascending ids. OpenCode v1 ids are hex
+// after the prefix and v2 ids lead with g; both must sort after the plugin's.
+const HOST_PART_IDS = ["prt_0000000001aaaaaaaaaaaaaaaa", "prt_g0000000002bbbbbbbbbbbbbbb"];
+const PART_KEYS = new Set(["id", "sessionID", "messageID", "type", "text", "synthetic", "metadata"]);
+
+// assertHostAcceptsPart is the strict shape check both hosts effectively make:
+// a prt-prefixed id, matching session and message ids, a text part with
+// non-empty text, and no top-level key the part schema does not know. The host
+// only logs an invalid part and still saves it, so the test must pin the shape.
+function assertHostAcceptsPart(part, sessionID, messageID) {
+  assert.equal(typeof part.id, "string");
+  assert.ok(part.id.startsWith("prt"), `part id ${part.id} lacks the prt prefix`);
+  assert.equal(part.sessionID, sessionID);
+  assert.equal(part.messageID, messageID);
+  assert.equal(part.type, "text");
+  assert.ok(typeof part.text === "string" && part.text.length > 0, "part text is empty");
+  for (const key of Object.keys(part)) {
+    assert.ok(PART_KEYS.has(key), `unknown top-level part key ${key}`);
+  }
+}
+
+// createUserMessage is the host double for one user message. It assigns the
+// host's ids to the user's parts first, awaits the plugin's chat.message hook
+// with { message, parts } the way both hosts do, then iterates the SAME array
+// it passed: an in-place push persists and a reassignment of output.parts does
+// not. The model view orders by id with plain string comparison, and the TUI
+// view drops synthetic parts.
+async function createUserMessage(hooks, sessionID, messageID, text = "do the work") {
+  const parts = HOST_PART_IDS.map((id, i) => ({
+    id,
+    sessionID,
+    messageID,
+    type: "text",
+    text: `${text} ${i}`,
+  }));
+  const message = { id: messageID, sessionID, role: "user", time: { created: 1 }, agent: "build" };
+  const output = { message, parts };
+  const hook = hooks["chat.message"];
+  if (hook) {
+    await hook({ sessionID, agent: "build", messageID }, output);
+  }
+  const persisted = [...parts];
+  assert.equal(new Set(persisted.map((p) => p.id)).size, persisted.length, "part ids are not unique");
+  for (const part of persisted) {
+    assertHostAcceptsPart(part, sessionID, messageID);
+  }
+  const model = [...persisted].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const tui = persisted.filter((p) => !p.synthetic);
+  return { parts, output, message, persisted, model, tui, injected: persisted.filter((p) => p.synthetic) };
 }
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gc-plugin-test-"));
@@ -341,13 +459,14 @@ for (const plugin of plugins) {
       assert.equal(drainCount(fake), 2);
     });
 
-    it("registers no chat.message hook and opens the turn from message.updated alone", async () => {
+    it("registers a chat.message hook that opens no turn", async () => {
       // OpenCode persists the user message (publishing message.updated) and
-      // only then starts the turn's first generation, so message.updated is
-      // sufficient to open the turn. chat.message would arrive earlier still,
-      // but any hook registered there risks writing output.message.system,
-      // which OpenCode folds back into system[0] every generation.
-      assert.equal(hooks["chat.message"], undefined);
+      // only then starts the turn's first generation, so message.updated alone
+      // opens the turn. The chat.message hook exists for the one SessionStart
+      // part; it must neither write output.message.system, which OpenCode
+      // folds back into system[0] every generation, nor open a turn.
+      assert.equal(typeof hooks["chat.message"], "function");
+      await hooks["chat.message"]({ sessionID: "ses_order" }, { message: { id: "msg_o0" }, parts: [] });
 
       // OpenCode invokes the event hook as `void hook.event(...)` and does not
       // wait for it; the turn must be recorded before the first await.
@@ -685,6 +804,331 @@ for (const plugin of plugins) {
       // must not be withheld from what may be the agent's own session.
       await hooks.event(sessionEvent("session.compacted", "ses_unknown"));
       assert.deepEqual(readPrimeLog(fake), ["ses_unknown"]);
+    });
+  });
+  describe(`${plugin.name} plugin SessionStart context`, { timeout: SUITE_TIMEOUT_MS }, () => {
+    // A fresh plugin instance per test: the arm and claim records live in the
+    // plugin's closure. The client has no session API, so session.created
+    // neither resolves the session through the client nor mirrors a transcript.
+    let factory;
+    let hooks;
+    const WARN_PREFIX = `gascity ${plugin.name} plugin:`;
+    const PART_TEXT = `${SESSION_START_LABEL}${SESSION_START}`;
+
+    before(async () => {
+      const staged = stagePlugin(tmp, plugin);
+      ({ default: factory } = await import(pathToFileURL(staged).href));
+    });
+
+    beforeEach(async () => {
+      resetDrains(fake);
+      resetSessionStartLogs();
+      for (const name of [
+        "GC_FAKE_MAIL",
+        "GC_FAKE_PRIME_STAMP",
+        "GC_FAKE_SESSIONSTART",
+        "GC_FAKE_SESSIONSTART_FAIL",
+        "GC_MANAGED_SESSION_HOOK",
+        "GC_HOOK_EVENT_NAME",
+      ]) {
+        delete process.env[name];
+      }
+      hooks = await factory({ directory: tmp, client: {} });
+    });
+
+    const created = (sessionID, info = { directory: tmp }) =>
+      hooks.event(sessionEvent("session.created", sessionID, info));
+
+    const BOTH_MARKERS = { managed: "1", event: "SessionStart" };
+
+    it("registers a chat.message hook", () => {
+      assert.equal(typeof hooks["chat.message"], "function");
+    });
+
+    it("arms a root session and delivers one synthetic part on its first message", async () => {
+      await created("ses_root");
+      const msgID = "msg_b1c2d3e4f5a6AbCdEfGhIjKlMn";
+      const host = await createUserMessage(hooks, "ses_root", msgID);
+
+      assert.equal(host.injected.length, 1, "expected exactly one synthetic part");
+      assert.deepEqual(host.injected[0], {
+        id: "prt_-b1c2d3e4f5a6AbCdEfGhIjKlMn",
+        sessionID: "ses_root",
+        messageID: msgID,
+        type: "text",
+        text: PART_TEXT,
+        synthetic: true,
+        metadata: { gascity: { hook: "SessionStart" } },
+      });
+      assert.equal(host.persisted.length, HOST_PART_IDS.length + 1);
+
+      // The id sorts ahead of every ascending host id (v1 hex and v2 g-led),
+      // so the model reads the context before the prompt.
+      assert.equal(host.model[0], host.injected[0], "the part must lead the model's view");
+      assert.deepEqual(
+        host.tui.map((p) => p.id),
+        HOST_PART_IDS,
+        "the TUI must show only the user's own parts",
+      );
+
+      // The persona refresh and the SessionStart prime are independent.
+      assert.deepEqual(
+        primeCallKeys(primeCalls()),
+        ["ses_root||", `ses_root|${BOTH_MARKERS.managed}|${BOTH_MARKERS.event}`].sort(),
+      );
+      assert.equal(host.message.system, undefined, "the hook must not write output.message.system");
+      assert.ok(!("system" in host.message));
+    });
+
+    it("pushes in place: output.parts keeps its identity", async () => {
+      await created("ses_inplace");
+      const parts = [];
+      const output = { message: { id: "msg_inplace1" }, parts };
+      await hooks["chat.message"]({ sessionID: "ses_inplace" }, output);
+      assert.equal(output.parts, parts, "output.parts was reassigned");
+      assert.equal(parts.length, 1);
+      assert.equal(parts[0].id, "prt_-inplace1");
+    });
+
+    it("derives a part id per message from the message id", async () => {
+      await created("ses_ids_a");
+      await created("ses_ids_b");
+      const a = await createUserMessage(hooks, "ses_ids_a", "msg_aaaaaaaaaaaa1");
+      const b = await createUserMessage(hooks, "ses_ids_b", "msg_bbbbbbbbbbbb2");
+      assert.equal(a.injected[0].id, "prt_-aaaaaaaaaaaa1");
+      assert.equal(b.injected[0].id, "prt_-bbbbbbbbbbbb2");
+      assert.notEqual(a.injected[0].id, b.injected[0].id);
+    });
+
+    it("arms before the event handler's first await", async () => {
+      // The host runs `void hook.event(...)`; the arm must already be recorded
+      // when chat.message runs, whatever the handler is still awaiting.
+      const pending = created("ses_sync");
+      const host = await createUserMessage(hooks, "ses_sync", "msg_sync0001");
+      await pending;
+      assert.equal(host.injected.length, 1);
+    });
+
+    it("never arms a child session", async () => {
+      await created("ses_child", { parentID: "ses_parent", directory: tmp });
+      const before = spawnLines().length;
+      const host = await createUserMessage(hooks, "ses_child", "msg_child0001");
+      assert.equal(host.injected.length, 0);
+      assert.equal(spawnLines().length, before, "chat.message spawned gc for a child session");
+      assert.deepEqual(sessionStartPrimes(), []);
+    });
+
+    it("does nothing for a session it never saw created (resume)", async () => {
+      const host = await createUserMessage(hooks, "ses_resumed", "msg_resume001");
+      assert.equal(host.injected.length, 0);
+      assert.equal(spawnLines().length, 0, "chat.message spawned gc for an unarmed session");
+      assert.deepEqual(sessionStartPrimes(), []);
+    });
+
+    it("does not arm on session.created without info", async () => {
+      await created("ses_noinfo", null);
+      const before = spawnLines().length;
+      const host = await createUserMessage(hooks, "ses_noinfo", "msg_noinfo001");
+      assert.equal(host.injected.length, 0);
+      assert.equal(spawnLines().length, before);
+      assert.deepEqual(sessionStartPrimes(), []);
+    });
+
+    it("does not arm on session.created after the first chat.message", async () => {
+      // 1.14 delivers events on a separate fiber, so session.created can land
+      // after the first message. A late arm must not turn the second message
+      // into the claim.
+      const first = await createUserMessage(hooks, "ses_late", "msg_late00001");
+      assert.equal(first.injected.length, 0);
+      await created("ses_late");
+      const before = spawnLines().length;
+      const second = await createUserMessage(hooks, "ses_late", "msg_late00002");
+      assert.equal(second.injected.length, 0);
+      assert.equal(spawnLines().length, before);
+      assert.deepEqual(sessionStartPrimes(), []);
+    });
+
+    it("keeps session.compacted marker-free and never arms from it", async () => {
+      await hooks.event(sessionEvent("session.compacted", "ses_compacted"));
+      assert.deepEqual(primeCallKeys(primeCalls()), ["ses_compacted||"]);
+      const host = await createUserMessage(hooks, "ses_compacted", "msg_compact01");
+      assert.equal(host.injected.length, 0);
+      assert.deepEqual(sessionStartPrimes(), []);
+    });
+
+    it("carries both markers on exactly one prime across a full lifecycle", async () => {
+      await created("ses_life");
+      const first = await createUserMessage(hooks, "ses_life", "msg_life00001");
+      await hooks.event(userMessageEvent("ses_life", "msg_life00001"));
+      const output = { system: [HEADER] };
+      await hooks["experimental.chat.system.transform"]({ sessionID: "ses_life", model: {} }, output);
+      await hooks.event(sessionEvent("session.compacted", "ses_life"));
+      const second = await createUserMessage(hooks, "ses_life", "msg_life00002");
+      await hooks.event(sessionEvent("session.compacted", "ses_life"));
+
+      assert.equal(first.injected.length, 1);
+      assert.equal(second.injected.length, 0);
+      const calls = primeCalls();
+      assert.equal(sessionStartPrimes().length, 1, JSON.stringify(calls));
+      assert.equal(
+        calls.filter((c) => c.managed !== "" || c.event !== "").length,
+        1,
+        "a marker appeared outside the one SessionStart prime",
+      );
+      // Neither marker is in the persona the transform prepends.
+      assert.ok(output.system[0].startsWith(ROLE));
+      assert.equal(countOccurrences(output.system.join("\n"), SESSION_START), 0);
+    });
+
+    it("gives one prime and one part for sequential and concurrent first messages", async () => {
+      await created("ses_seq");
+      await created("ses_conc");
+      const before = spawnLines().length;
+
+      const one = await createUserMessage(hooks, "ses_seq", "msg_seq000001");
+      const two = await createUserMessage(hooks, "ses_seq", "msg_seq000002");
+      assert.equal(one.injected.length, 1);
+      assert.equal(two.injected.length, 0);
+      assert.equal(spawnLines().length - before, 1, "sequential messages spawned gc more than once");
+
+      const mid = spawnLines().length;
+      const [a, b] = await Promise.all([
+        createUserMessage(hooks, "ses_conc", "msg_conc00001"),
+        createUserMessage(hooks, "ses_conc", "msg_conc00002"),
+      ]);
+      assert.equal(a.injected.length + b.injected.length, 1, "concurrent messages must yield one part");
+      assert.equal(spawnLines().length - mid, 1, "concurrent messages spawned gc more than once");
+      assert.equal(sessionStartPrimes().length, 2, "one SessionStart prime per session");
+    });
+
+    it("pushes nothing and stays silent when the payload is empty", async () => {
+      process.env.GC_FAKE_SESSIONSTART = "";
+      await created("ses_empty");
+      let host;
+      const warnings = await captureWarnings(async () => {
+        host = await createUserMessage(hooks, "ses_empty", "msg_empty0001");
+      });
+      assert.equal(host.injected.length, 0);
+      assert.deepEqual(warnings, []);
+      assert.equal(sessionStartPrimes().length, 1);
+    });
+
+    it("warns, pushes nothing and still creates the message when gc fails", async () => {
+      process.env.GC_FAKE_SESSIONSTART_FAIL = "1";
+      await created("ses_fail");
+      let host;
+      const warnings = await captureWarnings(async () => {
+        host = await createUserMessage(hooks, "ses_fail", "msg_fail00001");
+      });
+      assert.equal(host.injected.length, 0);
+      assert.deepEqual(
+        host.persisted.map((p) => p.id),
+        HOST_PART_IDS,
+        "the user's own parts must persist untouched",
+      );
+      assert.equal(warnings.length, 1, JSON.stringify(warnings));
+      assert.equal(warnings[0][0], WARN_PREFIX);
+      assert.equal(sessionStartPrimes().length, 1);
+    });
+
+    for (const [label, outputFor] of [
+      ["parts is not an array", () => ({ message: { id: "msg_bad000001" }, parts: undefined })],
+      ["parts is an object", () => ({ message: { id: "msg_bad000002" }, parts: {} })],
+      ["message id is empty", () => ({ message: { id: "" }, parts: [] })],
+      ["message id is missing", () => ({ message: {}, parts: [] })],
+      ["message id is not a string", () => ({ message: { id: 7 }, parts: [] })],
+    ]) {
+      it(`warns once and runs no SessionStart prime when ${label}`, async () => {
+        const sessionID = `ses_invalid_${label.replace(/\W+/g, "_")}`;
+        await created(sessionID);
+        const output = outputFor();
+        let thrown = null;
+        const warnings = await captureWarnings(async () => {
+          try {
+            await hooks["chat.message"]({ sessionID }, output);
+          } catch (err) {
+            thrown = err;
+          }
+        });
+        assert.equal(thrown, null, "the hook threw");
+        assert.equal(warnings.length, 1, JSON.stringify(warnings));
+        assert.equal(warnings[0][0], WARN_PREFIX);
+        assert.deepEqual(sessionStartPrimes(), [], "a prime ran without a delivery channel");
+
+        // Nothing was consumed: the per-turn path still delivers.
+        await hooks.event(userMessageEvent(sessionID, "msg_turn00001"));
+        const system = { system: [HEADER] };
+        await hooks["experimental.chat.system.transform"]({ sessionID, model: {} }, system);
+        assert.equal(system.system[1], `${CLOCK_PREFIX}1 (epoch 1)`);
+      });
+    }
+
+    it("never throws whatever input and output it is given", async () => {
+      await created("ses_armed_junk");
+      const junk = [undefined, null, {}];
+      for (const sessionID of ["ses_never_seen", "ses_armed_junk"]) {
+        for (const input of junk) {
+          for (const output of junk) {
+            const call = hooks["chat.message"](input ?? undefined, output ?? undefined);
+            await call;
+          }
+        }
+        await hooks["chat.message"]({ sessionID }, undefined);
+        await hooks["chat.message"]({ sessionID }, null);
+        await hooks["chat.message"]({ sessionID }, {});
+      }
+    });
+
+    it("stays silent for every unarmed shape", async () => {
+      const warnings = await captureWarnings(async () => {
+        for (const input of [undefined, null, {}, { sessionID: "ses_quiet" }]) {
+          for (const output of [undefined, null, {}, { message: {}, parts: undefined }]) {
+            await hooks["chat.message"](input, output);
+          }
+        }
+      });
+      assert.deepEqual(warnings, []);
+      assert.equal(spawnLines().length, 0);
+    });
+
+    it("opens no turn and drains nothing from chat.message", async () => {
+      await created("ses_noturn");
+      const spawnsBefore = spawnLines().length;
+      await createUserMessage(hooks, "ses_noturn", "msg_noturn001");
+      const added = spawnLines().slice(spawnsBefore);
+      assert.equal(added.length, 1, `chat.message spawned ${JSON.stringify(added)}`);
+      assert.ok(added[0].startsWith("prime --hook"), added[0]);
+      assert.equal(drainCount(fake), 0, "chat.message drained nudges");
+
+      // With no turn known the transform drains every time, so two
+      // generations drain twice: chat.message did not open the turn.
+      await hooks["experimental.chat.system.transform"]({ sessionID: "ses_noturn", model: {} }, { system: [HEADER] });
+      await hooks["experimental.chat.system.transform"]({ sessionID: "ses_noturn", model: {} }, { system: [HEADER] });
+      assert.equal(drainCount(fake), 2, "chat.message opened a turn");
+    });
+
+    it("keeps system[0] byte-identical across turns with the part present", async () => {
+      process.env.GC_FAKE_MAIL = MAIL;
+      await created("ses_stable");
+      async function generate(message) {
+        const system = [[AGENT_PROMPT, ENVIRONMENT, message.system].filter(Boolean).join("\n")];
+        await hooks["experimental.chat.system.transform"]({ sessionID: "ses_stable", model: {} }, { system });
+        return system;
+      }
+      async function turn(messageID) {
+        const host = await createUserMessage(hooks, "ses_stable", messageID);
+        void hooks.event(userMessageEvent("ses_stable", messageID));
+        return [host, await generate(host.message), await generate(host.message)];
+      }
+      const [hostOne, oneA, oneB] = await turn("msg_stable0001");
+      const [hostTwo, twoA, twoB] = await turn("msg_stable0002");
+
+      assert.equal(hostOne.injected.length, 1);
+      assert.equal(hostTwo.injected.length, 0);
+      for (const system of [oneA, oneB, twoA, twoB]) {
+        assert.equal(system[0], `${ROLE}\n\n${AGENT_PROMPT}\n${ENVIRONMENT}`);
+        assert.equal(countOccurrences(system.join("\n"), SESSION_START), 0, "the part's text leaked into system[]");
+      }
     });
   });
 }
