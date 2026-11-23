@@ -568,21 +568,37 @@ func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
 	}
 }
 
-// TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim drives the production
-// bd claim op against bd's refusal for a candidate whose status changed after
-// the work query read it (here it was closed). The refusal wrote nothing and
-// nothing is left for this session to resolve, so it is a lost claim: the
-// routed tier must drain a healthy no_work without recording a claim failure,
-// and the assigned tier must not fail the whole hook. A candidate dropped
-// before its claim drains the same way, so the row also pins that the refused
-// claim and its one settling read ran.
-func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
+// TestDoHookClaimClosedTargetRefusalPerTier drives the production bd claim op
+// against bd's refusal for a candidate whose status changed after the work
+// query read it (here it was closed): bd refuses "issue not claimable: status
+// closed" and the post-refusal read shows the closed row. The two tiers answer
+// that refusal differently (#5857, change 2): the routed tier's seat was
+// spawned by demand that a stale replica shadowed, so a closed canonical row
+// there is a claim FAILURE — bead.claim_failed with the seat-free sentinel,
+// the holder named on stderr, and a claims_errored drain that keeps the spawn
+// loop visible instead of laundering it into no_work. The ready tier claims
+// assigned work, not spawn demand, and keeps today's lost-race behavior: a
+// healthy no_work, no failure recorded. Both rows pin that the refused claim
+// and its one settling read ran.
+func TestDoHookClaimClosedTargetRefusalPerTier(t *testing.T) {
+	type failureRecorder struct {
+		beadID string
+		err    error
+	}
 	cases := []struct {
-		name     string
-		assignee string
+		name string
+		// candidateAssignee is the candidate's assignee: empty means the
+		// routed tier, a session means the ready tier.
+		candidateAssignee string
+		// holder is the closing session the readback names.
+		holder string
+		// wantReason is the drain the tier must report.
+		wantReason string
+		// wantFailure: whether the tier must record bead.claim_failed.
+		wantFailure bool
 	}{
-		{name: "routed candidate", assignee: ""},
-		{name: "ready assignment", assignee: "worker-1"},
+		{name: "routed candidate", candidateAssignee: "", holder: "other-session", wantReason: hookClaimReasonClaimsErrored, wantFailure: true},
+		{name: "ready assignment", candidateAssignee: "worker-1", holder: "worker-1", wantReason: hookClaimReasonNoWork, wantFailure: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -597,7 +613,7 @@ func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 						return nil, errors.New("exit status 1: Error updating work-1: issue not claimable: status closed\n" +
 							`{"error":"1 of 1 issues failed to update","failed":[{"id":"work-1","error":"updating issue: issue not claimable: status closed"}],"schema_version":1}`)
 					case name == "bd" && reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
-						return []byte(`[{"id":"work-1","title":"work","status":"closed","issue_type":"task","assignee":"` + tc.assignee + `","created_at":"2026-10-31T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`), nil
+						return []byte(`[{"id":"work-1","title":"work","status":"closed","issue_type":"task","assignee":"` + tc.holder + `","created_at":"2026-10-31T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`), nil
 					default:
 						t.Fatalf("unexpected command: %s %q", name, args)
 						return nil, nil
@@ -605,17 +621,19 @@ func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 				}
 			}
 			candidate, err := json.Marshal([]beads.Bead{{
-				ID: "work-1", Status: "open", Assignee: tc.assignee,
+				ID: "work-1", Status: "open", Assignee: tc.candidateAssignee,
 				Metadata: map[string]string{"gc.routed_to": "worker"},
 			}})
 			if err != nil {
 				t.Fatalf("marshal candidate: %v", err)
 			}
-			var claimFailed []string
+			var claimFailed []failureRecorder
 			ops := hookClaimOps{
-				Runner:            func(string, string) (string, error) { return string(candidate), nil },
-				DrainAck:          func(io.Writer) error { return nil },
-				EmitClaimFailed:   func(beadID string, _ hookClaimOptions, _ error) { claimFailed = append(claimFailed, beadID) },
+				Runner:   func(string, string) (string, error) { return string(candidate), nil },
+				DrainAck: func(io.Writer) error { return nil },
+				EmitClaimFailed: func(beadID string, _ hookClaimOptions, err error) {
+					claimFailed = append(claimFailed, failureRecorder{beadID, err})
+				},
 				EmitClaimRejected: func(string, string, string) {},
 			}
 
@@ -634,14 +652,23 @@ func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 				t.Fatalf("stdout is not JSON: %v\nraw: %s\nstderr: %s", err, stdout.String(), stderr.String())
 			}
-			if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
-				t.Fatalf("claim result = %+v, want drain/%s; stderr=%s", result, hookClaimReasonNoWork, stderr.String())
+			if result.Action != "drain" || result.Reason != tc.wantReason {
+				t.Fatalf("claim result = %+v, want drain/%s; stderr=%s", result, tc.wantReason, stderr.String())
 			}
-			if len(claimFailed) != 0 {
-				t.Fatalf("claim_failed recorded for %q: a status refusal is a lost claim, not a failed write", claimFailed)
-			}
-			if strings.Contains(stderr.String(), "skipping") {
-				t.Fatalf("stderr reports a skipped claim for a lost one: %s", stderr.String())
+			if tc.wantFailure {
+				if len(claimFailed) != 1 || claimFailed[0].beadID != "work-1" || !errors.Is(claimFailed[0].err, errHookClaimTargetClosed) {
+					t.Fatalf("claim failures = %+v, want work-1 with errHookClaimTargetClosed: the #5857 stale-replica refusal must reach the claim-loop guard", claimFailed)
+				}
+				if out := stderr.String(); !strings.Contains(out, "skipping work-1") || !strings.Contains(out, tc.holder) {
+					t.Fatalf("stderr must name the skipped target and its holder %q, got: %s", tc.holder, out)
+				}
+			} else {
+				if len(claimFailed) != 0 {
+					t.Fatalf("claim_failed recorded for %v: the ready tier is not spawn demand the guard can hold", claimFailed)
+				}
+				if strings.Contains(stderr.String(), "skipping") {
+					t.Fatalf("stderr reports a skipped claim in the ready tier: %s", stderr.String())
+				}
 			}
 			if want := []string{"bd update work-1 --claim --json", "bd show --json work-1"}; !reflect.DeepEqual(ran, want) {
 				t.Fatalf("bd ran %q, want the refused claim, then one read naming the holder %q", ran, want)

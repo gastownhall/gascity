@@ -810,3 +810,124 @@ func writeClaimLoopCityConfig(t *testing.T, tomlPath string, maxActive int) {
 		t.Fatalf("write config: %v", err)
 	}
 }
+
+// TestHookClaimClosedCanonicalRowIsAClaimFailure is change 2 of #5857: a CAS
+// refused by a canonical row that is closed is a claim failure, not a lost
+// race. The row's owning store already closed it, so a seat spawned for it
+// was spawned by a stale replica's shadow; reporting the refusal to the
+// claim-loop guard (bead.claim_failed with the sentinel error) is what lets
+// the guard hold the bead once enough seats fail the same way, and draining
+// claims_errored keeps the loop visible instead of laundering it into no_work.
+// A claim_rejected is not emitted: a closed row has no live claimant. Every
+// other !ok readback — an empty bead from a failed readback, a live claimant,
+// an open row — keeps today's path, and so does the ready tier.
+func TestHookClaimClosedCanonicalRowIsAClaimFailure(t *testing.T) {
+	type failure struct {
+		beadID string
+		err    error
+	}
+	type rejection struct {
+		beadID, existing, attempted string
+	}
+	routed := func(id string) beads.Bead {
+		return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{"gc.routed_to": "bd.dog"}}
+	}
+	opts := hookClaimOptions{
+		Assignee:           "bd.dog-1",
+		IdentityCandidates: []string{"bd.dog-1"},
+		RouteTargets:       []string{"bd.dog"},
+		Env:                []string{"GC_TEMPLATE=bd.dog"},
+		JSON:               true,
+		DrainAck:           true,
+	}
+
+	t.Run("closed readback is a claim failure, the next candidate is still tried", func(t *testing.T) {
+		var failed []failure
+		var rejections []rejection
+		var tried []string
+		ops := hookClaimOps{
+			Claim: func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, bool, error) {
+				tried = append(tried, id)
+				if id == "gcg-1" {
+					// The CAS refused; the canonical readback is the owner's
+					// closed copy, held by the session that closed it.
+					return beads.Bead{ID: "gcg-1", Status: "closed", Assignee: "bd.other-1"}, false, nil
+				}
+				// The next candidate's readback is empty: today's lost-race
+				// path, tried and skipped without a failure of its own.
+				return beads.Bead{}, false, nil
+			},
+			EmitClaimFailed: func(beadID string, _ hookClaimOptions, err error) { failed = append(failed, failure{beadID, err}) },
+			EmitClaimRejected: func(beadID, existing, attempted string) {
+				rejections = append(rejections, rejection{beadID, existing, attempted})
+			},
+			DrainAck: func(io.Writer) error { return nil },
+		}
+		var stdout, stderr bytes.Buffer
+		res := claimFirstEligibleHookCandidate([]beads.Bead{routed("gcg-1"), routed("gcg-2")}, opts, ops, "/city", &stdout, &stderr)
+		if res.terminal || !res.claimsErrored {
+			t.Fatalf("routed tier = %+v, want a non-terminal claims_errored drain: the closed target is a failed claim, not idle work", res)
+		}
+		if want := []string{"gcg-1", "gcg-2"}; !reflect.DeepEqual(tried, want) {
+			t.Fatalf("claims tried %v, want %v: a closed target must not stop the candidate loop", tried, want)
+		}
+		if len(failed) != 1 || failed[0].beadID != "gcg-1" || !errors.Is(failed[0].err, errHookClaimTargetClosed) {
+			t.Fatalf("claim failures = %+v, want exactly gcg-1 with errHookClaimTargetClosed", failed)
+		}
+		if len(rejections) != 0 {
+			t.Fatalf("claim_rejected = %+v: a closed row has no live claimant to lose a race to", rejections)
+		}
+		if out := stderr.String(); !strings.Contains(out, "skipping gcg-1") || !strings.Contains(out, "bd.other-1") {
+			t.Fatalf("stderr must name the skipped target and its holder, got: %s", out)
+		}
+	})
+
+	t.Run("an empty readback keeps today's lost-race path", func(t *testing.T) {
+		var failed []failure
+		var rejections []rejection
+		ops := hookClaimOps{
+			Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+				// A readback that could not be made: an empty bead, not a
+				// closed one.
+				return beads.Bead{}, false, nil
+			},
+			EmitClaimFailed: func(beadID string, _ hookClaimOptions, err error) { failed = append(failed, failure{beadID, err}) },
+			EmitClaimRejected: func(beadID, existing, attempted string) {
+				rejections = append(rejections, rejection{beadID, existing, attempted})
+			},
+			DrainAck: func(io.Writer) error { return nil },
+		}
+		var stdout, stderr bytes.Buffer
+		res := claimFirstEligibleHookCandidate([]beads.Bead{routed("gcg-3")}, opts, ops, "/city", &stdout, &stderr)
+		if res.terminal || res.claimsErrored {
+			t.Fatalf("routed tier = %+v, want a non-terminal result with no claim error: an empty readback proves nothing", res)
+		}
+		if len(failed) != 0 || len(rejections) != 0 {
+			t.Fatalf("events: failed=%v rejections=%v; an empty readback reports neither", failed, rejections)
+		}
+	})
+
+	t.Run("the ready tier does not feed the guard a closed target", func(t *testing.T) {
+		var failed []failure
+		var rejections []rejection
+		ops := hookClaimOps{
+			Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+				return beads.Bead{ID: "gcg-4", Status: "closed", Assignee: "bd.other-1"}, false, nil
+			},
+			EmitClaimFailed: func(beadID string, _ hookClaimOptions, err error) { failed = append(failed, failure{beadID, err}) },
+			EmitClaimRejected: func(beadID, existing, attempted string) {
+				rejections = append(rejections, rejection{beadID, existing, attempted})
+			},
+			DrainAck: func(io.Writer) error { return nil },
+		}
+		assigned := []beads.Bead{{ID: "gcg-4", Status: "open", Assignee: "bd.dog-1"}}
+		var stdout, stderr bytes.Buffer
+		res := claimFirstReadyHookAssignment(assigned, opts, ops, "/city", &stdout, &stderr)
+		if res.terminal || res.claimsErrored {
+			t.Fatalf("ready tier = %+v, want today's non-terminal lost-claim shape", res)
+		}
+		if len(failed) != 0 {
+			t.Fatalf("the ready tier reported claim failures %v; assigned work is not spawn demand the guard can hold", failed)
+		}
+	})
+}

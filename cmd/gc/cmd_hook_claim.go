@@ -1211,6 +1211,22 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			continue
 		}
 		if !ok {
+			// A canonical readback whose row is closed is a claim failure, not
+			// a lost race (#5857): the row's owning store already closed it, so
+			// no live claimant beat this seat to it — the demand that spawned
+			// the seat was a stale replica's shadow. Report it to the
+			// claim-loop guard with the seat-free sentinel (so its
+			// identical-error streak forms across the seats the spawn loop
+			// minted) and keep claimsErrored's drain honest; a
+			// claim_rejected stays for live claimants, which every other
+			// readback here — an open row, another session's in-progress
+			// claim, or the empty bead of a failed readback — may still be.
+			if strings.EqualFold(strings.TrimSpace(claimed.Status), "closed") {
+				fmt.Fprintf(stderr, "gc hook --claim: skipping %s: %v (held by %q)\n", candidate.ID, errHookClaimTargetClosed, strings.TrimSpace(claimed.Assignee)) //nolint:errcheck
+				ops.emitClaimFailed(candidate.ID, opts, errHookClaimTargetClosed)
+				claimsErrored = true
+				continue
+			}
 			reportHookClaimRejected(candidate, claimed, opts, ops)
 			continue
 		}
