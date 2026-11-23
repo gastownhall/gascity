@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -272,6 +273,12 @@ type crashScenario struct {
 	// ignoreMetadataKeys are excluded from the comparison for a known,
 	// tracked divergence. Each use must cite its bead.
 	ignoreMetadataKeys []string
+	// stopWritesBeforePrefix halts the fault sweep before the first write
+	// whose op starts with this prefix (the prefix write itself is not
+	// faulted), bounding a scenario to a write window whose crash recovery is
+	// in scope. Everything after the bound still runs — the whole run still
+	// converges per fault position — it is only never faulted.
+	stopWritesBeforePrefix string
 }
 
 type ledgerBead struct {
@@ -523,7 +530,7 @@ func processControlUnderFault(fx crashFixture, bead beads.Bead, inj *writeFaultI
 			crashed = true
 		}
 	}()
-	result, err = ProcessControl(fx.dispatch, bead, fx.opts)
+	result, err = ProcessControl(beadstest.Graph(fx.dispatch), bead, fx.opts)
 	return result, false, err
 }
 
@@ -588,6 +595,9 @@ func runCrashScenario(t *testing.T, sc crashScenario) {
 
 	for _, mode := range []writeFaultMode{writeFaultCrash, writeFaultTransient} {
 		for n := 1; n <= totalWrites; n++ {
+			if sc.stopWritesBeforePrefix != "" && strings.HasPrefix(writeOps[n-1], sc.stopWritesBeforePrefix) {
+				break
+			}
 			inj := &writeFaultInjector{mode: mode, faultAt: n}
 			fx := sc.build(t, func(s beads.Store) beads.Store { return faultStore{Store: s, f: inj} })
 			errs := serveToQuiescence(t, fx, inj)
@@ -666,10 +676,11 @@ func ralphCheckCrashScenario(name, script string, maxAttempts int, hardSubject b
 				t.Fatalf("close subject: %v", err)
 			}
 			logicalID, checkID = logical.ID, check1.ID
+			dispatch := wrap(store)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
-				opts:     ProcessOptions{CityPath: cityPath},
+				dispatch: dispatch,
+				opts:     ProcessOptions{CityPath: cityPath, Work: beadstest.Work(dispatch)},
 			}
 		},
 		check: func(t *testing.T, ledger []ledgerBead) { check(t, ledger, logicalID, checkID) },
@@ -741,6 +752,7 @@ func workflowFinalizeCrashScenario(name, stepOutcome string, check func(t *testi
 				ledger:   []*beads.MemStore{f.rigStore, f.cityStore},
 				dispatch: rig,
 				opts: ProcessOptions{
+					Work: beadstest.Work(rig),
 					ResolveStoreRef: func(ref string) (beads.Store, error) {
 						switch ref {
 						case "city:test":
@@ -811,9 +823,11 @@ func retryEvalCrashScenario(name string, runOutcome, evalOverrides map[string]st
 				}
 			}
 			logicalID, evalID = logical.ID, eval.ID
+			dispatch := wrap(store)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
+				dispatch: dispatch,
+				opts:     ProcessOptions{Work: beadstest.Work(dispatch)},
 			}
 		},
 		check: func(t *testing.T, ledger []ledgerBead) { check(t, ledger, logicalID, evalID) },
@@ -905,16 +919,18 @@ func teardownMoleculeCrashScenario(name, formulaDir, workOutcome string) crashSc
 		name: name,
 		build: func(t *testing.T, wrap func(beads.Store) beads.Store) crashFixture {
 			store := newBdClosePolicyStore()
-			cooked, err := molecule.Cook(context.Background(), store, "teardown-settlement", []string{formulaDir}, molecule.Options{})
+			cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "teardown-settlement", []string{formulaDir}, molecule.Options{})
 			if err != nil {
 				t.Fatalf("Cook: %v", err)
 			}
 			rootID := cooked.RootID
+			dispatch := wrap(store)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
+				dispatch: dispatch,
+				opts:     ProcessOptions{Work: beadstest.Work(dispatch)},
 				work: func(t *testing.T) bool {
-					members, err := molecule.ListSubtree(store, rootID)
+					members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 					if err != nil {
 						t.Fatalf("listing molecule members: %v", err)
 					}
@@ -1013,11 +1029,13 @@ func fanoutScopeCrashScenario(name, formulaDir string, source map[string]string,
 			bodyID, fanoutID = body.ID, fanout.ID
 			// The expanded members carry the scope ref, so each gets a
 			// scope-check routed to the control dispatcher.
+			dispatch := wrap(store)
 			opts := testProcessOptionsWithControlDispatcher("")
 			opts.FormulaSearchPaths = []string{formulaDir}
+			opts.Work = beadstest.Work(dispatch)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
+				dispatch: dispatch,
 				opts:     opts,
 				work: func(t *testing.T) bool {
 					open, err := store.ListOpen()
@@ -1109,7 +1127,7 @@ func drainScopeCrashScenario(name, formulaDir string, memberCount int, drainMeta
 			parent := mustCreateWorkflowBead(t, store, beads.Bead{Title: "parent", Type: "convoy"})
 			for i := range memberCount {
 				member := mustCreateWorkflowBead(t, store, beads.Bead{Title: fmt.Sprintf("member %d", i+1), Type: "task"})
-				if err := convoycore.TrackItem(store, parent.ID, member.ID); err != nil {
+				if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, parent.ID, member.ID); err != nil {
 					t.Fatalf("tracking member: %v", err)
 				}
 			}
@@ -1137,10 +1155,11 @@ func drainScopeCrashScenario(name, formulaDir string, memberCount int, drainMeta
 			drain := mustCreateWorkflowBead(t, store, beads.Bead{Title: "drain", Type: "task", Metadata: meta})
 			mustDepAdd(t, store, body.ID, drain.ID, "blocks")
 			bodyID, drainID = body.ID, drain.ID
+			dispatch := wrap(store)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
-				opts:     ProcessOptions{FormulaSearchPaths: []string{formulaDir}},
+				dispatch: dispatch,
+				opts:     ProcessOptions{FormulaSearchPaths: []string{formulaDir}, Work: beadstest.Work(dispatch)},
 			}
 		},
 		check: func(t *testing.T, ledger []ledgerBead) { check(t, ledger, bodyID, drainID) },

@@ -14,7 +14,7 @@ import (
 // sessionStartAutoHandoffInjection fetches and hands to ArchiveInjectedAutoHandoffs.
 func sendInjectableAutoHandoff(t *testing.T, p *Provider, subject string) mail.Message {
 	t.Helper()
-	msg, err := p.SendHandoff(mail.HandoffIntent{
+	msg, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:     "worker",
 		To:       "worker",
 		Subject:  subject,
@@ -41,7 +41,7 @@ func sendInjectableAutoHandoff(t *testing.T, p *Provider, subject string) mail.M
 // hard-Delete of any message bead in the inject path).
 func TestArchiveInjectedAutoHandoffMarksReadRetainsAddressable(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	auto := sendInjectableAutoHandoff(t, p, "context-cycle")
 
@@ -104,7 +104,7 @@ func TestArchiveInjectedAutoHandoffMarksReadRetainsAddressable(t *testing.T) {
 // unconsumed-and-unarchived handoff is never reclaimed out from under a recycle.
 func TestArchiveInjectedAutoHandoffReclaimedByReadGatedTTLSweep(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	injected := sendInjectableAutoHandoff(t, p, "injected-cycle")
 	neverInjected := sendInjectableAutoHandoff(t, p, "never-injected-cycle")

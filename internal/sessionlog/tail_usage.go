@@ -42,6 +42,12 @@ type TailUsage struct {
 	// Timestamp is the transcript entry's own timestamp, when the provider
 	// format carries one. Zero when absent or unparseable.
 	Timestamp time.Time
+	// ReportedCostUSD is the cost the provider's own transcript recorded for
+	// this invocation, valid only when HasReportedCost is set. Families whose
+	// transcripts carry no cost leave both zero and are priced from the
+	// pricing registry instead.
+	ReportedCostUSD float64
+	HasReportedCost bool
 }
 
 // ExtractTailUsage reads the tail of a session transcript and returns one

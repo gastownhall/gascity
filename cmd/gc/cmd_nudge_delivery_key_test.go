@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -75,7 +76,7 @@ func TestTryDeliverQueuedNudgesByPollerPinsTheDeliveryKey(t *testing.T) {
 			t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 		}
 		// Make the failed item due again at once.
-		if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		if err := withNudgeQueueState(dir, "test", func(state *nudgeQueueState) error {
 			for i := range state.Pending {
 				state.Pending[i].DeliverAfter = time.Now().Add(-time.Second)
 			}
@@ -168,7 +169,7 @@ func (h *keyedPollerHarness) pass(nudgeErr error) {
 
 func (h *keyedPollerHarness) makeDue() {
 	h.t.Helper()
-	if err := withNudgeQueueState(h.dir, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(h.dir, "test", func(state *nudgeQueueState) error {
 		for i := range state.Pending {
 			state.Pending[i].DeliverAfter = time.Now().Add(-time.Second)
 		}
@@ -181,7 +182,7 @@ func (h *keyedPollerHarness) makeDue() {
 // expireLeases lapses every in-flight claim, as when its claimer died.
 func (h *keyedPollerHarness) expireLeases() {
 	h.t.Helper()
-	if err := withNudgeQueueState(h.dir, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(h.dir, "test", func(state *nudgeQueueState) error {
 		for i := range state.InFlight {
 			state.InFlight[i].LeaseUntil = time.Now().Add(-time.Second)
 		}
@@ -224,38 +225,35 @@ func (h *keyedPollerHarness) enqueueWaitNudge(store beads.Store, message, state 
 	return item.ID, wait.ID
 }
 
-// failBeadWritesOf makes every metadata write to the bead behind queued nudge
-// nudgeID fail, as a store outage fails its withdraw, until restore is called.
-func (h *keyedPollerHarness) failBeadWritesOf(store beads.Store, nudgeID string) (restore func()) {
+// failWithdrawOf makes the withdrawal of queued nudge nudgeID fail without
+// committing, as an ack that cannot take the queue lock does: the item stays
+// in flight. The other blocked items are withdrawn as usual.
+func (h *keyedPollerHarness) failWithdrawOf(nudgeID string) (restore func()) {
 	h.t.Helper()
-	item, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(nudgeID)
-	if err != nil || !ok {
-		h.t.Fatalf("finding the bead of %s: ok=%v err=%v", nudgeID, ok, err)
-	}
-	prev := openOwnedNudgeBeadStore
-	openOwnedNudgeBeadStore = func(cityPath string) (beads.NudgesStore, beads.Store) {
-		nudges, opened := prev(cityPath)
-		if nudges.Store != nil {
-			nudges.Store = metadataFailingStore{Store: nudges.Store, failID: item.BeadID}
+	prev := terminalizeBlockedQueuedNudges
+	terminalizeBlockedQueuedNudges = func(cityPath string, blocked map[string][]queuedNudge) error {
+		rest := make(map[string][]queuedNudge, len(blocked))
+		failed := false
+		for reason, items := range blocked {
+			for _, item := range items {
+				if item.ID == nudgeID {
+					failed = true
+					continue
+				}
+				rest[reason] = append(rest[reason], item)
+			}
 		}
-		return nudges, opened
+		if err := prev(cityPath, rest); err != nil {
+			return err
+		}
+		if failed {
+			return fmt.Errorf("acking %s: %w", nudgeID, nudgequeue.ErrQueueBusy)
+		}
+		return nil
 	}
-	restore = func() { openOwnedNudgeBeadStore = prev }
+	restore = func() { terminalizeBlockedQueuedNudges = prev }
 	h.t.Cleanup(restore)
 	return restore
-}
-
-// metadataFailingStore fails every metadata batch write to one bead.
-type metadataFailingStore struct {
-	beads.Store
-	failID string
-}
-
-func (s metadataFailingStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	if id == s.failID {
-		return fmt.Errorf("setting metadata on %q: connection refused", id)
-	}
-	return s.Store.SetMetadataBatch(id, kvs)
 }
 
 // A batch whose delivery had an unknown outcome is redelivered under its
@@ -291,7 +289,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsTheBatchWhenNewNudgesArrive(t *testi
 func TestTryDeliverQueuedNudgesByPollerKeepsTheBatchAcrossLeaseExpiry(t *testing.T) {
 	h := newKeyedPollerHarness(t)
 	h.enqueue("nudge A")
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, time.Now())
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, nil, time.Now())
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim = %v, %v; want nudge A", claimed, err)
 	}
@@ -394,7 +392,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsTheBatchWhenAFencedPredecessorWakes(
 	census = map[string]struct{}{"S1": {}, "S2": {}} // S1 wakes again
 	predecessor := h.target
 	predecessor.sessionID = "S1"
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, predecessor, time.Now())
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, predecessor, nil, time.Now())
 	if err != nil || len(claimed) != 0 {
 		t.Fatalf("woken predecessor S1 claimed %+v (err %v), want nothing: the batch is S2's", claimed, err)
 	}
@@ -437,7 +435,7 @@ func TestClaimDueQueuedNudgeBatchMovesItsNudgesOntoTheClaimingFence(t *testing.T
 		census = map[string]struct{}{successor: {}}
 		target := h.target
 		target.sessionID = successor
-		claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, target, time.Now())
+		claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, target, nil, time.Now())
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("claim for %s = %+v, %v; want nudge A", successor, claimed, err)
 		}
@@ -456,7 +454,7 @@ func TestClaimDueQueuedNudgeBatchSkipsAPinnedBatchPartlyInFlight(t *testing.T) {
 	h := newKeyedPollerHarness(t)
 	h.enqueue("nudge A")
 	h.enqueue("nudge B")
-	if err := withNudgeQueueState(h.dir, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(h.dir, "test", func(state *nudgeQueueState) error {
 		for i := range state.Pending {
 			state.Pending[i].DeliveryBatch = "batch-k"
 		}
@@ -471,7 +469,7 @@ func TestClaimDueQueuedNudgeBatchSkipsAPinnedBatchPartlyInFlight(t *testing.T) {
 	}
 	h.enqueue("nudge C")
 
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, time.Now())
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +488,7 @@ func TestTryDeliverQueuedNudgesByPollerRekeysTheBatchWhenAWithdrawFails(t *testi
 	store := openNudgeBeadStore(h.dir).Store
 	h.enqueue("nudge A")
 	nudgeB, waitB := h.enqueueWaitNudge(store, "nudge B", waitStatePending)
-	restore := h.failBeadWritesOf(store, nudgeB)
+	restore := h.failWithdrawOf(nudgeB)
 
 	// {A,B} is claimed under one key. B's wait has not fired, so B is
 	// withheld, and its withdraw fails: B stays in flight while A goes out.
@@ -565,7 +563,7 @@ func TestTryDeliverQueuedNudgesByPollerRedeliversARekeyedBatchUnderItsNewKey(t *
 	store := openNudgeBeadStore(h.dir).Store
 	h.enqueue("nudge A")
 	nudgeB, _ := h.enqueueWaitNudge(store, "nudge B", waitStatePending)
-	restore := h.failBeadWritesOf(store, nudgeB)
+	restore := h.failWithdrawOf(nudgeB)
 	h.fake.NudgeErrors = map[string]error{"sess-worker": errors.New("read tcp: i/o timeout")}
 
 	if _, err := tryDeliverQueuedNudgesByPoller(h.target, store, store, h.sp, 3*time.Second, h.obs); err == nil || !strings.Contains(err.Error(), "withdrawing blocked nudges") {
@@ -599,7 +597,7 @@ func TestRekeyQueuedNudgesAfterFailedBookkeepingReleasesWhenAClaimIsGone(t *test
 	h := newKeyedPollerHarness(t)
 	h.enqueue("nudge A")
 	h.enqueue("nudge B")
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, time.Now())
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, nil, time.Now())
 	if err != nil || len(claimed) != 2 || claimed[0].DeliveryBatch == "" {
 		t.Fatalf("claimed = %+v (err %v), want nudges A and B under one key", claimed, err)
 	}

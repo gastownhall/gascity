@@ -34,7 +34,7 @@ func (p *rewriteConfigOnListProvider) ListRunning(prefix string) ([]string, erro
 	return p.Fake.ListRunning(prefix)
 }
 
-func stubReloadBeadsLifecycle(t *testing.T, fn func(string, string, *config.City, io.Writer) error) {
+func stubReloadBeadsLifecycle(t *testing.T, fn func(string, string, *config.City, cityStoreRecord, io.Writer) error) {
 	t.Helper()
 	previous := cityRuntimeStartBeadsLifecycle
 	cityRuntimeStartBeadsLifecycle = fn
@@ -152,7 +152,7 @@ func TestCityRuntimeReloadRejectsRevisionSupersededDuringPreparation(t *testing.
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	// A newer config lands on disk while the reload is still preparing its
 	// candidate (here: during the bead lifecycle step).
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error {
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		return os.WriteFile(tomlPath, []byte(supersedingCityConfig), 0o644)
 	})
 
@@ -191,7 +191,7 @@ func TestCityRuntimeReloadSupersededByAPIMutationConvergesOnRetry(t *testing.T) 
 	oldCfg, oldRevision := cr.cfg, cr.configRev
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	mutated := false
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error {
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		if mutated {
 			return nil
 		}
@@ -234,7 +234,7 @@ func TestCityRuntimeProviderReloadSupersededDuringCensusDoesNotPublishSwap(t *te
 	var stdout bytes.Buffer
 	cr, cs, _ := newPublicationTestRuntime(t, cityPath, provider, &stdout, io.Discard)
 
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
 	writeCityRuntimeConfig(t, tomlPath, "fail")
 	provider.rewrite = func() {
 		if err := os.WriteFile(tomlPath, []byte(supersedingCityConfig), 0o644); err != nil {
@@ -270,7 +270,7 @@ func TestCityRuntimeProviderReloadAlreadySupersededSkipsProviderEffects(t *testi
 	cr, cs, _ := newPublicationTestRuntime(t, cityPath, provider, &stdout, io.Discard)
 
 	writeCityRuntimeConfig(t, tomlPath, "fail")
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error {
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		return os.WriteFile(tomlPath, []byte(supersedingCityConfig), 0o644)
 	})
 	listed := false

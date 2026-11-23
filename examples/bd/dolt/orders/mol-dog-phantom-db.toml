@@ -7,3 +7,6 @@ description = "Detect phantom database resurrection after cleanup"
 exec = "$PACK_DIR/assets/scripts/mol-dog-phantom-db.sh"
 trigger = "cooldown"
 interval = "1h"
+# Dolt-server work: never dispatched for a scope on another backend (http,
+# postgres, doltlite); gc reports it there as inapplicable, not failed.
+requires_backend = ["dolt"]

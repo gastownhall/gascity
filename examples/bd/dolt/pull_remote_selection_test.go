@@ -1,3 +1,5 @@
+//go:build unix
+
 package dolt_test
 
 // Remote-selection determinism: `gc dolt pull` must not guess which remote

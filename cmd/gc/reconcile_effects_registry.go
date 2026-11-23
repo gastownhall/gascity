@@ -115,11 +115,11 @@ var effectSpecs = map[string]effectSpec{
 	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections},                                                                                                                             // A19 (C6a)
 	intentStop:            {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, needsFor: stopNeeds, caps: capReadStores | capProviderStop | capRelease, sections: stopSections}, // A4 (C6b2)
 	intentClose:           {class: capProbing, bootGated: true, needs: needs{Runtime: true, Legs: legWork, Lease: true}, caps: capReadStores | capRelease, sections: closeSections, around: closeAround},   // A21 (C5c1)
-	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},            // A10 (C3)
+	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Lease: true}, needsFor: rollbackNeeds, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},  // A10 (C3); L5 for a Workless one (#2081)
 	intentRowMetadata:     {class: capRowWrites, caps: capReadStores, around: aliasLockAround, sections: rowMetadataSections},                                                                              // A7 (C7d): a row write, lease-free
 	intentRuntimeAlias:    {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: runtimeAliasSections},                                                           // A7 (C7d)
 	intentMarkerClear:     {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: markerClearSections},                                                            // A13's pinned skip (mc-nm6yt)
 	intentBaseline:        {class: capRowWrites, sections: baselineSections},                                                                                                                               // A8 (C7c)
 	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                                                                                                                               // A6
-	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                                        // A6
+	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                                        // A6; A21's parked clear
 }

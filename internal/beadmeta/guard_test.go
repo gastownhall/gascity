@@ -64,6 +64,10 @@ var allowedNonMetadata = map[string]string{
 	"gc.bash": "shell completion filename (cmd/gc/cmd_shell.go)",
 	"gc.fish": "shell completion filename (cmd/gc/cmd_shell.go)",
 
+	// Windows executable name, not a metadata key: in PowerShell a bare gc is
+	// the Get-Content alias, so agent-facing command text names gc.exe.
+	"gc.exe": "Windows gc executable name (internal/runtime/gccommand_windows.go, internal/overlay/platform_windows.go)",
+
 	// City config YAML keys (config-file rewrite, not bead metadata).
 	"gc.endpoint_origin": "city config YAML key (internal/beads/contract/files.go)",
 	"gc.endpoint_status": "city config YAML key (internal/beads/contract/files.go)",
@@ -81,6 +85,7 @@ var excludedDirs = []string{
 	"internal/telemetry",        // gc.* metric/counter names
 	"internal/runtime/t3bridge", // t3bridge UI thread-metadata namespace
 	"internal/opjournal",        // op journal gc.op.* / gc.fact.* namespace; its codec is the only reader and writer
+	"internal/eventfact",        // event-fact gc.ev.* and projector-checkpoint gc.evproj.* namespaces; its codec is the only reader and writer
 	"internal/api/genclient",    // generated client code
 }
 

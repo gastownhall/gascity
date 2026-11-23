@@ -20,8 +20,10 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+	"github.com/rogpeppe/go-internal/testscript"
 )
 
 // doltLeakGuardGraceInitialInterval and doltLeakGuardGraceMaxElapsedTime
@@ -135,7 +137,7 @@ func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 }
 
 type doltLeakGuardedTestingM struct {
-	m        *testing.M
+	m        testscript.TestingM
 	tempRoot string
 	// sourceRoot is the package directory the test binary runs in. A managed
 	// dolt provider handed a city root of "" or "." resolves it to this
@@ -153,9 +155,21 @@ type doltLeakGuardedTestingM struct {
 	sourceRoot   string
 	checkoutRoot string
 	cleanupPaths []string
+	// diag receives runWith's verdict diagnostics; nil is os.Stderr. The
+	// guard's own unit tests capture it, so the failures they inject do not
+	// print as real ones in the package's output.
+	diag io.Writer
 }
 
-func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
+// diagWriter is where runWith reports a scan failure or a leak.
+func (g *doltLeakGuardedTestingM) diagWriter() io.Writer {
+	if g.diag != nil {
+		return g.diag
+	}
+	return os.Stderr
+}
+
+func newDoltLeakGuardedTestingM(m testscript.TestingM, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
 	// A failure here must not be fatal: os.Getwd only fails in exotic cases
 	// (an unlinked cwd), and losing the second root degrades the guard to its
 	// previous tempRoot-only behavior rather than breaking every test run.
@@ -224,6 +238,21 @@ func (g *doltLeakGuardedTestingM) runWith(
 	reapLeaks func([]DoltProcInfo),
 	graceInitialInterval, graceMaxElapsedTime time.Duration,
 ) int {
+	// A platform that cannot enumerate processes cannot produce a finding, and
+	// must not present that silence as a clean sweep. Announce the gap, then run
+	// the parts that need no process table: the symptom-based directory sweep
+	// still removes stray store dirs.
+	if !doltLeakDetectionAvailable() {
+		fmt.Fprintln(os.Stderr, "cmd/gc test dolt leak guard: dolt process enumeration is unavailable on this platform; leak detection is OFF for this run") //nolint:errcheck
+		sweepOrphanDirs()
+		stopSignalHandler := g.installSignalHandler()
+		defer stopSignalHandler()
+		code := runTests()
+		g.cleanupTemporaryPaths()
+		reapRegistered()
+		return code
+	}
+
 	_ = sweepStale("startup")
 	sweepOrphanDirs()
 	stopSignalHandler := g.installSignalHandler()
@@ -231,7 +260,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	initial, initialErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
 	if initialErr != nil {
-		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
+		fmt.Fprintf(g.diagWriter(), "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
 	}
 
 	code := runTests()
@@ -240,11 +269,11 @@ func (g *doltLeakGuardedTestingM) runWith(
 	if initialErr == nil {
 		leaked, finalErr := g.waitForFinalScanToClear(enumerate, initial, graceInitialInterval, graceMaxElapsedTime)
 		if finalErr != nil {
-			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
+			fmt.Fprintf(g.diagWriter(), "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
 		} else if len(leaked) > 0 {
-			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), strings.Join(g.nonEmptyLeakRoots(), ", ")) //nolint:errcheck
-			writeDoltLeakReport(os.Stderr, leaked)
+			fmt.Fprintf(g.diagWriter(), "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), strings.Join(g.nonEmptyLeakRoots(), ", ")) //nolint:errcheck
+			writeDoltLeakReport(g.diagWriter(), leaked)
 			reapLeaks(leaked)
 			guardFailed = true
 		}
@@ -322,10 +351,7 @@ func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
 			_ = g.reapDoltProcessesUnderRoot("signal")
 			g.cleanupTemporaryPaths()
 			signal.Stop(signals)
-			if s, ok := sig.(syscall.Signal); ok {
-				signal.Reset(s)
-				_ = syscall.Kill(os.Getpid(), s)
-			}
+			reraiseTestSignal(sig)
 		case <-done:
 		}
 	}()
@@ -558,12 +584,11 @@ func reapDoltLeakPIDs(pids []int) []error {
 }
 
 // processStillAlive reports whether pid is still present in the process
-// table, probing via signal 0 (delivers no actual signal; ESRCH means the
-// pid is already gone). Mirrors the ESRCH handling killFn callers already
-// use elsewhere in this file.
+// table. A process that exists but cannot be inspected counts as alive, so
+// an observation failure never invents an exit the reaper would then stop
+// waiting for.
 func processStillAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || !errors.Is(err, syscall.ESRCH)
+	return pidutil.Alive(pid)
 }
 
 // reapDoltLeakPIDsWithKillerAndWaiter is the fully injectable form of the
@@ -861,33 +886,6 @@ func stopManagedDoltProcessesUnderTestCity(t *testing.T, cityPath string) {
 // dolt test process to exit after SIGTERM before it escalates to SIGKILL.
 const managedDoltTestSIGTERMGrace = 5 * time.Second
 
-func stopManagedDoltTestPID(t *testing.T, pid int) {
-	t.Helper()
-	if pid <= 0 || !managedStopPIDAlive(pid) {
-		return
-	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
-		t.Fatalf("signal dolt test pid %d with SIGTERM: %v", pid, err)
-	}
-	deadline := time.Now().Add(managedDoltTestSIGTERMGrace)
-	for managedStopPIDAlive(pid) && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !managedStopPIDAlive(pid) {
-		return
-	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		t.Fatalf("signal dolt test pid %d with SIGKILL: %v", pid, err)
-	}
-	deadline = time.Now().Add(time.Second)
-	for managedStopPIDAlive(pid) && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if managedStopPIDAlive(pid) {
-		t.Fatalf("dolt test pid %d still alive after SIGKILL", pid)
-	}
-}
-
 // registerRealBDServerStop stops any dolt sql-server rooted under cityPath
 // before the calling test returns. Callers must invoke this after their own
 // t.TempDir() call so t.Cleanup's LIFO ordering runs this cleanup — and so
@@ -976,6 +974,9 @@ func maybeRunFakeDoltSQLServer() {
 // inert to it and /proc/<pid>/cmdline shows exactly what cmd.Args says.
 func startFakeDoltSQLServer(t *testing.T, cityPath string) *exec.Cmd {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake hands its readiness pipe over as fd 3, which Windows cannot pass to a child")
+	}
 	configPath := filepath.Join(cityPath, ".beads", "fake-dolt-config.yaml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(configPath), err)

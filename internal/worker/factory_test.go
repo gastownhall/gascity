@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -103,7 +104,7 @@ func TestFactoryThreadsStaleKeyDetectionWaiterToSessionHandles(t *testing.T) {
 	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := handle.StartResolved(context.Background(), startLeaseActor(t, handle), "claude --resume "+info.SessionKey, runtime.Config{WorkDir: t.TempDir()}); err != nil {
+	if err := startResolved(t, handle, "claude --resume "+info.SessionKey, runtime.Config{WorkDir: t.TempDir()}); err != nil {
 		t.Fatalf("StartResolved: %v", err)
 	}
 	select {
@@ -122,6 +123,7 @@ func TestFactoryThreadsEventRecorderToSessionManager(t *testing.T) {
 	sp.StartErrors["sky"] = fmt.Errorf("%w: session %q; last pane output:\nTrust this folder?", runtime.ErrSessionDiedDuringStartup, "sky")
 	rec := events.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath: t.TempDir(),
 		Store:    store,
 		Provider: sp,
 		Recorder: rec,
@@ -288,7 +290,7 @@ func TestFactoryTailMetaForProviderUsesCodexSchema(t *testing.T) {
 func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "legacy-provider", Transport: "", Resume: sessionpkg.ProviderResume{SessionIDFlag: "--stale-session-id"}})
 	if err != nil {
@@ -367,7 +369,7 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 func TestFactoryTransportResolverReceivesProviderForLegacyProviderSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp)
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "opencode", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "opencode", Transport: "", Resume: sessionpkg.ProviderResume{}})
 	if err != nil {
@@ -416,7 +418,7 @@ func TestFactoryTransportResolverReceivesProviderForLegacyProviderSession(t *tes
 func TestFactorySessionByIDPropagatesResolvedRuntimeError(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp)
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "legacy-provider", Transport: "", Resume: sessionpkg.ProviderResume{SessionIDFlag: "--stale-session-id"}})
 	if err != nil {
@@ -444,7 +446,7 @@ func TestFactorySessionByIDPropagatesResolvedRuntimeError(t *testing.T) {
 func TestFactorySessionByIDPreservesTemplateInWorkerOperationEvents(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	recorder := events.NewFake()
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "myrig/worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Transport: "", Resume: sessionpkg.ProviderResume{SessionIDFlag: "--session-id"}})
@@ -486,7 +488,7 @@ func TestFactorySessionByIDPreservesTemplateInWorkerOperationEvents(t *testing.T
 func TestFactoryHandleForTargetResolvesRuntimeSessionMeta(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(
 		context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})

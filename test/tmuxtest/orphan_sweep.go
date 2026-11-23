@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // SocketParentDirPrefix is the shared prefix for the tmux Unix-socket parent
@@ -25,7 +26,7 @@ import (
 const SocketParentDirPrefix = "gct-"
 
 // socketParentAliveSentinelName is a lock file inside each socket parent
-// dir. The creating process holds an exclusive flock on it for its
+// dir. The creating process holds an exclusive kernel lock on it for its
 // lifetime; SweepOrphanPIDPrefixedDirs probes the lock instead of trusting
 // PID visibility, which lies across PID namespaces (ga-djbcqt: bwrap
 // --unshare-pid sandboxes see every host PID as dead while sharing the host
@@ -55,16 +56,26 @@ func PIDPrefixedTempPattern(prefix string) string {
 }
 
 // HoldAliveSentinel creates <dir>/.gc-test-alive.lock and takes an
-// exclusive flock on it. The caller must keep the returned file referenced
-// for as long as dir must stay protected from SweepOrphanPIDPrefixedDirs:
-// the runtime finalizes unreachable os.Files, which closes the descriptor
-// and releases the lock.
+// exclusive kernel lock on it. The caller must keep the returned file
+// referenced for as long as dir must stay protected from
+// SweepOrphanPIDPrefixedDirs: the runtime finalizes unreachable os.Files,
+// which closes the descriptor and releases the lock.
+//
+// Closing the file is the documented release path on both platforms, so the
+// lock handle is deliberately not returned: flock is released when the last
+// descriptor for the open file closes, and a Windows byte-range lock is
+// released when its handle closes.
 func HoldAliveSentinel(dir string) (*os.File, error) {
-	f, err := os.OpenFile(filepath.Join(dir, socketParentAliveSentinelName), os.O_CREATE|os.O_RDWR, 0o644)
+	path := filepath.Join(dir, socketParentAliveSentinelName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening alive sentinel in %q: %w", dir, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	}); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("locking alive sentinel in %q: %w", dir, err)
 	}
@@ -73,10 +84,11 @@ func HoldAliveSentinel(dir string) (*os.File, error) {
 
 // aliveSentinelHeld probes <dir>'s alive sentinel. exists reports whether
 // the sentinel file is present; held reports whether some process still
-// holds its flock. Probe failures are reported as held so the sweep stays
+// holds its lock. Probe failures are reported as held so the sweep stays
 // conservative.
 func aliveSentinelHeld(dir string) (exists, held bool) {
-	f, err := os.OpenFile(filepath.Join(dir, socketParentAliveSentinelName), os.O_RDWR, 0)
+	path := filepath.Join(dir, socketParentAliveSentinelName)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, false
@@ -84,10 +96,15 @@ func aliveSentinelHeld(dir string) (exists, held bool) {
 		return true, true
 	}
 	defer f.Close() //nolint:errcheck
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		return true, true
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = lock.Release()
 	return true, false
 }
 
@@ -279,10 +296,16 @@ var liveTmuxServerReaper = tmuxServerReaper{
 	serverIdentity: tmuxServerIdentityAtSocket,
 	killServer:     killTmuxServerAtSocket,
 	sameProcess:    pidutil.AliveWithStartTime,
-	isTmuxProcess:  func(pid int) bool { return pidutil.AliveWithCmdline(pid, isTmuxArgv) },
-	signal:         syscall.Kill,
-	exitWait:       killTmuxServerWait,
-	pollInterval:   killTmuxServerPollInterval,
+	// An unreadable argv leaves the process unidentified, and this gates a
+	// kill: treat "cannot tell" as "not a tmux process" so the reaper never
+	// signals something it could not identify.
+	isTmuxProcess: func(pid int) bool {
+		matched, err := pidutil.AliveWithCmdline(pid, isTmuxArgv)
+		return err == nil && matched
+	},
+	signal:       signalProcess,
+	exitWait:     killTmuxServerWait,
+	pollInterval: killTmuxServerPollInterval,
 }
 
 // killTmuxServersUnder reaps the tmux server behind every Unix domain socket

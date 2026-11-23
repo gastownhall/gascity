@@ -198,7 +198,7 @@ func TestStartRuntimeOnlyEmitsSessionCrashedWhenStartupDeathIsTerminal(t *testin
 	}
 
 	sp.armed = true
-	err = mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
+	err = startRuntimeOnly(t, mgr, info.ID, "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
 	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
 		t.Fatalf("StartRuntimeOnly error = %v, want ErrSessionDiedDuringStartup", err)
 	}

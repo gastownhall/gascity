@@ -39,9 +39,11 @@ type Descriptor struct {
 	Ledgers    []DescriptorLedger `toml:"ledger"`
 }
 
-// DescriptorLedger is one attached ledger and the workspaces bound to it.
+// DescriptorLedger is one attached ledger, the storage classes it serves,
+// and the workspaces bound to it.
 type DescriptorLedger struct {
 	Scope          string   `toml:"scope"`
+	Classes        []string `toml:"classes"`
 	URL            string   `toml:"url"`
 	ProjectID      string   `toml:"project_id"`
 	CAFile         string   `toml:"ca_file,omitempty"`
@@ -64,6 +66,7 @@ type rawDescriptor struct {
 
 type rawLedger struct {
 	Scope          *string   `toml:"scope"`
+	Classes        *[]string `toml:"classes"`
 	URL            *string   `toml:"url"`
 	ProjectID      *string   `toml:"project_id"`
 	CAFile         *string   `toml:"ca_file"`
@@ -81,7 +84,7 @@ var (
 		"generation": true, "contract": true, "credential": true, descriptorLedgerTable: true,
 	}
 	descriptorLedgerKeys = map[string]bool{
-		"scope": true, "url": true, "project_id": true, "ca_file": true,
+		"scope": true, "classes": true, "url": true, "project_id": true, "ca_file": true,
 		"allow_plaintext": true, "workspaces": true,
 	}
 )
@@ -161,6 +164,8 @@ func DecodeDescriptor(data []byte) (Descriptor, error) {
 		switch {
 		case rl.Scope == nil:
 			return Descriptor{}, field("scope")
+		case rl.Classes == nil:
+			return Descriptor{}, field("classes")
 		case rl.URL == nil:
 			return Descriptor{}, field("url")
 		case rl.ProjectID == nil:
@@ -172,6 +177,7 @@ func DecodeDescriptor(data []byte) (Descriptor, error) {
 		}
 		l := DescriptorLedger{
 			Scope:          *rl.Scope,
+			Classes:        *rl.Classes,
 			URL:            *rl.URL,
 			ProjectID:      *rl.ProjectID,
 			AllowPlaintext: *rl.AllowPlaintext,
@@ -192,18 +198,15 @@ func DecodeDescriptor(data []byte) (Descriptor, error) {
 }
 
 // EncodeDescriptor validates d and renders it deterministically: keys in a
-// fixed order and each ledger's workspaces sorted, so the same descriptor
-// always yields the same bytes whatever order its workspaces were found in.
+// fixed order; the city ledger first, then binding ledgers by scope; each
+// ledger's classes in StorageClasses() order and its workspaces sorted. The
+// same descriptor always yields the same bytes whatever order its ledgers,
+// classes and workspaces were found in.
 func EncodeDescriptor(d Descriptor) ([]byte, error) {
 	if err := d.Validate(); err != nil {
 		return nil, err
 	}
-	ledgers := make([]DescriptorLedger, len(d.Ledgers))
-	for i, l := range d.Ledgers {
-		l.Workspaces = slices.Sorted(slices.Values(l.Workspaces))
-		ledgers[i] = l
-	}
-	d.Ledgers = ledgers
+	d.Ledgers = canonicalLedgers(d.Ledgers)
 	var buf bytes.Buffer
 	enc := toml.NewEncoder(&buf)
 	enc.Indent = ""
@@ -239,20 +242,64 @@ func (d Descriptor) Validate() error {
 	if !cleanAbs(path) {
 		return descriptorErr("credential path is not a clean absolute path")
 	}
-	if len(d.Ledgers) != 1 {
-		return descriptorErr("contract %d requires exactly one ledger, got %d", Contract, len(d.Ledgers))
-	}
 	for i, l := range d.Ledgers {
 		if err := l.validate(); err != nil {
 			return descriptorErr("ledger[%d]: %v", i, err)
 		}
 	}
+	shapes := make([]ledgerShape, len(d.Ledgers))
+	for i, l := range d.Ledgers {
+		shapes[i] = ledgerShape{scope: l.Scope, classes: l.Classes, url: l.URL, projectID: l.ProjectID}
+	}
+	if err := validateLedgerSet("ledger", shapes); err != nil {
+		return descriptorErr("%v", err)
+	}
+	workspaceAt := map[string]int{}
+	for i, l := range d.Ledgers {
+		for _, w := range l.Workspaces {
+			if j, dup := workspaceAt[w]; dup {
+				return descriptorErr("ledger[%d]: workspace %q is also under ledger[%d]", i, w, j)
+			}
+			workspaceAt[w] = i
+		}
+	}
 	return nil
 }
 
+// canonicalLedgers returns copies of ledgers in encode order: the city
+// ledger first, then binding ledgers by scope, each with its classes in
+// StorageClasses() order and its workspaces sorted.
+func canonicalLedgers(ledgers []DescriptorLedger) []DescriptorLedger {
+	out := make([]DescriptorLedger, len(ledgers))
+	classOrder := StorageClasses()
+	for i, l := range ledgers {
+		l.Classes = slices.Clone(l.Classes)
+		slices.SortFunc(l.Classes, func(a, b string) int {
+			return slices.Index(classOrder, a) - slices.Index(classOrder, b)
+		})
+		l.Workspaces = slices.Sorted(slices.Values(l.Workspaces))
+		out[i] = l
+	}
+	slices.SortFunc(out, func(a, b DescriptorLedger) int {
+		switch {
+		case a.Scope == b.Scope:
+			return 0
+		case a.Scope == ScopeCity:
+			return -1
+		case b.Scope == ScopeCity:
+			return 1
+		}
+		return strings.Compare(a.Scope, b.Scope)
+	})
+	return out
+}
+
 func (l DescriptorLedger) validate() error {
-	if l.Scope != ScopeCity {
-		return fmt.Errorf("scope %q is not %q", l.Scope, ScopeCity)
+	if err := validateScope(l.Scope); err != nil {
+		return err
+	}
+	if err := validateClasses(l.Classes); err != nil {
+		return err
 	}
 	if l.ProjectID == "" {
 		return fmt.Errorf("project_id is empty")

@@ -31,7 +31,7 @@ func startupCrashPayloadJSON(sessionID, template string) json.RawMessage {
 // returns the start error either way, and a row that moved since the death
 // keeps its own reason (FactsStartupCrash).
 func (m *Manager) recordStartupCrash(id, sessName, template string, startErr error, persistReason bool) {
-	if persistReason && id != "" && m.store != nil {
+	if persistReason && id != "" {
 		m.commitStartupCrashReason(id)
 	}
 	if m.rec == nil {

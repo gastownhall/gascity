@@ -71,7 +71,7 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 		{
 			profileID:             "codex/tmux-cli",
 			family:                "codex",
-			wantCommand:           "codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c model_reasoning_effort=xhigh",
+			wantCommand:           "codex --dangerously-bypass-approvals-and-sandbox",
 			wantReadyDelayMs:      3000,
 			wantReadyPromptPrefix: "› ",
 			wantProcessNames:      []string{"codex", "codex-raw"},

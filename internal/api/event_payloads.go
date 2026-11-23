@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/pendingwatch"
+	"github.com/gastownhall/gascity/internal/session"
 
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
@@ -89,11 +90,12 @@ func (SessionCreateSucceededPayload) IsEventPayload() {}
 
 // SessionMessageSucceededPayload is emitted on request.result.session.message.
 type SessionMessageSucceededPayload struct {
-	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID          string `json:"session_id" doc:"Session ID that received the message."`
-	Queued             bool   `json:"queued" doc:"True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h."`
-	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
-	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
+	RequestID          string          `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string          `json:"session_id" doc:"Session ID that received the message."`
+	Queued             bool            `json:"queued" doc:"True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h."`
+	WillStart          *bool           `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start."`
+	WillNotStartReason string          `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
+	Op                 *ConversationOp `json:"op,omitempty" doc:"The operation the request was recorded as, when it was; on a replay of a finished request the will_start fields are absent."`
 }
 
 // IsEventPayload marks SessionMessageSucceededPayload as an events.Payload variant.
@@ -101,12 +103,22 @@ func (SessionMessageSucceededPayload) IsEventPayload() {}
 
 // SessionSubmitSucceededPayload is emitted on request.result.session.submit.
 type SessionSubmitSucceededPayload struct {
-	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID          string `json:"session_id" doc:"Session ID that received the submission."`
-	Queued             bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
-	Intent             string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
-	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
-	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
+	RequestID          string                  `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string                  `json:"session_id" doc:"Session ID that received the submission."`
+	Queued             bool                    `json:"queued" doc:"Whether the message was queued for later delivery."`
+	Intent             string                  `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now). When the conversation lane delivers messages a follow_up resolves to default: the lane delivers both at the session's boundary."`
+	WillStart          *bool                   `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start."`
+	WillNotStartReason string                  `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
+	Interrupt          *SessionSubmitInterrupt `json:"interrupt,omitempty" doc:"What an interrupt_now did about the running turn, on a runtime that reports turns. Absent when no turn fence ran."`
+	Op                 *ConversationOp         `json:"op,omitempty" doc:"The operation the request was recorded as, when it was; on a replay of a finished request the will_start and interrupt fields are absent."`
+}
+
+// SessionSubmitInterrupt is what a turn-fenced interrupt_now did about the
+// turn it targeted (session.TurnInterruptReport).
+type SessionSubmitInterrupt struct {
+	Outcome     string `json:"outcome" enum:"settled,no_turn,stale,unsettled,unavailable" doc:"settled: the interrupt was sent and the turn ended; no_turn: no turn ran, nothing was sent; stale: the sighted turn ended or was replaced, or its agent is down, nothing was sent; unsettled: the interrupt was sent but the turn was not seen to end in time; unavailable: a read or the interrupt failed, nothing is known to have been sent."`
+	TurnID      string `json:"turn_id,omitempty" doc:"The turn the interrupt targeted, when one was sighted."`
+	Degradation string `json:"degradation,omitempty" doc:"unfenced_interrupt when the runtime accepted the interrupt without fencing it to that turn."`
 }
 
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
@@ -198,15 +210,28 @@ func (ProjectIdentityStampedPayload) IsEventPayload() {}
 // RequestFailedPayload is emitted on request.failed for any async
 // operation that fails. The operation enum identifies which operation.
 type RequestFailedPayload struct {
-	RequestID    string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit,rig.create" doc:"Which operation failed."`
-	ErrorCode    string `json:"error_code" doc:"Machine-readable error code."`
-	ErrorMessage string `json:"error_message" doc:"Human-readable error description."`
-	SessionID    string `json:"session_id,omitempty" doc:"Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id."`
+	RequestID    string          `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Operation    string          `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit,rig.create" doc:"Which operation failed."`
+	ErrorCode    string          `json:"error_code" doc:"Machine-readable error code."`
+	ErrorMessage string          `json:"error_message" doc:"Human-readable error description."`
+	SessionID    string          `json:"session_id,omitempty" doc:"Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id."`
+	Op           *ConversationOp `json:"op,omitempty" doc:"The operation the failed request was recorded as, when it was."`
 }
 
 // IsEventPayload marks RequestFailedPayload as an events.Payload variant.
 func (RequestFailedPayload) IsEventPayload() {}
+
+// RequestAcceptedPayload is emitted on request.accepted when the API accepts an
+// async session request and returns its 202. It marks the request as accepted
+// for the outcome lookup; the outcome itself arrives as request.result.* or
+// request.failed.
+type RequestAcceptedPayload struct {
+	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Operation string `json:"operation" enum:"session.create,session.message,session.submit" doc:"Which operation was accepted."`
+}
+
+// IsEventPayload marks RequestAcceptedPayload as an events.Payload variant.
+func (RequestAcceptedPayload) IsEventPayload() {}
 
 // SupervisorStartedPayload classifies how the previous supervisor
 // instance exited, recorded once per supervisor startup. The cause is
@@ -267,6 +292,8 @@ func (CityLifecyclePayload) IsEventPayload() {}
 // (BeadCreated, BeadUpdated, BeadClosed, BeadDeleted). The payload carries a
 // full snapshot of the bead as of the event; it is emitted by bd hooks and the
 // beads CachingStore for local writes and reconcile-detected external changes.
+// A bead.deleted may carry only the bead id, when its emitter held no snapshot
+// of the deleted row.
 type BeadEventPayload struct {
 	Bead beads.Bead `json:"bead"`
 }
@@ -675,6 +702,48 @@ func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstS
 	return b
 }
 
+// SessionConfigDriftDeferredPayload carries the machine-readable context for
+// a session.config_drift_deferred event: a config-drift restart the reconciler
+// defers because an ordinary seat holds assigned work. The envelope Message
+// renders the same facts as operator text; this payload is the machine
+// contract so subscribers can correlate the seat and the held bead, see which
+// configuration fields drifted, and tell the first observation from the
+// past-horizon escalation.
+type SessionConfigDriftDeferredPayload struct {
+	SessionID      string   `json:"session_id" doc:"Canonical session bead ID of the deferred seat (also the envelope Subject)."`
+	SessionName    string   `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	Template       string   `json:"template" doc:"Template of the seat."`
+	DriftedFields  []string `json:"drifted_fields" nullable:"false" doc:"Names of the configuration fields whose fingerprint changed. Never null; empty when the stored fingerprint breakdown is unavailable."`
+	WorkBeadID     string   `json:"work_bead_id" doc:"ID of the assigned work bead observed holding the restart back."`
+	DeferredSince  string   `json:"deferred_since" doc:"RFC3339 timestamp the deferral episode was first recorded; the escalation clock counts from here."`
+	PendingSeconds int64    `json:"pending_seconds" doc:"Whole seconds the episode had been deferred when the event fired."`
+	Escalated      bool     `json:"escalated" doc:"False on the first observation; true on the single emission after the episode outlives [daemon] drift_deferral_escalate_after."`
+}
+
+// IsEventPayload marks SessionConfigDriftDeferredPayload as an events.Payload
+// variant.
+func (SessionConfigDriftDeferredPayload) IsEventPayload() {}
+
+// SessionConfigDriftDeferredPayloadJSON builds the JSON wire form for
+// attachment to an events.Event.Payload field. A nil driftedFields is sent as
+// an empty list.
+func SessionConfigDriftDeferredPayloadJSON(sessionID, sessionName, template string, driftedFields []string, workBeadID string, deferredSince time.Time, pending time.Duration, escalated bool) json.RawMessage {
+	if driftedFields == nil {
+		driftedFields = []string{}
+	}
+	b, _ := json.Marshal(SessionConfigDriftDeferredPayload{
+		SessionID:      sessionID,
+		SessionName:    sessionName,
+		Template:       template,
+		DriftedFields:  driftedFields,
+		WorkBeadID:     workBeadID,
+		DeferredSince:  deferredSince.UTC().Format(time.RFC3339),
+		PendingSeconds: int64(pending / time.Second),
+		Escalated:      escalated,
+	})
+	return b
+}
+
 // Reasons carried by SessionPendingClearedPayload.Reason.
 const (
 	// PendingClearedResolved: the session is still probed but no longer
@@ -720,6 +789,63 @@ type SessionPendingClearedPayload struct {
 
 // IsEventPayload marks SessionPendingClearedPayload as an events.Payload variant.
 func (SessionPendingClearedPayload) IsEventPayload() {}
+
+// SessionCreatedPayload is the typed payload for session.created: a session
+// joined the city's set of open sessions (its session bead was created open,
+// or a closed one reopened). It carries the identity fields GET
+// /v0/city/{cityName}/sessions shows for the session, so a client can add it
+// to its list before reading the session in full.
+type SessionCreatedPayload struct {
+	SessionID string `json:"session_id" doc:"Session bead ID."`
+	Template  string `json:"template,omitempty" doc:"Session template, when known."`
+	Title     string `json:"title,omitempty" doc:"Session title."`
+	Alias     string `json:"alias,omitempty" doc:"Session alias, when set."`
+	AgentName string `json:"agent_name,omitempty" doc:"The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none."`
+}
+
+// IsEventPayload marks SessionCreatedPayload as an events.Payload variant.
+func (SessionCreatedPayload) IsEventPayload() {}
+
+// SessionCreatedPayloadFor builds the session.created payload from a session's
+// persisted projection.
+func SessionCreatedPayloadFor(info session.Info) SessionCreatedPayload {
+	return SessionCreatedPayload{
+		SessionID: info.ID,
+		Template:  info.Template,
+		Title:     info.Title,
+		Alias:     info.Alias,
+		AgentName: info.AgentName,
+	}
+}
+
+// SessionClosedPayload is the typed payload for session.closed: a session
+// left the city's set of open sessions (its session bead closed). It repeats
+// the session.created identity fields and the close reason the session bead
+// records.
+type SessionClosedPayload struct {
+	SessionID string `json:"session_id" doc:"Session bead ID."`
+	Template  string `json:"template,omitempty" doc:"Session template, when known."`
+	Title     string `json:"title,omitempty" doc:"Session title."`
+	Alias     string `json:"alias,omitempty" doc:"Session alias, when set."`
+	AgentName string `json:"agent_name,omitempty" doc:"The concrete agent identity the session ran as. Empty when the session records none."`
+	Reason    string `json:"reason,omitempty" doc:"The close reason the session bead records (its close_reason), when it records one."`
+}
+
+// IsEventPayload marks SessionClosedPayload as an events.Payload variant.
+func (SessionClosedPayload) IsEventPayload() {}
+
+// SessionClosedPayloadFor builds the session.closed payload from a session's
+// persisted projection and the close reason its bead records.
+func SessionClosedPayloadFor(info session.Info, reason string) SessionClosedPayload {
+	return SessionClosedPayload{
+		SessionID: info.ID,
+		Template:  info.Template,
+		Title:     info.Title,
+		Alias:     info.Alias,
+		AgentName: info.AgentName,
+		Reason:    reason,
+	}
+}
 
 // SessionWakeRefusedPayload is the typed payload for session.wake_refused: a
 // durable explicit wake request refused before the session reached a live
@@ -788,14 +914,18 @@ func init() {
 	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
 	events.RegisterPayload(events.SessionStrandedClaims, SessionStrandedClaimsPayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
+	events.RegisterPayload(events.SessionConfigDriftDeferred, SessionConfigDriftDeferredPayload{})
 	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionDrainFenceUnavailable, SessionLifecyclePayload{})
+	events.RegisterPayload(events.WorkStartedUnrecorded, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
 	events.RegisterPayload(events.SessionConversationReset, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionPending, SessionPendingPayload{})
 	events.RegisterPayload(events.SessionPendingCleared, SessionPendingClearedPayload{})
+	events.RegisterPayload(events.SessionCreated, SessionCreatedPayload{})
+	events.RegisterPayload(events.SessionClosed, SessionClosedPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
@@ -814,6 +944,7 @@ func init() {
 	events.RegisterPayload(events.RequestResultRigCreate, RigCreateSucceededPayload{})
 	events.RegisterPayload(events.RigProvisionProgress, RigProvisionProgressPayload{})
 	events.RegisterPayload(events.RequestFailed, RequestFailedPayload{})
+	events.RegisterPayload(events.RequestAccepted, RequestAcceptedPayload{})
 
 	// Non-terminal city lifecycle events (diagnostics only).
 	events.RegisterPayload(events.CityCreated, CityLifecyclePayload{})

@@ -136,9 +136,9 @@ func nudgeSessionSource(t *testing.T) string {
 		t.Fatalf("reading tmux.go: %v", err)
 	}
 	body := string(src)
-	start := strings.Index(body, "func (t *Tmux) NudgeSession(")
+	start := strings.Index(body, "func (t *Tmux) nudgeSessionCtx(")
 	if start < 0 {
-		t.Fatal("NudgeSession not found in tmux.go")
+		t.Fatal("nudgeSessionCtx (NudgeSession's body) not found in tmux.go")
 	}
 	rest := body[start:]
 	end := strings.Index(rest, "\nfunc ")

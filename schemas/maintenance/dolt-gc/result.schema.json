@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "ok",
+    "accepted"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "accepted": {
+      "type": "boolean"
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "started_at",
+        "finished_at",
+        "stage",
+        "before_bytes",
+        "after_bytes",
+        "duration_s"
+      ],
+      "properties": {
+        "started_at": {
+          "type": "string"
+        },
+        "finished_at": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "err": {
+          "type": "string"
+        },
+        "before_bytes": {
+          "type": "integer"
+        },
+        "after_bytes": {
+          "type": "integer"
+        },
+        "snapshot_path": {
+          "type": "string"
+        },
+        "duration_s": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

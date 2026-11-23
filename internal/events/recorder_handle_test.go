@@ -1,3 +1,5 @@
+//go:build unix
+
 package events
 
 import (
@@ -12,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // sidecarProbeWriter is a stderr sink that fails the test if anything is
@@ -169,7 +173,7 @@ func TestAppendBatchFollowsReplacedHandle(t *testing.T) {
 }
 
 // stubLockDataFile replaces lockDataFile for one test.
-func stubLockDataFile(t *testing.T, fn func(fd int, path string) error) {
+func stubLockDataFile(t *testing.T, fn func(f *os.File, path string) (*filelock.Lock, error)) {
 	t.Helper()
 	previous := lockDataFile
 	t.Cleanup(func() { lockDataFile = previous })
@@ -192,16 +196,17 @@ func TestRotationLocksNewLogBeforeAnchor(t *testing.T) {
 	seedEventLog(t, path, 3)
 	var locked []syscall.Stat_t
 	next := lockDataFile
-	stubLockDataFile(t, func(fd int, path string) error {
-		if err := next(fd, path); err != nil {
-			return err
+	stubLockDataFile(t, func(f *os.File, path string) (*filelock.Lock, error) {
+		lock, err := next(f, path)
+		if err != nil {
+			return nil, err
 		}
 		var st syscall.Stat_t
-		if err := syscall.Fstat(fd, &st); err != nil {
+		if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
 			t.Fatal(err)
 		}
 		locked = append(locked, st)
-		return nil
+		return lock, nil
 	})
 	rec, err := NewFileRecorder(path, io.Discard, WithoutStartupSweep())
 	if err != nil {
@@ -243,12 +248,12 @@ func TestRecorderRechecksHandleAfterLegacyRotation(t *testing.T) {
 	rotatingPath := filepath.Join(dir, formatRotatingBasename(time.Now().UTC(), 1, 20))
 	rotated := false
 	next := lockDataFile
-	stubLockDataFile(t, func(fd int, path string) error {
+	stubLockDataFile(t, func(f *os.File, path string) (*filelock.Lock, error) {
 		if !rotated {
 			rotated = true
 			legacyRotate(t, path, rotatingPath, 20)
 		}
-		return next(fd, path)
+		return next(f, path)
 	})
 	if err := rec.RecordAck(Event{Type: BeadCreated, Actor: "test", Subject: "after"}); err != nil {
 		t.Fatal(err)
