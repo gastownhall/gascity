@@ -153,8 +153,9 @@ Persistent Claude overrides belong in city-root `.claude/settings.json`. Runtime
 settings in `.gc/settings.json` are regenerated on initialization and Claude
 session preparation (launch and resume), selecting the preferred `.claude/settings.json`
 override, then `hooks/claude.json`, and using runtime edits only as a fallback when
-neither higher source exists. The sibling `.gc/settings.json.README` file explains
-this generated status and precedence.
+there is no `.claude/settings.json` and `hooks/claude.json` is absent or identical
+to the runtime file. The sibling `.gc/settings.json.README` file explains this
+generated status and precedence.
 
 Claude is the only provider wired automatically. To run an agent on a different
 provider — say you moved the mayor to Codex — list that provider in

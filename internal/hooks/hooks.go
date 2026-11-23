@@ -664,7 +664,8 @@ Settings source order:
 2. hooks/claude.json
 3. .gc/settings.json (runtime fallback)
 
-Direct runtime edits only serve as fallback when the two higher sources are absent.
+Direct runtime edits are only a fallback: they are used when .claude/settings.json
+is absent and hooks/claude.json is absent or identical to .gc/settings.json.
 `
 
 // installClaude writes the runtime settings file (.gc/settings.json) in the
