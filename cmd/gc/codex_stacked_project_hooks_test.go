@@ -239,3 +239,85 @@ func TestCodexStackedHooksSessionStartKeepsFingerprint(t *testing.T) {
 			startedHash, got, runtime.CoreFingerprintDriftFields(runtime.CoreFingerprintBreakdown(startedCfg), currentCfg))
 	}
 }
+
+// TestCodexProjectHooksFallbackWhenUserLayerDoesNotCover keeps gc's project
+// copy, byte-identical to what a city with no user hooks file stages, whenever
+// the user layer does not provide every gc hook that copy would carry, and
+// reports a user file it cannot parse.
+func TestCodexProjectHooksFallbackWhenUserLayerDoesNotCover(t *testing.T) {
+	current := stackedCodexGenerations()["a3558786"]
+	withoutEvent := func(event string) []stackedHookCmd {
+		var out []stackedHookCmd
+		for _, c := range current {
+			if c.event != event {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	boundElsewhere := func() []stackedHookCmd {
+		out := make([]stackedHookCmd, 0, len(current))
+		for _, c := range current {
+			out = append(out, stackedHookCmd{c.event, strings.Replace(c.command, `"${GC_BIN:-gc}" `, `"${GC_BIN:-gc}" --city /elsewhere `, 1)})
+		}
+		return out
+	}
+
+	cases := []struct {
+		name string
+		// user is the user-level hooks file content; nil leaves it absent.
+		user func(t *testing.T) []byte
+		// mutate adjusts the city before either tick.
+		mutate func(t *testing.T, cityPath string, cfg *config.City)
+		// warnPath reports that stderr must name the user hooks file.
+		warnPath bool
+	}{
+		{name: "user file absent"},
+		{name: "user file unparseable", user: func(*testing.T) []byte { return []byte("{") }, warnPath: true},
+		{name: "user layer lacks PreCompact", user: func(t *testing.T) []byte { return stackedHooksDoc(t, withoutEvent("PreCompact")...) }},
+		{name: "user hooks bound to another city", user: func(t *testing.T) []byte { return stackedHooksDoc(t, boundElsewhere()...) }},
+		{
+			name: "pack overlay contributes a non-gc hook",
+			user: func(t *testing.T) []byte { return coveringUserHooks(t, "a3558786") },
+			mutate: func(t *testing.T, cityPath string, cfg *config.City) {
+				extra := filepath.Join(cityPath, "packs", "extra", "overlay")
+				writeStackedTestFile(t, filepath.Join(extra, "per-provider", "codex", ".codex", "hooks.json"),
+					stackedHooksDoc(t, stackedHookCmd{"Stop", "pack-stop-hook"}))
+				cfg.PackOverlayDirs = append(cfg.PackOverlayDirs, extra)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			userHooks := isolateCodexUserHome(t)
+			cityPath, cfg := codexHookStagingCity(t)
+			if tc.mutate != nil {
+				tc.mutate(t, cityPath, cfg)
+			}
+			workHook := stackedTickWorkHook(t, cityPath, cfg, io.Discard)
+			baseline, err := os.ReadFile(workHook)
+			if err != nil {
+				t.Fatalf("baseline with no user hooks file: project hooks not staged: %v", err)
+			}
+			if err := os.Remove(workHook); err != nil {
+				t.Fatalf("remove baseline project hooks: %v", err)
+			}
+
+			if tc.user != nil {
+				writeStackedTestFile(t, userHooks, tc.user(t))
+			}
+			var stderr strings.Builder
+			workHook = stackedTickWorkHook(t, cityPath, cfg, &stderr)
+			got, err := os.ReadFile(workHook)
+			if err != nil {
+				t.Fatalf("fallback project hooks not staged: %v", err)
+			}
+			if string(got) != string(baseline) {
+				t.Fatalf("fallback project hooks =\n%s\nwant the no-user-file staging:\n%s", got, baseline)
+			}
+			if tc.warnPath && !strings.Contains(stderr.String(), userHooks) {
+				t.Fatalf("unparseable user hooks not reported naming %s; stderr:\n%s", userHooks, stderr.String())
+			}
+		})
+	}
+}
