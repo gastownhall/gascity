@@ -18,9 +18,9 @@ import (
 // transcriptFaultStore wraps a store and injects faults into transcript
 // writes: entry creates that commit and then report a transport error, entry
 // reads that fail, and next_sequence writes that fail without writing. It
-// forwards pinned create and metadata compare-and-set to the wrapped store, so
-// it hides no capability a transcript append needs, and logs every
-// next_sequence value written.
+// forwards pinned create and the conditional writes (metadata compare-and-set
+// included) to the wrapped store, so it hides no capability atomic transcript
+// allocation needs, and logs every next_sequence value written.
 type transcriptFaultStore struct {
 	beads.Store
 
@@ -104,6 +104,38 @@ func (f *transcriptFaultStore) CompareAndSetMetadataKey(id, key, expected, next 
 		f.logFrontier(next)
 	}
 	return swapped, err
+}
+
+func (f *transcriptFaultStore) conditionalWriter() (beads.ConditionalWriter, error) {
+	writer, ok := beads.ConditionalWriterFor(f.Store)
+	if !ok {
+		return nil, beads.ErrConditionalWriteUnsupported
+	}
+	return writer, nil
+}
+
+func (f *transcriptFaultStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	writer, err := f.conditionalWriter()
+	if err != nil {
+		return err
+	}
+	return writer.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+func (f *transcriptFaultStore) CloseIfMatch(id string, expectedRevision int64) error {
+	writer, err := f.conditionalWriter()
+	if err != nil {
+		return err
+	}
+	return writer.CloseIfMatch(id, expectedRevision)
+}
+
+func (f *transcriptFaultStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	writer, err := f.conditionalWriter()
+	if err != nil {
+		return err
+	}
+	return writer.DeleteIfMatch(id, expectedRevision)
 }
 
 func (f *transcriptFaultStore) SetMetadata(id, key, value string) error {

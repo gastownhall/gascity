@@ -43,19 +43,32 @@ type PinnedIDCreatorHandleProvider interface {
 }
 
 // PinnedIDCreatorFor returns the pinned-id create capability for store when
-// one is available. Like MetadataCASWriterFor it follows wrapper-declared
-// resolution targets (ConditionalWritesResolveTargeter) and never guesses at
-// unwrapping.
+// one is available. It walks store and the resolution targets it declares
+// (ConditionalWritesResolveTargeter), and never guesses at unwrapping. Unlike
+// MetadataCASWriterFor it asks each layer before following that layer's
+// target: a wrapper that implements its own pinned create (or a handle) runs
+// its create checks, while a wrapper that declares a target only for writes
+// it does not intercept is passed through.
 func PinnedIDCreatorFor(store Store) (PinnedIDCreator, bool) {
-	if store == nil {
-		return nil, false
-	}
-	store = followConditionalWritesResolveTarget(store)
-	if creator, ok := store.(PinnedIDCreator); ok {
-		return creator, true
-	}
-	if provider, ok := store.(PinnedIDCreatorHandleProvider); ok {
-		return provider.PinnedIDCreatorHandle()
+	for range conditionalWritesMaxResolveDepth {
+		if store == nil {
+			return nil, false
+		}
+		if creator, ok := store.(PinnedIDCreator); ok {
+			return creator, true
+		}
+		if provider, ok := store.(PinnedIDCreatorHandleProvider); ok {
+			return provider.PinnedIDCreatorHandle()
+		}
+		targeter, ok := store.(ConditionalWritesResolveTargeter)
+		if !ok {
+			return nil, false
+		}
+		target := targeter.ConditionalWritesResolveTarget()
+		if target == nil || target == store {
+			return nil, false
+		}
+		store = target
 	}
 	return nil, false
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -226,10 +227,14 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		CreatedAt:         now,
 		Metadata:          req.Metadata,
 	})
-	// Transcript append is non-fatal (whether hydration-pending or otherwise);
-	// the message was already published. If it failed, the entry was not written.
+	// Transcript append is non-fatal (whether hydration-pending or otherwise):
+	// the message was already published, so it is never sent again to record
+	// it. A failed append may still have stored the entry; the next append to
+	// the conversation publishes it.
 	if err == nil {
 		result.TranscriptEntry = &entry
+	} else {
+		log.Printf("extmsg: outbound message %q to %s was published but not recorded in its transcript: %v", receipt.MessageID, conversationTitle(req.Conversation), err)
 	}
 
 	// Step 7: Emit event.

@@ -33,6 +33,7 @@ rollout:ops.control
 rollout:ops.lifecycle
 ops-recording
 conversation-lanes
+extmsg-transcript-sequencing
 legacy-delivery
 config-refs
 stale-local-pack-dirs

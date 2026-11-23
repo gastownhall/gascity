@@ -147,3 +147,61 @@ func TestRefusedExtMsgServicesDoNotAnswerFromTheWorkLedger(t *testing.T) {
 		t.Errorf("the refusal reads %v, want the wiring cause carried through", err)
 	}
 }
+
+// TestCityExtMsgTranscriptsAllocateAtomically pins that the messaging store
+// the city's external-messaging services write through allocates transcript
+// sequences atomically: the probe the services decide by passes, and the
+// first entry lands at its pinned slot ID (<state ID>-<sequence>-entry), not
+// under a minted one. Under the split-strict gate that store is the
+// projection's class view, so this also pins the view's forwarding of the
+// pinned create: a view that dropped it would send every append to the
+// unguarded allocation.
+func TestCityExtMsgTranscriptsAllocateAtomically(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		build func(t *testing.T) (*storageRoutes, beads.Store)
+	}{
+		{name: "a city that relocates nothing", build: func(t *testing.T) (*storageRoutes, beads.Store) {
+			return nil, splittest.NewSingleStore(t, "hq")
+		}},
+		{name: "a city that relocates the messaging class", build: func(t *testing.T) (*storageRoutes, beads.Store) {
+			return &storageRoutes{stores: map[coordclass.Class]beads.Store{
+				coordclass.ClassMessaging: splittest.NewClassStore(t, config.BeadClassMessaging),
+			}}, splittest.NewWorkStore(t, "hq")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			routes, work := tc.build(t)
+			if err := extmsg.ProbeTranscriptSequencing(scopeStores("", routes, work).Mail()); err != nil {
+				t.Fatalf("ProbeTranscriptSequencing over the city's messaging store = %v, want atomic allocation", err)
+			}
+			svc := newCityExtMsgServices(routes, work, "")
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "tester"}
+			ref := extmsg.ConversationRef{
+				ScopeID:        "city-1",
+				Provider:       "discord",
+				AccountID:      "acct-1",
+				ConversationID: "thread-1",
+				Kind:           extmsg.ConversationThread,
+			}
+			entry, err := svc.Transcript.Append(context.Background(), extmsg.AppendTranscriptInput{
+				Caller:            caller,
+				Conversation:      ref,
+				Kind:              extmsg.TranscriptMessageInbound,
+				ProviderMessageID: "msg-1",
+				Text:              "hello",
+				CreatedAt:         time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC),
+			})
+			if err != nil {
+				t.Fatalf("Append through the city services: %v", err)
+			}
+			state, err := svc.Transcript.State(context.Background(), caller, ref)
+			if err != nil {
+				t.Fatalf("State: %v", err)
+			}
+			if want := state.ID + "-1-entry"; entry.ID != want {
+				t.Fatalf("the first entry is %q, want it at its pinned slot ID %q", entry.ID, want)
+			}
+		})
+	}
+}

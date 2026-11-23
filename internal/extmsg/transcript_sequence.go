@@ -21,6 +21,11 @@ import (
 // occupied slot at a time, so it never regresses and never skips a hole.
 // An entry is readable once the head is past its sequence; Append returns
 // success only after that.
+//
+// A store that cannot do both (transcriptAppendCapabilities) appends
+// unguarded instead (appendUnguardedLocked), and the service logs that once.
+// So does one append whose pinned create the store refuses before writing
+// anything (pinnedCreateRefused).
 
 const (
 	// transcriptSlotAttempts bounds how many slots one Append tries while
@@ -60,19 +65,114 @@ func newTranscriptAppendToken() (string, error) {
 	return hex.EncodeToString(raw[:]), nil
 }
 
-// transcriptAppendCapabilities resolves the two store capabilities sequence
-// allocation needs, refusing a store without either before anything is
-// written.
-func (s *transcriptService) transcriptAppendCapabilities() (beads.PinnedIDCreator, beads.MetadataCASWriter, error) {
-	creator, ok := beads.As[beads.PinnedIDCreator](s.store)
+// transcriptAppendCapabilities resolves the two store capabilities atomic
+// sequence allocation needs, and runs the store's conditional-write
+// capability probe, the check ops recording runs before it fences a write: the
+// head's compare-and-set is a revision-fenced write, which a bd without
+// --if-revision, the DoltLite read store and a read-only SQLite store refuse,
+// and a bd store fences its pinned create the same way. It writes nothing; a
+// bd store memoizes the probe's subprocesses. An error says why the store
+// cannot allocate atomically.
+func transcriptAppendCapabilities(store beads.MailStore) (beads.PinnedIDCreator, beads.MetadataCASWriter, error) {
+	creator, ok := beads.As[beads.PinnedIDCreator](store)
 	if !ok {
-		return nil, nil, fmt.Errorf("transcript append: mail store: %w", beads.ErrPinnedCreateUnsupported)
+		return nil, nil, fmt.Errorf("the messaging store has no pinned-id create: %w", beads.ErrPinnedCreateUnsupported)
 	}
-	cas, ok := beads.As[beads.MetadataCASWriter](s.store)
+	cas, ok := beads.As[beads.MetadataCASWriter](store)
 	if !ok {
-		return nil, nil, fmt.Errorf("transcript append: mail store has no metadata compare-and-set: %w", beads.ErrConditionalWriteUnsupported)
+		return nil, nil, fmt.Errorf("the messaging store has no metadata compare-and-set: %w", beads.ErrConditionalWriteUnsupported)
+	}
+	if capable, reason := beads.ProbeConditionalWrites(store); !capable {
+		return nil, nil, fmt.Errorf("the messaging store cannot fence writes (%s): %w", reason, beads.ErrConditionalWriteUnsupported)
 	}
 	return creator, cas, nil
+}
+
+// ProbeTranscriptSequencing reports whether store can allocate transcript
+// sequences atomically: nil when it has both capabilities and passes its
+// conditional-write probe, else why every append there runs unguarded and can
+// give two entries one sequence. A nil answer does not cover a pinned create
+// the store refuses when an append runs it (pinnedCreateRefused); that append
+// runs unguarded too. It writes nothing.
+func ProbeTranscriptSequencing(store beads.MailStore) error {
+	_, _, err := transcriptAppendCapabilities(store)
+	return err
+}
+
+// pinnedCreateRefused reports whether err is a pinned create the store
+// refused before writing anything, which the PinnedIDCreator contract
+// promises for both refusals: a store that cannot prove its pinned create
+// insert-only (beads.ErrPinnedCreateUnsupported: a bd whose version cannot be
+// read, or a wrapper over an engine without the capability), and a
+// namespace-fenced store refusing an ID outside its namespaces
+// (beads.ErrPinnedIDOutsideNamespace). The fence refuses every slot ID of a
+// transcript state that gc storage migrate carried into a class binding under
+// its work-store ID; the binding's minted IDs are inside the fence.
+func pinnedCreateRefused(err error) bool {
+	return errors.Is(err, beads.ErrPinnedCreateUnsupported) || errors.Is(err, beads.ErrPinnedIDOutsideNamespace)
+}
+
+// HasTranscriptState reports whether store holds a transcript state, open or
+// closed: whether external messaging has recorded a transcript entry or a
+// membership there.
+func HasTranscriptState(store beads.MailStore) (bool, error) {
+	items, err := store.List(beads.ListQuery{Label: labelTranscriptStateBase, IncludeClosed: true, Limit: 1})
+	if err != nil {
+		return false, fmt.Errorf("list transcript states: %w", err)
+	}
+	return len(items) > 0, nil
+}
+
+// appendUnguardedLocked appends over a store transcriptAppendCapabilities
+// refused: the entry is created at the state's head under a minted ID, then
+// the head is written past it unconditionally. Nothing at the store keeps a
+// second entry off that sequence, so an ambiguous create, a failed head write
+// or a writer holding another lock pool can give two entries one sequence;
+// what it buys is that a store that cannot fence writes still records every
+// transcript entry. An entry already stored under providerMessageID at or past
+// the head, left there by an append whose head write failed, is published the
+// same way before it is returned, so a retry of that append answers only once
+// the entry is readable. The caller holds the conversation's binding lock.
+func (s *transcriptService) appendUnguardedLocked(ref ConversationRef, state ConversationTranscriptStateRecord, providerMessageID string, entryAt func(int64) beads.Bead) (ConversationTranscriptRecord, error) {
+	if providerMessageID != "" {
+		existing, err := findTranscriptByProviderMessage(beads.LiveFor(s.store), ref, providerMessageID)
+		if err != nil {
+			return ConversationTranscriptRecord{}, err
+		}
+		if existing != nil {
+			if existing.Sequence >= transcriptHead(state) {
+				if err := s.advanceUnguardedHead(state, existing.Sequence); err != nil {
+					return ConversationTranscriptRecord{}, fmt.Errorf("publish stored transcript entry %s: %w", existing.ID, err)
+				}
+			}
+			return *existing, nil
+		}
+	}
+	sequence := transcriptHead(state)
+	created, err := s.store.Create(entryAt(sequence))
+	if err != nil {
+		return ConversationTranscriptRecord{}, fmt.Errorf("create transcript entry: %w", err)
+	}
+	if err := s.advanceUnguardedHead(state, sequence); err != nil {
+		return ConversationTranscriptRecord{}, err
+	}
+	return decodeTranscriptBead(created)
+}
+
+// advanceUnguardedHead writes the head of state past sequence, unconditionally,
+// with the retention floor of a legacy state that has none. Callers pass a
+// sequence at or past the head they read under the binding lock, so the write
+// never lowers a head written through that lock; a writer in another lock pool
+// can still race it.
+func (s *transcriptService) advanceUnguardedHead(state ConversationTranscriptStateRecord, sequence int64) error {
+	updates := map[string]string{"next_sequence": strconv.FormatInt(sequence+1, 10)}
+	if state.EarliestAvailableSequence <= 0 {
+		updates["earliest_available_sequence"] = "1"
+	}
+	if err := s.store.SetMetadataBatch(state.ID, updates); err != nil {
+		return fmt.Errorf("update transcript state: %w", err)
+	}
+	return nil
 }
 
 // transcriptAllocator appends one entry to one conversation's transcript.
@@ -139,7 +239,7 @@ func (a *transcriptAllocator) append(ctx context.Context) (ConversationTranscrip
 			}
 			return record, nil
 		}
-		if errors.Is(createErr, beads.ErrPinnedCreateUnsupported) {
+		if pinnedCreateRefused(createErr) {
 			return ConversationTranscriptRecord{}, fmt.Errorf("create transcript entry %s: %w", bead.ID, createErr)
 		}
 		slot, err := a.readSlot(bead.ID, head, createErr)
@@ -150,6 +250,7 @@ func (a *transcriptAllocator) append(ctx context.Context) (ConversationTranscrip
 			return ConversationTranscriptRecord{}, err
 		}
 		if a.owns(slot) {
+			a.svc.warnf("extmsg: transcript entry %s was stored by a create that reported %v; recovered it from its slot", bead.ID, createErr)
 			return slot.record, nil
 		}
 	}
@@ -225,6 +326,7 @@ func (a *transcriptAllocator) publishThrough(ctx context.Context, target int64) 
 	if lastErr == nil {
 		lastErr = errors.New("compare-and-set lost on every attempt")
 	}
+	a.svc.warnf("extmsg: transcript %s: gave up publishing through sequence %d after %d failed compare-and-sets: %v", a.stateID, target, transcriptPublishAttempts, lastErr)
 	return fmt.Errorf("publish transcript %s through %d: %w: %w", a.stateID, target, errTranscriptUnresolved, lastErr)
 }
 

@@ -29,16 +29,17 @@ type FakeBd struct {
 	// earlier releases upserted over the stored row.
 	version string
 	// conditionalWrites makes `bd <verb> --help` advertise --if-revision, so
-	// BdStore's conditional-write probe passes. Off by default: the fake does
-	// not implement fenced writes.
+	// BdStore's conditional-write probe passes. Off by default, as on every
+	// released bd: the fake does not implement fenced writes.
 	conditionalWrites bool
 }
 
-// NewFakeBd returns an empty fake bd reporting a current release.
+// NewFakeBd returns an empty fake bd reporting v1.3.4, the installable
+// default bd (deps.env BD_VERSION).
 func NewFakeBd() *FakeBd {
 	store := beads.NewMemStore()
 	store.HonorExplicitIDs = true
-	return &FakeBd{store: store, version: "1.4.2"}
+	return &FakeBd{store: store, version: "1.3.4"}
 }
 
 // SetVersion changes the release the fake reports, for gate legs that model a
@@ -130,8 +131,14 @@ func (f *FakeBd) Run(_, name string, args ...string) ([]byte, error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.conditionalWrites && len(args) == 2 && args[1] == "--help" {
-		return []byte("Usage:\n  bd " + args[0] + " [flags]\n\nFlags:\n  --if-revision int   apply only at this revision\n  --json              emit JSON\n"), nil
+	if len(args) == 2 && args[1] == "--help" {
+		// A released bd lists no --if-revision; AdvertiseConditionalWrites
+		// models one that does.
+		usage := "Usage:\n  bd " + args[0] + " [flags]\n\nFlags:\n"
+		if f.conditionalWrites {
+			usage += "  --if-revision int   apply only at this revision\n"
+		}
+		return []byte(usage + "  --json              emit JSON\n"), nil
 	}
 	switch args[0] {
 	case "version":

@@ -23,7 +23,8 @@ import (
 // transcriptRecoveryFaultStore wraps the mail store and injects faults into
 // transcript writes: entry creates that commit and then report a transport
 // error, failed reads of a transcript entry, and next_sequence writes that
-// fail unwritten. It forwards pinned create and metadata compare-and-set.
+// fail unwritten. It forwards pinned create and the conditional writes
+// (metadata compare-and-set included), so transcripts allocate atomically.
 type transcriptRecoveryFaultStore struct {
 	beads.Store
 
@@ -75,6 +76,38 @@ func (f *transcriptRecoveryFaultStore) CompareAndSetMetadataKey(id, key, expecte
 		return false, beads.ErrConditionalWriteUnsupported
 	}
 	return cas.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+func (f *transcriptRecoveryFaultStore) conditionalWriter() (beads.ConditionalWriter, error) {
+	writer, ok := beads.ConditionalWriterFor(f.Store)
+	if !ok {
+		return nil, beads.ErrConditionalWriteUnsupported
+	}
+	return writer, nil
+}
+
+func (f *transcriptRecoveryFaultStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	writer, err := f.conditionalWriter()
+	if err != nil {
+		return err
+	}
+	return writer.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+func (f *transcriptRecoveryFaultStore) CloseIfMatch(id string, expectedRevision int64) error {
+	writer, err := f.conditionalWriter()
+	if err != nil {
+		return err
+	}
+	return writer.CloseIfMatch(id, expectedRevision)
+}
+
+func (f *transcriptRecoveryFaultStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	writer, err := f.conditionalWriter()
+	if err != nil {
+		return err
+	}
+	return writer.DeleteIfMatch(id, expectedRevision)
 }
 
 func (f *transcriptRecoveryFaultStore) SetMetadata(id, key, value string) error {

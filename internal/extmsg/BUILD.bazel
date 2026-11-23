@@ -52,6 +52,7 @@ go_test(
         "system_reminder_test.go",
         "testenv_import_test.go",
         "transcript_sequence_test.go",
+        "transcript_unguarded_test.go",
         "types_wire_test.go",
     ],
     embed = [":extmsg"],

@@ -863,3 +863,47 @@ func TestNormalizePrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestStrictStorePinnedCreateKeepsTheCreateGuards pins that a pinned create
+// resolved through the wrapper runs Create's guards: beads.PinnedIDCreatorFor
+// asks the wrapper's handle before it follows the wrapper's resolution target
+// to the leaf, so a pinned id outside the namespace is refused before the leaf
+// is touched, and a leaf without the capability resolves absent.
+func TestStrictStorePinnedCreateKeepsTheCreateGuards(t *testing.T) {
+	t.Parallel()
+	work, graph := NewSplitStores(t)
+
+	t.Run("an in-prefix pinned id round-trips", func(t *testing.T) {
+		creator, ok := beads.PinnedIDCreatorFor(graph)
+		if !ok {
+			t.Fatal("no pinned create through the strict wrapper")
+		}
+		created, err := creator.CreatePinned(beads.Bead{ID: "gcg-pinned-slot", Title: "slot"})
+		if err != nil || created.ID != "gcg-pinned-slot" {
+			t.Fatalf("CreatePinned(gcg-pinned-slot) = %q, %v; want the pinned id round-tripped", created.ID, err)
+		}
+	})
+
+	t.Run("a foreign-prefix pinned id is refused before the leaf", func(t *testing.T) {
+		creator, ok := beads.PinnedIDCreatorFor(work)
+		if !ok {
+			t.Fatal("no pinned create through the strict wrapper")
+		}
+		_, err := creator.CreatePinned(beads.Bead{ID: "gcg-misplaced", Title: "misplaced"})
+		if err == nil || !strings.Contains(err.Error(), "prefix mismatch") {
+			t.Fatalf("CreatePinned(gcg-misplaced) on the work store = %v, want the create guard's prefix mismatch", err)
+		}
+		if _, err := work.Get("gcg-misplaced"); err == nil {
+			t.Fatal("the refused pinned create reached the leaf")
+		}
+	})
+
+	t.Run("a leaf without the capability resolves absent", func(t *testing.T) {
+		leaf := beads.NewMemStore()
+		leaf.IDPrefix = "gc"
+		strict := StrictWithPrefix(t, struct{ beads.Store }{leaf}, "gc", BdSemantics)
+		if _, ok := beads.PinnedIDCreatorFor(strict); ok {
+			t.Fatal("the strict wrapper claimed a pinned create its leaf does not have")
+		}
+	})
+}

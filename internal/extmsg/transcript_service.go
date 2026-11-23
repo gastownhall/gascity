@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -20,10 +22,23 @@ const (
 type transcriptService struct {
 	store beads.MailStore
 	locks *bindingLockPool
+	// warnf logs what an append recovered from or works around; log.Printf
+	// outside tests.
+	warnf func(format string, args ...any)
+	// unguardedWarning logs the first unguarded append only.
+	unguardedWarning sync.Once
 }
 
 func newTranscriptService(store beads.MailStore, locks *bindingLockPool) *transcriptService {
-	return &transcriptService{store: store, locks: locks}
+	return &transcriptService{store: store, locks: locks, warnf: log.Printf}
+}
+
+// warnUnguarded logs, once per service, that cause sends its appends to
+// unguarded allocation (appendUnguardedLocked).
+func (s *transcriptService) warnUnguarded(cause error) {
+	s.unguardedWarning.Do(func() {
+		s.warnf("extmsg: transcript sequences are allocated without a store-level guard: %v; an ambiguous create, a failed head write or a writer in another process can give two transcript entries one sequence (gc doctor: extmsg-transcript-sequencing)", cause)
+	})
 }
 
 func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptInput) (ConversationTranscriptRecord, error) {
@@ -54,10 +69,7 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 	createdAt := zeroNow(input.CreatedAt)
 	providerMessageID := strings.TrimSpace(input.ProviderMessageID)
 	text := strings.TrimSpace(input.Text)
-	creator, cas, err := s.transcriptAppendCapabilities()
-	if err != nil {
-		return ConversationTranscriptRecord{}, err
-	}
+	creator, cas, unguarded := transcriptAppendCapabilities(s.store)
 	token, err := newTranscriptAppendToken()
 	if err != nil {
 		return ConversationTranscriptRecord{}, err
@@ -121,6 +133,11 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				Metadata:    fields,
 			}
 		}
+		if unguarded != nil {
+			s.warnUnguarded(unguarded)
+			out, err = s.appendUnguardedLocked(ref, state, providerMessageID, entryAt)
+			return err
+		}
 		alloc := &transcriptAllocator{
 			svc:        s,
 			creator:    creator,
@@ -132,6 +149,21 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 			entryAt:    entryAt,
 		}
 		out, err = alloc.append(ctx)
+		if !pinnedCreateRefused(err) {
+			return err
+		}
+		// The store refused the pinned create before writing anything, as
+		// the capability promises (a bd whose version could not be read, a
+		// wrapper over an engine without the capability, or a fenced class
+		// binding refusing the slot ID of a state migrated in under its
+		// work-store ID), so nothing of this append is stored. The allocator
+		// may have moved the head meanwhile.
+		s.warnUnguarded(err)
+		_, state, err = s.readTranscriptStateLive(state.ID)
+		if err != nil {
+			return err
+		}
+		out, err = s.appendUnguardedLocked(ref, state, providerMessageID, entryAt)
 		return err
 	})
 	return out, err

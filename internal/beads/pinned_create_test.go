@@ -254,3 +254,102 @@ func TestPinnedCreateBdStoreCurrentVersionIsInsertOnly(t *testing.T) {
 		t.Fatalf("stored row = %q %v, want the first create unchanged by the refused duplicate", stored.Title, stored.Metadata)
 	}
 }
+
+// pinnedCheckingWrapper models a wrapper with its own pinned-create checks
+// that also declares its leaf as the conditional-writes resolution target, as
+// splittest's StrictStore does: the target names writes the wrapper does not
+// intercept, and a pinned create is not one of them.
+type pinnedCheckingWrapper struct {
+	beads.Store
+	calls *int
+}
+
+func (w pinnedCheckingWrapper) ConditionalWritesResolveTarget() beads.Store { return w.Store }
+
+func (w pinnedCheckingWrapper) CreatePinned(b beads.Bead) (beads.Bead, error) {
+	*w.calls++
+	creator, ok := beads.PinnedIDCreatorFor(w.Store)
+	if !ok {
+		return beads.Bead{}, beads.ErrPinnedCreateUnsupported
+	}
+	return creator.CreatePinned(b)
+}
+
+// pinnedHandleWrapper is pinnedCheckingWrapper exposing its checks as a
+// handle.
+type pinnedHandleWrapper struct {
+	beads.Store
+	calls *int
+}
+
+func (w pinnedHandleWrapper) ConditionalWritesResolveTarget() beads.Store { return w.Store }
+
+func (w pinnedHandleWrapper) PinnedIDCreatorHandle() (beads.PinnedIDCreator, bool) {
+	creator, ok := beads.PinnedIDCreatorFor(w.Store)
+	if !ok {
+		return nil, false
+	}
+	return countingPinnedCreator{creator: creator, calls: w.calls}, true
+}
+
+// countingPinnedCreator counts the pinned creates it forwards.
+type countingPinnedCreator struct {
+	creator beads.PinnedIDCreator
+	calls   *int
+}
+
+func (c countingPinnedCreator) CreatePinned(b beads.Bead) (beads.Bead, error) {
+	*c.calls++
+	return c.creator.CreatePinned(b)
+}
+
+// TestPinnedCreateAsksEachLayerBeforeItsTarget pins the resolution order: a
+// layer that implements its own pinned create, or a handle for one, answers
+// before the resolution target it declares, so its create checks run; a layer
+// that implements neither is passed through to its target.
+func TestPinnedCreateAsksEachLayerBeforeItsTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(leaf beads.Store, calls *int) beads.Store
+	}{
+		{name: "own pinned create", wrap: func(leaf beads.Store, calls *int) beads.Store {
+			return pinnedCheckingWrapper{Store: leaf, calls: calls}
+		}},
+		{name: "pinned create handle", wrap: func(leaf beads.Store, calls *int) beads.Store {
+			return pinnedHandleWrapper{Store: leaf, calls: calls}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, over := range []struct {
+				name    string
+				resolve func(beads.Store) (beads.PinnedIDCreator, bool)
+			}{
+				{name: "directly", resolve: beads.PinnedIDCreatorFor},
+				{name: "under a declared wrapper", resolve: func(s beads.Store) (beads.PinnedIDCreator, bool) {
+					return beads.PinnedIDCreatorFor(pinnedResolveTargetWrapper{Store: s})
+				}},
+				{name: "under a class handle", resolve: func(s beads.Store) (beads.PinnedIDCreator, bool) {
+					return beads.As[beads.PinnedIDCreator](beads.MailStore{Store: s})
+				}},
+			} {
+				t.Run(over.name, func(t *testing.T) {
+					calls := 0
+					leaf := beads.NewMemStore()
+					creator, ok := over.resolve(tc.wrap(leaf, &calls))
+					if !ok {
+						t.Fatal("no pinned create resolved")
+					}
+					if _, err := creator.CreatePinned(beads.Bead{ID: "gc-slot", Title: "slot"}); err != nil {
+						t.Fatalf("CreatePinned: %v", err)
+					}
+					if calls != 1 {
+						t.Fatalf("the wrapper's pinned create ran %d times, want 1; the walk followed its resolution target past it", calls)
+					}
+					if _, err := leaf.Get("gc-slot"); err != nil {
+						t.Fatalf("the leaf does not hold the pinned row: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
