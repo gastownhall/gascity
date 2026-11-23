@@ -570,19 +570,21 @@ func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
 
 // TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim drives the production
 // bd claim op against bd's refusal for a candidate whose status changed after
-// the work query read it (here it was closed). The refusal wrote nothing and
-// nothing is left for this session to resolve, so it is a lost claim: the
-// routed tier must drain a healthy no_work without recording a claim failure,
-// and the assigned tier must not fail the whole hook. A candidate dropped
-// before its claim drains the same way, so the row also pins that the refused
-// claim and its one settling read ran.
+// the work query read it. The refusal wrote nothing and nothing is left for
+// this session to resolve, so it is a lost claim: the routed tier must drain a
+// healthy no_work without recording a claim failure, and the assigned tier
+// must not fail the whole hook. A candidate dropped before its claim drains
+// the same way, so the row also pins that the refused claim and its one
+// settling read ran. The routed row was deferred: a routed row found closed is
+// a claim failure instead (TestHookClaimClosedCanonicalRowIsAClaimFailure).
 func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 	cases := []struct {
 		name     string
 		assignee string
+		status   string
 	}{
-		{name: "routed candidate", assignee: ""},
-		{name: "ready assignment", assignee: "worker-1"},
+		{name: "routed candidate", assignee: "", status: "deferred"},
+		{name: "ready assignment", assignee: "worker-1", status: "closed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -594,10 +596,10 @@ func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 					ran = append(ran, name+" "+strings.Join(args, " "))
 					switch {
 					case name == "bd" && reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
-						return nil, errors.New("exit status 1: Error updating work-1: issue not claimable: status closed\n" +
-							`{"error":"1 of 1 issues failed to update","failed":[{"id":"work-1","error":"updating issue: issue not claimable: status closed"}],"schema_version":1}`)
+						return nil, errors.New("exit status 1: Error updating work-1: issue not claimable: status " + tc.status + "\n" +
+							`{"error":"1 of 1 issues failed to update","failed":[{"id":"work-1","error":"updating issue: issue not claimable: status ` + tc.status + `"}],"schema_version":1}`)
 					case name == "bd" && reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
-						return []byte(`[{"id":"work-1","title":"work","status":"closed","issue_type":"task","assignee":"` + tc.assignee + `","created_at":"2026-10-31T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`), nil
+						return []byte(`[{"id":"work-1","title":"work","status":"` + tc.status + `","issue_type":"task","assignee":"` + tc.assignee + `","created_at":"2026-10-31T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`), nil
 					default:
 						t.Fatalf("unexpected command: %s %q", name, args)
 						return nil, nil
