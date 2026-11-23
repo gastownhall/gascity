@@ -2,9 +2,13 @@ package main
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -837,6 +841,76 @@ func TestAPIClientFallbackReasonUnboundAPIPort(t *testing.T) {
 			for _, route := range []apiRoute{apiRoutePreferSupervisor, apiRoutePreferSupervisorMutation, apiRouteStandaloneOnly} {
 				if got := routeFallbackReason(dir, route); got != "api-port-unbound" {
 					t.Fatalf("routeFallbackReason(route %d) = %q, want \"api-port-unbound\"", route, got)
+				}
+			}
+		})
+	}
+}
+
+// TestAPIClientUsesListeningStandalonePort guards the probe's accept path: a
+// live controller that identifies as standalone, or one of unknown hosting
+// mode, whose loopback [api] port has a listener gets a city-scoped client
+// whose requests reach that host:port from apiClient,
+// supervisorFallthroughAPIClient and standaloneAPIClient, and the
+// supervisor-managed client is never resolved.
+func TestAPIClientUsesListeningStandalonePort(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		hosts []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hosts = append(hosts, r.Host+" "+r.URL.Path)
+		mu.Unlock()
+		http.Error(w, "not served in this test", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	addr := srv.Listener.Addr().(*net.TCPAddr)
+	if !addr.IP.IsLoopback() {
+		t.Fatalf("test server bound %s, want a loopback address", addr)
+	}
+	wantHost := net.JoinHostPort("127.0.0.1", strconv.Itoa(addr.Port))
+
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() { apiRouteControllerIdentityHook, apiRouteSupervisorClientHook = origIdentity, origSup })
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	for _, mode := range []controllerHostingMode{controllerHostingStandalone, controllerHostingUnknown} {
+		t.Run(hostingModeName(mode), func(t *testing.T) {
+			t.Setenv("GC_NO_API", "")
+			apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+				return controllerIdentityReply{PID: 4242, HostingMode: mode}
+			}
+			apiRouteSupervisorClientHook = func(string) *api.Client {
+				t.Errorf("supervisor client resolved for a controller whose [api] port is listening")
+				return sentinel
+			}
+			dir := writeCityTOMLForRoute(t, t.TempDir(), apiPortCityTOML(addr.Port))
+			fallthroughClient, reason := supervisorFallthroughAPIClient(dir)
+			if reason != "" {
+				t.Fatalf("supervisorFallthroughAPIClient reason = %q, want empty", reason)
+			}
+			for name, c := range map[string]*api.Client{
+				"apiClient":                      apiClient(dir),
+				"supervisorFallthroughAPIClient": fallthroughClient,
+				"standaloneAPIClient":            standaloneAPIClient(dir),
+			} {
+				if c == nil || c == sentinel {
+					t.Fatalf("%s = %p, want the standalone client for %s", name, c, wantHost)
+				}
+				mu.Lock()
+				hosts = nil
+				mu.Unlock()
+				_, _ = c.ListRigs() // The server answers 503; only the request's target matters.
+				mu.Lock()
+				got := append([]string(nil), hosts...)
+				mu.Unlock()
+				if len(got) == 0 {
+					t.Fatalf("%s sent no request to the [api] listener at %s", name, wantHost)
+				}
+				for _, h := range got {
+					if !strings.HasPrefix(h, wantHost+" /v0/city/t/") {
+						t.Fatalf("%s request = %q, want one to %s under /v0/city/t/", name, h, wantHost)
+					}
 				}
 			}
 		})
