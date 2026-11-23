@@ -153,3 +153,34 @@ func TestIsTransientGraphApplyErrorRejectsBudgetExhausted(t *testing.T) {
 		}
 	}
 }
+
+func TestInstantiateStillRetriesAndFallsBackForUntypedTransients(t *testing.T) {
+	enableGraphApplyForTest(t)
+	for name, transient := range map[string]error{
+		"i/o timeout":          errors.New("native graph apply: read tcp 127.0.0.1:3307: i/o timeout"),
+		"invalid connection":   errors.New("native graph apply: invalid connection"),
+		"broken pipe":          errors.New("native graph apply: write: broken pipe"),
+		"subprocess timeout":   errors.New("bd create --graph: timed out after 45s"),
+		"statement deadline":   fmt.Errorf("native graph apply: adding edge a->b: failed to check for dependency cycle: %w", context.DeadlineExceeded),
+		"budget text, no type": errors.New(budgetExhaustedGraphApplyError().Error()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				store := &graphApplySpyStore{MemStore: beads.NewMemStore(), errs: []error{transient, transient}}
+				if _, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), twoStepBudgetRecipe(), Options{}); err != nil {
+					t.Fatalf("Instantiate error = %v, want the sequential fallback to succeed", err)
+				}
+				if store.calls != 2 {
+					t.Errorf("ApplyGraphPlan calls = %d, want 2 (one retry)", store.calls)
+				}
+				open, err := store.ListOpen()
+				if err != nil {
+					t.Fatalf("ListOpen: %v", err)
+				}
+				if len(open) != 2 {
+					t.Errorf("sequential fallback created %d beads, want 2", len(open))
+				}
+			})
+		})
+	}
+}
