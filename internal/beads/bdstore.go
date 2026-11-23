@@ -1545,6 +1545,30 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	return s.CreateWithStorage(b, StorageDefault)
 }
 
+// CreatePinned persists b at exactly b.ID via bd create --id. Only a bd that
+// passes the conditional-write probe (conditionalWritesCapable) refuses an
+// existing id; an older bd upserts it, overwriting the occupant, so such a
+// store is refused with ErrPinnedCreateUnsupported before anything is written,
+// and a failed probe is returned as the error. It satisfies PinnedIDCreator.
+func (s *BdStore) CreatePinned(b Bead) (Bead, error) {
+	if err := checkPinnedCreateID("bd pinned create", b.ID); err != nil {
+		return Bead{}, err
+	}
+	capable, err := s.conditionalWritesCapable()
+	if err != nil {
+		return Bead{}, fmt.Errorf("bd pinned create %q: probing conditional writes: %w", b.ID, err)
+	}
+	if !capable {
+		return Bead{}, fmt.Errorf("bd pinned create %q: bd lacks conditional writes, so it would overwrite an existing id: %w", b.ID, ErrPinnedCreateUnsupported)
+	}
+	noteSessionCreate(b)
+	created, err := s.CreateWithStorage(b, StorageDefault)
+	if err != nil {
+		return Bead{}, err
+	}
+	return checkPinnedCreateResult("bd pinned create", b.ID, created)
+}
+
 // CreateWithStorage persists a new bead via bd create using a storage tier
 // selected by policy middleware.
 func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {

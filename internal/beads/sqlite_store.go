@@ -678,6 +678,25 @@ func (s *SQLiteStore) Create(b Bead) (Bead, error) {
 	return s.create(b, false)
 }
 
+// CreatePinned persists b at exactly b.ID inside the store's namespaces,
+// refusing an id that already names a row without touching it. Create already
+// honors a pinned id under the insert-only duplicate check; this adds the
+// required-id contract of PinnedIDCreator.
+func (s *SQLiteStore) CreatePinned(b Bead) (Bead, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Bead{}, err
+	}
+	if err := checkPinnedCreateID("sqlite pinned create", b.ID); err != nil {
+		return Bead{}, err
+	}
+	noteSessionCreate(b)
+	created, err := s.create(b, false)
+	if err != nil {
+		return Bead{}, err
+	}
+	return checkPinnedCreateResult("sqlite pinned create", b.ID, created)
+}
+
 // create is the shared body. allowForeign is the CreateWithForeignID
 // exemption: the store-migration copy path carries preserved ids across, and
 // refusing them there would leave the beads nowhere at all.
