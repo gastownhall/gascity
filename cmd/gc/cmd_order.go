@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -1343,6 +1344,8 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		}
 	}
 
+	evals := evalOrderChecks(cityPath, cfg, aa, now, ep, resolveStores, latestFired)
+
 	if jsonOutput {
 		result := orderCheckJSON{
 			SchemaVersion: "1",
@@ -1350,72 +1353,24 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			OrdersTotal:   len(aa),
 			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
 		}
-		for _, a := range aa {
-			if err := validateOrderCheckPreflight(a); err != nil {
-				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+		for i, ev := range evals {
+			a := aa[i]
+			if ev.err != nil {
+				fmt.Fprintf(stderr, "gc order check: %v\n", ev.err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			if backend, inapplicable := orderCheckInapplicable(cityPath, cfg, a); inapplicable {
+			if ev.inapplicable {
 				result.Orders = append(result.Orders, orderCheckJSONRow{
 					Name:         a.Name,
 					Rig:          a.Rig,
 					ScopedName:   a.ScopedName(),
 					Trigger:      a.Trigger,
-					Reason:       orderInapplicableLabel(backend),
-					Inapplicable: "backend " + backend,
+					Reason:       orderInapplicableLabel(ev.backend),
+					Inapplicable: "backend " + ev.backend,
 				})
 				continue
 			}
-			typedStores, err := resolveStores(a)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			frontDoors := orderFrontDoorsForTypedStores(typedStores)
-			baseLastRunFn := orders.LastRunAcross(frontDoors)
-			var lastRunErr error
-			lastRunFn := func(orderName string) (time.Time, error) {
-				if t, ok := latestFired[orderName]; ok && !t.IsZero() {
-					if a.Trigger == "cooldown" {
-						if interval, err := time.ParseDuration(a.Interval); err == nil && interval > 0 {
-							if now.Sub(t) < interval {
-								return t, nil
-							}
-						}
-					}
-				}
-				last, err := baseLastRunFn(orderName)
-				if err != nil {
-					lastRunErr = err
-				}
-				return last, err
-			}
-			cursorFn := orders.CursorAcross(frontDoors)
-			if a.Trigger == "event" {
-				cursor, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
-				if err != nil {
-					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
-					return 1
-				}
-				start, err := orders.CheckEventStart(ep, cursor)
-				if err != nil {
-					fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
-					return 1
-				}
-				cursorFn = func(string) uint64 {
-					return start
-				}
-			}
-			triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			check := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
-			if lastRunErr != nil {
-				fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
-				return 1
-			}
+			check := ev.result
 			if check.Due {
 				result.AnyDue = true
 				result.DueTotal++
@@ -1445,73 +1400,25 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "TRIGGER", "DUE", "REASON") //nolint:errcheck
 	}
 	anyDue := false
-	for _, a := range aa {
-		if err := validateOrderCheckPreflight(a); err != nil {
-			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+	for i, ev := range evals {
+		a := aa[i]
+		if ev.err != nil {
+			fmt.Fprintf(stderr, "gc order check: %v\n", ev.err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if backend, inapplicable := orderCheckInapplicable(cityPath, cfg, a); inapplicable {
+		if ev.inapplicable {
 			if hasRig {
 				rig := a.Rig
 				if rig == "" {
 					rig = "-"
 				}
-				fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", a.Name, a.Trigger, rig, "-", orderInapplicableLabel(backend)) //nolint:errcheck
+				fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", a.Name, a.Trigger, rig, "-", orderInapplicableLabel(ev.backend)) //nolint:errcheck
 			} else {
-				fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Trigger, "-", orderInapplicableLabel(backend)) //nolint:errcheck
+				fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Trigger, "-", orderInapplicableLabel(ev.backend)) //nolint:errcheck
 			}
 			continue
 		}
-		typedStores, err := resolveStores(a)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		frontDoors := orderFrontDoorsForTypedStores(typedStores)
-		baseLastRunFn := orders.LastRunAcross(frontDoors)
-		var lastRunErr error
-		lastRunFn := func(orderName string) (time.Time, error) {
-			if t, ok := latestFired[orderName]; ok && !t.IsZero() {
-				if a.Trigger == "cooldown" {
-					if interval, err := time.ParseDuration(a.Interval); err == nil && interval > 0 {
-						if now.Sub(t) < interval {
-							return t, nil
-						}
-					}
-				}
-			}
-			last, err := baseLastRunFn(orderName)
-			if err != nil {
-				lastRunErr = err
-			}
-			return last, err
-		}
-		cursorFn := orders.CursorAcross(frontDoors)
-		if a.Trigger == "event" {
-			cursor, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			start, err := orders.CheckEventStart(ep, cursor)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			cursorFn = func(string) uint64 {
-				return start
-			}
-		}
-		triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
-		if lastRunErr != nil {
-			fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+		result := ev.result
 		due := "no"
 		if result.Due {
 			due = "yes"
@@ -1532,6 +1439,123 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		return 0
 	}
 	return 1
+}
+
+// orderCheckReadConcurrency bounds how many orders gc order check reads at
+// once. Each order's read is one or more bd processes (its last run on each
+// store leg, an event order's cursor), and read one after another they took
+// about a third of a second an order on a busy host: 10 s and more for a city
+// of 58 orders. The bound keeps the bd processes one check starts few.
+const orderCheckReadConcurrency = 8
+
+// orderCheckEval is one order's outcome in gc order check: inapplicable on
+// backend, a trigger result, or the error that ends the check there.
+type orderCheckEval struct {
+	inapplicable bool
+	backend      string
+	result       orders.TriggerResult
+	err          error
+}
+
+// evalOrderChecks evaluates aa's triggers for gc order check, in aa's order.
+// The setup (preflight, applicability, stores, trigger options) runs one order
+// after another and stops at the first order whose setup fails; the reads
+// (event cursor, last run, the trigger itself) of the orders before it then
+// run up to orderCheckReadConcurrency at once. A caller that prints the
+// results in order and stops at the first error prints what one sequential
+// loop over aa would: no order's reads depend on another's.
+func evalOrderChecks(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, latestFired map[string]time.Time) []orderCheckEval {
+	evals := make([]orderCheckEval, 0, len(aa))
+	type orderRead struct {
+		i           int
+		typedStores []beads.OrdersStore
+		triggerOpts orders.TriggerOptions
+	}
+	var reads []orderRead
+	for i, a := range aa {
+		if err := validateOrderCheckPreflight(a); err != nil {
+			evals = append(evals, orderCheckEval{err: err})
+			break
+		}
+		if backend, inapplicable := orderCheckInapplicable(cityPath, cfg, a); inapplicable {
+			evals = append(evals, orderCheckEval{inapplicable: true, backend: backend})
+			continue
+		}
+		typedStores, err := resolveStores(a)
+		if err != nil {
+			evals = append(evals, orderCheckEval{err: err})
+			break
+		}
+		triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
+		if err != nil {
+			evals = append(evals, orderCheckEval{err: err})
+			break
+		}
+		evals = append(evals, orderCheckEval{})
+		reads = append(reads, orderRead{i: i, typedStores: typedStores, triggerOpts: triggerOpts})
+	}
+
+	work := make(chan orderRead)
+	var wg sync.WaitGroup
+	for n := min(orderCheckReadConcurrency, len(reads)); n > 0; n-- {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := range work {
+				evals[r.i].result, evals[r.i].err = readOrderCheck(aa[r.i], now, ep, r.typedStores, r.triggerOpts, latestFired)
+			}
+		}()
+	}
+	for _, r := range reads {
+		work <- r
+	}
+	close(work)
+	wg.Wait()
+	return evals
+}
+
+// readOrderCheck reads what a's trigger needs from its stores and the event
+// log, and evaluates it. latestFired, each order's newest order.fired event,
+// lets a cooldown order still inside its interval skip its stores.
+func readOrderCheck(a orders.Order, now time.Time, ep events.Provider, typedStores []beads.OrdersStore, triggerOpts orders.TriggerOptions, latestFired map[string]time.Time) (orders.TriggerResult, error) {
+	frontDoors := orderFrontDoorsForTypedStores(typedStores)
+	baseLastRunFn := orders.LastRunAcross(frontDoors)
+	var lastRunErr error
+	lastRunFn := func(orderName string) (time.Time, error) {
+		if t, ok := latestFired[orderName]; ok && !t.IsZero() {
+			if a.Trigger == "cooldown" {
+				if interval, err := time.ParseDuration(a.Interval); err == nil && interval > 0 {
+					if now.Sub(t) < interval {
+						return t, nil
+					}
+				}
+			}
+		}
+		last, err := baseLastRunFn(orderName)
+		if err != nil {
+			lastRunErr = err
+		}
+		return last, err
+	}
+	cursorFn := orders.CursorAcross(frontDoors)
+	if a.Trigger == "event" {
+		cursor, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
+		if err != nil {
+			return orders.TriggerResult{}, fmt.Errorf("reading event cursor for %s: %w", a.ScopedName(), err)
+		}
+		start, err := orders.CheckEventStart(ep, cursor)
+		if err != nil {
+			return orders.TriggerResult{}, fmt.Errorf("%s: %w", a.ScopedName(), err)
+		}
+		cursorFn = func(string) uint64 {
+			return start
+		}
+	}
+	check := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
+	if lastRunErr != nil {
+		return orders.TriggerResult{}, fmt.Errorf("reading last run for %s: %w", a.ScopedName(), lastRunErr)
+	}
+	return check, nil
 }
 
 // orderCheckInapplicable reports whether gc order check should show a as
