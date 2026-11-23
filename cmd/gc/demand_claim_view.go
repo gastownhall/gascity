@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -130,4 +131,10 @@ func (v *demandClaimViews) trace(cache *readyDemandCache) {
 		"shadowed": v.shadowed,
 		"ids":      ids,
 	})
+}
+
+// demandClaimViewError names the template, the row and the claim view a failed
+// probe asked.
+func demandClaimViewError(template, id, viewKey string, err error) error {
+	return fmt.Errorf("default scale_check %s: claim view %s of cross-store row %s: %w", template, viewKey, id, err)
 }
