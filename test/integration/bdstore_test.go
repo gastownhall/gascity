@@ -1,11 +1,10 @@
-//go:build integration
+//go:build integration && unix
 
 package integration
 
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,19 +17,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
-const (
-	bdInitTimeout          = 60 * time.Second
-	doltServerStartupLimit = 10 * time.Second
-	// doltServerReadyTimeout budgets startDoltServerOnAllInterfaces's
-	// TCP-dial readiness wait (dolt_config_test.go). Kept separate from
-	// doltServerStartupLimit — same shape of wait, but a distinct call
-	// site — so a future tuning of one doesn't silently retune the other;
-	// that kind of implicit coupling is what let runBDInitCompat's timeout
-	// drift out of sync with bdInitTimeout in the first place (ga-gajll3).
-	doltServerReadyTimeout = 60 * time.Second
-)
+const bdInitTimeout = 60 * time.Second
 
 // TestBdStoreConformance runs the beads conformance suite against BdStore
 // backed by a real dolt server. This proves the full stack works:
@@ -43,16 +33,15 @@ const (
 // Requires: Dolt and bd binaries configured via PATH or the integration
 // override env vars.
 func TestBdStoreConformance(t *testing.T) {
-	// Skipped while gascity is pinned to bd 1.0.4 (ga-e7z613). bd 1.0.4 avoids
-	// bd 1.0.5's data-corruption bug but lacks the #3691 empty-DB-guard fix (it
-	// was tagged ~6.5h before #3691 merged), so it silently auto-imports into an
-	// empty on-disk DB, which trips gascity's ErrBDSilentFallback guard (#2080).
-	// This is NOT a regression: gascity 1.2.1 shipped on bd 1.0.4 with identical
-	// bd behavior; only the loud-fallback detection added after 1.2.1
-	// (#1930/#2080/#2079) is new. The user explicitly authorized applying this
-	// skip on main on 2026-06-21 as part of merging release/v1.3.0 into main.
-	// Remove once gascity moves to a clean bd (#3691 + the corruption fix).
-	t.Skip("bd 1.0.4 trips the silent-fallback guard (pre-existing, non-regression; pinned to avoid 1.0.5 corruption) — ga-e7z613")
+	// Skipped because BdStore fails this suite's
+	// ParentIDNamesARowThisStoreDoesNotHave row on every pinned bd: it hands
+	// ParentID to bd as --parent, and bd 1.3.x refuses a parent it cannot
+	// resolve ("parent issue ... not found"), the divergence ga-6od57 tracks.
+	// The bd 1.0.4 reason the skip was added for (ga-e7z613) no longer applies;
+	// every pin carries the #3691 empty-DB guard. The suite is in the gating
+	// integration-smoke filter, so un-skipping it (ga-x4j5ka) needs that row
+	// fixed or opted out, and a green run on both pins.
+	t.Skip("BdStore fails ParentIDNamesARowThisStoreDoesNotHave: bd refuses an unresolvable --parent (ga-6od57); un-skip is ga-x4j5ka")
 	requireDoltIntegration(t)
 	env := newIsolatedToolEnv(t, true)
 
@@ -106,55 +95,19 @@ func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 		t.Fatalf("creating dolt data dir: %v", err)
 	}
 
-	reserved, err := reserveLoopbackPort()
-	if err != nil {
-		t.Fatalf("allocating dolt port: %v", err)
-	}
-	port := strconv.Itoa(reserved)
-
-	logPath := filepath.Join(dataDir, "sql-server.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("creating dolt log file: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, doltBinary, "sql-server", "-H", "127.0.0.1", "-P", port, "--data-dir", dataDir)
-	cmd.Env = env
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		t.Fatalf("starting dolt sql-server: %v", err)
-	}
-
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-
-	deadline := time.Now().Add(doltServerStartupLimit)
-	addr := net.JoinHostPort("127.0.0.1", port)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			t.Cleanup(func() {
-				cancel()
-				<-waitCh
-				_ = logFile.Close()
-			})
-			return port
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	cancel()
-	<-waitCh
-	_ = logFile.Close()
-	logBytes, _ := os.ReadFile(logPath)
-	t.Fatalf("dolt sql-server did not become ready on %s within %s:\n%s", addr, doltServerStartupLimit, logBytes)
-	return ""
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltBinary,
+		Args: func(port int) []string {
+			return []string{"sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir}
+		},
+		Env:     env,
+		LogPath: filepath.Join(dataDir, "sql-server.log"),
+	})
+	t.Cleanup(func() {
+		_ = srv.Process.Kill()
+		<-srv.Exited
+	})
+	return strconv.Itoa(srv.Port)
 }
 
 // runBDInit initializes beads against the shared Dolt server with a bounded wait.

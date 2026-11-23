@@ -8,6 +8,7 @@ go_library(
         "memory_queue.go",
         "messaging.go",
         "nudges.go",
+        "nudges_startup.go",
         "orders.go",
         "reference.go",
         "runner.go",

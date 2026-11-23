@@ -80,7 +80,8 @@ func NewMemoryNudgeQueueWithPolicy(policy NudgeQueuePolicy) *MemoryNudgeQueue {
 }
 
 // verbPrologueLocked is the whole-queue recovery a legacy queue runs inside
-// every verb. A contract queue runs none: recovery is Maintain's alone.
+// the verbs VerbsMaintain names. A contract queue runs none: recovery is
+// Maintain's alone.
 func (q *MemoryNudgeQueue) verbPrologueLocked(now time.Time) {
 	if q.policy.VerbsMaintain {
 		q.maintainLocked(now)
@@ -136,11 +137,73 @@ func (q *MemoryNudgeQueue) ClaimDue(target storebinding.ClaimTarget, now time.Ti
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.verbPrologueLocked(now)
+	if turn, hold := q.judgeStartupLocked(target, now); hold {
+		if turn == nil {
+			return nil, nil
+		}
+		q.unpinSharedStartupTurnLocked(turn, now)
+		return []nudgequeue.Item{claimEntry(turn, now, turn.item.DeliveryBatch)}, nil
+	}
 	var claimed []nudgequeue.Item
 	for _, entry := range q.candidatesLocked(target, now, newClaimFence(target)) {
 		claimed = append(claimed, claimEntry(entry, now, entry.item.DeliveryBatch))
 	}
 	return claimed, nil
+}
+
+// judgeStartupLocked judges the startup turns of target's session
+// (nudgequeue.JudgeStartupTurns), asking target.LiveLaunch with the lock
+// released when a turn is due, and dead-letters the turns it finds stale or
+// superseded. It returns the turn to claim alone, if any, and whether the
+// claim must take nothing else. It is entered and left with q.mu held.
+func (q *MemoryNudgeQueue) judgeStartupLocked(target storebinding.ClaimTarget, now time.Time) (*memoryQueueEntry, bool) {
+	judgement := q.startupJudgementLocked(target, now, nudgequeue.LiveLaunch{})
+	if judgement.NeedsLaunch {
+		q.mu.Unlock()
+		launch := storebinding.AskLiveLaunch(target, judgement.Members)
+		q.mu.Lock()
+		judgement = q.startupJudgementLocked(target, now, launch)
+	}
+	for _, id := range judgement.Stale {
+		if entry := q.entries[id]; entry != nil && entry.live() {
+			deadLetterStartupTurn(entry, nudgequeue.StaleLaunchReason, now)
+		}
+	}
+	for _, id := range judgement.Superseded {
+		if entry := q.entries[id]; entry != nil && entry.live() && !entry.inFlightAt(now) {
+			deadLetterStartupTurn(entry, nudgequeue.SupersededReason, now)
+		}
+	}
+	if judgement.Claim == "" {
+		return nil, judgement.Hold
+	}
+	return q.entries[judgement.Claim], true
+}
+
+// startupJudgementLocked judges target's live, keyed entries as of now.
+func (q *MemoryNudgeQueue) startupJudgementLocked(target storebinding.ClaimTarget, now time.Time, launch nudgequeue.LiveLaunch) nudgequeue.StartupJudgement {
+	var pending, inFlight []nudgequeue.Item
+	for _, id := range q.order {
+		entry := q.entries[id]
+		if entry == nil || !entry.live() || !matchesQueueKeys(entry.item.Agent, target.QueueKeys) {
+			continue
+		}
+		if entry.inFlightAt(now) {
+			inFlight = append(inFlight, entry.item)
+		} else {
+			pending = append(pending, unclaimed(entry.item))
+		}
+	}
+	return nudgequeue.JudgeStartupTurns(target.SessionID, pending, inFlight, now, launch)
+}
+
+// deadLetterStartupTurn records a startup turn a claim judged dead, with
+// reason, and releases any claim on it.
+func deadLetterStartupTurn(entry *memoryQueueEntry, reason string, now time.Time) {
+	entry.item = unclaimed(entry.item)
+	entry.item.DeadAt = now.UTC()
+	entry.item.LastError = reason
+	entry.state = memoryQueueDead
 }
 
 // ClaimBatch claims target's next delivery batch: the first pinned batch among
@@ -153,6 +216,21 @@ func (q *MemoryNudgeQueue) ClaimBatch(target storebinding.ClaimTarget, now time.
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.verbPrologueLocked(now)
+	if turn, hold := q.judgeStartupLocked(target, now); hold {
+		if turn == nil {
+			return nil, nil
+		}
+		q.unpinSharedStartupTurnLocked(turn, now)
+		batch := turn.item.DeliveryBatch
+		if batch == "" {
+			minted, err := newMemoryBatchKey()
+			if err != nil {
+				return nil, err
+			}
+			batch = minted
+		}
+		return []nudgequeue.Item{claimEntry(turn, now, batch)}, nil
+	}
 	fence := newClaimFence(target)
 	candidates := q.candidatesLocked(target, now, fence)
 	seen := map[string]bool{}
@@ -191,9 +269,28 @@ func (q *MemoryNudgeQueue) ClaimBatch(target storebinding.ClaimTarget, now time.
 	return claimed, nil
 }
 
+// unpinSharedStartupTurnLocked unpins turn, the startup turn a claim takes
+// alone, when another live entry shares its delivery batch: only an older
+// gc's claim pins a turn with other items, and a turn claimed alone under
+// that key would be part of that batch. A turn pinned alone keeps its key.
+func (q *MemoryNudgeQueue) unpinSharedStartupTurnLocked(turn *memoryQueueEntry, now time.Time) {
+	batch := turn.item.DeliveryBatch
+	if batch == "" {
+		return
+	}
+	for _, id := range q.order {
+		entry := q.entries[id]
+		if entry != nil && entry != turn && entry.live() && entry.item.DeliveryBatch == batch && !expired(entry.item, now) {
+			turn.item.DeliveryBatch = ""
+			return
+		}
+	}
+}
+
 // candidatesLocked returns the entries target may claim now, in delivery
-// order: live, unclaimed, addressed to one of its keys, due, and passing the
-// fence. An expired entry it meets is dead-lettered instead.
+// order: live, unclaimed, addressed to one of its keys, due, passing the
+// fence, and not a startup turn (judgeStartupLocked claims those). An expired
+// entry it meets is dead-lettered instead.
 func (q *MemoryNudgeQueue) candidatesLocked(target storebinding.ClaimTarget, now time.Time, fence *claimFence) []*memoryQueueEntry {
 	var candidates []*memoryQueueEntry
 	for _, id := range q.order {
@@ -211,7 +308,7 @@ func (q *MemoryNudgeQueue) candidatesLocked(target storebinding.ClaimTarget, now
 		if entry.item.DeliverAfter.After(now) {
 			continue
 		}
-		if !fence.passes(entry.item) {
+		if nudgequeue.IsStartupTurn(entry.item) || !fence.passes(entry.item) {
 			continue
 		}
 		candidates = append(candidates, entry)
@@ -221,8 +318,8 @@ func (q *MemoryNudgeQueue) candidatesLocked(target storebinding.ClaimTarget, now
 }
 
 // wholeBatchLocked returns batch's live members and whether target can claim
-// them whole: none in flight, and every one due, addressed to one of target's
-// keys, and passing the fence.
+// them whole: none in flight or a startup turn, and every one due, addressed
+// to one of target's keys, and passing the fence.
 func (q *MemoryNudgeQueue) wholeBatchLocked(batch string, target storebinding.ClaimTarget, now time.Time, fence *claimFence) ([]*memoryQueueEntry, bool) {
 	var members []*memoryQueueEntry
 	for _, id := range q.order {
@@ -230,7 +327,7 @@ func (q *MemoryNudgeQueue) wholeBatchLocked(batch string, target storebinding.Cl
 		if entry == nil || !entry.live() || entry.item.DeliveryBatch != batch || expired(entry.item, now) {
 			continue
 		}
-		if entry.inFlightAt(now) || entry.item.DeliverAfter.After(now) ||
+		if entry.inFlightAt(now) || entry.item.DeliverAfter.After(now) || nudgequeue.IsStartupTurn(entry.item) ||
 			!matchesQueueKeys(entry.item.Agent, target.QueueKeys) || !fence.passes(entry.item) {
 			return nil, false
 		}
@@ -319,10 +416,9 @@ func (q *MemoryNudgeQueue) ListFor(target storebinding.ClaimTarget, now time.Tim
 
 // Snapshot returns every queued item in the canonical bucket order.
 func (q *MemoryNudgeQueue) Snapshot() (nudgequeue.State, error) {
-	pending, inFlight, dead, err := q.listMatching(time.Now().UTC(), func(nudgequeue.Item) bool { return true })
-	if err != nil {
-		return nudgequeue.State{}, err
-	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	pending, inFlight, dead := q.bucketsLocked(time.Now().UTC(), func(nudgequeue.Item) bool { return true })
 	state := nudgequeue.State{Pending: pending, InFlight: inFlight, Dead: dead}
 	nudgequeue.SortState(&state)
 	return state, nil
@@ -448,7 +544,6 @@ func (q *MemoryNudgeQueue) Rollback(item nudgequeue.Item, reason string) error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.verbPrologueLocked(time.Now().UTC())
 	entry := q.entries[item.ID]
 	if entry == nil {
 		item.DeadAt = time.Now().UTC()
@@ -466,7 +561,6 @@ func (q *MemoryNudgeQueue) Rollback(item nudgequeue.Item, reason string) error {
 func (q *MemoryNudgeQueue) WithdrawQueuedWaitNudges(ids []string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.verbPrologueLocked(time.Now().UTC())
 	for _, id := range ids {
 		entry := q.entries[id]
 		if entry == nil || entry.state == memoryQueueTerminal {
@@ -556,15 +650,21 @@ func (q *MemoryNudgeQueue) Lookup(ids []string, now time.Time) (map[string]nudge
 }
 
 // DueKeys returns, sorted and unique, the non-empty queue keys with an item
-// that reads as pending and is due at now.
+// that reads as pending and is due at now and is not held behind a startup
+// turn that is not yet claimable (nudgequeue.StartupBarrier).
 func (q *MemoryNudgeQueue) DueKeys(now time.Time) ([]string, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.verbPrologueLocked(now)
+	var barrier nudgequeue.StartupBarrier
+	for _, entry := range q.entries {
+		if entry.live() {
+			barrier.Add(entry.item, entry.inFlightAt(now), now)
+		}
+	}
 	seen := map[string]bool{}
 	var keys []string
 	for _, entry := range q.entries {
-		if entry.item.Agent == "" || seen[entry.item.Agent] || entry.item.DeliverAfter.After(now) {
+		if entry.item.Agent == "" || seen[entry.item.Agent] || entry.item.DeliverAfter.After(now) || barrier.Holds(entry.item) {
 			continue
 		}
 		if bucket, ok := entry.bucketAt(now); !ok || bucket != nudgequeue.BucketPending {
@@ -581,7 +681,6 @@ func (q *MemoryNudgeQueue) DueKeys(now time.Time) ([]string, error) {
 func (q *MemoryNudgeQueue) Empty() (bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.verbPrologueLocked(time.Now().UTC())
 	for _, entry := range q.entries {
 		if entry.live() || entry.state == memoryQueueDead {
 			return false, nil
@@ -596,7 +695,9 @@ func (q *MemoryNudgeQueue) insert(item nudgequeue.Item, state memoryQueueState) 
 }
 
 // expireLeases records the lease recovery the reads already project: in-flight
-// items whose lease has run out return to pending. It runs only in Maintain.
+// items whose lease has run out return to pending. It runs in Maintain, and
+// under VerbsMaintain in the prologue of the verbs that policy names, where, as
+// the file queue does, the recovered item is due again from that verb's clock.
 func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 	for _, entry := range q.entries {
 		if entry.state != memoryQueueInFlight {
@@ -608,6 +709,9 @@ func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 		entry.state = memoryQueuePending
 		entry.item.ClaimedAt = time.Time{}
 		entry.item.LeaseUntil = time.Time{}
+		if q.policy.VerbsMaintain {
+			entry.item.DeliverAfter = now
+		}
 	}
 }
 
@@ -615,6 +719,13 @@ func (q *MemoryNudgeQueue) listMatching(now time.Time, match func(nudgequeue.Ite
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.verbPrologueLocked(now)
+	pending, inFlight, dead = q.bucketsLocked(now, match)
+	return pending, inFlight, dead, nil
+}
+
+// bucketsLocked sorts the entries match selects into the buckets they read as
+// at now, each in delivery order.
+func (q *MemoryNudgeQueue) bucketsLocked(now time.Time, match func(nudgequeue.Item) bool) (pending, inFlight, dead []nudgequeue.Item) {
 	for _, id := range q.order {
 		entry := q.entries[id]
 		if entry == nil || !match(entry.item) {
@@ -636,7 +747,7 @@ func (q *MemoryNudgeQueue) listMatching(now time.Time, match func(nudgequeue.Ite
 	sortByDelivery(pending)
 	sortByDelivery(inFlight)
 	sortByDelivery(dead)
-	return pending, inFlight, dead, nil
+	return pending, inFlight, dead
 }
 
 // expired reports whether item's deliver-by deadline has passed at now.

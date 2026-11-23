@@ -123,8 +123,8 @@ compiler appends a `workflow-finalize` **control step** that depends on the last
 steps in your graph. Agents never work on it; the orchestrator completes it once
 everything upstream is done, recording the workflow's outcome and closing it.
 
-For the next few examples, keep the `mayor` from earlier tutorials and add a
-generic worker so you have a second execution target:
+Keep the `mayor` from earlier tutorials and add a generic worker, a second
+execution target that the later tutorials route work to:
 
 ```shell
 ~/my-city
@@ -145,7 +145,9 @@ directory overrides.
 ## Instantiating a formula
 
 Slinging a formula compiles it, materializes the root and every step as beads,
-and routes the resulting **workflow** to an agent — all in one command.
+and routes the resulting **workflow** to an agent — all in one command. Bead IDs
+are generated, so the IDs in your output will differ from the ones shown on this
+page.
 
 ![Applying a formula in three stages: the formula.toml on disk is compiled into
 an in-memory recipe (flattened steps plus dependency edges), then instantiated
@@ -155,7 +157,7 @@ session.](/diagrams/excalidraw-rendered/formula-apply-pipeline.svg)
 ```shell
 ~/my-city
 $ gc sling mayor pancakes --formula
-Started workflow mc-btj (formula "pancakes") → mayor
+Started workflow gcg-1025 (formula "pancakes") → mayor
 ```
 
 The root bead stays open — blocked on the finalize step — until every step
@@ -174,39 +176,29 @@ vocabulary in older formulas and messages; v2 formulas start workflows.
 [Tutorial 06](/tutorials/06-beads) shows how both shapes land in the bead store.
 </Accordion>
 
-To create the workflow's beads _without_ routing them — to inspect first, or
-route the work yourself — use `gc formula cook`: same compilation, same beads,
-no routing.
+To see exactly what a formula produces without starting it, use
+`gc formula cook`: same compilation, same beads, no routing.
 
 ```shell
 ~/my-city
 $ gc formula cook pancakes
-Root: mc-79s
+Root: gcg-2049
 Created: 7
-pancakes -> mc-79s
-pancakes.combine -> mc-265
-pancakes.cook -> mc-nia
-pancakes.dry -> mc-b8g
-pancakes.serve -> mc-k3q
-pancakes.wet -> mc-0ez
-pancakes.workflow-finalize -> mc-9vb
-
-~/my-city
-$ gc sling worker mc-79s
-Auto-convoy mc-ygc
-Slung mc-79s → worker
+pancakes -> gcg-2049
+pancakes.combine -> gcg-2052
+pancakes.cook -> gcg-2053
+pancakes.dry -> gcg-2050
+pancakes.serve -> gcg-2054
+pancakes.wet -> gcg-2051
+pancakes.workflow-finalize -> gcg-2055
 ```
 
 `Created: 7` is the root plus your five steps plus the finalize step, each with
-its own bead ID. Slinging the cooked root routes it like any other bead — and
-because that's a plain bead sling, you get an auto-convoy tracking it (the
-`--formula` path doesn't create one).
-
-Cook in the scope where the work belongs. Running `gc formula cook` inside a rig
-directory creates the beads in that rig's store (`mp-` prefixes for
-`my-project`), and `gc sling` refuses to route a rig's bead to an agent that
-reads a different store. We cooked in the city, so the city-scoped `worker` can
-take it.
+its own bead ID. A workflow's beads live in the city's infrastructure store,
+which is why their IDs start `gcg-` ([Tutorial 06](/tutorials/06-beads) covers
+the city's two stores). Nothing routes a cooked workflow, and `gc sling` won't
+route one by hand: it routes work beads, the tasks you and your agents reason
+about. To run a formula, sling it as shown above.
 
 ## Variables
 
@@ -215,7 +207,8 @@ section and reference them as `{{name}}` in step titles, descriptions, and other
 text fields. They expand at cook or sling time — placeholders become concrete
 values in the resulting beads.
 
-In the simplest case, a variable is a name with a default value:
+In the simplest case, a variable is a name with a default value. Save this as
+`formulas/greeting.toml`:
 
 ```toml
 formula = "greeting"
@@ -234,19 +227,19 @@ title = "Say hello to {{name}}"
 ```shell
 ~/my-city
 $ gc formula cook greeting --var name="Alice"
-Root: mc-tmf
+Root: gcg-5121
 Created: 3
-greeting -> mc-tmf
-greeting.say-hello -> mc-oyr
-greeting.workflow-finalize -> mc-5x2
+greeting -> gcg-5121
+greeting.say-hello -> gcg-5122
+greeting.workflow-finalize -> gcg-5123
 
 ~/my-city
 $ gc formula cook greeting
-Root: mc-h2g
+Root: gcg-6145
 Created: 3
-greeting -> mc-h2g
-greeting.say-hello -> mc-9qb
-greeting.workflow-finalize -> mc-gxo
+greeting -> gcg-6145
+greeting.say-hello -> gcg-6146
+greeting.workflow-finalize -> gcg-6147
 ```
 
 `cook` doesn't echo the substituted titles. To preview the expansion, use `gc
@@ -280,7 +273,7 @@ Variables can carry richer definitions:
 | `enum`        | Restrict to a set of allowed values              |
 | `pattern`     | Regex validation                                 |
 
-A more complete example:
+A more complete example — save this as `formulas/feature-work.toml`:
 
 ```toml
 formula = "feature-work"
@@ -312,19 +305,19 @@ Pass variables with `--var`:
 ```shell
 ~/my-city
 $ gc formula cook feature-work --var title="Auth overhaul" --var branch="develop"
-Root: mc-qnf
+Root: gcg-7169
 Created: 3
-feature-work -> mc-qnf
-feature-work.implement -> mc-35h
-feature-work.workflow-finalize -> mc-2fp
+feature-work -> gcg-7169
+feature-work.implement -> gcg-7170
+feature-work.workflow-finalize -> gcg-7171
 
 ~/my-city
 $ gc formula cook feature-work --var title="Auth overhaul" --var priority="critical"
-Root: mc-d1s
+Root: gcg-8193
 Created: 3
-feature-work -> mc-d1s
-feature-work.implement -> mc-ej5
-feature-work.workflow-finalize -> mc-6gi
+feature-work -> gcg-8193
+feature-work.implement -> gcg-8194
+feature-work.workflow-finalize -> gcg-8195
 ```
 
 `gc formula show` previews the substituted recipe and the declared variables;
@@ -446,8 +439,30 @@ is empty, `false`, `0`, `no`, or `off`; `!{{var}}` inverts that. The variable is
 substituted first, then compared as a string. For richer branching, use multiple
 variables and conditions across steps.
 
-`gc formula show` shows conditions taking effect. `deploy-flow` is an
-unconditional `build` step plus the conditional `deploy` above:
+`gc formula show` shows conditions taking effect. To try it, combine an
+unconditional `build` step with the conditional `deploy` above, and give `env` a
+default. Save this as `formulas/deploy-flow.toml`:
+
+```toml
+formula = "deploy-flow"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+env = "dev"
+
+[[steps]]
+id = "build"
+title = "Build"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to staging"
+condition = "{{env}} == staging"
+```
+
+With `env=dev` the `deploy` step is dropped; with `env=staging` it's included:
 
 ```shell
 ~/my-city
@@ -476,9 +491,15 @@ Steps (3):
 
 ### Loops
 
-A step can wrap a body of sub-steps that execute multiple times:
+A step can wrap a body of sub-steps that execute multiple times. Save this as
+`formulas/retry-deploy.toml`:
 
 ```toml
+formula = "retry-deploy"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
 [[steps]]
 id = "retries"
 title = "Attempt deployment"
@@ -491,9 +512,7 @@ id = "attempt"
 title = "Try to deploy"
 ```
 
-Save that as a formula named `retry-deploy` — with the `formula` line and
-`[requires]` block, like every formula in this tutorial. The body is expanded
-at cook time into three sequential iterations:
+The body is expanded at cook time into three sequential iterations:
 
 ```shell
 ~/my-city
@@ -521,9 +540,14 @@ not supported in `count`. For a variable-driven iteration count, use
 
 <Accordion title="The `until` loop and its caveat">
 An `until` loop expands one iteration at compile time and stamps the condition
-(plus a required `max` budget) on it:
+(plus a required `max` budget) on it. Save this as `formulas/poll-until.toml`:
 
 ```toml
+formula = "poll-until"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
 [[steps]]
 id = "poll"
 title = "Poll for readiness"
@@ -562,7 +586,8 @@ grammar.
 Conditions and loops are decided when you cook. Check makes a decision at
 runtime: it runs a validation script after the agent finishes a step. If the
 script passes, the step is done; if not, another iteration is spawned and the
-agent tries again — a runtime feedback loop, not a compile-time expansion.
+agent tries again — a runtime feedback loop, not a compile-time expansion. Save
+this as `formulas/checked.toml`:
 
 ```toml
 formula = "checked"
@@ -584,7 +609,9 @@ timeout = "30s"
 ```
 
 Check is v2-only: without the `[requires]` block, compilation fails with an
-error telling you to add it. The runtime loop shows up in the compiled recipe:
+error telling you to add it. The runtime loop shows up in the compiled recipe
+(`gc formula show` doesn't run the check, so `scripts/verify.sh` doesn't need to
+exist yet):
 
 ```shell
 ~/my-city

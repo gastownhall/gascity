@@ -2,10 +2,10 @@ package main
 
 // The one release verb (ARCH-RESTRUCTURE-2 R9, the REL half; pass-1 R4).
 //
-// Seven paths give a seat's claims back: the killed-seat release (B1), the
+// Eight paths give a seat's claims back: the killed-seat release (B1), the
 // drain-ack release (D5), the close cascade, the stranded repair, the
-// confirmed-orphan release, the dead-assignee sweep and the retired-session
-// sweep. Each decided for
+// confirmed-orphan release, the dead-assignee sweep, the retired-session
+// sweep and the work ladder's release of an unstarted claim. Each decided for
 // itself which claims it released and into which lane, and four of them
 // released claims no lane serves: an unserved route, or an expanded workflow
 // root with no route of its own (NEW-5, mc-zndi7.87). Released, such a claim
@@ -47,6 +47,8 @@ const (
 	releaseStrandedRepair
 	releaseOrphan // the confirmed orphan and the dead-assignee sweep: one policy
 	releaseRetired
+	releaseLadder  // the work ladder's release of an unstarted claim (PHASE1-2 §6.5)
+	releaseStalled // the claim an execution-stalled stop gives back (releaseStalledClaim)
 )
 
 // laneRule says when a released claim's route counts as served.
@@ -68,9 +70,15 @@ const (
 type releasePolicy struct {
 	statuses     []string // the claim statuses the path gives back
 	startedKeeps bool     // a started claim keeps the seat: nothing is released
-	lane         laneRule
-	seatRoute    bool // the seat's route is the fallback, stamped on a routeless claim
-	pool         bool // the orphan write: live re-check, detached probe, pool release
+	// startedNamedKeeps keeps each claim the seat's own started records name
+	// (releaseSeat.keepsStarted); the rest are released.
+	startedNamedKeeps bool
+	lane              laneRule
+	seatRoute         bool // the seat's route is the fallback, stamped on a routeless claim
+	pool              bool // the orphan write: live re-check, pool release
+	// detached holds a claim carrying gc.detached until its probe attests the
+	// runtime dead (detachedProbeAllowsOrphanRelease).
+	detached bool
 }
 
 var (
@@ -85,17 +93,39 @@ var (
 //   - drain-ack gives back only in_progress claims (D5): the agent said it
 //     holds nothing, and open claims are its continuation preassignments; a
 //     routeless claim takes the seat's route, as on the paths below, since
-//     kept it would leave the acked seat asleep holding it (mc-sca8r);
+//     kept it would leave the acked seat asleep holding it (mc-sca8r). A
+//     claim the seat's work_started cell or execution_claim_started stamp
+//     names is kept (PHASE1-2 §6.5), unless it is on a dispatch hold: the ack
+//     is no proof it never ran, and giving it back lost started work
+//     (mc-ilr3b);
 //   - the cascade, the stranded repair, both orphan releases and the
 //     retired-session sweep (`gc session close`, a removed named session)
-//     give back started work too: the seat is gone.
+//     give back started work too: the seat is gone;
+//   - the work ladder gives back one in_progress claim of a live seat, which
+//     its CAS proved unstarted (PHASE1-2 §6.5); a routeless claim takes the
+//     seat's route, as drain-ack's;
+//   - the stranded repair and both orphan releases give a claim carrying
+//     gc.detached back only once its probe attests the runtime dead: one
+//     that may still run elsewhere is kept, and the stranded repair keeps
+//     its slot for it (ReleaseOutcome.HeldDetached);
+//   - the execution-stalled stop gives back the claim it stopped the seat
+//     for under the stranded repair's rules, without the detached hold;
+//   - the other paths give a claim carrying gc.detached back unprobed. The
+//     cascade and the retired-session sweep release from a row already
+//     closed or archived: a claim they kept would stay assigned to a seat
+//     that is gone, and only the dead-assignee sweep would probe it again,
+//     on a pool route alone;
+//   - every release clears the gc.detached of the claim it gives back, in
+//     the same write (releaseServed), so no reopened claim carries a probe.
 var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseKilledSeat:     {statuses: openOrStarted, startedKeeps: true, lane: laneDirect, seatRoute: true},
-	releaseDrainAck:       {statuses: startedOnly, lane: laneCarried, seatRoute: true},
+	releaseDrainAck:       {statuses: startedOnly, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
 	releaseCloseCascade:   {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
-	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
-	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true},
+	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true, detached: true},
+	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true, detached: true},
 	releaseRetired:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
+	releaseLadder:         {statuses: startedOnly, lane: laneCarried, seatRoute: true},
+	releaseStalled:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 }
 
 // Why a claim was kept or failed.
@@ -103,7 +133,7 @@ const (
 	keptStarted       = "started"
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
-	keptDetachedAlive = "detached-alive"
+	keptDetachedHeld  = "detached-held" // its gc.detached probe did not attest the runtime dead
 	failedBudget      = "budget"
 )
 
@@ -115,40 +145,104 @@ var errReleaseNoConfig = errors.New("release: no city config to judge routes by"
 // releaseSeat is what a release reads off the seat whose claims it gives back.
 type releaseSeat struct {
 	id, name, template string
-	fallback           string          // the seat's own route (template, else agent_name)
-	started            map[string]bool // claims the seat names as executing
+	fallback           string // the seat's own route (template, else agent_name)
+	// started is every claim the seat names as executing: its current bead
+	// and claim stamps and its started records. The killed-seat release (B1)
+	// keeps the seat's work when any of them is held.
+	started map[string]bool
+	// recorded is the claims the seat's started records name: its
+	// work_started cell (PHASE1-2 §6.4) and its execution_claim_started stamp,
+	// whichever incarnation wrote it. Narrower than started: the current
+	// claim stamps name a claim the hook handed out, not one a turn began,
+	// and the drain-ack keep (D5) follows the design's two sources only.
+	recorded map[string]bool
+	// recordedUnread: the work_started cell could not be read, so it may name
+	// any claim (PHASE1-2 §6.1: unreadable reads as every claim started).
+	recordedUnread bool
 }
 
 func releaseSeatOfBead(b beads.Bead) releaseSeat {
 	s := releaseSeat{id: b.ID, name: b.Metadata["session_name"], template: b.Metadata["template"], fallback: retiredSessionFallbackRoute(b)}
-	for _, key := range []string{sessionpkg.CurrentBeadIDKey, beadmeta.CurrentClaimBeadIDMetadataKey} {
-		if id := strings.TrimSpace(b.Metadata[key]); id != "" {
-			if s.started == nil {
-				s.started = make(map[string]bool, 2)
-			}
-			s.started[id] = true
-		}
-	}
+	s.nameStarted(b.Metadata[sessionpkg.CurrentBeadIDKey], b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey])
+	s.nameRecorded(startedClaimBead(b.Metadata[executionClaimStartedKey]))
+	s.nameWorkStarted(b.Metadata[sessionpkg.WorkStartedKey])
 	return s
 }
 
 func releaseSeatOfInfo(info sessionpkg.Info) releaseSeat {
 	s := releaseSeat{id: info.ID, name: info.SessionNameMetadata, template: info.Template, fallback: retiredSessionFallbackRouteInfo(info)}
-	for _, id := range []string{info.CurrentlyProcessingBeadID, info.CurrentClaimBeadID} {
+	s.nameStarted(info.CurrentlyProcessingBeadID, info.CurrentClaimBeadID)
+	s.nameRecorded(startedClaimBead(info.ExecutionClaimStarted))
+	s.nameWorkStarted(info.WorkStartedRaw)
+	return s
+}
+
+// nameStarted adds ids to the claims the seat names as executing.
+func (s *releaseSeat) nameStarted(ids ...string) {
+	for _, id := range ids {
 		if id = strings.TrimSpace(id); id != "" {
 			if s.started == nil {
-				s.started = make(map[string]bool, 2)
+				s.started = make(map[string]bool, len(ids))
 			}
 			s.started[id] = true
 		}
 	}
-	return s
+}
+
+// nameRecorded adds ids to the claims the seat's started records name, and
+// to those it names as executing.
+func (s *releaseSeat) nameRecorded(ids ...string) {
+	s.nameStarted(ids...)
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			if s.recorded == nil {
+				s.recorded = make(map[string]bool, len(ids))
+			}
+			s.recorded[id] = true
+		}
+	}
+}
+
+// nameWorkStarted adds the claims the seat's work_started cell names: the
+// claims its own hook handed to a turn (PHASE1-2 §6.4).
+func (s *releaseSeat) nameWorkStarted(raw string) {
+	cell, err := sessionpkg.DecodeWorkStarted(raw)
+	if err != nil {
+		s.recordedUnread = true
+		return
+	}
+	for _, e := range cell.Claims {
+		s.nameRecorded(e.Bead)
+	}
+}
+
+// keepsStarted reports whether the drain-ack release keeps b as the seat's
+// started work: its started records name it, or may, and it is on no
+// dispatch hold (hold:mayor, hold:external), whose claim goes back as it
+// always has (gas-kg6).
+func (s releaseSeat) keepsStarted(b beads.Bead) bool {
+	return (s.recordedUnread || s.recorded[strings.TrimSpace(b.ID)]) && !beadmeta.HasDispatchHold(b.Labels)
+}
+
+// startedClaimBead is the bead an execution_claim_started stamp names
+// ("<instance_token>|<bead>", startedValue), whichever incarnation wrote it.
+func startedClaimBead(stamp string) string {
+	_, bead, ok := strings.Cut(strings.TrimSpace(stamp), "|")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(bead)
 }
 
 // ReleaseOpts adjusts one release.
 type ReleaseOpts struct {
 	Late     bool      // add the close-time re-read of the seat's legs (the cascade)
 	Deadline time.Time // zero: none; a write past it fails with failedBudget
+	// RefuseStarted refuses the whole release when the claims read include
+	// one the seat keeps as started (releaseSeat.keepsStarted): nothing is
+	// released, and the outcome is Refused with those claims Kept. A seat's
+	// own drain-ack uses it: it must finish such work before it acks.
+	RefuseStarted bool
 }
 
 // ReleaseOutcome is what a release did with each claim.
@@ -156,6 +250,7 @@ type ReleaseOutcome struct {
 	Released, Kept, Failed []seatWorkHit
 	Why                    map[string]string // by bead ID, for Kept and Failed
 	Route                  map[string]string // by bead ID, for a claim kept unserved: the route it would take
+	Refused                bool              // RefuseStarted refused the release: Kept are the started claims
 }
 
 // strandedClaim is one claim kept because no lane serves it.
@@ -173,6 +268,19 @@ func (o ReleaseOutcome) Unserved() []strandedClaim {
 	return out
 }
 
+// HeldDetached counts the claims kept because their gc.detached probe did not
+// attest the runtime dead: work that may still run elsewhere, still assigned
+// to the seat.
+func (o ReleaseOutcome) HeldDetached() int {
+	held := 0
+	for _, k := range o.Kept {
+		if o.Why[k.bead.ID] == keptDetachedHeld {
+			held++
+		}
+	}
+	return held
+}
+
 // ReleaseClaims gives back the claims scope holds on sw's legs, as why's
 // policy says. A read that fails releases nothing on a startedKeeps path,
 // whose gate needs the whole seat; elsewhere what was read is released.
@@ -182,6 +290,19 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	if opts.Late {
 		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil)
 		claims, err = appendUniqueSeatWork(claims, late), errors.Join(err, lateErr)
+	}
+	// The refusal needs no config: it releases nothing, so a seat whose
+	// config did not load is still refused, not acked past its started work.
+	if opts.RefuseStarted {
+		out := ReleaseOutcome{Why: map[string]string{}, Route: map[string]string{}}
+		for _, c := range claims {
+			if seat.keepsStarted(c.bead) {
+				out.Kept, out.Why[c.bead.ID], out.Refused = append(out.Kept, c), keptStarted, true
+			}
+		}
+		if out.Refused {
+			return out, err
+		}
 	}
 	if sw.Legs().cfg == nil && len(claims) > 0 {
 		return ReleaseOutcome{}, errors.Join(err, errReleaseNoConfig)
@@ -215,6 +336,10 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 		fallback = seat.fallback
 	}
 	for _, c := range mine {
+		if p.startedNamedKeeps && seat.keepsStarted(c.bead) {
+			keep(c, keptStarted)
+			continue
+		}
 		if route, served := releaseRoute(cfg, c.bead, fallback, p.lane); !served {
 			keep(c, keptUnservedRoute)
 			out.Route[c.bead.ID] = route
@@ -225,29 +350,48 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 			out.Why[c.bead.ID] = failedBudget
 			continue
 		}
-		if p.pool {
-			assignee := strings.TrimSpace(c.bead.Assignee)
-			if !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, assignee) {
-				keep(c, keptMoved)
-				continue
-			}
-			allowed, clearDetached := detachedProbeAllowsOrphanRelease(c.bead)
-			if !allowed {
-				keep(c, keptDetachedAlive)
-				continue
-			}
-			if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
-				keep(c, keptMoved)
-				continue
-			}
-		} else if err := workAssignmentForStore(beads.WorkStore{Store: c.store}).ReleaseWorkBead(c.bead, fallback); err != nil {
+		switch kept, err := releaseServed(c, workAssignmentForStore(beads.WorkStore{Store: c.store}), p, fallback); {
+		case kept != "":
+			keep(c, kept)
+		case err != nil:
 			out.Failed = append(out.Failed, c)
 			out.Why[c.bead.ID] = err.Error()
-			continue
+		default:
+			out.Released = append(out.Released, c)
 		}
-		out.Released = append(out.Released, c)
 	}
 	return out
+}
+
+// releaseServed gives back one claim a lane serves, as p says: why it was
+// kept instead, or the error of a release that did not land. wa is the
+// claim's work store (c.store) as the assignment façade, which a release
+// outside the pool writes through. A pool release re-reads the claim live
+// first. Under p.detached a claim carrying gc.detached goes back only when
+// its probe attests the runtime dead. Every release clears the claim's
+// gc.detached in its one write: a probe left on the reopened bead would ride
+// into the claim's next assignment, where once its socket is gone it holds
+// the work for good.
+func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback string) (string, error) {
+	if p.pool && !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, strings.TrimSpace(c.bead.Assignee)) {
+		return keptMoved, nil
+	}
+	if p.detached {
+		if allowed, _ := detachedProbeAllowsOrphanRelease(c.bead); !allowed {
+			return keptDetachedHeld, nil
+		}
+	}
+	clearDetached := strings.TrimSpace(c.bead.Metadata[detachedProbeMetadataKey]) != ""
+	if p.pool {
+		if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
+			return keptMoved, nil
+		}
+		return "", nil
+	}
+	if clearDetached {
+		return "", wa.ReleaseDetachedWorkBead(c.bead, fallback)
+	}
+	return "", wa.ReleaseWorkBead(c.bead, fallback)
 }
 
 // releaseRoute is the lane a released claim is demanded and claimed through,

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -27,16 +28,16 @@ import (
 // a build where extmsg had stopped checking at all.
 func TestCityExtMsgServicesCannotReachTheRefusalPath(t *testing.T) {
 	work := splittest.NewWorkStore(t, "hq")
-	if _, err := extmsg.NewServicesWithSessionDirectory(work, session.NewStore(beads.SessionStore{Store: work})); err != nil {
+	if _, err := extmsg.NewServicesWithSessionDirectory(beadstest.Mail(work), session.NewStore(beadstest.Sessions(work))); err != nil {
 		t.Fatalf("the directory this caller builds was refused: %v", err)
 	}
 	// The store a class resolves to is never consulted for nil-ness, so the
 	// degenerate case reaches the same verdict — which is what makes the arm
 	// unreachable rather than merely unreached today.
-	if _, err := extmsg.NewServicesWithSessionDirectory(work, session.NewStore(beads.SessionStore{Store: nil})); err != nil {
+	if _, err := extmsg.NewServicesWithSessionDirectory(beadstest.Mail(work), session.NewStore(beadstest.Sessions(nil))); err != nil {
 		t.Fatalf("a directory wrapping no store was refused, so the fallback arm IS reachable: %v", err)
 	}
-	if _, err := extmsg.NewServicesWithSessionDirectory(work, nil); err == nil {
+	if _, err := extmsg.NewServicesWithSessionDirectory(beadstest.Mail(work), nil); err == nil {
 		t.Fatal("extmsg accepted a nil session directory; the pin above proves nothing")
 	}
 }
@@ -57,8 +58,8 @@ func TestCityExtMsgServicesCannotReachTheRefusalPath(t *testing.T) {
 // answer off the single record a bind produces: the binding bead's id carries
 // the mint prefix of whichever store created it, and SessionName is non-empty
 // only if the directory found the session bead, which exists in the sessions
-// store alone. cfg, cityPath and rec are the arguments resolveClassStore
-// documents as unread, and are passed empty here to keep that visible.
+// store alone. cityPath is empty: it names no worker site, so no class is
+// refused.
 func TestCityExtMsgServicesRouteEachClassToItsOwnStore(t *testing.T) {
 	work := splittest.NewWorkStore(t, "hq")
 	messaging := splittest.NewClassStore(t, config.BeadClassMessaging)
@@ -79,7 +80,7 @@ func TestCityExtMsgServicesRouteEachClassToItsOwnStore(t *testing.T) {
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	svc := newCityExtMsgServices(routes, work, nil, "", nil)
+	svc := newCityExtMsgServices(routes, work, "")
 	record, err := svc.Bindings.Bind(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "tester"}, extmsg.BindInput{
 		Conversation: extmsg.ConversationRef{
 			ScopeID:        "city-1",

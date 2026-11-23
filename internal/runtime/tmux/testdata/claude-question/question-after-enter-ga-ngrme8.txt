@@ -1,0 +1,14 @@
+other tool before it. Step 2: when it returns, print the raw answers you
+received as a fenced JSON block, then stop.
+────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────────
+←  ☒ Q1  ☐ Q2  ☐ Q3  ☐ Q4  ✔ Submit  →
+How should we handle configuration?
+❯ 1. Environment variables (Recommended)
+2. Config file Beta
+3. Command-line Gamma
+4. Type something.
+────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────────
+5. Chat about this
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

@@ -12,3 +12,6 @@ exec = "$PACK_DIR/assets/scripts/mol-dog-backup.sh"
 trigger = "cooldown"
 interval = "6h"
 timeout = "1800s"
+# Dolt-server work: never dispatched for a scope on another backend (http,
+# postgres, doltlite); gc reports it there as inapplicable, not failed.
+requires_backend = ["dolt"]

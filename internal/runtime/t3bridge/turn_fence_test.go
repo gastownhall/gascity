@@ -194,6 +194,59 @@ func TestObserveTurnStalledServerReturnsByTheDeadline(t *testing.T) {
 	}
 }
 
+// lateTimerContext is a context whose deadline has passed for the sockets while
+// its own timer has not run: Deadline reports the deadline, but Done and Err
+// wait lag longer. A context.WithTimeout is in this state for a moment after
+// its deadline, and the sockets' read and dial deadlines, computed from the
+// same instant, fire inside that moment.
+type lateTimerContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func newLateTimerContext(t *testing.T, timeout, lag time.Duration) context.Context {
+	t.Helper()
+	base, cancel := context.WithCancel(t.Context())
+	timer := time.AfterFunc(timeout+lag, cancel)
+	t.Cleanup(func() { timer.Stop(); cancel() })
+	return lateTimerContext{Context: base, deadline: time.Now().Add(timeout)}
+}
+
+func (c lateTimerContext) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func (c lateTimerContext) Err() error {
+	if c.Context.Err() != nil {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// Kills a multi-candidate WebSocket call that keeps the deadline only when the
+// caller's context timer happens to run before the sockets' own deadlines: the
+// candidates' i/o timeouts reach the caller as text, so the deadline must be
+// wrapped from the context's Deadline as well as its Err. The candidates'
+// failures stay in the message.
+func TestObserveTurnKeepsTheDeadlineWhenTheContextTimerRunsLate(t *testing.T) {
+	server := newTurnFenceServer(t)
+	server.setStalled()
+	p := newTurnFenceTestProvider(t, server)
+	t.Setenv("T3_BEARER_TOKEN", "")
+	defaultWSURLCandidates = []string{strings.Replace(server.wsURL(), "127.0.0.1", "localhost", 1)}
+
+	ctx := newLateTimerContext(t, 200*time.Millisecond, time.Second)
+	start := time.Now()
+	_, err := p.ObserveTurn(ctx, turnFenceSession)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("ObserveTurn took %s past a 200ms deadline", elapsed)
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stalled with a late context timer = %v, want ErrRuntimeUnavailable wrapping the deadline", err)
+	}
+	if !strings.Contains(err.Error(), "all T3 WebSocket candidates failed") || !strings.Contains(err.Error(), "i/o timeout") {
+		t.Fatalf("stalled = %v, want the candidates' own failures kept in the message", err)
+	}
+}
+
 // Kills an InterruptTurn that dispatches without the turn, reports a fence V1
 // cannot give, or leaves the cache naming the interrupted turn.
 func TestInterruptTurnDispatchesForTheCurrentTurn(t *testing.T) {
@@ -550,7 +603,7 @@ func TestInterruptTurnLostAnswerWaitsForTheRefence(t *testing.T) {
 	lossy := func(t *testing.T, seq ...map[string]interface{}) (server, other *t3BridgeTestServer, p *Provider) {
 		t.Helper()
 		server = newTurnFenceServer(t, seq...)
-		server.dropCommands(1)
+		server.dropNextCommand()
 		p = newTurnFenceTestProvider(t, server)
 		other = newTurnFenceServer(t, turnRunning("t1"))
 		defaultWSURLCandidates = []string{other.wsURL()}

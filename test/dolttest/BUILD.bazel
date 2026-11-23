@@ -4,9 +4,12 @@ go_library(
     name = "dolttest",
     srcs = [
         "dolttest.go",
+        "dolttest_unix.go",
+        "dolttest_windows.go",
         "owner.go",
         "owner_linux.go",
         "owner_other.go",
+        "sqlserver.go",
     ],
     importpath = "github.com/gastownhall/gascity/test/dolttest",
     visibility = ["//visibility:public"],
@@ -30,9 +33,23 @@ go_test(
         "dolttest_test.go",
         "main_test.go",
         "owner_test.go",
+        "sqlserver_integration_test.go",
+        "sqlserver_test.go",
         "testenv_import_test.go",
     ],
+    data = select({
+        "//:gotags_integration": ["@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt"],
+        "//conditions:default": [],
+    }),
     embed = [":dolttest"],
+    # The integration build's tests run dolt by name: GC_TEST_TOOL_PATHS puts
+    # the pinned binary first on PATH (internal/testenv).
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_TOOL_PATHS": "$(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+        },
+        "//conditions:default": {},
+    }),
     deps = [
         "//internal/pidutil",
         "//internal/testenv",

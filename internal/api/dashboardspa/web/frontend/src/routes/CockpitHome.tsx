@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import type {
   ListBodySessionResponse,
   RunsCensusOutputBody,

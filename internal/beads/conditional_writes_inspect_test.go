@@ -153,7 +153,7 @@ func TestInspectConditionalWritesUnstamped(t *testing.T) {
 func TestInspectConditionalWritesReportsAModeSourcedWrappersSource(t *testing.T) {
 	for _, revision := range []bool{true, false} {
 		engine := openSQLiteLayoutForTest(t, revision, false)
-		if err := StampOpenedStore(engine, "SQLiteStore", gate.Auto, nil, nil); err != nil {
+		if err := StampOpenedStore(engine, "SQLiteStore", gate.Auto, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		_, _, _ = ResolveConditionalWriter(engine) // let the probe memo settle

@@ -141,3 +141,35 @@ func TestAssignmentWriteAbsorbSourcesEdgesFromTheRowOnlyWhenCarried(t *testing.T
 		}
 	})
 }
+
+// A migrated binding holds rows under ids no namespace of its own claims (the
+// migration preserves ids), so ApplyEvent drops their events. A caller that has
+// PROVED the bead resident in this cache's backing applies it through
+// ApplyResidentEventSnapshot, which skips only the namespace filter.
+func TestApplyResidentEventSnapshotAppliesAProvenForeignResident(t *testing.T) {
+	t.Parallel()
+	cache, engine := primedSQLiteCache(t, beads.WithEventIDPrefixes("gcg", "gcs", "gcn", "gcnq"))
+	row, err := engine.CreateWithForeignID(beads.Bead{ID: "hq-901", Title: "relic", Type: "task"})
+	if err != nil {
+		t.Fatalf("CreateWithForeignID: %v", err)
+	}
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("re-Prime: %v", err)
+	}
+	row.Title = "renamed"
+	if err := engine.Update(row.ID, beads.UpdateOpts{Title: &row.Title}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	payload, err := beads.EncodeBeadEventPayload(row)
+	if err != nil {
+		t.Fatalf("encoding: %v", err)
+	}
+	cache.ApplyEventSnapshot("bead.updated", payload)
+	if got, _ := cache.Get(row.ID); got.Title != "relic" {
+		t.Fatalf("namespace-filtered ApplyEventSnapshot applied a foreign id: title %q", got.Title)
+	}
+	cache.ApplyResidentEventSnapshot("bead.updated", payload)
+	if got, _ := cache.Get(row.ID); got.Title != "renamed" {
+		t.Fatalf("ApplyResidentEventSnapshot left title %q, want renamed", got.Title)
+	}
+}

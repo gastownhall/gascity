@@ -3,8 +3,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "workrecord",
     srcs = [
+        "format.go",
         "gate.go",
         "repo_dir.go",
+        "workrecord.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/workrecord",
     visibility = ["//:__subpackages__"],
@@ -18,9 +20,11 @@ go_library(
 go_test(
     name = "workrecord_test",
     srcs = [
+        "format_test.go",
         "gate_test.go",
         "repo_dir_test.go",
         "testenv_import_test.go",
+        "workrecord_test.go",
     ],
     embed = [":workrecord"],
     deps = [

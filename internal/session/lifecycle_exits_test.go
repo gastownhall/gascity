@@ -163,6 +163,14 @@ func TestDecideSessionExitChurnBand(t *testing.T) {
 			}, ExitNone,
 		},
 		{
+			"operator kill suppresses churn",
+			func(f ExitFacts) ExitFacts {
+				f = withWokeAge(f, 90*time.Second)
+				f.SleepReason = string(SleepReasonKilled)
+				return f
+			}, ExitNone,
+		},
+		{
 			"subprocess provider suppresses churn",
 			func(f ExitFacts) ExitFacts {
 				f = withWokeAge(f, 90*time.Second)
@@ -212,7 +220,7 @@ func TestIsDeliberateSleepReason(t *testing.T) {
 	deliberate := []string{
 		"idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",
 		"city-stop", "user-hold", "wait-hold", "rate_limit", "failed-create",
-		"provider-terminal-error",
+		"provider-terminal-error", "killed",
 		" idle ",
 	}
 	for _, reason := range deliberate {
@@ -368,24 +376,31 @@ func TestChurnAccrualPatch(t *testing.T) {
 }
 
 func TestConversationResetPatch(t *testing.T) {
+	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
 	// Wake failures clear the config hash so the next start is a first
-	// start; churn clears only the conversation binding.
-	assertPatch(t, ConversationResetPatch(true), MetadataPatch{
+	// start; churn clears only the conversation binding. Both re-arm
+	// continuation_reset_pending passively, so both clear ResetCommittedAtKey
+	// (gascity#4067: a session that reaches this reset after an earlier
+	// RestartRequestPatch must not inherit its stale timestamp, and a passive
+	// reset is no restart handoff).
+	assertPatch(t, ConversationResetPatch(true, now), MetadataPatch{
 		"session_key":                "",
 		"resume_failures":            "",
 		"resume_launch":              "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",
+		ResetCommittedAtKey:          "",
 		// Priming markers share started_config_hash's lifetime (S19 Stage 2).
 		"primed_at":            "",
 		"priming_attempted_at": "",
 		"prompt_hash":          "",
 	})
-	assertPatch(t, ConversationResetPatch(false), MetadataPatch{
+	assertPatch(t, ConversationResetPatch(false, now), MetadataPatch{
 		"session_key":                "",
 		"resume_failures":            "",
 		"resume_launch":              "",
 		"continuation_reset_pending": "true",
+		ResetCommittedAtKey:          "",
 	})
 }
 

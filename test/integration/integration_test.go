@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 // Package integration provides end-to-end tests that exercise the real gc
 // binary against real session providers (tmux or subprocess). Tests validate
@@ -44,6 +44,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/internal/worker/builtin"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/gastownhall/gascity/test/toolhome"
@@ -256,7 +257,7 @@ func TestMain(m *testing.M) {
 	} else if bazeltest.IsBazel() {
 		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
 		// (http_archive of the same release the go-test CI installs).
-		if bd := runfilesBinaryAt("bd_bin_v1_3_1", "bd"); bd != "" {
+		if bd := runfilesBinaryAt("bd_bin_v1_3_4", "bd"); bd != "" {
 			realBDBinary = bd
 		}
 	} else {
@@ -303,7 +304,7 @@ func TestMain(m *testing.M) {
 		if err := writeExecShim(doltBinary, override); err != nil {
 			panic("integration: writing dolt shim: " + err.Error())
 		}
-	} else if resolved := runfilesBinaryAt("dolt_bin_v2_2_0", "dolt-linux-amd64/bin/dolt"); resolved != "" {
+	} else if resolved := runfilesBinaryAt("dolt_bin_v2_6_0", "dolt-linux-amd64/bin/dolt"); resolved != "" {
 		// Prebuilt pinned dolt from runfiles (bazel http_archive data dep);
 		// preferred over PATH so remote workers without a system dolt run the
 		// dolt-backed shapes.
@@ -669,7 +670,7 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.1"
+const wantPinnedBeadsModuleVersion = "v1.3.4"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
@@ -990,7 +991,7 @@ func isSubprocessTestLeaf(cmd, agentScript string) bool {
 	switch {
 	case strings.Contains(cmd, "bd ready --label=pool:polecat --unassigned --json --limit=1"):
 		return true
-	case strings.Contains(cmd, "bd ready --assignee=worker --json --limit=1"):
+	case strings.Contains(cmd, "bd ready --assignee=worker --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"):
 		return true
 	case strings.Contains(cmd, agentScript):
 		return true
@@ -1124,6 +1125,9 @@ func standaloneBDEnvForDir(dir string) []string {
 		"LC_ALL",
 		"TZ",
 		"DOLT_ROOT_PATH",
+		// Presence-only switch that stops dolt forking a detached
+		// `dolt send-metrics`; internal/testenv sets it for the test process.
+		"DOLT_DISABLE_EVENT_FLUSH",
 		integrationRealBDBinaryEnv,
 		integrationGCBinaryEnv,
 		integrationDoltBinaryEnv,
@@ -1473,6 +1477,26 @@ func filterEnv(env []string, name string) []string {
 	return result
 }
 
+// filterProviderCredentialEnv strips every provider credential env var --
+// each builtin provider's UpstreamAPIKeyEnv/UpstreamAuthTokenEnv, plus the
+// legacy GOOGLE_API_KEY alias some Gemini tooling also honors -- from env.
+// Derived from builtin.BuiltinProviders() rather than a hardcoded list so
+// this can't independently drift from the provider catalog it mirrors
+// (ga-5cokvb.1: a hand-transcribed copy of this same list already drifted
+// once, missing GitHub Copilot's COPILOT_GITHUB_TOKEN).
+func filterProviderCredentialEnv(env []string) []string {
+	env = filterEnv(env, "GOOGLE_API_KEY")
+	for _, spec := range builtin.BuiltinProviders() {
+		if spec.UpstreamAPIKeyEnv != "" {
+			env = filterEnv(env, spec.UpstreamAPIKeyEnv)
+		}
+		if spec.UpstreamAuthTokenEnv != "" {
+			env = filterEnv(env, spec.UpstreamAuthTokenEnv)
+		}
+	}
+	return env
+}
+
 // integrationEnv is the env of the suite's shared GC_HOME, testGCHome; TestMain
 // checks that one for a leaked platform supervisor unit after m.Run.
 func integrationEnv() []string {
@@ -1545,6 +1569,9 @@ func buildIntegrationEnv(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, integrationDoltBinaryEnv)
 	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
 	env = filterEnv(env, "GC_DOLT_INIT_LOCK_DIR")
+	env = filterEnv(env, "CODEX_HOME")
+	env = filterEnv(env, "CLAUDE_CONFIG_DIR")
+	env = filterProviderCredentialEnv(env)
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
 	}
@@ -1557,6 +1584,26 @@ func buildIntegrationEnv(gcHome, runtimeDir string, useDolt bool) []string {
 	// so a lock directory under it keeps the serialization the lock exists for.
 	env = append(env, "GC_DOLT_INIT_LOCK_DIR="+filepath.Join(gcHome, "dolt-init-locks"))
 	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
+	// Isolated, unauthenticated per-test provider homes (ga-5cokvb.1): every
+	// integration test gets its own empty CODEX_HOME/CLAUDE_CONFIG_DIR under
+	// gcHome rather than inheriting the real host's ~/.codex or ~/.claude, so
+	// a test that launches codex or claude can never read or write the
+	// operator's actual credentials. Left empty by default -- no auth.json
+	// seeded -- callers that need authenticated state opt in explicitly
+	// rather than relying on ambient host credentials. Fails closed (panics,
+	// matching findModuleRoot's convention in this file above) rather than
+	// silently falling through to an unset var, which would let the CLI
+	// default back to the real host directory.
+	codexHome := filepath.Join(gcHome, ".codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		panic("integration: creating isolated CODEX_HOME: " + err.Error())
+	}
+	env = append(env, "CODEX_HOME="+codexHome)
+	claudeConfigDir := filepath.Join(gcHome, ".claude")
+	if err := os.MkdirAll(claudeConfigDir, 0o700); err != nil {
+		panic("integration: creating isolated CLAUDE_CONFIG_DIR: " + err.Error())
+	}
+	env = append(env, "CLAUDE_CONFIG_DIR="+claudeConfigDir)
 	env = append(env, managedDoltTestModeEnv+"=1")
 	env = append(env, managedDoltTestParentEnv+"="+strconv.Itoa(os.Getpid()))
 	env = append(env, integrationRealBDBinaryEnv+"="+realBDBinary)
@@ -1628,6 +1675,22 @@ func isolateGCHomeEnv(env []string, gcHome string) []string {
 	return replaceEnv(env, supervisorIsolatedHomeEnv, "1")
 }
 
+// realHomeDir returns the home directory the passwd database records for the
+// current uid, never $HOME: os.UserHomeDir() returns $HOME, which a test
+// process may already have pointed at an isolated directory (integrationEnvFor
+// does so for gc's own HOME, see isolateGCHomeEnv). It fails closed -- an
+// isolation assertion must not compare against a guessed path.
+func realHomeDir() (string, error) {
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		return "", fmt.Errorf("looking up passwd entry for uid %d: %w", os.Getuid(), err)
+	}
+	if strings.TrimSpace(lu.HomeDir) == "" {
+		return "", fmt.Errorf("passwd entry for uid %d has no home directory", os.Getuid())
+	}
+	return lu.HomeDir, nil
+}
+
 func prependPath(paths ...string) string {
 	parts := make([]string, 0, len(paths))
 	for _, path := range paths {
@@ -1649,6 +1712,22 @@ func newIsolatedToolEnv(t *testing.T, useDolt bool) []string {
 
 func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 	t.Helper()
+	return newIsolatedCommandEnvWithBD(t, useDolt, false)
+}
+
+// newIsolatedCommandEnvDirectBD is newIsolatedCommandEnv on a Dolt city whose gc
+// processes, the supervisor's included, find the pinned bd itself first on PATH
+// rather than the file-store shim. For a Dolt-backed city the shim only execs
+// that bd, after paying its own start (a 120 MB binary, ~35 ms of package init),
+// on every bd call: a latency guard measures gc and bd, not the harness
+// (ga-3js1ayv).
+func newIsolatedCommandEnvDirectBD(t *testing.T) []string {
+	t.Helper()
+	return newIsolatedCommandEnvWithBD(t, true, true)
+}
+
+func newIsolatedCommandEnvWithBD(t *testing.T, useDolt, directBD bool) []string {
+	t.Helper()
 
 	gcHome, _, env := newIsolatedEnvRoot(t, useDolt)
 
@@ -1661,6 +1740,14 @@ func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 		path := filepath.Join(shimDir, name)
 		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatalf("writing %s shim: %v", name, err)
+		}
+	}
+	if directBD {
+		if realBDBinary == "" {
+			t.Fatal("direct bd requested but no pinned bd is staged")
+		}
+		if err := os.Symlink(realBDBinary, filepath.Join(shimDir, "bd")); err != nil {
+			t.Fatalf("staging the pinned bd first on PATH: %v", err)
 		}
 	}
 	envMap := parseEnvList(env)
@@ -2332,6 +2419,7 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
 
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "1")
 	t.Setenv("BEADS_DIR", "/host/beads")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_DOLT_HOST", "ambient-host")
@@ -2373,6 +2461,12 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	}
 	if got["XDG_RUNTIME_DIR"] != dir {
 		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], dir)
+	}
+	// internal/testenv sets this process-wide and the allowlist rebuilds the
+	// child env from scratch, so a standalone bd/dolt command forks a detached
+	// `dolt send-metrics` unless the allowlist carries it.
+	if got["DOLT_DISABLE_EVENT_FLUSH"] != "1" {
+		t.Fatalf("DOLT_DISABLE_EVENT_FLUSH = %q, want 1 carried into standalone bd env", got["DOLT_DISABLE_EVENT_FLUSH"])
 	}
 	for _, key := range []string{
 		"GC_DOLT",
@@ -2663,6 +2757,9 @@ func TestNewIsolatedToolEnvSeedsLocalDoltIdentity(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"metrics.disabled":"true"`) {
 		t.Fatalf("isolated dolt config leaves dolt usage metrics on (egress to eventsapi.dolthub.com): %s", string(data))
+	}
+	if !strings.Contains(string(data), `"versioncheck.disabled":"true"`) {
+		t.Fatalf("isolated dolt config leaves dolt's release version check on (a synchronous HTTPS fetch inside every `dolt version`): %s", string(data))
 	}
 }
 
