@@ -3308,12 +3308,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// no operator suspend covers any longer (a resume voids a
 					// suspended drain, CONTRACT v5 §12.2 #3 ruling 4). Clear it
 					// and leave the runtime up; a failed clear retries next tick.
+					// The clearDrain backstop runs only after a clean clear: it
+					// removes the ack's source even when it cannot remove the
+					// flag, and a bare flag reads as the agent's own ack.
 					if reconcilerOwnedAck && (userHoldDrainReleased(ackReason, infoByID[id]) ||
 						(alive && ackReason == drainSuspended && suspendDrainReleased(ackReason, operatorSuspendCause(cfg, cityPath, infoByID[id], suspState)))) {
 						if err := clearReconcilerDrainAckMetadata(sp, name); err != nil {
 							fmt.Fprintf(stderr, "session reconciler: clearing released %s drain ack for %s: %v\n", ackReason, name, err) //nolint:errcheck
+						} else {
+							_ = dops.clearDrain(name)
 						}
-						_ = dops.clearDrain(name)
 						if dt != nil {
 							dt.clearIdleProbe(id)
 							dt.remove(id)

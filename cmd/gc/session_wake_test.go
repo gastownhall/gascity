@@ -8,6 +8,7 @@ import (
 	"log"
 	"maps"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -927,6 +928,45 @@ func TestCancelSessionDrain_ClearsAck(t *testing.T) {
 	ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK")
 	if ack != "" {
 		t.Errorf("GC_DRAIN_ACK = %q, want empty (should be cleared on cancel)", ack)
+	}
+}
+
+// A refused GC_DRAIN_ACK removal leaves the ack whole: stripped of its
+// provenance the flag would read as the agent's own ack, which the next tick
+// honors with a stop. Once the flag is gone, a refused provenance key keeps
+// only itself.
+func TestClearReconcilerDrainAckMetadataKeepsTheAckWholeWhileTheFlagStays(t *testing.T) {
+	keys := []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	}
+	for _, tc := range []struct {
+		refused string
+		kept    []string
+	}{
+		{refused: "GC_DRAIN_ACK", kept: keys},
+		{refused: reconcilerDrainAckReasonKey, kept: []string{reconcilerDrainAckReasonKey}},
+	} {
+		t.Run(tc.refused, func(t *testing.T) {
+			sp := runtime.NewFake()
+			for _, key := range keys {
+				mustSetMeta(t, sp, "worker", key, "v")
+			}
+			sp.RemoveMetaErrors["worker"] = map[string]error{tc.refused: errors.New("remove denied")}
+
+			if err := clearReconcilerDrainAckMetadata(sp, "worker"); err == nil {
+				t.Fatal("clearReconcilerDrainAckMetadata = nil, want the refused removal reported")
+			}
+			for _, key := range keys {
+				got, _ := sp.GetMeta("worker", key)
+				if kept, want := got != "", slices.Contains(tc.kept, key); kept != want {
+					t.Errorf("%s = %q after the clear: kept %v, want kept %v", key, got, kept, want)
+				}
+			}
+		})
 	}
 }
 

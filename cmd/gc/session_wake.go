@@ -437,6 +437,12 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 	return nil
 }
 
+// clearReconcilerDrainAckMetadata removes name's GC_DRAIN_ACK and then its
+// provenance (source, requester stamp, reason, generation). When the flag's
+// removal is refused it returns before touching the provenance. A flag that
+// outlives its source reads as the agent's own ack, which the next tick
+// honors with a stop. A whole ack stays attributed to its writer, so the
+// caller's next pass decides it again and retries the clear.
 func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 	if sp == nil {
 		return fmt.Errorf("session provider is nil")
@@ -458,6 +464,9 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 			// lags, and the log above reports that.
 			if !runtime.OnlyMetadataNotMirrored(err) {
 				errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+				if key == "GC_DRAIN_ACK" {
+					break // the flag is still set: keep its provenance with it
+				}
 			}
 		}
 	}

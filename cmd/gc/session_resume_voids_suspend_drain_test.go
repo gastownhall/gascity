@@ -162,6 +162,30 @@ func (f *suspendDrainFixture) armSuspendDrain(t *testing.T) {
 	}
 }
 
+// dropAck removes the armed ack from the runtime, as a write that never
+// landed would leave it. Only the tracked drain remains, so the armed-ack
+// release cannot fire and the row's forward pass decides the drain.
+func (f *suspendDrainFixture) dropAck(t *testing.T) {
+	t.Helper()
+	if err := clearReconcilerDrainAckMetadata(f.env.sp, f.name); err != nil {
+		t.Fatalf("clearReconcilerDrainAckMetadata: %v", err)
+	}
+}
+
+// suspendFixtureAgent suspends the fixture's agent in config.
+func suspendFixtureAgent(_ *testing.T, f *suspendDrainFixture) {
+	f.env.cfg.Agents[0].Suspended = true
+}
+
+// suspendFixtureRig suspends the fixture's rig through suspensionstate.
+func suspendFixtureRig(t *testing.T, f *suspendDrainFixture) {
+	t.Helper()
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, f.env.city, f.rig, &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+}
+
 // assertArmed asserts the suspend tick's premise for the fixture's row.
 func (f *suspendDrainFixture) assertArmed(t *testing.T) {
 	t.Helper()
@@ -208,6 +232,20 @@ func (f *suspendDrainFixture) assertReleased(t *testing.T, stopsBefore int) {
 	}
 }
 
+// assertAckStillOwned asserts the runtime still carries the armed suspended
+// ack with its provenance, so the next tick reads it as the controller's
+// suspended ack, not as the agent's own.
+func (f *suspendDrainFixture) assertAckStillOwned(t *testing.T) {
+	t.Helper()
+	if ack, err := f.env.sp.GetMeta(f.name, "GC_DRAIN_ACK"); err != nil || ack != "1" {
+		t.Fatalf("GC_DRAIN_ACK = %q, err %v after the refused clear; want it armed for the retry", ack, err)
+	}
+	if reason, owned := reconcilerDrainAckMatchesSessionInfo(f.env.sessionInfo(f.id), f.env.sp, f.name); !owned || reason != drainSuspended {
+		t.Fatalf("ack read as (reason %q, controller-owned %v) after the refused clear, want (%q, true): a flag without its provenance reads as the agent's own ack",
+			reason, owned, drainSuspended)
+	}
+}
+
 // assertHonored fails unless the tick honored the suspended drain's ack: the
 // row was marked for the drain-ack stop or the runtime was stopped.
 func (f *suspendDrainFixture) assertHonored(t *testing.T, stopsBefore int) {
@@ -245,6 +283,24 @@ func TestReconcileSessionBeads_SuspendDrainAckStillHonoredWhileCitySuspended(t *
 	f.assertHonored(t, stops)
 }
 
+// AC-2 (guard, forward pass): with the ack gone only the tracked drain
+// remains, and while the city stays suspended the row's forward pass keeps
+// it: the drain is neither released nor begun again.
+func TestReconcileSessionBeads_TrackedSuspendDrainKeptWhileCitySuspended(t *testing.T) {
+	f := newSuspendDrainFixture(t)
+	f.armSuspendDrain(t)
+	f.dropAck(t)
+
+	f.tick(t)
+
+	if ds := f.env.dt.get(f.id); ds == nil || ds.reason != drainSuspended {
+		t.Fatalf("drain = %+v, want the suspended drain kept\nstdout:\n%s", ds, f.env.stdout.String())
+	}
+	if got := strings.Count(f.env.stdout.String(), "Draining session '"+f.name+"': "+drainSuspended); got != 1 {
+		t.Fatalf("suspend drain began %d times, want exactly 1\nstdout:\n%s", got, f.env.stdout.String())
+	}
+}
+
 // AC-3 (guard): a resumed city whose narrower operator suspend still covers
 // the row keeps the suspended drain and honors its ack.
 func TestReconcileSessionBeads_ResumeKeepsSuspendDrainUnderNarrowerSuspend(t *testing.T) {
@@ -253,15 +309,8 @@ func TestReconcileSessionBeads_ResumeKeepsSuspendDrainUnderNarrowerSuspend(t *te
 		rig     string
 		suspend func(t *testing.T, f *suspendDrainFixture)
 	}{
-		{name: "agent", suspend: func(_ *testing.T, f *suspendDrainFixture) {
-			f.env.cfg.Agents[0].Suspended = true
-		}},
-		{name: "rig", rig: "r1", suspend: func(t *testing.T, f *suspendDrainFixture) {
-			suspended := true
-			if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, f.env.city, f.rig, &suspended); err != nil {
-				t.Fatalf("SetRigSuspended: %v", err)
-			}
-		}},
+		{name: "agent", suspend: suspendFixtureAgent},
+		{name: "rig", rig: "r1", suspend: suspendFixtureRig},
 		// The hold lands after the drain began, which moves the row off the
 		// tracked drain's basis and voids it on its own; the controller that
 		// restarted since has no basis, so only the release decides the ack.
@@ -282,6 +331,35 @@ func TestReconcileSessionBeads_ResumeKeepsSuspendDrainUnderNarrowerSuspend(t *te
 			f.tick(t)
 
 			f.assertHonored(t, stops)
+		})
+	}
+}
+
+// AC-3 (guard, forward pass): with the ack gone only the tracked drain
+// remains, so the row's forward pass decides it; a narrower operator suspend
+// that still covers the row keeps the suspended drain after a city resume.
+func TestReconcileSessionBeads_ResumeKeepsTrackedSuspendDrainUnderNarrowerSuspend(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rig     string
+		suspend func(t *testing.T, f *suspendDrainFixture)
+	}{
+		{name: "agent", suspend: suspendFixtureAgent},
+		{name: "rig", rig: "r1", suspend: suspendFixtureRig},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSuspendDrainFixtureInRig(t, tc.rig)
+			f.armSuspendDrain(t)
+			f.dropAck(t)
+			tc.suspend(t, f)
+
+			f.setCitySuspended(t, false)
+			f.tick(t)
+
+			if ds := f.env.dt.get(f.id); ds == nil || ds.reason != drainSuspended {
+				t.Fatalf("drain = %+v, want the suspended drain kept while the %s suspend covers the row\nstdout:\n%s",
+					ds, tc.name, f.env.stdout.String())
+			}
 		})
 	}
 }
@@ -337,44 +415,54 @@ func TestReconcileSessionBeads_ResumeClearsUntrackedSuspendAckAfterControllerRes
 	f.assertReleased(t, stops)
 }
 
-// AC-4 (edge): a refused ack clear is logged, leaves the runtime up with the
-// ack armed, and the next tick's release retries the clear without a stop.
+// AC-4 (edge): a refused ack clear is logged and leaves the runtime up with
+// the ack armed and still the controller's, so every next tick's release
+// retries the clear without a stop. A refusal of the flag's removal alone
+// must not strip its provenance: a bare GC_DRAIN_ACK reads as the agent's own
+// ack, which the next tick honors with a stop.
 func TestReconcileSessionBeads_ResumeReleaseSurvivesFailedAckClear(t *testing.T) {
-	f := newSuspendDrainFixture(t)
-	f.armSuspendDrain(t)
-	stops := f.env.sp.CountCalls("Stop", f.name)
-	// Every key the clear removes is refused, so no partial clear can strand
-	// the ack as a bare legacy flag.
-	ackKeys := []string{
-		"GC_DRAIN_ACK",
-		reconcilerDrainAckSourceKey,
-		drainAckRequesterInstanceTokenKey,
-		reconcilerDrainAckReasonKey,
-		reconcilerDrainAckGenerationKey,
-	}
-	f.env.sp.RemoveMetaErrors[f.name] = map[string]error{}
-	for _, key := range ackKeys {
-		f.env.sp.RemoveMetaErrors[f.name][key] = errors.New("remove denied")
-	}
+	for _, tc := range []struct {
+		name    string
+		refused []string
+	}{
+		{name: "every ack key", refused: []string{
+			"GC_DRAIN_ACK",
+			reconcilerDrainAckSourceKey,
+			drainAckRequesterInstanceTokenKey,
+			reconcilerDrainAckReasonKey,
+			reconcilerDrainAckGenerationKey,
+		}},
+		{name: "only the flag", refused: []string{"GC_DRAIN_ACK"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSuspendDrainFixture(t)
+			f.armSuspendDrain(t)
+			stops := f.env.sp.CountCalls("Stop", f.name)
+			f.env.sp.RemoveMetaErrors[f.name] = map[string]error{}
+			for _, key := range tc.refused {
+				f.env.sp.RemoveMetaErrors[f.name][key] = errors.New("remove denied")
+			}
 
-	f.setCitySuspended(t, false)
-	f.tick(t)
+			f.setCitySuspended(t, false)
+			// The resume tick's release and its first retry are both refused.
+			for range 2 {
+				f.tick(t)
+				f.assertNotStopped(t, stops)
+				f.assertAckStillOwned(t)
+				f.env.clk.Time = f.env.clk.Time.Add(time.Minute)
+			}
+			if want := "clearing released " + drainSuspended + " drain ack for " + f.name; !strings.Contains(f.env.stderr.String(), want) {
+				t.Fatalf("stderr lacks %q: the failed clear must be logged\nstderr:\n%s", want, f.env.stderr.String())
+			}
 
-	f.assertNotStopped(t, stops)
-	if want := "clearing released " + drainSuspended + " drain ack for " + f.name; !strings.Contains(f.env.stderr.String(), want) {
-		t.Fatalf("stderr lacks %q: the failed clear must be logged\nstderr:\n%s", want, f.env.stderr.String())
-	}
-	if ack, err := f.env.sp.GetMeta(f.name, "GC_DRAIN_ACK"); err != nil || ack != "1" {
-		t.Fatalf("GC_DRAIN_ACK = %q, err %v after the refused clear; want it armed for the retry", ack, err)
-	}
+			for _, key := range tc.refused {
+				delete(f.env.sp.RemoveMetaErrors[f.name], key)
+			}
+			f.tick(t)
 
-	for _, key := range ackKeys {
-		delete(f.env.sp.RemoveMetaErrors[f.name], key)
+			f.assertReleased(t, stops)
+		})
 	}
-	f.env.clk.Time = f.env.clk.Time.Add(time.Minute)
-	f.tick(t)
-
-	f.assertReleased(t, stops)
 }
 
 // AC-4 (edge): the release reads the ack metadata and suspension state, not
@@ -448,9 +536,7 @@ func TestReconcileSessionBeads_ResumeReplacementSurvivesSuspendDrainOnDestroyedR
 func TestReconcileSessionBeads_ResumeVoidsSuspendDrainUnderAssignedWorkDemand(t *testing.T) {
 	f := newSuspendDrainFixture(t)
 	f.armSuspendDrain(t)
-	if err := clearReconcilerDrainAckMetadata(f.env.sp, f.name); err != nil {
-		t.Fatalf("clearReconcilerDrainAckMetadata: %v", err)
-	}
+	f.dropAck(t)
 	task, err := f.env.store.Create(beads.Bead{Title: "assigned task", Type: "task"})
 	if err != nil {
 		t.Fatalf("Create(task): %v", err)
