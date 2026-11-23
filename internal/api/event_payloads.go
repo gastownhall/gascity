@@ -521,11 +521,31 @@ type SessionDrainAckedWithAssignedWorkPayload struct {
 	BeadID     string `json:"bead_id" doc:"ID of the work bead still holding this session as its assignee."`
 	Template   string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
 	BeadStatus string `json:"bead_status,omitempty" doc:"Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim)."`
-	Reason     string `json:"reason,omitempty" doc:"Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land."`
+	Reason     string `json:"reason,omitempty" doc:"Short diagnostic context naming the shape of the kept work: 'started_claim_kept' (the row kept an in_progress claim its own started records name), 'restart_requested' (the cycle completed a restart request), or 'drain_acked_with_assigned_work' (anything else: an open preassigned row, a claim the row never started, a started claim on a dispatch hold)."`
 }
 
 // IsEventPayload marks SessionDrainAckedWithAssignedWorkPayload as an events.Payload variant.
 func (SessionDrainAckedWithAssignedWorkPayload) IsEventPayload() {}
+
+// The reason values a SessionDrainAckedWithAssignedWorkPayload carries in
+// its reserved Reason field, naming the shape of the work the drain-ack
+// finalize kept. The emission sites choose mechanically from the row and
+// the kept bead (cmd/gc drainAckAnomalyReason); recovery policy stays with
+// pack-side subscribers.
+const (
+	// DrainAckReasonAssignedWork is the generic shape: the kept bead is an
+	// open preassigned row, or an in_progress claim the row never started
+	// (a live sibling's), or a started claim on a dispatch hold.
+	DrainAckReasonAssignedWork = "drain_acked_with_assigned_work"
+	// DrainAckReasonStartedClaimKept is the loop shape: the row kept an
+	// in_progress claim its own started records name, on no dispatch hold
+	// — the claim the drain-ack release keeps and the OD9 fence refuses a
+	// seat's own ack over.
+	DrainAckReasonStartedClaimKept = "started_claim_kept"
+	// DrainAckReasonRestartRequested is the designed handoff: the finalized
+	// cycle completed a restart request, whatever work it kept.
+	DrainAckReasonRestartRequested = "restart_requested"
+)
 
 // SessionDrainAckedWithAssignedWorkPayloadJSON builds the JSON wire form for
 // attachment to an events.Event.Payload field. Template, BeadStatus, and

@@ -572,7 +572,7 @@ func stopFacts(v txView, out stopped, kept *beads.Bead) effectFacts {
 		f.Events = append(f.Events, events.Event{
 			Type: events.SessionDrainAckedWithAssignedWork, Actor: "gc", Subject: template,
 			Message: "session drain-acked while still assigned to work bead", SessionID: v.Row.ID,
-			Payload: api.SessionDrainAckedWithAssignedWorkPayloadJSON(v.Row.ID, kept.ID, template, kept.Status, "drain_acked_with_assigned_work"),
+			Payload: api.SessionDrainAckedWithAssignedWorkPayloadJSON(v.Row.ID, kept.ID, template, kept.Status, drainAckAnomalyReason(v.Row, *kept)),
 		})
 	}
 	return f
