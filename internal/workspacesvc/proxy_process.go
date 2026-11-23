@@ -161,19 +161,16 @@ func (p *proxyProcessInstance) Status() Status {
 }
 
 func (p *proxyProcessInstance) HandleHTTP(w http.ResponseWriter, r *http.Request, subpath string) bool {
+	// A generation that has finished starting is proxied whatever its last
+	// health probe reported: the probe result is published through Status,
+	// and a process that cannot answer is reported by the proxy itself (502).
 	p.mu.Lock()
-	// Proxy whenever a live process has finished starting. A failed health
-	// probe marks the service degraded but leaves the process running, and only
-	// the next controller tick re-probes it; refusing requests on that cached
-	// verdict turns one slow probe into minutes of 503s to a process that is
-	// serving. A process that is really wedged still fails the request, through
-	// the ReverseProxy error handler or the caller's own timeout.
-	ready := !p.closed && p.cmd != nil && p.status.LocalState != "starting"
+	routable := !p.closed && p.cmd != nil && p.status.LocalState != "starting"
 	reason := p.status.Reason
 	transport := p.transport
 	p.mu.Unlock()
 
-	if !ready {
+	if !routable {
 		http.Error(w, serviceUnavailableMessage(reason), http.StatusServiceUnavailable)
 		return true
 	}
