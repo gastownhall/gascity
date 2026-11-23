@@ -1242,6 +1242,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Managed Claude sessions start with prompt suggestions off (#7973).**
+  The generated `.gc/settings.json` now sets `promptSuggestionEnabled: false`
+  beside `awaySummaryEnabled: false`. Claude Code otherwise fills an idle
+  session's input box with a dim suggested prompt, which `gc session peek`
+  and plain `tmux capture-pane` show as if it were typed input. Existing
+  cities pick the default up on their next install or launch, and generated
+  settings keep their other custom keys. A city that wants suggestions sets
+  `"promptSuggestionEnabled": true` in `.claude/settings.json`; a
+  `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` environment variable still overrides
+  either setting.
+
 - **API: `GET /v0/city/{cityName}/orders/history` and
   `GET /v0/city/{cityName}/order/history/{bead_id}` report `created_at` with
   sub-second precision (RFC 3339 with nanoseconds) (#8453).** They used to
@@ -1387,6 +1398,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --inject` stays.
 
 ### Fixed
+
+- **A pool seat holding an unstarted claim was drained without a single
+  nudge when its template set no `nudge` (#7973).** The execution backstop
+  had nothing to send, so it reported `execution.step_stalled` with 0
+  attempts and drained the seat as soon as the grace window ran out. A known
+  pool template with no `nudge` now gets `Run gc hook --claim --json now; it
+  returns the work assigned to you. Execute it.`, with no `--drain-ack`,
+  under the same three-attempt budget, backoff and started-work protection;
+  the event and drain follow only once those attempts are spent. A session
+  whose template names no configured agent still escalates at once. To tell
+  a person, have a pack order fire on the event (`trigger = "event"`,
+  `on = "execution.step_stalled"`).
 
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues

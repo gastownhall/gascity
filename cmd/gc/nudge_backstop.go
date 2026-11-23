@@ -352,9 +352,10 @@ func runNudgeBackstop(
 			}
 			content := pred.content(*s)
 			if content == "" {
-				// Nothing is deliverable for this session. `agent.Nudge` is
-				// optional and pool templates routinely leave it unset, so this
-				// is the common case, not the exotic one. Skipping silently
+				// Nothing is deliverable for this session: a predicate with no
+				// default for an unset `agent.Nudge` (configured-only content),
+				// or, for the execution backstop, a template that names no
+				// configured agent (claimedClaimNudgeFor). Skipping silently
 				// parks the state machine on its observe marker forever: no
 				// attempt is ever reserved, the cap is never reached, and the
 				// predicate's terminal action never runs — which for the

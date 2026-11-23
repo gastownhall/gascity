@@ -531,16 +531,19 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 // content is the agent's configured claim nudge. A seat whose stamp shows the
 // marker's claim started this incarnation gets the held-claim default when
 // none is configured (heldClaimNudgeFor: the started-rung text, which names
-// the claim and carries no --drain-ack, mc-ilr3b): its escalation is vetoed, so with nothing to
-// send it would wait at its prompt forever. A seat seen started on a pass whose stamp write failed gets no
-// default; escalatesNext holds it until the stamp lands. A started seat whose
-// template names no configured agent gets no default either, and is held as
-// executing, as in the stamp-failure case.
+// the claim and carries no --drain-ack, mc-ilr3b): its escalation is vetoed, so
+// with nothing to send it would wait at its prompt forever. Any other seat
+// whose template names a configured agent gets the ladder's claim line when
+// none is configured (claimedClaimNudgeFor), which carries no --drain-ack
+// either, so a seat seen started on a pass whose stamp write failed is nudged
+// safely while escalatesNext holds it. A seat whose template names no
+// configured agent gets no default and escalates at once, or is held as
+// executing when it was seen started.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
 	if p.markedStarted(s, s.Metadata[executionClaimNudgeWorkKey]) {
 		return heldClaimNudgeFor(p.cfg, s, s.Metadata[executionClaimNudgeWorkKey])
 	}
-	return claimNudgeFor(p.cfg, s)
+	return claimedClaimNudgeFor(p.cfg, s)
 }
 
 // revalidate re-reads the claim through the owning store's authoritative live
@@ -771,8 +774,9 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdou
 	}, executionClaimNudgeLabel, stdout) {
 		return
 	}
-	// Report the attempts actually DELIVERED, not the cap. An agent with no
-	// configured nudge escalates at 0/3 having never been contacted, and an
+	// Report the attempts actually DELIVERED, not the cap. A seat whose
+	// template names no configured agent has no nudge to deliver and
+	// escalates at 0/3 having never been contacted, and an
 	// operator reading "after 3 attempts" there would go looking for three
 	// nudges that were never sent.
 	attempts := atoiOr0(s.Metadata[executionClaimNudgeCountKey])

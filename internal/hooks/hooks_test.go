@@ -167,8 +167,90 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(s, `"awaySummaryEnabled": false`) {
 		t.Error("claude settings should disable awaySummaryEnabled to prevent idle stalls (gh-1962)")
 	}
+	if got, ok := claudeTopLevelSetting(t, runtimeData, "promptSuggestionEnabled"); !ok || got != false {
+		t.Errorf("claude settings promptSuggestionEnabled = %#v (present %v), want Boolean false so suggestion text never sits in an idle input box (gh-7973)", got, ok)
+	}
+	if got, ok := claudeTopLevelSetting(t, runtimeData, "awaySummaryEnabled"); !ok || got != false {
+		t.Errorf("claude settings awaySummaryEnabled = %#v (present %v), want Boolean false (gh-1962)", got, ok)
+	}
 	if !strings.Contains(s, `$HOME/go/bin`) {
 		t.Error("claude hook commands should include PATH export")
+	}
+}
+
+// claudeTopLevelSetting decodes Claude settings data and returns the value of
+// its top-level key, and whether the key is present.
+func claudeTopLevelSetting(t *testing.T, data []byte, key string) (any, bool) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decoding Claude settings: %v\n%s", err, data)
+	}
+	v, ok := doc[key]
+	return v, ok
+}
+
+// TestInstallClaudeKeepsCityPromptSuggestionOptIn: the managed default turns
+// prompt suggestions off, but a city that opts back in through
+// .claude/settings.json keeps its explicit choice (gh-7973).
+func TestInstallClaudeKeepsCityPromptSuggestionOptIn(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.claude/settings.json"] = []byte(`{"promptSuggestionEnabled": true}`)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtimeData := fs.Files["/city/.gc/settings.json"]
+	if got, ok := claudeTopLevelSetting(t, runtimeData, "promptSuggestionEnabled"); !ok || got != true {
+		t.Fatalf("promptSuggestionEnabled = %#v (present %v), want the city's explicit true:\n%s", got, ok, runtimeData)
+	}
+}
+
+// TestInstallClaudeUpgradeAddsPromptSuggestionDefault: a city upgraded from a
+// release whose generated .gc/settings.json predates the prompt-suggestion
+// default (and carries custom data) gains Boolean false on install, keeps its
+// custom data, and a second install leaves the file unchanged (gh-7973).
+func TestInstallClaudeUpgradeAddsPromptSuggestionDefault(t *testing.T) {
+	const runtimePath = "/city/.gc/settings.json"
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	var old map[string]any
+	if err := json.Unmarshal(current, &old); err != nil {
+		t.Fatalf("decoding embedded Claude settings: %v", err)
+	}
+	delete(old, "promptSuggestionEnabled")
+	old["customTopLevel"] = map[string]any{"keep": "me"}
+	oldData, err := overlay.MarshalCanonicalJSON(old)
+	if err != nil {
+		t.Fatalf("encoding previous generated settings: %v", err)
+	}
+
+	fs := fsys.NewFake()
+	fs.Files[runtimePath] = oldData
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	first := append([]byte(nil), fs.Files[runtimePath]...)
+	if got, ok := claudeTopLevelSetting(t, first, "promptSuggestionEnabled"); !ok || got != false {
+		t.Fatalf("promptSuggestionEnabled after upgrade = %#v (present %v), want Boolean false:\n%s", got, ok, first)
+	}
+	custom, ok := claudeTopLevelSetting(t, first, "customTopLevel")
+	if m, isMap := custom.(map[string]any); !ok || !isMap || m["keep"] != "me" {
+		t.Fatalf("customTopLevel after upgrade = %#v (present %v), want the city's custom data preserved:\n%s", custom, ok, first)
+	}
+	if got, ok := claudeTopLevelSetting(t, first, "awaySummaryEnabled"); !ok || got != false {
+		t.Fatalf("awaySummaryEnabled after upgrade = %#v (present %v), want Boolean false", got, ok)
+	}
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if second := fs.Files[runtimePath]; !bytes.Equal(second, first) {
+		t.Fatalf("second Install changed %s:\nfirst:\n%s\nsecond:\n%s", runtimePath, first, second)
 	}
 }
 
