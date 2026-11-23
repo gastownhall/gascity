@@ -645,7 +645,10 @@ export function BeadsPage() {
               >
                 {filteredDispatchAgents.map((agent) => (
                   <option key={agent.name} value={agent.name}>
-                    {agent.display_name ?? agent.name}
+                    {/* display_name is the provider's label (e.g. "Claude Code"), not the agent's. */}
+                    {agent.display_name && agent.display_name !== agent.name
+                      ? `${agent.name} (${agent.display_name})`
+                      : agent.name}
                   </option>
                 ))}
               </select>

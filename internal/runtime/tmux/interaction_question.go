@@ -4,8 +4,12 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // ---------------------------------------------------------------------------
@@ -43,6 +47,13 @@ import (
 // allowed, anchored higher up by "Review your answers" or the ✔ Submit tab
 // strip. One Enter on this page submits every answer.
 //
+// An option's number key answers a single-select page, but not two other
+// forms of it, which are answered in the terminal (TerminalOnly). A
+// multi-select page draws a checkbox before each label ("❯ 1. [ ] Cheese",
+// "[✔]" once ticked; testdata/claude-question/question-multiselect-*.txt) and
+// the key ticks that option in place. A page whose options carry previews
+// adds "n to add notes" to its footer, and there the key only moves the focus.
+//
 // The dialog is live only while the footer is the last thing on screen. Once
 // it is answered the frame stays in scrollback with the agent's output (or
 // the idle composer) beneath it, so a footer with anything below it is
@@ -71,6 +82,20 @@ var (
 	// carries the cursor glyph. Focus in the "Type something." row draws no
 	// cursor, so the glyph is a display field too.
 	askUserQuestionOptionRe = regexp.MustCompile(`^(❯\s+)?(\d+)\.\s*(.*)$`)
+
+	// askUserQuestionCheckboxRe matches the checkbox a multi-select page
+	// draws before an option's label: "[ ]", or "[✔]" once ticked.
+	askUserQuestionCheckboxRe = regexp.MustCompile(`^\[.\](?:\s+|$)`)
+)
+
+// askUserQuestionPreviewHint is the hint the select footer carries when the
+// page's options show previews, which a number key only focuses.
+const askUserQuestionPreviewHint = "to add notes"
+
+// Why a number key does not answer a question page (TerminalOnly).
+const (
+	questionMultiSelect  = "a multi-select page, where an option's key ticks it in place"
+	questionWithPreviews = "a page whose options show previews, where an option's key only focuses it"
 )
 
 const (
@@ -93,11 +118,22 @@ const (
 type parsedQuestion struct {
 	Header   string
 	Question string
-	// Choices are the numbered options' labels in pane order.
+	// Choices are the numbered options' labels in pane order, without a
+	// multi-select page's checkboxes.
 	Choices []string
+	// Numbers are the options' numbers, parallel to Choices: the key that
+	// selects each.
+	Numbers []int
 	// Focused is the label of the highlighted option, empty when the dialog
 	// draws no cursor.
 	Focused string
+	// Summary is a review page's rows above its prompt, top first: each
+	// question and the answer it got. Every review page asks the same
+	// thing, so these rows are what tell one questionnaire's apart.
+	Summary []string
+	// TerminalOnly, when set, says why an option's number key does not
+	// answer the page: it is answered in the terminal instead.
+	TerminalOnly string
 }
 
 // parseQuestionDialog returns the open AskUserQuestion dialog the pane lines
@@ -120,6 +156,9 @@ func parseQuestionPage(lines []string) *parsedQuestion {
 	}
 
 	q := &parsedQuestion{}
+	if strings.Contains(joinTrimmedRows(block[footer:]), askUserQuestionPreviewHint) {
+		q.TerminalOnly = questionWithPreviews
+	}
 	header := -1
 	for i := footer - 1; i >= 0 && footer-i <= questionDialogMaxRows; i-- {
 		if askUserQuestionHeaderRe.MatchString(block[i]) {
@@ -146,7 +185,15 @@ func parseQuestionPage(lines []string) *parsedQuestion {
 		}
 		if m := askUserQuestionOptionRe.FindStringSubmatch(trimmed); m != nil {
 			label := strings.TrimSpace(m[3])
+			// The checkbox is the option's state, not its label: ticking it
+			// leaves the page, and so its request ID, the same.
+			if box := askUserQuestionCheckboxRe.FindString(label); box != "" {
+				label = label[len(box):]
+				q.TerminalOnly = questionMultiSelect
+			}
+			number, _ := strconv.Atoi(m[2])
 			q.Choices = append(q.Choices, label)
+			q.Numbers = append(q.Numbers, number)
 			if m[1] != "" {
 				q.Focused = label
 			}
@@ -176,15 +223,21 @@ func questionFooterRow(block []string) int {
 		if !strings.HasPrefix(strings.TrimSpace(block[start]), "Enter to select") {
 			continue
 		}
-		joined := make([]string, 0, len(block)-start)
-		for _, row := range block[start:] {
-			joined = append(joined, strings.TrimSpace(row))
-		}
-		if askUserQuestionFooterRe.MatchString(strings.Join(joined, " ")) {
+		if askUserQuestionFooterRe.MatchString(joinTrimmedRows(block[start:])) {
 			return start
 		}
 	}
 	return -1
+}
+
+// joinTrimmedRows joins rows, each trimmed, with single spaces: the text of a
+// line the pane wrapped across them.
+func joinTrimmedRows(rows []string) string {
+	trimmed := make([]string, 0, len(rows))
+	for _, row := range rows {
+		trimmed = append(trimmed, strings.TrimSpace(row))
+	}
+	return strings.Join(trimmed, " ")
 }
 
 // trimTrailingBlankRows drops the blank rows a capture ends with, so the
@@ -230,13 +283,15 @@ func parseReviewPage(lines []string) *parsedQuestion {
 			return nil
 		}
 		q.Choices = append(q.Choices, labels[k])
+		q.Numbers = append(q.Numbers, k+1)
 		if m[1] != "" {
 			q.Focused = labels[k]
 		}
 	}
 	// The menu alone could be quoted history at the pane's bottom; the page
 	// is live only with its anchor above: the "Review your answers" heading
-	// or the ✔ Submit tab strip with its ☐/☒ chips.
+	// or the ✔ Submit tab strip with its ☐/☒ chips. The rows between the
+	// anchor and the prompt are the answers under review.
 	anchored := false
 	for i := prompt - 1; i >= 0 && prompt-i <= questionDialogMaxRows; i-- {
 		row := lines[i]
@@ -248,10 +303,14 @@ func parseReviewPage(lines []string) *parsedQuestion {
 			anchored = true
 			break
 		}
+		if trimmed := strings.TrimSpace(row); trimmed != "" {
+			q.Summary = append(q.Summary, trimmed)
+		}
 	}
 	if !anchored {
 		return nil
 	}
+	slices.Reverse(q.Summary)
 	return q
 }
 
@@ -279,10 +338,112 @@ func boundPromptText(text string) string {
 
 // requestID is the stable ID of the page on screen: the same on every look
 // while the page stays open, and different on the next one. It covers the
-// question and the choices, never the header's ☐/☒ chips or the focused
-// option, which change while the dialog is the same page — a multiSelect
-// toggle flips a chip, arrows move the cursor.
+// question, the choices and a review page's Summary, never the header's ☐/☒
+// chips, a multi-select page's checkboxes or the focused option, which change
+// while the dialog is the same page: a multiSelect toggle ticks a checkbox
+// and flips a chip, arrows move the cursor.
 func (q *parsedQuestion) requestID() string {
-	h := sha256.Sum256([]byte(q.Question + "\x00" + strings.Join(q.Choices, "\x00")))
+	text := q.Question + "\x00" + strings.Join(q.Choices, "\x00")
+	if len(q.Summary) > 0 {
+		text += "\x01" + strings.Join(q.Summary, "\x00")
+	}
+	h := sha256.Sum256([]byte(text))
 	return fmt.Sprintf("tmux-question-%x", h[:8])
+}
+
+// leftFor reports whether next, the question dialog the pane shows after an
+// option of page q was typed (nil for none), is past q: no dialog, or a page
+// with another question, such as the review page. A dialog's questions are
+// unique, and no redraw of a page changes its question, as one can change its
+// option rows (a ticked checkbox, a re-wrapped label).
+func (q *parsedQuestion) leftFor(next *parsedQuestion) bool {
+	return next == nil || next.Question != q.Question
+}
+
+// QuestionSelectAction is the InteractionResponse action that answers a
+// question page: its Text names the option to pick, by its label as
+// Pending's Options list it or, when no option carries that label, by its
+// number.
+const QuestionSelectAction = "select"
+
+// questionMetaChoices are the rows a question page offers that answer
+// nothing: they open a free-text field or a chat in the terminal, so
+// Respond does not pick them and Pending does not offer them.
+var questionMetaChoices = map[string]bool{
+	"Type something.": true,
+	"Chat about this": true,
+}
+
+// answerChoices are the labels of the options Respond may pick, in pane
+// order: every choice but questionMetaChoices, and none on a TerminalOnly
+// page.
+func (q *parsedQuestion) answerChoices() []string {
+	if q.TerminalOnly != "" {
+		return nil
+	}
+	out := make([]string, 0, len(q.Choices))
+	for _, c := range q.Choices {
+		if !questionMetaChoices[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// answerHint says how the page is answered, for a refusal to type at it.
+func (q *parsedQuestion) answerHint(session string) string {
+	if q.TerminalOnly != "" {
+		return fmt.Sprintf("answer it in the terminal (gc session attach %s), not by a message: it is %s", session, q.TerminalOnly)
+	}
+	return fmt.Sprintf("answer it with respond (action %q naming an option) or in the terminal (gc session attach %s), not by a message", QuestionSelectAction, session)
+}
+
+// questionOptionKey returns the key that picks the option response names on
+// q: action QuestionSelectAction, its Text one of answerChoices by label
+// (case and surrounding space ignored) or, when it is no option's label, by
+// number. A TerminalOnly page, another action, a text naming no offered
+// option or more than one, and an option no single key selects are refused
+// with runtime.ErrInteractionActionUnavailable.
+func questionOptionKey(q *parsedQuestion, response runtime.InteractionResponse) (string, error) {
+	if q.TerminalOnly != "" {
+		return "", fmt.Errorf("%w: the question dialog (%s) is %s; answer it in the terminal",
+			runtime.ErrInteractionActionUnavailable, q.promptText(), q.TerminalOnly)
+	}
+	offered := strings.Join(q.answerChoices(), " | ")
+	if response.Action != QuestionSelectAction {
+		return "", fmt.Errorf("%w: a question dialog (%s) is answered with action %q naming one of its options [%s], not %q",
+			runtime.ErrInteractionActionUnavailable, q.promptText(), QuestionSelectAction, offered, response.Action)
+	}
+	want := strings.TrimSpace(response.Text)
+	// A label names its option even where it reads as another option's
+	// number (a label "1" on option 2).
+	byLabel, byNumber := -1, -1
+	for i, label := range q.Choices {
+		if questionMetaChoices[label] || i >= len(q.Numbers) {
+			continue
+		}
+		if strings.EqualFold(label, want) {
+			if byLabel >= 0 && q.Numbers[byLabel] != q.Numbers[i] {
+				return "", fmt.Errorf("%w: %q names more than one option of the question dialog (%s); select it by its number",
+					runtime.ErrInteractionActionUnavailable, want, q.promptText())
+			}
+			byLabel = i
+		}
+		if byNumber < 0 && strconv.Itoa(q.Numbers[i]) == want {
+			byNumber = i
+		}
+	}
+	pick := byLabel
+	if pick < 0 {
+		pick = byNumber
+	}
+	if pick < 0 {
+		return "", fmt.Errorf("%w: the question dialog (%s) offers no option %q to select; its options are [%s] (free text and chat are answered in the terminal)",
+			runtime.ErrInteractionActionUnavailable, q.promptText(), want, offered)
+	}
+	if n := q.Numbers[pick]; n < 1 || n > 9 {
+		return "", fmt.Errorf("%w: option %d (%s) cannot be selected with one key; answer it in the terminal",
+			runtime.ErrInteractionActionUnavailable, n, q.Choices[pick])
+	}
+	return strconv.Itoa(q.Numbers[pick]), nil
 }

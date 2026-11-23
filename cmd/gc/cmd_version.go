@@ -34,9 +34,26 @@ const (
 	minAbbrevCommitLen = 7
 )
 
+// versionBuilt is the version this binary was built as, before
+// normalizeVersion: a Go pseudo-version (`go install …@<ref>`) keeps its
+// suffix here, which the version floor needs (gcVersionForFloor).
+var versionBuilt string
+
 func init() {
 	info, ok := debug.ReadBuildInfo()
+	versionBuilt = builtVersion(version, ok, info)
 	version, commit, date = resolveBuildMetadata(version, commit, date, ok, info)
+}
+
+// builtVersion is the version a binary was built as, before normalizeVersion:
+// the version injected at link time, or, when none was (it normalizes to
+// dev), the module version the Go toolchain recorded, a pseudo-version
+// suffix and all.
+func builtVersion(injected string, ok bool, info *debug.BuildInfo) string {
+	if normalizeVersion(injected) == "dev" && ok && info != nil {
+		return info.Main.Version
+	}
+	return injected
 }
 
 func resolveBuildMetadata(
@@ -119,6 +136,21 @@ func vcsDescribesCommit(revision, injectedCommit string) bool {
 	return strings.HasPrefix(longer, shorter)
 }
 
+// goPseudoVersionBase reports whether v, with or without a leading "v", is a
+// Go pseudo-version (what `go install …@<ref>` stamps), and the version it is
+// based on with the pseudo suffix removed. It is the one pseudo-version
+// check: normalizeVersion strips the suffix, and the version floor treats
+// such a build as not comparable (gcVersionCore, gcVersionForFloor).
+func goPseudoVersionBase(v string) (string, bool) {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	for _, re := range goPseudoVersionSuffixRes {
+		if m := re.FindStringSubmatch(v); len(m) == 2 {
+			return m[1], true
+		}
+	}
+	return v, false
+}
+
 func normalizeVersion(v string) string {
 	v = strings.TrimSpace(v)
 	v = strings.TrimPrefix(v, "v")
@@ -128,11 +160,8 @@ func normalizeVersion(v string) string {
 	// Strip +incompatible only (Go v2+ module compat sentinel for repos without a /vN import path).
 	// Preserve all other build metadata (e.g. +ra.1 marks a locally-patched release).
 	v = strings.TrimSuffix(v, "+incompatible")
-	for _, re := range goPseudoVersionSuffixRes {
-		if m := re.FindStringSubmatch(v); len(m) == 2 {
-			v = m[1]
-			break
-		}
+	if base, pseudo := goPseudoVersionBase(v); pseudo {
+		v = base
 	}
 	if v == "" || v == "0.0.0" {
 		return "dev"
