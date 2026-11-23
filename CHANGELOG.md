@@ -1388,6 +1388,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Molecule instantiation no longer replays a native graph apply that spent
+  its own budget.** A native graph apply derives its transaction budget from
+  the plan it is applying; when that budget, not the caller's context, is
+  what ended the apply, the failure was classified as a transient `deadline
+  exceeded` and `Instantiate` re-ran the identical apply under a fresh
+  identical budget, then discarded both errors into env-gated tracing and
+  fell through to a third, sequential non-atomic creation. The spent budget
+  is now reported as a typed cause, `*beads.GraphApplyBudgetExhaustedError`,
+  reading `graph apply budget of <budget> exhausted (<n> nodes, <m> edges)`
+  and never transient, so the failure reaches the caller (`gc sling` surfaces
+  it and rolls back replaced roots) instead of doubling the store load.
+  Genuine transients — i/o timeouts, invalid connections, broken pipes, a
+  `bd create --graph` kill, a statement deadline while both contexts are
+  live — keep today's single retry and sequential fallback.
+
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues
   were given, so an empty convoy created with `--rig <rig>` could never
