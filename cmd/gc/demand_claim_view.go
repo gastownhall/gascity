@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -74,8 +75,8 @@ func demandClaimView(stores storeref.Stores) beads.StoreReader {
 type claimViewVerdict int
 
 const (
-	// claimViewWin: the claim view holds the row open and unassigned, so the
-	// claim can win it.
+	// claimViewWin: the claim view holds the row open and unassigned, or holds
+	// no copy of it at all, so the claim can win it.
 	claimViewWin claimViewVerdict = iota
 	// claimViewShadow: the claim view holds the row closed, in progress or
 	// assigned, so the claim CAS will refuse it; the row is not demand this
@@ -86,6 +87,21 @@ const (
 	claimViewUnknown
 )
 
+// claimViewKey identifies one question the pass might ask twice: which view,
+// which row. The store groups a template's demand legs share a claim view, so
+// the same (view, id) can be asked about per template; the probe reads it once.
+type claimViewKey struct {
+	view beads.StoreReader
+	id   string
+}
+
+// claimViewAnswer is one view's answer to one such question, cached for the
+// rest of the pass.
+type claimViewAnswer struct {
+	verdict claimViewVerdict
+	err     error
+}
+
 // claimViewProbe asks one demand pass's claim views whether the claim can win
 // each cross-store row it counts.
 type claimViewProbe struct {
@@ -93,6 +109,10 @@ type claimViewProbe struct {
 	stats demandClaimViewStats
 	// shadowedIDs records which ids stats.ShadowedIDs already names.
 	shadowedIDs map[string]struct{}
+	// answers caches each (view, id) the pass has already asked, so a row two
+	// of a pool's demand legs both count costs one claim-view read, not two
+	// (the design's per-pass cost bound).
+	answers map[claimViewKey]claimViewAnswer
 }
 
 // demandClaimViewStats summarizes one demand pass's claim-view probes: how
@@ -109,21 +129,37 @@ type demandClaimViewStats struct {
 	ShadowedIDs []string
 }
 
-// check returns the claim view's verdict for id.
+// check returns the claim view's verdict for id: whether the row's claim —
+// which resolves the id in this view — can win it. ErrNotFound is a win: the
+// view is the pool's own store and it holds no row to refuse the claim, so the
+// row is city-delivered work the claim takes as new. An open, unassigned row
+// is a win too; any other held state the claim CAS refuses before any write.
+// A read that fails answers nothing (claimViewUnknown, the error carried for
+// the pass's partial marking). Each (view, id) is read at most once per pass.
 func (p *claimViewProbe) check(view beads.StoreReader, id string) (claimViewVerdict, error) {
 	if p == nil || view == nil {
 		return claimViewWin, nil
 	}
+	key := claimViewKey{view: view, id: id}
+	if answer, cached := p.answers[key]; cached {
+		return answer.verdict, answer.err
+	}
 	b, err := view.Get(id)
 	p.stats.Probed++
+	answer := claimViewAnswer{verdict: claimViewUnknown, err: err}
 	switch {
-	case err != nil:
-		return claimViewUnknown, err
-	case strings.EqualFold(strings.TrimSpace(b.Status), "open") && strings.TrimSpace(b.Assignee) == "":
-		return claimViewWin, nil
-	default:
-		return claimViewShadow, nil
+	case errors.Is(err, beads.ErrNotFound):
+		answer.verdict, answer.err = claimViewWin, nil
+	case err == nil && strings.EqualFold(strings.TrimSpace(b.Status), "open") && strings.TrimSpace(b.Assignee) == "":
+		answer.verdict = claimViewWin
+	case err == nil:
+		answer.verdict = claimViewShadow
 	}
+	if p.answers == nil {
+		p.answers = make(map[claimViewKey]claimViewAnswer)
+	}
+	p.answers[key] = answer
+	return answer.verdict, answer.err
 }
 
 // noteShadowed records that the pass withheld id as shadowed.

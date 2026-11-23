@@ -617,6 +617,10 @@ func TestDefaultScaleDemandCountsOnlyRowsTheClaimCanWin(t *testing.T) {
 	// StoreRefs.
 	seed(t, cityStore, routed("x"))
 	shadow(t, "x", "other-session", "closed")
+	// Y: city-delivered work the rig store holds no copy of at all. The claim
+	// resolves the id in the pool's own store and the owner has no row to
+	// refuse, so it is genuine demand: counted once, from the city leg.
+	seed(t, cityStore, routed("y"))
 	// Z: ready in BOTH stores. The own leg wins the dedup, so it is counted
 	// once from the rig store and the claim view is never asked about it.
 	seed(t, cityStore, routed("z"))
@@ -670,14 +674,17 @@ func TestDefaultScaleDemandCountsOnlyRowsTheClaimCanWin(t *testing.T) {
 		t.Fatalf("partialTemplates = %v, want none", partialTemplates)
 	}
 	entry := demand[agreementTemplate]
-	if got := counts[agreementTemplate]; got != 1 {
-		t.Fatalf("counts[%s] = %d, want 1 (z only; full demand=%+v)", agreementTemplate, got, entry)
+	if got := counts[agreementTemplate]; got != 2 {
+		t.Fatalf("counts[%s] = %d, want 2 (y and z; full demand=%+v)", agreementTemplate, got, entry)
 	}
-	if want := []string{"z"}; !reflect.DeepEqual(entry.WorkBeadIDs, want) {
-		t.Fatalf("WorkBeadIDs = %v, want %v: x/w/v and the window rows are not rows the claim can win", entry.WorkBeadIDs, want)
+	if want := []string{"y", "z"}; !reflect.DeepEqual(entry.WorkBeadIDs, want) {
+		t.Fatalf("WorkBeadIDs = %v, want %v: y is city-delivered work and z is the own leg's row; x/w/v and the window rows are not rows the claim can win", entry.WorkBeadIDs, want)
 	}
 	if got := entry.StoreRefs["z"]; got != "rig:rig" {
 		t.Fatalf("StoreRefs[z] = %q, want %q: the own leg wins the dedup for a row both stores hold", got, "rig:rig")
+	}
+	if got := entry.StoreRefs["y"]; got != "city" {
+		t.Fatalf("StoreRefs[y] = %q, want %q: y is counted from the city leg that delivered it", got, "city")
 	}
 	for _, id := range []string{"x", "w", "v", "win-bound"} {
 		if _, listed := entry.StoreRefs[id]; listed {
@@ -694,7 +701,7 @@ func TestDefaultScaleDemandCountsOnlyRowsTheClaimCanWin(t *testing.T) {
 	if slices.Contains(probed, "win-bound") {
 		t.Fatalf("claim view probed win-bound, which the claim window already withholds: %v", probed)
 	}
-	for _, id := range []string{"x", "w", "v"} {
+	for _, id := range []string{"x", "w", "v", "y"} {
 		if !slices.Contains(probed, id) {
 			t.Fatalf("claim view did not probe %s: %v", id, probed)
 		}
