@@ -635,6 +635,20 @@ func RestartRequestPatchAt(sessionKey string, now time.Time) MetadataPatch {
 	return patch
 }
 
+// RestartHandoffWakePatch is what a restart handoff adds for a row whose
+// runtime is already gone: a city-stop park is released and a durable
+// explicit wake recorded, so the fresh restart the operator asked for
+// starts the row. Every other sleep reason gets nil: that reset waits for
+// demand (#2345). It writes no state; the wake path owns the start.
+func RestartHandoffWakePatch(sleepReason string, now time.Time) MetadataPatch {
+	if SleepReason(strings.TrimSpace(sleepReason)) != SleepReasonCityStop {
+		return nil
+	}
+	patch := RequestExplicitWakePatch(string(WakeCauseExplicit), now)
+	patch["sleep_reason"] = ""
+	return patch
+}
+
 // ConfigDriftResetPatch records an in-place named-session repair after core
 // config drift. Creating claims a new runtime start; asleep stays dormant
 // until the next normal wake reason.

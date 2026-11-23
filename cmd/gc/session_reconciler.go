@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -3756,7 +3757,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// intentional death from crash and churn trackers (both
 				// check last_woke_at first).
 				newSessionKey, hasCapability := freshRestartSessionKeyInfo(tp, infoByID[id])
-				batch := sessionpkg.RestartRequestPatch(newSessionKey, clk.Now())
+				now := clk.Now()
+				batch := sessionpkg.RestartRequestPatch(newSessionKey, now)
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
 				}
@@ -3771,6 +3773,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// gc must not keep believing a session it just stopped
 					// is still awake. See ga-2fpf9z.
 					batch["state"] = string(sessionpkg.StateAsleep)
+				} else {
+					// Nothing was killed, so this tick's wake decision runs. A
+					// city-stop park would keep the row asleep under a sleep
+					// policy that suppresses its wake; the handoff releases it
+					// and records an explicit wake in this same write, so the
+					// restart the operator asked for starts the row now.
+					maps.Copy(batch, sessionpkg.RestartHandoffWakePatch(infoByID[id].SleepReason, now))
 				}
 				if err := sessionFrontDoor(store).ApplyPatch(id, batch); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck

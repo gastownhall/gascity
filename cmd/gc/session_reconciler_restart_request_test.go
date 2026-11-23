@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type restartRequestTestEnv struct {
@@ -1017,4 +1018,76 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 			t.Fatal("last_woke_at empty, want same-tick wake commit")
 		}
 	})
+}
+
+// newCityStopResetScenario builds the row `gc stop` leaves behind and a later
+// `gc session reset` marks: a named on_demand seat asleep with sleepReason,
+// restart_requested and continuation_reset_pending set, under an interactive
+// resume sleep policy of "0s", which suppresses its config wake. The runtime
+// is not running and there is no pool demand.
+func newCityStopResetScenario(t *testing.T, sleepReason string) (*restartRequestTestEnv, beads.Bead, string) {
+	t.Helper()
+
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		SessionSleep:  config.SessionSleepConfig{InteractiveResume: "0s"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	if class := config.ClassifySessionSleepAgent(&env.cfg.Agents[0]); class != config.SessionSleepInteractiveResume {
+		t.Fatalf("test fixture wrong: sleep class = %q, want %q", class, config.SessionSleepInteractiveResume)
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "asleep",
+		"sleep_reason":               sleepReason,
+		"slept_at":                   env.clk.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	return env, session, sessionName
+}
+
+// TestReconcileSessionBeads_ResetOfAsleepCityStopStartsSession pins
+// SESSION-RECON-024: `gc session reset` of a city-stop row whose runtime is
+// already gone releases the park and records an explicit wake in the handoff
+// write, so the row starts on that same tick even though its sleep policy
+// suppresses the config wake.
+func TestReconcileSessionBeads_ResetOfAsleepCityStopStartsSession(t *testing.T) {
+	env, session, sessionName := newCityStopResetScenario(t, string(sessionpkg.SleepReasonCityStop))
+	if env.sp.IsRunning(sessionName) {
+		t.Fatal("test fixture wrong: session should not be running")
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not start on the reset tick; stdout=%q stderr=%q", sessionName, env.stdout.String(), env.stderr.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["sleep_reason"] == string(sessionpkg.SleepReasonCityStop) {
+		t.Fatalf("sleep_reason = %q, want the city-stop park released", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
+	}
 }
