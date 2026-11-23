@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -604,6 +605,47 @@ func TestHandleInboundNormalizedAmbiguousCreateKeepsSequencesDistinct(t *testing
 		t.Fatalf("stored %d transcript entries, want 2", len(stored))
 	}
 	assertListedTexts(t, fabric.Transcript, ref, "first", "second")
+}
+
+// TestTranscriptPinnedAppendPersistentFaultIsRetryable covers faults that
+// outlast recovery: the inbound fails with a contextual error and emits
+// nothing, and a later retry of the same message publishes the entry the
+// failed attempt stored, without a duplicate.
+func TestTranscriptPinnedAppendPersistentFaultIsRetryable(t *testing.T) {
+	freezeTestClock(t)
+	fault := &transcriptFaultStore{Store: beads.NewMemStore()}
+	fabric := NewServices(beadstest.Mail(fault), beadstest.Sessions(fault))
+	ref := testConversationRef()
+	emitted := 0
+	deps := inboundRecoveryDeps(fabric, &emitted)
+	msg := inboundRecoveryMessage(ref, "msg-1", "first")
+
+	fault.setFaults(func(f *transcriptFaultStore) { f.failNextSequenceWrites = 1000 })
+	if _, err := HandleInboundNormalized(context.Background(), deps, msg); err == nil {
+		t.Fatal("HandleInboundNormalized succeeded while every head advance failed; want an error")
+	} else if errors.Is(err, ErrInvalidInput) || errors.Is(err, ErrInvalidConversation) || errors.Is(err, ErrInvariantViolation) ||
+		!strings.Contains(err.Error(), "appending transcript") {
+		t.Fatalf("persistent fault error = %v, want a retryable error in the transcript append's context", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("ExtMsgInbound emitted %d times for a failed inbound, want 0", emitted)
+	}
+
+	fault.setFaults(func(f *transcriptFaultStore) { f.failNextSequenceWrites = 0 })
+	retry, err := HandleInboundNormalized(context.Background(), deps, msg)
+	if err != nil {
+		t.Fatalf("HandleInboundNormalized(retry): %v", err)
+	}
+	if retry.TranscriptEntry == nil || retry.TranscriptEntry.Sequence != 1 {
+		t.Fatalf("retry transcript entry = %#v, want the stored entry at sequence 1", retry.TranscriptEntry)
+	}
+	if emitted != 1 {
+		t.Fatalf("ExtMsgInbound emitted %d times after the retry, want 1", emitted)
+	}
+	if stored := assertTranscriptSequencesUnique(t, fault); len(stored) != 1 {
+		t.Fatalf("stored %d transcript entries, want 1 (no duplicate)", len(stored))
+	}
+	assertListedTexts(t, fabric.Transcript, ref, "first")
 }
 
 // TestHandleOutboundTranscriptFaultRetriesRecordingWithoutResending drives
