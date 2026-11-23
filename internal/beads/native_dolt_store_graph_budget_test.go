@@ -152,3 +152,97 @@ func TestNativeApplyGraphPlanReportsItsOwnBudgetExhausted(t *testing.T) {
 		})
 	})
 }
+
+// TestNativeApplyGraphPlanDoesNotClaimItsBudgetForOtherDeadlines: the typed
+// budget cause is claimed only when the store's own budget ended the apply.
+// The caller's cancel, the caller's own earlier deadline, and a statement
+// failing on a deadline of its own while the budget is live all keep the base
+// failure text and carry no *GraphApplyBudgetExhaustedError.
+func TestNativeApplyGraphPlanDoesNotClaimItsBudgetForOtherDeadlines(t *testing.T) {
+	t.Run("caller deadline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			plan := graphBudgetTwoNodePlan()
+			storage := &nativeDoltBudgetProbeStorage{
+				nativeDoltMemStorage: newNativeDoltMemStorage(),
+				apply:                nativeDoltStallUntilApplyCtxEnds,
+			}
+			store := newNativeDoltStoreForTest(storage)
+
+			parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			start := time.Now()
+			_, err := store.ApplyGraphPlanWithStorage(parent, plan, StorageDefault)
+			if err == nil {
+				t.Fatal("ApplyGraphPlanWithStorage error = nil, want the apply failure")
+			}
+			var exhausted *GraphApplyBudgetExhaustedError
+			if errors.As(err, &exhausted) {
+				t.Errorf("caller's own deadline claimed as budget exhaustion: %v", err)
+			}
+			if got, want := err.Error(), "native graph apply: context deadline exceeded"; got != want {
+				t.Errorf("error text = %q, want the base text %q", got, want)
+			}
+			if elapsed := time.Since(start); elapsed != 10*time.Second {
+				t.Errorf("elapsed = %s, want the caller's 10s deadline", elapsed)
+			}
+		})
+	})
+
+	t.Run("caller cancel", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			plan := graphBudgetTwoNodePlan()
+			storage := &nativeDoltBudgetProbeStorage{
+				nativeDoltMemStorage: newNativeDoltMemStorage(),
+				apply:                nativeDoltStallUntilApplyCtxEnds,
+			}
+			store := newNativeDoltStoreForTest(storage)
+
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			time.AfterFunc(time.Second, cancel)
+			start := time.Now()
+			_, err := store.ApplyGraphPlanWithStorage(parent, plan, StorageDefault)
+			if err == nil {
+				t.Fatal("ApplyGraphPlanWithStorage error = nil, want the apply failure")
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("errors.Is(%v, context.Canceled) = false, want true", err)
+			}
+			var exhausted *GraphApplyBudgetExhaustedError
+			if errors.As(err, &exhausted) {
+				t.Errorf("caller cancel claimed as budget exhaustion: %v", err)
+			}
+			if got, want := err.Error(), "native graph apply: context canceled"; got != want {
+				t.Errorf("error text = %q, want the base text %q", got, want)
+			}
+			if elapsed := time.Since(start); elapsed != time.Second {
+				t.Errorf("elapsed = %s, want the caller's 1s cancel", elapsed)
+			}
+		})
+	})
+
+	t.Run("statement deadline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			plan := graphBudgetTwoNodePlan()
+			storage := &nativeDoltBudgetProbeStorage{
+				nativeDoltMemStorage: newNativeDoltMemStorage(),
+				apply: func(context.Context, issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
+					return issueops.ApplyBatchResult{}, fmt.Errorf("check cycle: %w", context.DeadlineExceeded)
+				},
+			}
+			store := newNativeDoltStoreForTest(storage)
+
+			_, err := store.ApplyGraphPlanWithStorage(context.Background(), plan, StorageDefault)
+			if err == nil {
+				t.Fatal("ApplyGraphPlanWithStorage error = nil, want the apply failure")
+			}
+			var exhausted *GraphApplyBudgetExhaustedError
+			if errors.As(err, &exhausted) {
+				t.Errorf("statement deadline claimed as budget exhaustion: %v", err)
+			}
+			if got, want := err.Error(), "native graph apply: check cycle: context deadline exceeded"; got != want {
+				t.Errorf("error text = %q, want the base text %q", got, want)
+			}
+		})
+	})
+}
