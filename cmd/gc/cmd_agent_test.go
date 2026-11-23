@@ -1486,11 +1486,12 @@ name = "test-city"
 }
 
 func TestLoadCityConfigFSAppliesFeatureFlags(t *testing.T) {
-	formulatest.HoldV2ForTest(t)
+	formulatest.SetV2ForTest(t, false)
 	oldGraphApply := molecule.IsGraphApplyEnabled()
 	t.Cleanup(func() {
 		molecule.SetGraphApplyEnabled(oldGraphApply)
 	})
+	molecule.SetGraphApplyEnabled(false)
 
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
@@ -1526,11 +1527,12 @@ name = "test-city"
 // caps cmd/gc at 5 test files referencing the legacy formula_v2 mechanism, and
 // a new file would have been the 6th.
 func TestLoadCityConfigWithBuiltinPacksAppliesFeatureFlags(t *testing.T) {
-	formulatest.HoldV2ForTest(t)
+	formulatest.SetV2ForTest(t, false)
 	oldGraphApply := molecule.IsGraphApplyEnabled()
 	t.Cleanup(func() {
 		molecule.SetGraphApplyEnabled(oldGraphApply)
 	})
+	molecule.SetGraphApplyEnabled(false)
 
 	clearGCEnv(t)
 	dir := t.TempDir()
