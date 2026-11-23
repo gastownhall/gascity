@@ -483,3 +483,61 @@ func mapValues(m map[int64]string) []string {
 	}
 	return out
 }
+
+// TestTranscriptPinnedAppendAdoptsLegacyMintedEntry covers an entry an older
+// writer created under a minted id at next_sequence without advancing it: an
+// upgraded writer publishes it unchanged and allocates above it.
+func TestTranscriptPinnedAppendAdoptsLegacyMintedEntry(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
+	ref := testConversationRef()
+
+	seed, err := appendTestTranscript(svc, ref, "msg-0", "seed")
+	if err != nil {
+		t.Fatalf("Append(seed): %v", err)
+	}
+	seedBead, err := store.Get(seed.ID)
+	if err != nil {
+		t.Fatalf("Get(seed): %v", err)
+	}
+	metadata := map[string]string{}
+	for k, v := range seedBead.Metadata {
+		if k == "append_token" {
+			continue
+		}
+		metadata[k] = v
+	}
+	metadata["sequence"] = "2"
+	metadata["provider_message_id"] = "msg-legacy"
+	labels := make([]string, 0, len(seedBead.Labels))
+	for _, label := range seedBead.Labels {
+		if label == transcriptProviderMessageLabel(ref, "msg-0") {
+			label = transcriptProviderMessageLabel(ref, "msg-legacy")
+		}
+		labels = append(labels, label)
+	}
+	legacy, err := store.Create(beads.Bead{
+		Title:       conversationTitle(ref) + "#2",
+		Type:        "task",
+		Description: "legacy",
+		Labels:      labels,
+		Metadata:    metadata,
+	})
+	if err != nil {
+		t.Fatalf("Create(legacy entry): %v", err)
+	}
+
+	next, err := appendTestTranscript(svc, ref, "msg-new", "upgraded")
+	if err != nil {
+		t.Fatalf("Append(upgraded): %v", err)
+	}
+	if next.Sequence != 3 {
+		t.Fatalf("upgraded append got sequence %d, want 3 (above the legacy entry)", next.Sequence)
+	}
+	assertTranscriptSequencesUnique(t, store)
+	listed := assertListedTexts(t, svc, ref, "seed", "legacy", "upgraded")
+	if listed[1].ID != legacy.ID {
+		t.Fatalf("legacy entry listed as %s, want its original id %s (no renumbering)", listed[1].ID, legacy.ID)
+	}
+}
