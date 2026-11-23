@@ -2528,7 +2528,8 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if view, crossStore := rowClaimViews[b.ID]; crossStore {
 				claimable, viewErr := views.claimable(view.reader, view.key, b.ID)
 				if viewErr != nil {
-					errs = append(errs, viewErr)
+					errs = append(errs, demandClaimViewError(template, b.ID, view.key, viewErr))
+					partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
 				}
 				if !claimable {
 					continue
