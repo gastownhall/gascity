@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -367,5 +369,83 @@ func TestStoreWatchdogLanesSkipSuspendedCity(t *testing.T) {
 	if cr.orderSweepWatchdogLast.IsZero() || cr.orderTrackingRetentionWatchdogLast.IsZero() || cr.nudgeMailSweepWatchdogLast.IsZero() {
 		t.Fatalf("watchdog clocks after resume: sweep=%v retention=%v nudge/mail=%v, want every lane to have run",
 			cr.orderSweepWatchdogLast, cr.orderTrackingRetentionWatchdogLast, cr.nudgeMailSweepWatchdogLast)
+	}
+}
+
+// Stopping the lanes does not wait on one blocked in a store call: stop
+// cancels every lane first, so the others exit while the retention lane is
+// still parked in its closed-history read, and stop returns only once that
+// call finishes and its lane exits too.
+func TestStoreWatchdogLaneSetStopDoesNotWaitOnABlockedLane(t *testing.T) {
+	now := time.Now()
+	store := newClosedHistoryBlockingStore(beads.NewMemStoreFrom(100, storeWatchdogSeed(now), nil))
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{})
+	cr.cfg.Daemon.PatrolInterval = "10ms"
+	set := cr.startStoreWatchdogLanes(context.Background())
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(store.release) }) }
+	t.Cleanup(func() {
+		release()
+		set.stop()
+	})
+	awaitClose(t, store.entered, "the retention lane reaching its closed-history read")
+
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		set.stop()
+	}()
+	for i, lane := range cr.storeWatchdogLanesOf() {
+		if lane.spec.key == storeWatchdogOrderTrackingRetention {
+			continue
+		}
+		awaitClose(t, set.done[i], "the "+lane.spec.work+" lane exiting while retention is blocked")
+	}
+	select {
+	case <-stopDone:
+		t.Fatal("stop returned while the retention lane was still in its store call")
+	default:
+	}
+	release()
+	awaitClose(t, stopDone, "stop returning once the retention call finished")
+}
+
+// Cancellation reaches the nudge/mail watchdog's queue maintenance, and no
+// mail sweep follows it: a lane stopped mid-maintenance closes no mail and
+// logs no cancellation as a failure.
+func TestNudgeMailSweepLaneSweepsNothingAfterCanceledMaintenance(t *testing.T) {
+	now := time.Now()
+	seed := []beads.Bead{mailSeed("mail-stale", now.Add(-nudgeMailSweepDefaultMailTTL-time.Minute))}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{})
+	var stderr bytes.Buffer
+	cr.stderr = &stderr
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	maintenanceSawCancel := false
+	cr.maintainNudgeQueue = func(mctx context.Context, _ beads.NudgesStore, _ time.Time) error {
+		cancel()
+		select {
+		case <-mctx.Done():
+			maintenanceSawCancel = true
+			return mctx.Err()
+		case <-time.After(hangBudget):
+			return errors.New("the lane's cancellation never reached queue maintenance")
+		}
+	}
+
+	cr.runStoreWatchdogLanePass(ctx, cr.storeWatchdogLaneOf(storeWatchdogNudgeMailSweep))
+	if !maintenanceSawCancel {
+		t.Fatalf("queue maintenance did not observe the lane's cancellation; stderr:\n%s", stderr.String())
+	}
+	mail, err := store.Get("mail-stale")
+	if err != nil {
+		t.Fatalf("get mail-stale: %v", err)
+	}
+	if mail.Status != "open" {
+		t.Fatalf("mail-stale status = %q, want open: a mail sweep followed the cancellation", mail.Status)
+	}
+	if out := stderr.String(); strings.Contains(out, "context canceled") {
+		t.Fatalf("stderr logs the cancellation as a failure:\n%s", out)
 	}
 }

@@ -374,6 +374,9 @@ type CityRuntime struct {
 	managedDoltHealth   func(context.Context, string) error
 	managedDoltOwned    func(string) (bool, error)
 	managedDoltPort     func(string) string
+	// maintainNudgeQueue runs the nudge queue's maintenance for the
+	// nudge/mail watchdog; nil means the file-backed queue's Maintain.
+	maintainNudgeQueue func(ctx context.Context, store beads.NudgesStore, now time.Time) error
 
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
@@ -2478,9 +2481,10 @@ func warnIfClosedOrderTrackingBacklogLarge(stores []beads.Store, stderr io.Write
 // runNudgeMailSweepWatchdog closes stale nudge and mail beads, at most once
 // every nudgeMailSweepWatchdogInterval. Its store watchdog lane runs it with
 // the pass's config snapshot, so it reads TTLs from cfg rather than through
-// the cr.cfg accessors.
-func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time) {
-	if !cr.nudgeMailSweepWatchdogDue(now) {
+// the cr.cfg accessors. ctx is the lane's: a canceled pass starts nothing,
+// queue maintenance sees the cancellation, and no sweep follows it.
+func (cr *CityRuntime) runNudgeMailSweepWatchdog(ctx context.Context, cfg *config.City, now time.Time) {
+	if ctx.Err() != nil || !cr.nudgeMailSweepWatchdogDue(now) {
 		return
 	}
 	cr.nudgeMailSweepWatchdogLast = now
@@ -2497,8 +2501,18 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	// payers left (a crash, a failing store), so a legacy-dispatcher city
 	// converges with only the controller running. The supervisor dispatcher
 	// runs the same maintenance every pass.
-	if _, err := openNudgeQueue(cr.cityPath, nudgeStore).Queue.Maintain(context.Background(), now); err != nil && cr.stderr != nil {
+	maintain := cr.maintainNudgeQueue
+	if maintain == nil {
+		maintain = func(ctx context.Context, store beads.NudgesStore, now time.Time) error {
+			_, err := openNudgeQueue(cr.cityPath, store).Queue.Maintain(ctx, now)
+			return err
+		}
+	}
+	if err := maintain(ctx, nudgeStore, now); err != nil && ctx.Err() == nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: nudge queue maintenance: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	// Load nudge state to protect live nudge IDs. A missing state file is not an
 	// error (LoadState returns empty state), so any error here is a real

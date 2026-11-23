@@ -85,9 +85,7 @@ var storeWatchdogSpecs = []storeWatchdogSpec{
 		key:  storeWatchdogNudgeMailSweep,
 		work: "nudge/mail sweep",
 		due:  (*CityRuntime).nudgeMailSweepWatchdogDue,
-		run: func(cr *CityRuntime, _ context.Context, cfg *config.City, now time.Time) {
-			cr.runNudgeMailSweepWatchdog(cfg, now)
-		},
+		run:  (*CityRuntime).runNudgeMailSweepWatchdog,
 	},
 }
 
