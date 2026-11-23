@@ -264,3 +264,51 @@ func TestNotifyDrainAckLoopHonorsOverrides(t *testing.T) {
 		t.Fatalf("gc calls = %q, want the events read over the 30m window", calls)
 	}
 }
+
+// TestNotifyDrainAckLoopFailsLoud: a setting it cannot use, or a read it
+// cannot complete or decode, exits non-zero with the cause on stderr and
+// mails nothing, so the order's failure is visible rather than a quiet
+// "no loop".
+func TestNotifyDrainAckLoopFailsLoud(t *testing.T) {
+	working := loopBeadJSON("in_progress", "gc-1")
+	for _, c := range []struct {
+		name   string
+		env    []string
+		events []string
+		bead   string
+		breaks string // a rig file to remove, so its read fails
+		want   string
+		noGC   bool // the script must refuse before calling gc
+	}{
+		{name: "the events read fails", events: loopCycles(3), bead: working, breaks: "events.jsonl", want: "reading session.drain_acked_with_assigned_work events"},
+		{name: "the events are not JSON", events: []string{"not json"}, bead: working, want: "decoding session.drain_acked_with_assigned_work events"},
+		{name: "the bead read fails", events: loopCycles(3), bead: working, breaks: "bead.json", want: "reading bead " + drainAckLoopBead},
+		{name: "the bead is not JSON", events: loopCycles(3), bead: "not json", want: "decoding bead " + drainAckLoopBead},
+		{name: "the bead read names no bead", events: loopCycles(3), bead: "[]", want: "decoding bead " + drainAckLoopBead},
+		{name: "a zero threshold", env: []string{"GC_DRAIN_ACK_LOOP_THRESHOLD=0"}, events: loopCycles(3), bead: working, want: "GC_DRAIN_ACK_LOOP_THRESHOLD", noGC: true},
+		{name: "a threshold that is no number", env: []string{"GC_DRAIN_ACK_LOOP_THRESHOLD=abc"}, events: loopCycles(3), bead: working, want: "GC_DRAIN_ACK_LOOP_THRESHOLD", noGC: true},
+		{name: "a window that is no duration", env: []string{"GC_DRAIN_ACK_LOOP_WINDOW=forever"}, events: loopCycles(3), bead: working, want: "GC_DRAIN_ACK_LOOP_WINDOW", noGC: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newDrainAckLoopRig(t, c.events, c.bead)
+			if c.breaks != "" {
+				if err := os.Remove(filepath.Join(r.work, c.breaks)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := r.run(t, c.env...)
+			if err == nil {
+				t.Fatalf("notify-drain-ack-loop succeeded, want a failure naming %q\n%s", c.want, out)
+			}
+			if !strings.Contains(out, "notify-drain-ack-loop: ") || !strings.Contains(out, c.want) {
+				t.Errorf("output %q does not give the cause %q", out, c.want)
+			}
+			if calls := r.escalations(t); len(calls) != 0 {
+				t.Errorf("escalate.sh calls = %q, want none", calls)
+			}
+			if calls := r.gcCalls(t); c.noGC && len(calls) != 0 {
+				t.Errorf("gc calls = %q, want none before the settings are valid", calls)
+			}
+		})
+	}
+}

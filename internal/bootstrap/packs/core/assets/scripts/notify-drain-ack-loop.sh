@@ -25,6 +25,9 @@
 # The mail gives the park command; this script never writes the bead. Parking
 # is the recipient's decision.
 #
+# An unusable setting, or an events or bead read that fails or does not
+# decode, exits non-zero with the cause on stderr and mails nothing.
+#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
@@ -37,10 +40,18 @@ LOOP_REASON="started_claim_kept"
 # Events of one (bead, session) closer than this are one cycle.
 CYCLE_MIN_SECONDS=60
 
-if ! command -v jq >/dev/null 2>&1; then
-    echo "notify-drain-ack-loop: jq is required but not found in PATH" >&2
+fail() {
+    echo "notify-drain-ack-loop: $*" >&2
     exit 1
-fi
+}
+
+# A setting it cannot use fails the order rather than counting wrong.
+[[ "$WINDOW" =~ ^([0-9]+[hms])+$ ]] ||
+    fail "GC_DRAIN_ACK_LOOP_WINDOW=$WINDOW is not a duration like 1h or 30m"
+[[ "$THRESHOLD" =~ ^[1-9][0-9]*$ ]] ||
+    fail "GC_DRAIN_ACK_LOOP_THRESHOLD=$THRESHOLD is not a positive whole number"
+
+command -v jq >/dev/null 2>&1 || fail "jq is required but not found in PATH"
 
 resolve_escalate_script() {
     local candidate
@@ -63,7 +74,8 @@ resolve_escalate_script() {
 
 ESCALATE_SCRIPT="$(resolve_escalate_script)"
 
-EVENTS="$(gc events --type "$EVENT_TYPE" --since "$WINDOW")"
+EVENTS="$(gc events --type "$EVENT_TYPE" --since "$WINDOW")" ||
+    fail "reading $EVENT_TYPE events since $WINDOW failed"
 
 # One compact line per looping bead: its ID, its cycle count, the sessions and
 # templates its counted events name. ts is RFC 3339 with an optional fraction
@@ -92,7 +104,8 @@ LOOPS="$(printf '%s\n' "$EVENTS" | jq -c -s \
     | select($cycles >= $threshold)
     | { bead: $events[0].bead, cycles: $cycles,
         sessions: ($events | map(.session) | unique),
-        templates: ($events | map(.template) | map(select(. != "")) | unique) }')"
+        templates: ($events | map(.template) | map(select(. != "")) | unique) }')" ||
+    fail "decoding $EVENT_TYPE events failed"
 [ -n "$LOOPS" ] || exit 0
 
 # Every bead is read before anything is sent, so a failed read mails nothing.
@@ -100,13 +113,15 @@ ALERTS=()
 while IFS= read -r loop; do
     [ -n "$loop" ] || continue
     bead="$(printf '%s' "$loop" | jq -r '.bead')"
-    shown="$(gc bd show "$bead" --json)"
-    verdict="$(printf '%s' "$shown" | jq -c --argjson loop "$loop" '
+    shown="$(gc bd show "$bead" --json)" || fail "reading bead $bead failed"
+    verdict="$(printf '%s' "$shown" | jq -e -c --arg id "$bead" --argjson loop "$loop" '
         (if type == "array" then .[0] else . end) as $b
+        | if ($b | type) != "object" or $b.id != $id then error("no bead \($id)") else . end
         | { title: ($b.title // ""),
             parkable: ($b.status == "in_progress"
                        and (($loop.sessions | index($b.assignee // "")) != null)
-                       and ((($b.labels // []) | map(select(. == "hold:mayor" or . == "hold:external")) | length) == 0)) }')"
+                       and ((($b.labels // []) | map(select(. == "hold:mayor" or . == "hold:external")) | length) == 0)) }')" ||
+        fail "decoding bead $bead failed"
     if [ "$(printf '%s' "$verdict" | jq -r '.parkable')" = true ]; then
         ALERTS+=("$(jq -c -n --argjson loop "$loop" --argjson v "$verdict" '$loop + {title: $v.title}')")
     fi
