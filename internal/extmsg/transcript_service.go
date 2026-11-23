@@ -120,7 +120,7 @@ func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput)
 	}
 	var out []ConversationTranscriptRecord
 	err = withBindingLock(s.locks, ref, func() error {
-		state, err := s.findStateLocked(ref)
+		state, err := s.findStateLive(ref)
 		if err != nil {
 			return err
 		}
@@ -128,7 +128,7 @@ func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput)
 			out = nil
 			return nil
 		}
-		out, err = s.listTranscriptLocked(ref, after, limit, order)
+		out, err = s.listTranscriptLocked(*state, ref, after, limit, order)
 		return err
 	})
 	return out, err
@@ -529,7 +529,7 @@ func (s *transcriptService) ListBackfill(ctx context.Context, input ListBackfill
 		if after == 0 && membership.BackfillPolicy == MembershipBackfillSinceJoin {
 			after = membership.JoinedSequence
 		}
-		out, err = s.listTranscriptLocked(ref, after, limit, TranscriptOrderAsc)
+		out, err = s.listTranscriptLocked(state, ref, after, limit, TranscriptOrderAsc)
 		return err
 	})
 	return out, err
@@ -633,7 +633,7 @@ func (s *transcriptService) State(ctx context.Context, caller Caller, ref Conver
 	}
 	var out *ConversationTranscriptStateRecord
 	err = withBindingLock(s.locks, ref, func() error {
-		state, err := s.findStateLocked(ref)
+		state, err := s.findStateLive(ref)
 		if err != nil {
 			return err
 		}
@@ -687,13 +687,24 @@ func (s *transcriptService) updateHydrationState(ctx context.Context, caller Cal
 	return out, err
 }
 
+// ensureStateLocked returns the conversation's transcript state, reading it
+// through the live handle so a caching layer never serves a stale head, and
+// creating the state bead on first touch.
 func (s *transcriptService) ensureStateLocked(ref ConversationRef) (ConversationTranscriptStateRecord, error) {
-	return s.ensureStateLockedWriter(s.store, ref)
+	state, err := s.findStateLive(ref)
+	if err != nil {
+		return ConversationTranscriptStateRecord{}, err
+	}
+	if state != nil {
+		return *state, nil
+	}
+	return s.createTranscriptState(s.store, ref)
 }
 
 // ensureStateLockedWriter is ensureStateLocked with its create routed through w,
 // so a first-touch transcript-state bead can be created inside the same
-// transaction as the membership and binding writes it accompanies.
+// transaction as the membership and binding writes it accompanies. Its lookup
+// reads s.store, keeping the pre-live semantics for transaction callers.
 func (s *transcriptService) ensureStateLockedWriter(w membershipWriter, ref ConversationRef) (ConversationTranscriptStateRecord, error) {
 	state, err := s.findStateLocked(ref)
 	if err != nil {
@@ -702,6 +713,12 @@ func (s *transcriptService) ensureStateLockedWriter(w membershipWriter, ref Conv
 	if state != nil {
 		return *state, nil
 	}
+	return s.createTranscriptState(w, ref)
+}
+
+// createTranscriptState creates the conversation's transcript state bead
+// through w and returns the decoded record.
+func (s *transcriptService) createTranscriptState(w membershipWriter, ref ConversationRef) (ConversationTranscriptStateRecord, error) {
 	fields := map[string]string{
 		"schema_version":              strconv.Itoa(schemaVersion),
 		"scope_id":                    ref.ScopeID,
@@ -732,6 +749,20 @@ func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationT
 	if err != nil {
 		return nil, fmt.Errorf("list transcript state: %w", err)
 	}
+	return transcriptStateFromItems(items, ref)
+}
+
+// findStateLive is findStateLocked through the live handle, so a primed cache
+// never hides a head another writer published after the prime.
+func (s *transcriptService) findStateLive(ref ConversationRef) (*ConversationTranscriptStateRecord, error) {
+	items, err := beads.LiveFor(s.store).List(beads.ListQuery{Label: transcriptStateLabel(ref)})
+	if err != nil {
+		return nil, fmt.Errorf("list transcript state: %w", err)
+	}
+	return transcriptStateFromItems(items, ref)
+}
+
+func transcriptStateFromItems(items []beads.Bead, ref ConversationRef) (*ConversationTranscriptStateRecord, error) {
 	var out *ConversationTranscriptStateRecord
 	for _, item := range items {
 		if !hasLabel(item, "gc:extmsg-transcript-state") || item.Status == "closed" {
@@ -779,11 +810,11 @@ func (s *transcriptService) findActiveMembershipLocked(ref ConversationRef, sess
 	return out, nil
 }
 
-func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int64, limit int, order TranscriptOrder) ([]ConversationTranscriptRecord, error) {
-	state, err := s.ensureStateLocked(ref)
-	if err != nil {
-		return nil, err
-	}
+// listTranscriptLocked collects the conversation's published entries after
+// the given sequence. The state record is read live by the caller and the
+// buckets are listed through the live handle, so a caching layer never hides
+// a published entry behind a stale head.
+func (s *transcriptService) listTranscriptLocked(state ConversationTranscriptStateRecord, ref ConversationRef, after int64, limit int, order TranscriptOrder) ([]ConversationTranscriptRecord, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -800,7 +831,7 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 	descending := order == TranscriptOrderDesc
 	records := make([]ConversationTranscriptRecord, 0, limit)
 	appendBucket := func(bucket int64) error {
-		items, err := s.store.List(beads.ListQuery{Label: transcriptBucketLabel(ref, bucket)})
+		items, err := beads.LiveFor(s.store).List(beads.ListQuery{Label: transcriptBucketLabel(ref, bucket)})
 		if err != nil {
 			return fmt.Errorf("list transcript bucket %d: %w", bucket, err)
 		}
