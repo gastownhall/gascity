@@ -1591,10 +1591,12 @@ func (s stampRefusingStore) SetMetadataBatch(id string, kvs map[string]string) e
 // TestExecutionBackstopNeverDrainsAStartedSeatWhoseStampDidNotPersist
 // (ga-ba7k1f). Kills the drain reaching a started seat through the
 // nothing-to-send shortcut: the seat's step_started is in the tail, so each
-// pass sees it started, but the stamp never lands, and the pool default nudge
-// is chosen from the stamp. With no nudge configured there is then nothing to
-// send, and the engine would escalate on the spot. Execution evidence vetoes
-// that escalation like any other: the seat is held, never drained.
+// pass sees it started, but the stamp never lands, so no pass can use the
+// held-claim default chosen from the stamp. With no nudge configured the
+// seat is re-woken through the unstarted treatment instead — the claim line,
+// never a --drain-ack (mc-ilr3b) — within the bounded attempts, and the
+// execution evidence vetoes the cap-time escalation like any other: the seat
+// is held, never drained.
 func TestExecutionBackstopNeverDrainsAStartedSeatWhoseStampDidNotPersist(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.cfg.Agents[0].Nudge = ""
@@ -1608,6 +1610,21 @@ func TestExecutionBackstopNeverDrainsAStartedSeatWhoseStampDidNotPersist(t *test
 
 	f.tickStale(t)
 
+	// The claim line is what flows while the stamp never lands: the attempt
+	// cap's worth, and no further delivery once the hold stands.
+	got := f.nudgesDelivered()
+	if len(got) != idleClaimNudgeMaxAttempts {
+		t.Fatalf("nudges = %d, want the attempt cap %d of the claim line; stdout=%s",
+			len(got), idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+	for i, text := range got {
+		if text != ladderClaimedNudge {
+			t.Fatalf("nudge %d = %q, want the claim line [%q]", i, text, ladderClaimedNudge)
+		}
+		if strings.Contains(text, "--drain-ack") {
+			t.Fatalf("nudge %d carries --drain-ack: %q", i, text)
+		}
+	}
 	if got := f.sessionMeta(t, executionClaimStartedKey); got != "" {
 		t.Fatalf("%s = %q, want the stamp never persisted", executionClaimStartedKey, got)
 	}
