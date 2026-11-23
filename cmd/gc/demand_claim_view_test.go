@@ -2,12 +2,16 @@ package main
 
 import (
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // errClaimViewRead is what failingClaimViewStore returns from Get.
@@ -194,6 +198,112 @@ func TestDemandClaimViewReadFailureWithholdsTheRowAndMarksPartial(t *testing.T) 
 	for _, want := range []string{agreementTemplate, "e", "city", errClaimViewRead.Error()} {
 		if !strings.Contains(errs[0].Error(), want) {
 			t.Fatalf("errs[0] = %q, want it to name %q", errs[0], want)
+		}
+	}
+}
+
+// TestCrossStoreDemandLegsCarryOwnClaimView pins the design's leg rule
+// (#5857): the only demand legs that carry a claim view are the cross-store
+// (city) legs appended for a rig pool — a pool on the generic default probe
+// and a rig pool backing a named session on the on-demand probe — and each
+// carries that pool's own store, where a seat of the pool resolves the leg's
+// ids when it claims. Every other leg (a pool's own store, a city-scoped
+// pool, a store-scoped control dispatcher) carries none, so its counting is
+// today's.
+func TestCrossStoreDemandLegsCarryOwnClaimView(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "gascity")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gc"},
+		Rigs:      []config.Rig{{Name: "gascity", Path: rigPath}},
+		Agents: []config.Agent{
+			// A generic rig pool on the default probe.
+			{Name: "worker", Dir: "gascity", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)},
+			// A rig pool that backs a named session (on-demand).
+			{Name: "nworker", Dir: "gascity", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			// A city-scoped pool: its own store IS the city store.
+			{Name: "cityworker", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			// A store-scoped control dispatcher on a rig.
+			{Name: config.ControlDispatcherAgentName, Dir: "gascity", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+		},
+		NamedSessions: []config.NamedSession{{Template: "nworker", Dir: "gascity", Mode: "on_demand"}},
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{"gascity": rigStore}
+
+	targets := buildDemandTargets("gc", cityPath, cfg, cityStore, rigStores, nil, nil, noProbeEnv, io.Discard)
+
+	legsByTemplate := func(list []defaultScaleCheckTarget, template string) map[string]defaultScaleCheckTarget {
+		out := map[string]defaultScaleCheckTarget{}
+		for _, leg := range list {
+			if leg.template == template {
+				out[leg.storeKey] = leg
+			}
+		}
+		return out
+	}
+	// assertPoolLegs checks one rig pool's legs in one target list: an own
+	// leg on the pool's own store with no claim view, and a cross-store city
+	// leg whose claim view is that pool's own store.
+	assertPoolLegs := func(list []defaultScaleCheckTarget, template string) {
+		t.Helper()
+		legs := legsByTemplate(list, template)
+		own, ok := legs["rig:gascity"]
+		if !ok {
+			t.Fatalf("%s: no own rig leg (legs=%v)", template, legs)
+		}
+		if own.claimView != nil {
+			t.Fatalf("%s: own leg carries claim view %v: a pool's own store needs no probe to ask the claim's question", template, own.claimView)
+		}
+		city, ok := legs["city"]
+		if !ok {
+			t.Fatalf("%s: no cross-store city leg: routed demand delivered there would be invisible to the pool (legs=%v)", template, legs)
+		}
+		if city.claimView == nil {
+			t.Fatalf("%s: city leg carries no claim view: its rows would be counted without asking whether the claim can win them", template)
+		}
+		if !beads.SameStore(city.claimView, rigStore) {
+			t.Fatalf("%s: city leg's claim view = %v, want the pool's own rig store, where the seat's claim resolves ids", template, city.claimView)
+		}
+	}
+
+	// The generic pool's legs are in the pool pipeline only.
+	assertPoolLegs(targets.defaultScaleTargets, "gascity/worker")
+	// The named-backing pool's legs are in both lists: the pool pipeline's
+	// copy is the one that counts, and the named list's copy preserves the
+	// same legs for partial-query retention.
+	assertPoolLegs(targets.defaultScaleTargets, "gascity/nworker")
+	assertPoolLegs(targets.defaultNamedScaleTargets, "gascity/nworker")
+
+	// A city-scoped pool has one leg, its own, on the city store, with no
+	// claim view: no cross-store delivery applies to it.
+	cityLegs := legsByTemplate(targets.defaultScaleTargets, "cityworker")
+	if len(cityLegs) != 1 {
+		t.Fatalf("cityworker: legs = %v, want exactly its own city leg", cityLegs)
+	}
+	if cityLegs["city"].claimView != nil {
+		t.Fatalf("cityworker: own city leg carries claim view %v: a city-scoped pool owns its own store", cityLegs["city"].claimView)
+	}
+	// A store-scoped control dispatcher keeps its legs on the stores it owns:
+	// its own rig leg, and no city leg, none with a claim view.
+	dispatcherLegs := legsByTemplate(targets.defaultScaleTargets, "gascity/"+config.ControlDispatcherAgentName)
+	if len(dispatcherLegs) != 1 {
+		t.Fatalf("control dispatcher: legs = %v, want exactly its own rig leg", dispatcherLegs)
+	}
+	if dispatcherLegs["rig:gascity"].claimView != nil {
+		t.Fatalf("control dispatcher: own leg carries claim view %v", dispatcherLegs["rig:gascity"].claimView)
+	}
+
+	// No leg anywhere carries a claim view other than a rig pool's own store.
+	for _, list := range [][]defaultScaleCheckTarget{targets.defaultScaleTargets, targets.defaultNamedScaleTargets} {
+		for _, leg := range list {
+			if leg.claimView != nil && !beads.SameStore(leg.claimView, rigStore) {
+				t.Fatalf("leg %s/%s carries unexpected claim view %v", leg.template, leg.storeKey, leg.claimView)
+			}
 		}
 	}
 }

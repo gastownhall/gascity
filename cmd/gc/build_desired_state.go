@@ -1431,11 +1431,17 @@ func buildDemandTargets(
 				// beads and be orphan-drained, then re-glimpse city demand on the
 				// next cold tick and respawn (the same spawn/drain treadmill,
 				// amplitude clamped to 1 by the namedOnDemandTemplates clamp).
+				// The city legs carry the pool's own store as their claim view
+				// (#5857, demand_claim_view.go), read through its federated work
+				// leg: a seat resolves a cross-store
+				// row's id there when it claims, so the probe counts the row only
+				// if the claim can win it — a stale open replica of a bead the
+				// owner store already closed is not demand, here or below.
 				// Same guard conditions apply: healthy own rig store, not
 				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
 				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-					city := cityTargets(template)
+					city := crossStoreDemandLegs(cityTargets(template), demandClaimView(scopeStores("", nil, ownTarget.store)))
 					if namedSessionMode != "always" {
 						defaultScaleTargets = append(defaultScaleTargets, city...)
 					}
@@ -1513,10 +1519,15 @@ func buildDemandTargets(
 			// coldWakeTemplates below) — the default probe IS the
 			// authoritative count, so it scales to total routed demand (bounded
 			// by max_active and the daemon's max_wakes_per_tick), matching the
-			// retired cold-pool-spawner's scale-to-want. Counts sum across
-			// store groups and the beads are distinct per store, so probing
-			// both yields the correct union demand. A city-scoped pool's
-			// own target is already the city store, so it needs no extra probe.
+			// retired cold-pool-spawner's scale-to-want. The union a
+			// cross-store probe yields is the union the claim can win: the city
+			// legs carry the pool's own store as their claim view (#5857,
+			// demand_claim_view.go), read through its federated work leg, and
+			// a row that store already holds closed,
+			// in progress or assigned is withheld as a stale replica, not
+			// counted on the premise that a seat could take it. A
+			// city-scoped pool's own target is already the city store, so it
+			// needs no extra probe.
 			//
 			// Gated on a healthy own rig store: when the rig store is missing or
 			// errored we stay partial and do NOT wake on cross-store demand —
