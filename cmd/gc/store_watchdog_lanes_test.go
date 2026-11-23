@@ -336,6 +336,57 @@ func TestStoreWatchdogLanePassKeepsWatchdogIntervals(t *testing.T) {
 	}
 }
 
+// Lane passes and reload publications are concurrent by design: a reload
+// publishes its config under serviceStateMu while every lane pass reads its
+// own snapshot, so a pass never sees a torn config and a reload never waits
+// on a watchdog. Passes on every lane and publications flipping the city's
+// suspension hammering at once must finish (and stay race-free), and every
+// lane's last status must stay one of the defined values.
+func TestStoreWatchdogLanePassesSurviveConcurrentConfigReloads(t *testing.T) {
+	now := time.Now()
+	store := beads.NewMemStoreFrom(100, storeWatchdogSeed(now), nil)
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{})
+
+	const publications = 16
+	const passesPerLane = 16
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range publications {
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city", Suspended: i%2 == 1}}
+			if !cr.publishRuntimeConfig(cfg, cr.sp, cr.dops, fmt.Sprintf("rev-%d", i)) {
+				t.Errorf("publication %d was rejected", i)
+				return
+			}
+		}
+	}()
+	for _, lane := range cr.storeWatchdogLanesOf() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range passesPerLane {
+				cr.runStoreWatchdogLanePass(context.Background(), lane)
+			}
+		}()
+	}
+	wg.Wait()
+
+	valid := map[storeWatchdogPassStatus]bool{
+		storeWatchdogPassNotDue:          true,
+		storeWatchdogPassSuspended:       true,
+		storeWatchdogPassPressureSkipped: true,
+		storeWatchdogPassCanceled:        true,
+		storeWatchdogPassAborted:         true,
+		storeWatchdogPassCompleted:       true,
+	}
+	for _, lane := range cr.storeWatchdogLanesOf() {
+		if got := lane.status().last; !valid[got] {
+			t.Fatalf("lane %q status after concurrent passes = %q, want one of the defined statuses", lane.spec.key, got)
+		}
+	}
+}
+
 // A suspended city's lanes reach no store, even with every watchdog due, and
 // leave every clock where it was; once the city resumes, the next pass runs.
 func TestStoreWatchdogLanesSkipSuspendedCity(t *testing.T) {
