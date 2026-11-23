@@ -197,6 +197,85 @@ func TestNativeListIDsUnsupportedBatchesReadFallbackOnce(t *testing.T) {
 	}
 }
 
+// A refused ID filter falls back to one unfiltered read per assignee: the
+// refused request is retried once, the second assignee's first batch reads
+// unfiltered, and every remaining batch is skipped.
+func TestNativeListIDsUnsupportedFanoutReadsOncePerAssignee(t *testing.T) {
+	var ids []string
+	for i := 0; i < 150; i++ {
+		ids = append(ids, fmt.Sprintf("gc-%03d", i))
+	}
+	rows := []*issueops.IssueWithCounts{
+		nativeIDListRow("gc-005", 1), nativeIDListRow("gc-120", 2),
+		nativeIDListRow("gc-other-a", 3), nativeIDListRow("gc-other-b", 4),
+		nativeIDListRow("gc-010", 5),
+	}
+	rows[0].Assignee, rows[1].Assignee = "a", "b"
+	rows[2].Assignee, rows[3].Assignee = "a", "b"
+	rows[4].Assignee = "c"
+	var sent []issueops.ListRequest
+	store := newNativeDoltStoreForTest(nativeIDListFixture(rows, true, &sent))
+	got, err := store.List(ListQuery{IDs: ids, Assignees: []string{"a", "b"}, TierMode: TierBoth, Sort: SortCreatedAsc})
+	var actual []string
+	for _, bead := range got {
+		actual = append(actual, bead.ID)
+	}
+	if err != nil || !slices.Equal(actual, []string{"gc-005", "gc-120"}) {
+		t.Fatalf("List = %v, %v; want [gc-005 gc-120]", actual, err)
+	}
+	// Refused a, its unfiltered retry, then one unfiltered read for b.
+	if len(sent) != 3 {
+		t.Fatalf("requests = %d, want 3: %+v", len(sent), sent)
+	}
+	if sent[0].IDFilter == "" || sent[0].Assignee != "a" {
+		t.Fatalf("first request = %+v; want a refused ID-filtered read for a", sent[0])
+	}
+	if sent[1].IDFilter != "" || sent[1].Assignee != "a" {
+		t.Fatalf("retry = %+v; want an unfiltered read for a", sent[1])
+	}
+	unfiltered := map[string]int{}
+	for _, req := range sent[1:] {
+		if req.IDFilter == "" {
+			unfiltered[req.Assignee]++
+		}
+	}
+	if unfiltered["a"] != 1 || unfiltered["b"] != 1 {
+		t.Fatalf("unfiltered reads per assignee = %v; want a=1 b=1", unfiltered)
+	}
+}
+
+// A union of several ID batches is put back into the backend's default order
+// (priority, then newest first, then id) before the limit keeps its prefix.
+func TestNativeListIDsMultiBatchRestoresDefaultOrder(t *testing.T) {
+	var ids []string
+	for i := 0; i < 150; i++ {
+		ids = append(ids, fmt.Sprintf("gc-%03d", i))
+	}
+	row := func(id string, priority int, created int64) *issueops.IssueWithCounts {
+		r := nativeIDListRow(id, created)
+		r.Priority = priority
+		return r
+	}
+	rows := []*issueops.IssueWithCounts{
+		row("gc-010", 3, 50), row("gc-020", 1, 10), row("gc-030", 2, 100), // first batch
+		row("gc-120", 1, 10), row("gc-130", 0, 5), row("gc-140", 2, 100), // second batch
+	}
+	var sent []issueops.ListRequest
+	store := newNativeDoltStoreForTest(nativeIDListFixture(rows, false, &sent))
+	got, err := store.List(ListQuery{IDs: ids, IncludeClosed: true, TierMode: TierBoth, Sort: SortDefault, Limit: 3})
+	if len(sent) != 2 {
+		t.Fatalf("requests = %d, want 2 batches", len(sent))
+	}
+	var actual []string
+	for _, bead := range got {
+		actual = append(actual, bead.ID)
+	}
+	want := []string{"gc-130", "gc-020", "gc-120"}
+	if err != nil || !slices.Equal(actual, want) {
+		t.Fatalf("List = %v, %v; want %v", actual, err, want)
+	}
+}
+
 func TestNativeListIDsUnsupportedSinglePageKeepsBackendOrder(t *testing.T) {
 	var ids []string
 	for i := 0; i < 205; i++ {
