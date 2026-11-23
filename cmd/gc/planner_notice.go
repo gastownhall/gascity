@@ -561,7 +561,7 @@ func plannerNoticeLaneFor(store beads.Store) plannerNoticeLane {
 		if !ok || !h.executesMessages() {
 			return true
 		}
-		if laneStoresShare(h.env.SessionsBeadStore().Store, store) {
+		if laneStoresShare(h.env.Stores().Sessions().Store, store) {
 			found = h
 			return false
 		}

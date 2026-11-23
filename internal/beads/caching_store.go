@@ -43,6 +43,9 @@ type CachingStore struct {
 	// reconcileGate, when set, is asked before each periodic reconcile; a
 	// false answer skips that cycle (WithReconcileGate).
 	reconcileGate func() bool
+	// storeWork, when set, counts each of the cache's own background reads as
+	// its owner's store work (WithStoreWork).
+	storeWork func() (end func())
 	// now is the clock every window and due time reads (WithClock); nil
 	// reads the real one. Read it through clockNow.
 	now func() time.Time
@@ -468,6 +471,9 @@ type CacheStats struct {
 	CadenceDriver string
 	// ReconcileRequests counts RequestReconcile calls.
 	ReconcileRequests int64
+	// ReconcilePaused reports that the cache's reconcile gate (WithReconcileGate)
+	// was closed when Stats ran, so its periodic re-scans are skipped until it opens.
+	ReconcilePaused bool
 }
 
 const (
@@ -617,11 +623,42 @@ func WithEventIDPrefixes(prefixes ...string) CachingStoreOption {
 // the cache resumes reconciling as soon as allowed answers true again. A
 // caller whose backing store must not be touched for a while (its scope is
 // quiescent) uses this to stop the loop's full scans without rebuilding the
-// cache.
+// cache. Stats also calls allowed, so it must be safe for concurrent use, must
+// not block, and must not call back into the cache.
 func WithReconcileGate(allowed func() bool) CachingStoreOption {
 	return func(c *CachingStore) {
 		c.reconcileGate = allowed
 	}
+}
+
+// WithStoreWork makes the cache count its own background reads (PrimeActive,
+// Prime, and each reconcile cycle, from before it asks its reconcile gate) as
+// its owner's store work: begin is called as the read starts and the func it
+// returns as the read ends.
+func WithStoreWork(begin func() (end func())) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.storeWork = begin
+	}
+}
+
+// JoinCachingStoreOptions applies opts, in order, as one option.
+func JoinCachingStoreOptions(opts ...CachingStoreOption) CachingStoreOption {
+	return func(c *CachingStore) {
+		for _, opt := range opts {
+			if opt != nil {
+				opt(c)
+			}
+		}
+	}
+}
+
+// beginStoreWork counts one background read as the owner's store work
+// (WithStoreWork) and returns the func that ends it.
+func (c *CachingStore) beginStoreWork() func() {
+	if c.storeWork == nil {
+		return func() {}
+	}
+	return c.storeWork()
 }
 
 // WithClock sets the clock the cache's windows and due times read: the
@@ -1112,6 +1149,34 @@ func (c *CachingStore) readyPredicateCanAnswerLocked(deps []Dep) bool {
 	return true
 }
 
+// readyEdgesJudgeableLocked is readyPredicateCanAnswerLocked for a reader
+// that trusts the cache row by row (ReadyJudgmentContext). The
+// dependency-derived predicate reads a row's direct ready-blocking edges, as
+// the Ready of a store that strands absent targets does (SQLite, the
+// in-memory stores), so for such a store it reproduces a lost verdict exactly
+// when every ready-blocking edge lands on a resident row: a non-blocking edge
+// (tracks, relates-to, parent-child) is read by none of them, and the
+// controller judges rows this way only on such a store's cache. bd's verdict
+// reads more than the predicate models: it propagates blocked-ness down
+// parent-child edges, judges a waits-for edge by the target's children rather
+// than the target, and counts a pinned target as satisfied. A parent-child
+// edge keeps the row unjudged; over a bd backing the rest is the same
+// approximation readyPredicateCanAnswerLocked makes. Caller must hold c.mu.
+func (c *CachingStore) readyEdgesJudgeableLocked(deps []Dep) bool {
+	for _, dep := range deps {
+		if dep.Type == "parent-child" {
+			return false
+		}
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if _, resident := c.beads[dep.DependsOnID]; !resident {
+			return false
+		}
+	}
+	return true
+}
+
 // markReadyProjectionLostLocked records that this row's projected verdict is
 // gone. Whether that costs the row its readiness answer is decided at read time
 // by readyProjectionUnknownLocked, so the mark itself stays a pure function of
@@ -1473,6 +1538,7 @@ func (c *CachingStore) fetchDirtyOverlay(todo []string, suppressed map[string]st
 // cachePartial state: filtered active queries and Get hit cache for primed
 // beads, while closed-bead queries still delegate to the backing store.
 func (c *CachingStore) PrimeActive() error {
+	defer c.beginStoreWork()()
 	c.mu.RLock()
 	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
@@ -1557,6 +1623,7 @@ func (c *CachingStore) PrimeActive() error {
 // Retries up to 3 times on failure since bd list can time out under
 // concurrent dolt load.
 func (c *CachingStore) Prime(ctx context.Context) error {
+	defer c.beginStoreWork()()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1985,10 +2052,15 @@ func (c *CachingStore) Stopped() <-chan struct{} {
 
 // Stats returns current cache statistics.
 func (c *CachingStore) Stats() CacheStats {
+	// The gate is immutable after construction; ask it outside c.mu so it can
+	// never deadlock against the cache.
+	paused := c.reconcileGate != nil && !c.reconcileGate()
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	s := c.stats
+	s.ReconcilePaused = paused
 	switch c.state {
 	case cachePartial:
 		s.State = "partial"

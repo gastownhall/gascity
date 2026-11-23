@@ -497,3 +497,69 @@ func TestCoreSQLOrdersDeclareRequiresBackendExceptHTTP(t *testing.T) {
 		}
 	}
 }
+
+// TestBindingSnapshotOrder pins the binding backup (S5 §5.3, S6): a
+// city-scoped cooldown exec every 6h of a live, read-only binding snapshot
+// into the pack's state directory, keeping 4. --if-bound is what makes it
+// inert on a city with no binding (the command exits 0 and writes nothing
+// there), and the state directory must be set rather than defaulting to a
+// path at the filesystem root.
+func TestBindingSnapshotOrder(t *testing.T) {
+	const file = "binding-snapshot.toml"
+	o := readOrder(t, file)
+	if err := orders.Validate(o); err != nil {
+		t.Fatalf("%s failed validation: %v", file, err)
+	}
+	if o.Trigger != "cooldown" || o.Interval != "6h" {
+		t.Errorf("trigger = %q interval = %q, want cooldown 6h", o.Trigger, o.Interval)
+	}
+	if !o.IsExec() || o.Pool != "" {
+		t.Errorf("want an exec order with no pool, got exec %q pool %q", o.Exec, o.Pool)
+	}
+	const want = `gc storage snapshot --binding --if-bound --to "${GC_PACK_STATE_DIR:?}/binding-archive" --keep 4`
+	if o.Exec != want {
+		t.Errorf("exec = %q, want %q", o.Exec, want)
+	}
+	if !o.IsCityScoped() {
+		t.Errorf("scope = %q, want city", o.Scope)
+	}
+	if !o.IsEnabled() {
+		t.Error("the order ships disabled")
+	}
+	interval, err := time.ParseDuration(o.Interval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timeout := o.TimeoutOrDefault(); timeout >= interval {
+		t.Errorf("timeout %s is not shorter than interval %s", timeout, interval)
+	}
+}
+
+// TestNudgeOnRouteReadsCreatedEventsSinceLastSeq guards two silent-drop paths
+// (#4382, sys-8war2): routing stamped in the CREATE payload only ever emits
+// bead.created, so the script must read that type too; and the controller
+// fires this order on its own dispatch cadence, so a fixed wall-clock lookback
+// drops every routing event between two runs — the script must cut on the
+// high-water event seq it persisted last run, and tolerate both the nested
+// ({"bead": …}) and flat bead payload shapes `gc events` emits (#5968).
+func TestNudgeOnRouteReadsCreatedEventsSinceLastSeq(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/nudge-on-route.sh")
+	if err != nil {
+		t.Fatalf("reading nudge-on-route.sh: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`.type == "bead.created"`,
+		`.type == "bead.updated"`,
+		`(.seq // 0) > $last`,
+		`(.payload.bead // .payload)`,
+		"nudge-on-route-seq",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("nudge-on-route.sh must read created+updated events past the persisted seq; missing %q", want)
+		}
+	}
+	if strings.Contains(body, "--type bead.updated") {
+		t.Errorf("nudge-on-route.sh must not filter to bead.updated only")
+	}
+}

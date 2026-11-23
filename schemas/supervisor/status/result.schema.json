@@ -30,6 +30,10 @@
       "items": {
         "type": "string"
       }
+    },
+    "api_url": {
+      "type": "string",
+      "description": "Base URL of the supervisor HTTP API, derived from supervisor.toml (bind and port) the way the CLI resolves it, whether or not the supervisor is running. Absent, with a warning on stderr, when supervisor.toml cannot be read."
     }
   },
   "additionalProperties": true

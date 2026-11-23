@@ -17,6 +17,10 @@ var v2ProfileCapabilities = [...]string{
 	runtime.ProtocolCapabilityReportAttachment,
 }
 
+// V2ProfileCapabilities is the v2 profile's capabilities, in the order
+// V2ProfileGaps reports them.
+func V2ProfileCapabilities() []string { return append([]string(nil), v2ProfileCapabilities[:]...) }
+
 // V2ProfileGaps returns the handshake capabilities reconciler v2 needs that
 // info lacks, in a fixed order (observe.v1, report-attachment); nil means
 // v2-ready. It is the one definition of exec v2 readiness: the provider, the

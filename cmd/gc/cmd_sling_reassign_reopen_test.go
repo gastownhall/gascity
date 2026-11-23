@@ -24,9 +24,9 @@ func TestOnFormulaReassignReopensOrderClaimedBead(t *testing.T) {
 	a := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(2)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "hotspot work", Type: "task", Status: "in_progress", Assignee: "order:mol-dog-jsonl"},
-	}, nil)
+	}, nil))
 
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "mol-polecat-work"
