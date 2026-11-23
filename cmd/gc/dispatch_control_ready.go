@@ -345,16 +345,17 @@ func mergeControlReadyLegs(legs ...[]beads.Bead) []beads.Bead {
 // controlReadyScopeShellReady is the scope leg: the batched ready scan taken by
 // shelling `bd` in the scope directory.
 //
-// A proxied-server scope is read without --readonly: bd refuses strict
-// readonly on that backend by design (proxy.readonly.unsupported), and the
-// proxy owns its read-only policy, so the flag would fail every scan in that
-// scope (#7358). `bd ready` is a read either way.
+// The read runs `bd --readonly --sandbox` except on a scope the shared
+// classifier (scopeUsesProxiedDoltMode) puts on a Dolt proxied-server, where bd
+// refuses strict --readonly (proxy.readonly.unsupported) and the read runs with
+// --sandbox alone. Such a read may start the workspace proxy or run bd's
+// maintenance, as any ordinary proxied bd read can.
 func controlReadyScopeShellReady(dir, cityPath string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
-	flags := "--readonly --sandbox"
-	if scopeUsesProxiedDoltMode(cityPath, dir) {
-		flags = "--sandbox"
+	globalFlags := "--readonly --sandbox"
+	if scopeUsesProxiedDoltMode(cityPath, resolveStoreScopeRoot(cityPath, dir)) {
+		globalFlags = "--sandbox"
 	}
-	query := fmt.Sprintf("bd %s ready --json --exclude-type=%s --limit=%d", flags, controlReadyExcludeType, controlReadyFallbackLimit)
+	query := fmt.Sprintf("bd %s ready --json --exclude-type=%s --limit=%d", globalFlags, controlReadyExcludeType, controlReadyFallbackLimit)
 	if includeEphemeral {
 		query += " --include-ephemeral"
 	}
