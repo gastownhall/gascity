@@ -781,7 +781,7 @@ func recordDrainAckAssignedWorkEvent(
 			strandedBead.ID,
 			template,
 			strandedBead.Status,
-			"drain_acked_with_assigned_work",
+			drainAckAnomalyReason(info, strandedBead),
 		),
 	})
 }

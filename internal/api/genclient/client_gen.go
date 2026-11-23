@@ -5547,7 +5547,7 @@ type SessionDrainAckedWithAssignedWorkPayload struct {
 	// BeadStatus Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim).
 	BeadStatus *string `json:"bead_status,omitempty"`
 
-	// Reason Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land.
+	// Reason Shape of the drain-acked stop: 'started_claim_kept' when the session kept an in_progress claim its started records name (and no dispatch hold), else 'drain_acked_with_assigned_work'.
 	Reason *string `json:"reason,omitempty"`
 
 	// SessionId Canonical session bead ID for the session that drain-acked.

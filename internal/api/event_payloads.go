@@ -521,8 +521,20 @@ type SessionDrainAckedWithAssignedWorkPayload struct {
 	BeadID     string `json:"bead_id" doc:"ID of the work bead still holding this session as its assignee."`
 	Template   string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
 	BeadStatus string `json:"bead_status,omitempty" doc:"Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim)."`
-	Reason     string `json:"reason,omitempty" doc:"Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land."`
+	Reason     string `json:"reason,omitempty" doc:"Shape of the drain-acked stop: 'started_claim_kept' when the session kept an in_progress claim its started records name (and no dispatch hold), else 'drain_acked_with_assigned_work'."`
 }
+
+// Reason values of SessionDrainAckedWithAssignedWorkPayload: the shape of
+// the finalized drain-ack stop that kept the work bead.
+const (
+	// DrainAckReasonAssignedWork is kept work the session never started: an
+	// open preassigned row, or an in_progress claim its started records do
+	// not name (such as a live sibling's).
+	DrainAckReasonAssignedWork = "drain_acked_with_assigned_work"
+	// DrainAckReasonStartedClaimKept is an in_progress claim the session's
+	// started records name, on no dispatch hold, that its stop kept.
+	DrainAckReasonStartedClaimKept = "started_claim_kept"
+)
 
 // IsEventPayload marks SessionDrainAckedWithAssignedWorkPayload as an events.Payload variant.
 func (SessionDrainAckedWithAssignedWorkPayload) IsEventPayload() {}
