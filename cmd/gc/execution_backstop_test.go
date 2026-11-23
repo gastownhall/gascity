@@ -1966,3 +1966,24 @@ func TestExecutionBackstopANewClaimStartsWithoutTheOldLatch(t *testing.T) {
 		t.Fatalf("latch token after B's escalation = %q, want incarnation-1", got)
 	}
 }
+
+// TestExecutionBackstopSendsTheConfiguredNudgeUnchanged: a template with its
+// own nudge gets exactly that text, trimmed of surrounding whitespace as the
+// configured nudge always is, with no fallback substituted or appended.
+func TestExecutionBackstopSendsTheConfiguredNudgeUnchanged(t *testing.T) {
+	const configured = "Check your hook with gc hook --claim --json and run what it returns."
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = "  \n" + configured + "\t\n"
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if got := f.nudgesDelivered(); len(got) != 1 || got[0] != configured {
+		t.Fatalf("nudges delivered = %q, want exactly [%q]; stdout=%s", got, configured, f.stdout.String())
+	}
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("drains %v, step_stalled %d; want neither after the first nudge", f.drained, f.stalledEvents())
+	}
+}
