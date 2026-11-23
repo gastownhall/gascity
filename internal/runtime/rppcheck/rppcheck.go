@@ -19,13 +19,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/privatecity"
 )
 
 // Status is the outcome of a single conformance check.
@@ -52,6 +52,10 @@ type Result struct {
 	// executable has no protocol op or the handshake failed.
 	Protocol runtime.ProtocolInfo
 	Checks   []Check
+	// Warnings name what the run could not clean up and did not gate: a
+	// final server-stop in a private city that did not exit 0 before the
+	// city was removed.
+	Warnings []string
 }
 
 // Failed reports whether any check failed.
@@ -114,13 +118,19 @@ func (o *Options) applyDefaults() {
 // checker speaks the documented protocol, not the Go client's
 // serialization helper.
 type startConfig struct {
-	WorkDir string `json:"work_dir,omitempty"`
-	Command string `json:"command,omitempty"`
+	WorkDir   string `json:"work_dir,omitempty"`
+	Command   string `json:"command,omitempty"`
+	FreshOnly bool   `json:"fresh_only,omitempty"`
 }
 
 // Run validates the executable against RPP v0 and returns per-check
-// results. It returns an error only when the run cannot start at all
-// (executable not found); protocol violations are recorded as failed
+// results. Every op runs in a city, as gc's own ops do: the inherited
+// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH when GC_EXEC_CITY_PATH is set,
+// otherwise a private city removed when Run returns, after server-stop there
+// for a script declaring server-lifecycle (a failed one is a Warning). It
+// returns an
+// error only when the run cannot start at all (executable not found, or no
+// private city can be made); protocol violations are recorded as failed
 // checks, never as errors.
 func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	path, err := exec.LookPath(executable)
@@ -130,18 +140,60 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	opts.applyDefaults()
 
 	c := &checker{path: path, opts: opts}
+	if !privatecity.Inherited() {
+		city, removeCity, err := privatecity.New(privateCityPrefix)
+		if err != nil {
+			return Result{}, fmt.Errorf("checking %s outside a city: %w", executable, err)
+		}
+		defer removeCity()
+		c.city = city
+	}
 	c.checkHandshake(ctx)
 	c.checkLifecycle(ctx)
+	c.checkProvisionLaunch(ctx)
 	c.checkServerLifecycle(ctx)
 	c.checkInputOutcome(ctx)
+	if c.city != nil {
+		c.endServer(ctx, nil)
+	}
 	return c.result, nil
 }
 
 // checker accumulates check results across the run.
 type checker struct {
-	path   string
-	opts   Options
+	path string
+	opts Options
+	// city is the env of the private city every op runs in; nil means every
+	// op runs in the city it inherited. An op's own city keys replace it.
+	city   []string
 	result Result
+}
+
+// privateCityPrefix starts the name of every private city the check makes.
+const privateCityPrefix = "gc-rpp-check-city-"
+
+// endServer sends server-stop to a private city the check is done with (city,
+// or the check's own for nil) when the handshake declares server-lifecycle,
+// as gc does to a city it stops: the server the check's sessions brought up
+// there ends before the city is removed, an interrupted check's included, on
+// a cancellation-detached context. The server-lifecycle checks gate the op
+// itself, so a server-stop that does not exit 0 here is a Warning, not a
+// check.
+func (c *checker) endServer(ctx context.Context, city []string) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		return
+	}
+	res := c.runOpEnv(context.WithoutCancel(ctx), c.opts.OpTimeout, city, nil, "server-stop")
+	err := res.err
+	if res.unsupported {
+		err = errors.New("exit 2, although the handshake declares server-lifecycle")
+	}
+	if err != nil {
+		if city == nil {
+			city = c.city
+		}
+		c.result.Warnings = append(c.result.Warnings, privatecity.ServerStopWarning(city, err))
+	}
 }
 
 func (c *checker) record(name string, status Status, detail string) {
@@ -170,14 +222,16 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 	return c.runOpEnv(ctx, timeout, nil, stdin, args...)
 }
 
-// runOpEnv is runOpTimeout with env added to the executable's environment
-// (a city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+// runOpEnv is runOpTimeout with the check's private city, then env, added
+// to the executable's environment. The last value of a key wins, so the
+// city keys of an op's own city (a server check's GC_EXEC_CITY_NAME and
+// GC_EXEC_CITY_PATH) replace the check's, while other keys add to it.
 func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) opResult {
 	var cmdEnv []string
-	if env != nil {
-		// Read before the op's deadline: execenv.Environ waits out an
-		// in-flight native store open, and that wait is not the op's.
-		cmdEnv = append(execenv.Environ(), env...)
+	if c.city != nil || env != nil {
+		// Read before the op's deadline, so the read is not the op's. During
+		// a native store open it is the environment as the open found it.
+		cmdEnv = append(append(execenv.Environ(), c.city...), env...)
 	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -238,6 +292,10 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // its ready-prompt store, are required checks below, not a single
 // capability-to-op map. input-outcome types the driving ops' answers rather
 // than promising an op, so it maps to "" and checkInputOutcome checks it.
+// proc.provision and proc.launch promise the provision and launch ops, which
+// checkProvisionLaunch runs for a handshake that un-welds start. input-fence
+// is a claim about the box's tmux (RUNTIME-CONTRACT-009), not an op, so it
+// maps to "".
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
@@ -248,6 +306,9 @@ var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityFSHost:           "",
 	runtime.ProtocolCapabilityCarrierOps:       "",
 	runtime.ProtocolCapabilityInputOutcome:     "",
+	runtime.ProtocolCapabilityProvision:        "provision",
+	runtime.ProtocolCapabilityLaunch:           "launch",
+	runtime.ProtocolCapabilityInputFence:       "",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
 }
@@ -267,6 +328,14 @@ const (
 const (
 	serverStopCheck           = "capability server-lifecycle: server-stop"
 	serverStopIdempotentCheck = "capability server-lifecycle: server-stop idempotent"
+)
+
+// The proc.provision and proc.launch smoke checks (`gc runtime conformance`
+// gates the tokens in full as the provision group).
+const (
+	provisionCheck       = "capability proc.provision: provision"
+	launchCheck          = "capability proc.launch: launch"
+	launchFreshOnlyCheck = "capability proc.launch: fresh_only launch on a running agent"
 )
 
 // inputOutcomeCheck is the input-outcome smoke check (`gc runtime
@@ -487,20 +556,22 @@ func (c *checker) goneAfterStop(op string, res opResult) bool {
 // script that does not declare the token is not sent server-stop.
 //
 // server-stop names no session: it ends every session of the city it runs
-// in. So every op here runs in a private city (privateCity), never in the
-// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH the check inherited, and a check
-// run from a city leaves that city's sessions running.
+// in. So every op here runs in a private city of its own, never in the city
+// the rest of the check runs in, and a check run from a city leaves that
+// city's sessions running. The city's last op, once its session is stopped,
+// is a final server-stop (endServer), so no server outlives the check.
 func (c *checker) checkServerLifecycle(ctx context.Context) {
 	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
 		return
 	}
-	city, removeCity, err := privateCity()
+	city, removeCity, err := privatecity.New(privateCityPrefix)
 	if err != nil {
 		c.record(serverStopCheck, StatusFail, err.Error())
 		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: no private city to run server-stop in")
 		return
 	}
 	defer removeCity()
+	defer c.endServer(ctx, city)
 	name := c.opts.SessionName + "-server"
 	cfg, err := json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command})
 	if err != nil {
@@ -545,15 +616,135 @@ func (c *checker) checkServerLifecycle(ctx context.Context) {
 	}
 }
 
-// privateCity returns the env of a city no live city uses: GC_EXEC_CITY_NAME
-// and GC_EXEC_CITY_PATH name a fresh temp dir, which remove deletes.
-func privateCity() (env []string, remove func(), err error) {
-	dir, err := os.MkdirTemp("", "gc-rpp-check-city-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("creating a private city to run server-stop in: %w", err)
+// checkProvisionLaunch runs the un-welded start gc sends a handshake that
+// un-welds start (runtime.ProtocolInfo.SeparableLaunch): provision exits 0
+// and leaves is-running false, and under proc.launch a launch into that box
+// exits 0 with is-running true, and a fresh_only launch over the running
+// agent exits 73. A welded handshake is sent neither op, as gc sends it
+// neither. Like the server checks, it runs in a private city of its own,
+// whose last ops are the session's stop and a final server-stop
+// (endServer).
+func (c *checker) checkProvisionLaunch(ctx context.Context) {
+	if !c.result.Protocol.SeparableLaunch() {
+		return
 	}
-	env = []string{"GC_EXEC_CITY_NAME=" + filepath.Base(dir), "GC_EXEC_CITY_PATH=" + dir}
-	return env, func() { _ = os.RemoveAll(dir) }, nil
+	launch := c.result.Protocol.Has(runtime.ProtocolCapabilityLaunch)
+	skipLaunch := func(detail string) {
+		if launch {
+			c.record(launchCheck, StatusSkip, detail)
+			c.record(launchFreshOnlyCheck, StatusSkip, detail)
+		}
+	}
+	cfg, err := json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command})
+	var fresh []byte
+	if err == nil {
+		fresh, err = json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command, FreshOnly: true})
+	}
+	if err != nil {
+		c.record(provisionCheck, StatusFail, fmt.Sprintf("marshaling start config: %v", err))
+		skipLaunch("skipped: no start config")
+		return
+	}
+	city, removeCity, err := privatecity.New(privateCityPrefix)
+	if err != nil {
+		c.record(provisionCheck, StatusFail, err.Error())
+		skipLaunch("skipped: no private city to provision in")
+		return
+	}
+	defer removeCity()
+	defer c.endServer(ctx, city)
+	name := c.opts.SessionName + "-launch"
+	// Whatever provision and launch do, the session is stopped (stop is
+	// idempotent), on a cancellation-detached context so an interrupted run
+	// does not leak it.
+	defer c.runOpEnv(context.WithoutCancel(ctx), c.opts.OpTimeout, city, nil, "stop", name)
+	if !c.checkProvision(ctx, city, name, cfg) {
+		skipLaunch("skipped: provision failed")
+		return
+	}
+	if !launch {
+		return
+	}
+	if !c.checkLaunch(ctx, city, name, cfg) {
+		c.record(launchFreshOnlyCheck, StatusSkip, "skipped: launch started no agent")
+		return
+	}
+	c.checkLaunchFreshOnly(ctx, city, name, fresh)
+}
+
+// checkProvision sends provision for name in city and checks it prepares the
+// box without its agent. It reports whether provision exited 0, so the launch
+// checks have a box to launch into.
+func (c *checker) checkProvision(ctx context.Context, city []string, name string, cfg []byte) bool {
+	res := c.runOpEnv(ctx, c.opts.StartTimeout, city, cfg, "provision", name)
+	switch {
+	case res.unsupported:
+		c.record(provisionCheck, StatusFail, "proc.provision declared but provision not implemented (exit 2)")
+		return false
+	case res.err != nil:
+		c.record(provisionCheck, StatusFail, res.err.Error())
+		return false
+	}
+	switch running := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "is-running", name); {
+	case running.unsupported || running.err != nil:
+		c.record(provisionCheck, StatusFail, "is-running after provision did not answer: "+unanswered(running))
+	case running.stdout != "false":
+		c.record(provisionCheck, StatusFail, fmt.Sprintf("is-running after provision = %q, want \"false\": provision prepares the box without its agent, which gc launches after it", running.stdout))
+	default:
+		c.record(provisionCheck, StatusPass, "")
+	}
+	return true
+}
+
+// checkLaunch sends launch for name in city, into the box provision
+// prepared, and checks it starts the agent. It reports whether the agent
+// runs.
+func (c *checker) checkLaunch(ctx context.Context, city []string, name string, cfg []byte) bool {
+	res := c.runOpEnv(ctx, c.opts.StartTimeout, city, cfg, "launch", name)
+	switch {
+	case res.unsupported:
+		c.record(launchCheck, StatusFail, "proc.launch declared but launch not implemented (exit 2): gc starts every agent of this runtime through it")
+		return false
+	case res.err != nil:
+		c.record(launchCheck, StatusFail, res.err.Error())
+		return false
+	}
+	switch running := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "is-running", name); {
+	case running.unsupported || running.err != nil:
+		c.record(launchCheck, StatusFail, "is-running after launch did not answer: "+unanswered(running))
+		return false
+	case running.stdout != "true":
+		c.record(launchCheck, StatusFail, fmt.Sprintf("is-running after launch = %q, want \"true\"", running.stdout))
+		return false
+	default:
+		c.record(launchCheck, StatusPass, "")
+		return true
+	}
+}
+
+// unanswered describes a required op that did not answer: its exit 2, which
+// leaves no error of its own, or its error.
+func unanswered(res opResult) string {
+	if res.unsupported {
+		return "exit 2, but it is a required op"
+	}
+	return res.err.Error()
+}
+
+// checkLaunchFreshOnly sends a fresh_only launch for name in city, whose
+// agent runs, and checks it refuses with exit 73 rather than replacing it.
+func (c *checker) checkLaunchFreshOnly(ctx context.Context, city []string, name string, fresh []byte) {
+	res := c.runOpEnv(ctx, c.opts.StartTimeout, city, fresh, "launch", name)
+	switch {
+	case res.unsupported:
+		c.record(launchFreshOnlyCheck, StatusFail, "proc.launch declared but launch not implemented (exit 2)")
+	case res.err == nil:
+		c.record(launchFreshOnlyCheck, StatusFail, fmt.Sprintf("exited 0, want %d: a fresh_only launch never replaces a running agent", runtime.ExitCodeFreshCollision))
+	case res.exitCode != runtime.ExitCodeFreshCollision:
+		c.record(launchFreshOnlyCheck, StatusFail, fmt.Sprintf("exited %d, want %d: %v", res.exitCode, runtime.ExitCodeFreshCollision, res.err))
+	default:
+		c.record(launchFreshOnlyCheck, StatusPass, fmt.Sprintf("exit %d", runtime.ExitCodeFreshCollision))
+	}
 }
 
 // checkRequiredBool asserts is-running prints exactly the wanted value
@@ -589,7 +780,7 @@ func (c *checker) remainingCheckNames() []string {
 	names = append(names,
 		"optional: process-alive",
 		c.nudgeCheckName(),
-		"optional: metadata round-trip",
+		metadataCheck,
 		c.drivingCheckName("peek"),
 		"optional: list-running",
 	)
@@ -889,19 +1080,29 @@ func (c *checker) checkNudge(ctx context.Context, name string) {
 	}
 }
 
+// metadataCheck is the name checkMetadataRoundTrip reports under.
+const metadataCheck = "optional: metadata round-trip"
+
 // checkMetadataRoundTrip validates set-meta/get-meta/remove-meta as one
 // unit: absent entirely is a skip, but a partial or lossy implementation
 // is a failure — gc's drain and lifecycle coordination depend on
-// metadata round-tripping faithfully.
+// metadata round-tripping faithfully. For a handshake that un-welds start
+// (runtime.ProtocolInfo.SeparableLaunch) absence is a failure too: gc binds
+// the first turn to the launch identity it publishes with set-meta
+// (publishLaunchIdentity), so it fails every launch of such a runtime.
 func (c *checker) checkMetadataRoundTrip(ctx context.Context, name string) {
 	const (
-		check = "optional: metadata round-trip"
+		check = metadataCheck
 		key   = "gc_rpp_check"
 		value = "rpp-check-value"
 	)
 
 	set := c.runOp(ctx, []byte(value), "set-meta", name, key)
 	if set.unsupported {
+		if c.result.Protocol.SeparableLaunch() {
+			c.record(check, StatusFail, "set-meta not implemented (exit 2): this handshake un-welds start, and gc fails a launch whose identity set-meta cannot publish")
+			return
+		}
 		c.record(check, StatusSkip, "set-meta not implemented (exit 2)")
 		return
 	}

@@ -17,13 +17,25 @@ import (
 
 // preflightRow reports whether out carries a report row tagged tag for check.
 func preflightRow(out, tag, check string) bool {
+	return preflightRowText(out, tag, check) != ""
+}
+
+// preflightRowText is the report row out carries tagged tag for check, with
+// the detail lines wrapped under it, or "" when out carries none.
+func preflightRowText(out, tag, check string) string {
 	prefix := fmt.Sprintf("%s%-*s%s", strings.Repeat(" ", preflightMargin), preflightTagColumn, tag, check)
+	var row strings.Builder
+	inRow := false
 	for _, line := range strings.Split(out, "\n") {
 		if rest, ok := strings.CutPrefix(line, prefix); ok && (rest == "" || rest[0] == ' ') {
-			return true
+			inRow = true
+		} else if !inRow || !strings.HasPrefix(line, preflightDetailIndent) {
+			inRow = false
+			continue
 		}
+		row.WriteString(line + "\n")
 	}
-	return false
+	return row.String()
 }
 
 // TestPreflightNamesEveryBlockerInOneRun is S-3's first acceptance item: the

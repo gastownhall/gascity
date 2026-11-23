@@ -235,7 +235,7 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		// busy target judges with the snapshot census too, so holding a busy
 		// session back reads no store (nudgeTarget.starvationCensus).
 		ok := false
-		if nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, time.Now()) {
+		if nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, nudgeLaunchReader(target, sp), time.Now()) {
 			target.starvationCensus = snapshotCensus
 			ok, err = tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
 		}
@@ -297,11 +297,13 @@ func nudgeFenceCensusFromSnapshot(snapshot *sessionBeadSnapshot) func() (map[str
 
 // nudgeTargetMayClaimPerSnapshot reports whether a claim for target, judged
 // with the pass's snapshot census, would claim anything: a lock-free dry run
-// (WouldClaimBatch) that reads no store. A dry run that fails answers yes, so
-// the authoritative claim decides.
-func nudgeTargetMayClaimPerSnapshot(queue nudgeQueueHandle, target nudgeTarget, snapshotCensus func() (map[string]struct{}, bool), now time.Time) bool {
+// (WouldClaimBatch) that reads no store. Its startup turns are judged with
+// launch, read only when one is due, and a claim that would only drop a stale
+// turn answers yes, so the pass that drops it runs. A dry run that fails
+// answers yes, so the authoritative claim decides.
+func nudgeTargetMayClaimPerSnapshot(queue nudgeQueueHandle, target nudgeTarget, snapshotCensus func() (map[string]struct{}, bool), launch func() (string, bool), now time.Time) bool {
 	target.fenceCensus = snapshotCensus
-	would, err := queue.Probe.WouldClaimBatch(target.claimTarget(target.cityPath), now)
+	would, err := queue.Probe.WouldClaimBatch(target.claimTarget(target.cityPath, launch), now)
 	return err != nil || would
 }
 

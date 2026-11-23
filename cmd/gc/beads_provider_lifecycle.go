@@ -95,6 +95,26 @@ func isBreakerOpenError(err error) bool {
 		strings.Contains(s, "server appears down, failing fast")
 }
 
+// isDataReadFailureError reports whether a provider health error is the data-read
+// probe's verdict (gc-beads-bd.sh health_data_read_gate) that a pre-existing
+// table cannot be read. Restarting the server cannot restore a lost chunk.
+func isDataReadFailureError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "dolt data read probe failed:")
+}
+
+// healthErrorSkipsRecover reports whether a provider health error must be
+// returned as-is instead of triggering recover:
+//   - an open bd circuit breaker means a recovery is already in flight (#2533
+//     clears the breaker on kill); recovering again would re-trip the breaker
+//     and re-desync the PID.
+//   - a data-read failure is not something recover can fix, and the helper's
+//     recovery path reports success without re-running the probe: recovering
+//     would replace the failure with a green health check on data that is
+//     still unreadable.
+func healthErrorSkipsRecover(err error) bool {
+	return isBreakerOpenError(err) || isDataReadFailureError(err)
+}
+
 func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
 	return cfg.Host != "" ||
 		cfg.Port != 0 ||
@@ -156,6 +176,9 @@ var (
 	initDirIfReadyInitAndHookDir      = initAndHookDir
 	initDirIfReadyWaitForManagedDolt  = waitForManagedDoltInitReady
 	initAndHookDirWaitForScopeReady   = waitForBeadsScopeReadyAfterRecovery
+	// startBeadsLifecycleInitRig is how the bead lifecycle initializes each
+	// rig, replaced by the tests that pin how it treats a rig it cannot serve.
+	startBeadsLifecycleInitRig = initAndHookDir
 )
 
 func isRetryableManagedDoltLifecycleError(err error) bool {
@@ -194,7 +217,13 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 // which holds the city to that record. Rigs must have absolute paths before
 // calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
-	if err := startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil); err != nil {
+	err := startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil)
+	// Init migrates only a database it is bootstrapping. Name every other
+	// one whose schema differs from the linked beads library's, with the
+	// command an operator runs, whether or not the lifecycle succeeded: a
+	// city store the pinned bd cannot open is one way it fails.
+	writeBdSchemaNotices(stderr, "warning: ", bdSchemaNoticesFor(cityPath, cfg))
+	if err != nil {
 		return err
 	}
 	// The binding boot leaves behind is the one every reload must keep.
@@ -307,7 +336,17 @@ func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City,
 			continue
 		}
 		prefix := cfg.Rigs[i].EffectivePrefix()
-		if err := initAndHookDir(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
+		if err := startBeadsLifecycleInitRig(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
+			// A rig whose database the pinned bd cannot open because of its
+			// schema waits for an operator to migrate it (init migrates only
+			// a database it is bootstrapping). Leave that rig unserved, as
+			// the runtime leaves any rig whose store will not open, rather
+			// than take the whole city down for it.
+			var unserved *bdSchemaUnservedError
+			if errors.As(err, &unserved) {
+				fmt.Fprintf(stderr, "init rig %q beads: %v; leaving the rig unserved until its database is migrated\n", cfg.Rigs[i].Name, err) //nolint:errcheck // best-effort stderr
+				continue
+			}
 			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
 		}
 	}
@@ -1069,7 +1108,7 @@ func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *ci
 			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
 		}
 		if err := initAndHookDirWaitForScopeReady(context.Background(), dir, cityPath, time.Now().Add(10*time.Second)); err != nil {
-			return fmt.Errorf("waiting for initialized bead scope readiness: %w", err)
+			return scopeReadinessError(cityPath, dir, err)
 		}
 		// Strong post-init validation: confirm the canonical database
 		// actually exists on the running Dolt server. The scope-ready
@@ -1786,6 +1825,8 @@ func providerScriptTraceDir(environ []string) string {
 // runProviderOwnedOpStrict differs from the legacy generic provider runner:
 // an exit status of 2 is a provider failure for a scope GC has explicitly
 // handed to the provider, never an invitation to fall back to GC lifecycle.
+// Where the platform cannot exec the bundled gc-beads-bd script, gc's native
+// form of it runs in its place (builtinProviderOwnedOp).
 func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, script string, environ []string, args ...string) error {
 	op := "provider operation"
 	if len(args) > 0 {
@@ -1793,14 +1834,21 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 	}
 	ctx, cancel := providerLifecycleContext(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, script, args...)
-	cmd.WaitDelay = 2 * time.Second
-	prepareProviderOpCommand(cmd)
-	cmd.Env = environ
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	start := time.Now()
-	err := cmd.Run()
+	var start time.Time
+	var err error
+	if native := builtinProviderOwnedOp(script, environ); native != nil {
+		start = time.Now()
+		err = native(ctx, environ, &stderr, args)
+	} else {
+		cmd := exec.CommandContext(ctx, script, args...)
+		cmd.WaitDelay = 2 * time.Second
+		prepareProviderOpCommand(cmd)
+		cmd.Env = environ
+		cmd.Stderr = &stderr
+		start = time.Now()
+		err = cmd.Run()
+	}
 	traceProviderScriptCall(script, providerScriptTraceDir(environ), args, start, err)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -2464,11 +2512,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				if !owned {
 					return err
 				}
-				// Breaker-aware preflight: if the bd circuit breaker is
-				// open, a recovery is already in flight (#2533 clears the
-				// breaker on kill). Skip recover here so the next restart
-				// doesn't re-trip the breaker and re-desync the PID.
-				if isBreakerOpenError(err) {
+				if healthErrorSkipsRecover(err) {
 					return err
 				}
 				// Recover backoff: refuse a 2nd recover within
@@ -2772,7 +2816,12 @@ func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRu
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: refuse to adopt the process as ours. This gate
+		// only grants trust, so declining is the safe direction.
+		return false
+	}
 	if deleted {
 		return false
 	}

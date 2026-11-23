@@ -12,9 +12,11 @@ import (
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -100,9 +102,16 @@ func newConvoyCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Create a convoy and optionally link existing issues to it.
 
 Creates a convoy bead and tracks any provided issue IDs. Issues can
-also be added later with "gc convoy add".`,
+also be added later with "gc convoy add", which finds them in the
+convoy's own store.
+
+The convoy lands in the store of the rig named by --rig (a rig name).
+Every issue's ID prefix must route to that same store. Without --rig it
+lands in the first issue's store, or in the city store when no issues
+are given; GC_RIG and the working directory do not choose the store.`,
 		Example: `  gc convoy create sprint-42
   gc convoy create sprint-42 issue-1 issue-2 issue-3
+  gc --rig frontend convoy create frontend-batch
   gc convoy create deploy --owner mayor --notify mayor --merge mr
   gc convoy create auth-rewrite --owned --target integration/auth-rewrite`,
 		Args: cobra.ArbitraryArgs,
@@ -163,12 +172,10 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 		}
 	}
 
-	// Determine which store to use: if children are provided, use the
-	// first child's rig store so convoy and children share a database.
-	// This avoids cross-store parent references that bd can't resolve.
-	storeDir := cityPath
-	if len(issueIDs) > 0 {
-		storeDir = convoyCreateStoreRoot(cfg, cityPath, issueIDs[0])
+	storeDir, err := convoyCreateStoreDir(cfg, cityPath, rigFlag, issueIDs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	store, err := openStoreAtForCity(storeDir, cityPath)
 	if err != nil {
@@ -193,6 +200,49 @@ func convoyCreateStoreRoot(cfg *config.City, cityPath, beadID string) string {
 		}
 	}
 	return cityPath
+}
+
+// convoyCreateStoreDir picks the store a new convoy lands in. A non-empty
+// rigName selects that rig's store, matched by name as gc bd and gc formula
+// match --rig, and every issue must route to the store an open of that rig
+// reaches. Without one the convoy shares the first issue's store, so convoy
+// and issues share a database, else it lands in the city store.
+func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs []string) (string, error) {
+	if name := strings.TrimSpace(rigName); name != "" {
+		rig, ok := rigByName(cfg, name)
+		if !ok {
+			return "", fmt.Errorf("rig %q not found", name)
+		}
+		if strings.TrimSpace(rig.Path) == "" {
+			return "", fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it", rig.Name, rig.Name)
+		}
+		root := resolveStoreScopeRoot(cityPath, rig.Path)
+		provider, store := openedStoreForScope(cityPath, root)
+		for _, id := range issueIDs {
+			routedProvider, routed := openedStoreForScope(cityPath, convoyCreateStoreRoot(cfg, cityPath, id))
+			if routedProvider != provider || !samePath(routed, store) {
+				return "", fmt.Errorf("--rig %q conflicts with issue %s, which routes to store %q; a convoy and its issues must share one store", name, id, routed)
+			}
+		}
+		return root, nil
+	}
+	if len(issueIDs) > 0 {
+		return convoyCreateStoreRoot(cfg, cityPath, issueIDs[0]), nil
+	}
+	return cityPath, nil
+}
+
+// openedStoreForScope names the store an open of scopeRoot reaches: the
+// provider that opens it and the root of the store it opens. A file scope
+// opens the city store on the legacy shared layout unless it has a store of
+// its own (compatibleFileStoreRoot); every other scope opens its own root.
+func openedStoreForScope(cityPath, scopeRoot string) (provider, root string) {
+	provider = rawBeadsProviderForScope(scopeRoot, cityPath)
+	if provider != "file" {
+		return provider, scopeRoot
+	}
+	root, _ = compatibleFileStoreRoot(scopeRoot, cityPath)
+	return provider, root
 }
 
 func validateConvoyCreateStoreScope(cfg *config.City, cityPath string, issueIDs []string) error {
@@ -1780,11 +1830,11 @@ func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, 
 func newConvoyAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "add <convoy-id> <issue-id>",
-		Short: "Add an issue to a convoy",
-		Long: `Link an existing issue bead to a convoy.
+		Use:   "add <convoy-id> <bead-ids...>",
+		Short: "Add one or more issues to a convoy",
+		Long: `Link one or more existing issue beads to a convoy.
 
-Adds a tracks dependency from the convoy to the issue, making it appear
+Adds a tracks dependency from the convoy to each issue, making it appear
 in the convoy's progress tracking without changing the issue parent.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1831,11 +1881,11 @@ func doConvoyAdd(store beads.Store, args []string, stdout, stderr io.Writer) int
 
 func doConvoyAddJSON(store beads.Store, args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "gc convoy add: usage: gc convoy add <convoy-id> <issue-id>") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc convoy add: usage: gc convoy add <convoy-id> <bead-ids...>") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	convoyID := args[0]
-	issueID := args[1]
+	issueIDs := args[1:]
 
 	convoy, err := store.Get(convoyID)
 	if err != nil {
@@ -1847,20 +1897,30 @@ func doConvoyAddJSON(store beads.Store, args []string, jsonOut bool, stdout, std
 		return 1
 	}
 
-	if _, err := store.Get(issueID); err != nil {
-		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	// Mirrors doConvoyCreateWithOptionsJSON's loop: every id given is
+	// validated and tracked in turn, stopping on the first error, so a
+	// multi-id call either fully succeeds or fails loudly instead of
+	// silently dropping everything after the first id (GH#8422).
+	for _, issueID := range issueIDs {
+		if _, err := store.Get(issueID); err != nil {
+			fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 
-	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, issueID); err != nil {
-		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, issueID); err != nil {
+			fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	if jsonOut {
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy add", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.add", Action: "add", ConvoyID: convoyID, IssueIDs: []string{issueID}})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy add", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.add", Action: "add", ConvoyID: convoyID, IssueIDs: issueIDs})
 	}
-	fmt.Fprintf(stdout, "Added %s to convoy %s\n", issueID, convoyID) //nolint:errcheck // best-effort stdout
+	if len(issueIDs) == 1 {
+		fmt.Fprintf(stdout, "Added %s to convoy %s\n", issueIDs[0], convoyID) //nolint:errcheck // best-effort stdout
+	} else {
+		fmt.Fprintf(stdout, "Added %d issue(s) to convoy %s\n", len(issueIDs), convoyID) //nolint:errcheck // best-effort stdout
+	}
 	return 0
 }
 
@@ -1961,6 +2021,10 @@ func newConvoyCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Evaluates each open convoy's children. If all children have status
 "closed", the convoy is automatically closed and an event is recorded.
+
+A drain's unit convoy is closed once its drain control has closed,
+whatever the status of the item it tracks, with that item's verdict as
+gc.outcome: a drain never closes the items its unit convoys track.
 
 The check skips a suspended rig's store, naming the rig on stderr, and
 checks its convoys once the rig resumes. A store it cannot open or list,
@@ -2107,12 +2171,9 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, unopened int, rec e
 		return 1
 	}
 
-	binding := classBindingStore(stores)
 	closed, failed := 0, 0
 	for _, item := range convoys {
-		// One frame per convoy store: the children plan reads the convoy's own
-		// store and the binding, and plans over no route (scopeStores).
-		ok, err := closeCompletedConvoyAcross(scopeStores("", nil, item.store), item.store, binding, item.bead)
+		ok, err := closeConvoyIfDone(stores, item)
 		switch {
 		case errors.Is(err, errAutocloseRefused), errors.Is(err, beads.ErrNotFound):
 			// The convoy changed or went away after the list; the next check decides it again.
@@ -2146,6 +2207,81 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, unopened int, rec e
 		}
 	}
 	return 0
+}
+
+// closeConvoyIfDone closes item when the check finds it done, and reports
+// whether this call closed it: a drain unit convoy whose drain control has
+// closed (retireDrainUnitOfClosedDrain), and otherwise a convoy whose children
+// are all closed (closeCompletedConvoyAcross).
+func closeConvoyIfDone(views []convoyStoreView, item convoyWithStore) (bool, error) {
+	if retired, err := retireDrainUnitOfClosedDrain(views, item); err != nil || retired {
+		return retired, err
+	}
+	// One frame per convoy store: the children plan reads the convoy's own
+	// store and the binding, and plans over no route (scopeStores).
+	return closeCompletedConvoyAcross(scopeStores("", nil, item.store), item.store, classBindingStore(views), item.bead)
+}
+
+// retireDrainUnitOfClosedDrain retires item when it is a drain unit convoy
+// whose drain control has closed (dispatch.DrainUnitConvoyRetirement), and
+// reports whether this call closed it. A drain never closes the members its
+// unit convoys track, so the children rule would leave such a unit open for
+// good, and only the closes a drain makes itself retire its units: a drain
+// closed under a canceled or settled workflow root, by a scope abort, a
+// dispatcher quarantine, the finalizer's sweep, run cancel or an operator
+// leaves them open. This retires them whichever path closed the drain, and
+// also the units a closed drain left open before drains retired their units.
+//
+// The close carries the unit's row verdict as gc.outcome and
+// dispatch.DrainUnitRetiredCloseReason, through the same live re-read and fence
+// as the children rule's close.
+func retireDrainUnitOfClosedDrain(views []convoyStoreView, item convoyWithStore) (bool, error) {
+	controlID := dispatch.DrainUnitConvoyControlID(item.bead)
+	if controlID == "" || !convoyStillAutocloses(item.bead) {
+		return false, nil
+	}
+	control, found, err := drainUnitControl(views, item, controlID)
+	if err != nil || !found {
+		return false, err
+	}
+	outcome, due, err := dispatch.DrainUnitConvoyRetirement(item.bead, control)
+	if err != nil || !due {
+		return false, err
+	}
+	closed, err := autocloseCloseIfStill(item.store, item.bead.ID, dispatch.DrainUnitRetiredCloseReason,
+		map[string]string{beadmeta.OutcomeMetadataKey: outcome}, convoyStillAutocloses, func() error {
+			if err := item.store.SetMetadata(item.bead.ID, beadmeta.OutcomeMetadataKey, outcome); err != nil {
+				return fmt.Errorf("stamping drain unit convoy %s outcome: %w", item.bead.ID, err)
+			}
+			return closeConvoyWithReason(item.store, item.bead.ID, dispatch.DrainUnitRetiredCloseReason)
+		})
+	if err != nil {
+		return false, fmt.Errorf("retiring drain unit convoy %s: %w", item.bead.ID, err)
+	}
+	return closed, nil
+}
+
+// drainUnitControl reads controlID, the drain control of item's unit convoy,
+// and reports whether a store holds it. A drain control is graph class: on a
+// city that relocated its classes it lives in the class binding, which is read
+// first, as every by-id read on a split city reads the binding before the work
+// ledger, and otherwise in the store that holds the unit. A control no store
+// holds is no proof that its drain closed, so the caller leaves the unit alone.
+func drainUnitControl(views []convoyStoreView, item convoyWithStore, controlID string) (beads.Bead, bool, error) {
+	for _, store := range []beads.Store{classBindingStore(views), item.store} { // residency:allow — the check's own two handles, binding first: the class binding its views already federate, then the store it listed the unit from; no topology, binding census or namespace is consulted
+		if store == nil {
+			continue
+		}
+		control, err := beads.HandlesFor(store).Live.Get(controlID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("reading drain control %s of unit convoy %s: %w", controlID, item.bead.ID, err)
+		}
+		return control, true, nil
+	}
+	return beads.Bead{}, false, nil
 }
 
 func newConvoyStrandedCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -2736,7 +2872,7 @@ func closeCompletedConvoyAcross(stores storeref.Stores, store, childStore beads.
 	case open || len(children) == 0:
 		return false, nil
 	}
-	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, convoyStillAutocloses, func() error {
+	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, nil, convoyStillAutocloses, func() error {
 		return closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason)
 	})
 	if err != nil {

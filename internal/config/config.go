@@ -835,6 +835,9 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the
+	// last word on new demand, its zeros included. See Agent.
+	ScaleCheckAuthoritative *bool `toml:"scale_check_authoritative,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -1196,6 +1199,12 @@ type PackCommandEntry struct {
 	// Script is the path to the script (relative to pack dir).
 	// Supports Go text/template variables: {{.CityRoot}}, {{.ConfigDir}}, etc.
 	Script string `toml:"script" jsonschema:"required"`
+	// NativeHelp opts the command into delegated help: when true,
+	// gc <pack> <command> --help runs the script with exactly "--help" and
+	// shows its stdout, instead of rendering Description and LongDescription.
+	// Set it only when the script's own --help is a safe, side-effect-free
+	// query that exits 0. Default false keeps the static rendering.
+	NativeHelp bool `toml:"native_help,omitempty"`
 }
 
 // PackGlobal defines commands a pack applies to all agents in scope.
@@ -1488,6 +1497,22 @@ type BeadsConfig struct {
 	// value through internal/rollout.Flags.AllowSchemaBehindMigrate, never
 	// this field directly.
 	AllowSchemaBehindMigrate *bool `toml:"allow_schema_behind_migrate,omitempty" jsonschema:"default=false"`
+	// MigrateCommand is the command gc's notices name for migrating an existing
+	// bd database whose schema is behind the beads library linked into gc (gc
+	// start, gc reload and gc doctor's bd-schema check). gc never runs it:
+	// migrating an existing database is the operator's consent. It is a
+	// one-line Go text/template rendered per database with the fields
+	// {{.City}}, {{.Rig}}, {{.ScopeDir}}, {{.BeadsDir}}, {{.Database}},
+	// {{.Host}}, {{.Port}}, {{.Socket}} and {{.Bd}}, and a shq function that
+	// quotes a value for a POSIX shell. Set it when the city's pinned bd is not
+	// the binary to migrate with, so the notice names the migrator the operator
+	// trusts. Its bd must migrate to the schema of the bd the city pins and no
+	// further: the pinned bd refuses a database migrated past its own schema.
+	// Empty uses gc's default: gc bd ... migrate schema, or the pinned bd with
+	// BEADS_DIR in a city whose gc bd refuses migrate. A template that does not
+	// parse, or that does not render a single line for sample databases, fails
+	// config load.
+	MigrateCommand string `toml:"migrate_command,omitempty"`
 	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
 	// child stay up with no connections before bd retires them; the next bd
 	// command restarts them. Go duration; "0" means never. A finite value
@@ -2729,7 +2754,7 @@ type DoctorConfig struct {
 	// the operator runs `gc doctor --fix`. Actual removal still
 	// requires --fix; this flag does not auto-prune. Safety is
 	// enforced by mechanical checks (no uncommitted changes, no
-	// unpushed commits, no stashes) — never by role identity.
+	// unpushed commits) — never by role identity.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
 
 	// Checks holds city-local inline doctor checks declared via
@@ -3813,6 +3838,28 @@ type Agent struct {
 	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
 	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative makes this pool's ScaleCheck the last word on
+	// new demand, its zeros included.
+	//
+	// By default a cold pool with a custom ScaleCheck is ALSO probed by gc's
+	// own Ready()/gc.routed_to count, merged with max(). That default exists
+	// for a real case: a rig-scoped check cannot see work routed to it that
+	// lives in the city store, so without the probe such a pool would never
+	// wake (TestBuildDesiredState_ScaleFromZero_CrossRig). But max() means a
+	// custom check can never answer "no demand" while cold — max(0,1) is 1 —
+	// so a pool whose check deliberately withholds demand is re-woken every
+	// tick, finds the work its own check already judged unactionable, and
+	// drains. Measured in production: 43 spawn/drain cycles in
+	// 40 minutes, one Claude cold start every ~30s, for as long as a review
+	// was outstanding.
+	//
+	// Set this only when the check reads the same store the routed work lives
+	// in — then the probe can discover nothing the check has not already
+	// weighed, and its disagreement is pure churn. A check that FAILS is
+	// still not a zero: it stays partial and falls through to the probe
+	// exactly as without this flag, so it adds no new way to strand routed
+	// work.
+	ScaleCheckAuthoritative bool `toml:"scale_check_authoritative,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
@@ -4241,7 +4288,9 @@ type agentKey struct{ dir, name string }
 
 // InjectImplicitAgents adds implicit agent entries for configured providers
 // that lack an explicit [[agent]] entry, enabling auto-materialization of
-// sling targets without requiring manual agent declarations.
+// sling targets without requiring manual agent declarations. Implicit agents
+// carry no prompt_template: gc prime selects their builtin worker prompt as it
+// does for any agent without one.
 func InjectImplicitAgents(cfg *City) {
 	// Build set of existing agent keys (dir, name).
 	existing := make(map[agentKey]bool, len(cfg.Agents))
@@ -4258,15 +4307,6 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	// Implicit agents default to the core pack's pool-worker prompt when
-	// the core pack is composed (it resolves from the user-global cache,
-	// so the path is absolute). Without core the template stays empty and
-	// prompt rendering falls back to the embedded baseline.
-	promptTemplate := ""
-	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
-		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
-	}
-
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
 		slingFormula = "mol-do-work"
@@ -4280,7 +4320,6 @@ func InjectImplicitAgents(cfg *City) {
 		cfg.Agents = append(cfg.Agents, Agent{
 			Name:                name,
 			Provider:            name,
-			PromptTemplate:      promptTemplate,
 			DefaultSlingFormula: &slingFormula,
 			Implicit:            true,
 		})
@@ -4296,7 +4335,6 @@ func InjectImplicitAgents(cfg *City) {
 				Name:                name,
 				Dir:                 rig.Name,
 				Provider:            name,
-				PromptTemplate:      promptTemplate,
 				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
 			})
@@ -5256,7 +5294,8 @@ func Parse(data []byte) (*City, error) {
 }
 
 // validateBeadsModes rejects an out-of-enum value in any [beads] mode field
-// (conditional_writes, guarded_release, native_transport, ledger_feed). Parse runs it on
+// (conditional_writes, guarded_release, native_transport, ledger_feed), and a
+// migrate_command template that does not render. Parse runs it on
 // its single layer and LoadWithIncludesOptions runs it again on the composed
 // root, because a fragment may supply any of these fields; one shared list
 // keeps the two load paths from drifting when a field is added.
@@ -5270,7 +5309,10 @@ func validateBeadsModes(b BeadsConfig) error {
 	if err := validateNativeTransport(b.NativeTransport); err != nil {
 		return err
 	}
-	return validateLedgerFeed(b.LedgerFeed)
+	if err := validateLedgerFeed(b.LedgerFeed); err != nil {
+		return err
+	}
+	return validateBeadsMigrateCommand(b.MigrateCommand)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes

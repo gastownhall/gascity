@@ -7,8 +7,11 @@ package reference
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // The golden reference's observe.v1 op bodies. Every box is the directory
@@ -24,7 +27,7 @@ const (
 	faultGuard = `be || exit 1; `
 
 	goldenStart = `cfg=$(cat); fresh=$(printf %s "$cfg" | sed -n 's/.*"fresh_only":true.*/y/p'); ` +
-		`if [ -d "$box" ]; then if [ -n "$fresh" ]; then exit 73; fi; exit 1; fi; ` +
+		goldenStartCollision +
 		`mkdir -p "$box.tmp"; ` +
 		`for k in GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES; do v=$(printf %s "$cfg" | sed -n "s/.*\"$k\":\"\([^\"]*\)\".*/\1/p"); if [ -n "$v" ]; then printf %s "$v" > "$box.tmp/meta.$k"; fi; done; ` +
 		`printf %s "$cfg" | sed -n 's/.*"process_names":\[\([^]]*\)\].*/\1/p' | tr -d '"' > "$box.tmp/procs"; ` +
@@ -80,6 +83,11 @@ const goldenExec = `cmd=$(cat); ` +
 const goldenListRunning = faultGuard + `for b in "$B"/*; do [ -d "$b" ] || continue; case "$b" in *.tmp) continue ;; esac; ` +
 	`n=$(basename "$b"); case "$n" in "$name"*) echo "$n" ;; esac; done`
 
+// goldenCopyTo copies a source that exists into the box, under copied/ at
+// the relative destination, and succeeds without copying a source that does
+// not: copy-to is best-effort.
+const goldenCopyTo = `if [ -d "$box" ] && [ -e "$3" ]; then mkdir -p "$box/copied/$4" && cp -R "$3" "$box/copied/$4"/; fi`
+
 // goldenServerStop ends the city's server: every box of the city (the city's
 // state, $B) goes with it, whether or not any is left. It is behind the
 // backend fault, like every op that reaches the backend.
@@ -122,6 +130,10 @@ func Bodies() map[string]string {
 		"kill-object":       goldenKillObject,
 		"peek":              goldenPeek,
 		"exec":              goldenExec,
+		// clear-scrollback: the model keeps no scrollback, so there is
+		// nothing to clear.
+		"clear-scrollback": `:`,
+		"copy-to":          goldenCopyTo,
 		// provision = the box half: consume the config and succeed WITHOUT
 		// creating the box, so is-running stays false; the box is exec-able
 		// (exec runs regardless).
@@ -216,7 +228,8 @@ func nonTmux(b map[string]string) map[string]string {
 // it types. The box's typed-input log is $box/typed, which peek shows after
 // the screen, as a terminal echoes what is typed into it. The fault knobs,
 // all under conformance-faults: blocked (the box's agent waits on a pending
-// interaction, which a nudge's text would answer), lose_reply (the input is
+// interaction, which a nudge's text would answer), refuse_<word> (a nudge
+// answers that outcome word and types nothing), lose_reply (the input is
 // typed, then the reply is lost: a nudge is unconfirmed, any other op exit
 // 1) and hold_send (a nudge is held unresolved in $box/held, and a second
 // identical one while it is held is unconfirmed again without being held
@@ -230,6 +243,7 @@ const (
 	goldenInputObserveDead = `if [ "${GC_RPP_FAULT:-}" = dead ]; then printf '{"state":"dead","object":{"id":"%s","created":"%s"}}\n' "$(cat "$box/id")" "$(cat "$box/created")"; exit 0; fi; `
 
 	goldenInputNudge = `txt=$(cat); ` + goldenInputEntry +
+		`case "$F" in refuse_*) out "${F#refuse_}" ;; esac; ` +
 		`if [ "$F" = blocked ]; then out pending_interaction; fi; ` +
 		`if [ "$F" = hold_send ]; then if grep -qxF -- "$txt" "$box/held" 2>/dev/null; then out unconfirmed; fi; printf '%s\n' "$txt" >> "$box/held"; out unconfirmed; fi; ` +
 		`printf '%s\n' "$txt" >> "$box/typed"; ` +
@@ -298,6 +312,46 @@ func InterruptEndsBoxBodies(b map[string]string) map[string]string {
 	return b
 }
 
+// StartupDialogEnv is the env key of a launch config whose agent shows a
+// startup dialog (LaunchBodies): set to "1", the launched box's screen shows
+// the bypass-permissions warning until a send-keys Enter answers it, and its
+// prompt after.
+const StartupDialogEnv = "GC_RPP_STARTUP_DIALOG"
+
+// The launch op (LaunchBodies): the golden start's box, created in place of
+// a running one, whose agent it replaces, unless the config is fresh_only.
+const (
+	goldenStartCollision = `if [ -d "$box" ]; then if [ -n "$fresh" ]; then exit 73; fi; exit 1; fi; `
+	goldenLaunchReplace  = `if [ -d "$box" ]; then if [ -n "$fresh" ]; then exit 73; fi; reap "$box"; rm -rf "$box"; fi; `
+
+	// goldenLaunchDialog draws the startup dialog a launch config asks for
+	// (StartupDialogEnv) on the launched box's screen ($box/dialog).
+	goldenLaunchDialog = `case "$cfg" in *'"` + StartupDialogEnv + `":"1"'*) echo "Bypass Permissions mode" > "$box/dialog" ;; esac`
+	// goldenDialogAnswer is the agent answering its dialog: Enter leaves
+	// its prompt where the dialog was.
+	goldenDialogAnswer = `if [ -f "$box/dialog" ] && [ "$3" = Enter ]; then echo '❯ ' > "$box/dialog"; fi; `
+)
+
+// LaunchBodies returns b, a reference whose start is complete (Bodies or a
+// variant), for a reference that un-welds start with proc.provision and
+// proc.launch: provision prepares nothing (a box without its agent), and
+// launch starts the agent as b's start does, replacing a running one unless
+// the config is fresh_only (exit 73), and types nothing. A launch config
+// carrying StartupDialogEnv shows a startup dialog, which peek shows first
+// and send-keys Enter answers. Apply it last, so launch is the variant's own
+// start.
+func LaunchBodies(b map[string]string) map[string]string {
+	b["protocol"] = strings.Replace(b["protocol"], `"server-lifecycle"`, `"server-lifecycle","proc.provision","proc.launch"`, 1)
+	b["launch"] = strings.Replace(b["start"], goldenStartCollision, goldenLaunchReplace, 1) + "; " + goldenLaunchDialog
+	b["peek"] = strings.Replace(b["peek"], `cat "$box/cmd0"; echo`, `if [ -f "$box/dialog" ]; then cat "$box/dialog"; fi; cat "$box/cmd0"; echo`, 1)
+	keys := b["send-keys"]
+	if keys == "" {
+		keys = ":"
+	}
+	b["send-keys"] = goldenDialogAnswer + keys
+	return b
+}
+
 // Script renders bodies (Bodies, or a variant) as an
 // executable RPP shell script keeping its state under stateDir. Unlisted
 // ops exit 2.
@@ -314,4 +368,77 @@ func Script(stateDir string, bodies map[string]string) string {
 	}
 	b.WriteString("  *) exit 2 ;;\nesac\n")
 	return b.String()
+}
+
+// CityOnlyScript renders a wrapper around the executable at runtimePath that
+// serves only a city, as gc's own ops always name one: every op, protocol
+// included, exits 1 when GC_EXEC_CITY_PATH is unset or empty, and any other
+// op runs runtimePath, stdin passed through. Each invocation first appends
+// the city it names and its arguments to opsLog (ReadCityOps), so a test can
+// tell which city every op ran in.
+func CityOnlyScript(runtimePath, opsLog string) string {
+	return fmt.Sprintf(`#!/bin/sh
+printf '%%s\t%%s\n' "${GC_EXEC_CITY_PATH:-}" "$*" >> '%s'
+if [ -z "${GC_EXEC_CITY_PATH:-}" ]; then echo "$1: GC_EXEC_CITY_PATH is not set: this runtime serves only a city" >&2; exit 1; fi
+exec '%s' "$@"
+`, opsLog, runtimePath)
+}
+
+// CityOp is one op a CityOnlyScript wrapper logged: the GC_EXEC_CITY_PATH it
+// ran in, empty for none, and its arguments joined by spaces.
+type CityOp struct {
+	City string
+	Args string
+}
+
+// ReadCityOps returns the ops a CityOnlyScript wrapper logged to opsLog, in
+// invocation order.
+func ReadCityOps(opsLog string) ([]CityOp, error) {
+	data, err := os.ReadFile(opsLog)
+	if err != nil {
+		return nil, fmt.Errorf("reading the city-only ops log: %w", err)
+	}
+	var ops []CityOp
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		city, args, ok := strings.Cut(line, "\t")
+		if !ok {
+			return nil, fmt.Errorf("city-only ops log line %q has no tab", line)
+		}
+		ops = append(ops, CityOp{City: city, Args: args})
+	}
+	return ops, nil
+}
+
+// OnFirstOp writes, into dir, a wrapper around the executable at
+// runtimePath that runs every op through it, stdin passed through, and
+// calls fn once the wrapper first runs op, so a test can act on an op
+// beginning (cancel a run, as a Ctrl-C would) with no polling: the wrapper
+// signals through a FIFO. Call release when the test ends; it unblocks the
+// wait when op never ran.
+func OnFirstOp(runtimePath, op, dir string, fn func()) (wrapper string, release func(), err error) {
+	fifo := filepath.Join(dir, "first-"+op)
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		return "", nil, fmt.Errorf("making the first-op FIFO: %w", err)
+	}
+	wrapper = filepath.Join(dir, "on-first-"+op)
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = '%s' ] && [ -p '%s' ]; then echo "$1" > '%s'; rm -f '%s'; fi
+exec '%s' "$@"
+`, op, fifo, fifo, fifo, runtimePath)
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		return "", nil, fmt.Errorf("writing the first-op wrapper: %w", err)
+	}
+	go func() {
+		_, _ = os.ReadFile(fifo) // blocks until the first op writes, or release
+		fn()
+	}()
+	release = func() {
+		if f, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = f.Close()
+		}
+	}
+	return wrapper, release, nil
 }

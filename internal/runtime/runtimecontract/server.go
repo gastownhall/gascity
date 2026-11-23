@@ -2,11 +2,10 @@ package runtimecontract
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
+	"errors"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/privatecity"
 )
 
 // This file is the server group: the server-lifecycle token's `server-stop`
@@ -15,20 +14,49 @@ import (
 // handshake declares server-lifecycle.
 //
 // server-stop names no session: it ends every session of the city it runs
-// in. So every op of a server probe runs in a private city (privateCity),
-// never in the GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH the run inherited,
-// and a run from a city leaves that city's sessions running.
+// in. So every op of a server probe runs in a private city of its own
+// (newPrivateCity), never in the city the rest of the run runs in, and a run
+// from a city leaves that city's sessions running.
 
-// privateCity returns the env of a city no live city uses, for one server
-// probe: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temp dir,
-// which remove deletes.
-func privateCity() (env []string, remove func(), err error) {
-	dir, err := os.MkdirTemp("", "gc-rpp-city-")
+// privateCityPrefix starts the name of every private city the run makes.
+const privateCityPrefix = "gc-rpp-city-"
+
+// newPrivateCity returns a private city for one probe (privatecity.New)
+// whose remove first sends it a final server-stop (endServer), so no server
+// a probe brought up there outlives the run. Defer remove before any of the
+// probe's session stops, so it runs after them.
+func newPrivateCity(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (city []string, remove func(), err error) {
+	city, removeCity, err := privatecity.New(privateCityPrefix)
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating a private city to run server-stop in: %w", err)
+		return nil, nil, err
 	}
-	env = []string{"GC_EXEC_CITY_NAME=" + filepath.Base(dir), "GC_EXEC_CITY_PATH=" + dir}
-	return env, func() { _ = os.RemoveAll(dir) }, nil
+	return city, func() {
+		endServer(ctx, r, hs, city)
+		removeCity()
+	}, nil
+}
+
+// endServer sends server-stop to a private city the run is done with (city,
+// or the run's own for nil) when hs declares server-lifecycle, as gc does to
+// a city it stops: the server the run's sessions brought up there ends
+// before the city is removed, an interrupted run's included, on a
+// cancellation-detached context. The server probes gate the op itself, so a
+// server-stop that does not exit 0 here is a Report warning, not a result.
+func endServer(ctx context.Context, r *runner, hs runtime.ProtocolInfo, city []string) {
+	if declared, _ := serverDeclared(hs); !declared {
+		return
+	}
+	res := r.opEnv(context.WithoutCancel(ctx), r.opts.OpTimeout, city, nil, "server-stop")
+	err := res.err
+	if res.unsupported {
+		err = errors.New("exit 2, although the handshake declares server-lifecycle")
+	}
+	if err != nil {
+		if city == nil {
+			city = r.city
+		}
+		r.warnings = append(r.warnings, privatecity.ServerStopWarning(city, err))
+	}
 }
 
 // serverStop runs server-stop in city and returns a non-pass status when it
@@ -65,7 +93,7 @@ func probeServerStopIdempotent(ctx context.Context, r *runner, hs runtime.Protoc
 	if ok, detail := serverDeclared(hs); !ok {
 		return StatusSkip, detail
 	}
-	city, removeCity, err := privateCity()
+	city, removeCity, err := newPrivateCity(ctx, r, hs)
 	if err != nil {
 		return StatusFail, err.Error()
 	}
@@ -94,7 +122,7 @@ func probeServerStartAfterStop(ctx context.Context, r *runner, hs runtime.Protoc
 	if ok, detail := serverDeclared(hs); !ok {
 		return StatusSkip, detail
 	}
-	city, removeCity, err := privateCity()
+	city, removeCity, err := newPrivateCity(ctx, r, hs)
 	if err != nil {
 		return StatusFail, err.Error()
 	}
@@ -126,7 +154,7 @@ func probeServerStopEndsSession(ctx context.Context, r *runner, hs runtime.Proto
 	if ok, detail := serverDeclared(hs); !ok {
 		return StatusSkip, detail
 	}
-	city, removeCity, err := privateCity()
+	city, removeCity, err := newPrivateCity(ctx, r, hs)
 	if err != nil {
 		return StatusFail, err.Error()
 	}
@@ -163,12 +191,12 @@ func probeServerStopSparesOtherCities(ctx context.Context, r *runner, hs runtime
 	if !hs.Has(observeCityToken) {
 		return StatusSkip, observeCityToken + " not declared"
 	}
-	cityA, removeA, err := privateCity()
+	cityA, removeA, err := newPrivateCity(ctx, r, hs)
 	if err != nil {
 		return StatusFail, err.Error()
 	}
 	defer removeA()
-	cityB, removeB, err := privateCity()
+	cityB, removeB, err := newPrivateCity(ctx, r, hs)
 	if err != nil {
 		return StatusFail, err.Error()
 	}
@@ -181,8 +209,6 @@ func probeServerStopSparesOtherCities(ctx context.Context, r *runner, hs runtime
 	if status, detail := requireStartIn(ctx, r, cityB, theirs); status != StatusPass {
 		return status, detail
 	}
-	// City B's server is this probe's to end too, after its session.
-	defer r.opEnv(ctx, r.opts.OpTimeout, cityB, nil, "server-stop")
 	defer stopIn(ctx, r, cityB, theirs)
 	if status, detail := serverStop(ctx, r, cityA, "in one city"); status != StatusPass {
 		return status, detail

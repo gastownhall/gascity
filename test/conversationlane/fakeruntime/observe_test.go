@@ -22,9 +22,10 @@ func TestMain(m *testing.M) {
 
 // Kills a fakeruntime observe.v1 profile that does not keep the promises
 // it declares: the conformance kit passes every requirement but the ones
-// it does not declare (exec, provision, the fault and city-scope tokens,
-// report-activity's last_activity, the listing fault the fault token
-// gates, and server-lifecycle).
+// it does not declare (exec, provision and launch, the fault and
+// city-scope tokens, report-activity's last_activity, the listing fault the
+// fault token gates, server-lifecycle, and the copy-to op it does not
+// implement).
 func TestObserveProfileIsConformant(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fakeruntime")
@@ -42,6 +43,11 @@ func TestObserveProfileIsConformant(t *testing.T) {
 	skip := map[runtimecontract.Code]bool{
 		runtimecontract.ReqConnectionExec: true, runtimecontract.ReqConnectionIdleBoundary: true,
 		runtimecontract.ReqProvisionBoxWithoutAgent: true,
+		// The profile does not declare proc.launch.
+		runtimecontract.ReqProvisionLaunchStartsAgent: true, runtimecontract.ReqProvisionLaunchReplaces: true,
+		runtimecontract.ReqProvisionLaunchFreshOnly: true,
+		// Nor proc.provision: its start is welded.
+		runtimecontract.ReqProvisionLaunchIdentity:  true,
 		runtimecontract.ReqObserveFaultsReadUnknown: true, runtimecontract.ReqObserveCityScoped: true,
 		runtimecontract.ReqObserveInventoryHasActivity:  true,
 		runtimecontract.ReqDiscoveryFailureIsNotAbsence: true,
@@ -56,6 +62,8 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		runtimecontract.ReqInputWordsAllowedOnOp: true, runtimecontract.ReqInputBlockedNotTyped: true, runtimecontract.ReqInputUnavailable: true,
 		runtimecontract.ReqInputLostReplyUnknown: true, runtimecontract.ReqInputExitZeroIsDelivered: true, runtimecontract.ReqInputHeldSendTypedOnce: true,
 		runtimecontract.ReqInputExit80OneLine: true, runtimecontract.ReqInputDeadBoxGone: true, runtimecontract.ReqInputKeysDelivered: true,
+		// The profile does not implement copy-to.
+		runtimecontract.ReqObservationCopyTo: true,
 	}
 	for _, res := range report.Results {
 		switch {

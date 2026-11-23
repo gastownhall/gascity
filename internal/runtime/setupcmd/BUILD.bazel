@@ -16,7 +16,10 @@ go_test(
     name = "setupcmd_test",
     srcs = [
         "activity_unix_test.go",
+        "redact_windows_test.go",
         "setupcmd_test.go",
+        "setupcommand_refusal_windows_test.go",
+        "setupcommand_windows_test.go",
         "testenv_import_test.go",
     ],
     embed = [":setupcmd"],

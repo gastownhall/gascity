@@ -4325,6 +4325,97 @@ func TestDoSupervisorInstallRejectsHomeOverrideEvenWhenIsolated(t *testing.T) {
 	}
 }
 
+// seedSupervisorServiceUnit writes a gc-owned platform unit at the path this
+// platform's uninstall would remove, derived from the current (test) HOME, and
+// returns that path.
+func seedSupervisorServiceUnit(t *testing.T) string {
+	t.Helper()
+	path := supervisorSystemdServicePath()
+	if goruntime.GOOS == "darwin" {
+		path = supervisorLaunchdPlistPath()
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("Environment=GC_HOME=\""+os.Getenv("GC_HOME")+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// uninstall resolves the unit path from $HOME, so under an overridden HOME it
+// would look in the wrong place and report success while the real unit,
+// installed under the real HOME, stays enabled. It must refuse instead, and
+// must not reach the platform uninstall at all.
+func TestDoSupervisorUninstallRejectsHomeOverride(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	unit := seedSupervisorServiceUnit(t)
+
+	var systemctlCalls, launchctlCalls []string
+	oldSystemctl, oldLaunchctl := supervisorSystemctlRun, supervisorLaunchctlRun
+	supervisorSystemctlRun = func(args ...string) error {
+		systemctlCalls = append(systemctlCalls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorLaunchctlRun = func(args ...string) error {
+		launchctlCalls = append(launchctlCalls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		supervisorSystemctlRun, supervisorLaunchctlRun = oldSystemctl, oldLaunchctl
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorUninstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorUninstall code = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.HasPrefix(stderr.String(), "gc supervisor uninstall: ") {
+		t.Fatalf("stderr = %q, want a 'gc supervisor uninstall:' refusal", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), lookup.HomeDir) {
+		t.Fatalf("stderr = %q, want current home %q", stderr.String(), lookup.HomeDir)
+	}
+	if len(systemctlCalls) != 0 || len(launchctlCalls) != 0 {
+		t.Fatalf("service manager reached under a HOME override: systemctl=%q launchctl=%q", systemctlCalls, launchctlCalls)
+	}
+	if _, err := os.Stat(unit); err != nil {
+		t.Fatalf("unit %q must survive a refused uninstall; stat err=%v", unit, err)
+	}
+}
+
+// The refusal comes after the delegated-mode warning, so a delegated operator
+// still sees why gc's own service files are left alone.
+func TestDoSupervisorUninstallHomeOverrideKeepsDelegationWarning(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd delegation only applies on linux")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	setDelegationEnvForTest(t, "gascity-prod.service", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorUninstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorUninstall code = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	warning := strings.Index(stderr.String(), "does not touch the delegated unit")
+	refusal := strings.Index(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs")
+	if warning < 0 || refusal < 0 || warning > refusal {
+		t.Fatalf("stderr = %q, want the delegation warning, then the HOME override refusal", stderr.String())
+	}
+}
+
 // The opt-in requires an explicit GC_HOME: without one, supervisor state would
 // land in the throwaway HOME's default ~/.gc with nothing tying the run to an
 // isolated installation.
@@ -5326,13 +5417,25 @@ func TestStopManagedCityPreservingSessionsWaitsForRuntimeShutdownOnTimeout(t *te
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not in PATH")
 	}
+	// The fake service takes serviceExitDelay to exit after SIGTERM, which
+	// outlasts the cancel grace (shutdownTimeout) but not the forced-stop
+	// window (5 x shutdownTimeout = 2s). The delay makes "preserve-mode
+	// shutdown waits for the runtime shutdown" deterministic, and the window
+	// leaves ~1.4s of scheduler jitter before the wait is abandoned. A
+	// tens-of-milliseconds window flaked under CPU contention (ga-elb781).
+	// mc.done never closes, so the call always runs the whole window.
+	const (
+		shutdownTimeout  = 400 * time.Millisecond
+		serviceExitDelay = 600 * time.Millisecond
+	)
 	cityPath := t.TempDir()
 	serviceScript := filepath.Join(t.TempDir(), "service.sh")
-	if err := os.WriteFile(serviceScript, []byte(`#!/usr/bin/env python3
+	if err := os.WriteFile(serviceScript, []byte(fmt.Sprintf(`#!/usr/bin/env python3
 import os
 import signal
 import socket
 import sys
+import time
 
 sock_path = os.environ["GC_SERVICE_SOCKET"]
 try:
@@ -5341,6 +5444,7 @@ except FileNotFoundError:
     pass
 
 def stop(_signum, _frame):
+    time.sleep(%.3f)
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, stop)
@@ -5350,7 +5454,7 @@ listener.listen(1)
 while True:
     conn, _ = listener.accept()
     conn.close()
-`), 0o755); err != nil {
+`, serviceExitDelay.Seconds())), 0o755); err != nil {
 		t.Fatalf("WriteFile(service script): %v", err)
 	}
 	var runtimeStdout bytes.Buffer
@@ -5358,7 +5462,7 @@ while True:
 		cityPath: cityPath,
 		cityName: "bright-lights",
 		cfg: &config.City{
-			Daemon: config.DaemonConfig{ShutdownTimeout: "20ms"},
+			Daemon: config.DaemonConfig{ShutdownTimeout: shutdownTimeout.String()},
 			Services: []config.Service{{
 				Name: "bridge",
 				Kind: "proxy_process",
@@ -7389,19 +7493,7 @@ const ephemeralPortThresholdForTest = 32768
 
 func freeEphemeralLoopbackPort(t *testing.T) int {
 	t.Helper()
-	for i := 0; i < 20; i++ {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("Listen: %v", err)
-		}
-		port := l.Addr().(*net.TCPAddr).Port
-		_ = l.Close()
-		if port >= ephemeralPortThresholdForTest {
-			return port
-		}
-	}
-	t.Skip("could not allocate a port >= 32768 in 20 tries")
-	return 0
+	return holdLoopbackPort(t, ephemeralPortThresholdForTest)
 }
 
 func freeLowLoopbackPort(t *testing.T) int {

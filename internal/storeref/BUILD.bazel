@@ -6,6 +6,7 @@ go_library(
         "bindings.go",
         "class_candidates.go",
         "intents.go",
+        "molecule_at.go",
         "plan.go",
         "relevance.go",
         "relic_census.go",
@@ -42,6 +43,7 @@ go_test(
         "resolve_test.go",
         "storeref_test.go",
         "stores_plan_t7b1_test.go",
+        "stores_plan_t7b2_test.go",
         "stores_plan_t7b3_test.go",
         "stores_plan_test.go",
         "stores_rigs_test.go",
@@ -56,6 +58,7 @@ go_test(
     ],
     embed = [":storeref"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
         "//internal/coordclass",

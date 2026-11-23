@@ -143,23 +143,28 @@ type execTransport struct{ p *Provider }
 var _ runtime.Transport = (*execTransport)(nil)
 
 // Launch launches the agent in the box and returns the live Attachment. For a
-// pack that declares proc.provision (SeparableLaunch), it execs `tmux new-session`
-// (or respawn-pane on a warm box) over the `exec` op — this is the controller-side
-// half of the un-weld (B3b), called after Provision by seamProvider.Start and by
-// the reconciler for a launch-only change. For a welded pack the agent is already
-// running (the `start` op launched it), so launchAgent is a no-op here. After a
-// separable launch into a box whose provision config gc stripped of its host
-// work (provisionBox), gc runs the session_setup it left out of that config,
-// as the welded Start does after its `start` op.
+// pack that declares proc.provision (SeparableLaunch), it runs the `launch` op
+// (proc.launch) or execs `tmux new-session` (or respawn-pane on a warm box) over
+// the `exec` op — this is the controller-side half of the un-weld (B3b), called
+// after Provision by seamProvider.Start and by the reconciler for a launch-only
+// change. For a welded pack the agent is already running (the `start` op
+// launched it), so launchAgent is a no-op here, and so is a launch after a
+// Provision that ran the welded `start` op while the handshake did not yet
+// declare a separable launch (weldedProvision). After a separable launch into a
+// box whose provision config gc stripped of its host work (provisionBox), gc
+// runs the session_setup it left out of that config, as the welded Start does
+// after its `start` op, then hands the config's first turn back for the
+// Start's caller to queue (finishSeparableLaunch).
 func (t *execTransport) Launch(ctx context.Context, place runtime.Place, spec runtime.LaunchSpec) (runtime.Attachment, error) {
 	name := placeName(place)
+	if _, welded := t.p.weldedProvision.LoadAndDelete(name); welded {
+		return &execAttachment{p: t.p, name: name}, nil
+	}
 	_, hostSetup := t.p.hostSetupDue.LoadAndDelete(name)
 	if err := t.p.launchAgent(ctx, name, spec.Config); err != nil {
 		return nil, err
 	}
-	if hostSetup {
-		t.p.runHostSessionSetup(ctx, name, spec.Config)
-	}
+	t.p.finishSeparableLaunch(ctx, name, spec.Config, hostSetup)
 	return &execAttachment{p: t.p, name: name}, nil
 }
 

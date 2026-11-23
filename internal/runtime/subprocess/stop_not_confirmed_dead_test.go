@@ -3,6 +3,7 @@ package subprocess
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -10,8 +11,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func TestProcessStopErrorPreservesCauses(t *testing.T) {
+	cause := fmt.Errorf("reaping owned tree: %w", processgroup.ErrProcessNotConfirmedDead)
+	err := processStopError(cause)
+	if !errors.Is(err, runtime.ErrProcessNotConfirmedDead) || !errors.Is(err, cause) || runtime.IsSessionGone(err) {
+		t.Fatalf("processStopError(%v) = %v, want retryable runtime error preserving its cause", cause, err)
+	}
+	for _, other := range []error{nil, processgroup.ErrNotOwned, processgroup.ErrUnsupported} {
+		if got := processStopError(other); !errors.Is(got, other) {
+			t.Errorf("processStopError(%v) = %v, want original error preserved", other, got)
+		}
+	}
+}
 
 // stuckSessionConn is a tracked session whose process never exits: done and
 // reaped stay open, as for a process that outlives SIGKILL. The nil-process
@@ -129,8 +144,8 @@ func TestStopSocketTimeoutOutlastsStopGraceAndReapGrace(t *testing.T) {
 	t.Cleanup(func() { sessionStopGrace = old })
 	for _, grace := range []time.Duration{10 * time.Millisecond, runtime.ManagedProcessStopGrace, 30 * time.Second} {
 		sessionStopGrace = grace
-		if got, floor := stopSocketTimeout(), grace+runtime.ManagedProcessReapGrace; got <= floor {
-			t.Errorf("stopSocketTimeout() = %v with a %v stop grace, want more than grace + reap grace = %v", got, grace, floor)
+		if got, floor := stopSocketTimeout(), grace+runtime.ManagedProcessReapGrace+processgroup.ManagedStopSignalRetryBudget; got <= floor {
+			t.Errorf("stopSocketTimeout() = %v with a %v stop grace, want more than grace + reap grace + signal retry budget = %v", got, grace, floor)
 		}
 	}
 }

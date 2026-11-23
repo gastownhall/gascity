@@ -18,6 +18,7 @@ go_library(
         "readiness.go",
         "seams.go",
         "server.go",
+        "startup_ladder.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/exec",
     visibility = ["//:__subpackages__"],
@@ -35,6 +36,7 @@ go_library(
 go_test(
     name = "exec_test",
     srcs = [
+        "batchfile_windows_test.go",
         "capacity_test.go",
         "carrier_fence_integration_test.go",
         "carrier_ops_conformance_test.go",
@@ -65,6 +67,7 @@ go_test(
         "seam_presence_test.go",
         "seams_test.go",
         "server_test.go",
+        "startup_ladder_test.go",
         "testenv_import_test.go",
         "v2_conformance_test.go",
     ],

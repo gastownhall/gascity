@@ -215,9 +215,13 @@ func TestResolveActiveWispStep_MoleculeNoSteps(t *testing.T) {
 	}
 }
 
-// TestResolveActiveWispStep_WispTypeMolecule verifies that type=wisp beads are
-// also recognized as molecule roots during resolution.
-func TestResolveActiveWispStep_WispTypeMolecule(t *testing.T) {
+// TestResolveActiveWispStep_WispTypeIsNotARoot verifies that type=wisp beads
+// are no longer recognized as molecule roots during resolution: gc never
+// creates a wisp-typed root, and bd refuses a typed listing of a type it does
+// not register, so activeMoleculeTypes holds only "molecule". The step is
+// left unassigned, so it is not reached through any other resolution branch
+// either.
+func TestResolveActiveWispStep_WispTypeIsNotARoot(t *testing.T) {
 	store := beads.NewMemStore()
 
 	wisp := mustCreateInProgress(t, store, beads.Bead{
@@ -226,11 +230,10 @@ func TestResolveActiveWispStep_WispTypeMolecule(t *testing.T) {
 		Assignee: "alice",
 	})
 
-	step := mustCreateInProgress(t, store, beads.Bead{
+	mustCreateInProgress(t, store, beads.Bead{
 		Title:       "Wisp step",
 		Description: "Do the wisp work",
 		Type:        "step",
-		Assignee:    "alice",
 		ParentID:    wisp.ID,
 	})
 
@@ -238,11 +241,8 @@ func TestResolveActiveWispStep_WispTypeMolecule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if b == nil {
-		t.Fatal("expected step bead, got nil")
-	}
-	if b.ID != step.ID {
-		t.Errorf("got bead ID %q, want wisp step %q", b.ID, step.ID)
+	if b != nil {
+		t.Errorf("got bead %q, want nil: a wisp root is no longer an active molecule type", b.ID)
 	}
 }
 
@@ -461,8 +461,8 @@ func TestWispStepResolutionListingsStateTheirOrder(t *testing.T) {
 			t.Errorf("%s(%+v) cuts %d rows in the store's default order, want newest created first", op.Method, op.Query, op.Query.Limit)
 		}
 	}
-	if bounded != 4 {
-		t.Fatalf("recorded %d bounded listings, want the two molecule types, the bridge and the legacy fallback", bounded)
+	if bounded != 3 {
+		t.Fatalf("recorded %d bounded listings, want the one molecule type, the bridge and the legacy fallback", bounded)
 	}
 }
 

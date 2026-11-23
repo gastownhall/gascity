@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **gc no longer migrates an existing bd database's schema; an operator
+  does.** `bd migrate schema` is bd's consent to a one-way schema change for
+  every client of a database (gastownhall/beads#5920 on a shared server,
+  gastownhall/beads#5764 for any existing database). The bd pack's init ran it
+  on every scope whose database already had a schema, on every `gc start` and
+  `gc reload`, so whenever the pinned bd was newer than a database, gc
+  consented on the operator's behalf and could lock out every older bd that
+  shares it. Init now runs it only on a database it is
+  bootstrapping: one this init created, or an interrupted bootstrap it has
+  just reset. Every other database keeps its schema, and init still reports
+  the scope ready instead of failing it. `gc start`, `gc reload` (as reply
+  warnings) and the new `bd-schema` check of `gc doctor` print a
+  `bd schema:` line for each database whose schema differs from the beads
+  library linked into gc, naming both schemas, what the pinned bd reports and
+  the command an operator runs once every client of the database is ready
+  (`gc bd --city <city> [--rig <rig>] migrate schema`, or the pinned bd with
+  `BEADS_DIR` pinned on a split city, whose `gc bd` refuses `migrate`). A rig
+  whose database the pinned bd then cannot open because of that difference is
+  left unserved, with a line in the city's log saying so, instead of failing
+  the whole start or reload; the city's own database still has to open. Upgrade bd, then migrate
+  each database yourself (see "Databases Gas City leaves to you" in "Upgrading
+  an Existing City"); `beads.allow_schema_behind_migrate = true` still lets
+  gc's own store migrate a database that is behind. A database whose
+  bootstrap an earlier init left clean but unfinished is no longer completed
+  on the next start; its `bd schema:` line names the command. Embedded scopes
+  are unaffected: init never ran the step on them, and bd decides whether
+  they migrate. gc measures against its linked beads library, which an OSS
+  city's pinned bd can differ from; a newer bd can refuse writes to a
+  database gc reports as current, and its own message names the schema it
+  needs.
+
 - **New cities are born split.** `gc init` now writes a `[storage]` section
   that keeps work in the work ledger and puts the five infrastructure classes
   (graph, sessions, messaging, orders, nudges) in one SQLite store under
@@ -1011,6 +1042,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Config: `[beads] migrate_command` names the migrator in `bd schema:`
+  notices.** When a city's pinned bd is not the binary an operator migrates
+  with, `migrate_command` (a one-line Go template over the database's city,
+  rig, scope and `.beads` directories, database name, server address and
+  pinned bd, with `shq` for shell quoting) replaces the command that
+  `gc start`, `gc reload` and `gc doctor`'s `bd-schema` check print. gc never
+  runs it. A template that does not parse, or does not render a single line
+  for a sample city and rig database, fails config load. Every behind notice now also says
+  the migrator must move both migration lanes (main and ignored) and that
+  `gc doctor --check bd-schema` reads both afterwards. See "Databases Gas
+  City leaves to you" in "Upgrading an Existing City".
 - **Events: `session.created` and `session.closed`.** The city event
   stream announces each session joining or leaving the open set, with
   typed payloads (`SessionCreatedPayload`, `SessionClosedPayload`), so a
@@ -1200,6 +1242,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Implicit provider agents' workers start with the core pack's builtin
+  worker prompt chosen by `formula_v2`: graph-worker by default, pool-worker
+  with `formula_v2 = false`.** The choice now holds at launch, on resume and
+  from `gc prime`; implicit agents used to be stamped with the pool-worker
+  prompt, whose bare `gc bd close <id>` fails retry-managed and abort-scope
+  steps and cost one cold session per step. Under the default a worker runs
+  one session across a workflow's steps. Under the default `formula_v2`,
+  `[workspace] global_fragments` and `[agent_defaults] append_fragments` no
+  longer reach implicit agents (graph-worker.md is plain markdown; explicit
+  prompt-less agents already do not receive them). `formula_v2 = false`
+  cities keep the pool-worker prompt, fragments included, at launch and
+  resume. A city that needs fragments on a provider worker declares an
+  explicit `[[agent]]` with a `prompt_template`.
+
 - **API: `GET /v0/city/{cityName}/orders/history` and
   `GET /v0/city/{cityName}/order/history/{bead_id}` report `created_at` with
   sub-second precision (RFC 3339 with nanoseconds) (#8453).** They used to
@@ -1345,6 +1401,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --inject` stays.
 
 ### Fixed
+
+- **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
+  landed in the first issue's store, or in the city store when no issues
+  were given, so an empty convoy created with `--rig <rig>` could never
+  track that rig's beads: every later `gc convoy add` failed with
+  `bead not found`. The convoy now lands in the named rig's store. The
+  value is a rig name, matched as `gc bd` and `gc formula` match it. A
+  non-empty `--rig` that names no rig (including the city name and
+  path-looking values such as `./dir`, `dir/` or an absolute directory,
+  which convoy create used to accept by ignoring the flag), a rig with no
+  path binding, or an issue whose prefix routes to another store now
+  fails before anything is written. An empty `--rig` and runs without
+  `--rig` keep the old placement.
 
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a

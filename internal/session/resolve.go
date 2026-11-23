@@ -93,7 +93,25 @@ func resolveSessionID(store beads.SessionStore, identifier string, allowClosed b
 	} else if !errors.Is(err, ErrSessionNotFound) {
 		return "", err
 	}
+	return resolveSessionIDByName(store, identifier, allowClosed)
+}
 
+// ResolveLiveSessionIDByName resolves identifier against live (open)
+// session_name and alias matches only — it never probes identifier as an
+// exact bead ID and never falls back to closed sessions. It is the name-only
+// half of ResolveSessionID, for a caller that has already ruled out (or does
+// not want) an exact-ID match: cmd/gc/worker_handle.go falls back to it when
+// ResolveSessionRecordByExactID answers ErrSessionNotFound, so the id it
+// tried is not re-probed as a name.
+func ResolveLiveSessionIDByName(store beads.SessionStore, identifier string) (string, error) {
+	return resolveSessionIDByName(store, identifier, false)
+}
+
+// resolveSessionIDByName is the name-lookup half of resolveSessionID: open
+// exact session_name matches first, then open exact current alias matches,
+// falling back to closed matches of each when allowClosed. See
+// ResolveSessionID's doc comment for the full identifier precedence.
+func resolveSessionIDByName(store beads.SessionStore, identifier string, allowClosed bool) (string, error) {
 	lookupIdentifier := strings.TrimSpace(identifier)
 	if lookupIdentifier == "" {
 		return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
@@ -146,6 +164,16 @@ func resolveSessionID(store beads.SessionStore, identifier string, allowClosed b
 	return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 }
 
+// listSessionBeadsByMetadata resolves a name (session_name or alias) among
+// session beads only: it asks ListAllSessionBeads for the type+label union
+// (IsSessionBeadOrRepairable's own definition of a session bead), keyed by
+// the metadata entry, rather than keying a store.List by the metadata key
+// alone. A metadata key has no index, so a lookup keyed by it alone compares
+// it on every bead the store holds, closed history of every other kind
+// included; the type and label legs are each indexed, so the union examines
+// only the session beads carrying that metadata. gc nudge poll resolves a
+// session's name on every observe, so this lookup runs every few seconds
+// per live session.
 func listSessionBeadsByMetadata(store beads.SessionStore, key, value string, allowClosed bool) ([]beads.Bead, error) {
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
@@ -153,23 +181,22 @@ func listSessionBeadsByMetadata(store beads.SessionStore, key, value string, all
 		return nil, nil
 	}
 	query := beads.ListQuery{
-		Metadata:      map[string]string{key: value},
 		IncludeClosed: allowClosed,
+		Metadata:      map[string]string{key: value},
 	}
 	if !allowClosed {
 		// Session bead status is open/closed; richer lifecycle states live in
 		// metadata. Treat any other raw status as invalid for live resolution.
 		query.Status = "open"
 	}
-	raw, err := store.List(query)
+	raw, err := ListAllSessionBeads(store, query)
 	if err != nil {
+		// A partial result is still an error here: a name lookup that may be
+		// missing rows must not resolve (or fail to resolve) silently wrong.
 		return nil, err
 	}
 	out := make([]beads.Bead, 0, len(raw))
 	for _, b := range raw {
-		if !IsSessionBeadOrRepairable(b) {
-			continue
-		}
 		normalizeEmptyType(&b)
 		out = append(out, b)
 	}

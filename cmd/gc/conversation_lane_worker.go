@@ -39,6 +39,10 @@ type laneWorkerState struct {
 	// waits on anything but the woken session's start, or startFor passing
 	// clears it.
 	wokeAt time.Time
+	// startingSince is when a pass first found an op waiting on its
+	// session's start, with every pass since finding the same. A take, or a
+	// pass that waits on anything else, clears it.
+	startingSince time.Time
 	// turns says the worker parked with observations pending, so the next
 	// worker watches the conversation's turns again whatever its first pass
 	// finds.
@@ -292,7 +296,7 @@ func (w *conversationLaneWorker) nextDelay(out lanePassOutcome) (time.Duration, 
 	// Take moved the conversation: pass again at once to re-plan. A take
 	// also ends the busy stretch, so the next turn's backoff starts over.
 	if res.Took != opjournal.TakeNone {
-		ws.busySince, ws.wokeAt = time.Time{}, time.Time{}
+		ws.busySince, ws.wokeAt, ws.startingSince = time.Time{}, time.Time{}, time.Time{}
 	}
 	if res.More || res.Took != opjournal.TakeNone {
 		return 0, false
@@ -319,11 +323,28 @@ func (w *conversationLaneWorker) nextDelay(out lanePassOutcome) (time.Duration, 
 	} else {
 		ws.busySince = time.Time{}
 	}
-	// Only a recorded wake is worth a quick look: the reconciler is about
+	// A session still being created or started is about to change: the
+	// reconciler is starting it, and nothing rings the lane when it is
+	// ready, since the row is written in process. Look again quickly for as
+	// long as a start may take, whoever started it: a session a create
+	// request is starting gets no wake from the lane, and without this its
+	// first message waits for the anti-entropy scan.
+	if laneWaitsForStart(res) {
+		if ws.startingSince.IsZero() {
+			ws.startingSince = now
+		}
+		if now.Sub(ws.startingSince) < w.startFor {
+			take(laneWakeRecheck)
+		}
+	} else {
+		ws.startingSince = time.Time{}
+	}
+	// A recorded wake is worth a quick look too: the reconciler is about
 	// to start the session, and a look that finds it still starting asks
 	// for no wake, so the looks stay quick until startFor after the wake.
-	// A held row, or one that is not dormant (a crash not yet healed, a
-	// failed create), changes on no schedule of ours.
+	// A held row, or one that is not dormant for any reason but a start (a
+	// crash not yet healed, a failed create), changes on no schedule of
+	// ours.
 	switch {
 	case out.wake == session.WakeRecorded:
 		ws.wokeAt = now

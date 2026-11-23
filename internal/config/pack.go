@@ -2294,6 +2294,7 @@ func legacyPackCommands(entries []PackCommandEntry, packDir, packName string) []
 			SourceDir:   packDir,
 			PackDir:     packDir,
 			PackName:    packName,
+			NativeHelp:  entry.NativeHelp,
 		})
 	}
 	return out
@@ -2918,6 +2919,7 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		MaxActiveSessions:       ov.MaxActiveSessions,
 		MinActiveSessions:       ov.MinActiveSessions,
 		ScaleCheck:              ov.ScaleCheck,
+		ScaleCheckAuthoritative: ov.ScaleCheckAuthoritative,
 		OptionDefaults:          ov.OptionDefaults,
 	}
 }
