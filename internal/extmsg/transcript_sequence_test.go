@@ -142,6 +142,23 @@ func (f *transcriptFaultStore) logFrontier(value string) {
 	f.mu.Unlock()
 }
 
+func (f *transcriptFaultStore) setFaults(apply func(f *transcriptFaultStore)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	apply(f)
+}
+
+func (f *transcriptFaultStore) assertFrontierNeverDecreased(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := 1; i < len(f.frontier); i++ {
+		if f.frontier[i] < f.frontier[i-1] {
+			t.Fatalf("next_sequence regressed: writes %v", f.frontier)
+		}
+	}
+}
+
 func appendTestTranscript(svc TranscriptService, ref ConversationRef, providerMessageID, text string) (ConversationTranscriptRecord, error) {
 	return svc.Append(context.Background(), AppendTranscriptInput{
 		Caller:            testAdapterCaller(),
@@ -241,6 +258,50 @@ func TestTranscriptAppendSequenceUniqueAfterAmbiguousCreate(t *testing.T) {
 			assertListedTexts(t, svc, ref, "first", "second")
 		})
 	}
+}
+
+// TestTranscriptAppendSequenceUniqueAfterStateBumpFailure covers a failed
+// head advance after the entry was created: a transient failure is retried
+// within the append, and a persistent one leaves the entry for the next
+// append to publish before it allocates above it.
+func TestTranscriptAppendSequenceUniqueAfterStateBumpFailure(t *testing.T) {
+	t.Run("a transient failure is retried", func(t *testing.T) {
+		freezeTestClock(t)
+		fault := &transcriptFaultStore{Store: beads.NewMemStore(), failNextSequenceWrites: 1}
+		svc := NewServices(beadstest.Mail(fault), beadstest.Sessions(fault)).Transcript
+		ref := testConversationRef()
+
+		if _, err := appendTestTranscript(svc, ref, "msg-1", "first"); err != nil {
+			t.Fatalf("Append(first) after one failed head advance: %v; want the advance retried", err)
+		}
+		if _, err := appendTestTranscript(svc, ref, "msg-2", "second"); err != nil {
+			t.Fatalf("Append(second): %v", err)
+		}
+		assertTranscriptSequencesUnique(t, fault)
+		assertListedTexts(t, svc, ref, "first", "second")
+	})
+
+	t.Run("a later append publishes the stranded entry", func(t *testing.T) {
+		freezeTestClock(t)
+		fault := &transcriptFaultStore{Store: beads.NewMemStore(), failNextSequenceWrites: 1000}
+		svc := NewServices(beadstest.Mail(fault), beadstest.Sessions(fault)).Transcript
+		ref := testConversationRef()
+
+		if _, err := appendTestTranscript(svc, ref, "msg-1", "first"); err == nil {
+			t.Fatal("Append(first) succeeded while every head advance failed; want an error")
+		}
+		fault.setFaults(func(f *transcriptFaultStore) { f.failNextSequenceWrites = 0 })
+		second, err := appendTestTranscript(svc, ref, "msg-2", "second")
+		if err != nil {
+			t.Fatalf("Append(second): %v", err)
+		}
+		if second.Sequence != 2 {
+			t.Fatalf("second.Sequence = %d, want 2 (above the stranded entry)", second.Sequence)
+		}
+		assertTranscriptSequencesUnique(t, fault)
+		assertListedTexts(t, svc, ref, "first", "second")
+		fault.assertFrontierNeverDecreased(t)
+	})
 }
 
 // TestTranscriptBackfillCursorDoesNotSkipLateEntry runs two writers on
