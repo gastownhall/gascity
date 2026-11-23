@@ -190,6 +190,23 @@ func claudeTopLevelSetting(t *testing.T, data []byte, key string) (any, bool) {
 	return v, ok
 }
 
+// TestInstallClaudeKeepsCityPromptSuggestionOptIn: the managed default turns
+// prompt suggestions off, but a city that opts back in through
+// .claude/settings.json keeps its explicit choice (gh-7973).
+func TestInstallClaudeKeepsCityPromptSuggestionOptIn(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.claude/settings.json"] = []byte(`{"promptSuggestionEnabled": true}`)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtimeData := fs.Files["/city/.gc/settings.json"]
+	if got, ok := claudeTopLevelSetting(t, runtimeData, "promptSuggestionEnabled"); !ok || got != true {
+		t.Fatalf("promptSuggestionEnabled = %#v (present %v), want the city's explicit true:\n%s", got, ok, runtimeData)
+	}
+}
+
 func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	fs := fsys.NewFake()
 	current, err := readEmbedded("config/claude.json")
