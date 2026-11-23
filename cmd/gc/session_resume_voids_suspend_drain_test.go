@@ -212,6 +212,21 @@ func TestReconcileSessionBeads_ResumeVoidsArmedSuspendDrainOnLiveNamedSession(t 
 	f.assertReleased(t, stops)
 }
 
+// AC-2 (guard): while the city stays suspended, open assigned work does not
+// cancel the armed suspended drain; its ack is honored.
+func TestReconcileSessionBeads_SuspendDrainAckStillHonoredWhileCitySuspended(t *testing.T) {
+	f := newSuspendDrainFixture(t)
+	if _, err := f.env.store.Create(beads.Bead{Title: "assigned work", Type: "task", Status: "open", Assignee: f.id}); err != nil {
+		t.Fatalf("Create(assigned work): %v", err)
+	}
+	f.armSuspendDrain(t)
+	stops := f.env.sp.CountCalls("Stop", f.name)
+
+	f.tick(t)
+
+	f.assertHonored(t, stops)
+}
+
 // AC-3 (guard): a resumed city whose narrower operator suspend still covers
 // the row keeps the suspended drain and honors its ack.
 func TestReconcileSessionBeads_ResumeKeepsSuspendDrainUnderNarrowerSuspend(t *testing.T) {
