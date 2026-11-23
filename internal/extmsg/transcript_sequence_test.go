@@ -304,6 +304,83 @@ func TestTranscriptAppendSequenceUniqueAfterStateBumpFailure(t *testing.T) {
 	})
 }
 
+// TestTranscriptAppendSequenceUniqueAcrossLockPools runs writers with
+// independent lock pools over one store, as two store generations across a
+// config reload do: sequences stay unique and next_sequence never regresses.
+func TestTranscriptAppendSequenceUniqueAcrossLockPools(t *testing.T) {
+	t.Run("a writer that interleaves inside another's append", func(t *testing.T) {
+		freezeTestClock(t)
+		fault := &transcriptFaultStore{Store: beads.NewMemStore()}
+		svcA := newTranscriptService(beadstest.Mail(fault), newBindingLockPool())
+		svcB := newTranscriptService(beadstest.Mail(fault), newBindingLockPool())
+		ref := testConversationRef()
+
+		var (
+			b    ConversationTranscriptRecord
+			bErr error
+		)
+		fault.afterEntryCreate = func(beads.Bead) {
+			b, bErr = appendTestTranscript(svcB, ref, "msg-b", "b")
+		}
+		a, err := appendTestTranscript(svcA, ref, "msg-a", "a")
+		if err != nil {
+			t.Fatalf("Append(a): %v", err)
+		}
+		if bErr != nil {
+			t.Fatalf("Append(b) inside a's append: %v", bErr)
+		}
+		if a.Sequence == b.Sequence {
+			t.Fatalf("both writers got sequence %d", a.Sequence)
+		}
+		if stored := assertTranscriptSequencesUnique(t, fault); len(stored) != 2 {
+			t.Fatalf("stored %d transcript entries, want 2", len(stored))
+		}
+		assertListedTexts(t, svcA, ref, "a", "b")
+		fault.assertFrontierNeverDecreased(t)
+	})
+
+	t.Run("concurrent writers", func(t *testing.T) {
+		freezeTestClock(t)
+		fault := &transcriptFaultStore{Store: beads.NewMemStore()}
+		pools := []*transcriptService{
+			newTranscriptService(beadstest.Mail(fault), newBindingLockPool()),
+			newTranscriptService(beadstest.Mail(fault), newBindingLockPool()),
+		}
+		ref := testConversationRef()
+		if _, err := appendTestTranscript(pools[0], ref, "msg-0", "seed"); err != nil {
+			t.Fatalf("Append(seed): %v", err)
+		}
+		const writers = 12
+		var wg sync.WaitGroup
+		errs := make(chan error, writers)
+		for i := range writers {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				id := fmt.Sprintf("msg-%d", i+1)
+				if _, err := appendTestTranscript(pools[i%2], ref, id, id); err != nil {
+					errs <- fmt.Errorf("Append(%s): %w", id, err)
+				}
+			}(i)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Error(err)
+		}
+		stored := assertTranscriptSequencesUnique(t, fault)
+		if len(stored) != writers+1 {
+			t.Fatalf("stored %d transcript entries, want %d", len(stored), writers+1)
+		}
+		for i, record := range stored {
+			if record.Sequence != int64(i+1) {
+				t.Fatalf("stored sequences have a gap at %d: %d", i+1, record.Sequence)
+			}
+		}
+		fault.assertFrontierNeverDecreased(t)
+	})
+}
+
 // TestTranscriptBackfillCursorDoesNotSkipLateEntry runs two writers on
 // independent primed caches over one store. One writer's entry lands while
 // the member reads and acknowledges the head; the member's later backfill
