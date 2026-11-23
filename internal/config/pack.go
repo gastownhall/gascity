@@ -2294,6 +2294,7 @@ func legacyPackCommands(entries []PackCommandEntry, packDir, packName string) []
 			SourceDir:   packDir,
 			PackDir:     packDir,
 			PackName:    packName,
+			NativeHelp:  entry.NativeHelp,
 		})
 	}
 	return out

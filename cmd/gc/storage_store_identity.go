@@ -35,11 +35,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // workStoreIdentityLinePrefix starts the marker line that records the work
@@ -147,16 +147,7 @@ func readWorkStoreIdentity(scopeRoot string) (workStoreIdentity, error) {
 }
 
 func canonicalIdentityPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(p); err == nil {
-		p = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		p = resolved
-	}
-	return filepath.Clean(p)
+	return pathutil.NormalizePathForCompare(p)
 }
 
 // workStoreIdentityMismatch compares the identity a marker recorded with the
