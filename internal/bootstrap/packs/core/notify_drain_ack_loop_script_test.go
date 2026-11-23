@@ -264,3 +264,77 @@ func TestNotifyDrainAckLoopHonorsOverrides(t *testing.T) {
 		t.Fatalf("gc calls = %q, want the events read over the 30m window", calls)
 	}
 }
+
+// TestNotifyDrainAckLoopFailsLoud: a setting it cannot use, or a read it
+// cannot complete or decode, exits non-zero with the cause on stderr and
+// mails nothing, so the order's failure is visible rather than a quiet
+// "no loop". An escalation that does not land fails the run the same way,
+// while an empty window stays a clean run.
+func TestNotifyDrainAckLoopFailsLoud(t *testing.T) {
+	working := loopBeadJSON("in_progress", "gc-1")
+	for _, c := range []struct {
+		name   string
+		env    []string
+		events []string
+		bead   string
+		breaks string // a rig file to remove, so its read fails
+		want   string
+		noGC   bool // the script must refuse before calling gc
+		// escalateFails makes the stub escalate.sh exit non-zero, so the
+		// one escalation attempt is the failure, not a stray send.
+		escalateFails bool
+		clean         bool // the run must succeed and escalate nothing
+	}{
+		{name: "the events read fails", events: loopCycles(3), bead: working, breaks: "events.jsonl", want: "reading session.drain_acked_with_assigned_work events"},
+		{name: "the events are not JSON", events: []string{"not json"}, bead: working, want: "decoding session.drain_acked_with_assigned_work events"},
+		{name: "the bead read fails", events: loopCycles(3), bead: working, breaks: "bead.json", want: "reading bead " + drainAckLoopBead},
+		{name: "the bead is not JSON", events: loopCycles(3), bead: "not json", want: "decoding bead " + drainAckLoopBead},
+		{name: "the bead read names no bead", events: loopCycles(3), bead: "[]", want: "decoding bead " + drainAckLoopBead},
+		{name: "a zero threshold", env: []string{"GC_DRAIN_ACK_LOOP_THRESHOLD=0"}, events: loopCycles(3), bead: working, want: "GC_DRAIN_ACK_LOOP_THRESHOLD", noGC: true},
+		{name: "a threshold that is no number", env: []string{"GC_DRAIN_ACK_LOOP_THRESHOLD=abc"}, events: loopCycles(3), bead: working, want: "GC_DRAIN_ACK_LOOP_THRESHOLD", noGC: true},
+		{name: "a window that is no duration", env: []string{"GC_DRAIN_ACK_LOOP_WINDOW=forever"}, events: loopCycles(3), bead: working, want: "GC_DRAIN_ACK_LOOP_WINDOW", noGC: true},
+		{name: "the escalation does not land", events: loopCycles(3), bead: working, want: "could not escalate the drain-ack loop of " + drainAckLoopBead, escalateFails: true},
+		{name: "an empty window is a clean run", bead: working, clean: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newDrainAckLoopRig(t, c.events, c.bead)
+			if c.breaks != "" {
+				if err := os.Remove(filepath.Join(r.work, c.breaks)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.escalateFails {
+				stub := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> '" + r.escalateLog + "'; done\nprintf -- '--\\n' >> '" + r.escalateLog + "'\necho 'escalate: store unavailable' >&2\nexit 1\n"
+				if err := os.WriteFile(r.escalate, []byte(stub), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := r.run(t, c.env...)
+			if c.clean {
+				if err != nil {
+					t.Fatalf("notify-drain-ack-loop failed on an empty window: %v\n%s", err, out)
+				}
+				if calls := r.escalations(t); len(calls) != 0 {
+					t.Errorf("escalate.sh calls = %q, want none", calls)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("notify-drain-ack-loop succeeded, want a failure naming %q\n%s", c.want, out)
+			}
+			if !strings.Contains(out, "notify-drain-ack-loop: ") || !strings.Contains(out, c.want) {
+				t.Errorf("output %q does not give the cause %q", out, c.want)
+			}
+			wantCalls := 0
+			if c.escalateFails {
+				wantCalls = 1
+			}
+			if calls := r.escalations(t); len(calls) != wantCalls {
+				t.Errorf("escalate.sh calls = %q, want %d", calls, wantCalls)
+			}
+			if calls := r.gcCalls(t); c.noGC && len(calls) != 0 {
+				t.Errorf("gc calls = %q, want none before the settings are valid", calls)
+			}
+		})
+	}
+}
