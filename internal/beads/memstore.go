@@ -156,26 +156,55 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 
 	explicit := strings.TrimSpace(b.ID)
 	if m.HonorExplicitIDs && explicit != "" {
-		if m.beadExistsLocked(explicit) {
-			return Bead{}, fmt.Errorf("creating bead %q: duplicate id", explicit)
-		}
-		// Honoring a pinned "<prefix>-<n>" consumes that suffix, exactly as
-		// SQLiteStore.normalizeCreate's ensureSequenceAtLeast does: without it
-		// the very next store-minted id re-issues the pinned one.
-		prefix := m.IDPrefix
-		if prefix == "" {
-			prefix = "gc"
-		}
-		// A suffix past math.MaxInt is out of mintIDLocked's reach, so skip it
-		// instead of letting int(n) wrap seq negative on a 32-bit int (CodeQL
-		// go/incorrect-integer-conversion).
-		if n, ok := parseSQLiteAutoIDSuffix(prefix, explicit); ok && n > 0 && n <= math.MaxInt && n > int64(m.seq) {
-			m.seq = int(n)
-		}
-		b.ID = explicit
-	} else {
-		b.ID = m.mintIDLocked(m.mintPrefixLocked(b))
+		return m.createPinnedLocked(b, explicit)
 	}
+	b.ID = m.mintIDLocked(m.mintPrefixLocked(b))
+	return m.insertLocked(b)
+}
+
+// CreatePinned persists b with exactly b.ID, refusing a duplicate ID without
+// modifying the existing occupant. It is the explicit-ID half of Create,
+// exposed as the optional pinned-create capability for callers that must
+// choose the ID themselves.
+func (m *MemStore) CreatePinned(b Bead) (Bead, error) {
+	explicit, err := validatePinnedID(b)
+	if err != nil {
+		return Bead{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.storageOnly {
+		noteSessionCreate(b)
+	}
+	return m.createPinnedLocked(b, explicit)
+}
+
+// createPinnedLocked persists b under explicit, refusing a duplicate ID.
+// The caller must hold m.mu.
+func (m *MemStore) createPinnedLocked(b Bead, explicit string) (Bead, error) {
+	if m.beadExistsLocked(explicit) {
+		return Bead{}, fmt.Errorf("creating bead %q: duplicate id", explicit)
+	}
+	// Honoring a pinned "<prefix>-<n>" consumes that suffix, exactly as
+	// SQLiteStore.normalizeCreate's ensureSequenceAtLeast does: without it
+	// the very next store-minted id re-issues the pinned one.
+	prefix := m.IDPrefix
+	if prefix == "" {
+		prefix = "gc"
+	}
+	// A suffix past math.MaxInt is out of mintIDLocked's reach, so skip it
+	// instead of letting int(n) wrap seq negative on a 32-bit int (CodeQL
+	// go/incorrect-integer-conversion).
+	if n, ok := parseSQLiteAutoIDSuffix(prefix, explicit); ok && n > 0 && n <= math.MaxInt && n > int64(m.seq) {
+		m.seq = int(n)
+	}
+	b.ID = explicit
+	return m.insertLocked(b)
+}
+
+// insertLocked finalizes a created bead and stores it. The caller must hold
+// m.mu.
+func (m *MemStore) insertLocked(b Bead) (Bead, error) {
 	// Set directly rather than through setBeadStatus: create is not a status
 	// transition over an existing bead, so a caller-supplied
 	// IndefinitelyDeferred must survive into the store instead of being cleared.

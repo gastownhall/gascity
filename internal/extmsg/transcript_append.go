@@ -142,10 +142,24 @@ func (s *transcriptService) appendDraftLocked(ctx context.Context, ref Conversat
 			}
 			continue
 		}
-		created, err := s.store.Create(s.buildEntryBead(ref, stateID, slot, draft, token))
+		entry := s.buildEntryBead(ref, stateID, slot, draft, token)
+		created, err := s.createEntry(entry)
 		if err != nil {
 			createErr := classifyTranscriptCreateError(err)
-			return s.recoverFailedCreate(ref, stateID, slot, draft, token, createErr)
+			outcome, recovered, rerr := s.recoverFailedCreate(ref, stateID, slot, draft, token)
+			if rerr != nil {
+				return ConversationTranscriptRecord{}, rerr
+			}
+			switch outcome {
+			case transcriptCreateRecovered:
+				return *recovered, nil
+			case transcriptCreateLostSlot:
+				// Another writer's entry took the slot and is now published:
+				// retry at the live head.
+				continue
+			default:
+				return ConversationTranscriptRecord{}, createErr
+			}
 		}
 		if err := s.publishSlotLive(ref, stateID, slot); err != nil {
 			return ConversationTranscriptRecord{}, err
@@ -196,40 +210,62 @@ func (s *transcriptService) buildEntryBead(ref ConversationRef, stateID string, 
 	}
 }
 
+// transcriptCreateOutcome classifies the recovery of a failed entry create.
+type transcriptCreateOutcome int
+
+const (
+	// transcriptCreatePending: the create did not commit (or the store
+	// minted a different ID, which the next append's occupancy check
+	// adopts); the caller may retry, and the create error is returned.
+	transcriptCreatePending transcriptCreateOutcome = iota
+	// transcriptCreateRecovered: this append's entry committed and is now
+	// published; the stored record is the append's result.
+	transcriptCreateRecovered
+	// transcriptCreateLostSlot: another writer's entry committed at the
+	// slot and is now published; the append retries at the live head.
+	transcriptCreateLostSlot
+)
+
+// createEntry persists the drafted entry, pinning its deterministic ID when
+// the store offers the capability and falling back to the ordinary create
+// otherwise. The fallback preserves the pre-capability behavior for plain
+// wrappers; a store that pins IDs in its ordinary create (SQLite, bd) pins
+// through it too.
+func (s *transcriptService) createEntry(entry beads.Bead) (beads.Bead, error) {
+	if creator, ok := beads.PinnedIDCreatorFor(s.store); ok {
+		return creator.CreatePinned(entry)
+	}
+	return s.store.Create(entry)
+}
+
 // recoverFailedCreate decides whether a failed entry create nevertheless
 // committed, by reading the slot's pinned ID authoritatively. A confirmed
 // absence retains the create error. A committed entry is published either
-// way, and this call reports success when the stored entry is ours — it
-// carries this append's token or provider message — or when a concurrent
-// delivery of the same provider message won the slot.
-func (s *transcriptService) recoverFailedCreate(ref ConversationRef, stateID string, slot int64, draft transcriptAppendDraft, token string, createErr error) (ConversationTranscriptRecord, error) {
+// way, and the append reports success when the stored entry is ours — it
+// carries this append's token or provider message — or lost the slot when
+// another writer's entry took it.
+func (s *transcriptService) recoverFailedCreate(ref ConversationRef, stateID string, slot int64, draft transcriptAppendDraft, token string) (transcriptCreateOutcome, *ConversationTranscriptRecord, error) {
 	pinned := transcriptEntryID(stateID, slot)
 	committed, err := s.getLiveBead(pinned)
 	if err != nil {
-		return ConversationTranscriptRecord{}, fmt.Errorf("read transcript entry %s after create error: %w: %w", pinned, err, errTranscriptRetryable)
+		return 0, nil, fmt.Errorf("read transcript entry %s after create error: %w: %w", pinned, err, errTranscriptRetryable)
 	}
 	if committed.ID == "" {
-		// The create did not commit (or the store minted a different ID for
-		// it, in which case the slot occupancy check on the next append
-		// adopts it): the caller may retry.
-		return ConversationTranscriptRecord{}, createErr
+		return transcriptCreatePending, nil, nil
 	}
 	occupant, verr := validateSlotOccupant(ref, committed, slot)
 	if verr != nil {
-		return ConversationTranscriptRecord{}, verr
+		return 0, nil, verr
 	}
 	if err := s.publishSlotLive(ref, stateID, slot); err != nil {
-		return ConversationTranscriptRecord{}, err
+		return 0, nil, err
 	}
 	ours := committed.Metadata[metadataKeyAppendToken] == token ||
 		(draft.providerMessageID != "" && occupant.ProviderMessageID == draft.providerMessageID)
 	if ours {
-		return *occupant, nil
+		return transcriptCreateRecovered, occupant, nil
 	}
-	// Another writer's entry now occupies the published slot; this append's
-	// message is still undelivered, so the caller sees the retryable create
-	// error and the next append allocates above it.
-	return ConversationTranscriptRecord{}, createErr
+	return transcriptCreateLostSlot, nil, nil
 }
 
 // classifyTranscriptCreateError wraps an entry-create failure for the
