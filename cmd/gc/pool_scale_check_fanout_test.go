@@ -383,3 +383,41 @@ func TestEvaluatePoolFanOutSumPrefixesEachProbeWithItsOwnDoltEndpoint(t *testing
 		t.Fatalf("riga probe check = %q carries the city's Dolt port", seen["riga"])
 	}
 }
+
+// TestFanOutProbePanicIsRecovered pins the panic containment of a fan-out
+// probe: each probe runs on its own goroutine, and recover works only on the
+// goroutine that panicked, so the pool goroutine's recoverLeg cannot cover it.
+// A panic in one probe must read as that probe's failure (the pool is
+// partial, so its sessions are retained), keep the surviving legs' sum, leave
+// a healthy neighbor pool untouched, and put the panic value on the pass's
+// stderr, rather than ending the controller process (mc-zndi7.40 class).
+func TestFanOutProbePanicIsRecovered(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "alpha"}, {Name: "zulu"}}}
+	pools := []poolEvalWork{
+		{agentIdx: 0, sp: scaleParams{Max: 5, Check: "probe-alpha"}, newDemand: true, probes: []poolStoreProbe{
+			{ref: "city", dir: "city-dir"},
+			{ref: "rig-a", dir: "rig-a-dir"},
+		}},
+		{agentIdx: 1, sp: scaleParams{Max: 5, Check: "probe-zulu"}, newDemand: true},
+	}
+	runner := func(command, dir string, _ map[string]string) (string, error) {
+		if strings.Contains(command, "probe-alpha") && dir == "rig-a-dir" {
+			panic("injected fan-out probe panic")
+		}
+		return "3", nil
+	}
+	var stderr strings.Builder
+	counts, partials := evaluatePendingPools(cfg, pools, runner, &stderr, nil)
+	if !partials[0] {
+		t.Fatalf("fan-out pool whose rig probe panicked: partial=%v, want true so its sessions are retained", partials[0])
+	}
+	if counts[0] != 3 {
+		t.Fatalf("fan-out pool count = %d, want 3 (the city probe's count; the panicking rig probe contributes 0)", counts[0])
+	}
+	if partials[1] || counts[1] != 3 {
+		t.Fatalf("healthy single-store pool: count=%d partial=%v, want 3 and not partial", counts[1], partials[1])
+	}
+	if !strings.Contains(stderr.String(), "injected fan-out probe panic") {
+		t.Fatalf("stderr = %q, want the panic value", stderr.String())
+	}
+}
