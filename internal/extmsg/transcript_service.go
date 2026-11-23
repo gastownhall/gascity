@@ -766,8 +766,10 @@ func (s *transcriptService) ensureStateLockedWriter(w membershipWriter, ref Conv
 	return decodeTranscriptStateBead(created)
 }
 
+// findStateLocked reads the conversation's transcript state past any cache:
+// its next_sequence is the published head every append and read decides from.
 func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationTranscriptStateRecord, error) {
-	items, err := s.store.List(beads.ListQuery{Label: transcriptStateLabel(ref)})
+	items, err := beads.LiveFor(s.store).List(beads.ListQuery{Label: transcriptStateLabel(ref)})
 	if err != nil {
 		return nil, fmt.Errorf("list transcript state: %w", err)
 	}
@@ -867,7 +869,10 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 	descending := order == TranscriptOrderDesc
 	records := make([]ConversationTranscriptRecord, 0, limit)
 	appendBucket := func(bucket int64) error {
-		items, err := s.store.List(beads.ListQuery{Label: transcriptBucketLabel(ref, bucket)})
+		// Buckets are read live: an entry another writer created through
+		// another cache is published once the head passes it, and a cached
+		// read could miss it below the head.
+		items, err := beads.LiveFor(s.store).List(beads.ListQuery{Label: transcriptBucketLabel(ref, bucket)})
 		if err != nil {
 			return fmt.Errorf("list transcript bucket %d: %w", bucket, err)
 		}
@@ -880,7 +885,7 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 			if err != nil {
 				return err
 			}
-			if !sameConversationRef(record.Conversation, ref) || record.Sequence <= after {
+			if !sameConversationRef(record.Conversation, ref) || record.Sequence < startSeq || record.Sequence > endSeq {
 				continue
 			}
 			bucketRecords = append(bucketRecords, record)
