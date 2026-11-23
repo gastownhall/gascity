@@ -101,6 +101,16 @@ type PromptRenderResult struct {
 	Err     error
 }
 
+// promptTemplateReadError marks a PromptRenderResult.Err as "the declared
+// template could not be read", as opposed to a parse or execute failure of
+// text that was read. Callers that fail on a broken template but keep the
+// beacon-only fallback for a missing one (session resolution) tell them apart
+// with errors.As.
+type promptTemplateReadError struct{ err error }
+
+func (e *promptTemplateReadError) Error() string { return e.err.Error() }
+func (e *promptTemplateReadError) Unwrap() error { return e.err }
+
 // renderPrompt reads a prompt template file and renders it with the given
 // context. cityName is used internally by template functions (e.g. session)
 // but not exposed as a template variable. sessionTemplate is the custom
@@ -112,7 +122,10 @@ type PromptRenderResult struct {
 // A template path that cannot be read also returns empty, after a warning to
 // stderr. On parse or execute error, logs a warning to stderr and returns the
 // raw text (graceful fallback). Callers that must tell a fallback from a clean
-// render use renderPromptWithMeta(...).Err.
+// render, or a read failure from a parse or execute failure, use
+// renderPromptWithMeta(...).Err.
+//
+//nolint:unparam // store seam kept for parity with renderPromptWithMeta; wrapper signature intentionally unchanged
 func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
 	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, store).Text
 }
@@ -136,7 +149,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 		} else {
 			fmt.Fprintf(stderr, "gc: prompt_template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
 		}
-		return PromptRenderResult{Err: err}
+		return PromptRenderResult{Err: &promptTemplateReadError{err: err}}
 	}
 	raw := string(data)
 	fm, body := promptmeta.Parse(raw)
