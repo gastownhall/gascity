@@ -115,8 +115,12 @@ func TestInstantiateReturnsBudgetExhaustedRetryWithoutFallback(t *testing.T) {
 				budgetExhaustedGraphApplyError(),
 			},
 		}
+		start := time.Now()
 		_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), twoStepBudgetRecipe(), Options{})
 		assertBudgetExhaustedSurfaced(t, store, err, 2)
+		if elapsed := time.Since(start); elapsed != graphApplyTransientRetryDelay {
+			t.Errorf("elapsed = %s, want exactly the %s retry delay (one retry, no second budget wait)", elapsed, graphApplyTransientRetryDelay)
+		}
 	})
 }
 
