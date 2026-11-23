@@ -28,7 +28,8 @@ type cachingGraphApplyStore struct {
 }
 
 func (s cachingGraphApplyStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
-	startSeq := s.cache.currentMutationSeq()
+	startSeq, endWrite := s.cache.beginLocalWrite()
+	defer endWrite()
 	result, err := s.applier.ApplyGraphPlan(ctx, plan)
 	if err != nil {
 		return result, err
@@ -50,7 +51,8 @@ type cachingStorageGraphApplyStore struct {
 }
 
 func (s cachingStorageGraphApplyStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error) {
-	startSeq := s.cache.currentMutationSeq()
+	startSeq, endWrite := s.cache.beginLocalWrite()
+	defer endWrite()
 	result, err := s.storageApplier.ApplyGraphPlanWithStorage(ctx, plan, storage)
 	if err != nil {
 		return result, err

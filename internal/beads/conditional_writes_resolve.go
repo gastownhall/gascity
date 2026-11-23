@@ -51,9 +51,10 @@ type condWritesStamp struct {
 	// the seam treats it exactly like Off, so an unwired open path can never
 	// RAISE enforcement.
 	condWritesModeVal gate.Mode
-	// condWritesDefaulted records that the factory received ModeUnset and
-	// mapped it to Off — an unthreaded open path, distinguishable from a
-	// deliberate off for tests and future doctor surfaces.
+	// condWritesDefaulted records that no operator chose the mode: the
+	// factory received ModeUnset and mapped it to Off (an unthreaded open
+	// path), or the caller passed the builtin default
+	// (StoreOpenOptions.ConditionalWritesDefaulted).
 	condWritesDefaulted bool
 	// condWritesDegradeNoted arms at-most-once degraded-event emission per
 	// store instance.
@@ -81,7 +82,7 @@ type ConditionalWritesDegrade struct {
 }
 
 // stampConditionalWritesMode records the resolved mode on this store.
-// defaulted marks a ModeUnset→Off factory mapping (unthreaded open path). The
+// defaulted marks a mode no operator chose (condWritesDefaulted). The
 // return reports whether the stamp LANDED: a store that owns its stamp always
 // lands it; a delegating wrapper (CachingStore) forwards into its backing and
 // reports false when the backing cannot carry a mode — the factory logs that
@@ -96,7 +97,7 @@ func (s *condWritesStamp) stampConditionalWritesMode(mode gate.Mode, defaulted b
 }
 
 // conditionalWritesMode returns the stamped mode and whether it was a
-// factory default for an unthreaded open path.
+// default no operator chose.
 func (s *condWritesStamp) conditionalWritesMode() (gate.Mode, bool) {
 	s.condWritesMu.Lock()
 	defer s.condWritesMu.Unlock()
@@ -247,6 +248,39 @@ func followConditionalWritesResolveTarget(store Store) Store {
 		store = target
 	}
 	return store
+}
+
+// idPrefixMaxHops bounds IDPrefixFor's walk through declared resolve targets.
+const idPrefixMaxHops = 8
+
+// IDPrefixFor returns the first non-empty IDPrefix() along store and the
+// resolve targets it declares (ConditionalWritesResolveTargeter), or "". A
+// wrapper that embeds a store, such as a typed class handle or a policy store,
+// hides the store's IDPrefix the way it hides the conditional-writes stamp, and
+// declares the same target for both; this follows it to the store that mints
+// the ids. The walk is bounded, and it ends at a nil or typed-nil target.
+func IDPrefixFor(store Store) string {
+	cur := store
+	for range idPrefixMaxHops {
+		if p, ok := cur.(interface{ IDPrefix() string }); ok {
+			if prefix := p.IDPrefix(); prefix != "" {
+				return prefix
+			}
+		}
+		t, ok := cur.(ConditionalWritesResolveTargeter)
+		if !ok {
+			return ""
+		}
+		next := t.ConditionalWritesResolveTarget()
+		if next == nil {
+			return ""
+		}
+		if v := reflect.ValueOf(next); v.Kind() == reflect.Pointer && v.IsNil() {
+			return ""
+		}
+		cur = next
+	}
+	return ""
 }
 
 // ConditionalWritesRequiredError reports that the resolved store cannot

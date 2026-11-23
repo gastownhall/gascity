@@ -12,8 +12,16 @@ import (
 // assignee field: it succeeds (status -> in_progress, assignee -> caller) only
 // when the bead is open/in_progress and currently unassigned, and is idempotent
 // when the same assignee already holds it. It returns ok=false (a conflict, not
-// an error) when a different assignee already holds the bead or the bead is
-// closed, and ErrNotFound when the bead does not exist.
+// an error) when a different assignee already holds the bead, the bead is
+// closed, or the bead is open and deferred into the future, and ErrNotFound
+// when the bead does not exist.
+//
+// An open row deferred into the future is the one this store's Live "open"
+// leaves out (LiveOpenLeavesOut): it records a deferral by its defer_until
+// alone, where bd records its deferred status, and bd claims only a bead in
+// its raw open. A claim that took one would leave the deferral on an
+// in_progress row, which every hook read drops as deferred while the
+// controller counts it as its claimant's work.
 //
 // It is the acquire-dual of [SQLiteStore.ReleaseIfCurrent]. Single-winner under
 // concurrency is guaranteed by the store's single write connection
@@ -46,6 +54,11 @@ func (s *SQLiteStore) Claim(id, assignee string) (Bead, bool, error) {
 		}
 		if b.Status != "open" && b.Status != "in_progress" {
 			// Terminal and otherwise non-claimable states are never resurrected.
+			return tx.Commit()
+		}
+		if b.Status == "open" && LiveOpenLeavesOut(b, time.Now().UTC()) {
+			// Deferred into the future: outside this store's raw open, so
+			// not claimable, as bd's claim refuses its deferred status.
 			return tx.Commit()
 		}
 		cur := strings.TrimSpace(b.Assignee)

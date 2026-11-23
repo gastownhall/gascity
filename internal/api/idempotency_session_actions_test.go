@@ -470,7 +470,7 @@ func TestSessionRespondInFlightReturnsConflict(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- postSessionAction(t, h, url, "respond-1", body) }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 
 	inFlight := postSessionAction(t, h, url, "respond-1", body)
 	if inFlight.Code != http.StatusConflict || !strings.Contains(inFlight.Body.String(), "idempotency-in-flight") {

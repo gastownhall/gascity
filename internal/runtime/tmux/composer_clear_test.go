@@ -138,6 +138,11 @@ type fakeClaudePane struct {
 	// placeholder is drawn dim in an empty input box, as Claude draws
 	// "Try \"write a test for <filepath>\"" at startup.
 	placeholder string
+	// stray is drawn red at the start of an empty input box by something
+	// other than Claude Code: the runtime's own error output, written
+	// straight to the terminal (see claudeRuntimeErrorPromptRows). No key
+	// changes it, and it is gone once Claude repaints the row for typed text.
+	stray string
 
 	// prompt is a full pane capture of a permission prompt. The pane shows
 	// it from the promptOnCapture'th capture-pane (1-based) on, or right
@@ -269,7 +274,13 @@ func (f *fakeClaudePane) renderStyled(escapes bool) []string {
 	lines = append(lines, strings.Repeat("─", 80))
 	for i, row := range f.inputRows() {
 		if i == 0 {
-			if f.draft == "" && f.placeholder != "" {
+			if f.draft == "" && f.stray != "" {
+				if escapes {
+					row = "\x1b[31m" + f.stray + "\x1b[39m"
+				} else {
+					row = f.stray
+				}
+			} else if f.draft == "" && f.placeholder != "" {
 				if escapes {
 					row = "\x1b[2m" + f.placeholder + "\x1b[0m"
 				} else {
@@ -364,8 +375,7 @@ func (f *fakeClaudePane) execute(args []string) (string, error) {
 		}
 		return strings.TrimSpace(strings.Join(f.renderStyled(slices.Contains(args, "-e")), "\n")), nil
 	case "send-keys":
-		f.sendKeys(args[1:])
-		return "", nil
+		return "", f.sendKeys(args[1:])
 	default:
 		return "", nil
 	}
@@ -375,7 +385,7 @@ func (f *fakeClaudePane) executeCtx(_ context.Context, args []string) (string, e
 	return f.execute(args)
 }
 
-func (f *fakeClaudePane) sendKeys(args []string) {
+func (f *fakeClaudePane) sendKeys(args []string) error {
 	literal := false
 	var keys []string
 	for i := 0; i < len(args); i++ {
@@ -383,14 +393,20 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 		case "-t":
 			i++
 		case "-l":
-			literal = true
+			// Everything after -l is text, read as tmux reads it.
+			text, err := runtime.TmuxLiteralText(args[i+1:])
+			if err != nil {
+				return err
+			}
+			literal, keys = true, []string{text}
+			i = len(args)
 		default:
 			keys = append(keys, args[i])
 		}
 	}
 	if f.promptShown {
 		f.promptKeys = append(f.promptKeys, keys...)
-		return
+		return nil
 	}
 	if literal {
 		if f.prompt != "" && f.promptAfterPaste {
@@ -401,10 +417,12 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 			f.captureErrAfterPaste = 0
 		}
 		text := strings.Join(keys, " ")
+		// Typed text makes Claude repaint the row over the stray cells.
+		f.stray = ""
 		c := f.cur()
 		f.draft = f.draft[:c] + text + f.draft[c:]
 		f.setCursor(c + len(text))
-		return
+		return nil
 	}
 	for _, key := range keys {
 		f.keys = append(f.keys, key)
@@ -428,6 +446,14 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 			}
 		}
 	}
+	return nil
+}
+
+// state returns the messages Enter submitted and the current draft.
+func (f *fakeClaudePane) state() (submitted []string, draft string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.submitted), f.draft
 }
 
 func (f *fakeClaudePane) keyCount(key string) int {
@@ -533,10 +559,10 @@ func TestNudgeSessionLeavesAttachedClaudeDraftAlone(t *testing.T) {
 // draft: the human now at the pane may be typing (#5192).
 func TestNudgeSessionStopsClearingWhenClientAttachesMidClear(t *testing.T) {
 	pane := newFakeClaudePane(claudeRestoredDraft)
-	// Capture 4 is the redraw read after the first Ctrl-U Ctrl-K: the nudge
+	// Capture 5 is the redraw read after the first Ctrl-U Ctrl-K: the nudge
 	// looks for a permission prompt (1) and a dialog (2), then the clear reads
-	// the input box (3) and presses.
-	pane.attachOnCapture = 4
+	// the input box (3), looks for a prompt again (4) and presses.
+	pane.attachOnCapture = 5
 	tm := newFakeClaudeTmux(pane)
 
 	err := tm.NudgeSession(pane.sessionName, "nudge")
@@ -665,6 +691,81 @@ func TestClaudeInputIgnoresDimPlaceholder(t *testing.T) {
 		if got := stripDimText(raw); got != want {
 			t.Errorf("stripDimText(%q) = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+// Bun, the runtime Claude Code ships on, writes some of its own errors straight
+// to the terminal in red: a response whose gzip body will not decompress prints
+// "Decompression error: ZlibError" at the cursor, which Claude Code parks at the
+// start of its empty input box. Claude Code never drew those cells, so they stay
+// until it next repaints the row, and no key reaches them: the input box behind
+// them is empty. Captured with capture-pane -e -J from gascity--reviewer, Claude
+// Code 2.1.319 mid-turn, 2026-11-19, where every nudge then failed with "input
+// box still holds" this text (ga-c2zv71a2).
+var claudeRuntimeErrorPromptRows = []string{
+	"\x1b[38;5;244m" + strings.Repeat("─", 80),
+	"\x1b[38;5;246m❯ \x1b[31mDecompression error: ZlibError\x1b[39m  ",
+	"\x1b[38;5;244m" + strings.Repeat("─", 80),
+}
+
+// The runtime's red error text in the prompt row is not a draft.
+func TestClaudeInputIgnoresRuntimeErrorInPromptRow(t *testing.T) {
+	lines := make([]string, len(claudeRuntimeErrorPromptRows))
+	for i, line := range claudeRuntimeErrorPromptRows {
+		lines[i] = stripDimText(line)
+	}
+	in, ok := readClaudeInput(lines)
+	if !ok || !in.empty() {
+		t.Fatalf("input box = %q (found %v), want an empty input box: the red text is the runtime's, not typed", in.rows, ok)
+	}
+}
+
+// Typed text Claude Code colors itself is still a draft. Captured from Claude
+// Code 2.1.319 after typing "hello typed draft ultrathink /help @README": the
+// keyword is drawn in rainbow colors, the command in its own color.
+func TestClaudeInputKeepsTypedTextClaudeColors(t *testing.T) {
+	rule := "\x1b[38;2;136;136;136m" + strings.Repeat("─", 80)
+	typed := "\x1b[39m❯ hello typed draft \x1b[38;2;235;95;87mu\x1b[38;2;245;139;87ml" +
+		"\x1b[38;2;250;195;95mt\x1b[38;2;145;200;130mr\x1b[38;2;130;170;220ma\x1b[38;2;155;130;200mt" +
+		"\x1b[38;2;200;130;180mh\x1b[38;2;235;95;87mi\x1b[38;2;245;139;87mn\x1b[38;2;250;195;95mk\x1b[39m " +
+		"\x1b[38;2;177;185;249m/help\x1b[39m @README\x1b[7m "
+	in, ok := readClaudeInput([]string{stripDimText(rule), stripDimText(typed), stripDimText("\x1b[0m" + rule)})
+	if want := "hello typed draft ultrathink /help @README"; !ok || in.text() != want {
+		t.Fatalf("typed input box = %q (found %v), want %q", in.rows, ok, want)
+	}
+
+	for raw, want := range map[string]string{
+		"\x1b[31mred\x1b[39mback":         "back",
+		"\x1b[1;31mbold red\x1b[0mback":   "back",
+		"\x1b[31mred\x1b[32mgreen":        "green",
+		"\x1b[31mred\x1b[38;5;196mkept":   "kept", // a 256-color red is Claude's own
+		"\x1b[91mbright red\x1b[39m":      "bright red",
+		"\x1b[41mred background\x1b[49m":  "red background",
+		"\x1b[38;5;31mcolor 31\x1b[39m":   "color 31",
+		"\x1b[31;2mred dim\x1b[0mvisible": "visible",
+	} {
+		if got := stripDimText(raw); got != want {
+			t.Errorf("stripDimText(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// A nudge to a session whose prompt row shows the runtime's error goes out:
+// nothing to clear, the message is pasted into the empty input box behind it.
+func TestNudgeSessionDeliversOverRuntimeErrorInPromptRow(t *testing.T) {
+	pane := newFakeClaudePane("")
+	pane.stray = "Decompression error: ZlibError"
+	tm := newFakeClaudeTmux(pane)
+	const msg = "Work slung. Check your hook."
+
+	if err := tm.NudgeSession(pane.sessionName, msg); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	if !slices.Equal(pane.submitted, []string{msg}) {
+		t.Fatalf("Claude received %q, want only %q", pane.submitted, msg)
+	}
+	if n := pane.keyCount("C-u"); n != 0 {
+		t.Fatalf("sent %d Ctrl-U over the runtime's error text, want none (keys %q)", n, pane.keys)
 	}
 }
 

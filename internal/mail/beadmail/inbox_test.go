@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -41,7 +42,7 @@ func (s *readCountingStore) reset() { s.gets, s.sessionLists, s.messageLists = 0
 func newInboxFixture(t *testing.T) (*readCountingStore, *Provider, session.Info) {
 	t.Helper()
 	store := &readCountingStore{MemStore: beads.NewMemStore()}
-	p := New(store)
+	p := newTestProvider(store)
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
@@ -66,7 +67,7 @@ func newInboxFixture(t *testing.T) (*readCountingStore, *Provider, session.Info)
 	if err := p.MarkRead(read.ID); err != nil {
 		t.Fatalf("MarkRead: %v", err)
 	}
-	info, _, err := session.ResolveSessionRecordByExactID(store, sessionBead.ID)
+	info, _, err := session.ResolveSessionRecordByExactID(beadstest.Sessions(store), sessionBead.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}
@@ -251,8 +252,8 @@ func (s *writeCountingStore) Close(id string) error {
 // alone.
 func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
-	p := New(store)
-	handoff, err := p.SendHandoff(mail.HandoffIntent{
+	p := newTestProvider(store)
+	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
 		From: "human", To: "sky", Subject: "context cycle", ThreadID: "t1",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 	})
@@ -263,7 +264,7 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	elsewhere, err := p.SendHandoff(mail.HandoffIntent{
+	elsewhere, _, err := p.SendHandoff(mail.HandoffIntent{
 		From: "human", To: "other", Subject: "not this inbox", ThreadID: "t2",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 	})
@@ -315,8 +316,8 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 // the failed label write is reported rather than swallowed.
 func TestArchiveWhoseLabelWriteFailsStillRetiresTheHandoff(t *testing.T) {
 	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
-	p := New(store)
-	handoff, err := p.SendHandoff(mail.HandoffIntent{
+	p := newTestProvider(store)
+	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
 		From: "human", To: "sky", Subject: "context cycle", ThreadID: "t1",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 	})
@@ -369,10 +370,10 @@ func TestArchiveFromInboxClosesEveryHandoffBeforeAnyLabel(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
-			p := New(store)
+			p := newTestProvider(store)
 			var ids []string
 			for _, thread := range []string{"t1", "t2"} {
-				handoff, err := p.SendHandoff(mail.HandoffIntent{
+				handoff, _, err := p.SendHandoff(mail.HandoffIntent{
 					From: "human", To: "sky", Subject: "context cycle " + thread, ThreadID: thread,
 					ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 				})
@@ -419,11 +420,11 @@ func TestInboxUnreadAutoHandoffsMatchesCheckAutoHandoffs(t *testing.T) {
 	_, p, info := newInboxFixture(t)
 	labels := []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}
 	for i, to := range []string{"sky", info.ID, "old-sky", "someone-else"} {
-		if _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: to, Subject: "handoff " + to, ThreadID: "t" + to, ExtraLabels: labels}); err != nil {
+		if _, _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: to, Subject: "handoff " + to, ThreadID: "t" + to, ExtraLabels: labels}); err != nil {
 			t.Fatalf("SendHandoff %d: %v", i, err)
 		}
 	}
-	if _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: "sky", Subject: "not archive-after-inject", ThreadID: "plain", ExtraLabels: []string{mail.AutoHandoffLabel}}); err != nil {
+	if _, _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: "sky", Subject: "not archive-after-inject", ThreadID: "plain", ExtraLabels: []string{mail.AutoHandoffLabel}}); err != nil {
 		t.Fatalf("SendHandoff: %v", err)
 	}
 	want, err := p.CheckAutoHandoffs(session.MailboxAddressesFromInfo(info))
@@ -446,7 +447,7 @@ func TestInboxUnreadAutoHandoffsMatchesCheckAutoHandoffs(t *testing.T) {
 func newSuccessionFixture(t *testing.T) (*readCountingStore, *Provider, func() session.Info) {
 	t.Helper()
 	store := &readCountingStore{MemStore: beads.NewMemStore()}
-	p := New(store)
+	p := newTestProvider(store)
 	s, err := store.Create(beads.Bead{
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
@@ -457,7 +458,7 @@ func newSuccessionFixture(t *testing.T) (*readCountingStore, *Provider, func() s
 	}
 	return store, p, func() session.Info {
 		t.Helper()
-		info, _, err := session.ResolveSessionRecordByExactID(store.MemStore, s.ID)
+		info, _, err := session.ResolveSessionRecordByExactID(beadstest.Sessions(store.MemStore), s.ID)
 		if err != nil {
 			t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 		}
@@ -602,7 +603,7 @@ func TestInboxForSessionReadBudget(t *testing.T) {
 	}
 
 	recording := &keyedListStore{readCountingStore: store}
-	p = New(recording)
+	p = newTestProvider(recording)
 	recording.reset()
 	if _, err := p.InboxForSession(current()); err != nil {
 		t.Fatalf("InboxForSession: %v", err)
@@ -727,7 +728,7 @@ func TestInboxForSessionWithPredecessorsStaysKeyed(t *testing.T) {
 		t.Fatalf("SetMetadata(alias_history): %v", err)
 	}
 	recording := &planRecordingStore{readCountingStore: store}
-	p := New(recording)
+	p := newTestProvider(recording)
 	var preds []string
 	for _, alias := range []string{"old-sky", "older-sky"} {
 		preds = append(preds, createSessionBead(t, store, map[string]string{

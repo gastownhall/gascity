@@ -15,61 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// newForegroundStartLockCity writes a city whose bead store is an exec
-// provider script. The script appends each op it is asked to run to the
-// returned log, followed by the controller-lock state when the op ran. Its
-// "start" op leaves a long-lived child behind, the way a real provider leaves
-// its server running, and records the child's PID; the helper kills it on
-// cleanup. startExit is the exit status the script returns for "start".
-func newForegroundStartLockCity(t *testing.T, startExit string) (cityPath, opsLog string) {
-	t.Helper()
-	cityPath = t.TempDir()
-	clearInheritedBeadsEnv(t)
-	t.Chdir(t.TempDir())
-
-	if err := os.MkdirAll(filepath.Join(cityPath, citylayout.RuntimeRoot), 0o755); err != nil {
-		t.Fatalf("scaffold runtime root: %v", err)
-	}
-	opsLog = filepath.Join(cityPath, "provider-ops")
-	lockPath := filepath.Join(cityPath, ".gc", "controller.lock")
-	childPID := filepath.Join(cityPath, "provider-child.pid")
-	t.Cleanup(func() {
-		data, err := os.ReadFile(childPID)
-		if err != nil {
-			return
-		}
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
-			syscall.Kill(pid, syscall.SIGKILL) //nolint:errcheck // best-effort fixture cleanup
-		}
-	})
-	script := filepath.Join(cityPath, "provider.sh")
-	body := "#!/bin/sh\n" +
-		"state=free\n" +
-		"if command -v flock >/dev/null 2>&1 && ! flock -n \"" + lockPath + "\" true 2>/dev/null; then state=held; fi\n" +
-		"printf '%s lock=%s\\n' \"$1\" \"$state\" >> \"" + opsLog + "\"\n" +
-		"if [ \"$1\" = start ]; then\n" +
-		"  sleep 60 </dev/null >/dev/null 2>&1 &\n" +
-		"  echo $! > \"" + childPID + "\"\n" +
-		"  exit " + startExit + "\n" +
-		"fi\n" +
-		"exit 0\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil { //nolint:gosec // test fixture must be executable
-		t.Fatalf("write provider script: %v", err)
-	}
-	cityTOML := "[workspace]\nname = \"lock-order-city\"\n\n" +
-		"[beads]\nprovider = \"exec:" + script + "\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-
-	oldBuild := buildSessionProviderByName
-	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	buildSessionProviderByName = func(_ *config.City, _ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		return runtime.NewFake(), nil
-	}
-	return cityPath, opsLog
-}
-
 func readProviderOps(t *testing.T, opsLog string) []string {
 	t.Helper()
 	data, err := os.ReadFile(opsLog)
@@ -133,4 +78,53 @@ func TestStartForegroundStartsBeadsProviderUnderControllerLock(t *testing.T) {
 		t.Fatalf("controller lock still held after the failed start returned (leaked into the provider's child?): %v", err)
 	}
 	lock.Close() //nolint:errcheck // probe cleanup
+}
+
+func newForegroundStartLockCity(t *testing.T, startExit string) (cityPath, opsLog string) {
+	t.Helper()
+	cityPath = t.TempDir()
+	clearInheritedBeadsEnv(t)
+	t.Chdir(t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(cityPath, citylayout.RuntimeRoot), 0o755); err != nil {
+		t.Fatalf("scaffold runtime root: %v", err)
+	}
+	opsLog = filepath.Join(cityPath, "provider-ops")
+	lockPath := filepath.Join(cityPath, ".gc", "controller.lock")
+	childPID := filepath.Join(cityPath, "provider-child.pid")
+	t.Cleanup(func() {
+		data, err := os.ReadFile(childPID)
+		if err != nil {
+			return
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			platformKill(pid, syscall.SIGKILL) //nolint:errcheck // best-effort fixture cleanup
+		}
+	})
+	script := filepath.Join(cityPath, "provider.sh")
+	body := "#!/bin/sh\n" +
+		"state=free\n" +
+		"if command -v flock >/dev/null 2>&1 && ! flock -n \"" + lockPath + "\" true 2>/dev/null; then state=held; fi\n" +
+		"printf '%s lock=%s\\n' \"$1\" \"$state\" >> \"" + opsLog + "\"\n" +
+		"if [ \"$1\" = start ]; then\n" +
+		"  sleep 60 </dev/null >/dev/null 2>&1 &\n" +
+		"  echo $! > \"" + childPID + "\"\n" +
+		"  exit " + startExit + "\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil { //nolint:gosec // test fixture must be executable
+		t.Fatalf("write provider script: %v", err)
+	}
+	cityTOML := "[workspace]\nname = \"lock-order-city\"\n\n" +
+		"[beads]\nprovider = \"exec:" + script + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	buildSessionProviderByName = func(_ *config.City, _ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		return runtime.NewFake(), nil
+	}
+	return cityPath, opsLog
 }

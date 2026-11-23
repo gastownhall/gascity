@@ -925,3 +925,103 @@ func TestPathCheckBinary(t *testing.T) {
 		})
 	}
 }
+
+// TestCopilotAskUserOption pins the copilot ask_user option: unattended
+// sessions launch without the ask_user tool by default, and an agent a human
+// attaches to opts back in through option_defaults.
+func TestCopilotAskUserOption(t *testing.T) {
+	providers := BuiltinProviders()
+	for _, tc := range []struct {
+		name     string
+		defaults map[string]string
+		want     string
+	}{
+		{"default", nil, "copilot --yolo --no-ask-user"},
+		{"off", map[string]string{"ask_user": "off"}, "copilot --yolo --no-ask-user"},
+		{"on", map[string]string{"ask_user": "on"}, "copilot --yolo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &Agent{Name: "worker", Provider: "copilot", OptionDefaults: tc.defaults}
+			resolved, err := ResolveProvider(agent, nil, providers, func(s string) (string, error) { return s, nil })
+			if err != nil {
+				t.Fatalf("ResolveProvider: %v", err)
+			}
+			if pins := resolved.UnhonoredOptionPins(); len(pins) != 0 {
+				t.Fatalf("UnhonoredOptionPins() = %+v, want none", pins)
+			}
+			launch, err := ProviderTemplateCommand(resolved, "", nil, providers)
+			if err != nil {
+				t.Fatalf("ProviderTemplateCommand: %v", err)
+			}
+			if launch != tc.want {
+				t.Errorf("launch = %q, want %q", launch, tc.want)
+			}
+		})
+	}
+}
+
+// TestProviderSessionCreateTransportBuiltinGolden pins every builtin's
+// default transport and template launch command to the values recorded
+// before ACPOmittedArgs existed, so the omitted-args transport rule moves
+// only city-declared wrappers, never a builtin.
+func TestProviderSessionCreateTransportBuiltinGolden(t *testing.T) {
+	golden := map[string]struct{ transport, launch string }{
+		"amp":         {"", "amp --dangerously-allow-all --no-ide"},
+		"antigravity": {"", "agy --dangerously-skip-permissions"},
+		"auggie":      {"", "auggie --allow-indexing"},
+		"cerebras":    {"acp", "opencode acp --model cerebras/gpt-oss-120b"},
+		"claude":      {"", "claude --dangerously-skip-permissions --effort max"},
+		"codex":       {"", "codex --dangerously-bypass-approvals-and-sandbox"},
+		"copilot":     {"", "copilot --yolo --no-ask-user"},
+		"cursor":      {"", "cursor-agent -f --trust"},
+		"gemini":      {"", "gemini --approval-mode yolo"},
+		"grok":        {"", "grok --permission-mode bypassPermissions --model grok-composer-2.5-fast"},
+		"groq":        {"acp", "opencode acp --model groq/openai/gpt-oss-120b"},
+		"kimi":        {"acp", "kimi --yolo --no-thinking acp"},
+		"kiro":        {"", "kiro-cli chat --no-interactive --agent gascity --trust-all-tools"},
+		"mimocode":    {"", "mimo --never-ask"},
+		"omp":         {"", "omp --hook .omp/hooks/gc-hook.ts"},
+		"opencode":    {"acp", "opencode acp"},
+		"pi":          {"", "pi -e .pi/extensions/gc-hooks.js"},
+		"zcode":       {"", "zcode-repl"},
+	}
+	providers := BuiltinProviders()
+	if len(providers) != len(golden) {
+		t.Fatalf("BuiltinProviders() has %d providers, golden table has %d; record the new builtin's transport and launch", len(providers), len(golden))
+	}
+	cfg := &City{Providers: providers}
+	if err := BuildResolvedProviderCache(cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+	for name := range providers {
+		want, ok := golden[name]
+		if !ok {
+			t.Errorf("builtin %q missing from golden table", name)
+			continue
+		}
+		resolved, err := ResolveProvider(&Agent{Name: "worker", Provider: name}, nil, providers, func(s string) (string, error) { return s, nil })
+		if err != nil {
+			t.Fatalf("ResolveProvider(%q): %v", name, err)
+		}
+		cached, ok := ResolvedProviderCached(cfg, name)
+		if !ok {
+			t.Fatalf("ResolvedProviderCached(%q) missing", name)
+		}
+		for path, rp := range map[string]*ResolvedProvider{"ResolveProvider": resolved, "ResolvedProviderCached": &cached} {
+			if len(rp.ACPOmittedArgs) != 0 {
+				t.Errorf("%s(%q).ACPOmittedArgs = %q, want empty", path, name, rp.ACPOmittedArgs)
+			}
+		}
+		transport := resolved.ProviderSessionCreateTransport()
+		if transport != want.transport {
+			t.Errorf("%q: ProviderSessionCreateTransport() = %q, want %q", name, transport, want.transport)
+		}
+		launch, err := ProviderTemplateCommand(resolved, transport, nil, providers)
+		if err != nil {
+			t.Fatalf("ProviderTemplateCommand(%q): %v", name, err)
+		}
+		if launch != want.launch {
+			t.Errorf("%q: template launch = %q, want %q", name, launch, want.launch)
+		}
+	}
+}

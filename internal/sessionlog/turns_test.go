@@ -53,16 +53,16 @@ func TestTurnSupportFor(t *testing.T) {
 		provider string
 		want     TurnSupport
 	}{
-		{"claude", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
-		{"claude/tmux-cli", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
-		{"claude-eco", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
-		{"opencode-claude", TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone, Replace: TurnReplaceInterrupt}},
-		{"codex", TurnSupport{Start: TurnStartRecorded, End: TurnEndRecorded, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
-		{"codex/tmux-cli", TurnSupport{Start: TurnStartRecorded, End: TurnEndRecorded, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
-		{"gemini", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterruptReset}},
-		{"pi", TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone, Replace: TurnReplaceRestart}},
-		{"kimi", TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone, Replace: TurnReplaceInterrupt}},
-		{"", TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone, Replace: TurnReplaceInterrupt}},
+		{"claude", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated}},
+		{"claude/tmux-cli", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated}},
+		{"claude-eco", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated}},
+		{"opencode-claude", TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone}},
+		{"codex", TurnSupport{Start: TurnStartRecorded, End: TurnEndRecorded, Link: TurnLinkCorrelated}},
+		{"codex/tmux-cli", TurnSupport{Start: TurnStartRecorded, End: TurnEndRecorded, Link: TurnLinkCorrelated}},
+		{"gemini", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated}},
+		{"pi", TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone}},
+		{"kimi", TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone}},
+		{"", TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone}},
 	}
 	for _, tt := range tests {
 		if got := TurnSupportFor(tt.provider); got != tt.want {

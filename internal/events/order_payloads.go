@@ -57,7 +57,32 @@ func OrderSkippedPayloadJSON(p OrderSkippedPayload) json.RawMessage {
 	return b
 }
 
+// OrderInapplicablePayload is the typed payload for order.inapplicable
+// events: which order the dispatcher will not run, for which bead scope
+// ("city" or "rig:<name>"), the backend that scope uses, and the backends the
+// order requires.
+type OrderInapplicablePayload struct {
+	OrderName       string   `json:"order_name"`
+	Scope           string   `json:"scope"`
+	Backend         string   `json:"backend"`
+	RequiresBackend []string `json:"requires_backend"`
+}
+
+// IsEventPayload marks OrderInapplicablePayload as an events.Payload variant.
+func (OrderInapplicablePayload) IsEventPayload() {}
+
+// OrderInapplicablePayloadJSON builds the JSON wire form for attachment to an
+// Event.Payload field.
+func OrderInapplicablePayloadJSON(p OrderInapplicablePayload) json.RawMessage {
+	if p.RequiresBackend == nil {
+		p.RequiresBackend = []string{}
+	}
+	b, _ := json.Marshal(p) //nolint:errcheck // a struct of strings and a string slice cannot fail to marshal
+	return b
+}
+
 func init() {
 	RegisterPayload(OrderSuppressed, OrderSuppressedPayload{})
 	RegisterPayload(OrderSkipped, OrderSkippedPayload{})
+	RegisterPayload(OrderInapplicable, OrderInapplicablePayload{})
 }

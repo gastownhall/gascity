@@ -7,8 +7,8 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "2.2.0"
-  BD_VERSION: "v1.3.1"
+  DOLT_VERSION: "2.6.0"
+  BD_VERSION: "v1.3.4"
   # Bypass the systemd gascity-test.slice re-exec on CI runners. The Blacksmith
   # runners' user systemd cannot reliably create a transient --scope for the
   # heavy acceptance workloads; gc_test_slice_reexec then exec's
@@ -30,24 +30,41 @@ jobs:
       force_blacksmith: true
     secrets: inherit
 
+  # The advisory live probes (contract radar, MCP mail conformance) run in
+  # their own workflow, beside CI parity, and read no secret. RC summary
+  # needs them, so a red radar fails the gate; the acceptance, integration
+  # and tutorial chain waits on CI parity only, so it still runs.
+  probes_parity:
+    name: Advisory probes parity
+    permissions:
+      contents: read
+    uses: ./.github/workflows/advisory-probes.yml
+    with:
+      force_blacksmith: true
+
   # Every Bazel lane on the dispatched ref, executing on rbe-west: unit
   # (the untagged suite with cmd/gc's fast tests, docsync, the generated
   # artifact and policy checks, nogo), acceptance (Tier A), integration-
   # packages (cmd/gc's process suite and every package's integration-tagged
-  # tests), integration-smoke and, as a dispatch, the full //test/integration
-  # suite (evidence-only until G3). It replaces the go-test fast-test shards
-  # and `make check-docs-go`; the darwin build of internal/fsys is
+  # tests), integration-smoke, split-strict (cmd/gc and internal/api under
+  # the split-strict projection gate; gating) and, as a dispatch, the full
+  # //test/integration suite (evidence-only until G3). It replaces the
+  # go-test fast-test shards and `make check-docs-go`; the darwin build of internal/fsys is
   # mac_regression's native one.
   bazel_parity:
     name: Bazel parity
     permissions:
       contents: read
       actions: write # bazel.yml's rbe job pre-warms the worker pool
+      pull-requests: read # bazel.yml's rbe job lists a PR's files (split-strict lane; pull_request only)
       # issues: write and id-token: write are requested by bazel.yml's
-      # rrc-verify and repo contents cache seed jobs; GitHub validates a called
-      # workflow's permissions at startup even for jobs that skip, so the
-      # caller must grant them (startup_failure otherwise). Neither job runs
-      # for RC Gate's events, and the mint refuses non-main-push tokens.
+      # rrc-verify, split-strict-alert and repo contents cache seed jobs;
+      # GitHub validates a called workflow's permissions at startup even for
+      # jobs that skip, so the caller must grant them (startup_failure
+      # otherwise). split-strict-alert (schedule only) and the seed job
+      # (main pushes only; the mint refuses other tokens) never run for RC
+      # Gate's events; rrc-verify runs on its dispatch when the repo contents
+      # cache is on.
       issues: write
       id-token: write
     uses: ./.github/workflows/bazel.yml
@@ -57,7 +74,8 @@ jobs:
 
   # Release-time pin guard: the bundled core/bd/dolt pin must name an
   # ancestor commit with the content this ref embeds, and DOLT_VERSION must be
-  # the Dolt the pinned beads release qualifies (scripts/check-embedded-pins).
+  # at least the Dolt the pinned beads release qualifies
+  # (scripts/check-embedded-pins).
   ubuntu_embedded_pins:
     name: ubuntu / embedded pins are the latest releases
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -406,6 +424,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     needs:
       - ci_parity
+      - probes_parity
       - bazel_parity
       - ubuntu_embedded_pins
       - ubuntu_acceptance_a
@@ -430,9 +449,9 @@ jobs:
           lines = [
               "## RC Gate",
               "",
-              "This workflow is the manual pre-RC gate. It calls the reusable CI workflow plus RC-only release jobs for the dispatched ref.",
+              "This workflow is the manual pre-RC gate. It calls the reusable CI, advisory probes and Bazel workflows plus RC-only release jobs for the dispatched ref.",
               "",
-              "The `ci_parity` and `bazel_parity` entries are the aggregate results of the shared CI and Bazel workflows. Inspect their nested jobs in this run for per-check detail.",
+              "The `ci_parity`, `probes_parity` and `bazel_parity` entries are the aggregate results of the shared CI, advisory probes and Bazel workflows. Inspect their nested jobs in this run for per-check detail.",
               "",
               "Jobs that show `skipped` were intentionally gated off by the same conditional logic used in CI.",
               "",
