@@ -143,10 +143,10 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 		}
 		if !ladderGoverns(p.cfg, row) {
 			if ladderSeat(p.cfg, row) {
-				// Excluded by its agent (ladderExclusion): settle what an
-				// earlier governed pass left in its cell, so a pending
-				// release cannot keep the hook refusing the claim's start for
-				// good. Never nudges, releases or recycles.
+				// Excluded (ladderExclusion): settle what an earlier governed
+				// pass left in its cell, under the exclusion's reason, so a
+				// pending release cannot keep the hook refusing the claim's
+				// start for good. Never nudges, releases or recycles.
 				p.standDownSeat(row, workladder.Gate{Held: true, Reason: ladderExclusion(p.cfg, row)})
 			}
 			continue
@@ -181,9 +181,8 @@ func ladderExclusion(cfg *config.City, row beads.Bead) string {
 		return "one_shot"
 	case isControlDispatcherSeat(cfg, row):
 		return "control_dispatcher"
-	default:
-		return ""
 	}
+	return ""
 }
 
 // ladderSeat is the seats whose work_ladder cell the ladder owns: open

@@ -518,30 +518,15 @@ func currentSessionAssigneeIdentities(sessionBead beads.Bead) []string {
 	return result
 }
 
-// governs is every pool seat except a control dispatcher's
-// (isControlDispatcherSeat), which has no claim to miss.
+// governs is the pool seats the claim backstop paces: pool-managed rows and
+// collapsed canonical-singleton pool seats, except a control dispatcher's
+// (isControlDispatcherSeat), whose open, unassigned trigger is the control
+// step it is executing, not a claim it missed.
 func (p poolClaimBackstop) governs(s beads.Bead) bool {
 	if isControlDispatcherSeat(p.cfg, s) {
 		return false
 	}
 	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true" || isCollapsedCanonicalSingletonPoolBead(p.cfg, s)
-}
-
-// isControlDispatcherSeat reports whether row is a session of a control
-// dispatcher (config.ControlDispatcherAgentName under any rig or binding).
-// The dispatcher is the SDK's own deterministic process, not an agent that
-// answers a prompt: it executes the control beads routed to it in place,
-// without claiming them, so the one it is running (a check that runs a long
-// gate, say) stays open and unassigned until the step closes it, and a claim
-// nudge typed into its pane is never read. Its pool's demand starts it and
-// drains it when no control work is left. A pace-keeper that reads an open,
-// unassigned trigger as a claim the seat missed would nudge it and then
-// recycle it mid-step, killing the step it is executing; so the claim backstop
-// and the work ladder govern no such seat. A row whose agent the config does
-// not name is not a dispatcher.
-func isControlDispatcherSeat(cfg *config.City, row beads.Bead) bool {
-	agent := findAgentByTemplate(cfg, normalizedSessionTemplate(row, cfg))
-	return agent != nil && isWorkflowServeControlDispatcherAgent(*agent)
 }
 
 // outstandingID acts only while the trigger bead is genuinely unclaimed. A
@@ -976,6 +961,17 @@ func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) stri
 		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
 	}
 	return nudge
+}
+
+// isControlDispatcherSeat reports whether row's configured agent is the
+// control dispatcher. The dispatcher executes routed control beads in place:
+// ProcessControl requires them open and never claims them, so the open,
+// unassigned trigger the pool pace-keepers read as a missed claim is its
+// normal executing state. A row whose agent the config does not name is
+// not a dispatcher seat.
+func isControlDispatcherSeat(cfg *config.City, row beads.Bead) bool {
+	agent := findAgentByTemplate(cfg, normalizedSessionTemplate(row, cfg))
+	return agent != nil && isWorkflowServeControlDispatcherAgent(*agent)
 }
 
 func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {
