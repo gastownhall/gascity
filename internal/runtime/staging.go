@@ -62,18 +62,34 @@ func StageSessionWorkDir(cfg Config) error {
 func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer, opts ...StageOption) error {
 	if cfg.WorkDir != "" {
 		overlayProviders := EffectiveOverlayProviderNames(cfg)
+		skip := SkipStackedHookPathFunc(cfg.SkipStackedHookPaths)
 		for _, od := range cfg.PackOverlayDirs {
-			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings, opts...); err != nil {
+			if err := StageProviderOverlayDirSkippingInstalledMergeable(od, cfg.WorkDir, overlayProviders, skip, warnings, opts...); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
 			}
 		}
 		if cfg.OverlayDir != "" {
-			if err := StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings, opts...); err != nil {
+			if err := StageProviderOverlayDirSkippingInstalledMergeable(cfg.OverlayDir, cfg.WorkDir, overlayProviders, skip, warnings, opts...); err != nil {
 				return fmt.Errorf("overlay %q -> %q: %w", cfg.OverlayDir, cfg.WorkDir, err)
 			}
 		}
 	}
 	return stageCopyFiles(cfg.WorkDir, cfg.CopyFiles)
+}
+
+// SkipStackedHookPathFunc returns the skip predicate for
+// StageProviderOverlayDirSkippingInstalledMergeable that withholds paths
+// (Config.SkipStackedHookPaths), or nil when paths is empty, which stages
+// every overlay file.
+func SkipStackedHookPathFunc(paths []string) func(relPath string) bool {
+	if len(paths) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		set[filepath.ToSlash(filepath.Clean(p))] = true
+	}
+	return func(relPath string) bool { return set[relPath] }
 }
 
 // EffectiveOverlayProviderNames returns the provider overlay slots to stage for

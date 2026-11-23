@@ -110,3 +110,65 @@ func writeTmuxScaffoldFixture(t *testing.T, path, content string) {
 		t.Fatalf("WriteFile(%q): %v", path, err)
 	}
 }
+
+// TestStageStartFilesSkipsStackedHookPaths is the #5872 tmux half of AC-2:
+// a runtime.Config whose SkipStackedHookPaths names the project-level codex
+// hooks file must withhold it from session-start staging, while staging every
+// non-listed sibling. An empty SkipStackedHookPaths stages the file (legacy
+// behavior).
+func TestStageStartFilesSkipsStackedHookPaths(t *testing.T) {
+	t.Parallel()
+
+	stagedHook := func(t *testing.T, cfg runtime.Config) bool {
+		t.Helper()
+		cfg.WorkDir = t.TempDir()
+		if err := stageStartFiles(cfg, &bytes.Buffer{}); err != nil {
+			t.Fatalf("stageStartFiles: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(cfg.WorkDir, ".codex", "hooks.json")); err != nil {
+			return false
+		}
+		return true
+	}
+	cfg := func() runtime.Config {
+		return runtime.Config{
+			ProviderName:        "codex",
+			ProviderOverlayName: "codex",
+			PackOverlayDirs:     []string{tmuxCodexHooksOverlaySrc(t)},
+		}
+	}
+
+	if !stagedHook(t, cfg()) {
+		t.Fatal("empty SkipStackedHookPaths must stage .codex/hooks.json (legacy behavior)")
+	}
+
+	skipCfg := cfg()
+	skipCfg.SkipStackedHookPaths = []string{".codex/hooks.json"}
+	if stagedHook(t, skipCfg) {
+		t.Fatal("SkipStackedHookPaths=[\".codex/hooks.json\"] did not withhold the stacked project hooks file")
+	}
+
+	skipCfg.WorkDir = t.TempDir()
+	if err := stageStartFiles(skipCfg, &bytes.Buffer{}); err != nil {
+		t.Fatalf("stageStartFiles: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(skipCfg.WorkDir, "AGENTS.codex.md")); err != nil {
+		t.Fatalf("non-listed sibling overlay not staged: %v", err)
+	}
+}
+
+func tmuxCodexHooksOverlaySrc(t *testing.T) string {
+	t.Helper()
+	src := t.TempDir()
+	codexDir := filepath.Join(src, "per-provider", "codex", ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("mkdir codex overlay: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexDir, "hooks.json"), []byte(`{"hooks":{"SessionStart":[]}}`), 0o644); err != nil {
+		t.Fatalf("write codex hooks overlay: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "per-provider", "codex", "AGENTS.codex.md"), []byte("codex"), 0o644); err != nil {
+		t.Fatalf("write codex sibling overlay: %v", err)
+	}
+	return src
+}

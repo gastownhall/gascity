@@ -200,3 +200,42 @@ func TestCodexProjectHooksRetiredWhenUserLayerCovers(t *testing.T) {
 		}
 	})
 }
+
+// stackedTick runs one reconcile tick and returns the codex agent's session
+// name and desired template params.
+func stackedTick(t *testing.T, cityPath string, cfg *config.City) (string, TemplateParams) {
+	t.Helper()
+	result := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	return onlyDesiredSession(t, result.State)
+}
+
+// TestCodexStackedHooksSessionStartKeepsFingerprint covers session start for a
+// covered codex agent: session-start staging (subprocess, acp, herdr and host
+// exec through runtime.StageSessionWorkDirWithWarnings; tmux through
+// stageStartFiles, covered in its own package) must not write the project
+// copy the tick withholds, and the next tick must compute the fingerprint the
+// session started with.
+func TestCodexStackedHooksSessionStartKeepsFingerprint(t *testing.T) {
+	userHooks := isolateCodexUserHome(t)
+	writeStackedTestFile(t, userHooks, coveringUserHooks(t, "a3558786"))
+	cityPath, cfg := codexHookStagingCity(t)
+
+	sessionName, firstTP := stackedTick(t, cityPath, cfg)
+	startedCfg := templateParamsToConfig(firstTP)
+	startedHash := runtime.CoreFingerprint(startedCfg)
+	if err := runtime.StageSessionWorkDirWithWarnings(startedCfg, io.Discard); err != nil {
+		t.Fatalf("StageSessionWorkDirWithWarnings: %v", err)
+	}
+	assertNoStackedProjectHooks(t, filepath.Join(startedCfg.WorkDir, ".codex", "hooks.json"), "after session start")
+
+	result := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	secondTP, ok := result.State[sessionName]
+	if !ok {
+		t.Fatalf("second desired state missing %q", sessionName)
+	}
+	currentCfg := templateParamsToConfig(secondTP)
+	if got := runtime.CoreFingerprint(currentCfg); got != startedHash {
+		t.Fatalf("core fingerprint moved after session start: started=%s current=%s drifted=%v",
+			startedHash, got, runtime.CoreFingerprintDriftFields(runtime.CoreFingerprintBreakdown(startedCfg), currentCfg))
+	}
+}

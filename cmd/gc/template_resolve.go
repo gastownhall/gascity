@@ -843,6 +843,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
 		CopyFiles:              copyFiles,
+		SkipStackedHookPaths:   stackedHookSkipPaths(p.stackedHookSkips(cfgAgent, resolved, qualifiedName, workDir, nil)),
 	}
 
 	params := TemplateParams{

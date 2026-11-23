@@ -161,6 +161,43 @@ func stackedProjectHookVerdicts(in stackedHookAgent, read stackedHookReadFunc, s
 	return out
 }
 
+// stackedHookSkipPaths returns the sorted paths verdicts skip, for
+// runtime.Config.SkipStackedHookPaths.
+func stackedHookSkipPaths(verdicts map[string]stackedHookVerdict) []string {
+	var out []string
+	for rel, v := range verdicts {
+		if v.skip {
+			out = append(out, rel)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// cityStackedHookSkipPaths returns the stacked project hook paths a session of
+// agentCfg must not stage at start, for start paths that build
+// runtime.Config outside a desired-state build. It computes only the agent's
+// own verdicts; withholding a file at session start never removes one, so a
+// work-dir sibling that still wants the file keeps it.
+func cityStackedHookSkipPaths(cfg *config.City, cityPath, cityName string, agentCfg *config.Agent, resolved *config.ResolvedProvider, qualifiedName string, packDirs []string, overlayDir string) []string {
+	if cfg == nil {
+		return nil
+	}
+	return stackedHookSkipPaths(stackedProjectHookVerdicts(stackedHookAgent{
+		city:            cfg,
+		cityName:        cityName,
+		cityPath:        cityPath,
+		sessionProvider: cfg.Session.Provider,
+		providers:       cfg.Providers,
+		workspace:       &cfg.Workspace,
+		agent:           agentCfg,
+		resolved:        resolved,
+		qualifiedName:   qualifiedName,
+		packDirs:        packDirs,
+		overlayDir:      overlayDir,
+	}, nil, nil))
+}
+
 // stackedHookGetenv resolves environment variables the way a host session
 // inherits them: the operator-authored env layers resolveTemplate folds into
 // the session (workspace, provider, agent) over the controller's own process

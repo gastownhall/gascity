@@ -43,6 +43,10 @@ type StartupHints struct {
 	// ProviderOverlayName's. Populated from the agent's install_agent_hooks
 	// config (or the workspace default).
 	InstallAgentHooks []string
+	// SkipStackedHookPaths lists project hook files session-start overlay
+	// staging must not write because the session's user layer already loads
+	// every gc hook they carry (runtime.Config.SkipStackedHookPaths).
+	SkipStackedHookPaths []string
 	// PackOverlayDirs lists overlay directories from packs. Copied to
 	// the session workdir before the agent's own OverlayDir.
 	PackOverlayDirs []string
@@ -85,6 +89,7 @@ func (h StartupHints) ToRuntimeConfig() runtime.Config {
 		ProviderName:           h.ProviderName,
 		ProviderOverlayName:    h.ProviderOverlayName,
 		InstallAgentHooks:      h.InstallAgentHooks,
+		SkipStackedHookPaths:   h.SkipStackedHookPaths,
 		PackOverlayDirs:        h.PackOverlayDirs,
 		OverlayDir:             h.OverlayDir,
 		CopyFiles:              h.CopyFiles,

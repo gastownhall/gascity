@@ -128,6 +128,7 @@ var excludedFromCore = map[string]string{
 	"PromptFlag":             "command-reconstruction hint, not hashed",
 	"FreshOnly":              "per-call Start mode (LL6), not config identity",
 	"ProgramStatus":          "leaf-applied capture declaration; arming and heal never restart the agent",
+	"SkipStackedHookPaths":   "effect already fingerprinted via the probed CopyFiles entry; hashing it would tie fingerprints to the controller's home directory",
 }
 
 // TestFingerprintPartitionAccountsForEveryConfigField is the FP-1/GAP-6
