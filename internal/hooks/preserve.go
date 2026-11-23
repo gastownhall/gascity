@@ -32,14 +32,10 @@ func PreserveManagedFile(relPath string, existing []byte) bool {
 	if !ok {
 		return false
 	}
-	// The desired bytes are nil because every predicate reachable through
-	// managedOverlayHookPaths decides from a version marker in the existing
-	// file alone. Only the .cursor/hooks.json predicate compares against the
-	// desired document, and that path is mergeable
-	// (overlay.IsMergeablePath), so the staging caller skips it before the
-	// preserve predicate is ever consulted — it is deliberately absent from
-	// the map above.
-	needsUpgrade := overlayManagedNeedsUpgrade(provider, cleanRelPath, nil)
+	// .cursor/hooks.json is deliberately absent from the map above: that path is
+	// mergeable (overlay.IsMergeablePath), so the staging caller skips it before
+	// the preserve predicate is ever consulted.
+	needsUpgrade := overlayManagedNeedsUpgrade(provider, cleanRelPath)
 	if needsUpgrade == nil {
 		return false
 	}

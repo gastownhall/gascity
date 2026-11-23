@@ -138,11 +138,7 @@ func TestManagedOverlayHookPathsCoverEveryVersionedFile(t *testing.T) {
 				return nil
 			}
 			rel := strings.TrimPrefix(name, base+"/")
-			data, readErr := iofs.ReadFile(core.PackFS, name)
-			if readErr != nil {
-				return readErr
-			}
-			if overlayManagedNeedsUpgrade(provider, rel, data) == nil {
+			if overlayManagedNeedsUpgrade(provider, rel) == nil {
 				return nil
 			}
 			if overlay.IsMergeablePath(filepath.FromSlash(rel)) {

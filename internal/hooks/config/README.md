@@ -83,7 +83,11 @@ pre-compaction hook is installed because Antigravity does not expose one.
   Queued nudges still reach these sessions through the supervisor's nudge
   dispatcher (or the per-session poller), which types them in; unread mail
   gets no hook-time injection on them, which in effect it never had.
-  `TestDiscardedOutputOverlaysRunNoConsumptiveHooks` pins it.
+  `TestDiscardedOutputOverlaysRunNoConsumptiveHooks` pins it. Overlay staging
+  never removes a hook, so `Install` replaces every released copy of these two
+  files that still runs them (backing the old bytes up to `.bak`); the frozen
+  shapes live in `released_hook_shapes.go` and
+  `TestInstallUpgradesReleasedDiscardedOutputHooks` pins them.
 
 - **kiro pre-compaction** — Kiro's hook config (under
   `.kiro/agents/gascity.json`) wires `agentSpawn` and `userPromptSubmit`

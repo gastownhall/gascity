@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "hooks.go",
         "preserve.go",
+        "released_hook_shapes.go",
     ],
     embedsrcs = [
         "config/README.md",
