@@ -12,12 +12,13 @@ import (
 )
 
 // drainAckSeed creates the work a drain-acking seat keeps and returns the
-// metadata to stamp on the seat's row (its started records, a restart
-// request), given the seat's ID and the work bead's ID.
+// metadata to stamp on the seat's row (its started records), given the
+// seat's ID and the work bead's ID.
 type drainAckSeed struct {
 	status  string
 	labels  []string
 	rowMeta func(sessionID, beadID string) map[string]string
+	restart bool // the row carries a pending restart request
 }
 
 // create makes the kept bead, assigned to seatID, in the seed's status
@@ -73,6 +74,9 @@ func legacyDrainAckAnomaly(t *testing.T, seed drainAckSeed) ([]api.SessionDrainA
 	if seed.rowMeta != nil {
 		env.setSessionMetadata(&seat, seed.rowMeta(seat.ID, work.ID))
 	}
+	if seed.restart {
+		env.setSessionMetadata(&seat, map[string]string{"restart_requested": "true"})
+	}
 
 	dops := newFakeDrainOps()
 	if err := dops.setDrainAck("worker"); err != nil {
@@ -88,12 +92,16 @@ func legacyDrainAckAnomaly(t *testing.T, seed drainAckSeed) ([]api.SessionDrainA
 	return drainAckAnomalyPayloads(t, fake.Events), seat.ID, work.ID
 }
 
-// v2DrainAckAnomaly runs the stop verb on a signaled row (extra stamped on
-// it) that keeps seed's bead and returns the anomaly payloads its finalize
-// recorded, the row's ID and the bead's ID.
-func v2DrainAckAnomaly(t *testing.T, seed drainAckSeed, extra ...string) ([]api.SessionDrainAckedWithAssignedWorkPayload, string, string) {
+// v2DrainAckAnomaly runs the stop verb on a signaled row that keeps seed's
+// bead and returns the anomaly payloads its finalize recorded, the row's ID
+// and the bead's ID.
+func v2DrainAckAnomaly(t *testing.T, seed drainAckSeed) ([]api.SessionDrainAckedWithAssignedWorkPayload, string, string) {
 	t.Helper()
 	var seatID, beadID string
+	var extra []string
+	if seed.restart {
+		extra = append(extra, "restart_requested", "true")
+	}
 	s, _, _ := stopRun(t, signaled(drainOrphaned, extra...), undesired(drainOrphaned), func(_ *effectPass, _ *fenceLeaf, store beads.Store, id string) {
 		work := seed.create(t, store, id)
 		seatID, beadID = id, work.ID
@@ -120,21 +128,20 @@ func startedBy(_, beadID string) map[string]string {
 // restart_requested for a stop that completed a restart request, and the
 // generic drain_acked_with_assigned_work for work the row never started.
 func TestDrainAckAnomalyReasonShapes(t *testing.T) {
-	type emitter func(*testing.T, drainAckSeed, ...string) ([]api.SessionDrainAckedWithAssignedWorkPayload, string, string)
-	legacy := func(t *testing.T, seed drainAckSeed, _ ...string) ([]api.SessionDrainAckedWithAssignedWorkPayload, string, string) {
-		return legacyDrainAckAnomaly(t, seed)
-	}
+	type emitter func(*testing.T, drainAckSeed) ([]api.SessionDrainAckedWithAssignedWorkPayload, string, string)
 	for _, c := range []struct {
 		name   string
 		seed   drainAckSeed
 		reason string
 	}{
 		{"AC-1 a started in_progress claim", drainAckSeed{status: "in_progress", rowMeta: startedBy}, "started_claim_kept"},
+		{"AC-2 a started claim kept by a restart", drainAckSeed{status: "in_progress", rowMeta: startedBy, restart: true}, "restart_requested"},
+		{"AC-2 open work kept by a restart", drainAckSeed{status: "open", restart: true}, "restart_requested"},
 	} {
 		for _, e := range []struct {
 			name string
 			run  emitter
-		}{{"legacy", legacy}, {"v2", v2DrainAckAnomaly}} {
+		}{{"legacy", legacyDrainAckAnomaly}, {"v2", v2DrainAckAnomaly}} {
 			t.Run(c.name+"/"+e.name, func(t *testing.T) {
 				got, seatID, beadID := e.run(t, c.seed)
 				if len(got) != 1 {
