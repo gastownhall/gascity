@@ -2,8 +2,11 @@ package main
 
 import (
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -133,5 +136,64 @@ func TestClaimViewProbeCachesPerStoreAndID(t *testing.T) {
 	}
 	if probe.stats.Probed != 3 {
 		t.Fatalf("Probed = %d, want 3", probe.stats.Probed)
+	}
+}
+
+// TestDemandClaimViewReadFailureWithholdsTheRowAndMarksPartial is the design's
+// error row (#5857): a cross-store row whose claim-view read fails with an
+// error that is not not-found is a row the pass cannot prove the claim can win,
+// so it is not counted — and the template's count is marked partial with an
+// error naming the template, the row, the store the row was counted from, and
+// the cause, so the decide retains capacity instead of silently shrinking it.
+func TestDemandClaimViewReadFailureWithholdsTheRowAndMarksPartial(t *testing.T) {
+	cfg := agreementConfig()
+	cityStore := beads.NewMemStore()
+	cityStore.HonorExplicitIDs = true
+	rigStore := beads.NewMemStore()
+	rigStore.HonorExplicitIDs = true
+
+	// E: open, unassigned and routed in the city store, with a claim view that
+	// cannot answer for it (a read failure that is not not-found).
+	if _, err := cityStore.Create(beads.Bead{
+		ID: "e", Title: "row e", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+	}); err != nil {
+		t.Fatalf("seeding e: %v", err)
+	}
+
+	targets := []defaultScaleCheckTarget{
+		{template: agreementTemplate, store: rigStore, storeKey: "rig:rig"},
+	}
+	targets = append(targets, crossStoreDemandLegs([]defaultScaleCheckTarget{
+		{template: agreementTemplate, store: cityStore, storeKey: "city"},
+	}, &failingClaimViewStore{Store: rigStore})...)
+
+	counts, demand, partialTemplates, errs, _ := defaultScaleCheckCountsAndDemand(cfg, targets, newReadyDemandCache())
+
+	if got := counts[agreementTemplate]; got != 0 {
+		t.Fatalf("counts[%s] = %d, want 0: an unproven cross-store row is not demand", agreementTemplate, got)
+	}
+	entry := demand[agreementTemplate]
+	for _, id := range []string{"e"} {
+		if slices.Contains(entry.WorkBeadIDs, id) {
+			t.Fatalf("WorkBeadIDs lists %s: the pass could not prove the claim can win it", id)
+		}
+		if _, listed := entry.StoreRefs[id]; listed {
+			t.Fatalf("StoreRefs lists %s: an unproven cross-store row is not demand", id)
+		}
+	}
+	if !partialTemplates[agreementTemplate] {
+		t.Fatalf("partialTemplates = %v, want %s marked partial: its count is a partial of one demand source", partialTemplates, agreementTemplate)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("errs = %v, want exactly the claim-view read failure", errs)
+	}
+	if !errors.Is(errs[0], errClaimViewRead) {
+		t.Fatalf("errs[0] = %v, want it to wrap the read failure %v", errs[0], errClaimViewRead)
+	}
+	for _, want := range []string{agreementTemplate, "e", "city", errClaimViewRead.Error()} {
+		if !strings.Contains(errs[0].Error(), want) {
+			t.Fatalf("errs[0] = %q, want it to name %q", errs[0], want)
+		}
 	}
 }

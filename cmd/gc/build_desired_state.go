@@ -2537,9 +2537,21 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			// so a shadowed row in front of a worktree-bound one still holds
 			// that row behind the claim window, exactly as the seat reads it.
 			if view := rowClaimViews[b.ID]; view != nil {
-				verdict, _ := probes.check(view, b.ID)
+				verdict, probeErr := probes.check(view, b.ID)
 				if verdict == claimViewShadow {
 					probes.noteShadowed(b.ID)
+					continue
+				}
+				// A claim view that cannot answer leaves the row's
+				// claimability unproven, so counting it would re-mint the
+				// spawn loop on a read error; dropping it silently would
+				// shrink a pool whose work is real. Withhold the row and say
+				// what and why: the template's count is a partial of one
+				// demand source, and the error names the template, the row,
+				// the store the row was counted from, and the cause.
+				if verdict == claimViewUnknown {
+					errs = append(errs, fmt.Errorf("default scale_check %s: claim view for cross-store row %s (store %s): %w", template, b.ID, rowStoreKeys[b.ID], probeErr))
+					partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
 					continue
 				}
 			}
