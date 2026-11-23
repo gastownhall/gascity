@@ -199,3 +199,40 @@ func TestDriftDetect_WithRealisticPacks_NFR1(t *testing.T) {
 	t.Logf("NFR-1 OK: p95 detect cost = %s, max = %s, min = %s (budget %s, %d samples)",
 		p95, samples[len(samples)-1], samples[0], budget, iterations)
 }
+
+// driftBudgetStatistic is the sample TestDriftDetect_WithRealisticPacks_NFR1
+// judges against its budget.
+func driftBudgetStatistic(samples []time.Duration) time.Duration {
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	return sorted[len(sorted)*95/100]
+}
+
+// TestDriftBudgetStatistic_IgnoresLoadSpikes pins that host load alone cannot
+// push the NFR-1 verdict over its budget: a loaded host delays some calls
+// (ga-bofb21z7: p95 125ms against 1.4ms alone), but one undelayed call proves
+// the code still fits.
+func TestDriftBudgetStatistic_IgnoresLoadSpikes(t *testing.T) {
+	const budget = 100 * time.Millisecond
+	samples := make([]time.Duration, 30)
+	for i := range samples {
+		samples[i] = 500 * time.Millisecond // descheduled by a loaded host
+	}
+	samples[17] = 2 * time.Millisecond // one call that got the CPU
+	if got := driftBudgetStatistic(samples); got > budget {
+		t.Fatalf("statistic = %s (>%s): load spikes alone fail the budget", got, budget)
+	}
+}
+
+// TestDriftBudgetStatistic_FlagsUniformSlowdown pins that a real regression
+// still fails: when every call is over budget, no amount of luck hides it.
+func TestDriftBudgetStatistic_FlagsUniformSlowdown(t *testing.T) {
+	const budget = 100 * time.Millisecond
+	samples := make([]time.Duration, 30)
+	for i := range samples {
+		samples[i] = 150*time.Millisecond + time.Duration(i)*time.Millisecond
+	}
+	if got := driftBudgetStatistic(samples); got <= budget {
+		t.Fatalf("statistic = %s (<=%s): a slowdown of every call passes the budget", got, budget)
+	}
+}
