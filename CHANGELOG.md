@@ -1388,6 +1388,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A native graph apply that ran out of its own budget was replayed, then
+  silently re-created step by step.** With graph apply enabled
+  (`[daemon] formula_v2`), a native-store apply derives its transaction
+  budget from the plan (120 s plus 2 s per node and edge). When that budget
+  ended the apply, `gc sling`, `gc formula` and order dispatch re-ran the same
+  plan under the same budget, discarded both errors unless `GC_SLING_TRACE`
+  was set, and fell back to creating the beads one at a time. The apply now
+  fails the operation on the first attempt with
+  `native graph apply: graph apply budget of <budget> exhausted (<N> nodes,
+  <M> edges): <store error>`, and creates nothing further. Any other
+  deadline (the caller's own, or a single statement's) and connection-level
+  transients (`i/o timeout`, `broken pipe`, a `bd create --graph` subprocess
+  timeout) are handled as before.
+
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues
   were given, so an empty convoy created with `--rig <rig>` could never
