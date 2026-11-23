@@ -646,6 +646,69 @@ func (s *Store) SetCurrentClaim(id, beadID string) (bool, error) {
 	return true, nil
 }
 
+// CurrentClaimOutcome classifies one fenced write of a session's current-claim
+// pointer (beadmeta.CurrentClaimBeadIDMetadataKey). Conflict is an ordinary race
+// result, not an error: another claim moved the pointer off the value the caller
+// expected, and nothing was written.
+type CurrentClaimOutcome string
+
+const (
+	// CurrentClaimSwapped means the pointer held the expected value and a
+	// metadata compare-and-set replaced it.
+	CurrentClaimSwapped CurrentClaimOutcome = "swapped"
+	// CurrentClaimUnchanged means the pointer already held the requested value;
+	// nothing was written by this call.
+	CurrentClaimUnchanged CurrentClaimOutcome = "unchanged"
+	// CurrentClaimConflict means the pointer held neither the expected nor the
+	// requested value; nothing was written.
+	CurrentClaimConflict CurrentClaimOutcome = "conflict"
+)
+
+// ReserveCurrentClaim points the session's current-claim pointer at beadID,
+// fenced on expected: the RAW pointer value the caller read before it decided
+// to claim (Info.CurrentClaimBeadID, never a trimmed form). Two claims of one
+// session that both read the same value cannot both win: the write is a
+// key-level compare-and-set (beads.ApplyMetadataCAS), so exactly one swaps and
+// the other is told CurrentClaimConflict and writes nothing.
+//
+// The id is resolved EXACTLY and a non-session bead is refused before any
+// write (validatedBead), and the write targets the canonical id that read
+// returned: bd's fuzzy id resolver would otherwise let the post-claim stamp land
+// on a prefix-colliding session bead.
+//
+// A transport error is returned as-is and never classified: the caller cannot
+// know whether it committed. Retrying with the same expected value is safe, as
+// a committed attempt reads back as CurrentClaimUnchanged.
+func (s *Store) ReserveCurrentClaim(id, expected, beadID string) (CurrentClaimOutcome, error) {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return "", fmt.Errorf("reserving current claim on session %q: empty bead id", id)
+	}
+	return s.swapCurrentClaim(id, expected, beadID)
+}
+
+// swapCurrentClaim is the fenced write shared by the current-claim writers: it
+// moves the pointer from expected to next.
+func (s *Store) swapCurrentClaim(id, expected, next string) (CurrentClaimOutcome, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return "", err
+	}
+	outcome, err := beads.ApplyMetadataCAS(s.store, b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, expected, next)
+	if err != nil {
+		return "", err
+	}
+	switch outcome {
+	case beads.MetadataCASSwapped:
+		return CurrentClaimSwapped, nil
+	case beads.MetadataCASAlreadyNext:
+		return CurrentClaimUnchanged, nil
+	case beads.MetadataCASConflict:
+		return CurrentClaimConflict, nil
+	}
+	return "", fmt.Errorf("writing current claim on session %q: unknown metadata CAS outcome %q", b.ID, outcome)
+}
+
 // CurrentClaimBeadID returns the id of the work bead this session most recently
 // claimed through `gc hook --claim` ("" when unset). It is the read half of
 // SetCurrentClaim and the front door for `gc hook current`.

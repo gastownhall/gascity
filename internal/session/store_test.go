@@ -2,7 +2,9 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -781,5 +783,176 @@ func TestStoreBacked(t *testing.T) {
 	var nilDoor *Store
 	if nilDoor.Backed() {
 		t.Error("a nil door reports backed")
+	}
+}
+
+// currentClaimFixture seeds one session bead whose current-claim pointer reads
+// pointer ("" leaves the key absent) into a MemStore, which offers metadata
+// CAS, behind an OpRecordingStore so a test can count the ops a writer issued.
+func currentClaimFixture(t *testing.T, pointer string) (*Store, *beads.MemStore, *beadstest.OpRecordingStore) {
+	t.Helper()
+	var meta map[string]string
+	if pointer != "" {
+		meta = map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: pointer}
+	}
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{sessionBeadFixture("s-1", "open", meta)}, nil)
+	rec := beadstest.NewOpRecordingStore(mem)
+	return NewStore(beads.SessionStore{Store: rec}), mem, rec
+}
+
+// currentClaimPointer reads the raw pointer straight off the backing store.
+func currentClaimPointer(t *testing.T, mem *beads.MemStore) string {
+	t.Helper()
+	b, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatalf("reading session bead: %v", err)
+	}
+	return b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]
+}
+
+// currentClaimWrites counts the metadata writes a recorder saw, the
+// compare-and-set included.
+func currentClaimWrites(rec *beadstest.OpRecordingStore) map[string]int {
+	out := map[string]int{}
+	for _, op := range rec.Ops() {
+		switch op.Kind {
+		case beadstest.OpSetMetadata, beadstest.OpSetMetadataBatch, beadstest.OpCompareAndSetMetadataKey:
+			out[op.Kind]++
+		}
+	}
+	return out
+}
+
+// TestReserveCurrentClaimSwapThenConflict is AC-1: two reserves that both read
+// the pointer as "X" race on a store that offers metadata CAS. The first swaps
+// it to its bead; the second is told it lost and writes nothing, so the pointer
+// keeps naming the first claim.
+func TestReserveCurrentClaimSwapThenConflict(t *testing.T) {
+	is, mem, rec := currentClaimFixture(t, "X")
+
+	first, err := is.ReserveCurrentClaim("s-1", "X", "A")
+	if err != nil {
+		t.Fatalf("first ReserveCurrentClaim: %v", err)
+	}
+	if first != CurrentClaimSwapped {
+		t.Fatalf("first reserve = %q, want %q", first, CurrentClaimSwapped)
+	}
+	rec.Reset()
+	second, err := is.ReserveCurrentClaim("s-1", "X", "B")
+	if err != nil {
+		t.Fatalf("second ReserveCurrentClaim: %v", err)
+	}
+	if second != CurrentClaimConflict {
+		t.Fatalf("second reserve = %q, want %q", second, CurrentClaimConflict)
+	}
+	if w := currentClaimWrites(rec); w[beadstest.OpSetMetadata] != 0 || w[beadstest.OpSetMetadataBatch] != 0 {
+		t.Errorf("losing reserve wrote unconditionally: %v", w)
+	}
+	if got := currentClaimPointer(t, mem); got != "A" {
+		t.Fatalf("pointer = %q, want A (the winner's stamp)", got)
+	}
+}
+
+// TestReserveCurrentClaimRefusesEmptyBeadID pins that a reserve must name the
+// bead it claims: clearing the pointer is ClearCurrentClaim's job, so an empty
+// reserve cannot launder a clear past the expected-value fence.
+func TestReserveCurrentClaimRefusesEmptyBeadID(t *testing.T) {
+	is, mem, rec := currentClaimFixture(t, "X")
+
+	if _, err := is.ReserveCurrentClaim("s-1", "X", ""); err == nil {
+		t.Fatal("ReserveCurrentClaim with an empty bead id = nil error, want a refusal")
+	}
+	if writes := currentClaimWrites(rec); len(writes) != 0 {
+		t.Fatalf("issued writes: %v, want none", writes)
+	}
+	if p := currentClaimPointer(t, mem); p != "X" {
+		t.Fatalf("pointer = %q, want %q", p, "X")
+	}
+}
+
+// casInterleavingStore runs between before the first compare-and-set of the
+// current-claim key to trigger lands, standing in for a second claim process
+// that read the same pointer and swapped first. It offers the metadata CAS
+// capability itself, forwarding to the wrapped MemStore.
+type casInterleavingStore struct {
+	beads.Store
+	trigger string
+	between func()
+	fired   bool
+}
+
+func (s *casInterleavingStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if !s.fired && key == beadmeta.CurrentClaimBeadIDMetadataKey && next == s.trigger {
+		s.fired = true
+		s.between()
+	}
+	return s.Store.(beads.MetadataCASWriter).CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+// TestReserveCurrentClaimInterleavedClaimersExactlyOneWins is the #6110
+// reproduction: claimer A has read the pointer and is about to write when
+// claimer B reads the same value and writes first. Exactly one of them may be
+// told its stamp landed, and the pointer names that one.
+func TestReserveCurrentClaimInterleavedClaimersExactlyOneWins(t *testing.T) {
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{sessionBeadFixture("s-1", "open", nil)}, nil)
+	wrapped := &casInterleavingStore{Store: mem, trigger: "gcg-A"}
+	is := NewStore(beads.SessionStore{Store: wrapped})
+
+	var outB CurrentClaimOutcome
+	var errB error
+	wrapped.between = func() { outB, errB = is.ReserveCurrentClaim("s-1", "", "gcg-B") }
+	outA, errA := is.ReserveCurrentClaim("s-1", "", "gcg-A")
+	if !wrapped.fired {
+		t.Fatal("interleaving hook never fired; the test did not exercise the race")
+	}
+	if errA != nil || errB != nil {
+		t.Fatalf("reserve errors: A=%v B=%v", errA, errB)
+	}
+	if outA != CurrentClaimConflict || outB != CurrentClaimSwapped {
+		t.Fatalf("outcomes A=%q B=%q, want A conflict and B swapped", outA, outB)
+	}
+	if got := currentClaimPointer(t, mem); got != "gcg-B" {
+		t.Fatalf("pointer = %q, want gcg-B (the one claimer told it won)", got)
+	}
+}
+
+// TestReserveCurrentClaimConcurrentSingleWinner races sixteen reserves that all
+// read the pointer as "X": exactly one swaps, every other one conflicts, and the
+// pointer names the winner.
+func TestReserveCurrentClaimConcurrentSingleWinner(t *testing.T) {
+	is, mem, _ := currentClaimFixture(t, "X")
+	const n = 16
+	outcomes := make([]CurrentClaimOutcome, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			outcomes[i], errs[i] = is.ReserveCurrentClaim("s-1", "X", fmt.Sprintf("b%d", i))
+		}(i)
+	}
+	wg.Wait()
+	winner := ""
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("reserve %d: %v", i, errs[i])
+		}
+		switch outcomes[i] {
+		case CurrentClaimSwapped:
+			if winner != "" {
+				t.Fatalf("two reserves swapped: %s and b%d", winner, i)
+			}
+			winner = fmt.Sprintf("b%d", i)
+		case CurrentClaimConflict:
+		default:
+			t.Fatalf("reserve %d = %q, want swapped or conflict", i, outcomes[i])
+		}
+	}
+	if winner == "" {
+		t.Fatal("no reserve swapped")
+	}
+	if got := currentClaimPointer(t, mem); got != winner {
+		t.Fatalf("pointer = %q, want the winner %s", got, winner)
 	}
 }
