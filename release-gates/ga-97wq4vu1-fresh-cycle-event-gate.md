@@ -13,7 +13,7 @@ Evidence root: `/var/tmp/gc-deploy-ga-97wq4vu1.gyvfrlfo`. `docs/PROJECT_MANIFEST
 | --- | --- | --- |
 | 1. Review complete | PASS | ga-h1hziox closed PASS, security/spec findings read, no unresolved HIGH. reviewer-added-tests.sh check resolves X/Y and accepts only cmd/gc/session_reconciler_bead_reassign_test.go. |
 | 2. Acceptance criteria | PASS | Source wires the recorder and emits session.draining after successful handoff with actor, subject, session ID and both bead IDs. Five owned test roots and 11 parent/subtest names PASS. Real private-supervisor fresh reassignment appears in CLI event output; details below. |
-| 3. Tests and required lanes | PASS | Complete canonical remote suite, native floor, policy/format/drift, owned-name and skip audits, required-CI closure below. No failed test, no waiver or attributed failure. |
+| 3. Tests and required lanes | PASS | Complete canonical remote suite, native floor, policy/format/drift, owned-name and skip audits, required-CI closure below. No failed criterion-3 test, no waiver or attributed criterion-3 failure. |
 | 4. Review findings | PASS | Review ga-h1hziox reports verdict pass; unresolved HIGH count 0. |
 | 5. Clean branch | PASS | Source and raw merge scratch have empty git status. Only this gate record is added to the isolated deploy branch; clean delivery status is checked before publication. |
 | 6. Merge/build state | PASS | Clean raw merge on pinned main; full-tree bazel build and make vet passed, c6-output.stdout/.stderr, terminal rc0. No self-rebase. |
@@ -94,3 +94,11 @@ PASS authorizes PR opening. Merge requires CI / required green on the exact PR h
 ## Retained audit
 
 final-audit.json, acceptance-source-walk.json, tree-proof.json, owned-final-audit.json, remote-independent-audit.json and all raw logs remain under the evidence root. Prior policy HOLD is superseded by this fresh, complete run after its stamped fix landed. No prior run's results are credited here.
+
+## Publication pre-push attribution
+
+The normal pre-push hook ran completely at `e0897d7b407acc49a854bd49667a2f62cf205a4d`: `bazel test //... --config=fork-cache --keep_going`, 297/298 targets PASS, only `TestDatedWaiversAgainstToday` FAIL, push rc1 and remote branch absent. It checked the frozen reviewed branch, whose historical provider ledger has t3bridge/exec expiry 2026-11-05 (fatal after 2026-11-19). The complete canonical current-base merge above passed this test by name; none of its results is replaced or retried.
+
+prepush_failure_attribution: TestDatedWaiversAgainstToday -> ga-5550q2dx, clause 3a MECHANISM. Clause1: test/file and failure sites38/41 unchanged, no shared hunks. Clause2: existing tracker created2026-11-05, opened with all comments, explicitly covers this test/condition; sighting read back. Clause3a: computed test-binary module import closure excludes cmd/gc; datedWaivers consumes literal expiry ledgers, so event/reconciler changes cannot reach this failure. Clause4: no package/path overlap. First hit on this bead (prior HOLD was an unrelated routed-test-rows condition); no new tracker, expiry edit, source refresh, test retry or waiver grant.
+
+The non-diff-owned-gate-failure protocol authorizes a specific-head pre-push exception after this attribution. Only this gate record is updated after the tested head; implementation remains exactly the reviewed source. Final publish head is recorded on the bead and verified remotely before PR opening. Normal pre-commit docsync still applies. Full proof, terminal hook output and retained per-job logs: prepush-attribution.json, prepush-waiverexpiry-sites.stdout, prepush-waiverexpiry-closure.stdout, push-ready-output.*, prepush-artifacts.json and prepush-testlogs under the evidence root.
