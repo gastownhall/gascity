@@ -235,6 +235,7 @@ go_test(
         "native_dolt_store_facade_test.go",
         "native_dolt_store_graph_apply_batch_test.go",
         "native_dolt_store_graph_apply_integration_test.go",
+        "native_dolt_store_graph_budget_test.go",
         "native_dolt_store_graph_deadline_test.go",
         "native_dolt_store_graph_validate_test.go",
         "native_dolt_store_guarded_batch_integration_test.go",
