@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // Beads 1.3 guards update --status closed, while CloseAll is the explicit
@@ -35,7 +36,7 @@ func TestSkipScopeMembersClosesBlockedMember(t *testing.T) {
 	control := mustCreateWorkflowBead(t, store, beads.Bead{Title: "abort control"})
 	member := mustCreateWorkflowBead(t, store, beads.Bead{Title: "skipped member"})
 	mustDepAdd(t, store, member.ID, control.ID, "blocks")
-	closed, err := skipScopeMembers(store, []string{member.ID})
+	closed, err := skipScopeMembers(beadstest.Graph(store), []string{member.ID})
 	if err != nil || closed != 1 {
 		t.Fatalf("skip blocked member = %d, %v", closed, err)
 	}

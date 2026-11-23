@@ -15,7 +15,7 @@ import (
 func TestQueuedNudgeClaimAsksTheCensusOnlyForADueCandidate(t *testing.T) {
 	claims := []struct {
 		name  string
-		claim func(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error)
+		claim func(cityPath string, target nudgeTarget, launch func() (string, bool), now time.Time) ([]queuedNudge, error)
 	}{
 		{name: "drain", claim: claimDueQueuedNudgesForTarget},
 		{name: "batch", claim: claimDueQueuedNudgeBatchForTarget},
@@ -45,7 +45,7 @@ func TestQueuedNudgeClaimAsksTheCensusOnlyForADueCandidate(t *testing.T) {
 			}
 			target := nudgeTarget{agent: config.Agent{Name: "worker"}, sessionID: "gc-new", continuationEpoch: "2"}
 
-			claimed, err := tc.claim(dir, target, now)
+			claimed, err := tc.claim(dir, target, nil, now)
 			if err != nil {
 				t.Fatalf("claim before due: %v", err)
 			}
@@ -56,7 +56,7 @@ func TestQueuedNudgeClaimAsksTheCensusOnlyForADueCandidate(t *testing.T) {
 				t.Fatalf("a claim with no due candidate asked the census %d times, want never", calls)
 			}
 
-			claimed, err = tc.claim(dir, target, dueAt.Add(time.Second))
+			claimed, err = tc.claim(dir, target, nil, dueAt.Add(time.Second))
 			if err != nil {
 				t.Fatalf("claim once due: %v", err)
 			}
@@ -115,7 +115,7 @@ func TestQueuedNudgeBatchClaimAsksTheCensusOnlyForADuePinnedBatch(t *testing.T) 
 		}
 		calls := countCensus(t, "gc-new")
 
-		claimed, err := claimDueQueuedNudgeBatchForTarget(dir, target, now)
+		claimed, err := claimDueQueuedNudgeBatchForTarget(dir, target, nil, now)
 		if err != nil {
 			t.Fatalf("claim before due: %v", err)
 		}
@@ -123,7 +123,7 @@ func TestQueuedNudgeBatchClaimAsksTheCensusOnlyForADuePinnedBatch(t *testing.T) 
 			t.Fatalf("claim before due: claimed %d, census asked %d times; want nothing and never", len(claimed), *calls)
 		}
 
-		claimed, err = claimDueQueuedNudgeBatchForTarget(dir, target, dueAt.Add(time.Second))
+		claimed, err = claimDueQueuedNudgeBatchForTarget(dir, target, nil, dueAt.Add(time.Second))
 		if err != nil {
 			t.Fatalf("claim once due: %v", err)
 		}
@@ -149,7 +149,7 @@ func TestQueuedNudgeBatchClaimAsksTheCensusOnlyForADuePinnedBatch(t *testing.T) 
 		}
 		calls := countCensus(t, "gc-new")
 
-		claimed, err := claimDueQueuedNudgeBatchForTarget(dir, target, now)
+		claimed, err := claimDueQueuedNudgeBatchForTarget(dir, target, nil, now)
 		if err != nil {
 			t.Fatalf("claim: %v", err)
 		}
@@ -175,7 +175,7 @@ func TestQueuedNudgeBatchClaimAsksTheCensusOnlyForADuePinnedBatch(t *testing.T) 
 		}
 		calls := countCensus(t, "gc-new", "gc-old")
 
-		claimed, err := claimDueQueuedNudgeBatchForTarget(dir, target, now)
+		claimed, err := claimDueQueuedNudgeBatchForTarget(dir, target, nil, now)
 		if err != nil {
 			t.Fatalf("claim: %v", err)
 		}

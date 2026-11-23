@@ -124,6 +124,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"logicalReadTier": true,
 		"epoch":           true, // instance identity, fixed at construction
 		"reconcileGate":   true, // reconcile-loop gate, fixed at construction
+		"storeWork":       true, // owner's store-work hook (WithStoreWork), fixed at construction
 		"now":             true, // the clock (WithClock), fixed at construction
 		"onChange":        true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
@@ -185,6 +186,8 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
 		"ReconcileRequests": true, // counts RequestReconcile calls, not merge outcome
+		// read from the reconcile gate by Stats; the merge neither reads nor writes it
+		"ReconcilePaused": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
 }

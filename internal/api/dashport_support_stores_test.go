@@ -48,3 +48,22 @@ func TestSeededStateClassStoresAreTheCityStore(t *testing.T) {
 		t.Errorf("the city store does not hold group %q: %v", group.ID, err)
 	}
 }
+
+// TestSeededStateTopologyMatchesProduction: the seeded city's minted Stores
+// carry the topology the API plane derives from the same state
+// (residencyTopology), configured prefixes included.
+func TestSeededStateTopologyMatchesProduction(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "seeded", Prefix: "tc"},
+		Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", Prefix: "mr"}},
+	}
+	s := newSeededState(SeededCityDeps{
+		CityName: "seeded", CityPath: t.TempDir(), Config: cfg,
+		CityBeadStore: beads.NewMemStore(),
+		RigStores:     map[string]beads.Store{"myrig": beads.NewMemStore()},
+	})
+	assertAPITopologyAgrees(t, "seeded", s)
+	if topo := s.Stores().Topology(); len(topo.Rigs) != 1 || topo.Rigs[0].Prefix != "mr" || topo.Work.Prefix != "tc" {
+		t.Errorf("seeded topology = %+v, want the configured prefixes", topo)
+	}
+}

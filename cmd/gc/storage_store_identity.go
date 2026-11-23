@@ -35,11 +35,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // workStoreIdentityLinePrefix starts the marker line that records the work
@@ -147,16 +147,7 @@ func readWorkStoreIdentity(scopeRoot string) (workStoreIdentity, error) {
 }
 
 func canonicalIdentityPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(p); err == nil {
-		p = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		p = resolved
-	}
-	return filepath.Clean(p)
+	return pathutil.NormalizePathForCompare(p)
 }
 
 // workStoreIdentityMismatch compares the identity a marker recorded with the
@@ -190,6 +181,13 @@ func readMarkerWorkStoreIdentity(markerPath string) (id workStoreIdentity, recor
 	if err != nil {
 		return workStoreIdentity{}, false, err
 	}
+	return parseMarkerWorkStoreIdentity(markerPath, data)
+}
+
+// parseMarkerWorkStoreIdentity reads the identity line out of a convergence
+// marker's bytes, already read from markerPath, which only names the file in
+// an error. recorded is false for a legacy marker with no such line.
+func parseMarkerWorkStoreIdentity(markerPath string, data []byte) (id workStoreIdentity, recorded bool, err error) {
 	for _, line := range strings.Split(string(data), "\n") {
 		rest, ok := strings.CutPrefix(strings.TrimSpace(line), strings.TrimSpace(workStoreIdentityLinePrefix)+" ")
 		if !ok {

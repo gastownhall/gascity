@@ -21,7 +21,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -31,6 +33,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var claim bool
 	var drainAck bool
 	var jsonOut bool
+	var worktree bool
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
 		Short: "Find routed work for an agent",
@@ -88,6 +91,18 @@ nothing is claimed or served, GC_HOOK_STORE_UNAVAILABLE is printed on stderr
 with the refusal, the hook exits 2, and the event says the fence failed
 closed.
 
+A bead whose gc.exclude_claimants metadata names this session is never
+claimed, adopted or pre-assigned by it, even when the bead is routed to its
+pool. The value is a comma-separated list of fully qualified identities,
+matched exactly against $GC_ALIAS, $GC_AGENT and the session's own
+identities, so an eligible session in the same pool claims the bead instead.
+--claim enforces this on every claim tier and again on the store's canonical
+readback, so a custom work_query cannot bypass it. The default work query
+also drops excluded beads before it picks one to serve, so an excluded bead
+at the head of the queue never hides the work behind it. An exclusion does
+not take back a claim the session already started: with --drain-ack it is
+still the started claim the session must finish.
+
 The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -97,6 +112,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 				Claim:      claim,
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
+				Worktree:   worktree,
 			}
 			// exitForCode, not `!= 0 → errExit`: the store-unavailable
 			// contract is exit 2 (reportWorkQueryFailure), and folding it
@@ -110,6 +126,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
+	cmd.Flags().BoolVar(&worktree, "worktree", false, "with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged)")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
 	}
@@ -291,6 +308,7 @@ type hookCommandOptions struct {
 	Claim      bool
 	DrainAck   bool
 	JSON       bool
+	Worktree   bool
 	DrainAckFn hookDrainAckFunc
 }
 
@@ -319,6 +337,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	_ = opts.HookFormat
 	if opts.DrainAck && !opts.Claim {
 		fmt.Fprintln(stderr, "gc hook: --drain-ack requires --claim") //nolint:errcheck
+		return 1
+	}
+	if opts.Worktree && !opts.Claim {
+		fmt.Fprintln(stderr, "gc hook: --worktree requires --claim") //nolint:errcheck
 		return 1
 	}
 
@@ -597,7 +619,25 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			// The fenced row, so the worktree check costs no extra read.
 			PoolSeat: hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
 		}
-		return claimHookWork(city, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		var provisionWorktree hookProvisionWorktreeFunc
+		if opts.Worktree {
+			resolved, err := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook: resolving provider for worktree staging: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			provisionWorktree, err = newHookClaimWorktreeProvisioner(cityPath, cityName, cfg, &a, resolvedAgentName, resolved)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			for i := range stores {
+				if stores[i].storeRef == "" {
+					stores[i].storeRef = primaryHookStoreRef(cityPath, cfg, agentForQuery, stores[i].dir, stores[i].env)
+				}
+			}
+		}
+		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
@@ -881,6 +921,13 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // city that relocates nothing the route is nil and the ops are the work-store
 // ops alone.
 func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, nil, emitFailure, stdout, stderr)
+}
+
+// claimHookWorkProvisioning is claimHookWork with the claimed bead's worktree
+// provisioned before its receipt is delivered (gc hook --claim --worktree).
+// A nil provisionWorktree is the plain claim.
+func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -891,7 +938,9 @@ func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string,
 	// Work-store writes announce themselves to the city's event log so the run
 	// views see a claim within a poll (hook_claim_bead_events.go). They are
 	// wrapped before the class route, whose binding writes announce themselves.
-	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(city.claimOps(), city.path), opened, err, city.recorder, stderr)
+	base := city.claimOps()
+	base.ProvisionWorktree = provisionWorktree
+	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(base, city.path), opened, err, city.recorder, stderr)
 	if !proceed {
 		return 1
 	}
@@ -1000,6 +1049,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if len(claimStore.env) > 0 {
 			storeOpts.Env = claimStore.env
 		}
+		storeOpts.StoreRef = claimStore.storeRef
 		storeDir := workDir
 		if dir := strings.TrimSpace(claimStore.dir); dir != "" {
 			storeDir = dir
@@ -1292,16 +1342,33 @@ type WorkQueryRunner func(command, dir string) (string, error)
 // the real cure remains ga-4qdfn (fewer round-trips, faster reader).
 var hookWorkQueryTimeout = 150 * time.Second
 
-// shellWorkQueryWithEnv runs a work query command via sh -c and returns
-// stdout. If env is non-nil it is used as the subprocess environment
-// (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides); otherwise
-// the child inherits the parent process environment. Times out after a
-// short bounded interval so startup hooks cannot strand sessions behind a
+// shellWorkQueryWithEnv runs a work query command through the platform's
+// command interpreter (runtime.ShellCommandContext: `sh -c` on Unix,
+// PowerShell on Windows) and returns stdout. A command the platform refuses
+// (runtime.ShellCommandUnavailable) starts nothing, but on Windows a program
+// this process generated runs in gc's embedded interpreter instead
+// (generatedProgram). If env is non-nil it is used as the subprocess
+// environment (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides);
+// otherwise the child inherits the parent process environment. Times out after
+// a short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	if generated := generatedProgram(command); generated != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+		defer cancel()
+		var stderr bytes.Buffer
+		out, err := generated(ctx, dir, execenv.WithUsageMetricsDisabled(workQueryEnvForDir(env, dir)), &stderr)
+		return workQueryResult(ctx, command, out, &stderr, err)
+	}
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return "", fmt.Errorf("work query refused: %s", reason)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return "", fmt.Errorf("running work query %q: %w", command, err)
+	}
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if dir != "" {
@@ -1311,7 +1378,14 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	disableProductMetricsForChild(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, err := runWorkQueryCommand(cmd)
+	return workQueryResult(ctx, command, out, &stderr, err)
+}
+
+// workQueryResult turns a finished work query's output and error into
+// shellWorkQueryWithEnv's result. ctx is the query's own, bounded by
+// hookWorkQueryTimeout.
+func workQueryResult(ctx context.Context, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
 	if ctx.Err() == context.DeadlineExceeded {
 		// Wrap context.DeadlineExceeded so callers can classify the timeout as
 		// transient (dispatch.IsTransientControllerError / errors.Is). Without
