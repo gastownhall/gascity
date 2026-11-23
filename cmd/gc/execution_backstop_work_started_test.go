@@ -20,7 +20,8 @@ import (
 // entry is started evidence: the seat is stamped, gets the held-claim nudge,
 // and is held as executing, never drained. An entry that does not prove this
 // incarnation started this claim, or a cell that cannot be read, is no
-// evidence, and the seat drains as before.
+// evidence, and the seat is treated as unstarted: the claim-line fallback,
+// its own bounded budget, then one escalation.
 func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 	const (
 		token    = "incarnation-2"
@@ -112,9 +113,13 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 			f.tick(t) // the grace has run
 
 			if !tc.started {
-				if len(f.drained) != 1 || f.sessionMeta(t, executionClaimStartedKey) != "" {
-					t.Fatalf("no started evidence: drains %v, stamp %q; want one drain at 0/3 and no stamp, as before; stdout=%s",
+				if len(f.drained) != 0 || f.sessionMeta(t, executionClaimStartedKey) != "" {
+					t.Fatalf("no started evidence: drains %v, stamp %q; want no drain and no stamp; stdout=%s",
 						f.drained, f.sessionMeta(t, executionClaimStartedKey), f.stdout.String())
+				}
+				// Unstarted: the claim line, not the held-claim default.
+				if got := f.nudgesDelivered(); len(got) != 1 || got[0] != ladderClaimedNudge {
+					t.Fatalf("no started evidence: nudges %q, want exactly [%q]", got, ladderClaimedNudge)
 				}
 				return
 			}

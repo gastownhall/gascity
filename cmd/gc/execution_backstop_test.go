@@ -1113,7 +1113,7 @@ func TestExecutionBackstopNeverDrainsASeatExecutingSinceItsWake(t *testing.T) {
 // maintainer-city loop's row). Kills a new incarnation escalating on its
 // first quiet tick because the marker its predecessor left (same claim,
 // observed hours ago, no token) reads as an expired window: it is observed
-// afresh for the current incarnation, and only its own window escalates it.
+// afresh for the current incarnation, and only its own window advances it.
 func TestExecutionBackstopNewIncarnationInheritsNoSpentWindow(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.cfg.Agents[0].Nudge = ""
@@ -1132,8 +1132,12 @@ func TestExecutionBackstopNewIncarnationInheritsNoSpentWindow(t *testing.T) {
 	f.now = f.now.Add(idleClaimNudgeGrace)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
-	if len(f.drained) != 1 {
-		t.Fatalf("after the incarnation's own grace with no nudge to send: drains %v, want one escalation", f.drained)
+	if len(f.drained) != 0 || f.sessionMeta(t, executionClaimNudgeCountKey) != "1" {
+		t.Fatalf("after the incarnation's own grace: drains %v, attempts %q; want no drain and the first attempt of the fresh window",
+			f.drained, f.sessionMeta(t, executionClaimNudgeCountKey))
+	}
+	if got := f.nudgesDelivered(); len(got) != 1 || got[0] != ladderClaimedNudge {
+		t.Fatalf("after the incarnation's own grace: nudges %q, want exactly [%q]", got, ladderClaimedNudge)
 	}
 }
 
@@ -1213,8 +1217,9 @@ func TestExecutionBackstopKeepsTheStampAcrossAOnePassClaimGap(t *testing.T) {
 // TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp (mc-muv2x).
 // Kills a stamp outliving the incarnation or claim it names: a stamp of the
 // previous incarnation, or of this incarnation's earlier claim, with no step
-// started for the current one, is no evidence. It earns no pool default nudge,
-// and the seat escalates.
+// started for the current one, is no evidence. The seat gets the unstarted
+// claim line, never the held-claim default, and escalates once its attempts
+// are spent.
 func TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp(t *testing.T) {
 	for name, stamp := range map[string]func(f *executionBackstopFixture) string{
 		"another incarnation": func(f *executionBackstopFixture) string { return "incarnation-1|" + f.work.ID },
@@ -1231,8 +1236,14 @@ func TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp(t *testing.T) {
 			if len(f.drained) != 1 {
 				t.Fatalf("with only a stamp of %s: drains %v, want one escalation", name, f.drained)
 			}
-			if got := f.nudgesDelivered(); len(got) != 0 {
-				t.Fatalf("with only a stamp of %s: nudges %q, want none", name, got)
+			got := f.nudgesDelivered()
+			if len(got) != idleClaimNudgeMaxAttempts {
+				t.Fatalf("with only a stamp of %s: nudges %q, want the attempt cap %d", name, got, idleClaimNudgeMaxAttempts)
+			}
+			for i, msg := range got {
+				if msg != ladderClaimedNudge {
+					t.Fatalf("with only a stamp of %s: nudge %d = %q, want the claim line %q", name, i, msg, ladderClaimedNudge)
+				}
 			}
 		})
 	}
@@ -1985,5 +1996,37 @@ func TestExecutionBackstopSendsTheConfiguredNudgeUnchanged(t *testing.T) {
 	}
 	if len(f.drained) != 0 || f.stalledEvents() != 0 {
 		t.Fatalf("drains %v, step_stalled %d; want neither after the first nudge", f.drained, f.stalledEvents())
+	}
+}
+
+// TestExecutionBackstopNudgesAPoolSeatWithNoConfiguredNudge (gh-7973): pool
+// templates routinely leave agent.Nudge unset. A known template's unstarted
+// claim is no reason to drain at zero attempts: the seat gets the safe claim
+// line (ladderClaimedNudge, which never carries --drain-ack), the attempt is
+// recorded, and nothing is drained.
+func TestExecutionBackstopNudgesAPoolSeatWithNoConfiguredNudge(t *testing.T) {
+	for name, nudge := range map[string]string{
+		"empty":           "",
+		"whitespace only": "  \n\t ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.cfg.Agents[0].Nudge = nudge
+			f.idleFor(t, 10*time.Minute)
+			f.tick(t) // first sighting: start the grace clock
+			f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+			f.idleFor(t, 10*time.Minute)
+			f.tick(t)
+
+			if got := f.nudgesDelivered(); len(got) != 1 || got[0] != ladderClaimedNudge || strings.Contains(got[0], "--drain-ack") {
+				t.Fatalf("nudges delivered = %q, want exactly [%q] with no --drain-ack; stdout=%s", got, ladderClaimedNudge, f.stdout.String())
+			}
+			if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+				t.Fatalf("persisted attempt count = %q, want 1", got)
+			}
+			if len(f.drained) != 0 || f.stalledEvents() != 0 {
+				t.Fatalf("drains %v, step_stalled %d; want neither after the first fallback nudge", f.drained, f.stalledEvents())
+			}
+		})
 	}
 }

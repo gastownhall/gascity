@@ -940,6 +940,20 @@ func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
 	return nudge
 }
 
+// claimedClaimNudgeFor is the execution backstop's nudge for a seat whose
+// in-progress claim has not started: its configured nudge, else the ladder's
+// claim line (ladderClaimedNudge) when its template names a configured agent,
+// and "" when it names none. The claim line carries no --drain-ack, so a seat
+// whose step started without the stamp landing cannot ack a drain on the
+// hook's no-work answer.
+func claimedClaimNudgeFor(cfg *config.City, session beads.Bead) string {
+	nudge, known := configuredClaimNudgeFor(cfg, session)
+	if known && nudge == "" {
+		return ladderClaimedNudge
+	}
+	return nudge
+}
+
 // heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID
 // has started: its configured nudge, else defaultHeldClaimNudge naming the
 // claim, and "" when its template names no configured agent. A configured

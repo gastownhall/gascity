@@ -50,7 +50,7 @@
         },
         "nudge": {
           "type": "string",
-          "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. For a known\npool session whose trigger remains unclaimed after the 90-second recovery\ngrace period, an empty or whitespace-only Nudge does not opt out: it sends\n\"Run gc hook --claim --drain-ack --json now; if it returns work, execute\nit immediately.\" This fallback applies only to the initial stalled-claim\nrecovery; continuation-claim recovery remains configured-only. Unknown\ntemplates receive no fallback."
+          "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. An empty or\nwhitespace-only Nudge does not opt a known pool template out of\nrecovery nudges. For a pool session whose trigger remains unclaimed\nafter the 90-second recovery grace period, it sends \"Run gc hook\n--claim --drain-ack --json now; if it returns work, execute it\nimmediately.\" For a pool session that stays quiet past the grace period\nholding one in-progress claim, it sends \"Run gc hook --claim --json now;\nit returns the work assigned to you. Execute it.\" until the claim's step\nhas started, then a reminder naming the claim; neither carries\n--drain-ack. Continuation-claim recovery remains configured-only.\nUnknown templates receive no fallback."
         },
         "session": {
           "type": "string",

@@ -1399,6 +1399,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pool seat holding an unstarted claim was drained without a single
+  nudge when its template set no `nudge` (#7973).** The execution backstop
+  had nothing to send, so it reported `execution.step_stalled` with 0
+  attempts and drained the seat as soon as the grace window ran out. A known
+  pool template with no `nudge` now gets `Run gc hook --claim --json now; it
+  returns the work assigned to you. Execute it.`, with no `--drain-ack`,
+  under the same three-attempt budget, backoff and started-work protection;
+  the event and drain follow only once those attempts are spent. A session
+  whose template names no configured agent still escalates at once. To tell
+  a person, have a pack order fire on the event (`trigger = "event"`,
+  `on = "execution.step_stalled"`).
+
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues
   were given, so an empty convoy created with `--rig <rig>` could never
