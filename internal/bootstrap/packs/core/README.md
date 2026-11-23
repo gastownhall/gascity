@@ -27,6 +27,7 @@ none requires per-city configuration.
 | **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
 | **`notify-on-claims-stalled`** | **event `agent.claims_stalled`** | **Mail the escalation recipient when an agent's seats stop claiming their work (once per stall episode)** |
 | **`notify-on-claims-resumed`** | **event `agent.claims_resumed`** | **Resolve that incident and mail a short note when the agent claims its work again** |
+| **`notify-on-drain-ack-loop`** | **event `session.drain_acked_with_assigned_work`** | **Mail the escalation recipient when one bead keeps drain-acking with a started claim kept (once per bead)** |
 
 The **event-driven nudge orders** are documented in detail below.
 
@@ -197,6 +198,48 @@ output names the override.
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
 | `GC_NOTIFY_CLAIMS_STALL_LOOKBACK` | `15m` | Event lookback window |
+| `GC_ESCALATION_RECIPIENT` | `human` | Who is mailed |
+
+## `notify-on-drain-ack-loop`
+
+**Why.** A misrouted work bead can livelock the dispatcher (#6940): a pool
+session claims the bead, correctly refuses to execute or close it,
+escalates, and drain-acks still assigned — on repeat, forever, with
+nothing dispatch reads ever changing. The reconcilers record
+`session.drain_acked_with_assigned_work` with reason `started_claim_kept`
+for exactly that shape; the event alone reaches only the event log, so
+nothing wakes a person while the loop burns cycles.
+
+**Event contract.** The order runs `assets/scripts/notify-drain-ack-loop.sh`,
+which reads the event over a window, keeps only the `started_claim_kept`
+cycles (restart handoffs and preassigned rows are not loops), and mails
+through `escalate.sh` to `$GC_ESCALATION_RECIPIENT` (default `human`) once
+a bead crosses the cycle threshold:
+
+- one bead mails once: the incident key is `drain-ack-loop:<bead>` and the
+  fingerprint the bead (`escalate.sh` reminds once a day while the loop
+  stands);
+- events for the same (bead, session) less than 60s apart count as one
+  cycle: a real cycle spans a sleep, a wake and an agent turn;
+- a bead no longer in_progress, no longer assigned to a session the events
+  name, or on a dispatch hold is not mailed — the loop is over or the bead
+  is already parked;
+- the mail gives the park recipe (`gc bd set-state <id> hold=mayor`), which
+  makes the bead stop looking dispatch-eligible; the seat's next own
+  drain-ack then releases the claim. The script itself never writes the
+  bead.
+
+**Loud-fail.** An event read or a bead read that fails, output that does
+not decode, or an invalid window or threshold exits non-zero, so the
+controller logs the order's output, and nothing is mailed. The next event
+that still finds the loop runs the order again.
+
+**Configuration** (all optional):
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `GC_DRAIN_ACK_LOOP_WINDOW` | `1h` | Event lookback window |
+| `GC_DRAIN_ACK_LOOP_THRESHOLD` | `3` | Cycles one bead needs inside the window to mail |
 | `GC_ESCALATION_RECIPIENT` | `human` | Who is mailed |
 
 ## Dependencies

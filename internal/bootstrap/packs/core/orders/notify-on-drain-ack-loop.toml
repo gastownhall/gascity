@@ -1,0 +1,19 @@
+# notify-on-drain-ack-loop mails the escalation recipient when one work
+# bead keeps drain-acking with a started claim kept: a pool session claims
+# the bead, correctly refuses to execute or close it, escalates, and the
+# drain-ack keeps the claim assigned — on repeat, forever, with nothing
+# dispatch reads ever changing (gastownhall/gascity#6940). The event's
+# reason names that shape (started_claim_kept); this order counts the
+# cycles and tells a person how to park the bead.
+#
+# Mail rides escalate.sh with the bead as both the incident key and the
+# fingerprint, so one bead mails once (reminded daily while the loop
+# lasts), however many cycles the window re-reads. See
+# assets/scripts/notify-drain-ack-loop.sh.
+#
+# Mechanical (an event read and a mail send), no LLM judgment: exec order.
+[order]
+description = "Mail the escalation recipient when one bead keeps drain-acking with a started claim kept"
+trigger = "event"
+on = "session.drain_acked_with_assigned_work"
+exec = "$PACK_DIR/assets/scripts/notify-drain-ack-loop.sh"
