@@ -495,3 +495,25 @@ func TestReconcileSessionBeads_ResumeVoidsTrackedSuspendDrainWhenAckReadFails(t 
 	f.tick(t)
 	f.assertReleased(t, stops)
 }
+
+// AC-7: a resume voids the suspended drain whether or not the session has wake
+// demand. The named session is on demand with no work by the resume tick, so
+// nothing wants it up; it is still not stopped on that tick: what drains it
+// next is its own no-demand verdict, not the suspend.
+func TestReconcileSessionBeads_ResumeVoidsSuspendDrainWithoutWakeDemand(t *testing.T) {
+	f := newSuspendDrainFixture(t)
+	f.armSuspendDrain(t)
+	stops := f.env.sp.CountCalls("Stop", f.name)
+	f.env.cfg.NamedSessions[0].Mode = "on_demand"
+	tp := f.env.desiredState[f.name]
+	tp.ConfiguredNamedMode = "on_demand"
+	f.env.desiredState[f.name] = tp
+	if err := f.env.store.SetMetadata(f.id, namedSessionModeMetadata, "on_demand"); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", namedSessionModeMetadata, err)
+	}
+
+	f.setCitySuspended(t, false)
+	f.tick(t)
+
+	f.assertNotStopped(t, stops)
+}
