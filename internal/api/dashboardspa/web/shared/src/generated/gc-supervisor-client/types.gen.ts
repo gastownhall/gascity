@@ -4015,7 +4015,7 @@ export type SessionDrainAckedWithAssignedWorkPayload = {
      */
     bead_status?: string;
     /**
-     * Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land.
+     * Shape of the drain-acked stop: 'started_claim_kept' when the session kept an in_progress claim its started records name (and no dispatch hold), else 'drain_acked_with_assigned_work'.
      */
     reason?: string;
     /**
