@@ -333,3 +333,39 @@ func TestStoreWatchdogLanePassKeepsWatchdogIntervals(t *testing.T) {
 		t.Fatal("a watchdog is due half an interval after its pass")
 	}
 }
+
+// A suspended city's lanes reach no store, even with every watchdog due, and
+// leave every clock where it was; once the city resumes, the next pass runs.
+func TestStoreWatchdogLanesSkipSuspendedCity(t *testing.T) {
+	now := time.Now()
+	store := &watchdogOpCountingStore{Store: beads.NewMemStoreFrom(100, storeWatchdogSeed(now), nil)}
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{}, "1h")
+	suspended := *cr.cfg
+	suspended.Workspace.Suspended = true
+	cr.cfg = &suspended
+
+	for _, lane := range cr.storeWatchdogLanesOf() {
+		cr.runStoreWatchdogLanePass(context.Background(), lane)
+	}
+	if got := store.ops.Load(); got != 0 {
+		t.Fatalf("suspended passes made %d store calls, want 0", got)
+	}
+	assertStoreWatchdogClocksZero(t, cr)
+	assertStoreWatchdogSeedUntouched(t, store)
+
+	resumed := suspended
+	resumed.Workspace.Suspended = false
+	cr.serviceStateMu.Lock()
+	cr.cfg = &resumed
+	cr.serviceStateMu.Unlock()
+	for _, lane := range cr.storeWatchdogLanesOf() {
+		cr.runStoreWatchdogLanePass(context.Background(), lane)
+	}
+	if store.ops.Load() == 0 {
+		t.Fatal("no pass reached a store after the city resumed")
+	}
+	if cr.orderSweepWatchdogLast.IsZero() || cr.orderTrackingRetentionWatchdogLast.IsZero() || cr.nudgeMailSweepWatchdogLast.IsZero() {
+		t.Fatalf("watchdog clocks after resume: sweep=%v retention=%v nudge/mail=%v, want every lane to have run",
+			cr.orderSweepWatchdogLast, cr.orderTrackingRetentionWatchdogLast, cr.nudgeMailSweepWatchdogLast)
+	}
+}

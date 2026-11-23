@@ -28,7 +28,8 @@ import (
 // The patrol interval paces attempts; the watchdog's own clock decides
 // whether an attempt is due, so the watchdog intervals (30 s for the tracking
 // sweep, 15 minutes for retention, five minutes for nudge/mail) are unchanged.
-// A pass that is not due does nothing else. Passes on one lane never overlap,
+// A pass that is not due does nothing else, and a suspended city's passes
+// reach no store. Passes on one lane never overlap,
 // and lanes never wait on each other or on the orders lane.
 type storeWatchdogLane struct {
 	spec storeWatchdogSpec
@@ -145,7 +146,9 @@ func (cr *CityRuntime) startStoreWatchdogLanes(ctx context.Context) storeWatchdo
 }
 
 // runStoreWatchdogLanePass is one pass of lane: nothing unless the watchdog
-// is due, then the watchdog body against the published config.
+// is due, nothing in a suspended city, then the watchdog body against the
+// published config. A skipped pass advances no watchdog clock, so the next
+// pass after the city resumes runs.
 func (cr *CityRuntime) runStoreWatchdogLanePass(ctx context.Context, lane *storeWatchdogLane) {
 	if ctx.Err() != nil {
 		return
@@ -160,5 +163,10 @@ func (cr *CityRuntime) runStoreWatchdogLanePass(ctx context.Context, lane *store
 		return
 	}
 	cfg := cr.serviceConfigSnapshot()
+	// A suspended city's watchdogs read no store: every one reads every
+	// scope's store, restarting the proxies suspension retired.
+	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
+		return
+	}
 	lane.spec.run(cr, ctx, cfg, now)
 }
