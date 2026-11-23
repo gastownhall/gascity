@@ -1123,3 +1123,40 @@ func TestReconcileSessionBeads_ResetOfIdleAsleepWaitsForDemand(t *testing.T) {
 		t.Fatalf("session %q started on a later tick; an idle-asleep reset must wait for demand (#2345)", sessionName)
 	}
 }
+
+// TestReconcileSessionBeads_ResetOfLiveCityStopYieldsTick pins the live-runtime
+// half of the restart handoff next to SESSION-RECON-024: a city-stop row whose
+// runtime still runs is killed, marked asleep and the tick yields, with no
+// wake recorded, so the new start does not race the alias release.
+func TestReconcileSessionBeads_ResetOfLiveCityStopYieldsTick(t *testing.T) {
+	env, session, sessionName := newCityStopResetScenario(t, string(sessionpkg.SleepReasonCityStop))
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; the handoff must kill the live runtime and yield the tick", sessionName)
+	}
+	if !strings.Contains(env.stdout.String(), "Stopped restart-requested session") {
+		t.Fatalf("stdout = %q, want the handoff's stop report", env.stdout.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateAsleep) {
+		t.Fatalf("state = %q, want asleep after the handoff kill", got.Metadata["state"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["wake_request"] != "" || got.Metadata["wake_requested_at"] != "" {
+		t.Fatalf("wake_request = %q, wake_requested_at = %q; want no wake recorded on the live branch",
+			got.Metadata["wake_request"], got.Metadata["wake_requested_at"])
+	}
+}
