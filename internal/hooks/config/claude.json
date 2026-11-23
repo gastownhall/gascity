@@ -3,6 +3,7 @@
   "enableAllProjectMcpServers": true,
   "editorMode": "normal",
   "awaySummaryEnabled": false,
+  "promptSuggestionEnabled": false,
   "hooks": {
     "SessionStart": [
       {

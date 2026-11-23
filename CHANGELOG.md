@@ -1242,6 +1242,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Managed Claude sessions start with prompt suggestions off (#7973).**
+  The generated `.gc/settings.json` now sets `promptSuggestionEnabled: false`
+  beside `awaySummaryEnabled: false`. Claude Code otherwise fills an idle
+  session's input box with a dim suggested prompt, which `gc session peek`
+  and plain `tmux capture-pane` show as if it were typed input. Existing
+  cities pick the default up on their next install or launch, and generated
+  settings keep their other custom keys. A city that wants suggestions sets
+  `"promptSuggestionEnabled": true` in `.claude/settings.json`; a
+  `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` environment variable still overrides
+  either setting.
+
 - **API: `GET /v0/city/{cityName}/orders/history` and
   `GET /v0/city/{cityName}/order/history/{bead_id}` report `created_at` with
   sub-second precision (RFC 3339 with nanoseconds) (#8453).** They used to

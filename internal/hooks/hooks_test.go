@@ -167,9 +167,27 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(s, `"awaySummaryEnabled": false`) {
 		t.Error("claude settings should disable awaySummaryEnabled to prevent idle stalls (gh-1962)")
 	}
+	if got, ok := claudeTopLevelSetting(t, runtimeData, "promptSuggestionEnabled"); !ok || got != false {
+		t.Errorf("claude settings promptSuggestionEnabled = %#v (present %v), want Boolean false so suggestion text never sits in an idle input box (gh-7973)", got, ok)
+	}
+	if got, ok := claudeTopLevelSetting(t, runtimeData, "awaySummaryEnabled"); !ok || got != false {
+		t.Errorf("claude settings awaySummaryEnabled = %#v (present %v), want Boolean false (gh-1962)", got, ok)
+	}
 	if !strings.Contains(s, `$HOME/go/bin`) {
 		t.Error("claude hook commands should include PATH export")
 	}
+}
+
+// claudeTopLevelSetting decodes Claude settings data and returns the value of
+// its top-level key, and whether the key is present.
+func claudeTopLevelSetting(t *testing.T, data []byte, key string) (any, bool) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decoding Claude settings: %v\n%s", err, data)
+	}
+	v, ok := doc[key]
+	return v, ok
 }
 
 func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
