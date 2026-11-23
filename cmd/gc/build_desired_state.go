@@ -223,6 +223,13 @@ type defaultScaleCheckTarget struct {
 	// holds every scope's rows, so storeKey says where a row lives, not who
 	// owns it: the row's gc.root_store_ref does (rootStoreRefMatchesCandidate).
 	classBinding bool
+	// claimView is the store a seat of template resolves this leg's ids in
+	// when it claims, set only on a pool's cross-store legs
+	// (crossStoreDemandLegs). A row such a leg counts is demand only if the
+	// claim view has no copy of it or holds it claimable; nil counts the leg's
+	// rows as read. claimViewKey names that store in errors.
+	claimView    beads.StoreReader
+	claimViewKey string
 }
 
 type scaleCheckDemand struct {
@@ -1474,9 +1481,12 @@ func buildDemandTargets(
 			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
 			// may live in the city store (vp-kvp cross-store delivery), which
 			// the own-rig probe above cannot see. Add a city-store probe so the
-			// pool's demand reflects routed work in either store — matching the
-			// claim path, where a rig agent's work_query already federates
-			// across stores and claims city-delivered work.
+			// pool's demand reflects routed work in either store. A seat
+			// claims a city row by resolving its id in the pool's own store
+			// first, so a city row counts only when that claim can win it:
+			// the rig store has no copy of the id, or holds it open and
+			// unassigned. A stale city replica of a rig bead closed or held
+			// there is not demand (#5857; crossStoreDemandLegs).
 			//
 			// NOT gated on isCold. This probe began as a cold-wake assist (a
 			// sleeping pool can't discover city-store demand), but gating it on
@@ -1523,7 +1533,7 @@ func buildDemandTargets(
 			// claim a route from the city store. Keep their cold-wake probe on the
 			// owning store instead of applying generic cross-store pool delivery.
 			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-				defaultScaleTargets = append(defaultScaleTargets, cityTargets(template)...)
+				defaultScaleTargets = append(defaultScaleTargets, crossStoreDemandLegs(cityTargets(template), ownTarget)...)
 			}
 			continue
 		}
@@ -2367,6 +2377,9 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		// byTemplate is the group's ready rows bucketed by the template each one
 		// is servable to, in the store's own order.
 		byTemplate map[string][]beads.Bead
+		// claimViews is, per template reading the group through a cross-store
+		// leg, the store that template's seats claim the group's rows in.
+		claimViews map[string]demandClaimView
 	}
 	// A group is one (key, store) pair: on a split city the work ledger and the
 	// binding both count under "city", and they are two stores to read, not one.
@@ -2418,6 +2431,12 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			}
 			templateGroups[template] = append(templateGroups[template], group)
 		}
+		if target.claimView != nil {
+			if group.claimViews == nil {
+				group.claimViews = make(map[string]demandClaimView)
+			}
+			group.claimViews[template] = demandClaimView{reader: target.claimView, key: target.claimViewKey}
+		}
 	}
 
 	// The counting pass dedups bead IDs per template ACROSS store groups,
@@ -2462,12 +2481,15 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			group.byTemplate[template] = append(group.byTemplate[template], b)
 		}
 	}
+	views := newDemandClaimViews()
 	for _, template := range templateOrder {
 		seen := make(map[string]struct{})
 		var rows []beads.Bead
 		rowStoreKeys := make(map[string]string)
 		rowBindingResident := make(map[string]bool)
+		rowClaimViews := make(map[string]demandClaimView)
 		for _, group := range templateGroups[template] {
+			claimView, crossStore := group.claimViews[template]
 			for _, b := range group.byTemplate[template] {
 				if _, dup := seen[b.ID]; dup {
 					continue
@@ -2476,6 +2498,9 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				rows = append(rows, b)
 				rowStoreKeys[b.ID] = group.storeKey
 				rowBindingResident[b.ID] = group.classBinding
+				if crossStore {
+					rowClaimViews[b.ID] = claimView
+				}
 			}
 		}
 		// The claim reader merges these legs and serves them in the canonical
@@ -2496,6 +2521,18 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			// directory can claim it.
 			if specErr == nil && spec != nil && rank >= config.RoutedReadyClaimWindow {
 				continue
+			}
+			// A row read through a cross-store leg is demand only if a seat's
+			// claim can win it in the store the seat claims in. A shadowed row
+			// keeps its rank: it still occupies the claim window the seat reads.
+			if view, crossStore := rowClaimViews[b.ID]; crossStore {
+				claimable, viewErr := views.claimable(view.reader, view.key, b.ID)
+				if viewErr != nil {
+					errs = append(errs, viewErr)
+				}
+				if !claimable {
+					continue
+				}
 			}
 			counts[template]++
 			entry := demand[template]
@@ -2547,6 +2584,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			demand[template] = entry
 		}
 	}
+	views.trace(cache)
 	return counts, demand, partialTemplates, errs
 }
 
