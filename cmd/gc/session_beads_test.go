@@ -10680,6 +10680,54 @@ func TestCleanupDeadRuntimeSessionCorpsesReapsPreBootBeadsWhenServerAbsent(t *te
 	}
 }
 
+// TestCleanupDeadRuntimeSessionCorpsesKeepsExplicitlyWokenPreBootRow pins
+// SESSION-RECON-024's reaper guard: an operator wake clears a pool row's
+// city-stop park, and the corpse sweep runs before the reconcile tick, so a
+// pre-boot row carrying a pending explicit wake stays open for the reconciler
+// to honor. The same row without the wake is still reaped.
+func TestCleanupDeadRuntimeSessionCorpsesKeepsExplicitlyWokenPreBootRow(t *testing.T) {
+	testCity := t.TempDir()
+	boot := time.Now().Add(-10 * time.Minute)
+	withHostBootTime(t, boot, nil)
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.listErr = serverAbsentListErr()
+
+	sleptAt := boot.Add(-30 * time.Minute).UTC().Format(time.RFC3339)
+	store, snapshot := preBootReapFixture([]beads.Bead{
+		{
+			ID: "s-woken", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "worker-1", "template": "worker", "state": "asleep",
+				"sleep_reason": "", "slept_at": sleptAt,
+				"wake_request":      string(session.WakeCauseExplicit),
+				"wake_requested_at": boot.Add(time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			ID: "s-unwoken", Status: "open", Type: sessionBeadType,
+			CreatedAt: boot.Add(-time.Hour),
+			Metadata: map[string]string{
+				"session_name": "worker-2", "template": "worker", "state": "asleep",
+				"sleep_reason": "", "slept_at": sleptAt,
+			},
+		},
+	})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(testCity, store, testSeatWork(testCity, nil, store, nil), snapshot, nil, sp, nil, nil, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1 (only the unwoken row); stderr=%q", got, stderr.String())
+	}
+	if b, err := store.Get("s-woken"); err != nil || b.Status != "open" {
+		t.Fatalf("explicitly woken pre-boot row should stay open: status=%q err=%v; stderr=%q", b.Status, err, stderr.String())
+	}
+	if b, err := store.Get("s-unwoken"); err != nil || b.Status != "closed" {
+		t.Fatalf("unwoken pre-boot row should be reaped: status=%q err=%v", b.Status, err)
+	}
+}
+
 func TestCleanupDeadRuntimeSessionCorpsesFailSafesOnPartialListingWithLiveServer(t *testing.T) {
 	testCity := t.TempDir()
 	boot := time.Now().Add(-10 * time.Minute)
