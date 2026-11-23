@@ -421,8 +421,10 @@ func TestGateSandboxEnvPinsManagedDirectCityOverAmbientEnv(t *testing.T) {
 	if got := lookup["GC_DOLT_PORT"]; got != port {
 		t.Errorf("GC_DOLT_PORT = %q, want the city's managed port %q", got, port)
 	}
-	if got := lookup["BEADS_DOLT_SERVER_HOST"]; got == "other-city-db.example.com" {
-		t.Errorf("BEADS_DOLT_SERVER_HOST = %q: another city's ambient host survived into the managed city's probe", got)
+	// The managed layout clears GC_DOLT_HOST, so mirrorBeadsDoltEnv drops
+	// BEADS_DOLT_SERVER_HOST and bd defaults to loopback.
+	if got, ok := lookup["BEADS_DOLT_SERVER_HOST"]; ok && got != "127.0.0.1" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want it absent or loopback for a managed city", got)
 	}
 	if got, ok := lookup["GC_DOLT_HOST"]; ok {
 		t.Errorf("GC_DOLT_HOST = %q, want it cleared for a managed city", got)
@@ -442,16 +444,23 @@ func TestGateSandboxEnvLegacyCityWithCityTomlDoltKeepsConfiguredEndpoint(t *test
 	registerCityDoltConfig(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
 	t.Cleanup(func() { clearCityDoltConfig(cityPath) })
 
-	t.Setenv("GC_DOLT_HOST", "compat-db.example.com")
-	t.Setenv("GC_DOLT_PORT", "4406")
+	// Simulate a shell that still carries a DIFFERENT city's connection env.
+	t.Setenv("GC_DOLT_HOST", "other-city-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "other-city-db.example.com")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 
 	lookup := gateSandboxEnvLookup(t, cityPath)
 
-	if got := lookup["GC_DOLT_HOST"]; got != "compat-db.example.com" {
-		t.Errorf("GC_DOLT_HOST = %q, want the city.toml [dolt] host %q kept", got, "compat-db.example.com")
+	for _, key := range []string{"GC_DOLT_HOST", "BEADS_DOLT_SERVER_HOST"} {
+		if got := lookup[key]; got != "compat-db.example.com" {
+			t.Errorf("%s = %q, want the city.toml [dolt] host %q, not the ambient one", key, got, "compat-db.example.com")
+		}
 	}
-	if got := lookup["GC_DOLT_PORT"]; got != "4406" {
-		t.Errorf("GC_DOLT_PORT = %q, want the city.toml [dolt] port %q kept", got, "4406")
+	for _, key := range []string{"GC_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"} {
+		if got := lookup[key]; got != "4406" {
+			t.Errorf("%s = %q, want the city.toml [dolt] port %q, not the ambient one", key, got, "4406")
+		}
 	}
 	if got, ok := lookup["GC_DOLT_MANAGED_LOCAL"]; ok && got == "1" {
 		t.Errorf("GC_DOLT_MANAGED_LOCAL = %q, want no managed projection for a city.toml [dolt] endpoint", got)

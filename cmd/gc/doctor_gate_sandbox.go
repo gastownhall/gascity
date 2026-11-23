@@ -79,8 +79,9 @@ func gateSandboxEnv(cityPath string) []string {
 // target, so applyOrderExecCanonicalDoltEnv leaves the doctor shell's ambient
 // BEADS_DOLT_SERVER_*/GC_DOLT_* in place, and those can belong to a different
 // city (gastownhall/gascity#8418). The city's store is gc-managed unless it is
-// externally bound through metadata.json or city.toml [dolt] names a host or
-// port; in either of those cases env is left untouched. This is doctor-only:
+// externally bound through metadata.json (env is then left untouched) or
+// city.toml [dolt] names a host or port (that endpoint is then projected over
+// the ambient one, without the managed layout). This is doctor-only:
 // order-exec environments keep their existing pass-through for this shape.
 func applyGateSandboxLegacyCityManagedEnv(cityPath string, env map[string]string) {
 	if scopeStoreIsExternallyBoundBestEffort(cityPath, cityPath) {
@@ -90,7 +91,14 @@ func applyGateSandboxLegacyCityManagedEnv(cityPath string, env map[string]string
 	if err != nil || resolved.Kind != contract.ScopeConfigLegacyMinimal {
 		return
 	}
-	if _, _, ok := configuredCityDoltTarget(cityPath); ok {
+	if host, port, ok := configuredCityDoltTarget(cityPath); ok {
+		if host != "" {
+			env["GC_DOLT_HOST"] = host
+		}
+		if port != "" {
+			env["GC_DOLT_PORT"] = port
+		}
+		mirrorBeadsDoltEnv(env)
 		return
 	}
 	layout, err := resolveManagedDoltOrderRuntimeLayout(cityPath, env)
