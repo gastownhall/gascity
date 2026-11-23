@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	beadslib "github.com/steveyegge/beads"
 )
@@ -160,6 +161,28 @@ type GraphApplyTooLargeError struct {
 func (e *GraphApplyTooLargeError) Error() string {
 	return fmt.Sprintf("graph apply plan expands to %d items, which exceeds the %d-item batch cap; split the plan into smaller apply calls", e.Items, e.Max)
 }
+
+// GraphApplyBudgetExhaustedError reports that a store's own graph-apply
+// budget, the deadline it derived for this plan, ended the apply while the
+// caller's context was still live. Replaying the same plan derives the same
+// budget, so a caller that wants another attempt must decide that under a
+// budget of its own. It unwraps to context.DeadlineExceeded.
+type GraphApplyBudgetExhaustedError struct {
+	// Budget is the deadline the store derived for the plan.
+	Budget time.Duration
+	// Nodes is the number of nodes in the plan.
+	Nodes int
+	// Edges is the number of edges in the plan.
+	Edges int
+}
+
+// Error reports the spent budget and the plan size it was derived from.
+func (e *GraphApplyBudgetExhaustedError) Error() string {
+	return fmt.Sprintf("graph apply budget of %s exhausted (%d nodes, %d edges)", e.Budget, e.Nodes, e.Edges)
+}
+
+// Unwrap keeps errors.Is(err, context.DeadlineExceeded) true.
+func (e *GraphApplyBudgetExhaustedError) Unwrap() error { return context.DeadlineExceeded }
 
 // ValidateGraphApplyResult checks that every requested node key resolved to a
 // concrete bead ID in the apply result.

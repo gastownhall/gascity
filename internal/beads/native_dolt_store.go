@@ -64,7 +64,8 @@ func nativeDoltOperationContext(parent context.Context) (context.Context, contex
 // of partial work (2026-07-17 code red). Until the per-edge check is replaced
 // by one whole-graph CycleThroughEdges pass (needs a beads-side export of
 // DependencyAddOptions), give each node and edge a slice of budget on top of
-// the flat floor so the atomic path completes instead of falling back.
+// the flat floor so the atomic path completes instead of falling back. An
+// apply this budget ends reports *GraphApplyBudgetExhaustedError.
 func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
 	d := bdCommandTimeout
 	if plan == nil {
@@ -1253,6 +1254,10 @@ func (s *NativeDoltStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPl
 // applyGraphPlanOverCapInTransaction's pairwise parent/edge check, or whatever
 // the transaction's own dependency write raises. A caller cannot classify a
 // refused plan by those types without knowing which side of the cap it fell on.
+//
+// Both routes run under nativeGraphApplyDeadline(plan); when that budget, not
+// the caller's context, ends the apply, the error wraps
+// *GraphApplyBudgetExhaustedError.
 func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan *GraphApplyPlan, storageClass StorageClass) (*GraphApplyResult, error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return nil, err
@@ -1282,7 +1287,9 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, nativeGraphApplyDeadline(plan))
+	budget := nativeGraphApplyDeadline(plan)
+	ctx, cancel := context.WithTimeoutCause(parent, budget,
+		&GraphApplyBudgetExhaustedError{Budget: budget, Nodes: len(plan.Nodes), Edges: len(plan.Edges)})
 	defer cancel()
 
 	if len(req.Items) <= issueops.MaxApplyBatchItems {
@@ -1292,7 +1299,7 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 		}
 		applyResult, err := applier.ApplyBatch(ctx, req)
 		if err != nil {
-			return nil, fmt.Errorf("native graph apply: %w", err)
+			return nil, nativeGraphApplyFailure(ctx, err)
 		}
 		result := &GraphApplyResult{IDs: applyResult.Keys}
 		if err := ValidateGraphApplyResult(plan, result); err != nil {
@@ -1314,7 +1321,20 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 		// backend has no atomic route left for a plan this large at all.
 		return nil, fmt.Errorf("native graph apply: %w", &GraphApplyTooLargeError{Items: len(req.Items), Max: issueops.MaxApplyBatchItems})
 	}
-	return nil, fmt.Errorf("native graph apply: %w", err)
+	return nil, nativeGraphApplyFailure(ctx, err)
+}
+
+// nativeGraphApplyFailure wraps an apply failure, naming the store's own
+// budget (*GraphApplyBudgetExhaustedError) when that budget is the deadline
+// that ended the apply. context.Cause reports it only when the apply's own
+// timer fired first; a caller cancel, a caller deadline, or a context that
+// never ended leaves the text exactly "native graph apply: <err>".
+func nativeGraphApplyFailure(ctx context.Context, err error) error {
+	var exhausted *GraphApplyBudgetExhaustedError
+	if errors.As(context.Cause(ctx), &exhausted) && !errors.Is(err, exhausted) {
+		return fmt.Errorf("native graph apply: %w: %w", exhausted, err)
+	}
+	return fmt.Errorf("native graph apply: %w", err)
 }
 
 // applyGraphPlanOverCapInTransaction is the over-cap fallback for a LOCAL
