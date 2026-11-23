@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // transcriptFaultStore wraps a store and injects faults into transcript
@@ -540,4 +541,67 @@ func TestTranscriptPinnedAppendAdoptsLegacyMintedEntry(t *testing.T) {
 	if listed[1].ID != legacy.ID {
 		t.Fatalf("legacy entry listed as %s, want its original id %s (no renumbering)", listed[1].ID, legacy.ID)
 	}
+}
+
+// inboundRecoveryDeps builds inbound deps that route by default to an agent
+// and count ExtMsgInbound emissions.
+func inboundRecoveryDeps(fabric Services, emitted *int) InboundDeps {
+	return InboundDeps{
+		Services:                    fabric,
+		DefaultAgentForConversation: func(ConversationRef) string { return "myrig/frontdesk" },
+		EmitEvent: func(eventType, _ string, _ events.Payload) {
+			if eventType == events.ExtMsgInbound {
+				*emitted++
+			}
+		},
+	}
+}
+
+func inboundRecoveryMessage(ref ConversationRef, providerMessageID, text string) ExternalInboundMessage {
+	return ExternalInboundMessage{
+		ProviderMessageID: providerMessageID,
+		Conversation:      ref,
+		Actor:             ExternalActor{ID: "user-1", DisplayName: "User One"},
+		Text:              text,
+		ReceivedAt:        testNow(),
+	}
+}
+
+// TestHandleInboundNormalizedAmbiguousCreateKeepsSequencesDistinct drives the
+// inbound path through a create that commits and reports an error, followed
+// by a failed read of the slot it was pinned to: the inbound recovers the
+// entry once, emits one event, and the next inbound gets the next sequence.
+func TestHandleInboundNormalizedAmbiguousCreateKeepsSequencesDistinct(t *testing.T) {
+	freezeTestClock(t)
+	fault := &transcriptFaultStore{Store: beads.NewMemStore()}
+	fabric := NewServices(beadstest.Mail(fault), beadstest.Sessions(fault))
+	ref := testConversationRef()
+	emitted := 0
+	deps := inboundRecoveryDeps(fabric, &emitted)
+
+	fault.setFaults(func(f *transcriptFaultStore) {
+		f.commitThenFailCreates = 1
+		f.failEntryGets = 1
+	})
+	first, err := HandleInboundNormalized(context.Background(), deps, inboundRecoveryMessage(ref, "msg-1", "first"))
+	if err != nil {
+		t.Fatalf("HandleInboundNormalized(first) with a recoverable transcript fault: %v", err)
+	}
+	if first.TranscriptEntry == nil || first.TranscriptEntry.Sequence != 1 {
+		t.Fatalf("first transcript entry = %#v, want sequence 1", first.TranscriptEntry)
+	}
+	if emitted != 1 {
+		t.Fatalf("ExtMsgInbound emitted %d times for the first inbound, want 1", emitted)
+	}
+	second, err := HandleInboundNormalized(context.Background(), deps, inboundRecoveryMessage(ref, "msg-2", "second"))
+	if err != nil {
+		t.Fatalf("HandleInboundNormalized(second): %v", err)
+	}
+	if second.TranscriptEntry == nil || second.TranscriptEntry.Sequence != 2 {
+		t.Fatalf("second transcript entry = %#v, want sequence 2", second.TranscriptEntry)
+	}
+	if stored := assertTranscriptSequencesUnique(t, fault); len(stored) != 2 {
+		t.Fatalf("stored %d transcript entries, want 2", len(stored))
+	}
+	assertListedTexts(t, fabric.Transcript, ref, "first", "second")
 }

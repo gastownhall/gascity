@@ -215,7 +215,7 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	}
 
 	// Step 6: Append outbound transcript entry.
-	entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+	entry, err := appendTranscriptRecovering(ctx, deps.Services.Transcript, AppendTranscriptInput{
 		Caller:            caller,
 		Conversation:      req.Conversation,
 		Kind:              TranscriptMessageOutbound,
