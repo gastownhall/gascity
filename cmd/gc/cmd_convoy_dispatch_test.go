@@ -2101,6 +2101,136 @@ func TestFindWorkflowBeadsCloseOrderKeepsRootClosedLast(t *testing.T) {
 	}
 }
 
+// continueOnErrorStore closes ids one at a time and, like BdStore's per-id
+// fallback after a failed batch, keeps going past an id that fails, joining
+// the failures at the end.
+type continueOnErrorStore struct {
+	beads.Store
+	failOn map[string]bool
+}
+
+func (s continueOnErrorStore) CloseAll(ids []string, _ map[string]string) (int, error) {
+	closed := 0
+	var errs []error
+	for _, id := range ids {
+		if s.failOn[id] {
+			errs = append(errs, fmt.Errorf("closing %s: simulated failure", id))
+			continue
+		}
+		if err := s.Close(id); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		closed++
+	}
+	return closed, errors.Join(errs...)
+}
+
+// TestCloseWorkflowMatchesKeepsRootOpenWhenAStepFailsUnderContinueOnErrorStore
+// pins #6332 on a store whose CloseAll keeps going after a failed id: the root
+// must stay open while any step failed to close.
+func TestCloseWorkflowMatchesKeepsRootOpenWhenAStepFailsUnderContinueOnErrorStore(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "Workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":        "workflow",
+			"gc.workflow_id": "wf-6332-continue",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	var steps []beads.Bead
+	for i := 0; i < 2; i++ {
+		step, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("Step %d", i),
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.root_bead_id": root.ID},
+		})
+		if err != nil {
+			t.Fatalf("Create(step %d): %v", i, err)
+		}
+		steps = append(steps, step)
+	}
+	failing, closing := steps[0], steps[1]
+
+	found, err := findWorkflowBeads(store, root.ID)
+	if err != nil {
+		t.Fatalf("findWorkflowBeads: %v", err)
+	}
+	continuing := continueOnErrorStore{Store: store, failOn: map[string]bool{failing.ID: true}}
+	if _, err := closeWorkflowMatches([]workflowStoreMatch{{
+		store: continuing,
+		beads: found,
+		label: "city",
+	}}); err == nil {
+		t.Fatal("closeWorkflowMatches: want an error from the failed step")
+	}
+
+	for _, tc := range []struct {
+		id, want string
+	}{
+		{closing.ID, "closed"},
+		{failing.ID, "open"},
+		{root.ID, "open"},
+	} {
+		got, err := store.Get(tc.id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", tc.id, err)
+		}
+		if got.Status != tc.want {
+			t.Errorf("bead %s status = %q, want %q", tc.id, got.Status, tc.want)
+		}
+	}
+}
+
+func TestFindWorkflowBeadsFromRootOrdersRootLast(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "Workflow",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("Step %d", i),
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.root_bead_id": root.ID},
+		}); err != nil {
+			t.Fatalf("Create(step %d): %v", i, err)
+		}
+	}
+
+	found, err := findWorkflowBeadsFromRoot(store, root)
+	if err != nil {
+		t.Fatalf("findWorkflowBeadsFromRoot: %v", err)
+	}
+	if len(found) != 3 {
+		t.Fatalf("findWorkflowBeadsFromRoot(...) = %v, want root and 2 descendants", workflowBeadIDs(found))
+	}
+	if found[len(found)-1].ID != root.ID {
+		t.Fatalf("findWorkflowBeadsFromRoot(...) = %v, want root %q last", workflowBeadIDs(found), root.ID)
+	}
+	rootCount := 0
+	for _, b := range found {
+		if b.ID == root.ID {
+			rootCount++
+		}
+	}
+	if rootCount != 1 {
+		t.Fatalf("root %q appears %d times in %v, want once", root.ID, rootCount, workflowBeadIDs(found))
+	}
+}
+
 func TestDeleteWorkflowMatchesUsesCascadeWithoutPreClose(t *testing.T) {
 	store := beads.NewMemStore()
 	root, err := store.Create(beads.Bead{

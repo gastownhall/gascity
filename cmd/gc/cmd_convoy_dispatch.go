@@ -2168,15 +2168,50 @@ func closeWorkflowMatches(matches []workflowStoreMatch) (int, error) {
 // finishes between the listing and the batch is still rewritten to skipped;
 // closing that window takes a close guarded by each row's status in the store
 // itself, which ga-srkwts tracks.
+//
+// The open roots go in a second call, sent only after every open step closed.
+// Ordering the root last in one batch is not enough: a store whose CloseAll
+// keeps going after a failed id (the bd per-id fallback) would still close the
+// root behind a step that failed, leaving a closed root over open, routed
+// steps (#6332). With two calls, "root closed" implies "every step closed".
 func closeOpenWorkflowBeads(store beads.Store, matched []beads.Bead) (int, error) {
-	ids := openWorkflowBeadIDs(matched)
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	return store.CloseAll(ids, map[string]string{
+	stepIDs, rootIDs := splitOpenWorkflowBeadIDs(matched)
+	meta := map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-	})
+	}
+	closed := 0
+	if len(stepIDs) > 0 {
+		n, err := store.CloseAll(stepIDs, meta)
+		closed += n
+		if err != nil {
+			return closed, err
+		}
+	}
+	if len(rootIDs) > 0 {
+		n, err := store.CloseAll(rootIDs, meta)
+		closed += n
+		if err != nil {
+			return closed, err
+		}
+	}
+	return closed, nil
+}
+
+// splitOpenWorkflowBeadIDs returns the ids of the beads that are not closed,
+// split into steps and workflow roots (sourceworkflow.IsWorkflowRoot).
+func splitOpenWorkflowBeadIDs(bb []beads.Bead) (stepIDs, rootIDs []string) {
+	for _, b := range bb {
+		if b.Status == "closed" {
+			continue
+		}
+		if sourceworkflow.IsWorkflowRoot(b) {
+			rootIDs = append(rootIDs, b.ID)
+			continue
+		}
+		stepIDs = append(stepIDs, b.ID)
+	}
+	return stepIDs, rootIDs
 }
 
 // verifyWorkflowMatchesClosed re-reads every bead the sweep closed and refuses
@@ -3970,18 +4005,6 @@ func workflowBeadIDs(bb []beads.Bead) []string {
 	ids := make([]string, len(bb))
 	for i, b := range bb {
 		ids[i] = b.ID
-	}
-	return ids
-}
-
-// openWorkflowBeadIDs returns the ids of the beads that are not closed yet.
-func openWorkflowBeadIDs(bb []beads.Bead) []string {
-	ids := make([]string, 0, len(bb))
-	for _, b := range bb {
-		if b.Status == "closed" {
-			continue
-		}
-		ids = append(ids, b.ID)
 	}
 	return ids
 }
