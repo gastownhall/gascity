@@ -38,6 +38,7 @@ func discoveredCommandFromPackCommandInfo(info config.PackCommandInfo) config.Di
 		PackDir:     info.PackDir,
 		PackName:    info.PackName,
 		BindingName: info.PackName,
+		NativeHelp:  info.Entry.NativeHelp,
 	}
 }
 
