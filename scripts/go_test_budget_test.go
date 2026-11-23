@@ -21,11 +21,17 @@ var sweepTargets = []struct {
 	{target: "test-mac", observableName: "test-mac"},
 }
 
+// sweepDryRunPkgs pins MAC_UNIT_PKGS for the dry run. The Makefile derives it
+// from a repo-wide go list and stops when that list is empty, and go list
+// cannot run in the Bazel test sandbox (the embed patterns resolve to
+// symlinks there). The -timeout under test does not depend on the list.
+const sweepDryRunPkgs = "MAC_UNIT_PKGS=github.com/gastownhall/gascity/internal/fsys"
+
 // sweepTimeoutFlag dry-runs a sweep target with GO_TEST_TIMEOUT set to
 // override and returns the -timeout its go-test-observable line carries.
 func sweepTimeoutFlag(t *testing.T, target, observableName, override string) string {
 	t.Helper()
-	cmd := makeCommand("-n", target)
+	cmd := makeCommand("-n", target, sweepDryRunPkgs)
 	cmd.Dir = repoRoot(t)
 	cmd.Env = append(os.Environ(), "GO_TEST_TIMEOUT="+override)
 	out, err := cmd.CombinedOutput()
