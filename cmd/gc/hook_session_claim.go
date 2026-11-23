@@ -83,6 +83,31 @@ func reserveSessionCurrentClaimVia(front sessionFrontGetter, sessionID string, e
 	return sessFront.ReserveCurrentClaim(sessionID, expected.Value, beadID)
 }
 
+// hookClaimPreReadCurrentClaim reads the current-claim pointer of the session
+// identified by sessionID before the claim's work query: the value the claim's
+// reserve is fenced on. The row the instance-token fence verified (fenced) is
+// used when it is that session's, so the token path costs no extra read;
+// otherwise the pointer is read through front. A failed read is reported on
+// stderr and returns an unknown value, which makes the reserve read the
+// pointer itself. A run with no session id has no pointer to read.
+func hookClaimPreReadCurrentClaim(front sessionFrontGetter, sessionID string, fenced *session.Info, stderr io.Writer) hookClaimExpected {
+	if sessionID == "" {
+		return hookClaimExpected{}
+	}
+	if fenced != nil && fenced.ID == sessionID {
+		return hookClaimExpected{Value: fenced.CurrentClaimBeadID, Known: true}
+	}
+	sessFront, err := front()
+	if err == nil {
+		var info session.Info
+		if info, err = sessFront.Get(sessionID); err == nil {
+			return hookClaimExpected{Value: info.CurrentClaimBeadID, Known: true}
+		}
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: reading current claim of session %s before the work query: %v\n", sessionID, err) //nolint:errcheck
+	return hookClaimExpected{}
+}
+
 // hookClearSessionCurrentClaim empties the current-claim pointer of the
 // session identified by sessionID while it still names expected. It is the
 // production implementation of the hookClaimOps.ClearSessionClaim seam.

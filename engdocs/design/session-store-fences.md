@@ -19,12 +19,16 @@ not negotiate store semantics per operation.
 
 Facts, from `internal/beads/beads.go` on this branch:
 
-- **No conditional writes.** `UpdateOpts` has no expected-revision,
-  expected-value, or token field. There is no compare-and-swap primitive
-  anywhere in the `Store` interface; the optional
-  `ConditionalAssignmentReleaser.ReleaseIfCurrent` is the one existing
-  narrowly-scoped conditional write, and is the precedent for proposing
-  another narrow conditional primitive rather than general CAS.
+- **Conditional writes are optional capabilities.** `UpdateOpts` has no
+  expected-revision, expected-value, or token field, and the `Store`
+  interface itself has no compare-and-swap. The narrow conditional writes
+  are optional interfaces a store may implement:
+  `ConditionalAssignmentReleaser.ReleaseIfCurrent`, and the single-key
+  metadata value-CAS that `beads.ApplyMetadataCAS`
+  (`internal/beads/metadata_cas.go`) reaches through
+  `MetadataCASWriterFor`. A store without the capability reports
+  `ErrConditionalWriteUnsupported`, and the caller must say what it does
+  then.
 - **Batches are not atomic on external stores.** `SetMetadataBatch` applies
   all writes atomically on in-memory stores (MemStore, FileStore) but
   sequentially on external stores (BdStore, exec) — partial application is
@@ -138,6 +142,37 @@ adopts Fence 2 must also satisfy:
 - **Partial-batch tolerance.** Batch contents are ordered and chosen so any
   prefix leaves a state the reconciler heals (the existing
   `healState`/projection machinery is the recovery owner).
+
+### The current-claim pointer: value-CAS against the pre-claim read
+
+`current_claim_bead_id` names the bead a session claimed for itself through
+`gc hook --claim`. Two claim runs of one session can overlap, so the
+pointer has one writer per run, not one per tick, and it is a value-CAS
+writer under the "own bead and justification" clause below (issue #6110).
+
+- **Fence.** `session.Store.ReserveCurrentClaim(id, expected, next)` swaps
+  the pointer from `expected` to `next` through `beads.ApplyMetadataCAS`.
+  `expected` is the raw value the run read before its work query: the
+  instance-token fence's row, or a tokenless read through the same session
+  front door. Two runs that both read it before either reserves cannot both
+  win. `ClearCurrentClaim(id, expected)` is the rollback half: a run giving
+  back its own bead clears the pointer only while it still names that bead.
+  `DropCurrentClaim` stays unfenced for the close, retire and reassign
+  cascades, where the session loses all its work at once.
+- **Why a lost race converges.** The loser delivers nothing: a minted claim
+  is given back (`current_claim_lost`), and an adopted bead stays assigned
+  to the session, which the next claim serves again. A pointer already
+  naming the bead is left unwritten, so an adoption re-run makes no write.
+- **Residuals.** A store without metadata CAS falls back to compare, then
+  write (`CurrentClaimLegacy`), with the old interleaving window. A failed
+  pre-read leaves the expected value unknown, and the reserve reads it at
+  stamp time. A reserve whose store errors three times is reported and the
+  claim delivered without it.
+- **Contended-path tests.** `TestReserveCurrentClaimConcurrentSingleWinner`,
+  `TestReserveCurrentClaimInterleavedClaimersExactlyOneWins`,
+  `TestClearCurrentClaimLeavesLaterStamp`,
+  `TestHookClaimConcurrentMintsDeliverExactlyOnce` and
+  `TestHookClaimReserveUsesPreQueryRead`.
 
 ## What a mutating slice must state
 

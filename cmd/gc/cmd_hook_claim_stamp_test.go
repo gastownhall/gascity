@@ -939,3 +939,82 @@ func TestHookClaimAdoptedReserveConflictDeliversNothing(t *testing.T) {
 		t.Fatalf("stderr = %q, want the cause naming hw-adopt", stderr.String())
 	}
 }
+
+// TestHookClaimReserveUsesPreQueryRead is AC-8: the reserve is fenced on the
+// session's current-claim pointer as the run read it BEFORE its work query —
+// from the instance-token fence's row, or a tokenless read through the same
+// front door — so a pointer another run moves during the query makes this
+// run's minted claim conflict and be given back. A pre-read that fails is
+// reported and leaves the expected value unknown; the reserve then reads the
+// pointer itself.
+func TestHookClaimReserveUsesPreQueryRead(t *testing.T) {
+	brokenFront := func() (*session.Store, error) { return nil, errors.New("front door down") }
+	for _, tc := range []struct {
+		name          string
+		fenced        bool
+		preReadBroken bool
+		wantExpected  hookClaimExpected
+		wantDelivered bool
+	}{
+		{name: "token", fenced: true, preReadBroken: true, wantExpected: hookClaimExpected{Value: "X", Known: true}},
+		{name: "tokenless", wantExpected: hookClaimExpected{Value: "X", Known: true}},
+		{name: "unknown", preReadBroken: true, wantExpected: hookClaimExpected{}, wantDelivered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			front, mem := currentClaimSession(t, "X")
+			preRead := func() (*session.Store, error) { return front, nil }
+			if tc.preReadBroken {
+				preRead = brokenFront
+			}
+			var fenced *session.Info
+			if tc.fenced {
+				info, err := front.Get(hookCurrentSessionID)
+				if err != nil {
+					t.Fatalf("reading fenced row: %v", err)
+				}
+				fenced = &info
+			}
+			var preStderr bytes.Buffer
+			opts := currentClaimHookOptions()
+			opts.CurrentClaimExpected = hookClaimPreReadCurrentClaim(preRead, hookClaimSessionID(opts.Env), fenced, &preStderr)
+			if opts.CurrentClaimExpected != tc.wantExpected {
+				t.Fatalf("pre-read = %+v, want %+v", opts.CurrentClaimExpected, tc.wantExpected)
+			}
+			if gotDiag := strings.Contains(preStderr.String(), "front door down"); gotDiag != !tc.wantExpected.Known {
+				t.Fatalf("pre-read stderr = %q, want a diagnostic only when the read failed", preStderr.String())
+			}
+
+			rec := &turnBoundClaimRecorder{}
+			ops := currentClaimHookOps(t, rec, currentClaimRoutedWork("hw-a"), front)
+			query := ops.Runner
+			ops.Runner = func(cmd, dir string) (string, error) {
+				moveCurrentClaim(t, mem, "Y")
+				return query(cmd, dir)
+			}
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", opts, ops, &stdout, &stderr)
+
+			if tc.wantDelivered {
+				if code != 0 {
+					t.Fatalf("code = %d, want 0; stderr=%s", code, stderr.String())
+				}
+				if got := currentClaimPointerOf(t, mem); got != "hw-a" {
+					t.Fatalf("pointer = %q, want hw-a", got)
+				}
+				return
+			}
+			if code != 1 || stdout.Len() != 0 {
+				t.Fatalf("code = %d stdout = %q, want 1 and no result line; stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if len(rec.releases) != 1 || rec.releases[0] != "hw-a" {
+				t.Fatalf("releases = %v, want [hw-a]", rec.releases)
+			}
+			if len(rec.claimReleased) != 1 || rec.claimReleased[0].Reason != hookClaimReleaseReasonCurrentClaimLost {
+				t.Fatalf("claim_released = %+v, want one with reason %q", rec.claimReleased, hookClaimReleaseReasonCurrentClaimLost)
+			}
+			if got := currentClaimPointerOf(t, mem); got != "Y" {
+				t.Fatalf("pointer = %q, want Y", got)
+			}
+		})
+	}
+}
