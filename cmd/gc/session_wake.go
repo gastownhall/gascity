@@ -798,6 +798,14 @@ func userHoldDrainReleased(reason string, info sessions.Info) bool {
 	return reason == string(sessions.SleepReasonUserHold) && !sessions.DispositionOfInfo(info).KeepsSlot()
 }
 
+// suspendDrainReleased reports whether a suspended drain lost its premise: no
+// operator suspend (city, rig, agent, or session hold) covers the row this
+// tick, so suspendCause, operatorSuspendCause's verdict for the row, is empty.
+// A resume voids the drain (CONTRACT v5 §12.2 #3 ruling 4).
+func suspendDrainReleased(reason, suspendCause string) bool {
+	return reason == drainSuspended && suspendCause == ""
+}
+
 func advanceSessionDrainsWithSessionsTraced(
 	cityPath string,
 	dt *drainTracker,

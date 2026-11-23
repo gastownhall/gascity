@@ -3302,11 +3302,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSessionInfo(infoByID[id], sp, name)
-					// A user-hold ack whose row no longer carries the hold is
-					// stale: an operator's resume consumed the hold after the
-					// drain began. Clear it and leave the runtime up.
-					if reconcilerOwnedAck && userHoldDrainReleased(ackReason, infoByID[id]) {
-						_ = clearReconcilerDrainAckMetadata(sp, name)
+					// A released ack is stale: a user-hold ack whose row no
+					// longer carries the hold (an operator's resume consumed it
+					// after the drain began), or a suspended ack on a live row
+					// no operator suspend covers any longer (a resume voids a
+					// suspended drain, CONTRACT v5 §12.2 #3 ruling 4). Clear it
+					// and leave the runtime up; a failed clear retries next tick.
+					if reconcilerOwnedAck && (userHoldDrainReleased(ackReason, infoByID[id]) ||
+						(alive && ackReason == drainSuspended && suspendDrainReleased(ackReason, operatorSuspendCause(cfg, cityPath, infoByID[id], suspState)))) {
+						if err := clearReconcilerDrainAckMetadata(sp, name); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: clearing released %s drain ack for %s: %v\n", ackReason, name, err) //nolint:errcheck
+						}
 						_ = dops.clearDrain(name)
 						if dt != nil {
 							dt.clearIdleProbe(id)
