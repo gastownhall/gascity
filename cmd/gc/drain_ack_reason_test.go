@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -63,6 +66,14 @@ func drainAckAnomalyPayloads(t *testing.T, evs []events.Event) []api.SessionDrai
 // the anomaly payloads it recorded, the seat's ID and the bead's ID.
 func legacyDrainAckAnomaly(t *testing.T, seed drainAckSeed) ([]api.SessionDrainAckedWithAssignedWorkPayload, string, string) {
 	t.Helper()
+	return legacyDrainAckStop(t, seed, nil)
+}
+
+// legacyDrainAckStop is legacyDrainAckAnomaly with ack, when set, run as the
+// seat's own gc runtime drain-ack on the seeded store just before the
+// controller sees the ack.
+func legacyDrainAckStop(t *testing.T, seed drainAckSeed, ack func(env *reconcilerTestEnv, seat, work beads.Bead)) ([]api.SessionDrainAckedWithAssignedWorkPayload, string, string) {
+	t.Helper()
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
@@ -79,6 +90,9 @@ func legacyDrainAckAnomaly(t *testing.T, seed drainAckSeed) ([]api.SessionDrainA
 		env.setSessionMetadata(&seat, map[string]string{"restart_requested": "true"})
 	}
 
+	if ack != nil {
+		ack(env, seat, work)
+	}
 	dops := newFakeDrainOps()
 	if err := dops.setDrainAck("worker"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)
@@ -173,4 +187,36 @@ func TestDrainAckAnomalyReasonShapes(t *testing.T) {
 			t.Errorf("reason = %q, want %q", got, api.DrainAckReasonStartedClaimKept)
 		}
 	})
+}
+
+// TestDrainAckParkPathReleasesAHeldStartedClaim (AC-7) pins the park path the
+// drain-ack loop escalation prescribes: a seat holding a started claim that is
+// then put on hold:mayor runs its own drain-ack; the ack succeeds (the release
+// runs with the started refusal armed, as the seat's own ack runs it, and keeps
+// nothing), releases the claim (open, unassigned, the hold kept) and the
+// finalized stop records no session.drain_acked_with_assigned_work.
+func TestDrainAckParkPathReleasesAHeldStartedClaim(t *testing.T) {
+	var stderr bytes.Buffer
+	got, _, _ := legacyDrainAckStop(t, drainAckSeed{status: "in_progress", labels: []string{beadmeta.HoldMayorLabel}, rowMeta: startedBy},
+		func(env *reconcilerTestEnv, seat, work beads.Bead) {
+			row, err := env.store.Get(seat.ID)
+			if err != nil {
+				t.Fatalf("reading the session bead: %v", err)
+			}
+			refused := releaseDrainAckClaims(testWorkLegs("", servingCity("worker"), env.store, nil), row, true, drainAckReleaseBudget, &stderr)
+			if len(refused) != 0 {
+				t.Fatalf("the seat's own drain-ack was refused over %v; a started claim on %s does not hold its seat's ack (stderr %s)", refused, beadmeta.HoldMayorLabel, stderr.String())
+			}
+			kept, err := env.store.Get(work.ID)
+			if err != nil {
+				t.Fatalf("reading the claim back: %v", err)
+			}
+			if kept.Status != "open" || kept.Assignee != "" || !slices.Contains(kept.Labels, beadmeta.HoldMayorLabel) {
+				t.Errorf("after the seat's own ack, claim %s is status=%q assignee=%q labels=%q, want open, unassigned, %s kept; stderr=%s",
+					kept.ID, kept.Status, kept.Assignee, kept.Labels, beadmeta.HoldMayorLabel, stderr.String())
+			}
+		})
+	if len(got) != 0 {
+		t.Errorf("%s payloads = %+v, want none once the held claim is released", events.SessionDrainAckedWithAssignedWork, got)
+	}
 }
