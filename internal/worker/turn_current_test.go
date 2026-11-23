@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -185,7 +187,9 @@ func TestTurnHistoryFromScan(t *testing.T) {
 	t.Run("a failed turn keeps the error its source recorded", func(t *testing.T) {
 		cooling := sessionlog.TurnFailure{Code: "rate_limit", Status: 429, RateLimited: true, Message: "API Error: Request rejected (429) · pool cooling for another 3d 16h"}
 		overloaded := sessionlog.TurnFailure{Code: "server_error", Status: 529, Message: "API Error: overloaded"}
+		spent := sessionlog.TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: "You've hit your usage limit."}
 		got, err := turnHistoryFromScan(sessionlog.TurnScan{Recent: []sessionlog.ScannedTurn{
+			{ID: "spent", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: spent},
 			{ID: "refused", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: cooling},
 			{ID: "overloaded", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: overloaded},
 			{ID: "done", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusCompleted},
@@ -194,6 +198,7 @@ func TestTurnHistoryFromScan(t *testing.T) {
 			t.Fatalf("turnHistoryFromScan: %v", err)
 		}
 		want := []runtime.TurnFailure{
+			{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: spent.Message},
 			{Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: cooling.Message},
 			{Code: "server_error", HTTPStatus: 529, Message: overloaded.Message},
 			{},
@@ -548,7 +553,7 @@ func TestFreshTurnJoinsNoReadInFlight(t *testing.T) {
 func TestFreshTurnBoundsItsSessionLoad(t *testing.T) {
 	s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}), "claude", "")
 	store := newStallingTurnStore(t, s.store)
-	s.handle.manager = sessionpkg.NewManagerWithOptions(store, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+	s.handle.manager = sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), s.sp, sessionpkg.WithCityPath(t.TempDir()))
 	store.stall(s.info.ID)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()

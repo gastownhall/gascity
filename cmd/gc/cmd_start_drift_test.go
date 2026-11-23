@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -335,6 +336,154 @@ func TestRunStartDriftCheck_RestartReturnsContinue(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Drift detected:") {
 		t.Errorf("stdout missing drift report:\n%s", stdout.String())
+	}
+}
+
+// restartedSupervisorFixture models a direct drift restart whose replacement
+// comes up the way runSupervisor brings it up: /health serves the new build
+// from the moment the replacement is spawned, while the control socket and
+// the follow-up /health probes behave as the caller scripts them. The old
+// supervisor is restartedSupervisorOldPID; the caller decides when, if ever,
+// the replacement answers as restartedSupervisorNewPID.
+//
+// socketAfterSpawn answers the n-th control-socket probe after the spawn
+// (1-based); healthAfterSpawn answers whether the n-th /health request after
+// the spawn succeeds (false = 503).
+func restartedSupervisorFixture(t *testing.T, socketAfterSpawn func(n int32) int, healthAfterSpawn func(n int32) bool) {
+	t.Helper()
+	oldDry, oldNoAR := dryRunMode, noAutoRestartMode
+	dryRunMode, noAutoRestartMode = false, false
+	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
+	oldJustRestarted := justRestartedSupervisorPID
+	t.Cleanup(func() { justRestartedSupervisorPID = oldJustRestarted })
+
+	var spawned atomic.Bool
+	var healthAfter, probesAfter atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		build := "old-build-id"
+		if spawned.Load() {
+			build = "new-build-id"
+			if !healthAfterSpawn(healthAfter.Add(1)) {
+				http.Error(w, "replacement still starting", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"ok","version":"v0","build_id":%q,"uptime_sec":1,"cities_total":0,"cities_running":0}`, build)
+	}))
+	t.Cleanup(srv.Close)
+	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
+	supervisorAliveHook = func() int {
+		if !spawned.Load() {
+			return restartedSupervisorOldPID
+		}
+		return socketAfterSpawn(probesAfter.Add(1))
+	}
+	restartHelpersHook = func() restartHelpers {
+		return restartHelpers{
+			Kill:     func(int) error { return nil },
+			WaitExit: func(int) error { return nil },
+			Spawn: func(string, ...string) error {
+				spawned.Store(true)
+				return nil
+			},
+		}
+	}
+}
+
+const (
+	restartedSupervisorOldPID = 4101
+	restartedSupervisorNewPID = 4102
+)
+
+// assertPostRestartIdentity checks that the re-printed Supervisor: line names
+// the replacement and its new build, after the ready marker, and that the
+// replacement's PID was handed to ensureNoStandaloneController.
+func assertPostRestartIdentity(t *testing.T, stdout, stderr string) {
+	t.Helper()
+	want := fmt.Sprintf("Supervisor: pid=%d ", restartedSupervisorNewPID)
+	ready := strings.Index(stdout, " ready (")
+	reprint := strings.LastIndex(stdout, want)
+	if ready < 0 || reprint < ready || !strings.Contains(stdout[reprint:], "buildID=new-build-id") {
+		t.Fatalf("post-restart identity line missing: want %q with buildID=new-build-id after the ready marker\nstdout:\n%s\nstderr:\n%s", want, stdout, stderr)
+	}
+	if justRestartedSupervisorPID != restartedSupervisorNewPID {
+		t.Errorf("justRestartedSupervisorPID = %d, want %d (the replacement)", justRestartedSupervisorPID, restartedSupervisorNewPID)
+	}
+}
+
+// TestRunStartDriftCheck_RestartRePrintsIdentityWhenControlSocketLagsHealth
+// pins the post-restart identity line against the supervisor's startup order:
+// runSupervisor serves /health before it binds its control socket, so the
+// first socket probe after PollReady's 2xx can find nothing listening yet (a
+// real `gc supervisor run` answered its socket 3.6ms after /health on a
+// loaded host, ga-ai1gn9p5). gc start must wait for the replacement to answer
+// instead of silently dropping the line.
+func TestRunStartDriftCheck_RestartRePrintsIdentityWhenControlSocketLagsHealth(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id")
+	restartedSupervisorFixture(t,
+		func(n int32) int {
+			if n <= 2 {
+				return 0 // control socket not bound yet
+			}
+			return restartedSupervisorNewPID
+		},
+		func(int32) bool { return true })
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 0 || !cont {
+		t.Fatalf("runStartDriftCheck = (%d, %v), want (0, true)\nstdout:\n%s\nstderr:\n%s", exitCode, cont, stdout.String(), stderr.String())
+	}
+	assertPostRestartIdentity(t, stdout.String(), stderr.String())
+}
+
+// TestRunStartDriftCheck_RestartRePrintsIdentityAfterTransientStatusFailure
+// pins the other half of the same handoff: one failed /health read right
+// after PollReady's 2xx must not drop the post-restart identity line either.
+func TestRunStartDriftCheck_RestartRePrintsIdentityAfterTransientStatusFailure(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id")
+	restartedSupervisorFixture(t,
+		func(int32) int { return restartedSupervisorNewPID },
+		// Request 1 is PollReady's ping; request 2, the first identity
+		// read after it, fails once.
+		func(n int32) bool { return n != 2 })
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 0 || !cont {
+		t.Fatalf("runStartDriftCheck = (%d, %v), want (0, true)\nstdout:\n%s\nstderr:\n%s", exitCode, cont, stdout.String(), stderr.String())
+	}
+	assertPostRestartIdentity(t, stdout.String(), stderr.String())
+}
+
+// TestRunStartDriftCheck_RestartWarnsWhenReplacementNeverAnswersSocket pins
+// the bounded end of that wait: a replacement that serves /health but never
+// answers on its control socket within driftReadyTimeout is reported on
+// stderr, not swallowed, and the restart stays non-terminal so registration
+// still runs (and reports any real breakage).
+func TestRunStartDriftCheck_RestartWarnsWhenReplacementNeverAnswersSocket(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id")
+	shrinkDriftReadyTimeout(t)
+	restartedSupervisorFixture(t,
+		func(int32) int { return 0 },
+		func(int32) bool { return true })
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 0 || !cont {
+		t.Fatalf("runStartDriftCheck = (%d, %v), want (0, true)\nstdout:\n%s\nstderr:\n%s", exitCode, cont, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), fmt.Sprintf("Supervisor: pid=%d", restartedSupervisorNewPID)) {
+		t.Errorf("stdout re-printed an identity the replacement never confirmed:\n%s", stdout.String())
+	}
+	for _, want := range []string{"warning:", "control socket", driftReadyTimeout.String()} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
 	}
 }
 

@@ -136,6 +136,26 @@ type rulesPlan struct {
 	openUnits []string
 }
 
+// contentSince is when the oldest content candidate became deliverable: its
+// creation, or its not_before when later. It is zero when no content is a
+// candidate.
+func (rp *rulesPlan) contentSince() time.Time {
+	var since time.Time
+	for _, e := range rp.content {
+		if !e.candidate() {
+			continue
+		}
+		at := e.op.CreatedAt
+		if e.op.NotBefore.After(at) {
+			at = e.op.NotBefore
+		}
+		if since.IsZero() || at.Before(since) {
+			since = at
+		}
+	}
+	return since
+}
+
 func (rp *rulesPlan) waitOpDetail(op Op, r WaitReason, detail string, until time.Time) {
 	rp.waits = append(rp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail, Until: until})
 	rp.next = minTime(rp.next, until)

@@ -157,7 +157,8 @@ func checkTurnRead(hist runtime.TurnHistory, err error) error {
 }
 
 // checkTurnFailure checks an ended turn's failure: only a failed turn has
-// one, and a rate limit is the source's class or HTTP 429, never the text.
+// one, a rate limit is the source's class or HTTP 429, never the text, and a
+// spent quota is a rate limit of the source's own class.
 func checkTurnFailure(t runtime.EndedTurn) error {
 	f := t.Failure
 	if f != (runtime.TurnFailure{}) && t.Status != runtime.TurnStatusFailed {
@@ -165,6 +166,9 @@ func checkTurnFailure(t runtime.EndedTurn) error {
 	}
 	if f.RateLimited && f.Code == "" && f.HTTPStatus != http.StatusTooManyRequests {
 		return fmt.Errorf("failure %+v is a rate limit with neither the source's class nor HTTP 429", f)
+	}
+	if f.Quota && (!f.RateLimited || f.Code == "") {
+		return fmt.Errorf("failure %+v is a spent quota that is not the source's rate-limit class", f)
 	}
 	return nil
 }

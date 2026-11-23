@@ -44,7 +44,7 @@ type rootView struct {
 // view when opts carries one (reading them on first use), otherwise read live.
 // gateRoot, when it is the root ProcessControl's gate already read, spares the
 // read of the root itself.
-func rootViewMembers(store beads.Store, rootID string, opts ProcessOptions) ([]beads.Bead, error) {
+func rootViewMembers(store beads.GraphStore, rootID string, opts ProcessOptions) ([]beads.Bead, error) {
 	view := opts.view
 	if view == nil || (view.loaded && view.rootID != rootID) {
 		// No view, or a second root in one invocation (not a shape any kind
@@ -74,7 +74,7 @@ func rootViewAll(opts ProcessOptions, rootID string) ([]beads.Bead, bool) {
 // getRootInView is store.Get(rootID) answered from the root's direct members
 // when the invocation has already read them. A loaded view without the root
 // read it missing, so the answer is beads.ErrNotFound, as the Get would be.
-func getRootInView(store beads.Store, rootID string, opts ProcessOptions) (beads.Bead, error) {
+func getRootInView(store beads.GraphStore, rootID string, opts ProcessOptions) (beads.Bead, error) {
 	all, ok := rootViewAll(opts, rootID)
 	if !ok {
 		return store.Get(rootID)
@@ -87,7 +87,7 @@ func getRootInView(store beads.Store, rootID string, opts ProcessOptions) (beads
 	return beads.Bead{}, fmt.Errorf("root %s: %w", rootID, beads.ErrNotFound)
 }
 
-func readDirectMembers(store beads.Store, rootID string, gateRoot *beads.Bead) ([]beads.Bead, error) {
+func readDirectMembers(store beads.GraphStore, rootID string, gateRoot *beads.Bead) ([]beads.Bead, error) {
 	if gateRoot != nil && gateRoot.ID == rootID {
 		return beads.DirectMembersWithRoot(store, *gateRoot)
 	}

@@ -163,6 +163,10 @@ const (
 	// rather than drained.
 	executionHoldExecuting     = "executing"
 	executionHoldSnapshotError = "snapshot_error"
+	// executionHoldHeartbeat names a seat that called `gc runtime heartbeat`:
+	// its held_until is still in the future, so a silent pane is a declared
+	// long operation rather than a stalled claim.
+	executionHoldHeartbeat = "heartbeat"
 )
 
 // executionClaimNudgeLabel names the execution backstop in its log lines and
@@ -202,7 +206,7 @@ func nudgeStalledPoolExecution(
 	if sp == nil || cfg == nil || store == nil || snapshotPartial {
 		return // hot reconcile path: never panic on a half-built dependency
 	}
-	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
+	if beads.IsNilStore(store) {
 		return
 	}
 	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, executionClaimNudgeLabel, poolExecutionBackstop{
@@ -229,6 +233,11 @@ type executionClaim struct {
 	// graph step, the session that holds it, and its kind
 	// (executionLifecycleCandidate).
 	StepID, SessionID, SessionName, Kind string
+	// AwaitingHuman is the claimed bead's gc.awaiting_human, read off this
+	// claim's own bead and never another store's with its ID: the session
+	// that asked a person about it and waits on their decision
+	// (beadmeta.AwaitsHuman).
+	AwaitingHuman string
 }
 
 // executionLifecycleCandidate reports whether claim can carry a step_started
@@ -266,13 +275,14 @@ func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRef
 			continue
 		}
 		claim := executionClaim{
-			BeadID:      wb.ID,
-			RootID:      strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
-			Assignee:    assignee,
-			StepID:      strings.TrimSpace(wb.Metadata[beadmeta.StepIDMetadataKey]),
-			SessionID:   strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]),
-			SessionName: strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]),
-			Kind:        strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]),
+			BeadID:        wb.ID,
+			RootID:        strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
+			Assignee:      assignee,
+			StepID:        strings.TrimSpace(wb.Metadata[beadmeta.StepIDMetadataKey]),
+			SessionID:     strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]),
+			SessionName:   strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]),
+			Kind:          strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]),
+			AwaitingHuman: strings.TrimSpace(wb.Metadata[beadmeta.AwaitingHumanMetadataKey]),
 		}
 		if i < len(storeRefs) {
 			claim.StoreRef = claimStoreRef(storeRefs[i])
@@ -331,9 +341,10 @@ func (p poolExecutionBackstop) governs(s beads.Bead) bool {
 
 // resolve reports an outstanding stall only when all of it holds: the session
 // holds exactly ONE in-progress claim under a current identity, and the runtime
-// says the session has been quiet for at least the grace window (quietHold). A
-// seat with execution evidence is held as executing instead whenever the
-// engine's next action would escalate it (escalatesNext); its nudges go out.
+// says the session has been quiet for at least the grace window (quietHold)
+// with no heartbeat hold in force (held_until). A seat with execution evidence
+// is held as executing instead whenever the engine's next action would
+// escalate it (escalatesNext); its nudges go out.
 //
 // Exactly one, because the pacing state names a single bead: a session juggling
 // several claims is demonstrably doing something, and picking one of them to
@@ -365,6 +376,15 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	if !started && (workStartedAtGen(s, claim) ||
 		executionLifecycleCandidate(claim, s) && p.executedSinceWake(s, claim.BeadID)) {
 		started = p.markStarted(&s, claim.BeadID)
+	}
+	// A seat that called `gc runtime heartbeat` declared a long silent
+	// operation, the same declaration that defers the reconciler's idle and
+	// max-age timers. Like every hold here it skips the tick and leaves the
+	// pacing state alone, so a hold that lapses with the seat still quiet
+	// resumes the escalation instead of restarting the grace window.
+	if sessionpkg.DecodeDisposition(s.Metadata).HeartbeatHeld(p.now) {
+		p.observeHold(p.store, &s, executionHoldHeartbeat, p.stdout)
+		return backstopTarget{}, backstopResolutionHold
 	}
 	if hold := p.quietHold(s, sessName); hold != "" {
 		p.observeHold(p.store, &s, hold, p.stdout)
@@ -409,8 +429,9 @@ func holdIs(s beads.Bead, reason string) bool {
 }
 
 // escalatesNext reports whether the engine's next action on s, given its
-// pacing, is the terminal escalation (exhausted): the attempts are spent, or a
-// nudge is due with no content to deliver, which the engine escalates at once.
+// pacing, is the terminal escalation (exhausted): the attempts are spent and
+// the last one's backoff has passed, or a nudge is due with no content to
+// deliver, which the engine escalates at once.
 // The second mirrors runNudgeBackstop's empty-content shortcut; change the two
 // in lockstep.
 func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last time.Time) bool {
@@ -434,7 +455,10 @@ func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last ti
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	return sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
+	hold := sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
+	shadowHold(p.sp, sessName, s.ID, sessionpkg.ProviderFamilyFromMetadata(s.Metadata, ""),
+		runtime.ProgramPointExecutionBackstop, hold != "", p.now, runtime.ProgramHoldVerdict)
+	return hold
 }
 
 // sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
@@ -647,6 +671,17 @@ func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
 }
 
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
+	// A new claim, or a new incarnation, starts without the old latch. A
+	// failed clear leaves the window unopened, so the next pass observes
+	// again rather than opening the new window under the old latch.
+	if s.Metadata[executionClaimNudgeStalledKey] != "" || s.Metadata[executionClaimNudgeStalledTokenKey] != "" {
+		if !writeSessionMetadata(store, s, map[string]string{
+			executionClaimNudgeStalledKey:      "",
+			executionClaimNudgeStalledTokenKey: "",
+		}, executionClaimNudgeLabel, stdout) {
+			return
+		}
+	}
 	writeExecutionClaimMarker(store, s, target, 0, now, stdout)
 }
 

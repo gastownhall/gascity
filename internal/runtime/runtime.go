@@ -79,6 +79,25 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // commands use to report an infrastructure outcome (convergence.GateInfraExitCode).
 const ExitCodeTempFail = 75
 
+// ExitCodeNoScreen is sysexits.h EX_NOINPUT: an observe.v1 exec script's
+// `peek` of a name whose box has no screen to read (no box, or a dead box
+// whose screen is gone). It is an answer, not a failure: an empty screen.
+const ExitCodeNoScreen = 66
+
+// ExitCodeInputOutcome is the exit code of a typed non-success input
+// outcome: under [ProtocolCapabilityInputOutcome], a driving op (nudge,
+// send-keys, interrupt, clear-scrollback) that did not deliver its input
+// exits with it and prints exactly one outcome line naming why. It sits
+// above the sysexits block and below the shell's and the signals' codes, so
+// no killed or unrunnable op produces it; to a gc that does not read the
+// token it is an ordinary failure.
+const ExitCodeInputOutcome = 80
+
+// ExitCodeFreshCollision is sysexits.h EX_CANTCREAT: a fresh_only `start`,
+// `provision` or `launch` refusing a name a box or an agent already holds,
+// live or dead, rather than recycling, killing or reusing it.
+const ExitCodeFreshCollision = 73
+
 // CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
 // as the launched command's exit status.
 const CapacitySourceExitStatus = "exit_status"
@@ -114,6 +133,24 @@ func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapac
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrAgentBlocked reports that the runtime refused to deliver input because
+// the agent is waiting on interactive input of its own: a question to the
+// user, a permission or trust dialog. Typing into the session then would
+// answer that prompt, so the refusal is correct, and it lasts until someone
+// answers. Callers holding the input should keep it and retry later instead of
+// treating the refusal as a delivery failure. Providers wrap their own
+// "blocked" condition with this sentinel so callers can dispatch with
+// errors.Is.
+var ErrAgentBlocked = errors.New("agent is blocked on interactive input")
+
+// ErrProcessNotConfirmedDead reports that a provider-managed process was sent
+// SIGKILL but had not left the run/ready set when the bounded reap wait ran
+// out (a process in uninterruptible sleep can outlive its own SIGKILL). The
+// process may still be alive, so the error is retryable and is never "gone":
+// [IsSessionGone] is false for it, and a teardown caller must keep the
+// session's bookkeeping instead of treating Stop as having succeeded.
+var ErrProcessNotConfirmedDead = errors.New("process not confirmed dead after SIGKILL")
+
 // ErrNudgeDeliveredUnobserved reports that a nudge reached the session and
 // was consumed, but the provider never observed the session start the turn.
 // Delivery is proven, so callers must treat the nudge as delivered and must
@@ -121,6 +158,13 @@ var ErrSessionNotFound = errors.New("session not found")
 // unobserved-delivery conditions with this sentinel so callers can dispatch
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
+
+// NudgeDelivered reports whether a nudge's err means the nudge reached the
+// session: nil, or [ErrNudgeDeliveredUnobserved] from any runtime. A caller
+// that retries undelivered nudges acks both and never redelivers them.
+func NudgeDelivered(err error) bool {
+	return err == nil || errors.Is(err, ErrNudgeDeliveredUnobserved)
+}
 
 // ErrNudgeDeliveryUnconfirmed reports that a nudge's submit was sent to the
 // session but the provider could not confirm it took: the message may have
@@ -285,6 +329,12 @@ func MetaValue(v string, err error) (string, error) {
 // A wrap over a join is judged by the join, not by the wrap's text. An error
 // tree with no join keeps the single-error rule below.
 func IsSessionGone(err error) bool {
+	// A process that may still be alive is never gone, whatever else the error
+	// says: a join with a "not found" leaf or a wrapped ErrSessionNotFound must
+	// not certify it dead.
+	if errors.Is(err, ErrProcessNotConfirmedDead) {
+		return false
+	}
 	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf of a join must be gone, which errors.Is cannot express
 	case nil:
 		return false
@@ -720,6 +770,15 @@ type IdleSnapshotProvider interface {
 // signal they would use without a snapshot.
 var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
 
+// ErrIdlePendingChoice reports an [IdleSnapshotProvider] observation that saw
+// a menu waiting for a choice: its highlighted option is drawn where the
+// ready prompt would be, so text sent now would pick an option instead of
+// reaching the composer. It wraps [ErrIdleIndeterminate], which is what every
+// caller that does not ask for it by name reads; the wait-idle pre-read
+// ([IdleBoundaryNow]) reads it as pending, since a menu does not close by
+// itself within a short wait.
+var ErrIdlePendingChoice = fmt.Errorf("%w: a menu awaits a choice", ErrIdleIndeterminate)
+
 // ErrWaitUnobserved reports that an idle or interrupt-boundary wait
 // ([IdleWaitProvider], [InterruptBoundaryWaitProvider]) reached its timeout
 // without one reading that showed the session busy: every read failed, or
@@ -756,6 +815,30 @@ func TurnRunningFor(p Provider, name string) (TurnRunningProvider, bool) {
 	leaf, _, _ := ResolveBackend(p, name)
 	tr, ok := leaf.(TurnRunningProvider)
 	return tr, ok
+}
+
+// FreshActivityProvider is an optional extension for runtimes whose
+// [Provider.GetLastActivity] may answer from a cached snapshot (tmux: the
+// fleet snapshot, kept for its TTL): FreshActivity reads session name's last
+// activity from the session itself, so a read taken after another
+// observation, such as a [TurnRunningProvider] look at its screen, reflects
+// the session no earlier than that observation. The snapshot's activity can
+// predate it: a turn that started after the snapshot was taken is not in it.
+//
+// It discounts gc's own input as [Provider.GetLastActivity] does. A non-nil
+// err means the read could not be made. Composites do not implement it: it
+// is read on the session's routed leaf ([FreshActivityFor]).
+type FreshActivityProvider interface {
+	FreshActivity(name string) (time.Time, error)
+}
+
+// FreshActivityFor returns the [FreshActivityProvider] of the backend serving
+// session name, the leaf [ResolveBackend] names, and false when that backend
+// takes no such read.
+func FreshActivityFor(p Provider, name string) (FreshActivityProvider, bool) {
+	leaf, _, _ := ResolveBackend(p, name)
+	fa, ok := leaf.(FreshActivityProvider)
+	return fa, ok
 }
 
 // ExecProvider is an optional extension for runtimes that expose the RPP
@@ -836,6 +919,11 @@ type InventoryEntry struct {
 	// Incarnation identifies this runtime instance of the session. A new
 	// runtime under the same name, or a respawn of the session's first pane,
 	// gets a different value. Empty when the provider cannot report one.
+	// A provider whose fresh reads name the session's object
+	// (Liveness.ObjectID and ObjectCreated) leads it with
+	// "<ObjectID>:<ObjectCreated>", as tmux's
+	// "#{session_id}:#{session_created}:#{pane_pid}" does, so a probe's
+	// answer can be matched to this incarnation.
 	//
 	// On tmux it can also change without a restart: swap-pane,
 	// split-window -b, rotate-window, or killing pane 0.0 moves a different
@@ -865,6 +953,66 @@ type InventoryEntry struct {
 	// ([ProgramStatusProvider]) taken in the same batch: Unread unless the
 	// runtime reads program status for this session.
 	Program ProgramStatus
+	// ProcessKnown and ProcessAlive report whether the agent process (the
+	// GT_PROCESS_NAMES the session was started with) runs in the session's
+	// live box, as the batched read sees it (an exec pack's `inventory`),
+	// so no per-name process probe is needed. ProcessAlive is meaningless
+	// unless ProcessKnown.
+	ProcessKnown, ProcessAlive bool
+	// IdentityKnown and Identity report the session's identity env
+	// (GC_SESSION_ID, GC_RUNTIME_EPOCH, GC_INSTANCE_TOKEN, GT_PROCESS_NAMES;
+	// a missing key is unset) for this Incarnation, read in the same batch.
+	// An empty Identity is a box with no gc identity. Identity is
+	// meaningless unless IdentityKnown.
+	IdentityKnown bool
+	Identity      map[string]string
+}
+
+// InventoryGate is implemented by providers whose [InventoryProvider] is
+// static on the type but served only when their backend says so (an exec
+// pack that is not v2-ready has none). Read it through [InventoryFor].
+type InventoryGate interface {
+	InventoryAvailable() bool
+}
+
+// InventoryLister is implemented by providers whose listing is their
+// batched inventory (an exec pack's `inventory`): ListInventory answers
+// ListRunning(prefix), and the inventory of the names it lists, from one
+// read, so a caller wanting both makes one call, under one bound. Read it
+// through [ListInventoryWithAttestation], which serves it only where
+// [InventoryFor] does.
+type InventoryLister interface {
+	ListInventory(prefix string) ([]string, map[string]InventoryEntry, error)
+}
+
+// ListInventoryWithAttestation is [ListRunningWithAttestation], plus the
+// inventory of the listed names when sp serves both from one read
+// ([InventoryLister], gated as [InventoryFor]); otherwise the inventory is
+// nil and the caller reads it separately, if at all.
+func ListInventoryWithAttestation(sp Provider, prefix string) (names []string, inventory map[string]InventoryEntry, attested bool, err error) {
+	lister, ok := sp.(InventoryLister)
+	if _, served := InventoryFor(sp); !ok || !served {
+		names, attested, err = ListRunningWithAttestation(sp, prefix)
+		return names, nil, attested, err
+	}
+	before := ListRunningAttested(sp)
+	names, inventory, err = lister.ListInventory(prefix)
+	return names, inventory, before && ListRunningAttested(sp), err
+}
+
+// InventoryFor returns p's batched inventory when p has one it serves now:
+// an [InventoryProvider] that is not an [InventoryGate] reporting it
+// unavailable. Every caller deciding whether to take a batched inventory
+// asks it, so a gated-off provider takes the no-inventory path exactly.
+func InventoryFor(p Provider) (InventoryProvider, bool) {
+	inv, ok := p.(InventoryProvider)
+	if !ok {
+		return nil, false
+	}
+	if gate, gated := p.(InventoryGate); gated && !gate.InventoryAvailable() {
+		return nil, false
+	}
+	return inv, true
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
@@ -882,6 +1030,28 @@ type EnvironmentBatchProvider interface {
 // identity.
 type IdentitySidecarProvider interface {
 	LocalIdentitySidecar() bool
+}
+
+// IdentityObserver is an optional extension for providers that read a
+// session's identity env (GC_SESSION_ID, GC_RUNTIME_EPOCH,
+// GC_INSTANCE_TOKEN, GT_PROCESS_NAMES) in one fresh answer, without
+// [EnvironmentBatchProvider]'s adoption and API side effects. A provider
+// whose identity is not readable now reports IdentityObservable false.
+// ObserveIdentity returns [ErrSessionNotFound] for an absent name and an
+// error wrapping [ErrRuntimeUnavailable] while the identity cannot be read;
+// an empty map is a box with no gc identity.
+type IdentityObserver interface {
+	IdentityObservable() bool
+	ObserveIdentity(name string) (map[string]string, error)
+}
+
+// V2ReadinessReporter is an optional extension for providers whose fitness
+// for reconciler v2 depends on what their backend declares (an exec
+// script's handshake). V2Readiness returns the capabilities v2 needs that
+// the backend lacks, nil when it has them all, or the error that kept it
+// from asking.
+type V2ReadinessReporter interface {
+	V2Readiness() (missing []string, err error)
 }
 
 // TransportCapabilityProvider is an optional extension for providers that can
@@ -1064,7 +1234,8 @@ type LiveRuntime struct {
 	// tmux process on this host. It is not socket-scoped to one provider
 	// instance, and it does not separate a server from a client. A caller that
 	// needs true provider-scoped attribution — this provider's own server, on
-	// this provider's socket — must add that check itself.
+	// this provider's socket — must add that check itself, or read the
+	// provider's LiveUnlisted.
 	//
 	// It is the positive form of the PPID test above, and it exists because the
 	// negative form cannot be made reliable: recognizing a reparent destination
@@ -1102,6 +1273,19 @@ type LiveRuntime struct {
 	// IsTracked is true when this runtime also appears in the provider's
 	// registry. False marks a live process that is invisible to the provider.
 	IsTracked bool
+	// LiveUnlisted is true when the provider claims an untracked root as a
+	// live runtime of its own that its listing does not show, or cannot rule
+	// that out. Only the provider sets it, from its own provider-scoped
+	// evidence, which ParentIsProviderInfrastructure alone is not: the tmux
+	// provider sets it on a tmux-parented root unless the root's TMUX
+	// variable proves its parent is a server bound to another socket, so a
+	// pane of this provider's socket name in a socket directory this process
+	// does not resolve, or one a failed or racing listing missed, is set,
+	// while a server an agent started on its own socket is not. Such a root
+	// is not an orphan, and a replacement would race it for the session's
+	// work, so a caller that terminates orphans before a start must refuse
+	// the start instead.
+	LiveUnlisted bool
 }
 
 // ProcessTableScanner is an optional extension for runtimes that can discover
@@ -1109,7 +1293,8 @@ type LiveRuntime struct {
 // artifacts.
 //
 // Providers that cannot inspect process tables do not implement this
-// interface. Callers must use a type assertion and continue safely when the
+// interface, or report false through [ConditionalProcessTableScanner].
+// Callers must use [AsProcessTableScanner] and continue safely when the
 // provider lacks the capability.
 type ProcessTableScanner interface {
 	// FindRuntimesBySessionID returns live agent root processes carrying
@@ -1328,6 +1513,13 @@ type Config struct {
 	// ReadyDelayMs is a fallback fixed delay when no prompt prefix is available.
 	ReadyDelayMs int
 
+	// NotReadyMarkers are text the agent prints when it discards a submitted
+	// prompt because it is not ready for input yet, even though its input
+	// prompt is showing (e.g. Copilot's "policy is still loading"). A marker
+	// that appears after a startup turn is submitted means the turn was
+	// dropped, so the runtime may submit it again.
+	NotReadyMarkers []string
+
 	// ProcessNames lists expected process names for liveness checks.
 	ProcessNames []string
 
@@ -1353,7 +1545,8 @@ type Config struct {
 	PreStart []string
 
 	// SessionSetup is a list of shell commands run after session creation,
-	// between verify-alive and nudge. Commands run in gc's process via sh -c.
+	// between verify-alive and nudge. Commands run in gc's process through the
+	// platform's command interpreter (see [ShellCommandContext]).
 	SessionSetup []string
 
 	// SessionSetupScript is a script path run after session_setup commands.
@@ -1406,7 +1599,9 @@ type Config struct {
 	// PromptSuffix is the shell-quoted prompt text appended to Command
 	// when starting the session. Excluded from CoreFingerprint because
 	// it contains beacon text with timestamps or other volatile data
-	// that should not trigger restarts.
+	// that should not trigger restarts. On Windows the ACP provider
+	// refuses it: no prompt text may reach a command line there (see
+	// [ShellQuote]), so an ACP agent's prompts ride Nudge instead.
 	PromptSuffix string
 
 	// PromptFlag is the CLI flag (e.g., "--prompt") prepended to

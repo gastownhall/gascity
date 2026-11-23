@@ -17,13 +17,16 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads/contract",
+        "//internal/beads/proxyendpoint",
         "//internal/builtinpacks",
         "//internal/config",
         "//internal/fsys",
         "//internal/git",
         "//internal/packregistry",
         "//internal/pathdurability",
+        "//internal/pathutil",
         "//internal/remotesource",
+        "//internal/shellquote",
     ],
 )
 
@@ -50,6 +53,7 @@ go_test(
         "//internal/fsys",
         "//internal/git",
         "//internal/pathdurability",
+        "//internal/shellquote",
         "//internal/testenv",
     ],
 )

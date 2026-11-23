@@ -147,3 +147,39 @@ func TestSeatHooksReadTheBindingOnASplitCity(t *testing.T) {
 		t.Errorf("the work store holds %s (type %s, labels %v); a relocated class must be served from the binding only", b.ID, b.Type, b.Labels)
 	}
 }
+
+// TestSessionNewAliasReservationReadsTheBindingOnASplitCity pins gc session
+// new's alias reservation on a city whose sessions live in the binding: a
+// second session asking for an alias the first one holds is refused rather
+// than minted beside it. Two checks enforce it, the pre-flight in
+// cmdSessionNew and the one the session manager makes under the identifier
+// lock; both read the sessions store, and either alone refuses this.
+func TestSessionNewAliasReservationReadsTheBindingOnASplitCity(t *testing.T) {
+	f := newSplitHookBudgetFixture(t)
+	t.Setenv("GC_SESSION_ID", "")
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{hookBudgetIdentity}, "split-alias", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(first) = %d; stderr=%s", code, stderr.String())
+	}
+	resetHookBudgetProcessState(t)
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdSessionNew([]string{hookBudgetIdentity}, "split-alias", "", "", true, false, 0, &stdout, &stderr); code == 0 {
+		t.Fatal("cmdSessionNew(second) = 0, want an alias conflict: the reservation did not read the binding")
+	}
+	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
+		t.Fatalf("stderr = %q, want the alias conflict", stderr.String())
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(f.cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	work, err := openCityStoreAt(f.cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	held, err := cliSessionStore(work, cfg, f.cityDir).ListByMetadata(map[string]string{"alias": "split-alias"}, 0)
+	if err != nil || len(held) != 1 {
+		t.Fatalf("binding session beads holding the alias = %d (%v), want 1", len(held), err)
+	}
+}

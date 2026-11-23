@@ -115,6 +115,7 @@ func TestDoRuntimeHeartbeatJSONOutput(t *testing.T) {
 	if out.Session != sessionName {
 		t.Errorf("unexpected session %q", out.Session)
 	}
+	validateJSONAgainstResultSchema(t, []string{"runtime", "heartbeat"}, stdout.Bytes())
 }
 
 func TestValidateHeartbeatDuration(t *testing.T) {

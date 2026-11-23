@@ -219,7 +219,7 @@ jobs:
             end
 
             def install
-              bin.install "gc", "gc-osc7501"
+              bin.install "gc", "gc-osc7501", "gc-write-mint"
             end
 
             def caveats

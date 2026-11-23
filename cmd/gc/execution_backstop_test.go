@@ -753,9 +753,9 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 	}
 }
 
-// driveToEscalation spends the attempt budget on the fixture's claim and
-// confirms the escalation drained the session exactly once.
-func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
+// driveToLastNudge observes the fixture's claim and spends every attempt on
+// it, leaving f.now at the pass that reserved the last one.
+func driveToLastNudge(t *testing.T, f *executionBackstopFixture) {
 	t.Helper()
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
@@ -764,6 +764,16 @@ func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
 	}
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("last-nudge precondition: delivered nudges = %d, want %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+}
+
+// driveToEscalation spends the attempt budget on the fixture's claim and
+// confirms the escalation drained the session exactly once.
+func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
+	t.Helper()
+	driveToLastNudge(t, f)
 	f.now = f.now.Add(idleClaimNudgeBackoff)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
@@ -1593,5 +1603,321 @@ func TestExecutionBackstopNeverDrainsAStartedSeatWhoseStampDidNotPersist(t *test
 	}
 	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting+" ") {
 		t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldExecuting)
+	}
+}
+
+// holdUntil stamps held_until on the session bead the way `gc runtime
+// heartbeat` does: an RFC3339 deadline.
+func (f *executionBackstopFixture) holdUntil(t *testing.T, until time.Time) {
+	t.Helper()
+	f.setSessionMeta(t, map[string]string{"held_until": until.UTC().Format(time.RFC3339)})
+}
+
+// TestExecutionBackstopHonorsAHeartbeatHold: a seat that called `gc runtime
+// heartbeat` declared a long silent operation. Its pane is quiet for far longer
+// than the grace, yet the backstop neither marks it, nudges it, nor drains it
+// while the hold stands, and the breadcrumb names the heartbeat as the gate.
+func TestExecutionBackstopHonorsAHeartbeatHold(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.holdUntil(t, f.now.Add(2*time.Hour))
+
+	f.tickStale(t)
+
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("nudges to a seat under a heartbeat hold = %d, want 0; stdout=%s", got, f.stdout.String())
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests for a seat under a heartbeat hold = %v, want none", f.drained)
+	}
+	for _, e := range f.rec.Events {
+		if e.Type == events.ExecutionStepStalled {
+			t.Fatalf("execution.step_stalled emitted for a seat under a heartbeat hold: %+v", e)
+		}
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
+		t.Fatalf("persisted work marker = %q, want no pacing write under a heartbeat hold", got)
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldHeartbeat+" ") {
+		t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldHeartbeat)
+	}
+}
+
+// TestExecutionBackstopIgnoresAHeartbeatThatIsNotInForce: an absent, empty or
+// expired held_until leaves the backstop exactly as it was: the attempts are
+// spent and the seat is drained once.
+func TestExecutionBackstopIgnoresAHeartbeatThatIsNotInForce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta func(f *executionBackstopFixture) map[string]string
+	}{
+		{"absent", func(*executionBackstopFixture) map[string]string { return nil }},
+		{"empty", func(*executionBackstopFixture) map[string]string { return map[string]string{"held_until": ""} }},
+		{"expired", func(f *executionBackstopFixture) map[string]string {
+			return map[string]string{"held_until": f.now.Add(-time.Hour).UTC().Format(time.RFC3339)}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if meta := tc.meta(f); meta != nil {
+				f.setSessionMeta(t, meta)
+			}
+
+			f.tickStale(t)
+
+			if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+				t.Fatalf("delivered nudges = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+			}
+			if len(f.drained) != 1 || f.drained[0] != f.sessName {
+				t.Fatalf("drain requests = %v, want exactly one for %s", f.drained, f.sessName)
+			}
+			if got := f.sessionMeta(t, executionClaimHoldKey); strings.HasPrefix(got, executionHoldHeartbeat) {
+				t.Fatalf("hold breadcrumb = %q, want no heartbeat hold", got)
+			}
+		})
+	}
+}
+
+// holdThenLapse drives a seat that was nudged once through three ticks held by
+// hold, each a full backoff apart (so a nudge is due on every one), then
+// releases the hold and ticks once more. A hold skips the tick; it must not
+// erase the pacing state, so the first tick after the release delivers the
+// second nudge at once rather than re-observing the claim and restarting the
+// grace window.
+func holdThenLapse(t *testing.T, f *executionBackstopFixture, hold, release func()) {
+	t.Helper()
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // first sighting
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // first nudge
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges before the hold = %d, want 1; stdout=%s", got, f.stdout.String())
+	}
+	wantAt := f.sessionMeta(t, executionClaimNudgeAtKey)
+
+	hold()
+	for i := 0; i < 3; i++ {
+		f.now = f.now.Add(idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		if got := f.nudgeCount(); got != 1 {
+			t.Fatalf("nudges on held tick %d = %d, want still 1; stdout=%s", i+1, got, f.stdout.String())
+		}
+		if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+			t.Fatalf("work marker on held tick %d = %q, want %q kept", i+1, got, f.work.ID)
+		}
+		if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+			t.Fatalf("attempt count on held tick %d = %q, want 1 kept", i+1, got)
+		}
+		if got := f.sessionMeta(t, executionClaimNudgeAtKey); got != wantAt {
+			t.Fatalf("nudge time on held tick %d = %q, want %q kept", i+1, got, wantAt)
+		}
+	}
+
+	release()
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.nudgeCount(); got != 2 {
+		t.Fatalf("nudges on the first tick after the hold = %d, want 2 (pacing resumed, not restarted); stdout=%s", got, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "2" {
+		t.Fatalf("attempt count after the hold = %q, want 2", got)
+	}
+}
+
+// TestExecutionBackstopHeartbeatHoldKeepsThePacingState: a heartbeat that
+// lapses with the seat still quiet resumes the escalation where it left off.
+func TestExecutionBackstopHeartbeatHoldKeepsThePacingState(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	var until time.Time
+	holdThenLapse(t, f,
+		func() {
+			until = f.now.Add(idleClaimNudgeBackoff*3 + time.Minute)
+			f.holdUntil(t, until)
+		},
+		func() { f.now = until },
+	)
+}
+
+// TestExecutionBackstopMultiClaimHoldKeepsThePacingState is the same property
+// for the multi-claim hold: a transient second claim must not reset a window
+// already running.
+func TestExecutionBackstopMultiClaimHoldKeepsThePacingState(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	second, err := f.store.Create(beads.Bead{Title: "second claimed step", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the second work bead: %v", err)
+	}
+	holdThenLapse(t, f,
+		func() {
+			inProgress := "in_progress"
+			if err := f.store.Update(second.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.sessName}); err != nil {
+				t.Fatalf("claiming the second work bead: %v", err)
+			}
+		},
+		func() {
+			closed := "closed"
+			if err := f.store.Update(second.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+				t.Fatalf("closing the second work bead: %v", err)
+			}
+		},
+	)
+}
+
+// TestExecutionBackstopTheLastNudgeGetsItsFullBackoff (ga-uns4sw): every
+// earlier nudge gets idleClaimNudgeBackoff to be answered before the next
+// step, and so does the last. A pass inside its backoff latches nothing,
+// reports nothing, drains nothing and nudges no more: a seat answering it by
+// running its claim hook gets the time to do so.
+func TestExecutionBackstopTheLastNudgeGetsItsFullBackoff(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	driveToLastNudge(t, f)
+	lastNudge := f.now
+
+	for _, after := range []time.Duration{10 * time.Second, idleClaimNudgeBackoff - time.Second} {
+		f.now = lastNudge.Add(after)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		if len(f.drained) != 0 {
+			t.Fatalf("drain requests %s after the last nudge (inside its %s backoff) = %v, want none; stdout=%s",
+				after, idleClaimNudgeBackoff, f.drained, f.stdout.String())
+		}
+		if got := f.stalledEvents(); got != 0 {
+			t.Fatalf("execution.step_stalled events %s after the last nudge = %d, want 0", after, got)
+		}
+		if got := f.sessionMeta(t, executionClaimNudgeStalledKey); got != "" {
+			t.Fatalf("stalled latch %s after the last nudge = %q, want none", after, got)
+		}
+		if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+			t.Fatalf("delivered nudges %s after the last nudge = %d, want still %d", after, got, idleClaimNudgeMaxAttempts)
+		}
+	}
+}
+
+// TestExecutionBackstopEscalatesOnceTheLastBackoffHasPassed (ga-uns4sw): the
+// last nudge's backoff is the whole answer window, not a grace on top of it.
+// The first pass at or after it records exactly one latch, one
+// execution.step_stalled event and one drain request, and later passes inside
+// executionStalledLatchRetryAfter add none.
+func TestExecutionBackstopEscalatesOnceTheLastBackoffHasPassed(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	driveToLastNudge(t, f)
+	lastNudge := f.now
+
+	f.now = lastNudge.Add(idleClaimNudgeBackoff - time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("one second before the last backoff ends: drains %v, events %d; want neither yet", f.drained, f.stalledEvents())
+	}
+
+	f.now = lastNudge.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests once the last backoff passed = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	}
+	if got := f.stalledEvents(); got != 1 {
+		t.Fatalf("execution.step_stalled events once the last backoff passed = %d, want 1", got)
+	}
+	latchedAt := f.sessionMeta(t, executionClaimNudgeStalledKey)
+	if latchedAt != f.now.UTC().Format(time.RFC3339) {
+		t.Fatalf("stalled latch = %q, want the escalating pass %s", latchedAt, f.now.UTC().Format(time.RFC3339))
+	}
+
+	escalatedAt := f.now
+	for _, after := range []time.Duration{time.Second, idleClaimNudgeBackoff, executionStalledLatchRetryAfter - time.Second} {
+		f.now = escalatedAt.Add(after)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if len(f.drained) != 1 || f.stalledEvents() != 1 {
+		t.Fatalf("inside the latch window: drains %v, events %d; want still one of each", f.drained, f.stalledEvents())
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledKey); got != latchedAt {
+		t.Fatalf("stalled latch inside its window = %q, want unchanged %q", got, latchedAt)
+	}
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("delivered nudges = %d, want still %d", got, idleClaimNudgeMaxAttempts)
+	}
+}
+
+// TestExecutionBackstopANewClaimStartsWithoutTheOldLatch (ga-uns4sw): a seat
+// that escalated claim A and then, in the same incarnation, holds only claim
+// B opens B's window without A's latch. B gets its own grace, nudges and last
+// backoff, then its own escalation, though A's latch is still inside
+// executionStalledLatchRetryAfter.
+func TestExecutionBackstopANewClaimStartsWithoutTheOldLatch(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
+	latchedA := f.now
+
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing claim A: %v", err)
+	}
+	claimB, err := f.store.Create(beads.Bead{
+		Title: "claimed step B",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:  "root-1",
+			beadmeta.StepIDMetadataKey:      "step-2",
+			beadmeta.SessionIDMetadataKey:   f.session.ID,
+			beadmeta.SessionNameMetadataKey: f.sessName,
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding claim B: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := f.store.Update(claimB.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.sessName}); err != nil {
+		t.Fatalf("claiming B: %v", err)
+	}
+
+	// One pass sees the same incarnation holding only B: a fresh window.
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != claimB.ID {
+		t.Fatalf("marker work after B's first pass = %q, want %q", got, claimB.ID)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
+		t.Fatalf("marker count after B's first pass = %q, want 0", got)
+	}
+	for _, key := range []string{executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey} {
+		if got := f.sessionMeta(t, key); got != "" {
+			t.Fatalf("%s after the fresh window = %q, want A's latch cleared", key, got)
+		}
+	}
+
+	// B, quiet and unstarted, spends its own budget and then escalates.
+	nudgesBefore := f.nudgeCount()
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		if len(f.drained) != 1 {
+			t.Fatalf("drain requests during B's nudge %d = %v, want only A's", i+1, f.drained)
+		}
+	}
+	if got := f.nudgeCount() - nudgesBefore; got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("nudges delivered for B = %d, want its own %d", got, idleClaimNudgeMaxAttempts)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if !f.now.Before(latchedA.Add(executionStalledLatchRetryAfter)) {
+		t.Fatalf("B escalated at %s, not inside A's latch window ending %s", f.now, latchedA.Add(executionStalledLatchRetryAfter))
+	}
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests once B's budget is spent = %v, want a second escalation; stdout=%s", f.drained, f.stdout.String())
+	}
+	if got := f.stalledEvents(); got != 2 {
+		t.Fatalf("execution.step_stalled events = %d, want one per escalated claim", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-1" {
+		t.Fatalf("latch token after B's escalation = %q, want incarnation-1", got)
 	}
 }

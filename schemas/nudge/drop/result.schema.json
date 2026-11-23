@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc nudge drop --json success result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "command",
+    "city_path",
+    "results"
+  ],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "nudge drop" },
+    "city_path": { "type": "string" },
+    "results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/result" }
+    }
+  },
+  "$defs": {
+    "result": {
+      "type": "object",
+      "required": [
+        "id",
+        "ok"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "ok": { "type": "boolean" },
+        "outcome": { "type": "string" },
+        "error": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

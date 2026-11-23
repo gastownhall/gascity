@@ -16,8 +16,9 @@ import (
 
 // On a split city `gc bd` is an ALLOWLIST. bd writes whatever it is told into
 // the work store, and a bead that lands there with an infrastructure class is
-// stranded: every later routed gc command refuses until the fleet is stopped
-// and the row repaired. gc bd forwards only the command paths in
+// stranded: no reader of its class sees it, and the city serves degraded and
+// says so (gc storage status exits 1, a storage.binding.stranded event, a
+// warning on every gc process) until the row is repaired. gc bd forwards only the command paths in
 // bdSplitAllowlist, each with a vetted flag set; anything else is refused with
 // a pointer to the gc-native command.
 //
@@ -157,7 +158,7 @@ var bdSplitAllowlist = map[string]bdSplitCommand{
 	},
 
 	// Writes judged by the class-must-not-flip guard.
-	"create":          {judge: judgeBdCreate, why: "judged: the bead's type, labels and metadata are classified"},
+	"create":          {judge: judgeBdCreate, why: "judged: the bead's type, labels and metadata are classified; a --graph plan is judged node by node"},
 	"q":               {judge: judgeBdCreate, why: "judged: the bead's type and labels are classified"},
 	"update":          {judge: judgeBdUpdate, why: "judged: type/label/metadata writes are classified against the bead they land on"},
 	"label add":       {judge: judgeBdLabelAddRemove, why: "judged against the bead"},
@@ -619,9 +620,17 @@ type bdClassGuardInput struct {
 	gcFlag    bool
 	holds     []coordclass.Class
 	scopeRoot string
+	// inv is the pinned inventory the argv was resolved under; a judge that
+	// repoints argv verifies the result against it (bdRepointFlag).
+	inv *bdflags.Inventory
 	// judged collects the caller-named files the judge read
 	// (readJudgedFile); an admitted write is pointed at private copies.
 	judged *bdJudgedFiles
+	// flipNote follows a class-flip refusal checkIDs writes for a variant at
+	// or after index flipNoteFrom: why that reading of the write was judged
+	// (bdMetadataReadingsNote), or "".
+	flipNote     string
+	flipNoteFrom int
 	bdClassGuardDeps
 }
 
@@ -633,9 +642,16 @@ func (in bdClassGuardInput) pass() bdClassGuard { return bdClassGuard{args: in.b
 
 // bdClassFlipGuard is gc bd's split-city gate: the bd build check, the
 // allowlist, then the allowlisted command's judge. It runs after the by-id
-// door, which has already served or refused every binding resident. A
-// single-store city passes everything through unchanged (gc's own
-// --skip-infra on import is dropped).
+// door (maybeRouteBdByID), which has served or refused every binding resident
+// it probed: the subjects of a served verb, of a write mutation, of a by-id
+// read, or of a subject-table verb (bdByIDSubjectTable), and any
+// reserved-prefix id an argv outside that table addresses. It has NOT probed
+// a non-subject position of a table verb (comment text, a `dep remove`
+// target), nor a work-prefixed id in an argv none of those reduce to
+// subjects — a verb in no table, or a scan made ambiguous by a flag outside
+// the manifest — so such an argv can reach this gate naming a binding
+// resident, and this gate does not decide residence. A single-store city passes everything through unchanged (gc's
+// own --skip-infra on import is dropped).
 func bdClassFlipGuard(cfg *config.City, scopeRoot string, bdArgs []string, deps bdClassGuardDeps) bdClassGuard {
 	holds := workStoreClassHolds(cfg)
 	args, gcFlag := stripGCOwnFlags(bdArgs)
@@ -659,7 +675,7 @@ func bdClassFlipGuard(cfg *config.City, scopeRoot string, bdArgs []string, deps 
 	judged := &bdJudgedFiles{}
 	g := res.cmd.judge(bdClassGuardInput{
 		path: res.path, args: res.args, bdArgs: args, gcFlag: gcFlag, holds: holds, scopeRoot: scopeRoot,
-		judged: judged, bdClassGuardDeps: deps,
+		inv: inv, judged: judged, bdClassGuardDeps: deps,
 	})
 	if g.refusal == "" {
 		g = judged.pin(inv, res.path, g)

@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -1016,7 +1018,7 @@ schema = 1
 name = "polecat"
 scope = "city"
 `)
-	if _, err := runRepoCacheGit(seedDir, "init"); err != nil {
+	if _, err := runRepoCacheGit(seedDir, "init", "-q"); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 	if _, err := runRepoCacheGit(seedDir, "add", "pack.toml"); err != nil {
@@ -2620,4 +2622,338 @@ func TestQualifiedName_WithBindingName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// useNeutralGitTestEnv isolates real-git cache tests from the host's user
+// config and locale so seeding and diagnostics are deterministic.
+func useNeutralGitTestEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("LC_ALL", "C")
+}
+
+// seedRepoCacheGit commits every file under dir into a fresh repository
+// through the real cache git runner and returns the HEAD commit.
+func seedRepoCacheGit(t *testing.T, dir string) string {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"add", "."},
+		{"-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "seed"},
+	} {
+		if _, err := defaultRunRepoCacheGit(dir, args...); err != nil {
+			t.Fatalf("seeding cache repo: %v", err)
+		}
+	}
+	commit, err := defaultRunRepoCacheGit(dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+	return commit
+}
+
+// recordRepoCacheGit delegates to the real cache git runner and returns a
+// pointer to the subcommand argument lists it was invoked with.
+func recordRepoCacheGit(t *testing.T) *[]string {
+	t.Helper()
+	var calls []string
+	prev := runRepoCacheGit
+	runRepoCacheGit = func(dir string, args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return defaultRunRepoCacheGit(dir, args...)
+	}
+	t.Cleanup(func() { runRepoCacheGit = prev })
+	return &calls
+}
+
+func TestValidateLockedRemoteCacheAcceptsContentIdenticalStatDirtyFiles(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, cacheDir string)
+	}{
+		{name: "writable index"},
+		{name: "held index lock", setup: func(t *testing.T, cacheDir string) {
+			writeTestFile(t, cacheDir, filepath.Join(".git", "index.lock"), "")
+		}},
+		{name: "optional locks disabled", setup: func(t *testing.T, _ string) {
+			t.Setenv("GIT_OPTIONAL_LOCKS", "0")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useNeutralGitTestEnv(t)
+			cacheDir := t.TempDir()
+			writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+			writeTestFile(t, cacheDir, "formulas/build.toml", "formula = \"build\"\n")
+			commit := seedRepoCacheGit(t, cacheDir)
+
+			// Re-render the formula with byte-identical content: new inode via
+			// temp+rename and a different mtime, as template tooling does.
+			formula := filepath.Join(cacheDir, "formulas", "build.toml")
+			tmp := formula + ".tmp"
+			if err := os.WriteFile(tmp, []byte("formula = \"build\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, formula); err != nil {
+				t.Fatal(err)
+			}
+			future := time.Now().Add(time.Hour)
+			if err := os.Chtimes(formula, future, future); err != nil {
+				t.Fatal(err)
+			}
+			if tc.setup != nil {
+				tc.setup(t, cacheDir)
+			}
+
+			calls := recordRepoCacheGit(t)
+			if err := validateLockedRemoteCache("https://example.com/tools.git", cacheDir, commit); err != nil {
+				t.Fatalf("validateLockedRemoteCache rejected content-identical stat-dirty cache: %v", err)
+			}
+			want := []string{"rev-parse HEAD", "status --porcelain"}
+			if !slices.Equal(*calls, want) {
+				t.Fatalf("git calls = %q, want %q", *calls, want)
+			}
+		})
+	}
+}
+
+func TestValidateLockedRemoteCacheIgnoresGitTraceOutput(t *testing.T) {
+	useNeutralGitTestEnv(t)
+	cacheDir := t.TempDir()
+	writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+	commit := seedRepoCacheGit(t, cacheDir)
+
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+	if err := validateLockedRemoteCache("https://example.com/tools.git", cacheDir, commit); err != nil {
+		t.Fatalf("validateLockedRemoteCache with GIT_TRACE set: %v", err)
+	}
+}
+
+func TestRepoCacheGitEnvDropsOnlyTraceVariables(t *testing.T) {
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+	t.Setenv("GC_REPO_CACHE_ENV_PROBE", "kept")
+	env := repoCacheGitEnv()
+	for _, e := range env {
+		if strings.HasPrefix(e, "GIT_TRACE") {
+			t.Errorf("repoCacheGitEnv kept trace variable %q", e)
+		}
+	}
+	for _, want := range []string{"GC_REPO_CACHE_ENV_PROBE=kept", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("repoCacheGitEnv missing %q", want)
+		}
+	}
+}
+
+func TestValidateLockedRemoteCacheDirtyErrorNamesEntries(t *testing.T) {
+	const source = "https://example.com/tools.git"
+	seed := func(t *testing.T) (string, string) {
+		t.Helper()
+		useNeutralGitTestEnv(t)
+		cacheDir := t.TempDir()
+		writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+		writeTestFile(t, cacheDir, ".gitignore", "*.pyc\n")
+		return cacheDir, seedRepoCacheGit(t, cacheDir)
+	}
+	requireDirty := func(t *testing.T, err error, cacheDir string, entries ...string) string {
+		t.Helper()
+		if err == nil {
+			t.Fatal("validateLockedRemoteCache accepted a dirty cache")
+		}
+		msg := err.Error()
+		for _, want := range append([]string{"has local worktree changes", `run "gc import install"`, fmt.Sprintf("%q", cacheDir)}, entries...) {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error = %q, want it to contain %q", msg, want)
+			}
+		}
+		return msg
+	}
+
+	t.Run("modified and untracked entries", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		writeTestFile(t, cacheDir, "pack.toml", "[pack]\r\nname = \"tools\"\r\nschema = 1\r\n")
+		writeTestFile(t, cacheDir, "extra.txt", "extra\n")
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		msg := requireDirty(t, err, cacheDir, `" M pack.toml"`, `"?? extra.txt"`)
+		if strings.Contains(msg, "more") {
+			t.Errorf("error = %q, want no omitted-entry count for two entries", msg)
+		}
+	})
+
+	t.Run("caps reported entries", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"} {
+			writeTestFile(t, cacheDir, name, "x\n")
+		}
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		msg := requireDirty(t, err, cacheDir, `"?? a.txt"`, `"?? b.txt"`, `"?? c.txt"`, "and 2 more")
+		for _, omitted := range []string{"d.txt", "e.txt"} {
+			if strings.Contains(msg, omitted) {
+				t.Errorf("error = %q, want %s omitted", msg, omitted)
+			}
+		}
+	})
+
+	t.Run("mode-only change", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		if err := os.Chmod(filepath.Join(cacheDir, "pack.toml"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		requireDirty(t, err, cacheDir, `" M pack.toml"`)
+	})
+
+	t.Run("unusual pathname is quoted", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		writeTestFile(t, cacheDir, "line\nbreak.txt", "x\n")
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		msg := requireDirty(t, err, cacheDir, "line")
+		if strings.Contains(msg, "\n") {
+			t.Errorf("error = %q, want no raw newline", msg)
+		}
+	})
+
+	t.Run("embedded double quote is escaped", func(t *testing.T) {
+		want := `"?? say \"hi\".txt"`
+		if got := dirtyStatusSummary(`?? say "hi".txt`); got != want {
+			t.Errorf("dirtyStatusSummary = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("ignored artifacts accepted", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		writeTestFile(t, cacheDir, "scripts/__pycache__/tool.pyc", "bytecode")
+		if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
+			t.Fatalf("validateLockedRemoteCache rejected ignored artifacts: %v", err)
+		}
+	})
+
+	t.Run("cache-local excluded artifacts accepted", func(t *testing.T) {
+		cacheDir, commit := seed(t)
+		// The exclude lives in .git/info, cache-local git state, not in the
+		// pack content itself.
+		writeTestFile(t, cacheDir, filepath.Join(".git", "info", "exclude"), "*.bak\n")
+		writeTestFile(t, cacheDir, "artifact.bak", "backup\n")
+		if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
+			t.Fatalf("validateLockedRemoteCache rejected an excluded artifact: %v", err)
+		}
+	})
+}
+
+// fakeStatusGitOnPath puts a git stub first and alone on PATH. It answers
+// rev-parse with headCommit and status with the given stdout and stderr,
+// exiting zero. The script uses only shell builtins.
+func fakeStatusGitOnPath(t *testing.T, headCommit, statusStdout, statusStderr string) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+	case "$arg" in
+	rev-parse) printf '%%s\n' '%s'; exit 0 ;;
+	status) printf '%%s' '%s'; printf '%%s\n' '%s' >&2; exit 0 ;;
+	esac
+done
+exit 2
+`, headCommit, statusStdout, statusStderr)
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+}
+
+func TestValidateLockedRemoteCacheGitStderrFailsClosed(t *testing.T) {
+	const (
+		source     = "https://example.com/tools.git"
+		headCommit = "0123456789abcdef0123456789abcdef01234567"
+		diagnostic = "warning: could not open directory sub/: Permission denied"
+	)
+	requireStatusDiagnostic := func(t *testing.T, err error, diagnostic string) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("validateLockedRemoteCache accepted a status that wrote diagnostics")
+		}
+		msg := err.Error()
+		for _, want := range []string{"worktree status", "git status --porcelain", diagnostic} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error = %q, want it to contain %q", msg, want)
+			}
+		}
+		if strings.Contains(msg, "local worktree changes") {
+			t.Errorf("error = %q, want stderr not reported as local worktree changes", msg)
+		}
+	}
+
+	t.Run("stderr with clean stdout", func(t *testing.T) {
+		fakeStatusGitOnPath(t, headCommit, "", diagnostic)
+		err := validateLockedRemoteCache(source, t.TempDir(), headCommit)
+		requireStatusDiagnostic(t, err, diagnostic)
+	})
+
+	t.Run("stderr with dirty stdout", func(t *testing.T) {
+		fakeStatusGitOnPath(t, headCommit, " M pack.toml\n", diagnostic)
+		err := validateLockedRemoteCache(source, t.TempDir(), headCommit)
+		requireStatusDiagnostic(t, err, diagnostic)
+	})
+
+	t.Run("real git unsearchable directory", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads unsearchable directories; the stub subtests cover this criterion")
+		}
+		useNeutralGitTestEnv(t)
+		cacheDir := t.TempDir()
+		writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+		commit := seedRepoCacheGit(t, cacheDir)
+		locked := filepath.Join(cacheDir, "locked")
+		writeTestFile(t, locked, "f.txt", "x\n")
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		err := validateLockedRemoteCache(source, cacheDir, commit)
+		requireStatusDiagnostic(t, err, "could not open directory")
+	})
+}
+
+func TestDefaultRunRepoCacheGitFailureKeepsStderr(t *testing.T) {
+	t.Run("nonzero exit", func(t *testing.T) {
+		useNeutralGitTestEnv(t)
+		cacheDir := t.TempDir()
+		writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n")
+		seedRepoCacheGit(t, cacheDir)
+
+		out, err := defaultRunRepoCacheGit(cacheDir, "rev-parse", "missing-revision")
+		if err == nil {
+			t.Fatal("rev-parse of a missing revision succeeded")
+		}
+		if out != "" {
+			t.Errorf("output = %q, want empty on failure", out)
+		}
+		for _, want := range []string{"git rev-parse missing-revision", "ambiguous argument"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to contain %q", err, want)
+			}
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Errorf("error = %v, want it to wrap *exec.ExitError", err)
+		}
+	})
+
+	t.Run("process start failure", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		out, err := defaultRunRepoCacheGit(t.TempDir(), "rev-parse", "HEAD")
+		if out != "" {
+			t.Errorf("output = %q, want empty on failure", out)
+		}
+		if !errors.Is(err, exec.ErrNotFound) {
+			t.Fatalf("error = %v, want it to wrap exec.ErrNotFound", err)
+		}
+		if !strings.Contains(err.Error(), "git rev-parse HEAD") {
+			t.Errorf("error = %q, want it to name the git command", err)
+		}
+	})
 }

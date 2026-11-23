@@ -70,6 +70,13 @@ func fakeProgramStatusFixtures(relayed fakeRelay) ProgramStatusFixtures {
 			p.emit(t, script...)
 			return p.session()
 		},
+		Held: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
+			p := newFakeProgramPane(t, mode)
+			p.arm(t)
+			p.fake.SetProgramHold(fakeProgramSession, true)
+			p.emit(t, script...)
+			return p.session()
+		},
 		Unarmed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
 			p := newFakeProgramPane(t, mode)
 			p.emit(t, script...)
@@ -234,6 +241,25 @@ func (p *fakeProgramPane) publish(t *testing.T, store *programstatus.Store) {
 	p.update(func(row *runtime.ProgramPaneRow) {
 		row.RecordForm, row.Record = programstatus.RecordForm(err), rec
 	})
+}
+
+// RelayedProgramOutput runs the emitter script steps as a relayed pane's
+// program does: behind the relay's byte path, which answers its probes, in
+// front of a pane that answers DA1 as tmux does. It returns what reached the
+// pane, which is what that pane's capture reader reads, and whether the
+// steps ended the program. A provider's Relayed fixture predicts its
+// capture with it.
+func RelayedProgramOutput(t *testing.T, steps ...string) (out []byte, ended bool) {
+	t.Helper()
+	prog, err := emit.ParseLines(steps...)
+	if err != nil {
+		t.Fatalf("emitter script: %v", err)
+	}
+	out, outcome, err := runFakeProgram(t, prog, relayAnswersProbes)
+	if err != nil {
+		t.Fatalf("running emitter script behind the relay: %v", err)
+	}
+	return out, outcome.Ended
 }
 
 // runFakeProgram runs prog as a pane's program, behind relayed, and returns
