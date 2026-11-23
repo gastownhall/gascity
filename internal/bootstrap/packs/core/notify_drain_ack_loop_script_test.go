@@ -41,6 +41,15 @@ func drainAckLoopGC(t *testing.T, events []string, beads map[string]string) (wor
 	if err := os.WriteFile(eventsFile, []byte(strings.Join(events, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	binDir, logPath = drainAckLoopGCReading(t, `cat "`+eventsFile+`"`, `echo "Sent message m-1 to human"`, work, beads)
+	return work, binDir, logPath
+}
+
+// drainAckLoopGCReading is drainAckLoopGC answering the event read with
+// eventsCmd and a mail send with mailCmd, each a shell command, over the
+// bead fixtures of work.
+func drainAckLoopGCReading(t *testing.T, eventsCmd, mailCmd, work string, beads map[string]string) (binDir, logPath string) {
+	t.Helper()
 	beadsDir := filepath.Join(work, "beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -51,12 +60,12 @@ func drainAckLoopGC(t *testing.T, events []string, beads map[string]string) (wor
 		}
 	}
 	binDir, logPath = fakeGCBin(t, `case "$1 $2" in
-"events --type") cat "`+eventsFile+`" ;;
+"events --type") `+eventsCmd+` ;;
 "bd show") if [ -f "`+beadsDir+`/$3.json" ]; then cat "`+beadsDir+`/$3.json"; else echo "bd: no such issue: $3" >&2; exit 1; fi ;;
-"mail send") echo "Sent message m-1 to human" ;;
+"mail send") `+mailCmd+` ;;
 *) echo "gc: unexpected call: $*" >&2; exit 1 ;;
 esac`)
-	return work, binDir, logPath
+	return binDir, logPath
 }
 
 // drainAckLoopBead is the still-claiming bead the loop mails about.
@@ -255,5 +264,144 @@ func TestNotifyDrainAckLoopHonorsTheWindowOverride(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "--since 30m") {
 		t.Fatalf("the script did not read the overridden 30m window:\n%s", data)
+	}
+}
+
+// TestNotifyDrainAckLoopFailsLoud pins the loud-fail contract: an event
+// read or a bead read that fails, output that does not decode, an invalid
+// window or threshold, or an escalation that does not land, exits non-zero
+// with the cause on the output — which is what makes the controller log
+// the order's output — and mails nothing. A failure never parks a bead or
+// counts half a window.
+func TestNotifyDrainAckLoopFailsLoud(t *testing.T) {
+	const readFails = `echo "simulated event API failure" >&2; exit 17`
+	threeCycles := []string{drainAckCycle1, drainAckCycle2, drainAckCycle3}
+	cases := []struct {
+		name  string
+		run   func(t *testing.T) (string, []string, error) // returns output, sends, run error
+		want  []string
+		clean bool // an empty window is a clean run
+		// attemptedSend: a mail send was made and failed — the escalation
+		// was tried, it just did not land, so a send attempt in the log is
+		// the failure itself, not a stray escalation.
+		attemptedSend bool
+	}{
+		{
+			name: "the event read fails",
+			run: func(t *testing.T) (string, []string, error) {
+				work := t.TempDir()
+				binDir, logPath := drainAckLoopGCReading(t, readFails, `echo "Sent message m-1 to human"`, work, nil)
+				out, err := runDrainAckLoop(t, binDir, drainAckLoopEnv(t, work))
+				return out, drainAckLoopSends(t, logPath), err
+			},
+			want: []string{"simulated event API failure", "could not read the session.drain_acked_with_assigned_work events"},
+		},
+		{
+			name: "the event output does not decode",
+			run: func(t *testing.T) (string, []string, error) {
+				work := t.TempDir()
+				binDir, logPath := drainAckLoopGCReading(t, `echo "event stream truncated {"`, `echo "Sent message m-1 to human"`, work, nil)
+				out, err := runDrainAckLoop(t, binDir, drainAckLoopEnv(t, work))
+				return out, drainAckLoopSends(t, logPath), err
+			},
+			want: []string{"could not decode the events gc events printed"},
+		},
+		{
+			name: "the bead read fails",
+			run: func(t *testing.T) (string, []string, error) {
+				work := t.TempDir()
+				eventsFile := filepath.Join(work, "events.jsonl")
+				if err := os.WriteFile(eventsFile, []byte(strings.Join(threeCycles, "\n")+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				binDir, logPath := drainAckLoopGCReading(t, `cat "`+eventsFile+`"`, `echo "Sent message m-1 to human"`, work, nil)
+				out, err := runDrainAckLoop(t, binDir, drainAckLoopEnv(t, work))
+				return out, drainAckLoopSends(t, logPath), err
+			},
+			want: []string{"could not read bead gc-9"},
+		},
+		{
+			name: "the bead output does not decode",
+			run: func(t *testing.T) (string, []string, error) {
+				work := t.TempDir()
+				eventsFile := filepath.Join(work, "events.jsonl")
+				if err := os.WriteFile(eventsFile, []byte(strings.Join(threeCycles, "\n")+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				binDir, logPath := drainAckLoopGCReading(t, `cat "`+eventsFile+`"`, `echo "Sent message m-1 to human"`, work,
+					map[string]string{"gc-9": "{"})
+				out, err := runDrainAckLoop(t, binDir, drainAckLoopEnv(t, work))
+				return out, drainAckLoopSends(t, logPath), err
+			},
+			want: []string{"could not decode what gc bd show printed"},
+		},
+		{
+			name: "the window is invalid",
+			run: func(t *testing.T) (string, []string, error) {
+				work := t.TempDir()
+				binDir, logPath := drainAckLoopGCReading(t, `true`, `echo "Sent message m-1 to human"`, work, nil)
+				out, err := runDrainAckLoop(t, binDir, drainAckLoopEnv(t, work, "GC_DRAIN_ACK_LOOP_WINDOW=soon"))
+				return out, drainAckLoopSends(t, logPath), err
+			},
+			want: []string{"GC_DRAIN_ACK_LOOP_WINDOW", "must be a duration"},
+		},
+		{
+			name: "the threshold is invalid",
+			run: func(t *testing.T) (string, []string, error) {
+				work := t.TempDir()
+				binDir, logPath := drainAckLoopGCReading(t, `true`, `echo "Sent message m-1 to human"`, work, nil)
+				out, err := runDrainAckLoop(t, binDir, drainAckLoopEnv(t, work, "GC_DRAIN_ACK_LOOP_THRESHOLD=0"))
+				return out, drainAckLoopSends(t, logPath), err
+			},
+			want: []string{"GC_DRAIN_ACK_LOOP_THRESHOLD", "whole number of at least 1"},
+		},
+		{
+			name: "the escalation does not land",
+			run: func(t *testing.T) (string, []string, error) {
+				work := t.TempDir()
+				eventsFile := filepath.Join(work, "events.jsonl")
+				if err := os.WriteFile(eventsFile, []byte(strings.Join(threeCycles, "\n")+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				binDir, logPath := drainAckLoopGCReading(t, `cat "`+eventsFile+`"`, `echo "store unavailable" >&2; exit 1`, work,
+					map[string]string{"gc-9": drainAckLoopBead})
+				out, err := runDrainAckLoop(t, binDir, drainAckLoopEnv(t, work))
+				return out, drainAckLoopSends(t, logPath), err
+			},
+			want:          []string{"could not escalate the drain-ack loop of gc-9"},
+			attemptedSend: true,
+		},
+		{
+			name: "an empty window is a clean run",
+			run: func(t *testing.T) (string, []string, error) {
+				work := t.TempDir()
+				binDir, logPath := drainAckLoopGCReading(t, `true`, `echo "Sent message m-1 to human"`, work, nil)
+				out, err := runDrainAckLoop(t, binDir, drainAckLoopEnv(t, work))
+				return out, drainAckLoopSends(t, logPath), err
+			},
+			clean: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, sends, err := tc.run(t)
+			if tc.clean {
+				if err != nil {
+					t.Fatalf("an empty window failed: %v\n%s", err, out)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("exited 0, want a failure:\n%s", out)
+			}
+			if !tc.attemptedSend && len(sends) != 0 {
+				t.Fatalf("sends = %q, want none:\n%s", sends, out)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("output does not say %q:\n%s", want, out)
+				}
+			}
+		})
 	}
 }
