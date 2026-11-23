@@ -2,6 +2,7 @@ package molecule
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -82,6 +83,10 @@ func instantiateViaGraphApply(ctx context.Context, applier beads.GraphApplyStore
 func isTransientGraphApplyError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var exhausted *beads.GraphApplyBudgetExhaustedError
+	if errors.As(err, &exhausted) {
+		return false // the apply spent the budget sized for this plan; an identical replay gets the same budget
 	}
 	text := strings.ToLower(err.Error())
 	if !isGraphApplyErrorText(text) {
