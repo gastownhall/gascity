@@ -1388,6 +1388,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OpenCode and MiMo Code agents now get SessionStart context once per
+  session.** It arrives as one synthetic first-message part from a new
+  `chat.message` hook. The managed-hook markers are confined to that one
+  `gc prime --hook` call and are absent from `providerSessionEnv()`,
+  `session.compacted` and the persona refresh; the role prompt stays in
+  `system[0]`. OpenCode hook version 9, MiMo Code hook version 5; `gc`
+  upgrades installed plugins below those or without the SessionStart
+  `chat.message` handling.
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues
   were given, so an empty convoy created with `--rig <rig>` could never

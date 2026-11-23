@@ -35,8 +35,8 @@ var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "op
 
 const (
 	managedPiHookVersion       = 10
-	managedOpenCodeHookVersion = 8
-	managedMimoCodeHookVersion = 4
+	managedOpenCodeHookVersion = 9
+	managedMimoCodeHookVersion = 5
 	managedOmpHookVersion      = 3
 )
 
@@ -545,7 +545,13 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		// A turn opens on a user-message id the session has not seen, not
 		// on a higher one: OpenCode's ids wrap and follow the wall clock, so
 		// an id-order gate stops opening turns (#6629).
-		!hookContains(src, "state.userMessageIDs.has(messageID)") {
+		!hookContains(src, "state.userMessageIDs.has(messageID)") ||
+		// SessionStart context is delivered once as a synthetic first-message
+		// part whose prime carries the managed-hook markers (ga-bfvxmcvb).
+		!hookContains(src, `"chat.message"`) ||
+		!hookContains(src, `GC_MANAGED_SESSION_HOOK: "1"`) ||
+		!hookContains(src, `GC_HOOK_EVENT_NAME: "SessionStart"`) ||
+		!hookContains(src, "synthetic: true") {
 		return true
 	}
 	for _, marker := range []string{
@@ -593,7 +599,14 @@ func mimocodeHookNeedsUpgrade(existing []byte) bool {
 		!hookContains(src, "const turns = new Map()") ||
 		// A turn opens on an unseen user-message id, not a higher one
 		// (#6629, same shape as OpenCode).
-		!hookContains(src, "state.userMessageIDs.has(messageID)")
+		!hookContains(src, "state.userMessageIDs.has(messageID)") ||
+		// SessionStart context is delivered once as a synthetic first-message
+		// part whose prime carries the managed-hook markers (same shape as
+		// OpenCode).
+		!hookContains(src, `"chat.message"`) ||
+		!hookContains(src, `GC_MANAGED_SESSION_HOOK: "1"`) ||
+		!hookContains(src, `GC_HOOK_EVENT_NAME: "SessionStart"`) ||
+		!hookContains(src, "synthetic: true")
 }
 
 func mimocodeHookVersion(content string) int {

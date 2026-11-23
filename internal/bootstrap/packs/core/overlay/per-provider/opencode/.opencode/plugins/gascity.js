@@ -17,6 +17,12 @@
 //     the per-turn text (nudges with their clock line, unread mail) is
 //     appended as a trailing system entry so it lands after every stable
 //     entry and the provider's prompt-cache prefix survives across turns.
+//   - chat.message → on the first message of a root session, run one
+//     gc prime --hook that carries the SessionStart markers and push its
+//     output onto that message as one synthetic text part, so the
+//     session-start context (beacon, step reminder, auto-handoff, unread-mail
+//     snapshot) reaches the model once and stays until compaction. The role
+//     prompt stays in system[0].
 //
 // OpenCode instantiates one plugin per directory, not per session. The
 // agent's root session, every subagent child session the task tool opens and
@@ -29,7 +35,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 8;
+const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -135,6 +141,20 @@ function providerSessionEnv(sessionID) {
   return env;
 }
 
+// sessionStartEnv is the environment of the one `gc prime --hook` that
+// reports a session start. gc reads the marker pair as "this is the session's
+// start": it adds the auto-handoff and the unread-mail snapshot, archives the
+// handoff as it writes stdout, and leaves out the role prompt once the startup
+// prompt was delivered. The pair therefore belongs to this one call and never
+// to providerSessionEnv(), the compaction refresh or the persona refresh.
+function sessionStartEnv(sessionID) {
+  return {
+    ...providerSessionEnv(sessionID),
+    GC_MANAGED_SESSION_HOOK: "1",
+    GC_HOOK_EVENT_NAME: "SessionStart",
+  };
+}
+
 async function mirrorTranscript(directory, client, sessionID) {
   const exportDir = process.env.GC_OPENCODE_TRANSCRIPT_DIR || "";
   const safeID = safeSessionID(sessionID);
@@ -191,6 +211,14 @@ export default async function gascityPlugin({ directory, client }) {
   // lifecycle events must not refresh the shared prime or hand their id to
   // `gc prime --hook` as the provider resume key.
   const childSessions = new Set();
+  // sessionStarts maps a session id to "armed" (a root session.created was
+  // seen and no message has claimed it yet) or "spent" (its first message has
+  // been seen). A session never armed, such as a child, a resumed session or
+  // one whose created event arrived late, has no entry until its first
+  // message records it as spent, and keeps today's per-turn delivery only.
+  // Entries are never removed: one small record per session for the life of
+  // the process, the same accepted bound as turns.
+  const sessionStarts = new Map();
 
   async function readPrime(force = false, extraEnv = {}) {
     if (force || cachedPrime === null) {
@@ -237,8 +265,7 @@ export default async function gascityPlugin({ directory, client }) {
   // a separate subscriber fiber, which relies on that delivery running ahead
   // of the first generation (the prompt loop awaits several steps before it
   // generates). Neither awaits the hook, so the event handler must record
-  // the turn before its first await. No chat.message hook is registered for
-  // this (see the transform below).
+  // the turn before its first await. chat.message does not open turns.
   //
   // Only a user message the session has not reported before opens a turn.
   // OpenCode also emits message.updated for an older user message when a
@@ -342,6 +369,71 @@ export default async function gascityPlugin({ directory, client }) {
     }
   }
 
+  // armSessionStart marks a root session whose first chat.message should carry
+  // the SessionStart context. It reads only the created event, never the
+  // client, so a payload without session info leaves the session unarmed, and
+  // it runs before the event handler's first await because the host does not
+  // wait for that handler.
+  function armSessionStart(sessionID, event) {
+    const info = event?.properties?.info;
+    if (!info || typeof info !== "object" || info.parentID) {
+      return;
+    }
+    if (typeof sessionID !== "string" || sessionID === "") {
+      return;
+    }
+    if (!sessionStarts.has(sessionID)) {
+      sessionStarts.set(sessionID, "armed");
+    }
+  }
+
+  // deliverSessionStart runs in chat.message, which the host awaits before it
+  // persists the user message, so it spawns gc at most once per session: in
+  // the call that claims an armed session. Every other call returns without
+  // I/O. The claim is recorded before the first await so a concurrent second
+  // message cannot also claim it. Delivery is at-most-once: gc archives the
+  // auto-handoff when it writes stdout, so nothing here may retry. Every
+  // failure leaves the content to the per-turn path.
+  async function deliverSessionStart(sessionID, output) {
+    if (typeof sessionID !== "string" || sessionID === "") {
+      return;
+    }
+    const armed = sessionStarts.get(sessionID) === "armed";
+    sessionStarts.set(sessionID, "spent");
+    if (!armed) {
+      return;
+    }
+    // Check the delivery channel before gc runs, so nothing is consumed
+    // without somewhere to put it.
+    const messageID = output?.message?.id;
+    if (!Array.isArray(output?.parts) || typeof messageID !== "string" || messageID === "") {
+      console.warn(
+        "gascity opencode plugin:",
+        "chat.message output has no parts array or message id; SessionStart context is left to the per-turn path",
+      );
+      return;
+    }
+    const payload = await runCommand(directory, ["prime", "--hook"], true, sessionStartEnv(sessionID));
+    if (!payload) {
+      return;
+    }
+    // The host assigned the user's part ids before this hook ran, and a part's
+    // id is its storage key, so the part brings its own, derived from the
+    // unique message id. "-" sorts below every id the host assigns, so the
+    // model reads this context ahead of the prompt. The array is extended in
+    // place: the host iterates the array it passed, and a replaced one is
+    // never persisted.
+    output.parts.push({
+      id: "prt_-" + messageID.replace(/^msg_/, ""),
+      sessionID,
+      messageID,
+      type: "text",
+      text: "SessionStart hook additional context:\n" + payload,
+      synthetic: true,
+      metadata: { gascity: { hook: "SessionStart" } },
+    });
+  }
+
   return {
     event: async ({ event }) => {
       switch (event.type) {
@@ -349,6 +441,9 @@ export default async function gascityPlugin({ directory, client }) {
         case "session.compacted":
           {
             const sessionID = sessionIDFromEvent(event);
+            if (event.type === "session.created") {
+              armSessionStart(sessionID, event);
+            }
             if (!(await isChildSession(sessionID, event))) {
               await readPrime(true, providerSessionEnv(sessionID));
             }
@@ -373,11 +468,24 @@ export default async function gascityPlugin({ directory, client }) {
       }
     },
 
-    // No chat.message hook: OpenCode persists output.message.system on the
-    // user message and joins it into the tail of system[0] on every
-    // generation of that turn, so anything written there re-enters the
-    // stable header and undoes the split below. It is not needed to open
-    // the turn either; message.updated precedes the first generation.
+    // chat.message runs before the host persists the user message, so it is
+    // where the SessionStart part joins that message's parts. It writes
+    // neither output.message.system (the host persists it on the user message
+    // and joins it into the tail of system[0] on every generation of that
+    // turn, which would undo the stable-header split below) nor a turn: turns
+    // open from message.updated. It never throws; the host awaits it.
+    "chat.message": async (input, output) => {
+      try {
+        await deliverSessionStart(input?.sessionID, output);
+      } catch (err) {
+        try {
+          console.warn("gascity opencode plugin:", "chat.message SessionStart delivery failed:", err?.message || err);
+        } catch {
+          return;
+        }
+      }
+    },
+
     "experimental.chat.system.transform": async (input, output) => {
       const prime = await readPrime();
       const volatile = await readTurnVolatile(input?.sessionID);
