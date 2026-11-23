@@ -37,7 +37,7 @@ These are the canonical reader's emitted result-line totals across lanes, not di
 test_log_dir: /var/tmp/deploy-ga-1nh67zro-20261122.t4FHpp/criterion3/evidence/remote/logs
 test_bd: GASCITY_TEST_BD version=v1.3.4 bin=/home/jaword/.local/bd-versions/v1.3.4/bd reports='bd version 1.3.4 (7ef2fd05e: HEAD@7ef2fd05eb0c)' ref_check=match:7ef2fd05e origin=preexisting
 waiver_ref: none
-failure_attribution: none (no failed test verdict)
+failure_attribution: none in the canonical full-suite chain; the separate publication-source attribution is recorded below.
 heavy_mode: none
 owned_topup: none required
 floor_topup: complete, 16/16 steps exit 0
@@ -126,3 +126,22 @@ Additional manual Bazel targets passed freshly: gc_split_strict_test, api_split_
 /var/tmp/deploy-ga-1nh67zro-20261122.t4FHpp/base-comparisons-result.txt (SHA256 e818008dede096cdaae3143777aeb3a40ef7e6eaab163c065ebb2e767fd73764)
 /var/tmp/deploy-ga-1nh67zro-20261122.t4FHpp/ci-closure.txt (SHA256 cf559da5cd3f2a12b296758280a5c71fce46c2c103551567368ad363877d4dbc)
 /var/tmp/deploy-ga-1nh67zro-20261122.t4FHpp/native-windows-closure.txt (SHA256 3fecdddca96fa7539d6b30512dd99dc5468ba4208f396a75b7e8331c7f2e8f20)
+
+## Publication-source validation
+
+The canonical gate above tested the reviewed changes merged with the pinned current base. A separate publication check also ran the complete unit/policy suite on frozen source head 1c2d5955a2c61d20e51b779f983b867f5c725745, before this report-only supplement. Its command was gascity-bazel-legs.sh test --config=fork-cache --keep_going --jobs=4 //...: leg 1 completed 297 targets (296 PASS, one FAIL; 70 executed and 227 cached), and the tokenrender processwrapper leg passed its one target. Its aggregate exit was 3. The failed verdict is retained; no failed test was retried. The normal pre-push hook was not launched after this equivalent suite failed.
+
+failure_attribution: TestDatedWaiversAgainstToday -> ga-5550q2dx
+- Clause 1: not diff-owned. The failure is internal/testpolicy/waiverexpiry/waiverexpiry_test.go:41; the entire package is unchanged and has no shared diff hunks.
+- Clause 2: tracker ga-5550q2dx was opened in full with its comments. Created 2026-11-05, it predates this run and explicitly documents this test and the historical provider-catalog expiry condition. This is the first occurrence on this deploy bead; its earlier hold was a different check-routed-test-rows condition. The sighting was appended to the existing tracker, without filing another.
+- Clause 3(a), MECHANISM: computed module test-binary import closures on the frozen source (23 packages) and canonical merge (24) both exclude cmd/gc. The change contains only five cmd/gc test files and this Markdown record. It cannot change the datedWaivers literal ledger inputs or clock read.
+- Clause 4: no path overlap with internal/testpolicy/waiverexpiry.
+
+The frozen source lacks landed renewal bc60286b7564195ad20e2eca1925cbcab555d455, present in the pinned gate base and canonical merge. The failing messages name the t3bridge/exec waivers expired 2026-11-05 and fleet-fatal after 2026-11-19; ACP/k8s/hybrid are warnings only. Earlier renewal 08190f2b9975f9415fd0621483b6a54961f1379d is present in both trees and is not the missing fix. This session's canonical unit log independently records TestDatedWaiversAgainstToday PASS by name. No source rebase, waiver edit or waiver_ref is involved.
+
+The non-diff-owned-gate-failure protocol authorizes a specific-head push with --no-verify after attribution. The final publication head differs from the checked source head only in this gate report; the exact resulting head is bound in bead metadata/notes before that push. The bead ownership and beads-chain pre-push checks are run explicitly. This authorizes branch publication; current-head required CI and the deferred Windows job remain required for merge.
+
+publication_load: threshold=15 waited_seconds=0 wait_timed_out=0 run_start_load=14.42 run_max_load=25.61 run_mean_load=20.32 run_readings=58
+publication_evidence: /var/tmp/deploy-ga-1nh67zro-20261122.t4FHpp/publish-result.txt
+publication_failure_log: /var/tmp/deploy-ga-1nh67zro-20261122.t4FHpp/prepush-waiverexpiry-test.log (SHA256 bbee3e28cc795bfdcd03a9f235c3ad16e5fd49b4ba4e3efa2dd76de13f752ee9)
+publication_import_closures: prepush-import-closure.txt, prepush-merge-import-closure.txt under the retained run directory.
