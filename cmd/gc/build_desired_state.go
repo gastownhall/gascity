@@ -1425,8 +1425,10 @@ func buildDemandTargets(
 				// Same guard conditions apply: healthy own rig store, not
 				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
+				// As there, a city row counts only when the seat's claim, which
+				// resolves the id in the rig store first, can win it (#5857).
 				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-					city := cityTargets(template)
+					city := crossStoreDemandLegs(cityTargets(template), ownTarget)
 					if namedSessionMode != "always" {
 						defaultScaleTargets = append(defaultScaleTargets, city...)
 					}
