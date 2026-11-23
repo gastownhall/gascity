@@ -66,7 +66,9 @@ func BenchmarkDriftDetect_NoDrift(b *testing.B) {
 // BenchmarkDriftDetect_WithRealisticPacks measures DetectPackDrift
 // against a 5-pack tree with ~hundreds of files. NFR-1 budget: <100ms
 // p95. The pack tree mirrors the gastown / consumer pack scale operators
-// see in the field.
+// see in the field. This benchmark reports mean time per op, and
+// TestDriftDetect_WithRealisticPacks_NFR1 checks only the best-case sample,
+// so neither enforces the p95 budget.
 func BenchmarkDriftDetect_WithRealisticPacks(b *testing.B) {
 	roots := buildRealisticPackTree(b, 5, 120)
 
@@ -165,9 +167,12 @@ func TestDriftDetect_NoDrift_NFR4(t *testing.T) {
 	t.Logf("NFR-4 OK: avg detect cost = %s over %d iterations (budget %s)", avg, iterations, budget)
 }
 
-// TestDriftDetect_WithRealisticPacks_NFR1 pins the NFR-1 p95 budget
-// (<100ms) for DetectPackDrift over a 5-pack city. p95 is computed
-// across enough samples that the upper tail is meaningful.
+// TestDriftDetect_WithRealisticPacks_NFR1 checks DetectPackDrift over a
+// 5-pack city against the NFR-1 100ms budget using the fastest of 30
+// samples (see driftBudgetStatistic), so host scheduling spikes cannot
+// fail it. This is a best-case bound: it catches a slowdown of every call,
+// not tail (p95) latency, which only BenchmarkDriftDetect_WithRealisticPacks
+// observes and no CI lane enforces.
 func TestDriftDetect_WithRealisticPacks_NFR1(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NFR budget test in short mode")
@@ -200,7 +205,8 @@ func TestDriftDetect_WithRealisticPacks_NFR1(t *testing.T) {
 // driftBudgetStatistic is the sample TestDriftDetect_WithRealisticPacks_NFR1
 // judges against its budget: the fastest one. Host load can only add time to a
 // call, never remove it, so the fastest of N calls is the one least touched by
-// it, while a real regression slows every call and so raises it too.
+// it, while a regression that slows every call raises it too; a regression
+// confined to some calls is not caught here.
 func driftBudgetStatistic(samples []time.Duration) time.Duration {
 	return slices.Min(samples)
 }
