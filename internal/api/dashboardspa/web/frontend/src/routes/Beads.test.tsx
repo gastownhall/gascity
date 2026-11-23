@@ -10,6 +10,7 @@ import type { SupervisorBead } from '../supervisor/beadReads';
 
 const PROJECT = 'gascity';
 const beadQueries: URLSearchParams[] = [];
+let boardBeads: SupervisorBead[];
 const supervisorWrites: Array<{
   method: string;
   path: string;
@@ -19,6 +20,7 @@ const supervisorWrites: Array<{
 beforeEach(() => {
   setActiveCity('test-city');
   beadQueries.length = 0;
+  boardBeads = [sampleBead()];
   supervisorWrites.length = 0;
   invalidate('beads:board:');
   invalidate('sessions');
@@ -31,7 +33,7 @@ beforeEach(() => {
       const method = requestMethod(input, init);
       if (url.pathname === '/v0/city/test-city/beads' && method === 'GET') {
         beadQueries.push(url.searchParams);
-        return jsonResponse(beadListPayload(url.searchParams.has('type') ? [] : [sampleBead()]));
+        return jsonResponse(beadListPayload(url.searchParams.has('type') ? [] : boardBeads));
       }
       if (url.pathname === '/v0/city/test-city/beads' && method === 'POST') {
         supervisorWrites.push({
@@ -136,6 +138,54 @@ describe('BeadsPage', () => {
     expect(screen.queryByRole('table')).toBeNull();
     expect(screen.queryByRole('radiogroup', { name: /view/i })).toBeNull();
     expect(screen.getByRole('button', { name: /new bead/i })).toBeTruthy();
+  });
+
+  it('filters the board by routed agent even before a session claims the bead', async () => {
+    const base = sampleBead(false);
+    boardBeads = [
+      { ...base, metadata: { 'gc.routed_to': 'reviewer' } },
+      {
+        ...base,
+        id: `${PROJECT}-0002`,
+        title: 'Claimed review',
+        status: 'in_progress',
+        assignee: 'session-42',
+        metadata: { 'gc.routed_to': 'reviewer' },
+      },
+      {
+        ...base,
+        id: `${PROJECT}-0003`,
+        title: 'Another role',
+        assignee: 'reviewer',
+        metadata: { 'gc.routed_to': 'rig/reviewer' },
+      },
+      { ...base, id: `${PROJECT}-0004`, title: 'Unrouted work' },
+    ];
+    renderPage();
+
+    const board = await screen.findByRole('region', { name: PROJECT });
+    const row = within(board).getByRole('button', { name: /sample bead/i });
+    expect(within(row).getByText('For agent: reviewer')).toBeTruthy();
+    const filter = screen.getByRole('combobox', { name: /for agent/i });
+    // The routed-agent filter is client-side: it must never issue a new read.
+    const queriesAfterLoad = beadQueries.length;
+    expect(queriesAfterLoad).toBeGreaterThan(0);
+
+    fireEvent.change(filter, { target: { value: 'reviewer' } });
+    expect(within(board).getByText('Sample bead')).toBeTruthy();
+    expect(within(board).getByText('Claimed review')).toBeTruthy();
+    expect(within(board).queryByText('Another role')).toBeNull();
+    expect(within(board).queryByText('Unrouted work')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /^in progress$/i }));
+    expect(within(board).queryByText('Sample bead')).toBeNull();
+    expect(within(board).getByText('Claimed review')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /^in progress$/i }));
+    fireEvent.change(filter, { target: { value: '' } });
+    expect(within(board).getByText('Unrouted work')).toBeTruthy();
+    expect(beadQueries).toHaveLength(queriesAfterLoad);
+    expect(supervisorWrites).toHaveLength(0);
   });
 
   it('requests direct supervisor current engineering beads without type fan-out or closed history', async () => {
@@ -351,7 +401,7 @@ function beadListPayload(items: ReadonlyArray<SupervisorBead>): {
   return { items, total: items.length };
 }
 
-function sampleBead(): SupervisorBead {
+function sampleBead(assigned = true): SupervisorBead {
   return {
     id: `${PROJECT}-0001`,
     title: 'Sample bead',
@@ -363,7 +413,7 @@ function sampleBead(): SupervisorBead {
     status: 'open',
     priority: 0,
     issue_type: 'task',
-    assignee: 'mayor',
+    ...(assigned ? { assignee: 'mayor' } : {}),
     labels: [],
     created_at: '2026-01-01T00:00:00Z',
   };

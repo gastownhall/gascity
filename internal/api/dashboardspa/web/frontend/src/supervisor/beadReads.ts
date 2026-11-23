@@ -8,6 +8,10 @@ import { SupervisorApiError, supervisorApi } from './client';
 
 export type SupervisorBead = Bead;
 
+export function routedAgent(bead: SupervisorBead): string | undefined {
+  return bead.metadata?.['gc.routed_to']?.trim() || undefined;
+}
+
 export interface SupervisorBeadList extends Omit<ListBodyBead, 'items' | 'total'> {
   items: SupervisorBead[];
   total: number;
