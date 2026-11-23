@@ -14,6 +14,11 @@ import (
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
+// canonicalTutorialRoot is the module-relative directory holding the
+// tutorial pages the goldens parse. It lives in this non-test file so both
+// `go build -tags acceptance_c` and the test binary see one declaration.
+const canonicalTutorialRoot = "docs/tutorials"
+
 type tutorialSnapshot struct {
 	pages map[string]*tutorialPage
 }

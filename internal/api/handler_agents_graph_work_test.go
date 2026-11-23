@@ -81,45 +81,57 @@ func getAgentByName(t *testing.T, st *fakeState, name string) agentResponse {
 // agents.running by the status handler and reads "working" — not "stopped" —
 // via /v0/agents, with its active_bead pointing at the graph bead.
 func TestGraphResidentWorkCountsAsRunning(t *testing.T) {
-	st := bdDogState(t)
-	graph := beads.NewMemStore()
-	st.graphBeadStore = graph
-	beadID := seedGraphWisp(t, graph, "bd__dog", "917c4dd26bd772e2463919029a889e0e")
+	for name, relocate := range map[string]func(st *fakeState, binding beads.Store){
+		"graph split": func(st *fakeState, binding beads.Store) { st.graphBeadStore = binding },
+		// The routes' whole split: every non-work class in the one binding,
+		// so the graph handle and the sessions handle share a store, and only
+		// the work store tells a relocated graph from an unrelocated one.
+		"whole split": func(st *fakeState, binding beads.Store) {
+			st.graphBeadStore, st.sessionsBeadStore, st.ordersBeadStore, st.nudgesBeadStore = binding, binding, binding, binding
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := bdDogState(t)
+			graph := beads.NewMemStore()
+			relocate(st, graph)
+			beadID := seedGraphWisp(t, graph, "bd__dog", "917c4dd26bd772e2463919029a889e0e")
 
-	// (b) Status handler counts the agent as running.
-	body := New(st).buildStatusBody(context.Background(), false)
-	if body.Agents.Total != 1 {
-		t.Fatalf("agents.total = %d, want 1", body.Agents.Total)
-	}
-	if body.Agents.Running != 1 {
-		t.Errorf("agents.running = %d, want 1 (graph-resident work must count)", body.Agents.Running)
-	}
-	if body.Running != 1 {
-		t.Errorf("top-level running = %d, want 1", body.Running)
-	}
+			// (b) Status handler counts the agent as running.
+			body := New(st).buildStatusBody(context.Background(), false)
+			if body.Agents.Total != 1 {
+				t.Fatalf("agents.total = %d, want 1", body.Agents.Total)
+			}
+			if body.Agents.Running != 1 {
+				t.Errorf("agents.running = %d, want 1 (graph-resident work must count)", body.Agents.Running)
+			}
+			if body.Running != 1 {
+				t.Errorf("top-level running = %d, want 1", body.Running)
+			}
 
-	// (a) /v0/agents reports the agent working with the graph bead active.
-	got := getAgentByName(t, st, "bd.dog")
-	if got.State != "working" {
-		t.Errorf("agent state = %q, want %q", got.State, "working")
-	}
-	if !got.Running {
-		t.Errorf("agent running = false, want true")
-	}
-	if got.ActiveBead != beadID {
-		t.Errorf("agent active_bead = %q, want %q", got.ActiveBead, beadID)
+			// (a) /v0/agents reports the agent working with the graph bead active.
+			got := getAgentByName(t, st, "bd.dog")
+			if got.State != "working" {
+				t.Errorf("agent state = %q, want %q", got.State, "working")
+			}
+			if !got.Running {
+				t.Errorf("agent running = false, want true")
+			}
+			if got.ActiveBead != beadID {
+				t.Errorf("agent active_bead = %q, want %q", got.ActiveBead, beadID)
+			}
+		})
 	}
 }
 
 // TestGraphResidentSingleStoreByteIdentical pins the single-store invariant:
-// with the graph class NOT relocated (GraphBeadStore() == CityBeadStore()), the
+// with the graph class NOT relocated (Stores().Graph() == CityBeadStore()), the
 // graph leg is inert — the very same wisp bead placed in the shared store is
 // ignored, so the agent stays stopped and uncounted, byte-identical to the
 // pre-seam behavior. This is the regression guard for the relocation gate.
 func TestGraphResidentSingleStoreByteIdentical(t *testing.T) {
 	st := bdDogState(t)
-	// graphBeadStore left nil => GraphBeadStore() falls back to the city store.
-	if st.GraphBeadStore().Store != st.CityBeadStore() {
+	// graphBeadStore left nil => Stores().Graph() falls back to the city store.
+	if st.Stores().Graph().Store != st.CityBeadStore() {
 		t.Fatalf("precondition: expected single-store (graph == city)")
 	}
 	// Same wisp bead as the relocated test, but in the shared city store.
