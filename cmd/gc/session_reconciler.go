@@ -1374,6 +1374,39 @@ func freshRestartSessionKeyInfo(tp TemplateParams, info sessionpkg.Info) (string
 	return "", true
 }
 
+// restartHandoffWriteAttempts bounds the city-stop restart handoff's fenced
+// write against concurrent writers to the row.
+const restartHandoffWriteAttempts = 3
+
+// recordRestartHandoff writes the legacy reconciler's restart handoff batch
+// for the row snapshot names and returns the patch it wrote. When the
+// runtime was already gone and the snapshot reads a city-stop park, the
+// handoff also releases the park and records an explicit wake
+// (RestartHandoffWakePatch), so the fresh restart starts the row. That
+// release is decided again on a fresh read of the row and written with batch
+// in one write fenced on that read's revision (UpdateMetadataFenced), so an
+// operator verb that landed after the tick snapshot, such as a gc session
+// kill's fence (sleep_reason=killed), is never written over: batch then goes
+// without the release. Any other handoff writes batch as it is.
+func recordRestartHandoff(front *sessionpkg.Store, snapshot sessionpkg.Info, batch sessionpkg.MetadataPatch, runtimeGone bool, now time.Time) (sessionpkg.MetadataPatch, error) {
+	if !runtimeGone || sessionpkg.RestartHandoffWakePatch(snapshot.SleepReason, now) == nil {
+		return batch, front.ApplyPatch(snapshot.ID, batch)
+	}
+	var written sessionpkg.MetadataPatch
+	landed, err := front.UpdateMetadataFenced(snapshot.ID, restartHandoffWriteAttempts, func(fresh sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+		written = maps.Clone(batch)
+		maps.Copy(written, sessionpkg.RestartHandoffWakePatch(fresh.SleepReason, now))
+		return written
+	})
+	switch {
+	case err != nil:
+		return nil, err
+	case !landed:
+		return nil, fmt.Errorf("the row changed under each of %d fenced writes", restartHandoffWriteAttempts)
+	}
+	return written, nil
+}
+
 // allDependenciesAliveForTemplate checks that all template dependencies of a
 // resolved logical template have at least one alive instance. Uses the
 // runtime.Provider directly instead of agent types for liveness checks.
@@ -3773,19 +3806,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// gc must not keep believing a session it just stopped
 					// is still awake. See ga-2fpf9z.
 					batch["state"] = string(sessionpkg.StateAsleep)
-				} else {
-					// Nothing was killed, so this tick's wake decision runs. A
-					// city-stop park would keep the row asleep under a sleep
-					// policy that suppresses its wake; the handoff releases it
-					// and records an explicit wake in this same write, so the
-					// restart the operator asked for starts the row now.
-					maps.Copy(batch, sessionpkg.RestartHandoffWakePatch(infoByID[id].SleepReason, now))
 				}
-				if err := sessionFrontDoor(store).ApplyPatch(id, batch); err != nil {
+				// When nothing was killed, this tick's wake decision runs. A
+				// city-stop park would keep the row asleep under a sleep policy
+				// that suppresses its wake, so the handoff of a runtime already
+				// gone releases it and records an explicit wake in the same
+				// write, decided on a fresh read of the row
+				// (recordRestartHandoff): the restart the operator asked for
+				// starts the row now.
+				written, err := recordRestartHandoff(sessionFrontDoor(store), infoByID[id], batch, !runtimeRunning, now)
+				if err != nil {
 					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
 					continue
 				}
-				// Fold the batch onto the snapshot (Step 6d write-returns-Info), so the
+				// Fold the patch written onto the snapshot (Step 6d write-returns-Info), so the
 				// restart handoff — which CONSUMES the restart_requested marker
 				// (RestartRequestPatch sets it to "") and clears started_config_hash /
 				// last_woke_at / pending_create_* — clears the marker (and its siblings)
@@ -3798,8 +3832,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// R4): its only consumer was the start-execution cluster's raw bead
 				// pointer, now deleted — the executor reads the captured Info twin, which
 				// this fold keeps coherent.
-				restartFold := make(sessionpkg.MetadataPatch, len(batch))
-				for key, value := range batch {
+				restartFold := make(sessionpkg.MetadataPatch, len(written))
+				for key, value := range written {
 					if key == sessionpkg.ResetCommittedAtKey {
 						continue
 					}

@@ -70,6 +70,22 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			wantWakeRequest: "explicit",
 		},
 		{
+			// gc stop marks a row whose runtime already died while it still
+			// reads active. The wake keeps the mark: the runtime-missing heal
+			// then keeps the row's conversation and moves it asleep, the
+			// pending wake starts it, and PreWake drops the mark.
+			name: "active city-stop requests start and keeps the park for the heal",
+			metadata: map[string]string{
+				"template":     "worker",
+				"state":        "active",
+				"sleep_reason": string(session.SleepReasonCityStop),
+			},
+			wantState:       "active",
+			wantSleepReason: string(session.SleepReasonCityStop),
+			wantPending:     "",
+			wantWakeRequest: "explicit",
+		},
+		{
 			name: "creating clears quarantine but stays creating",
 			metadata: map[string]string{
 				"template":          "worker",

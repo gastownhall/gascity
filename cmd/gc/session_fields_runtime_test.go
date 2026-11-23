@@ -602,6 +602,12 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{"restart_requested", "true", "resume_failures", "2", "resume_launch", "true"},
 			patchSite(func(session.Info) session.MetadataPatch { return session.RestartRequestPatch("key", now) }),
 		},
+		"internal/session/lifecycle_transition.go:RestartHandoffWakePatch": { // a dead-runtime city-stop row's restart handoff (SESSION-RECON-024)
+			[]string{"state", "asleep", "sleep_reason", string(session.SleepReasonCityStop)},
+			patchSite(func(info session.Info) session.MetadataPatch {
+				return session.RestartHandoffWakePatch(info.SleepReason, now)
+			}),
+		},
 		"cmd/gc/reconcile_arms_heals.go:armClaimClear": {
 			[]string{"state", "active", "pending_create_claim", "true", "pending_create_started_at", ago(time.Minute)},
 			armSite(armClaimClear),

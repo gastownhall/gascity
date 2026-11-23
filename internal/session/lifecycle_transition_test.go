@@ -809,6 +809,41 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 				"sleep_reason":          "",
 			},
 		},
+		{
+			name:        "city-stop on a suspended row is cleared as it goes asleep",
+			state:       StateSuspended,
+			sleepReason: string(SleepReasonCityStop),
+			want: MetadataPatch{
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"state":                 string(StateAsleep),
+				"sleep_reason":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			// gc stop marks a row whose runtime already died while it still
+			// reads active; the mark keeps its conversation through the heal.
+			name:        "city-stop on a still-active row is kept",
+			state:       StateActive,
+			sleepReason: string(SleepReasonCityStop),
+			want: MetadataPatch{
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+			},
+		},
+		{
+			name:        "city-stop on a still-awake row is kept",
+			state:       StateAwake,
+			sleepReason: string(SleepReasonCityStop),
+			want: MetadataPatch{
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+			},
+		},
 	}
 
 	for _, tt := range tests {
