@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -192,7 +194,7 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 			Provider:  key.Provider,
 			AccountID: key.AccountID,
 		}
-		entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+		entry, err := appendTranscriptRecovering(ctx, deps.Services.Transcript, AppendTranscriptInput{
 			Caller:            caller,
 			Conversation:      msg.Conversation,
 			Kind:              TranscriptMessageInbound,
@@ -255,7 +257,7 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 	// Step 3: Append to transcript.
 	if result.routed() {
 		caller := Caller{Kind: CallerController, ID: "inbound-normalized"}
-		entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+		entry, err := appendTranscriptRecovering(ctx, deps.Services.Transcript, AppendTranscriptInput{
 			Caller:            caller,
 			Conversation:      msg.Conversation,
 			Kind:              TranscriptMessageInbound,
@@ -290,4 +292,52 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 	}
 
 	return result, nil
+}
+
+// appendTranscriptRecovering records one message in the transcript: it
+// appends once and, when that fails with an error a retry can settle for a
+// message with a provider message ID, appends once more. The retry finds an
+// entry the first attempt stored by its provider message ID and publishes it,
+// so nothing is duplicated and nothing is resent to the provider. When the
+// retry fails too, both errors are returned.
+func appendTranscriptRecovering(ctx context.Context, transcript TranscriptService, input AppendTranscriptInput) (ConversationTranscriptRecord, error) {
+	entry, err := transcript.Append(ctx, input)
+	if err == nil || !transcriptAppendRetryable(ctx, input, err) {
+		return entry, err
+	}
+	entry, retryErr := transcript.Append(ctx, input)
+	if retryErr != nil {
+		return ConversationTranscriptRecord{}, errors.Join(err, fmt.Errorf("retrying transcript append: %w", retryErr))
+	}
+	return entry, nil
+}
+
+// transcriptAppendPermanentErrors are the append failures a retry of the same
+// input reproduces or must not override.
+var transcriptAppendPermanentErrors = []error{
+	ErrUnauthorized,
+	ErrInvalidCaller,
+	ErrInvalidInput,
+	ErrInvalidConversation,
+	ErrInvariantViolation,
+	ErrHydrationPending,
+	context.Canceled,
+	context.DeadlineExceeded,
+	beads.ErrPinnedCreateUnsupported,
+	beads.ErrConditionalWriteUnsupported,
+}
+
+// transcriptAppendRetryable reports whether one more append of input may
+// settle err: input names a provider message ID to find a stored entry by,
+// ctx is live, and err is not permanent.
+func transcriptAppendRetryable(ctx context.Context, input AppendTranscriptInput, err error) bool {
+	if strings.TrimSpace(input.ProviderMessageID) == "" || ctx.Err() != nil {
+		return false
+	}
+	for _, permanent := range transcriptAppendPermanentErrors {
+		if errors.Is(err, permanent) {
+			return false
+		}
+	}
+	return true
 }

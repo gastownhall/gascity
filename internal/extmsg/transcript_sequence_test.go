@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // transcriptFaultStore wraps a store and injects faults into transcript
@@ -540,4 +541,119 @@ func TestTranscriptPinnedAppendAdoptsLegacyMintedEntry(t *testing.T) {
 	if listed[1].ID != legacy.ID {
 		t.Fatalf("legacy entry listed as %s, want its original id %s (no renumbering)", listed[1].ID, legacy.ID)
 	}
+}
+
+// inboundRecoveryDeps builds inbound deps that route by default to an agent
+// and count ExtMsgInbound emissions.
+func inboundRecoveryDeps(fabric Services, emitted *int) InboundDeps {
+	return InboundDeps{
+		Services:                    fabric,
+		DefaultAgentForConversation: func(ConversationRef) string { return "myrig/frontdesk" },
+		EmitEvent: func(eventType, _ string, _ events.Payload) {
+			if eventType == events.ExtMsgInbound {
+				*emitted++
+			}
+		},
+	}
+}
+
+func inboundRecoveryMessage(ref ConversationRef, providerMessageID, text string) ExternalInboundMessage {
+	return ExternalInboundMessage{
+		ProviderMessageID: providerMessageID,
+		Conversation:      ref,
+		Actor:             ExternalActor{ID: "user-1", DisplayName: "User One"},
+		Text:              text,
+		ReceivedAt:        testNow(),
+	}
+}
+
+// TestHandleInboundNormalizedAmbiguousCreateKeepsSequencesDistinct drives the
+// inbound path through a create that commits and reports an error, followed
+// by a failed read of the slot it was pinned to: the inbound recovers the
+// entry once, emits one event, and the next inbound gets the next sequence.
+func TestHandleInboundNormalizedAmbiguousCreateKeepsSequencesDistinct(t *testing.T) {
+	freezeTestClock(t)
+	fault := &transcriptFaultStore{Store: beads.NewMemStore()}
+	fabric := NewServices(beadstest.Mail(fault), beadstest.Sessions(fault))
+	ref := testConversationRef()
+	emitted := 0
+	deps := inboundRecoveryDeps(fabric, &emitted)
+
+	fault.setFaults(func(f *transcriptFaultStore) {
+		f.commitThenFailCreates = 1
+		f.failEntryGets = 1
+	})
+	first, err := HandleInboundNormalized(context.Background(), deps, inboundRecoveryMessage(ref, "msg-1", "first"))
+	if err != nil {
+		t.Fatalf("HandleInboundNormalized(first) with a recoverable transcript fault: %v", err)
+	}
+	if first.TranscriptEntry == nil || first.TranscriptEntry.Sequence != 1 {
+		t.Fatalf("first transcript entry = %#v, want sequence 1", first.TranscriptEntry)
+	}
+	if emitted != 1 {
+		t.Fatalf("ExtMsgInbound emitted %d times for the first inbound, want 1", emitted)
+	}
+	second, err := HandleInboundNormalized(context.Background(), deps, inboundRecoveryMessage(ref, "msg-2", "second"))
+	if err != nil {
+		t.Fatalf("HandleInboundNormalized(second): %v", err)
+	}
+	if second.TranscriptEntry == nil || second.TranscriptEntry.Sequence != 2 {
+		t.Fatalf("second transcript entry = %#v, want sequence 2", second.TranscriptEntry)
+	}
+	if stored := assertTranscriptSequencesUnique(t, fault); len(stored) != 2 {
+		t.Fatalf("stored %d transcript entries, want 2", len(stored))
+	}
+	assertListedTexts(t, fabric.Transcript, ref, "first", "second")
+}
+
+// TestHandleOutboundTranscriptFaultRetriesRecordingWithoutResending drives
+// the outbound recording through a create that commits and reports an error:
+// the adapter publishes the message exactly once, and the recording retry
+// finds the committed entry by the receipt's provider message id instead of
+// resending or storing it twice.
+func TestHandleOutboundTranscriptFaultRetriesRecordingWithoutResending(t *testing.T) {
+	freezeTestClock(t)
+	fault := &transcriptFaultStore{Store: beads.NewMemStore()}
+	fabric := NewServices(beadstest.Mail(fault), beadstest.Sessions(fault))
+	ref := testConversationRef()
+	adapter := newStubAdapter("stub", ref)
+	reg := NewAdapterRegistry()
+	reg.Register(AdapterKey{Provider: ref.Provider, AccountID: ref.AccountID}, adapter)
+	deps := OutboundDeps{
+		Services:               fabric,
+		Registry:               reg,
+		ResolveSessionSelector: agentTestResolver(map[string]string{"rig-a/helper": "sess-live-1"}),
+	}
+	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		AgentName:    "rig-a/helper",
+		Now:          testNow(),
+	}); err != nil {
+		t.Fatalf("Bind(agent): %v", err)
+	}
+
+	fault.setFaults(func(f *transcriptFaultStore) { f.commitThenFailCreates = 1 })
+	result, err := HandleOutbound(context.Background(), deps, testControllerCaller(), OutboundRequest{
+		Conversation: ref,
+		Text:         "published once",
+	})
+	if err != nil {
+		t.Fatalf("HandleOutbound with a recoverable transcript fault: %v", err)
+	}
+	fault.mu.Lock()
+	pendingFaults := fault.commitThenFailCreates
+	fault.mu.Unlock()
+	if pendingFaults != 0 {
+		t.Fatalf("commit-then-fail create faults left = %d, want 0 (the recording never hit the fault)", pendingFaults)
+	}
+	if len(adapter.publishs) != 1 {
+		t.Fatalf("adapter publishes = %d, want exactly 1 (the recording retry must never resend)", len(adapter.publishs))
+	}
+	if result.TranscriptEntry == nil || result.TranscriptEntry.Sequence != 1 {
+		t.Fatalf("TranscriptEntry = %#v, want the recording retried at sequence 1", result.TranscriptEntry)
+	}
+	if stored := assertTranscriptSequencesUnique(t, fault); len(stored) != 1 {
+		t.Fatalf("stored %d transcript entries, want 1", len(stored))
+	}
+	assertListedTexts(t, fabric.Transcript, ref, "published once")
 }
