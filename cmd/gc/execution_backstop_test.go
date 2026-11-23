@@ -2030,3 +2030,44 @@ func TestExecutionBackstopNudgesAPoolSeatWithNoConfiguredNudge(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutionBackstopEscalatesAFallbackNudgedSeatAfterItsLastBackoff: the
+// fallback claim line spends the same bounded budget as a configured nudge.
+// After three delivered attempts the seat is not escalated until the last
+// one's full backoff has passed; then one execution.step_stalled reports
+// Attempts 3 and one drain is requested, latched for the claim and
+// incarnation.
+func TestExecutionBackstopEscalatesAFallbackNudgedSeatAfterItsLastBackoff(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = ""
+	driveToLastNudge(t, f)
+	for i, msg := range f.nudgesDelivered() {
+		if msg != ladderClaimedNudge {
+			t.Fatalf("nudge %d = %q, want the fallback %q", i, msg, ladderClaimedNudge)
+		}
+	}
+
+	f.now = f.now.Add(idleClaimNudgeBackoff - time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("inside the last backoff: drains %v, step_stalled %d; want neither", f.drained, f.stalledEvents())
+	}
+
+	f.now = f.now.Add(time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < 3; i++ {
+		f.now = f.now.Add(idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	}
+	f.assertOneStepStalled(t, idleClaimNudgeMaxAttempts)
+	if got := len(f.nudgesDelivered()); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("nudges delivered after exhaustion = %d, want still %d", got, idleClaimNudgeMaxAttempts)
+	}
+}
