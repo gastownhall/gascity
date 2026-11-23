@@ -74,6 +74,24 @@ utility workers define their own -- for example, the `gastown` pack owns the
 `dog` utility pool and the `mol-shutdown-dance` formula, and the `dolt` pack
 ships its own separate `dog` agent for Dolt maintenance formulas.
 
+## bd Pack
+
+The bundled `bd` pack drives the default Dolt-backed bead store. Its
+`gc-beads-bd` provider script runs the city's Dolt server, through the `dolt`
+pack it imports, and initializes each scope's database whenever the city
+starts, reloads or gains a rig.
+
+Running `bd migrate schema` changes a database's schema for every client of
+it at once, and a `bd` built for the older schema then refuses it. So the
+provider runs it only on a database it is creating, which includes repairing
+a creation an earlier start cut off in the middle of a migration step. Any
+other database keeps its schema until an operator migrates it. `gc start`,
+`gc reload` and the `bd-schema` check of `gc doctor` name each database whose
+schema differs from the Beads library built into `gc`, with the command to
+run. A rig whose database the city's `bd` cannot open because of that
+difference is left unserved instead of stopping the city. See
+[Databases Gas City leaves to you](/getting-started/upgrading#databases-gas-city-leaves-to-you).
+
 ## Doctor Repair And Migration
 
 `gc doctor` includes a fixable check named `builtin-pack-imports`. It flags

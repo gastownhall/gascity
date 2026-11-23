@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -207,14 +208,14 @@ func TestLookupConfiguredNamedSessionResolvesThePreRequalificationBareRow(t *tes
 	row := seedBareRow(t, store)
 	spec := requalifiedSpec(t)
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
 	if !lookup.HasCanonical || lookup.Canonical.ID != row.ID {
 		t.Fatalf("lookup = (canonical %q, has %v, conflict %q, hasConf %v), want the bare row %q", lookup.Canonical.ID, lookup.HasCanonical, lookup.Conflict.ID, lookup.HasConflict, row.ID)
 	}
-	bead, ok, err := FindCanonicalConfiguredNamedSessionBead(store, spec)
+	bead, ok, err := FindCanonicalConfiguredNamedSessionBead(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("FindCanonicalConfiguredNamedSessionBead: %v", err)
 	}
@@ -227,7 +228,7 @@ func TestLookupConfiguredNamedSessionResolvesThePreRequalificationBareRow(t *tes
 	twoBare := beads.NewMemStore()
 	seedBareRow(t, twoBare)
 	seedBareRow(t, twoBare)
-	lookup, err = LookupConfiguredNamedSession(twoBare, spec)
+	lookup, err = LookupConfiguredNamedSession(beadstest.Sessions(twoBare), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession(twoBare): %v", err)
 	}
@@ -243,7 +244,7 @@ func TestNamedSessionResolutionCandidatesAdmitThePreRequalificationBareRow(t *te
 	store := beads.NewMemStore()
 	row := seedBareRow(t, store)
 	spec := requalifiedSpec(t)
-	got, err := NamedSessionResolutionCandidates(store, spec)
+	got, err := NamedSessionResolutionCandidates(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("NamedSessionResolutionCandidates: %v", err)
 	}
@@ -276,7 +277,7 @@ func TestNamedSessionResolutionCandidatesAdmitThePreRequalificationBareRow(t *te
 		if !ok || aspec.BareIdentity != "" {
 			t.Fatalf("%s: spec = (%v, bare %q), want BareIdentity empty", identity, ok, aspec.BareIdentity)
 		}
-		candidates, err := NamedSessionResolutionCandidates(store, aspec)
+		candidates, err := NamedSessionResolutionCandidates(beadstest.Sessions(store), aspec)
 		if err != nil {
 			t.Fatalf("NamedSessionResolutionCandidates(%s): %v", identity, err)
 		}

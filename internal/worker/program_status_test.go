@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -66,7 +67,7 @@ func TestProgramPhaseDecidesOnlyUnderOn(t *testing.T) {
 func startedProgramStatusHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string) {
 	t.Helper()
 	fake := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), runtime.FullFake{Fake: fake}, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), runtime.FullFake{Fake: fake}, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{Manager: manager, Session: SessionSpec{
 		Profile: ProfileCodexTmuxCLI, Template: "probe", Title: "Probe", WorkDir: t.TempDir(),
 	}})

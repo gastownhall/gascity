@@ -181,3 +181,41 @@ func TestDiscoverPackCommands_AllowsVisibleAssetSubdirsUnderLeaf(t *testing.T) {
 		t.Fatalf("command words = %#v, want %#v", got[0].Command, []string{"deploy"})
 	}
 }
+
+func TestDiscoverPackCommands_NativeHelpFromManifest(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "mypk")
+
+	writeTestFile(t, packDir, "commands/opted/command.toml", "native_help = true\n")
+	writeTestFile(t, packDir, "commands/opted/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, packDir, "commands/explicit-off/command.toml", "native_help = false\n")
+	writeTestFile(t, packDir, "commands/explicit-off/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, packDir, "commands/plain/command.toml", "description = \"Plain\"\n")
+	writeTestFile(t, packDir, "commands/plain/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, packDir, "commands/no-manifest/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, packDir, "commands/templated/command.toml", "native_help = true\nrun = \"{{.ConfigDir}}/run.sh\"\n")
+
+	got, err := DiscoverPackCommands(fsys.OSFS{}, packDir, "mypk")
+	if err != nil {
+		t.Fatalf("DiscoverPackCommands: %v", err)
+	}
+	want := map[string]bool{
+		"opted":        true,
+		"explicit-off": false,
+		"plain":        false,
+		"no-manifest":  false,
+		"templated":    true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d commands, want %d: %+v", len(got), len(want), got)
+	}
+	for _, cmd := range got {
+		wantNative, ok := want[cmd.Name]
+		if !ok {
+			t.Fatalf("unexpected command %q", cmd.Name)
+		}
+		if cmd.NativeHelp != wantNative {
+			t.Errorf("command %q NativeHelp = %v, want %v", cmd.Name, cmd.NativeHelp, wantNative)
+		}
+	}
+}

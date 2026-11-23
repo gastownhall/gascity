@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -37,9 +38,17 @@ func turnConformanceSessionWithStore(t *testing.T, sp runtime.Provider, script f
 // window) without the test sleeping.
 func turnConformanceSessionAged(t *testing.T, sp runtime.Provider, script func(name string), transcript []string, age time.Duration) (*worker.SessionHandle, beads.Store) {
 	t.Helper()
+	return turnConformanceSessionRunning(t, sp, "claude", script, transcript, age)
+}
+
+// turnConformanceSessionRunning is turnConformanceSessionAged with the
+// session's launch command given: a runtime that runs the command on this
+// host (an exec pack sharing the host filesystem) is handed a harmless one.
+func turnConformanceSessionRunning(t *testing.T, sp runtime.Provider, command string, script func(name string), transcript []string, age time.Duration) (*worker.SessionHandle, beads.Store) {
+	t.Helper()
 	searchBase, workDir := t.TempDir(), t.TempDir()
 	store := beads.NewMemStore()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()),
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()),
 		// A keyed start would otherwise wait out the stale-key detection delay.
 		sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }))
 	handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
@@ -49,7 +58,7 @@ func turnConformanceSessionAged(t *testing.T, sp runtime.Provider, script func(n
 			Profile:  worker.ProfileClaudeTmuxCLI,
 			Template: "probe",
 			Title:    "Probe",
-			Command:  "claude",
+			Command:  command,
 			WorkDir:  workDir,
 			Provider: "claude",
 			Resume:   sessionpkg.ProviderResume{SessionIDFlag: "--session-id"},
