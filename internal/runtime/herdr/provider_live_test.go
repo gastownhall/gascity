@@ -21,7 +21,7 @@ func TestProviderLive(t *testing.T) {
 	ctx := context.Background()
 	cfg := runtime.Config{
 		WorkDir: t.TempDir(),
-		Command: `for i in $(seq 1 60); do echo "tick $i"; sleep 1; done`,
+		Command: liveTickCommand,
 		Env:     map[string]string{"GC_SESSION_ID": "gctest-live-session"},
 	}
 	if err := p.Start(ctx, "smoke", cfg); err != nil {
@@ -47,20 +47,20 @@ func TestProviderLive(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		time.Sleep(300 * time.Millisecond)
 		got, _ = p.Peek("smoke", 10)
-		if strings.Contains(got, "tick") {
+		if strings.Contains(got, liveTickOutput) {
 			break
 		}
 	}
-	if !strings.Contains(got, "tick") {
-		t.Errorf("Peek did not capture screen output; got %q", got)
+	if !strings.Contains(got, liveTickOutput) {
+		t.Errorf("Peek did not capture %q; got %q", liveTickOutput, got)
 	}
 
 	// ProcessAlive: nil → true; matching name → true; bogus → false.
 	if !p.ProcessAlive("smoke", nil) {
 		t.Error("ProcessAlive(nil) = false")
 	}
-	if !p.ProcessAlive("smoke", []string{"sleep", "sh", "bash"}) {
-		t.Error("ProcessAlive([sleep/sh/bash]) = false")
+	if !p.ProcessAlive("smoke", liveProcessNames) {
+		t.Errorf("ProcessAlive(%v) = false", liveProcessNames)
 	}
 	if p.ProcessAlive("smoke", []string{"definitely-not-a-real-process"}) {
 		t.Error("ProcessAlive([bogus]) = true")

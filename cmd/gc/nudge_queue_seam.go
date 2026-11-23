@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -50,33 +51,14 @@ type nudgeClaimRepinner interface {
 
 // openNudgeQueue is the only constructor of the city's nudge queue in cmd/gc.
 // store is the nudges-class store the caller already holds. With the zero
-// value, Enqueue opens its own to save the shadow, the verbs whose commit owes
-// shadow debts open their own after the queue lock to pay them
-// (settleNudgeShadowDebts), and so does the shim's import (importMigrated),
-// which saves the moved items' shadows. WithdrawQueuedWaitNudges does not, and
-// reaches shadows only through a caller-passed store: with the zero value it
-// retires the queue item and leaves its shadow open, as does Rollback of an
-// item no longer queued.
+// value, Enqueue opens its own to save the shadow, and the verbs whose commit
+// owes shadow debts open their own after the queue lock to pay them
+// (settleNudgeShadowDebts). WithdrawQueuedWaitNudges does not, and reaches
+// shadows only through a caller-passed store: with the zero value it retires
+// the queue item and leaves its shadow open, as does Rollback of an item no
+// longer queued.
 //
-// It builds the file queue only: the beads queue, its shadow view
-// (storebinding.NewBeadsNudgeFrontDoors) and the shim that moves live work
-// between the two (shimNudgeQueue) have no production caller yet. The change
-// that selects the queue by mode here owes three more things (ga-w0hgvz):
-//
-//   - In beads mode, the wait helpers' shadow reads (nudgeShadows) must go
-//     through that view: a moved item's legacy gc:nudge shadow stays open, so
-//     a direct read sees the item still queued and never finalizes its wait.
-//     The view's Save confirms a record in any state, even one retired
-//     migrated; Find is the state-aware read.
-//   - A shim pass must run in the configured mode's direction from the site
-//     that reads the mode.
-//   - file → beads must reinstate a record retired "migrated"
-//     (ReinstateMigrated, DES-NQ D12), or a quick flip back strands the
-//     batch in the file queue (the shim header).
-//   - The shim reads the beads queue through ListLive, which only the
-//     concrete queue has, so the caller type-asserts it: add ListLive to the
-//     contract, or have NewBeadsNudgeFrontDoors return a queue the shim takes
-//     as it is.
+// It builds the file queue only.
 func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 	q := &fileNudgeQueue{cityPath: cityPath, store: store, clk: clock.Real{}}
 	return nudgeQueueHandle{
@@ -94,18 +76,21 @@ func nudgeShadows(store beads.NudgesStore) storebinding.NudgeShadows {
 	return nudgeFrontDoor(store)
 }
 
-// claimTarget is the contract's view of t: its queue keys, its fence, and a
+// claimTarget is the contract's view of t: its queue keys, its fence, a
 // census of cityPath's sessions, taken at most once, that lets it adopt a
-// superseded session's nudges. A target that carries a census of its own
-// (fenceCensus, the dispatcher's skip-only snapshot census) answers with it
-// instead.
-func (t nudgeTarget) claimTarget(cityPath string) storebinding.ClaimTarget {
+// superseded session's nudges, and launch, the reader of the launch t's
+// session runs now that judges its startup turns (ClaimTarget.LiveLaunch;
+// nudgeLaunchReader). A nil launch holds those turns. A target that carries a
+// census of its own (fenceCensus, the dispatcher's skip-only snapshot census)
+// answers with it instead.
+func (t nudgeTarget) claimTarget(cityPath string, launch func() (string, bool)) storebinding.ClaimTarget {
 	if t.fenceCensus != nil {
 		return storebinding.ClaimTarget{
 			QueueKeys:         t.queueKeys(),
 			SessionID:         t.sessionID,
 			ContinuationEpoch: t.continuationEpoch,
 			LiveFenceSessions: t.fenceCensus,
+			LiveLaunch:        launch,
 		}
 	}
 	var once sync.Once
@@ -118,5 +103,17 @@ func (t nudgeTarget) claimTarget(cityPath string) storebinding.ClaimTarget {
 			once.Do(func() { ids = liveNudgeFenceSessionIDsForCity(cityPath) })
 			return ids, ids != nil
 		},
+		LiveLaunch: launch,
 	}
+}
+
+// nudgeLaunchReader reads the launch running as t's session through sp
+// (runtime.ReadLaunchID): on tmux the pane environment's instance token, on
+// other runtimes their identity read. It is nil, an unknown launch, when
+// there is no runtime or no session name to read.
+func nudgeLaunchReader(t nudgeTarget, sp runtime.Provider) func() (string, bool) {
+	if sp == nil || t.sessionName == "" {
+		return nil
+	}
+	return func() (string, bool) { return runtime.ReadLaunchID(sp, t.sessionName) }
 }

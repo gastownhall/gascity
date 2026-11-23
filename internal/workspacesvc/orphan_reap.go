@@ -1,10 +1,8 @@
 package workspacesvc
 
 import (
-	"fmt"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -120,12 +118,14 @@ func (id orphanIdentity) parentIsSubreaper(ppid int) bool {
 // or signal failures are logged and never block the spawn; on hosts without
 // /proc the sweep is a no-op.
 func reapOrphanedServiceProcesses(id orphanIdentity) {
-	// The sweeper runs in the supervisor whose orphans it reaps, so the
-	// subreapers that adopt them are the sweeper's own ancestors. On a
-	// plain-init host the set stays empty and matchesLive keeps the strict
-	// ppid==1 rule.
+	// The sweeper's ancestors may adopt its orphans. On a plain-init host
+	// the empty set leaves the strict ppid == 1 rule in place.
 	id.subreapers = pidutil.DetectSubreapers(os.Getpid())
-	pids := findOrphanedServiceProcesses(id)
+	pids, err := findOrphanedServiceProcesses(id)
+	if err != nil {
+		log.Printf("workspacesvc: orphan sweep for service %q did not run; duplicates from a previous hard exit will not be reaped: %v", id.serviceName, err)
+		return
+	}
 	if len(pids) == 0 {
 		return
 	}
@@ -133,9 +133,9 @@ func reapOrphanedServiceProcesses(id orphanIdentity) {
 	terminateOrphanedProcesses(id, pids)
 }
 
-// findOrphanedServiceProcesses scans /proc for processes matching id.
+// findOrphanedServiceProcesses scans the process table for processes matching id.
 // Processes that exit mid-scan or whose records are unreadable are skipped.
-func findOrphanedServiceProcesses(id orphanIdentity) []int {
+func findOrphanedServiceProcesses(id orphanIdentity) ([]int, error) {
 	return findOrphanedServiceProcessesFrom(os.Getpid(), id)
 }
 
@@ -149,18 +149,17 @@ func findOrphanedServiceProcesses(id orphanIdentity) []int {
 // the pid namespace — so the sweep finds nothing by definition. An identity
 // without a state root is incomplete and matches nothing rather than
 // matching too broadly.
-func findOrphanedServiceProcessesFrom(self int, id orphanIdentity) []int {
+func findOrphanedServiceProcessesFrom(self int, id orphanIdentity) ([]int, error) {
 	if len(id.command) == 0 || id.stateRoot == "" || self == 1 {
-		return nil
+		return nil, nil
 	}
-	entries, err := os.ReadDir("/proc")
+	candidates, err := listProcessTablePIDs()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var pids []int
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid == self {
+	for _, pid := range candidates {
+		if pid == self {
 			continue
 		}
 		if !id.matchesLive(pid) {
@@ -168,7 +167,7 @@ func findOrphanedServiceProcessesFrom(self int, id orphanIdentity) []int {
 		}
 		pids = append(pids, pid)
 	}
-	return pids
+	return pids, nil
 }
 
 // terminateOrphanedProcesses sends SIGTERM to each pid (preferring its
@@ -197,29 +196,6 @@ func terminateOrphanedProcesses(id orphanIdentity, pids []int) {
 	for _, pid := range remaining {
 		signalProcessOrGroup(pid, syscall.SIGKILL)
 	}
-}
-
-// signalProcessOrGroup signals the process group led by pid, falling back
-// to the process itself when pid is not a group leader. Unsafe targets are
-// refused outright.
-func signalProcessOrGroup(pid int, sig syscall.Signal) {
-	if unsafeSignalTarget(pid) {
-		log.Printf("workspacesvc: refusing to signal unsafe orphan-reap target pid %d", pid)
-		return
-	}
-	if err := syscall.Kill(-pid, sig); err == nil {
-		return
-	}
-	_ = syscall.Kill(pid, sig)
-}
-
-// unsafeSignalTarget reports whether pid must never be signaled: init,
-// nonpositive pids (kill(2) broadcast and current-group semantics), and the
-// sweeper's own process group. The scan cannot produce such pids today;
-// this mirrors processgroup.Terminate's refusal so kill-adjacent code stays
-// safe under future refactors.
-func unsafeSignalTarget(pid int) bool {
-	return pid <= 1 || pid == syscall.Getpgrp()
 }
 
 // liveMatchingOrphans filters pids down to those that still match the full
@@ -274,11 +250,11 @@ func argvEquals(argv, command []string) bool {
 // city+service — so a sibling city running the same service name and
 // command never matches. (GC_SERVICE_SOCKET would not work as the ownership
 // key: it is freshly allocated per instance, so no orphan would ever
-// match.) /proc/<pid>/environ is readable only for same-uid processes,
-// which doubles as the ownership check; unreadable or unmarked processes
-// are never reaped.
+// match.) The environment of another process is readable only for the same
+// uid, which doubles as the ownership check; unreadable or unmarked
+// processes are never reaped.
 func processEnvironMatchesService(pid int, serviceName, stateRoot string) bool {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	data, err := readProcessEnviron(pid)
 	if err != nil {
 		return false
 	}

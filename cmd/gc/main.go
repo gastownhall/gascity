@@ -1688,13 +1688,25 @@ func openExistingScopeLocalFileStore(scopeRoot, cityPath string) (*beads.FileSto
 	return openScopeLocalFileStoreForCity(scopeRoot, cityPath)
 }
 
-func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
+// compatibleFileStoreRoot returns the root of the file store
+// openCompatibleFileStore opens for scopeRoot. A scope with its own
+// .gc/beads.json, and every scope of a city on the scoped-roots layout, opens
+// the store at its own root (scoped is true); on the legacy shared layout
+// every other scope opens the city store.
+func compatibleFileStoreRoot(scopeRoot, cityPath string) (root string, scoped bool) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 	if !samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot) {
-		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
+		return scopeRoot, true
 	}
 	if fileStoreUsesScopedRoots(cityPath) {
-		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
+		return scopeRoot, true
+	}
+	return cityPath, false
+}
+
+func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
+	if root, scoped := compatibleFileStoreRoot(scopeRoot, cityPath); scoped {
+		return openExistingScopeLocalFileStore(root, cityPath)
 	}
 	return openScopeLocalFileStoreForCity(cityPath, cityPath)
 }
@@ -1827,10 +1839,14 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if authoritative {
 		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	}
+	// The storage migration's maintenance window forces the proxied-native
+	// lane for this city's opens alone (storage_maintenance.go). Its opens
+	// skip the memo: a scope memoized before the window took the other lane.
+	forceProxied := activeMigrationWindow(runtimeCityPath) != nil
 	// A one-shot invocation with the memo active opens each scope once; see
 	// invocation_store_memo.go. Long-lived opens never take the memo.
 	var memoEntry *invocationStoreEntry
-	if memo := activeInvocationStoreMemo(); memo != nil && !longLived {
+	if memo := activeInvocationStoreMemo(); memo != nil && !longLived && !forceProxied {
 		memoEntry = memo.entry(invocationStoreKey{scopeRoot: scopeRoot, cityPath: runtimeCityPath, provider: provider, authoritative: authoritative})
 		memoEntry.mu.Lock()
 		defer memoEntry.mu.Unlock()
@@ -1888,6 +1904,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		ConditionalWrites:          mode,
 		ConditionalWritesDefaulted: conditionalWritesOpenDefaulted(cfg, mode),
 		NativeTransport:            nativeTransport,
+		ForceProxiedNative:         forceProxied,
 		LongLived:                  longLived,
 		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
 			flags, resolved := resolvedConditionalWritesFlags(cfg)
@@ -2068,6 +2085,11 @@ func openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath strin
 	}
 	store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
 	store.SetEnv(env)
+	if !execProviderIsBdBacked(provider) {
+		// The exec protocol carries no dependency payload, and nothing under
+		// this provider is bd, where a graph plan writes one (S5 §1.4).
+		store.DeclarePayloadBlind()
+	}
 	return store, nil
 }
 

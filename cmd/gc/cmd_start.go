@@ -164,6 +164,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 			fmt.Fprintf(stderr, "on_death %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 			continue
 		}
+		reported := false
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
@@ -172,6 +173,15 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 				continue
 			}
 			cmd = expandAgentCommandTemplate(cityPath, cityName, &instance, cfg.Rigs, "on_death", cmd, stderr)
+			if a.OnDeathIsGenerated() {
+				if reason := generatedHookUnavailable(cmd); reason != "" {
+					if stderr != nil && !reported {
+						fmt.Fprintf(stderr, "on_death %s: not run: %s\n", a.QualifiedName(), reason) //nolint:errcheck // best-effort stderr
+					}
+					reported = true
+					continue
+				}
+			}
 			dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 			sn := startupSessionName(cityName, qualifiedInstance, st)
 			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir, Env: agentEnv}
@@ -616,14 +626,26 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 		printDoltAuthorIdentityBlock(stderr, "gc start", status)
 		return 1
 	}
+	if w := startBdBatchFileWarning(cityPath); w != "" {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
 	startStdout := stdout
 	if jsonOut {
 		startStdout = io.Discard
 	}
-	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true); code != 0 {
+	code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true)
+	// The supervisor ran the bead lifecycle, so its notices for databases left
+	// for an operator to migrate went to its log; repeat them here, whether
+	// or not the city came up (a city store the pinned bd cannot open is one
+	// way it does not).
+	printBdSchemaStartWarnings(cityPath, stderr)
+	if code != 0 {
 		return code
 	}
 	warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
+	// After registration, so the first start's pack setup has run and the
+	// client-side load sees the same config the supervisor does.
+	printRigFederationStartWarnings(cityPath, stderr)
 	if jsonOut {
 		cityName := nameOverride
 		if entry, registered, err := registeredCityEntry(cityPath); err == nil && registered {
@@ -643,6 +665,33 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// printRigFederationStartWarnings tells the operator running `gc start` that a
+// guarded rig is not protected by this build. The supervisor that runs the
+// city logs the same warning, but only to its own log, so the client loads the
+// config itself. It is best effort: a config that does not load here is
+// reported by the supervisor's own load.
+func printRigFederationStartWarnings(cityPath string, stderr io.Writer) {
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), io.Discard)
+	if err != nil {
+		return
+	}
+	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
+}
+
+// printBdSchemaStartWarnings writes gc start's warning for each bd database
+// whose schema differs from the linked beads library's (bdSchemaNotices). A
+// config that does not load says nothing here; the start reports it.
+func printBdSchemaStartWarnings(cityPath string, stderr io.Writer) {
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), io.Discard)
+	if err != nil {
+		return
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	writeBdSchemaNotices(stderr, "gc start: warning: ", bdSchemaNoticesFor(cityPath, cfg))
 }
 
 // resolveStartDir resolves the city directory for start/restart. The
@@ -804,10 +853,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Refuse an inadmissible session_reconciler before any init, so a refused
 	// start (including --dry-run) starts no bead store and opens no event log.
 	// runController latches again (newControllerWiring) for the mode it runs.
-	// The two cannot disagree: both read only cfg, which nothing below
-	// rewrites, and reconcilerModeLookupEnv's GC_SESSION and
-	// GC_BEADS_CONDITIONAL_WRITES, which no gc code sets.
-	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
+	// The two agree: both read only cfg, which nothing below rewrites,
+	// reconcilerModeLookupEnv's GC_SESSION and GC_BEADS_CONDITIONAL_WRITES,
+	// which no gc code sets, and an exec runtime's admission handshake,
+	// remembered per version of its script (execReadiness); a script
+	// rewritten between the two is caught at boot (C0.8).
+	mode, err := latchReconcilerMode(cfg, cityPath, reconcilerModeLookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -828,6 +879,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := config.ValidateRigFederationLayout(cityPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Reserved coordination-class prefixes refuse a split city (its binding
 	// mints in that namespace, R10) and stay a non-fatal advisory for a city
 	// that relocates nothing.
@@ -836,6 +891,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 	for _, w := range config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)) {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
+	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
@@ -855,6 +913,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// a plan instead of writing (below).
 	if !dryRunMode {
 		ensureInitArtifacts(cityPath, stderr, "gc start")
+	}
+	if w := startBdBatchFileWarning(cityPath); w != "" {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 
 	// Resolve rig paths and run the full bead store lifecycle:
@@ -1139,7 +1200,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
-	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	poolDecisionTime := time.Now()
 	// The pass's park verdicts, decided once: the pool counts and the
 	// reconciler's hold read the same set.
@@ -1147,7 +1208,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
 		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
+			cfg, poolWorkBeads, readyAssignedFlagsForBeads(dsResult.ReadyAssigned, poolWorkBeads, poolWorkRefs), openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)
@@ -1844,57 +1905,6 @@ func checkAgentImages(sp runtime.Provider, agents []config.Agent, _ io.Writer) e
 		}
 	}
 	return nil
-}
-
-// countRunningPoolInstances counts how many pool instances are currently
-// running for a given pool agent. For bounded pools, checks static names
-// (1..max). For unlimited pools, discovers via prefix matching.
-//
-// Uses ListRunning with the city prefix for a single batch call instead
-// of N individual IsRunning calls. For exec providers (K8s), this reduces
-// N subprocess spawns to 1.
-func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent, cityName, sessionTemplate string, sp runtime.Provider) int { //nolint:unparam // agentName varies in production use
-	isUnlimited := sp0.Max < 0
-	if isUnlimited {
-		// Unlimited: count by prefix matching.
-		instances := discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp)
-		count := 0
-		for _, qn := range instances {
-			sn := sessionName(nil, cityName, qn, sessionTemplate)
-			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
-				count++
-			}
-		}
-		return count
-	}
-
-	// Bounded: build the set of expected pool runtime session names.
-	expected := make(map[string]bool, sp0.Max)
-	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
-		expected[sessionName(nil, cityName, qualifiedInstance, sessionTemplate)] = true
-	}
-
-	// Single ListRunning call, then intersect with expected set.
-	// Per-city socket isolation: all sessions belong to this city.
-	running, err := sp.ListRunning("")
-	if err != nil {
-		// Fallback: individual IsRunning calls (original behavior).
-		count := 0
-		for sn := range expected {
-			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
-				count++
-			}
-		}
-		return count
-	}
-
-	count := 0
-	for _, name := range running {
-		if expected[name] {
-			count++
-		}
-	}
-	return count
 }
 
 // buildFingerprintExtra builds the fpExtra map for an agent's fingerprint

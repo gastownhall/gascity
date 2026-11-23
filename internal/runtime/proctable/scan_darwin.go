@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -31,7 +30,7 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	}
 	roots := scanRecordsBySessionID(records, id)
 	if id == "" {
-		roots = orphanCandidates(roots, pidutil.Subreapers{})
+		roots = orphanCandidates(roots)
 	}
 	return withStartIdentities(roots), nil
 }
