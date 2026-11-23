@@ -551,7 +551,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_start_drift_test.go"
 resource = "http_test_server"
-calls = 1
+calls = 2
 
 [[count]]
 path = "cmd/gc/cmd_start_drift_windows_test.go"
@@ -3330,6 +3330,11 @@ calls = 4
 path = "scripts/makefile_cgo_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "scripts/makefile_go_list_guard_test.go"
+resource = "subprocess"
+calls = 2
 
 [[count]]
 path = "scripts/makefile_install_test.go"

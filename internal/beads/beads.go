@@ -1164,13 +1164,27 @@ type Store interface {
 	// arbitrary string key. Unlike SetMetadata, values written here are never
 	// synced through Dolt/git and are never visible in Bead.Metadata — they
 	// live only in this store's local clone (in-memory, or a local sidecar
-	// file for on-disk stores). Use this for ephemeral, high-churn, or
-	// clone-specific data where cross-clone durability is unnecessary or
-	// actively undesirable (e.g. synced_at, last_woke_at,
-	// pending_create_claim — illustrative examples, not an exhaustive list).
-	// Setting value to "" clears the key. Writing here never touches the
-	// bead's UpdatedAt, since that field is Dolt-synced and a clone-local
-	// write must not appear as a durable change to other clones.
+	// file for on-disk stores). Setting value to "" clears the key.
+	//
+	// A key is single-home: durable or clone-local, never both. A local write
+	// touches nothing durable — not the bead row, its Revision, or its
+	// UpdatedAt (that field is Dolt-synced, so a clone-local write must not
+	// appear as a durable change to other clones) — so a revision fence cannot
+	// see it. Likewise a durable write of the same key (SetMetadata, or a
+	// clear) leaves the local value as it was, and the two are not merged.
+	//
+	// The sidecar is a per-process cache: it reads its file on first use and
+	// never re-reads it, and every save rewrites the whole file. Two
+	// processes, or two Store instances, over one file diverge for their
+	// lifetime and the later save drops the other's keys (see "H2" in
+	// proxied_store.go, which patches it for one process only).
+	//
+	// That makes few keys suitable. Move a key here only if a durable write or
+	// Dolt commit removed on a named hot path was measured (a key written
+	// only inside a batch that is committed anyway saves nothing); nothing
+	// durable reads, writes, clears or fences on it; its writers and readers
+	// share one process; every reader goes through GetLocalString; and it is
+	// not cleared in the same patch that records an action.
 	//
 	// Implementations that already hold the bead set in process (MemStore,
 	// FileStore) return ErrNotFound for an unknown id, matching SetMetadata.
@@ -1186,10 +1200,13 @@ type Store interface {
 	// local clone. Returns "" with a nil error if the key was never set, was
 	// cleared, or was set by a different clone — not ErrNotFound — mirroring
 	// the empty-string-means-absent convention SetLocalString uses for
-	// clearing. As with SetLocalString, only in-process implementations
-	// additionally return ErrNotFound for an unknown bead id; external-store
-	// implementations return "", nil instead. Callers must not rely on this
-	// method to validate bead existence.
+	// clearing. It reads only the local value: it never falls back to a
+	// durable Metadata entry of the same key, and it does not see a value
+	// another process or Store instance wrote to the same sidecar file after
+	// this store first loaded it (see SetLocalString). As with SetLocalString,
+	// only in-process implementations additionally return ErrNotFound for an
+	// unknown bead id; external-store implementations return "", nil instead.
+	// Callers must not rely on this method to validate bead existence.
 	GetLocalString(id, key string) (string, error)
 
 	// Tx executes fn inside a single logical transaction identified by

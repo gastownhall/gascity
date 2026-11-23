@@ -3917,8 +3917,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			tick.set(id, clearChurn(infoByID[id], sessFront))
 		}
 		if alive && shouldRollbackPendingCreateInfo(infoByID[id]) {
+			// The heal projects a claimed live row to awake, so awake is a
+			// start's post-heal face and is deferred like creating. Active is
+			// not: the heal keeps an active row with a claim active, so
+			// recovery repairs that partial commit now.
 			switch stateBeforeHeal {
-			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+			case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAwake:
 				if pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout) {
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryInFlight, TraceOutcomeDeferred, tp.TemplateName, name, nil)
@@ -5795,6 +5799,11 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 //   - held — a canonical dispatch hold label (beadmeta.HasDispatchHold) is a
 //     fresh bead-local field too, and the hook refuses to serve a held row on
 //     every path, so this is PROOF as well: draining past it was correct pull.
+//   - status_blocked — bd itself parked the row (status "blocked", read back from
+//     Bead.SourceStatus because the read folds it to "open"). A fresh bead-local
+//     field, and the seat's ready query excludes the row whatever its
+//     dependencies, so this is PROOF with no dependency read: draining past it
+//     was correct pull.
 //   - blockedness_unproven — bd's is_blocked projection reads STALE-CAPABLE true,
 //     or (the production reading) is absent entirely. Neither is proof, so the
 //     row's real blockedness is settled against live deps first
@@ -5824,7 +5833,7 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 // TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError.
 func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now time.Time) (bool, error) {
 	switch classifyDemandRowClaimability(item, now) {
-	case demandRowDeferred, demandRowHeld:
+	case demandRowDeferred, demandRowHeld, demandRowStatusBlocked:
 		return true, nil
 	case demandRowBlockednessUnproven:
 		return beadHasUnmetPlainBlocksDep(store, item.ID)
