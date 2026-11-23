@@ -3,6 +3,7 @@ package builtinpacks
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -107,31 +108,16 @@ func TestValidateSyntheticRepoDetectsMtimeRestoredCorruptionAfterSuccessfulValid
 
 	ctimeBefore, ok := statCtimeNanos(before)
 	if !ok {
-		t.Skip("platform exposes no ctime; the memo signature cannot see an mtime restore here")
+		// Only Windows exposes no ctime. Anywhere else a miss means the unix shim
+		// no longer matches this platform's Stat_t, and skipping would leave the
+		// regression test protecting nothing while the package stays green.
+		if runtime.GOOS == "windows" {
+			t.Skip("windows exposes no ctime; the memo signature cannot see an mtime restore here")
+		}
+		t.Fatalf("statCtimeNanos found no ctime on %s: the unix shim no longer matches this platform's Stat_t", runtime.GOOS)
 	}
 
-	// Rewrite and restore until the rewrite's ctime differs from the original.
-	// On a coarse-clock filesystem a rewrite inside the materialization's own
-	// tick would share its ctime, which is the accidental case this test does
-	// not cover; retrying (not sleeping) steps past that tick.
-	corrupted := strings.Repeat("#", len(original))
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		writeFile(t, target, corrupted)
-		if err := os.Chtimes(target, before.ModTime(), before.ModTime()); err != nil {
-			t.Fatalf("Chtimes(%q): %v", target, err)
-		}
-		info, err := os.Stat(target)
-		if err != nil {
-			t.Fatalf("Stat(%q) after restore: %v", target, err)
-		}
-		if ctime, _ := statCtimeNanos(info); ctime != ctimeBefore {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("ctime of %q never moved off %d after repeated rewrites", target, ctimeBefore)
-		}
-	}
+	rewriteUntilCtimeMoves(t, target, strings.Repeat("#", len(original)), before.ModTime(), ctimeBefore)
 
 	after, err := os.Stat(target)
 	if err != nil {
@@ -147,6 +133,44 @@ func TestValidateSyntheticRepoDetectsMtimeRestoredCorruptionAfterSuccessfulValid
 	}
 	if !strings.Contains(err.Error(), "content differs") {
 		t.Fatalf("error = %v, want content differs", err)
+	}
+}
+
+// rewriteUntilCtimeMoves rewrites target with content, restores its mtime to
+// modTime, and repeats until the rewrite's ctime differs from ctimeBefore.
+//
+// The boundary is the host filesystem's timestamp clock, which signals nothing:
+// on a coarse-tick filesystem a rewrite inside the materialization's own tick
+// shares its ctime, which is the accidental case the calling test does not
+// cover, and retrying past that tick is the only way through. Backoff is
+// bounded (1ms doubling to 20ms); the 5s deadline only guards a clock that
+// never advances and does not set the normal duration.
+func rewriteUntilCtimeMoves(t *testing.T, target, content string, modTime time.Time, ctimeBefore int64) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	backoff := time.Millisecond
+	var last int64
+	for {
+		writeFile(t, target, content)
+		if err := os.Chtimes(target, modTime, modTime); err != nil {
+			t.Fatalf("Chtimes(%q): %v", target, err)
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			t.Fatalf("Stat(%q) after restore: %v", target, err)
+		}
+		if last, _ = statCtimeNanos(info); last != ctimeBefore {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("ctime of %q never moved off %d after repeated rewrites (last observed %d)", target, ctimeBefore, last)
+		case <-time.After(backoff):
+		}
+		if backoff < 20*time.Millisecond {
+			backoff *= 2
+		}
 	}
 }
 
