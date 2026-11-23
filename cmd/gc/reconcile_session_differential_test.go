@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -719,21 +718,16 @@ func (w *legacyWorld) gateIdleProbes() []chan struct{} {
 
 // awaitIdleProbes waits out the idle probes a tick launched, their gates
 // open: they finish on goroutines of the tick's, so the next tick sees each
-// probe finished whatever the scheduler does. It yields rather than sleeps;
-// simGuard turns a hang into a failure.
+// probe finished whatever the scheduler does. It polls through awaitCond, so a
+// starved host is not made worse by a spinning waiter, and the hang budget
+// turns a hang into a failure.
 func (w *legacyWorld) awaitIdleProbes(t *testing.T) {
 	t.Helper()
-	for deadline := time.Now().Add(simGuard); ; goruntime.Gosched() {
+	awaitCond(t, func() bool {
 		w.dt.mu.Lock()
-		pending := slices.ContainsFunc(slices.Collect(maps.Values(w.dt.idleProbes)), func(p *idleProbeState) bool { return p != nil && !p.ready })
-		w.dt.mu.Unlock()
-		if !pending {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("an idle probe never finished")
-		}
-	}
+		defer w.dt.mu.Unlock()
+		return !slices.ContainsFunc(slices.Collect(maps.Values(w.dt.idleProbes)), func(p *idleProbeState) bool { return p != nil && !p.ready })
+	}, "an idle probe finished")
 }
 
 // sameParityBead is sameBead plus the type and assignee.

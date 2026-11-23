@@ -2979,8 +2979,10 @@ func hookClaimDirLooksLikeRepo(dir string) bool {
 
 // hookClaimPathOutside reports whether child can be SHOWN to name a directory that
 // is neither parent nor inside it. Symlinks are resolved on both sides so an aliased
-// spelling is compared as the directory it reaches; when a name cannot be resolved --
-// a recorded path that no longer exists -- the cleaned names are compared instead.
+// spelling is compared as the directory it reaches; a name whose leaf no longer exists
+// -- a recorded path that was removed -- resolves its nearest existing ancestor and
+// re-appends the missing tail. Only a name that cannot be resolved at all (a symlink
+// loop, a permission failure) is compared by its cleaned name instead.
 //
 // Every reading it cannot establish is false, because the caller admits on true. A
 // relative name is refused because it means nothing without the process directory it
@@ -2995,13 +2997,7 @@ func hookClaimPathOutside(child, parent string) bool {
 	if hookClaimPathFoldsDotDot(child) || hookClaimPathFoldsDotDot(parent) {
 		return false
 	}
-	resolve := func(path string) string {
-		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			return resolved
-		}
-		return filepath.Clean(path)
-	}
-	childPath, parentPath := resolve(child), resolve(parent)
+	childPath, parentPath := pathutil.NormalizePathForCompare(child), pathutil.NormalizePathForCompare(parent)
 	if childPath == parentPath {
 		return false
 	}

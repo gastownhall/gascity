@@ -2046,6 +2046,9 @@ func (r *reverseRun) retireSplit() error {
 // reverseCityTOMLPath is the city.toml R4 edits, through a symlink.
 func reverseCityTOMLPath(cityPath string) (string, error) {
 	path := filepath.Join(cityPath, "city.toml")
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. R4 rewrites the physical city.toml, so a missing or broken
+	// link must stay an error (TestCityConfigPathProbesStillRequireResolvableFile).
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", err
