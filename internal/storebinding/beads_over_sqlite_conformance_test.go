@@ -24,6 +24,7 @@ package storebinding_test
 // the declaration below is a claim this file has to earn, not a formality.
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
@@ -197,4 +198,79 @@ func TestBeadsOverSQLiteBindsTheBeadsBackedQueue(t *testing.T) {
 	if got != want {
 		t.Fatalf("the corpus ran against a %s queue, want the Beads-backed %s; the class corpus proves nothing about the queue it did not run", got, want)
 	}
+}
+
+// claimingMemStore is beads.MemStore with the two-argument assignment claim
+// the beads queue requires, built on the store's own revision fence: a claim
+// is a guarded update that retries only when the revision moved, so exactly
+// one concurrent claimant wins a bead. MemStore carries every other primitive
+// the queue needs, so this leg runs the queue's code unchanged over a store
+// with no SQL engine underneath.
+type claimingMemStore struct {
+	*beads.MemStore
+}
+
+// Claim assigns id to assignee when it is open or in progress and unassigned
+// (or already assigned to assignee), as the engines' claims do.
+func (s claimingMemStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	for {
+		current, err := s.Get(id)
+		if err != nil {
+			return beads.Bead{}, false, err
+		}
+		if current.Status != "open" && current.Status != "in_progress" {
+			return beads.Bead{}, false, nil
+		}
+		if current.Assignee != "" && current.Assignee != assignee {
+			return beads.Bead{}, false, nil
+		}
+		if current.Assignee == assignee && current.Status == "in_progress" {
+			return current, true, nil
+		}
+		inProgress := "in_progress"
+		err = s.UpdateIfMatch(id, current.Revision, beads.UpdateOpts{Assignee: &assignee, Status: &inProgress})
+		var stale *beads.PreconditionFailedError
+		if errors.As(err, &stale) {
+			continue
+		}
+		if err != nil {
+			return beads.Bead{}, false, err
+		}
+		claimed, err := s.Get(id)
+		return claimed, err == nil, err
+	}
+}
+
+// openBeadsQueueOverMemStore binds the beads queue over one fresh in-memory
+// bead store, beside the canonical shadow projection over the same store.
+func openBeadsQueueOverMemStore(tb storebindingtest.TB) storebinding.NudgeFrontDoors {
+	tb.Helper()
+	memory := beads.NewMemStore()
+	// The queue derives each record's id from its nudge id, so the store has
+	// to keep the id it is given.
+	memory.HonorExplicitIDs = true
+	store := claimingMemStore{MemStore: memory}
+	queue, err := storebinding.NewBeadsNudgeQueue(beads.NudgesStore{Store: store})
+	if err != nil {
+		tb.Fatalf("binding the beads nudge queue over MemStore: %v", err)
+	}
+	adapters, err := storebinding.NewBeadsAdapters(
+		store,
+		storebinding.BeadsAdapterIdentity{OpenerID: "beads-over-memstore", ComponentID: "nudges", PhysicalID: "memory"},
+		queue,
+	)
+	if err != nil {
+		tb.Fatalf("projecting the beads queue over MemStore: %v", err)
+	}
+	return adapters.Nudges
+}
+
+// TestBeadsQueueOverMemStoreRunsTheNudgesCorpus runs the Nudges corpus against
+// the beads queue over beads.MemStore, the third leg beside the in-memory
+// reference queue and the beads queue over SQLite.
+func TestBeadsQueueOverMemStoreRunsTheNudgesCorpus(t *testing.T) {
+	storebindingtest.RunNudgeFrontDoorTests(storebindingtest.Wrap(t), storebindingtest.NudgesSuite{
+		NewFrontDoors: openBeadsQueueOverMemStore,
+		Capability:    storebindingtest.ReferenceCapability,
+	})
 }

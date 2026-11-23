@@ -282,6 +282,43 @@ func TestStart_HandshakeTimeout(t *testing.T) {
 	}
 }
 
+// TestStart_ExpiredContextErrorNamesStage pins that a start whose context
+// had already expired names the ACP start, and that a handshake timeout keeps
+// its own handshake prefix.
+func TestStart_ExpiredContextErrorNamesStage(t *testing.T) {
+	t.Run("expired before start", func(t *testing.T) {
+		p := newTestProvider(t)
+		name := testName()
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		err := p.Start(ctx, name, runtime.Config{Command: "sleep 300", WorkDir: t.TempDir()})
+		if err == nil {
+			t.Cleanup(func() { _ = p.Stop(name) })
+			t.Fatal("Start with an expired context succeeded")
+		}
+		if want := fmt.Sprintf("acp start for %q: ", name); !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("err = %q, want prefix %q", err.Error(), want)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("errors.Is(%v, context.DeadlineExceeded) = false", err)
+		}
+	})
+	t.Run("handshake timeout", func(t *testing.T) {
+		p := newTestProvider(t)
+		name := testName()
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		err := p.Start(ctx, name, runtime.Config{Command: "sleep 300", WorkDir: t.TempDir()})
+		if err == nil {
+			t.Cleanup(func() { _ = p.Stop(name) })
+			t.Fatal("Start should fail when the handshake times out")
+		}
+		if want := fmt.Sprintf("acp handshake for %q: ", name); !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("err = %q, want prefix %q", err.Error(), want)
+		}
+	})
+}
+
 func TestStart_RequiresCommand(t *testing.T) {
 	p := newTestProvider(t)
 	name := testName()

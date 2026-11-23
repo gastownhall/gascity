@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -45,15 +46,15 @@ func TestExitAccrualDecidesOnAFreshRead(t *testing.T) {
 			snapshot := mustGetBead(t, env.store, row.ID) // the tick's read
 
 			if c.killed {
-				fence, err := sessionpkg.WriteKillFence(env.store, row.ID, env.clk.Now())
+				fence, err := sessionpkg.WriteKillFence(beadstest.Sessions(env.store), row.ID, env.clk.Now())
 				if err != nil {
 					t.Fatal(err)
 				}
-				mgr := sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithCityPath(env.city))
+				mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(env.store), env.sp, sessionpkg.WithCityPath(env.city))
 				if err := mgr.Kill(context.Background(), testActorIn(t, sessionpkg.ActorOperator, env.city), row.ID); err != nil {
 					t.Fatal(err)
 				}
-				if err := fence.Clear(env.store); err != nil {
+				if err := fence.Clear(beadstest.Sessions(env.store)); err != nil {
 					t.Fatal(err)
 				}
 			} else if err := env.sp.Stop("worker"); err != nil {
@@ -101,11 +102,11 @@ func TestExitAccrualAccruesNothingOnAFailedFreshRead(t *testing.T) {
 		check   func(sessionpkg.Info, *sessionpkg.Store) bool
 	}{
 		{"rapid crash", 10 * time.Second, func(i sessionpkg.Info, f *sessionpkg.Store) bool {
-			_, stab := checkStability(i, nil, false, newDrainTracker(), f, clk, nil, nil, nil)
+			_, stab := checkStability(i, nil, false, newDrainTracker(), f, t.TempDir(), clk, nil, nil, nil)
 			return stab
 		}},
 		{"churn", time.Minute, func(i sessionpkg.Info, f *sessionpkg.Store) bool {
-			_, churn := checkChurn(i, nil, false, newDrainTracker(), f, clk)
+			_, churn := checkChurn(i, nil, false, newDrainTracker(), f, t.TempDir(), clk)
 			return churn
 		}},
 	} {

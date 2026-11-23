@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -623,12 +624,18 @@ func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T
 	}
 	cfg := result.Cfg
 	applyFeatureFlags(cfg)
+	// Boot the bead lifecycle as the supervisor does before a runtime exists:
+	// reload refuses a city whose store was never initialized.
+	if err := startBeadsLifecycle(dir, "test", cfg, io.Discard); err != nil {
+		t.Fatalf("boot bead lifecycle: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	initialOrders, err := scanOrderSetSnapshotFS(fsys.OSFS{}, dir, cfg, &stderr, "test")
 	if err != nil {
 		t.Fatalf("initial order scan: %v", err)
 	}
 	cr := &CityRuntime{
+		bootCityStore:      recordCityStore(dir),
 		cityPath:           dir,
 		cityName:           "test",
 		configName:         "test",
@@ -943,20 +950,26 @@ func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *test
 	}
 	cfg := result.Cfg
 	applyFeatureFlags(cfg)
+	// Boot the bead lifecycle as the supervisor does before a runtime exists:
+	// reload refuses a city whose store was never initialized.
+	if err := startBeadsLifecycle(dir, "test", cfg, io.Discard); err != nil {
+		t.Fatalf("boot bead lifecycle: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
-		cityPath:   dir,
-		cityName:   "test",
-		configName: "test",
-		tomlPath:   tomlPath,
-		configRev:  result.Revision,
-		cfg:        cfg,
-		sp:         runtime.NewFake(),
-		dops:       newDrainOps(runtime.NewFake()),
-		rec:        events.Discard,
-		stdout:     &stdout,
-		stderr:     &stderr,
-		logPrefix:  "gc test",
+		bootCityStore: recordCityStore(dir),
+		cityPath:      dir,
+		cityName:      "test",
+		configName:    "test",
+		tomlPath:      tomlPath,
+		configRev:     result.Revision,
+		cfg:           cfg,
+		sp:            runtime.NewFake(),
+		dops:          newDrainOps(runtime.NewFake()),
+		rec:           events.Discard,
+		stdout:        &stdout,
+		stderr:        &stderr,
+		logPrefix:     "gc test",
 	}
 	// The reload restarts the config watcher; stop it with the test.
 	t.Cleanup(cr.stopConfigWatcher)

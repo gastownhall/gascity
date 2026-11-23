@@ -48,7 +48,8 @@ func stepBeadCandidates() []beads.Bead {
 }
 
 // buildContinuationNudgeOps returns a hookClaimOps that captures nudge
-// enqueue calls. siblingIDs controls what ListContinuation returns.
+// enqueue calls as "<assignee> for <root id>". siblingIDs controls what
+// ListContinuation returns.
 func buildContinuationNudgeOps(candidates []beads.Bead, siblingIDs []string, enqueued *[]string) hookClaimOps {
 	siblings := make([]beads.Bead, 0, len(siblingIDs))
 	for _, id := range siblingIDs {
@@ -79,15 +80,16 @@ func buildContinuationNudgeOps(candidates []beads.Bead, siblingIDs []string, enq
 			return nil
 		},
 		DrainAck: func(io.Writer) error { return nil },
-		EnqueueContinuationNudge: func(assignee string) {
-			*enqueued = append(*enqueued, assignee)
+		EnqueueContinuationNudge: func(assignee, rootID string, _ io.Writer) {
+			*enqueued = append(*enqueued, assignee+" for "+rootID)
 		},
 	}
 }
 
 // TestHookClaimWorkflowRootEnqueuesContinuationNudge verifies that
 // claiming a workflow root that pre-assigns at least one sibling enqueues a
-// hook-claim-continuation nudge for the claiming session name.
+// hook-claim-continuation nudge for the claiming session name and the root it
+// claimed, which keys the nudge's lane notice when message is listed.
 func TestHookClaimWorkflowRootEnqueuesContinuationNudge(t *testing.T) {
 	var enqueued []string
 	ops := buildContinuationNudgeOps(workflowRootCandidates(), []string{"sib-1", "sib-2"}, &enqueued)
@@ -102,8 +104,8 @@ func TestHookClaimWorkflowRootEnqueuesContinuationNudge(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if len(enqueued) != 1 || enqueued[0] != "gascity/worker/slot-0" {
-		t.Fatalf("continuation nudge enqueued for %v, want [gascity/worker/slot-0]", enqueued)
+	if len(enqueued) != 1 || enqueued[0] != "gascity/worker/slot-0 for root-1" {
+		t.Fatalf("continuation nudge enqueued for %v, want [gascity/worker/slot-0 for root-1]", enqueued)
 	}
 }
 
@@ -292,7 +294,7 @@ func TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle(t *testing.T) {
 			}
 			t.Cleanup(func() { startNudgePoller = prevPoller })
 
-			hookContinuationNudgeEnqueue(assignee)
+			hookContinuationNudgeEnqueue(assignee, "", io.Discard)
 
 			state, err := nudgequeue.LoadState(cityDir)
 			if err != nil {

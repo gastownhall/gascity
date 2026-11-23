@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
 	"net"
+	"os"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -183,5 +186,98 @@ func TestManagedDoltTCPReachable_RealSocket(t *testing.T) {
 	}
 	if managedDoltTCPReachable(host, "1") {
 		t.Error("managedDoltTCPReachable on port 1 (no listener) = true, want false")
+	}
+}
+
+// stubManagedDoltDial replaces the dial behind managedDoltTCPProbe for the
+// rest of the test.
+func stubManagedDoltDial(t *testing.T, dial func(network, address string, timeout time.Duration) (net.Conn, error)) {
+	t.Helper()
+	prev := managedDoltDialFn
+	managedDoltDialFn = dial
+	t.Cleanup(func() { managedDoltDialFn = prev })
+}
+
+// dialErrorFor builds the error net.Dial returns when the named syscall fails.
+func dialErrorFor(syscallName string, errno syscall.Errno) error {
+	return &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError(syscallName, errno)}
+}
+
+func TestManagedDoltDialFailedLocally(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "no ephemeral port left", err: dialErrorFor("connect", syscall.EADDRNOTAVAIL), want: true},
+		{name: "no buffer space", err: dialErrorFor("connect", syscall.ENOBUFS), want: true},
+		{name: "process out of descriptors", err: dialErrorFor("socket", syscall.EMFILE), want: true},
+		{name: "host out of descriptors", err: dialErrorFor("socket", syscall.ENFILE), want: true},
+		{name: "connection refused", err: dialErrorFor("connect", syscall.ECONNREFUSED), want: false},
+		{name: "dial timeout", err: &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}, want: false},
+		{name: "no error", err: nil, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := managedDoltDialFailedLocally(tc.err); got != tc.want {
+				t.Fatalf("managedDoltDialFailedLocally(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// A one-nanosecond timeout allows exactly one probe before the wait gives up.
+func TestWaitForManagedDoltReadyIsInconclusiveWhenEveryDialFailsLocally(t *testing.T) {
+	stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+		return nil, dialErrorFor("connect", syscall.EADDRNOTAVAIL)
+	})
+
+	report, err := waitForManagedDoltReady(t.TempDir(), "127.0.0.1", "3307", "root", os.Getpid(), time.Nanosecond, false)
+	if err == nil {
+		t.Fatal("waitForManagedDoltReady() error = nil, want an error for a wait that never reached the server")
+	}
+	if !errors.Is(err, syscall.EADDRNOTAVAIL) {
+		t.Fatalf("waitForManagedDoltReady() error = %v, want it to carry the local dial error", err)
+	}
+	if report.Ready || !report.Inconclusive || !report.PIDAlive {
+		t.Fatalf("waitForManagedDoltReady() = %+v, want inconclusive, not ready, pid alive", report)
+	}
+}
+
+func TestWaitForManagedDoltReadyIsConclusiveWhenTheServerRefuses(t *testing.T) {
+	stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+		return nil, dialErrorFor("connect", syscall.ECONNREFUSED)
+	})
+
+	report, err := waitForManagedDoltReady(t.TempDir(), "127.0.0.1", "3307", "root", os.Getpid(), time.Nanosecond, false)
+	if err == nil {
+		t.Fatal("waitForManagedDoltReady() error = nil, want a timeout")
+	}
+	if report.Ready || report.Inconclusive {
+		t.Fatalf("waitForManagedDoltReady() = %+v, want not ready and not inconclusive", report)
+	}
+}
+
+// TestWaitForManagedDoltReadyCountsARefusalAgainstTheServer pins that one
+// refused dial outweighs earlier local failures: a refusal means the dial
+// reached the host and nothing was listening there.
+func TestWaitForManagedDoltReadyCountsARefusalAgainstTheServer(t *testing.T) {
+	var dials atomic.Int32
+	stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+		if dials.Add(1) == 1 {
+			return nil, dialErrorFor("connect", syscall.EADDRNOTAVAIL)
+		}
+		return nil, dialErrorFor("connect", syscall.ECONNREFUSED)
+	})
+
+	report, err := waitForManagedDoltReady(t.TempDir(), "127.0.0.1", "3307", "root", os.Getpid(), 600*time.Millisecond, false)
+	if err == nil {
+		t.Fatal("waitForManagedDoltReady() error = nil, want a timeout")
+	}
+	if n := dials.Load(); n < 2 {
+		t.Fatalf("dials = %d, want at least 2 so a refusal follows the local failure", n)
+	}
+	if report.Inconclusive {
+		t.Fatalf("waitForManagedDoltReady() = %+v, want conclusive once a dial was refused", report)
 	}
 }

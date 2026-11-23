@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -566,17 +565,14 @@ func TestTruncateNulPaddedTailSerializesAgainstConcurrentAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sib := mustOpenSiblingLock(t, path)
+	sib, releaseSibling := mustOpenSiblingLock(t, path)
 	const concurrentAppend = `{"seq":3,"type":"bead.created","actor":"human","subject":"concurrent"}` + "\n"
 	appended := make(chan struct{})
 	time.AfterFunc(60*time.Millisecond, func() {
 		if _, err := sib.Write([]byte(concurrentAppend)); err != nil {
 			t.Errorf("concurrent append through sibling lock holder: %v", err)
 		}
-		if err := syscall.Flock(int(sib.Fd()), syscall.LOCK_UN); err != nil {
-			t.Errorf("sibling unlock: %v", err)
-		}
-		_ = sib.Close()
+		releaseSibling()
 		close(appended)
 	})
 
@@ -621,11 +617,8 @@ func TestTruncateNulPaddedTailTimesOutWaitingForFlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sib := mustOpenSiblingLock(t, path)
-	defer func() {
-		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
-		_ = sib.Close()
-	}()
+	_, releaseSibling := mustOpenSiblingLock(t, path)
+	defer releaseSibling()
 
 	var stderr bytes.Buffer
 	start := time.Now()
@@ -635,8 +628,8 @@ func TestTruncateNulPaddedTailTimesOutWaitingForFlock(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when the flock cannot be acquired, got nil")
 	}
-	if !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "waiting on flock") {
-		t.Errorf("err = %v, want it to mention timing out waiting on the flock", err)
+	if !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "waiting on lock") {
+		t.Errorf("err = %v, want it to mention timing out waiting on the lock", err)
 	}
 	if elapsed < recordFlockTimeout {
 		t.Errorf("elapsed = %v, want >= %v", elapsed, recordFlockTimeout)

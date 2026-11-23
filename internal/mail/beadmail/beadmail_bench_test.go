@@ -46,7 +46,7 @@ func runArchiveManyBench(b *testing.B, n int, batch bool) {
 func benchSetup(b *testing.B, n int) (*Provider, []string) {
 	b.Helper()
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	ids := make([]string, 0, n)
 	for i := 0; i < n; i++ {
 		m, err := p.Send("alice", "bob", "", "bench")

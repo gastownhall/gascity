@@ -43,7 +43,8 @@ func claimProtocolFragmentBody(t *testing.T) string {
 // ga-2q2r0). The prompt must carry the protocol text, stay byte-identical to
 // the core pack's claim-protocol fragment body (the canonical copy), match
 // the nudge vocabulary in agent.toml, and never reintroduce the
-// claim-without-discovery idiom.
+// claim-without-discovery idiom. It describes the incident without citing its
+// bead id.
 func TestDogPromptNamesTheHookClaimCommand(t *testing.T) {
 	root := repoRoot(t)
 	promptData, err := os.ReadFile(filepath.Join(root, "agents", "dog", "prompt.template.md"))
@@ -53,11 +54,16 @@ func TestDogPromptNamesTheHookClaimCommand(t *testing.T) {
 	prompt := string(promptData)
 	for _, want := range []string{
 		"gc hook --claim --drain-ack --json",
-		"ga-tmzjx6",
+		"41 hours without running",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("dog prompt missing %q", want)
 		}
+	}
+	// The incident is described, not cited: agents echo prompt prose, so a
+	// literal bead id here became a bead reference in every dog run.
+	if strings.Contains(prompt, "ga-tmzjx6") {
+		t.Error("dog prompt cites the incident bead id literally; describe the incident instead")
 	}
 	if strings.Contains(prompt, "gc bd update <id> --claim") {
 		t.Error("dog prompt reintroduces the claim-without-discovery idiom; claims go through gc hook --claim")

@@ -24,9 +24,26 @@ import (
 var simCoverage = struct {
 	sync.Mutex
 	arms     map[string]*armHits       // by armKey
-	effects  map[string]int            // released effects, by kind
+	effects  map[string]int            // settled effects, by kind, as posted
 	outcomes map[string]map[string]int // by kind, then outcome (and cause)
-}{arms: map[string]*armHits{}, effects: map[string]int{}, outcomes: map[string]map[string]int{}}
+	reasons  map[string]int            // admitted intents, by a gated reason (simCoverageReasons)
+}{arms: map[string]*armHits{}, effects: map[string]int{}, outcomes: map[string]map[string]int{}, reasons: map[string]int{}}
+
+// simCoverageReasons are decide reasons the census counts and the gate
+// requires, paths no arm or kind tells apart: A11's floor-ack cancel
+// (DRAIN-010, PAR-FLOORACK), one signal-ack among many.
+var simCoverageReasons = []string{decideFloorAckCancel}
+
+// countReason counts an intent a planning pass admitted, by its reason,
+// when the census gates that reason.
+func countReason(it intent) {
+	if !slices.Contains(simCoverageReasons, it.Reason) {
+		return
+	}
+	simCoverage.Lock()
+	defer simCoverage.Unlock()
+	simCoverage.reasons[it.Reason]++
+}
 
 // armHits are an arm's decisions: an intent it proposed, or a hold.
 type armHits struct{ Acts, Holds int }
@@ -120,25 +137,25 @@ func countArms(arms []rowArm, credit *decisionCredit) []rowArm {
 	return out
 }
 
-func init() {
-	simEffectChecks = append(simEffectChecks, (*sim).countEffect)
-}
-
-// countEffect counts a released effect and its settlement.
-func (s *sim) countEffect(e *simEffect) func(settlement) {
-	return func(res settlement) {
-		simCoverage.Lock()
-		defer simCoverage.Unlock()
-		simCoverage.effects[e.it.Kind]++
-		m := simCoverage.outcomes[e.it.Kind]
-		if m == nil {
-			m = map[string]int{}
-			simCoverage.outcomes[e.it.Kind] = m
-		}
-		m[outcomeName(res.Outcome)]++
-		if res.Cause != "" {
-			m[outcomeName(res.Outcome)+"/"+res.Cause]++
-		}
+// countPost counts an effect's settlement as the executor posts it to the
+// planner: its kind and its outcome (and cause). A create abandoned at its
+// deadline is ambiguous there, whatever it returns later; that late return
+// posts its facts alone (Late) and is not counted again.
+func countPost(st settlement) {
+	if st.Late {
+		return
+	}
+	simCoverage.Lock()
+	defer simCoverage.Unlock()
+	simCoverage.effects[st.Kind]++
+	m := simCoverage.outcomes[st.Kind]
+	if m == nil {
+		m = map[string]int{}
+		simCoverage.outcomes[st.Kind] = m
+	}
+	m[outcomeName(st.Outcome)]++
+	if st.Cause != "" {
+		m[outcomeName(st.Outcome)+"/"+st.Cause]++
 	}
 }
 
@@ -163,6 +180,7 @@ type simCoverageReport struct {
 	Arms     map[string]armHits        `json:"arms"`
 	Effects  map[string]int            `json:"effects"`
 	Outcomes map[string]map[string]int `json:"outcomes"`
+	Reasons  map[string]int            `json:"reasons"`
 }
 
 // writeSimCoverage writes the census to the path GC_V2_SIM_COVERAGE names,
@@ -173,7 +191,7 @@ func writeSimCoverage(t *testing.T) {
 		return
 	}
 	simCoverage.Lock()
-	r := simCoverageReport{Arms: map[string]armHits{}, Effects: simCoverage.effects, Outcomes: simCoverage.outcomes}
+	r := simCoverageReport{Arms: map[string]armHits{}, Effects: simCoverage.effects, Outcomes: simCoverage.outcomes, Reasons: simCoverage.reasons}
 	for k, h := range simCoverage.arms {
 		r.Arms[k] = *h
 	}
@@ -202,18 +220,14 @@ func settleOutcomes() []string {
 // for want of a generator (mc-i7efm). The gate fails on a listed key that
 // gets hits, so each entry goes when its generator lands.
 var simCoverageAllowlist = map[string]string{
-	// No generator wires the create effects (p.creates): every create
-	// intent is unregistered, and pending creates are an external op.
-	"effect:" + intentCreate: "mc-i7efm: creates",
 	// No generator asks a row to restart (generators frozen for the
 	// release; the scripted A13 scenarios cover it).
 	"arm:A13/armRestartRequested": "mc-i7efm: restart requested",
-	// No generator drifts an agent's config.
-	"arm:A14/armConfigDrift":        "mc-i7efm: config drift",
-	"effect:" + intentDriftRepair:   "mc-i7efm: config drift",
-	"effect:" + intentDriftRestart:  "mc-i7efm: config drift",
-	"effect:" + intentDriftRelaunch: "mc-i7efm: config drift",
-	"effect:" + intentLiveApply:     "mc-i7efm: config drift",
+	"effect:" + intentMarkerClear: "mc-i7efm: restart requested",
+	// No generator wakes an awake row (generators frozen for the release;
+	// TestSatisfiedWakeClear and TestSimSatisfiedWakeDoesNotRestartAfterADeath
+	// cover it).
+	"arm:A6/armSatisfiedWake": "mc-i7efm: wake requests",
 	// No agent sleeps after idle (sleep_after_idle, mc-ivrct).
 	"arm:A15/armIdleTimeout": "mc-i7efm: idle timeout",
 	// No execution stalls past the backstop.
@@ -229,14 +243,12 @@ var simCoverageAllowlist = map[string]string{
 	"effect:" + intentBaseline: "mc-i7efm: baseline",
 	// Every runtime the sim makes has a row first.
 	"arm:A1/armNoRow": "mc-i7efm: no-row runtime",
-	// No fake provider answers ambiguously.
-	"outcome:ambiguous": "mc-i7efm: ambiguous settles",
 }
 
 // simCoverageGaps are the registered keys the reports never reach and are
 // not allowlisted, then the allowlisted keys they do reach (or that are no
 // longer registered).
-func simCoverageGaps(reports []simCoverageReport, arms, effects []string, allow map[string]string) (zero, stale []string) {
+func simCoverageGaps(reports []simCoverageReport, arms, effects, reasons []string, allow map[string]string) (zero, stale []string) {
 	hits := map[string]int{}
 	for _, r := range reports {
 		for k, h := range r.Arms {
@@ -250,9 +262,12 @@ func simCoverageGaps(reports []simCoverageReport, arms, effects []string, allow 
 				hits["outcome:"+o] += n
 			}
 		}
+		for k, n := range r.Reasons {
+			hits["reason:"+k] += n
+		}
 	}
 	registered := map[string]bool{}
-	for _, keys := range [][]string{prefixed("arm:", arms), prefixed("effect:", effects), prefixed("outcome:", settleOutcomes())} {
+	for _, keys := range [][]string{prefixed("arm:", arms), prefixed("effect:", effects), prefixed("outcome:", settleOutcomes()), prefixed("reason:", reasons)} {
 		for _, k := range keys {
 			registered[k] = true
 			if _, ok := allow[k]; hits[k] == 0 && !ok {
@@ -309,7 +324,7 @@ func TestSimCoverageGate(t *testing.T) {
 		}
 		reports = append(reports, r)
 	}
-	zero, stale := simCoverageGaps(reports, registeredArms(), registeredEffects(), simCoverageAllowlist)
+	zero, stale := simCoverageGaps(reports, registeredArms(), registeredEffects(), simCoverageReasons, simCoverageAllowlist)
 	for _, k := range zero {
 		t.Errorf("%s: no hit over %d censuses (a generator is missing, or list it in simCoverageAllowlist with its bead)", k, len(reports))
 	}
@@ -323,6 +338,7 @@ func TestSimCoverageGaps(t *testing.T) {
 		Arms:     map[string]armHits{"A1/a": {Holds: 1}, "A2/b": {Acts: 1}},
 		Effects:  map[string]int{"x": 1},
 		Outcomes: map[string]map[string]int{"x": {"landed": 1, "failed": 1, "refused": 1, "ambiguous": 1, "noop/why": 1, "noop": 1}},
+		Reasons:  map[string]int{"r": 1},
 	}
 	noAmbiguous := map[string]map[string]int{"x": {"landed": 1, "failed": 1, "refused": 1, "noop": 1, "ambiguous/why": 1}}
 	for _, c := range []struct {
@@ -334,15 +350,15 @@ func TestSimCoverageGaps(t *testing.T) {
 		{name: "every key hit", reports: []simCoverageReport{all}},
 		{name: "hits sum over censuses", reports: []simCoverageReport{
 			{Arms: map[string]armHits{"A1/a": {Holds: 1}}, Effects: map[string]int{"x": 1}, Outcomes: all.Outcomes},
-			{Arms: map[string]armHits{"A2/b": {Acts: 1}, "A2/b-mutant": {Acts: 1}}},
+			{Arms: map[string]armHits{"A2/b": {Acts: 1}, "A2/b-mutant": {Acts: 1}}, Reasons: map[string]int{"r": 1}},
 		}},
-		{name: "no census", zero: []string{"arm:A1/a", "arm:A2/b", "effect:x", "outcome:ambiguous", "outcome:failed", "outcome:landed", "outcome:noop", "outcome:refused"}},
+		{name: "no census", zero: []string{"arm:A1/a", "arm:A2/b", "effect:x", "outcome:ambiguous", "outcome:failed", "outcome:landed", "outcome:noop", "outcome:refused", "reason:r"}},
 		{name: "a zero entry is a hit of none", reports: []simCoverageReport{
-			{Arms: map[string]armHits{"A1/a": {}, "A2/b": {Acts: 1}}, Effects: map[string]int{"x": 0}, Outcomes: noAmbiguous},
-		}, zero: []string{"arm:A1/a", "effect:x", "outcome:ambiguous"}},
+			{Arms: map[string]armHits{"A1/a": {}, "A2/b": {Acts: 1}}, Effects: map[string]int{"x": 0}, Outcomes: noAmbiguous, Reasons: map[string]int{"r": 0}},
+		}, zero: []string{"arm:A1/a", "effect:x", "outcome:ambiguous", "reason:r"}},
 		{name: "allowlisted zeros pass", reports: []simCoverageReport{
 			{Arms: map[string]armHits{"A2/b": {Acts: 1}}, Outcomes: noAmbiguous},
-		}, allow: map[string]string{"arm:A1/a": "bead", "effect:x": "bead", "outcome:ambiguous": "bead"}},
+		}, allow: map[string]string{"arm:A1/a": "bead", "effect:x": "bead", "outcome:ambiguous": "bead", "reason:r": "bead"}},
 		{
 			name: "an allowlisted key hit is stale", reports: []simCoverageReport{all},
 			allow: map[string]string{"arm:A1/a": "bead", "outcome:noop": "bead"}, stale: []string{"arm:A1/a", "outcome:noop"},
@@ -353,7 +369,7 @@ func TestSimCoverageGaps(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			zero, stale := simCoverageGaps(c.reports, []string{"A1/a", "A2/b"}, []string{"x"}, c.allow)
+			zero, stale := simCoverageGaps(c.reports, []string{"A1/a", "A2/b"}, []string{"x"}, []string{"r"}, c.allow)
 			if !slices.Equal(zero, c.zero) || !slices.Equal(stale, c.stale) {
 				t.Errorf("gaps = %q, %q; want %q, %q", zero, stale, c.zero, c.stale)
 			}

@@ -431,6 +431,31 @@ func TestConditionalWritesStatusBlock(t *testing.T) {
 		}
 	})
 
+	t.Run("the builtin default lists no incapable store", func(t *testing.T) {
+		cs := &controllerState{rolloutFlags: rollout.ForTest()}
+		cs.cityBeadStore = disableFencing(t, openStamped(t, gate.Auto))
+		got := cs.ConditionalWritesStatus()
+		if got.Mode != "auto" || got.Origin != "builtin" || got.Effective != "off" || len(got.Stores) != 0 {
+			t.Fatalf("block = %+v, want auto/builtin, effective off, no store rows", got)
+		}
+		// An unprobed bd store is no row: "capable" there would be a guess.
+		bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) { return nil, nil })
+		if err := beads.StampOpenedStore(bd, "BdStore", gate.Auto, false, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		cs.beadStores = map[string]beads.Store{"good": openStamped(t, gate.Auto), "bd": bd}
+		got = cs.ConditionalWritesStatus()
+		if got.Effective != "active" || len(got.Stores) != 1 || got.Stores[0].StoreID != "rig/good" {
+			t.Fatalf("block = %+v, want active with the one capable store", got)
+		}
+		// A pending restart is reported even when no store fences.
+		cs.beadStores = nil
+		cs.noteRolloutDrift(&config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}})
+		if got = cs.ConditionalWritesStatus(); got.Effective != "pending_restart" {
+			t.Fatalf("effective = %q, want pending_restart over the quiet off", got.Effective)
+		}
+	})
+
 	t.Run("all capable is active; drift downgrades to pending_restart", func(t *testing.T) {
 		cs := &controllerState{
 			rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Auto)),

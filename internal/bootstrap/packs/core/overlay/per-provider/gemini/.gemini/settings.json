@@ -11,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "gc prime --hook --hook-format gemini"
+            "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format gemini"
           }
         ]
       }
