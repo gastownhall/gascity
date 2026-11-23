@@ -265,3 +265,84 @@ func TestCanScanProcessTableFollowsDefaultBackend(t *testing.T) {
 		t.Error("AsProcessTableScanner = true over a scannerless default")
 	}
 }
+
+// fencingScanner is a default backend whose scan fences tmux subtrees when
+// fences is set, as exec's does for a host-sharing pack whose agents run
+// outside tmux, and whose scan also returns err.
+type fencingScanner struct {
+	*runtime.Fake
+	fences bool
+	err    error
+}
+
+func (f *fencingScanner) FencesTmuxSubtrees() bool { return f.fences }
+
+func (f *fencingScanner) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	found, err := f.Fake.FindRuntimesBySessionID(id)
+	return found, errors.Join(err, f.err)
+}
+
+// Kills a composite that reports a later backend's root that its fencing
+// default backend left out (auto over a host-sharing exec pack whose agents
+// run outside tmux). The ACP backend's scan, which has no fence, reports a
+// process in a pane of a tmux server founded inside an exec box (4201), and
+// a root the default's fence could not decide (4400, left out with an entry
+// error), as untracked roots; merged, either would go to a start's orphan
+// kill. The composite reports only the PIDs the fencing default reports,
+// and surfaces its error labeled. A default whose scan does not fence (a
+// pack whose agent runs in its box's tmux), and one with no fence at all,
+// leave every backend's roots merged.
+func TestFindRuntimesBySessionIDReportsOnlyAFencingDefaultsRoots(t *testing.T) {
+	acp := runtime.NewFake()
+	acp.ExtraRuntimes = []runtime.LiveRuntime{{SessionID: "sid", PID: 4201}, {SessionID: "sid", PID: 4300}, {SessionID: "sid", PID: 4400}}
+	newDefault := func(fences bool) *fencingScanner {
+		def := &fencingScanner{Fake: runtime.NewFake(), fences: fences, err: errors.New("fence: one root's ancestry")}
+		def.ExtraRuntimes = []runtime.LiveRuntime{{SessionID: "sid", PID: 4300}}
+		return def
+	}
+
+	found, err := New(newDefault(true), acp).FindRuntimesBySessionID("sid")
+	if got := byPID(found); len(got) != 1 || got[4300].PID != 4300 {
+		t.Fatalf("found = %+v, want the fencing default's root 4300 alone", found)
+	}
+	if err == nil || !strings.Contains(err.Error(), DefaultBackendLabel+" backend: fence: one root's ancestry") {
+		t.Fatalf("err = %v, want the default backend's error labeled", err)
+	}
+
+	for name, def := range map[string]runtime.Provider{
+		"a default whose scan does not fence": newDefault(false),
+		"a default without a fence":           runtime.NewFake(),
+	} {
+		if found, _ := New(def, acp).FindRuntimesBySessionID("sid"); len(found) != 3 {
+			t.Errorf("over %s: found = %+v, want every backend's roots", name, found)
+		}
+	}
+}
+
+// A later backend still adds what it knows of a PID the fencing default
+// reports: the ACP backend's tracking of its own agent (5000) wins over the
+// default's untracked record of it, and the default's LiveUnlisted claim on a
+// root its failed inventory could not rule out (6000) stands beside the ACP
+// backend's plain record, so a start refuses rather than ends it
+// (SESSION-START-024).
+func TestFindRuntimesBySessionIDFencingDefaultKeepsTrackingAndClaims(t *testing.T) {
+	acp := runtime.NewFake()
+	acp.ExtraRuntimes = []runtime.LiveRuntime{
+		{SessionID: "sid", PID: 5000, IsTracked: true, ProviderName: "acp-seat"},
+		{SessionID: "sid", PID: 6000},
+	}
+	def := &fencingScanner{Fake: runtime.NewFake(), fences: true}
+	def.ExtraRuntimes = []runtime.LiveRuntime{{SessionID: "sid", PID: 5000}, {SessionID: "sid", PID: 6000, LiveUnlisted: true}}
+
+	found, err := New(def, acp).FindRuntimesBySessionID("sid")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	got := byPID(found)
+	if r := got[5000]; len(got) != 2 || !r.IsTracked || r.ProviderName != "acp-seat" {
+		t.Fatalf("found = %+v, want 5000 tracked by the ACP backend as acp-seat", found)
+	}
+	if r := got[6000]; r.IsTracked || !r.LiveUnlisted {
+		t.Fatalf("root 6000 = %+v, want it untracked and still LiveUnlisted", r)
+	}
+}

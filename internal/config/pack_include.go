@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -437,10 +438,10 @@ type remoteCacheValidationEntry struct{ fingerprint string }
 // rewrites the tree (changing root mtime); git checkout/reset update the
 // index. The .git directory itself is intentionally excluded: git status
 // --porcelain creates and removes a lock file inside .git/ as a side effect,
-// updating .git dir mtime on every run and defeating the memo. .git/index
-// mtime is stable across git status (the flags we pass, including
-// -c core.untrackedCache=false, prevent any index refresh writes).
-// A nested manual worktree edit touching neither root nor the index escapes
+// updating .git dir mtime on every run and defeating the memo. git status
+// may opportunistically write refreshed stat data back to .git/index, but
+// validation records the fingerprint only after status returns, so that
+// write-back does not invalidate the memo on the next load. A nested manual worktree edit touching neither root nor the index escapes
 // detection until the process restarts — acceptable for a pinned,
 // gc-managed cache.
 func remoteCacheFingerprint(cacheDir string) string {
@@ -584,10 +585,38 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	if err != nil {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
-	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
+	if status != "" {
+		return fmt.Errorf("cached import %s has local worktree changes in %q: %s; run \"gc import install\"", source, cacheDir, dirtyStatusSummary(status))
 	}
 	return nil
+}
+
+// maxDirtyStatusEntries bounds how many porcelain records the dirty-cache
+// error quotes; further records are summarized as a count so a large diff
+// cannot flood the log line. It bounds the record count, not the length of
+// arbitrary pathnames.
+const maxDirtyStatusEntries = 3
+
+// dirtyStatusSummary quotes up to maxDirtyStatusEntries nonempty porcelain
+// records, preserving each record's leading status column, and ends with
+// an omitted-entry count when there are more.
+func dirtyStatusSummary(status string) string {
+	quoted := make([]string, 0, maxDirtyStatusEntries+1)
+	omitted := 0
+	for _, record := range strings.Split(status, "\n") {
+		if record == "" {
+			continue
+		}
+		if len(quoted) < maxDirtyStatusEntries {
+			quoted = append(quoted, fmt.Sprintf("%q", record))
+			continue
+		}
+		omitted++
+	}
+	if omitted > 0 {
+		quoted = append(quoted, fmt.Sprintf("and %d more", omitted))
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
@@ -598,12 +627,42 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	}, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
-	cmd.Env = gitutil.HermeticEnv()
-	out, err := cmd.CombinedOutput()
+	cmd.Env = repoCacheGitEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	command := "git " + strings.Join(args, " ")
+	diagnostic := strings.TrimSpace(stderr.String())
 	if err != nil {
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+		if diagnostic == "" {
+			return "", fmt.Errorf("%s: %w", command, err)
+		}
+		return "", fmt.Errorf("%s: %s: %w", command, diagnostic, err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	// Callers parse stdout as a commit hash or porcelain records, so a
+	// successful command that still wrote diagnostics (such as a directory it
+	// could not read) fails closed instead of passing an incomplete answer.
+	if diagnostic != "" {
+		return "", fmt.Errorf("%s: unexpected diagnostics: %s", command, diagnostic)
+	}
+	// Trim only trailing newlines: leading spaces are porcelain status
+	// columns the dirty-cache diagnostics must preserve.
+	return strings.TrimRight(string(out), "\r\n"), nil
+}
+
+// repoCacheGitEnv is gitutil.HermeticEnv without GIT_TRACE* variables. Trace
+// output is diagnostic noise to the cache runner, whose callers parse git's
+// output as a commit hash or porcelain records.
+func repoCacheGitEnv() []string {
+	env := gitutil.HermeticEnv()
+	kept := env[:0]
+	for _, e := range env {
+		if strings.HasPrefix(e, "GIT_TRACE") {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 // RepoCacheKey computes the sha256 cache key for a remote source+commit pair.

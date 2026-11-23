@@ -112,7 +112,7 @@ func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailur
 	switch {
 	case r.rateLimit, r.terminal != "", f.cause == causeAttribution && errors.Is(f.err, runtime.ErrSessionExists):
 	case f.pending, f.cause == causePrepare, f.cause == causeAttribution:
-		_ = c.episode.fail(f.episode, f.err, c.start.clock.Now())
+		_ = c.episode.fail(f.episode, f.launch.TemplateName, f.err, c.start.clock.Now(), c.start.rec, c.start.stderr)
 	default:
 		r.keeps = wakeFailureKeepsConversation(f.row, launchTranscriptRoots(f.cfg, f.launch))
 		r.resume = startResumeFailure(f.resumed, f.died, f.row.SessionKey, f.err, pane)
@@ -206,7 +206,7 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 		kept := failureKeepsConversation(row, f)
 		backstop, count := resumeBackstop(failures, kept, f.resume)
 		if !kept || backstop {
-			maps.Copy(patch, session.ConversationResetPatch(true))
+			maps.Copy(patch, session.ConversationResetPatch(true, now))
 			count = 0
 		}
 		maps.Copy(patch, resumeFailuresPatch(row, count))

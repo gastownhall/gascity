@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 package tmux
 
@@ -351,12 +351,15 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 	// for the pane to report it. macOS reports a process name cut to 16
 	// bytes, so a process waited on by name keeps a short one; a caller
 	// whose process name varies by host (python3 runs as Python on macOS)
-	// passes "" and waits on what the process paints instead.
+	// passes "" and waits on what the process paints instead. command is
+	// execed: tmux runs it as the default-shell -c, and dash (/bin/sh on
+	// Debian and Ubuntu, the SHELL the test runners pin) would stay the
+	// pane's command with the process its child.
 	start := func(t *testing.T, tm *Tmux, name, command, process string, env map[string]string) {
 		t.Helper()
 		maps.Copy(env, fenceEnv(f))
 		_ = tm.KillSession(name)
-		if err := tm.NewSessionWithCommandAndEnv(name, t.TempDir(), command, env); err != nil {
+		if err := tm.NewSessionWithCommandAndEnv(name, t.TempDir(), "exec "+command, env); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = tm.KillSession(name) })

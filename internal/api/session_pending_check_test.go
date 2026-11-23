@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -158,7 +159,9 @@ func TestRejectPendingInteractionIsBounded(t *testing.T) {
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Hangs")
 	fs.sessionProvider = &pendingLookProvider{Fake: fs.sp, look: hangingPendingLook(t)}
 	done := make(chan error, 1)
-	go func() { done <- srv.rejectPendingInteraction(context.Background(), fs.cityBeadStore, info.ID) }()
+	go func() {
+		done <- srv.rejectPendingInteraction(context.Background(), beadstest.Sessions(fs.cityBeadStore), info.ID)
+	}()
 	select {
 	case err := <-done:
 		if err == nil || !strings.HasPrefix(err.Error(), pendingCheckCode+": ") {
