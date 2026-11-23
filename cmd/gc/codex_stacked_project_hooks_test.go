@@ -397,3 +397,73 @@ func TestCodexStackedHooksGuardsKeepTodaysStaging(t *testing.T) {
 		})
 	}
 }
+
+// TestCodexStackedHooksSharedWorkDirStable covers a covered codex agent
+// sharing its work dir with a codex agent whose sessions do not read the host
+// filesystem (an acp agent), which still needs gc's project copy. The copy is
+// staged on the first tick and then left alone: no tick retires what another
+// agent's staging restores, so the file and both agents' fingerprints hold.
+func TestCodexStackedHooksSharedWorkDirStable(t *testing.T) {
+	userHooks := isolateCodexUserHome(t)
+	writeStackedTestFile(t, userHooks, coveringUserHooks(t, "a3558786"))
+	cityPath, cfg := codexHookStagingCity(t)
+	spec := cfg.Providers["codex"]
+	spec.SupportsACP = boolPtr(true)
+	cfg.Providers["codex"] = spec
+	cfg.Agents = append(cfg.Agents, config.Agent{
+		Name:              "acp-operator",
+		Provider:          "codex",
+		Session:           "acp",
+		MaxActiveSessions: intPtr(1),
+		ScaleCheck:        "echo 1",
+		WorkDir:           "worker",
+	})
+	workHook := filepath.Join(cityPath, "worker", ".codex", "hooks.json")
+
+	type snapshot struct {
+		content string
+		modTime time.Time
+		core    map[string]string
+	}
+	tick := func(n int) snapshot {
+		t.Helper()
+		var stderr strings.Builder
+		result := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, transportFake{runtime.NewFake()}, nil, &stderr)
+		if len(result.State) != 2 {
+			t.Fatalf("tick %d: desired state size = %d, want 2; stderr:\n%s", n, len(result.State), stderr.String())
+		}
+		snap := snapshot{core: make(map[string]string, len(result.State))}
+		for name, tp := range result.State {
+			if got := filepath.Clean(tp.WorkDir); got != filepath.Dir(filepath.Dir(workHook)) {
+				t.Fatalf("tick %d: session %q work dir = %s, want the shared %s", n, name, got, filepath.Dir(filepath.Dir(workHook)))
+			}
+			snap.core[name] = runtime.CoreFingerprint(templateParamsToConfig(tp))
+		}
+		info, err := os.Stat(workHook)
+		if err != nil {
+			t.Fatalf("tick %d: shared project hooks not staged although the acp agent needs them: %v", n, err)
+		}
+		data, err := os.ReadFile(workHook)
+		if err != nil {
+			t.Fatalf("tick %d: read %s: %v", n, workHook, err)
+		}
+		snap.content, snap.modTime = string(data), info.ModTime()
+		return snap
+	}
+
+	first := tick(1)
+	for n := 2; n <= 3; n++ {
+		got := tick(n)
+		if got.content != first.content {
+			t.Fatalf("tick %d: shared project hooks changed:\n%s\nwant (tick 1):\n%s", n, got.content, first.content)
+		}
+		if !got.modTime.Equal(first.modTime) {
+			t.Fatalf("tick %d: shared project hooks rewritten: mtime %s, tick 1 %s", n, got.modTime, first.modTime)
+		}
+		for name, fp := range first.core {
+			if got.core[name] != fp {
+				t.Fatalf("tick %d: session %q core fingerprint moved: %s, tick 1 %s", n, name, got.core[name], fp)
+			}
+		}
+	}
+}
