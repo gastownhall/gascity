@@ -2,12 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // storeWatchdogSeed is order-tracking history every store watchdog has work
@@ -182,5 +189,147 @@ func TestStoreWatchdogLanesRunWhileRetentionIsBlocked(t *testing.T) {
 		if got.Status != want {
 			t.Fatalf("%s status = %q, want %q while retention is blocked", id, got.Status, want)
 		}
+	}
+}
+
+// watchdogOpCountingStore counts every read and write a watchdog reaches it with.
+type watchdogOpCountingStore struct {
+	beads.Store
+	ops atomic.Int64
+}
+
+func (s *watchdogOpCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.ops.Add(1)
+	return s.Store.List(q)
+}
+
+func (s *watchdogOpCountingStore) Close(id string) error {
+	s.ops.Add(1)
+	return s.Store.Close(id)
+}
+
+// The store watchdog lanes start right after the orders lane, ahead of the
+// cold-start reconcile, and run without waiting for it: with the reconcile
+// parked in its desired-state build, every watchdog's work lands within a few
+// patrol intervals of startup.
+func TestStoreWatchdogLanesRunDuringColdStartReconcile(t *testing.T) {
+	t.Setenv(fsPressureThresholdEnv, "100")
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Daemon.PatrolInterval = "10ms"
+	sp := runtime.NewFake()
+	reconcileEntered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releaseStartup := func() { releaseOnce.Do(func() { close(release) }) }
+	cr, runtimeErr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			enterOnce.Do(func() { close(reconcileEntered) })
+			<-release
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if runtimeErr != nil {
+		t.Fatalf("building the city runtime: %v", runtimeErr)
+	}
+	cr.od = &recordingOrderDispatcher{}
+	now := time.Now()
+	seed := append(storeWatchdogSeed(now), mailSeed("mail-stale", now.Add(-nudgeMailSweepDefaultMailTTL-time.Minute)))
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = store
+	cr.setControllerState(cs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		cr.run(ctx)
+	}()
+	stopped := false
+	stop := func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		releaseStartup()
+		cancel()
+		awaitClose(t, runDone, "run() returning after cancellation")
+	}
+	t.Cleanup(stop)
+	awaitClose(t, reconcileEntered, "the cold-start reconcile reaching its desired-state build")
+
+	deadline := time.Now().Add(hangBudget)
+	for {
+		mail, mailErr := store.Get("mail-stale")
+		closed, listErr := store.List(beads.ListQuery{Status: "closed", Label: "order-run:prune", TierMode: beads.TierBoth})
+		if mailErr != nil || listErr != nil {
+			t.Fatalf("reading the store: %v", errors.Join(mailErr, listErr))
+		}
+		if mail.Status == "closed" && len(closed) <= minClosedOrderTrackingRetained {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("with the cold-start reconcile parked: mail-stale %q, %d closed prunable tracking beads; want the nudge/mail and retention lanes to have run", mail.Status, len(closed))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case <-release:
+		t.Fatal("the cold-start reconcile was released before the lanes ran")
+	default:
+	}
+
+	// run() joins the lanes before it returns, so their clocks are readable.
+	stop()
+	if cr.orderSweepWatchdogLast.IsZero() || cr.orderTrackingRetentionWatchdogLast.IsZero() || cr.nudgeMailSweepWatchdogLast.IsZero() {
+		t.Fatalf("watchdog clocks after run: sweep=%v retention=%v nudge/mail=%v, want every lane to have run",
+			cr.orderSweepWatchdogLast, cr.orderTrackingRetentionWatchdogLast, cr.nudgeMailSweepWatchdogLast)
+	}
+}
+
+// A pass that has just run leaves its watchdog not due: the patrol interval
+// paces attempts, and each watchdog keeps its own interval, so a second pass
+// right after the first reaches no store.
+func TestStoreWatchdogLanePassKeepsWatchdogIntervals(t *testing.T) {
+	now := time.Now()
+	store := &watchdogOpCountingStore{Store: beads.NewMemStoreFrom(100, storeWatchdogSeed(now), nil)}
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{}, "1h")
+	for _, lane := range cr.storeWatchdogLanesOf() {
+		cr.runStoreWatchdogLanePass(context.Background(), lane)
+	}
+	if store.ops.Load() == 0 {
+		t.Fatal("the first passes reached no store: the watchdogs were not due")
+	}
+	before := store.ops.Load()
+	for _, lane := range cr.storeWatchdogLanesOf() {
+		cr.runStoreWatchdogLanePass(context.Background(), lane)
+	}
+	if got := store.ops.Load() - before; got != 0 {
+		t.Fatalf("second passes made %d store calls, want 0: a watchdog ran before its interval", got)
+	}
+	later := time.Now()
+	if !cr.orderTrackingSweepWatchdogDue(later.Add(orderTrackingSweepWatchdogInterval)) ||
+		!cr.orderTrackingRetentionWatchdogDue(later.Add(orderTrackingRetentionWatchdogInterval)) ||
+		!cr.nudgeMailSweepWatchdogDue(later.Add(nudgeMailSweepWatchdogInterval)) {
+		t.Fatal("a watchdog is not due one interval after its pass")
+	}
+	if cr.orderTrackingRetentionWatchdogDue(later.Add(orderTrackingRetentionWatchdogInterval/2)) ||
+		cr.nudgeMailSweepWatchdogDue(later.Add(nudgeMailSweepWatchdogInterval/2)) {
+		t.Fatal("a watchdog is due half an interval after its pass")
 	}
 }

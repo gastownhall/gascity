@@ -929,6 +929,15 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		stopOrdersLane()
 		<-ordersLaneDone
 	}()
+	// The store watchdogs run on lanes of their own (store_watchdog_lanes.go),
+	// so neither order dispatch nor the cold-start reconcile below waits on a
+	// slow sweep or prune. Their first pass comes one patrol interval from
+	// here: until then stale tracking in a rig scope, which the boot orphan
+	// sweep does not read, waits for that pass, and an order it holds waits
+	// for the orders pass after it. run() cancels every lane and then joins
+	// them on every exit, before shutdown closes the stores they read.
+	storeWatchdogs := cr.startStoreWatchdogLanes(ctx)
+	defer storeWatchdogs.stop()
 	// The wisp GC's work arm reads work ledgers (bd on a hosted city, one
 	// subprocess per read), so it runs on its own lane; the tick only wakes it
 	// (wisp_gc_work_lane.go).

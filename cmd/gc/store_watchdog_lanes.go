@@ -83,6 +83,8 @@ var storeWatchdogSpecs = []storeWatchdogSpec{
 	},
 }
 
+const storeWatchdogLaneSafeTickTrigger = "store-watchdog-lane"
+
 // storeWatchdogLanesOf returns this runtime's store watchdog lanes, creating
 // them on first use so a directly-constructed CityRuntime needs no wiring.
 func (cr *CityRuntime) storeWatchdogLanesOf() []*storeWatchdogLane {
@@ -104,6 +106,42 @@ func (cr *CityRuntime) storeWatchdogLaneOf(key storeWatchdogKey) *storeWatchdogL
 		}
 	}
 	return nil
+}
+
+// storeWatchdogLaneSet is a started set of store watchdog lanes.
+type storeWatchdogLaneSet struct {
+	cancel context.CancelFunc
+	done   []<-chan struct{}
+}
+
+// stop cancels every lane, then waits for each to exit. Canceling all of
+// them first means a lane blocked in a store call does not hold the others'
+// shutdown: they stop while it finishes the call it is in.
+func (s storeWatchdogLaneSet) stop() {
+	s.cancel()
+	for _, done := range s.done {
+		<-done
+	}
+}
+
+// startStoreWatchdogLanes starts one goroutine per store watchdog, under a
+// context derived from ctx. Each runs a pass one patrol interval (read once
+// from the published config, as the orders lane reads it) after the previous
+// pass ended. The caller must stop the returned set before the stores the
+// watchdogs read are closed.
+func (cr *CityRuntime) startStoreWatchdogLanes(ctx context.Context) storeWatchdogLaneSet {
+	laneCtx, cancel := context.WithCancel(ctx)
+	interval := cr.serviceConfigSnapshot().Daemon.PatrolIntervalDuration()
+	lanes := cr.storeWatchdogLanesOf()
+	set := storeWatchdogLaneSet{cancel: cancel, done: make([]<-chan struct{}, 0, len(lanes))}
+	for _, lane := range lanes {
+		set.done = append(set.done, startPacedLane(laneCtx, interval, 0, nil, func(bool) {
+			cr.safeTick(func() {
+				cr.runStoreWatchdogLanePass(laneCtx, lane)
+			}, storeWatchdogLaneSafeTickTrigger+":"+string(lane.spec.key))
+		}))
+	}
+	return set
 }
 
 // runStoreWatchdogLanePass is one pass of lane: nothing unless the watchdog
