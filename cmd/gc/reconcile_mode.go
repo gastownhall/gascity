@@ -342,12 +342,12 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		r.Message += "; " + note
 		r.FixHint = firstHint(r.FixHint, v2ExecOptInHint)
 	}
-	if detail, warn := execRuntimeDoctorDetail(c.cfg, cityPathOf(ctx), c.lookupEnv, mode); detail != "" && !fellBack {
+	if detail, warn, hint := execRuntimeDoctorDetail(c.cfg, cityPathOf(ctx), c.lookupEnv, mode); detail != "" && !fellBack {
 		r.Details = append(r.Details, detail)
 		if warn != "" {
 			r.Status = doctor.StatusWarning
 			r.Message += "; " + warn
-			r.FixHint = firstHint(r.FixHint, "declare proc.exec and input-fence in the script's handshake if it fences input")
+			r.FixHint = firstHint(r.FixHint, hint)
 		}
 	}
 	for _, refusal := range v2LatchRefusals(c.cfg, cityPathOf(ctx), c.lookupEnv) {

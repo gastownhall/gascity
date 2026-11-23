@@ -6,6 +6,9 @@
 //
 // Discovery is Linux-only via /proc and a no-op elsewhere, mirroring the
 // scan test/integration already uses (readProcessSnapshot); CI runs on Linux.
+// The matching, path, and run-dir logic is platform-neutral and is exercised
+// on every platform; only the process discovery and signaling primitives are
+// per-platform. See dolttest_unix.go and dolttest_windows.go.
 package dolttest
 
 import (
@@ -20,6 +23,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/doltorphan"
 )
+
+// reapGracePeriod is how long a reaped process is given to act on the
+// cooperative stop request before the forced kill.
+const reapGracePeriod = 250 * time.Millisecond
 
 // reap sends SIGTERM, then SIGKILL to survivors, to every `dolt sql-server`
 // whose --config or --data-dir path is within root. Both flags are checked
@@ -104,10 +111,7 @@ func Guard(runDir string) (stop func()) {
 		case s := <-sig:
 			reap(runDir)
 			signal.Stop(sig)
-			if ss, ok := s.(syscall.Signal); ok {
-				signal.Reset(ss)
-				_ = syscall.Kill(os.Getpid(), ss)
-			}
+			reraise(s)
 		case <-done:
 		}
 	}()
@@ -116,47 +120,6 @@ func Guard(runDir string) (stop func()) {
 		close(done)
 		reap(runDir)
 	}
-}
-
-// scanDoltSQLServers returns pid->cmdline for every running `dolt sql-server`.
-// Linux-only via /proc; returns nil where /proc is unavailable.
-func scanDoltSQLServers() map[int]string {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil
-	}
-	out := make(map[int]string)
-	for _, e := range entries {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		cmd, ok := readProcCmdline(pid)
-		if !ok || !looksLikeDoltSQLServer(strings.Fields(cmd)) {
-			continue
-		}
-		out[pid] = cmd
-	}
-	return out
-}
-
-// readProcCmdline returns the space-joined argv of pid from /proc.
-func readProcCmdline(pid int) (string, bool) {
-	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
-	if err != nil || len(raw) == 0 {
-		return "", false
-	}
-	cmd := strings.TrimSpace(strings.ReplaceAll(string(raw), "\x00", " "))
-	if cmd == "" {
-		return "", false
-	}
-	return cmd, true
-}
-
-// pidIsDoltSQLServer reports whether pid is, right now, a dolt sql-server.
-func pidIsDoltSQLServer(pid int) bool {
-	cmd, ok := readProcCmdline(pid)
-	return ok && looksLikeDoltSQLServer(strings.Fields(cmd))
 }
 
 func looksLikeDoltSQLServer(fields []string) bool {
@@ -254,26 +217,24 @@ func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	// Signal 0 probes existence without delivering a signal; EPERM means the
-	// process exists but is not ours to signal — treat as alive (don't reap).
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
+	return platformPIDAlive(pid)
 }
 
+// reapPIDs stops every pid, giving each a cooperative window before the
+// forced kill. Before escalating, each pid is re-confirmed to still be a
+// dolt sql-server: a process that exited during the grace period may have had
+// its pid reused by something unrelated (likelier on a loaded host).
 func reapPIDs(pids []int) {
 	if len(pids) == 0 {
 		return
 	}
 	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		requestStop(pid)
 	}
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(reapGracePeriod)
 	for _, pid := range pids {
-		// Re-confirm the pid is STILL a dolt sql-server before escalating to
-		// SIGKILL: a process that exited during the grace period may have had
-		// its pid reused by something unrelated (likelier on a loaded host).
 		if pidIsDoltSQLServer(pid) {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+			forceKill(pid)
 		}
 	}
 }

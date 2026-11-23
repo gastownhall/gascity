@@ -54,7 +54,7 @@ func TestOnFormulaLegacyColdPoolSeesDemand(t *testing.T) {
 	}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	store := newSlingTestStore()
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	// The bead lives in the saitoc rig store, reused below as the rig store for
 	// the scale_check probe; align StoreRef so the HQ->rig-pool route is allowed
 	// and the bead ID prefix matches the rig prefix (cross-rig guard).
@@ -145,7 +145,7 @@ title = "Do work"
 	store := beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 	}, nil)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "")
 
@@ -266,7 +266,7 @@ func TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand(t *testing.T) {
 				{ID: "BL-42", Title: "Work", Type: "task", Status: "open", Metadata: tt.metadata},
 			}, tt.seed...)
 			store := beads.NewMemStoreFrom(1, seed, nil)
-			deps.Store = store
+			deps = slingDepsWithStore(deps, store)
 
 			a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
 
@@ -385,7 +385,7 @@ func TestOnFormulaGraphV2SourceSlungPlainAgainIsRecoveredWhenDetached(t *testing
 			Metadata: map[string]string{"session_name": "polecat-1", "template": "polecat"},
 		},
 	}, nil)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
 
 	wrap := testOpts(a, "BL-42")

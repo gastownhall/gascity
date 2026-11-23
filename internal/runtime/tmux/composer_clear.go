@@ -98,8 +98,9 @@ func (in claudeInput) equal(other claudeInput) bool {
 // below it, and the rule that closes it. Rows of the transcript start with the
 // same glyph but are not framed by rules, and neither is the "❯ 1. Yes" cursor
 // of a permission menu. Text drawn dim (the "Try ..." placeholder, prompt
-// suggestions) must already have been removed (see stripDimText). It reports
-// false when no framed input box is on screen.
+// suggestions) and the runtime's red error text must already have been
+// removed (see stripDimText). It reports false when no framed input box is on
+// screen.
 func readClaudeInput(lines []string) (claudeInput, bool) {
 	for i := len(lines) - 1; i >= 1; i-- {
 		if !isDialogRule(lines[i-1]) || !matchesPromptPrefix(lines[i], DefaultReadyPromptPrefix) {
@@ -123,15 +124,26 @@ func readClaudeInput(lines []string) (claudeInput, bool) {
 
 // stripDimText removes the escape sequences from a line captured with
 // capture-pane -e, and with them every character drawn with the dim (faint)
-// attribute. Claude Code draws its input placeholder ("Try \"write a test for
-// <filepath>\"") and prompt suggestions dim; they are not a draft, and Ctrl-U
-// cannot delete them. On an empty input box the cursor sits on the
-// placeholder's first character, which is drawn reverse video rather than dim
-// ("Press up to edit queued messages" while a message waits behind a running
-// turn): a single reverse-video cell followed directly by dim text is that
-// cursor and goes with the placeholder. A reverse-video run followed by
-// anything else, or longer than one cell, is the cursor on or after typed
-// text, or highlighted text, and stays.
+// attribute or in the terminal's basic red. Claude Code draws its input
+// placeholder ("Try \"write a test for <filepath>\"") and prompt suggestions
+// dim; they are not a draft, and Ctrl-U cannot delete them. On an empty input
+// box the cursor sits on the placeholder's first character, which is drawn
+// reverse video rather than dim ("Press up to edit queued messages" while a
+// message waits behind a running turn): a single reverse-video cell followed
+// directly by dim text is that cursor and goes with the placeholder. A
+// reverse-video run followed by anything else, or longer than one cell, is the
+// cursor on or after typed text, or highlighted text, and stays.
+//
+// Basic red (SGR 31) is the color Bun, the runtime Claude Code ships on, writes
+// its own errors in, straight to the terminal: a response whose gzip body will
+// not decompress prints "Decompression error: ZlibError" at the cursor, which
+// Claude Code parks in its empty input box. Claude Code never drew those cells,
+// so no key changes them, and they stay until it next repaints the row
+// (ga-c2zv71a2). Claude Code's default themes draw every color, typed text
+// included, as 256-color or RGB codes. Its ANSI themes use basic red for
+// errors and for some letters of a highlighted keyword, whose other letters
+// still read. Other colors stay: Claude Code colors typed text too (a
+// highlighted keyword, a slash command).
 func stripDimText(line string) string {
 	var b strings.Builder
 	var attrs sgrAttrs
@@ -149,6 +161,8 @@ func stripDimText(line string) string {
 			switch {
 			case attrs.dim:
 				settle(true)
+			case attrs.red:
+				settle(false)
 			case attrs.reverse:
 				cursor.WriteByte(line[i])
 			default:
@@ -192,6 +206,7 @@ func stripDimText(line string) string {
 type sgrAttrs struct {
 	dim     bool // SGR 2, cleared by 22
 	reverse bool // SGR 7, cleared by 27
+	red     bool // foreground SGR 31, cleared by 39 or any other foreground
 }
 
 // apply returns a after the SGR parameters params; an empty list resets.
@@ -212,7 +227,15 @@ func (a sgrAttrs) apply(params string) sgrAttrs {
 			a.reverse = true
 		case "27":
 			a.reverse = false
+		case "31":
+			a.red = true
+		case "30", "32", "33", "34", "35", "36", "37", "39",
+			"90", "91", "92", "93", "94", "95", "96", "97":
+			a.red = false
 		case "38", "48", "58": // extended color: 5;n or 2;r;g;b
+			if parts[k] == "38" {
+				a.red = false
+			}
 			if k+1 < len(parts) {
 				switch parts[k+1] {
 				case "5":
@@ -238,10 +261,10 @@ func (t *Tmux) readInput(target string) (claudeInput, bool, error) {
 
 // captureInputLines captures the last promptObservationLines rows of target
 // for callers that read the input box. It differs from CapturePaneLines in
-// three ways: -e keeps the escape sequences, so dim text can be told apart; -J
-// joins a row tmux wrapped with the row it continues on, so a long draft reads
-// as one line rather than one per pane row; and stripDimText then removes the
-// escape sequences along with the dim text.
+// three ways: -e keeps the escape sequences, so dim and red text can be told
+// apart; -J joins a row tmux wrapped with the row it continues on, so a long
+// draft reads as one line rather than one per pane row; and stripDimText then
+// removes the escape sequences along with the dim and red text.
 func (t *Tmux) captureInputLines(target string) ([]string, error) {
 	out, err := t.run("capture-pane", "-p", "-e", "-J", "-t", paneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 	if err != nil {

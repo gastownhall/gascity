@@ -248,7 +248,7 @@ func TestSubprocessObserveLivenessPrefersOwnedProcess(t *testing.T) {
 func TestSubprocessStartRefusesConnectedSilentSocket(t *testing.T) {
 	p := newProbeProvider(t)
 	p.ops.dial = fakeSocketDial(t, map[string]socketOutcome{p.sockPath("busy"): {}})
-	p.ops.start = func(*exec.Cmd) error { return errors.New("process start must not be reached") }
+	p.ops.start = func(*exec.Cmd) (int, error) { return 0, errors.New("process start must not be reached") }
 	err := p.Start(context.Background(), "busy", runtime.Config{Command: "true"})
 	if !errors.Is(err, runtime.ErrSessionExists) {
 		t.Fatalf("Start = %v, want ErrSessionExists", err)

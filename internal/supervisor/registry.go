@@ -12,10 +12,10 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // validCityName matches names safe for use in URL path segments.
@@ -350,13 +350,14 @@ func (r *Registry) fileLock() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening registry lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, Label: lockPath})
+	if err != nil {
 		f.Close() //nolint:errcheck
 		return nil, fmt.Errorf("acquiring registry lock: %w", err)
 	}
 	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck
-		f.Close()                                   //nolint:errcheck
+		lock.Release() //nolint:errcheck
+		f.Close()      //nolint:errcheck
 	}, nil
 }
 

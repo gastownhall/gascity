@@ -1,9 +1,11 @@
 package coordclass
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -288,5 +290,50 @@ func TestMintCommandNamesEveryClass(t *testing.T) {
 		if MintCommand(c) == "" {
 			t.Errorf("MintCommand(%s) is empty", c)
 		}
+	}
+}
+
+// TestClassMetadataOnly pins the declassify helper the stranded-row repair
+// advice rests on: it names the classifier metadata keys whose removal returns
+// a bead to the work class, and only when metadata ALONE decided the class.
+func TestClassMetadataOnly(t *testing.T) {
+	cases := []struct {
+		name     string
+		bead     beads.Bead
+		wantKeys []string
+		wantOK   bool
+	}{
+		// The substrate 2026-11-09 incident shape: an agent's plain `bd create`
+		// stamped its workflow root as provenance on ordinary work.
+		{"task with root bead id", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-622605", "gc.step_ref": "x"}}, []string{beadmeta.RootBeadIDMetadataKey}, true},
+		{"bug with root bead id", beads.Bead{Type: "bug", Labels: []string{"triage/needs-decision"}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-622605"}}, []string{beadmeta.RootBeadIDMetadataKey}, true},
+		// Genuine graph beads are never work-shaped: an operator told to unset
+		// their keys would strip a real workflow of its members.
+		{"workflow root (kind and contract)", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.FormulaContractMetadataKey: "graph.v2"}}, nil, false},
+		{"contract alone", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.FormulaContractMetadataKey: "graph.v2"}}, nil, false},
+		{"wisp by gc.kind alone", beads.Bead{Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}}, nil, false},
+		{"real step (root and step id)", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1", beadmeta.StepIDMetadataKey: "s1", "gc.step_ref": "f.s1"}}, nil, false},
+		{"root id beside another class key", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1", beadmeta.SyntheticMetadataKey: "true"}}, nil, false},
+		{"work bead has nothing to remove", beads.Bead{Type: "task"}, nil, false},
+		{"session label decides", beads.Bead{Type: "task", Labels: []string{labelSession}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1"}}, nil, false},
+		{"session type decides", beads.Bead{Type: typeSession}, nil, false},
+		{"convergence type decides", beads.Bead{Type: typeConvergence, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1"}}, nil, false},
+		{"message type decides", beads.Bead{Type: typeMessage}, nil, false},
+		{"wisp label decides", beads.Bead{Type: "task", Labels: []string{labelGCWisp}}, nil, false},
+		{"classifier label alongside metadata decides", beads.Bead{Type: "task", Labels: []string{labelNudge}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1"}}, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keys, ok := ClassMetadataOnly(tc.bead)
+			if ok != tc.wantOK || !slices.Equal(keys, tc.wantKeys) {
+				t.Fatalf("ClassMetadataOnly = %v, %v; want %v, %v", keys, ok, tc.wantKeys, tc.wantOK)
+			}
+			if ok {
+				after := Mutation{UnsetMetadata: keys}.Apply(tc.bead)
+				if got := Classify(after); got != ClassWork {
+					t.Fatalf("removing %v leaves class %s, want work", keys, got)
+				}
+			}
+		})
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // S4a readers in the API: on a split city a rig's graph rows live in the city
@@ -22,6 +23,17 @@ type relicReportingState struct {
 }
 
 func (s relicReportingState) RigGraphRelicFree(rig string) bool { return s.relicFree[rig] }
+
+// Stores is the fake's epoch with the same relic-free bits, as a production
+// holder mints them (cmd/gc's mintCityStores reads splitRigGraphRelicFree, the
+// bit RigGraphRelicFree answers): the workflow legs read the bit from the
+// epoch, the order reads from RigGraphRelicFree.
+func (s relicReportingState) Stores() storeref.Stores {
+	f := s.fakeState
+	bits := f.rigBits
+	bits.relicFree = s.relicFree
+	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), storeref.StoresOptions{Projection: gateProjection{}, ClassRefusals: f.classRefusals}, f.cfg, f.ClassBindingHasLegacyResidents, bits)
+}
 
 func newS4APIState(t *testing.T, split bool) (relicReportingState, beads.Store, beads.Store) {
 	t.Helper()
@@ -68,13 +80,13 @@ func TestWorkflowEventRootProbesTheBindingBeforeTheScopeItNames(t *testing.T) {
 		beadmeta.RootStoreRefMetadataKey: "rig:myrig",
 	}}
 	info, got, ok := workflowEventRoot(state, step)
-	if !ok || got.ID != root.ID || info.store != binding {
-		t.Fatalf("workflowEventRoot = (%v, %s, store %T), want the binding's root", ok, got.ID, info.store)
+	if !ok || got.ID != root.ID || !beads.SameStore(info.leg.Reader, binding) {
+		t.Fatalf("workflowEventRoot = (%v, %s, leg %s), want the binding's root", ok, got.ID, info.ref)
 	}
 
 	legacy := workflowRoot(t, rig, "pre-S4 rig root")
 	step.Metadata[beadmeta.RootBeadIDMetadataKey] = legacy.ID
-	if info, got, ok := workflowEventRoot(state, step); !ok || got.ID != legacy.ID || info.store != rig {
+	if info, got, ok := workflowEventRoot(state, step); !ok || got.ID != legacy.ID || !beads.SameStore(info.leg.Reader, rig) {
 		t.Fatalf("workflowEventRoot for a pre-S4 rig root = (%v, %s), want it from the rig store", ok, got.ID)
 	}
 	state.relicFree["myrig"] = true
@@ -93,7 +105,7 @@ func TestWorkflowEventRootIsUnchangedOnASingleStoreCity(t *testing.T) {
 		beadmeta.RootStoreRefMetadataKey: "rig:myrig",
 	}}
 	plain := state.fakeState
-	if info, got, ok := workflowEventRoot(plain, step); !ok || got.ID != root.ID || info.store != rig {
+	if info, got, ok := workflowEventRoot(plain, step); !ok || got.ID != root.ID || !beads.SameStore(info.leg.Reader, rig) {
 		t.Fatalf("single-store workflowEventRoot = (%v, %s), want the rig's root", ok, got.ID)
 	}
 }
@@ -142,7 +154,7 @@ func TestWorkflowEventRootResolvesATwinToTheBinding(t *testing.T) {
 		beadmeta.RootStoreRefMetadataKey: "rig:myrig",
 	}}
 	info, got, ok := workflowEventRoot(state, step)
-	if !ok || got.Title != "binding copy" || info.store != binding {
+	if !ok || got.Title != "binding copy" || !beads.SameStore(info.leg.Reader, binding) {
 		t.Fatalf("workflowEventRoot for a twin = (%v, %q), want the binding's copy", ok, got.Title)
 	}
 }

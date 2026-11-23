@@ -10,12 +10,18 @@ import (
 // ProgramStatusDeclaration is a program-status declaration as gc arms it:
 // whether capture is declared, the program name the capture reader accepts
 // reports from, whether the program runs under the probe-answering relay,
-// and whether input typed mid-turn aborts its turn (the mid-turn hold).
+// whether input typed mid-turn aborts its turn (the mid-turn hold), and
+// whether the startup ladder and the interrupt settle decide with the
+// program's record under the switch on (decide_startup, decide_settle): a
+// family declares those only once a shadow measured its records against
+// that decision.
 type ProgramStatusDeclaration struct {
-	Declared    bool
-	App         string
-	Relay       bool
-	HoldMidTurn bool
+	Declared      bool
+	App           string
+	Relay         bool
+	HoldMidTurn   bool
+	DecideStartup bool
+	DecideSettle  bool
 }
 
 // ProgramStatusExpectation is a profile's OSC 7501 program-status
@@ -132,7 +138,8 @@ func ProgramStatusPendingSlice(code RequirementCode) (string, bool) {
 // ProgramStatusGate classifies profile for WC-PSTAT row code before the
 // row's behavior runs. implementation is the declaration gc's provider data
 // arms for the profile's family. A declaration that drifts from the
-// profile's expectation (declared, app, relay or hold) fails; an undeclared
+// profile's expectation (declared, app, relay, hold or a decision opt-in)
+// fails; an undeclared
 // profile is out of scope (Unsupported), as is a profile not declaring the
 // mid-turn hold for the hold's row; a row whose behavior has not landed
 // is pending (Unsupported, naming its slice). run is true only when the row
@@ -148,6 +155,8 @@ func ProgramStatusGate(profile Profile, code RequirementCode, implementation Pro
 		evidence["implementation_app"] = implementation.App
 		evidence["implementation_relay"] = strconv.FormatBool(implementation.Relay)
 		evidence["implementation_hold_mid_turn"] = strconv.FormatBool(implementation.HoldMidTurn)
+		evidence["implementation_decide_startup"] = strconv.FormatBool(implementation.DecideStartup)
+		evidence["implementation_decide_settle"] = strconv.FormatBool(implementation.DecideSettle)
 	}
 	switch slice, pending := ProgramStatusPendingSlice(code); {
 	case implementation != expected:

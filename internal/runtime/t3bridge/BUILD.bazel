@@ -44,6 +44,7 @@ go_test(
         "turn_identity_test.go",
         "watch_latest_seq_test.go",
         "watched_bead_event_test.go",
+        "write_deadline_test.go",
     ],
     embed = [":t3bridge"],
     deps = [

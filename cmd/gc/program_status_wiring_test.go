@@ -159,19 +159,44 @@ func TestProgramStatusRecordedACPLaunchIsDisarmed(t *testing.T) {
 	}
 }
 
+// Under the switch off a declared provider's start carries its declaration
+// (the leaf arms it only under its live switch, so a resolution cached under
+// off follows a later flip on) and nothing else: no forced env, no launch
+// fingerprint movement, the rest of runtime.Config as an undeclared provider's.
 func TestProgramStatusOffInjectsNothing(t *testing.T) {
 	cityPath := newProgramStatusTestCity(t)
 	declared := programStatusTemplateConfig(t, cityPath, "off", programStatusTestBinding(), "")
 	undeclared := programStatusTemplateConfig(t, cityPath, "off", config.ProgramStatusBinding{}, "")
 	unset := programStatusTemplateConfig(t, cityPath, "", programStatusTestBinding(), "")
-	if !reflect.DeepEqual(declared, undeclared) {
-		t.Errorf("off: a declared binding changed runtime.Config\ndeclared:   %+v\nundeclared: %+v", declared, undeclared)
+	for name, cfg := range map[string]runtime.Config{"off": declared, "unset switch": unset} {
+		if cfg.ProgramStatus != programStatusTestArm {
+			t.Errorf("%s: ProgramStatus = %+v, want the declaration %+v", name, cfg.ProgramStatus, programStatusTestArm)
+		}
+		if _, ok := cfg.Env[programStatusTestEnvKey]; ok {
+			t.Errorf("%s injected %s", name, programStatusTestEnvKey)
+		}
+		assertProgramStatusFingerprintsEqual(t, name, undeclared, cfg)
+		cfg.ProgramStatus = runtime.ProgramStatusArm{}
+		if !reflect.DeepEqual(cfg, undeclared) {
+			t.Errorf("%s: a declared binding changed runtime.Config beyond its declaration\ndeclared:   %+v\nundeclared: %+v", name, cfg, undeclared)
+		}
 	}
-	if !reflect.DeepEqual(unset, undeclared) {
-		t.Errorf("unset switch: a declared binding changed runtime.Config")
-	}
-	if _, ok := declared.Env[programStatusTestEnvKey]; ok {
-		t.Errorf("off injected %s", programStatusTestEnvKey)
+}
+
+// assertProgramStatusFingerprintsEqual fails when any launch fingerprint of got
+// differs from base's.
+func assertProgramStatusFingerprintsEqual(t *testing.T, label string, base, got runtime.Config) {
+	t.Helper()
+	for name, fp := range map[string]func(runtime.Config) string{
+		"ConfigFingerprint":             runtime.ConfigFingerprint,
+		"CoreFingerprint":               runtime.CoreFingerprint,
+		"LiveFingerprint":               runtime.LiveFingerprint,
+		"PrePolicyProvisionFingerprint": runtime.PrePolicyProvisionFingerprint,
+		"PrePolicyLaunchFingerprint":    runtime.PrePolicyLaunchFingerprint,
+	} {
+		if fp(base) != fp(got) {
+			t.Errorf("%s: %s moved", label, name)
+		}
 	}
 }
 
@@ -238,7 +263,7 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 		wantEnv bool
 	}{
 		{"on", programStatusTestArm, true},
-		{"off", runtime.ProgramStatusArm{}, false},
+		{"off", programStatusTestArm, false},
 	} {
 		t.Run("worker create "+tc.mode, func(t *testing.T) {
 			cityDir := t.TempDir()
@@ -317,36 +342,38 @@ func builtinProgramStatusTemplateConfig(t *testing.T, cityPath, mode, family str
 }
 
 // The builtin codex and claude declarations (ga-f4ovjm.18) reach a city
-// provider that inherits them, yet change nothing while the switch is off or
-// unset: the runtime.Config is the one the explicitly undeclared provider
-// resolves to. Under shadow and on they arm capture (claude under the relay)
-// without moving any launch fingerprint, and protocol = "none" undeclares.
+// provider that inherits them. While the switch is off or unset a start
+// carries only the declaration, for the leaf to arm under its live switch: the
+// rest of runtime.Config is the one the explicitly undeclared provider
+// resolves to. Under every switch the declaration (claude under the relay)
+// moves no launch fingerprint, and protocol = "none" undeclares.
 func TestBuiltinProgramStatusDeclarationsInertWhenOff(t *testing.T) {
 	cityPath := newProgramStatusTestCity(t)
 	undeclare := config.ProgramStatusBinding{Protocol: config.ProgramStatusProtocolNone}
 	for family, wantArm := range map[string]runtime.ProgramStatusArm{
-		"codex":  {Capture: true, App: "codex", HoldMidTurn: true},
-		"claude": {Capture: true, App: "claude-code", Relay: true},
+		"codex":  {Capture: true, App: "codex", HoldMidTurn: true, DecideStartup: true},
+		"claude": {Capture: true, App: "claude-code", Relay: true, DecideStartup: true, DecideSettle: true},
 	} {
 		t.Run(family, func(t *testing.T) {
 			undeclared := builtinProgramStatusTemplateConfig(t, cityPath, "off", family, undeclare)
 			for _, mode := range []string{"", "off"} {
 				got := builtinProgramStatusTemplateConfig(t, cityPath, mode, family, config.ProgramStatusBinding{})
+				got.ProgramStatus = runtime.ProgramStatusArm{}
 				if !reflect.DeepEqual(got, undeclared) {
-					t.Errorf("switch %q: the builtin declaration changed runtime.Config\ndeclared:   %+v\nundeclared: %+v", mode, got, undeclared)
+					t.Errorf("switch %q: the builtin declaration changed runtime.Config beyond its declaration\ndeclared:   %+v\nundeclared: %+v", mode, got, undeclared)
 				}
 			}
-			for _, mode := range []string{"shadow", "on"} {
+			for _, mode := range []string{"", "off", "shadow", "on"} {
 				armed := builtinProgramStatusTemplateConfig(t, cityPath, mode, family, config.ProgramStatusBinding{})
 				if armed.ProgramStatus != wantArm {
-					t.Errorf("%s: ProgramStatus = %+v, want %+v", mode, armed.ProgramStatus, wantArm)
+					t.Errorf("%q: ProgramStatus = %+v, want the declaration %+v", mode, armed.ProgramStatus, wantArm)
 				}
 				if runtime.CoreFingerprint(armed) != runtime.CoreFingerprint(undeclared) ||
 					runtime.PrePolicyLaunchFingerprint(armed) != runtime.PrePolicyLaunchFingerprint(undeclared) {
-					t.Errorf("%s: arming the builtin declaration moved the launch fingerprint", mode)
+					t.Errorf("%q: the builtin declaration moved the launch fingerprint", mode)
 				}
 				if got := builtinProgramStatusTemplateConfig(t, cityPath, mode, family, undeclare).ProgramStatus; got != (runtime.ProgramStatusArm{}) {
-					t.Errorf("%s: protocol = \"none\" left ProgramStatus = %+v, want disarmed", mode, got)
+					t.Errorf("%q: protocol = \"none\" left ProgramStatus = %+v, want disarmed", mode, got)
 				}
 			}
 		})
