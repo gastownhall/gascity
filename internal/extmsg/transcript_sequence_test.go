@@ -242,3 +242,106 @@ func TestTranscriptAppendSequenceUniqueAfterAmbiguousCreate(t *testing.T) {
 		})
 	}
 }
+
+// TestTranscriptBackfillCursorDoesNotSkipLateEntry runs two writers on
+// independent primed caches over one store. One writer's entry lands while
+// the member reads and acknowledges the head; the member's later backfill
+// returns it, and no entry at or below the final acknowledgement goes unseen.
+func TestTranscriptBackfillCursorDoesNotSkipLateEntry(t *testing.T) {
+	freezeTestClock(t)
+	ctx := context.Background()
+	backing := beads.NewMemStore()
+	cacheA := beads.NewCachingStoreForTest(backing, nil)
+	cacheB := beads.NewCachingStoreForTest(backing, nil)
+	faultA := &transcriptFaultStore{Store: cacheA}
+	svcA := newTranscriptService(beadstest.Mail(faultA), newBindingLockPool())
+	svcB := newTranscriptService(beadstest.Mail(cacheB), newBindingLockPool())
+	ref := testConversationRef()
+	const member = "member-1"
+
+	if _, err := svcB.EnsureMembership(ctx, EnsureMembershipInput{
+		Caller:         testControllerCaller(),
+		Conversation:   ref,
+		SessionID:      member,
+		BackfillPolicy: MembershipBackfillAll,
+		Owner:          MembershipOwnerManual,
+		Now:            testNow(),
+	}); err != nil {
+		t.Fatalf("EnsureMembership: %v", err)
+	}
+	if _, err := appendTestTranscript(svcB, ref, "msg-0", "seed"); err != nil {
+		t.Fatalf("Append(seed): %v", err)
+	}
+	for name, cache := range map[string]*beads.CachingStore{"A": cacheA, "B": cacheB} {
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("PrimeActive(%s): %v", name, err)
+		}
+	}
+
+	seen := map[int64]string{}
+	var acked int64
+	readAndAck := func(step string) {
+		t.Helper()
+		got, err := svcB.ListBackfill(ctx, ListBackfillInput{
+			Caller:       testControllerCaller(),
+			Conversation: ref,
+			SessionID:    member,
+			Limit:        100,
+		})
+		if err != nil {
+			t.Fatalf("ListBackfill(%s): %v", step, err)
+		}
+		for _, record := range got {
+			seen[record.Sequence] = record.Text
+			acked = max(acked, record.Sequence)
+		}
+		state, err := svcB.State(ctx, testControllerCaller(), ref)
+		if err != nil || state == nil {
+			t.Fatalf("State(%s) = %v, %v", step, state, err)
+		}
+		acked = max(acked, state.NextSequence-1)
+		if err := svcB.Ack(ctx, AckMembershipInput{
+			Caller:       testControllerCaller(),
+			Conversation: ref,
+			SessionID:    member,
+			Sequence:     acked,
+		}); err != nil {
+			t.Fatalf("Ack(%s, %d): %v", step, acked, err)
+		}
+	}
+	readAndAck("before the late writer")
+
+	var bErr error
+	faultA.afterEntryCreate = func(beads.Bead) {
+		readAndAck("while the late entry is unpublished")
+		if _, bErr = appendTestTranscript(svcB, ref, "msg-2", "after"); bErr == nil {
+			readAndAck("after the next append")
+		}
+	}
+	if _, err := appendTestTranscript(svcA, ref, "msg-late", "late"); err != nil {
+		t.Fatalf("Append(late): %v", err)
+	}
+	if bErr != nil {
+		t.Fatalf("Append(after) on the other cache: %v", bErr)
+	}
+	readAndAck("after the late writer returned")
+
+	stored := assertTranscriptSequencesUnique(t, backing)
+	for _, record := range stored {
+		if record.Sequence <= acked && seen[record.Sequence] != record.Text {
+			t.Fatalf("entry %d (%q) is at or below the acknowledged sequence %d but backfill never returned it; seen %v",
+				record.Sequence, record.Text, acked, seen)
+		}
+	}
+	if !slices.Contains(mapValues(seen), "late") {
+		t.Fatalf("backfill never returned the late entry; seen %v", seen)
+	}
+}
+
+func mapValues(m map[int64]string) []string {
+	out := make([]string, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
+}
