@@ -12,14 +12,14 @@ import (
 )
 
 // TestCoreOrdersRefusedOnWindowsAreTheScriptOrders pins which of the core
-// pack's orders Windows refuses to run: the thirteen whose program is a POSIX
+// pack's orders Windows refuses to run: the fourteen whose program is a POSIX
 // shell script, until they are ported, and none of the five that run gc.
 func TestCoreOrdersRefusedOnWindowsAreTheScriptOrders(t *testing.T) {
 	want := []string{
 		"cascade-nudge-on-blocker-close", "cross-rig-deps", "gate-sweep", "jsonl-export",
-		"notify-on-claims-resumed", "notify-on-claims-stalled", "notify-on-human-gate-creation",
-		"nudge-on-route", "orphan-sweep", "prune-branches", "reaper", "renudge-stale-human-gates",
-		"spawn-storm-detect",
+		"notify-on-claims-resumed", "notify-on-claims-stalled", "notify-on-drain-ack-loop",
+		"notify-on-human-gate-creation", "nudge-on-route", "orphan-sweep", "prune-branches", "reaper",
+		"renudge-stale-human-gates", "spawn-storm-detect",
 	}
 	entries, err := fs.ReadDir(PackFS, "orders")
 	if err != nil {

@@ -312,3 +312,9 @@ func TestNotifyDrainAckLoopFailsLoud(t *testing.T) {
 		})
 	}
 }
+
+// TestNotifyOnDrainAckLoopOrder pins the order's event contract: it wakes on
+// session.drain_acked_with_assigned_work and runs notify-drain-ack-loop.sh.
+func TestNotifyOnDrainAckLoopOrder(t *testing.T) {
+	assertEventExecOrder(t, "notify-on-drain-ack-loop.toml", "session.drain_acked_with_assigned_work", "notify-drain-ack-loop.sh")
+}

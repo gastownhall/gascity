@@ -1,0 +1,20 @@
+# notify-on-drain-ack-loop mails the escalation recipient when one work bead
+# keeps cycling through drain-ack with its started claim kept: each stop is a
+# session.drain_acked_with_assigned_work whose reason is started_claim_kept,
+# and the same bead comes back stop after stop (a seat wakes for its claim,
+# cannot finish it, and stops again). Nothing in the city ends that loop by
+# itself, and the controller does not judge it: this order counts the cycles
+# and tells a person, who parks the bead (bd set-state <id> hold=mayor) if it
+# should stop.
+#
+# Mail rides escalate.sh with the bead as the incident key, so one loop mails
+# once (reminded daily while it lasts). The script never writes the bead. See
+# assets/scripts/notify-drain-ack-loop.sh.
+#
+# Mechanical (an event read, a bead read and a mail send), no LLM judgment:
+# exec order.
+[order]
+description = "Mail the escalation recipient when one bead keeps drain-acking with a started claim kept"
+trigger = "event"
+on = "session.drain_acked_with_assigned_work"
+exec = "$PACK_DIR/assets/scripts/notify-drain-ack-loop.sh"
