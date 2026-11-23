@@ -41,7 +41,7 @@ func legacyCollectedDemandView(env demandGatherEnv) demandView {
 	}
 	if len(targets.defaultScaleTargets) > 0 {
 		v.Collected.DefaultProbed = true
-		v.Collected.DefaultCounts, v.Collected.DefaultDemand, v.Collected.DefaultPartials, _ = defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, demandCache)
+		v.Collected.DefaultCounts, v.Collected.DefaultDemand, v.Collected.DefaultPartials, _, _ = defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, demandCache)
 	}
 	if len(targets.defaultNamedScaleTargets) > 0 {
 		v.NamedDefault, v.Collected.NamedPartials, _ = defaultNamedSessionDemand(targets.defaultNamedScaleTargets, cfg, env.CityName, demandCache)

@@ -121,7 +121,7 @@ func TestDecideAndLegacyFreshWakeSkipBlockedAssignedStep(t *testing.T) {
 			assigned, _, refs, ready, partial := collectAssignedWorkBeadsWithStores(cityPath, cfg, store, nil, nil, snap, newReadyDemandCache())
 			routed, _, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(cityPath, cfg, store, nil, nil, io.Discard, nil, nil)
 			targets := buildDemandTargets("city", cityPath, cfg, store, nil, nil, snap.OpenInfos(), controllerQueryRuntimeEnv, io.Discard)
-			counts, demand, partials, _ := defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, newReadyDemandCache())
+			counts, demand, partials, _, _ := defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, newReadyDemandCache())
 			f.in.Demand = demandView{
 				AssignedWork: assigned, AssignedStoreRefs: refs, ReadyAssigned: ready, StorePartial: partial,
 				Collected: collectedDemand{

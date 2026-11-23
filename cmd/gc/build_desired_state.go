@@ -223,6 +223,12 @@ type defaultScaleCheckTarget struct {
 	// holds every scope's rows, so storeKey says where a row lives, not who
 	// owns it: the row's gc.root_store_ref does (rootStoreRefMatchesCandidate).
 	classBinding bool
+	// claimView is the store a seat of this template resolves this leg's ids
+	// in when it claims: the pool's own store on a cross-store (city) leg of a
+	// rig pool, nil on every other leg. A row counted from a leg that carries
+	// one is demand only if the claim view holds no copy of it or holds it open
+	// and unassigned — the claim's own question (#5857, demand_claim_view.go).
+	claimView beads.StoreReader
 }
 
 type scaleCheckDemand struct {
@@ -757,17 +763,27 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		if len(targets.defaultScaleTargets) > 0 {
 			subPhaseStart = trace.demandNow()
 			var errs []error
+			var claimViewStats demandClaimViewStats
 			collected.DefaultProbed = true
-			collected.DefaultCounts, collected.DefaultDemand, collected.DefaultPartials, errs = defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, demandReadyCache)
+			collected.DefaultCounts, collected.DefaultDemand, collected.DefaultPartials, errs, claimViewStats = defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, demandReadyCache)
 			// A bead whose claims keep failing the same way is not spawn demand
 			// (claim_loop_guard.go).
 			collected.DefaultCounts, collected.DefaultDemand = claimLoopGuardFor(cityPath).withhold(collected.DefaultCounts, collected.DefaultDemand)
 			// Nor is the work of a template whose seats stopped claiming
 			// (claim_stall_guard.go).
 			collected.DefaultCounts, collected.DefaultDemand = claimStallGuardFor(cityPath).withhold(collected.DefaultCounts, collected.DefaultDemand)
-			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
+			// The claim-view probes are the demand pass's only record of the
+			// stale cross-store replicas it withheld (#5857): a standing one is
+			// visible to `gc trace` here without stderr noise on every tick.
+			demandFields := map[string]any{
 				"targets": len(targets.defaultScaleTargets),
-			})
+			}
+			if claimViewStats.Probed > 0 {
+				demandFields["claim_view_probed"] = claimViewStats.Probed
+				demandFields["claim_view_shadowed"] = claimViewStats.Shadowed
+				demandFields["claim_view_shadowed_ids"] = claimViewStats.ShadowedIDs
+			}
+			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, demandFields)
 			for _, err := range errs {
 				// defaultScaleCheckCounts wraps Ready() failures with
 				// enough context to keep this generic outer log honest
@@ -1523,7 +1539,7 @@ func buildDemandTargets(
 			// claim a route from the city store. Keep their cold-wake probe on the
 			// owning store instead of applying generic cross-store pool delivery.
 			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-				defaultScaleTargets = append(defaultScaleTargets, cityTargets(template)...)
+				defaultScaleTargets = append(defaultScaleTargets, crossStoreDemandLegs(cityTargets(template), demandClaimView(scopeStores("", nil, ownTarget.store)))...)
 			}
 			continue
 		}
@@ -2347,16 +2363,16 @@ func defaultScaleCheckTargetForAgent(
 // that need normalization should call defaultScaleCheckCountsAndDemand
 // directly with a real *config.City.
 func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int, map[string]bool, []error) {
-	counts, _, partialTemplates, errs := defaultScaleCheckCountsAndDemand(nil, targets)
+	counts, _, partialTemplates, errs, _ := defaultScaleCheckCountsAndDemand(nil, targets)
 	return counts, partialTemplates, errs
 }
 
-func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error, demandClaimViewStats) {
 	cache := optionalReadyDemandCache(caches)
 	counts := make(map[string]int, len(targets))
 	demand := make(map[string]scaleCheckDemand, len(targets))
 	if len(targets) == 0 {
-		return counts, demand, nil, nil
+		return counts, demand, nil, nil, demandClaimViewStats{}
 	}
 
 	type scaleStoreGroup struct {
@@ -2367,6 +2383,11 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		// byTemplate is the group's ready rows bucketed by the template each one
 		// is servable to, in the store's own order.
 		byTemplate map[string][]beads.Bead
+		// claimViews maps each template this group carries a cross-store leg
+		// for to that pool's own store, where a seat of the template resolves
+		// the group's ids when it claims (#5857). A template with no entry
+		// keeps today's counting: its legs are stores it owns.
+		claimViews map[string]beads.StoreReader
 	}
 	// A group is one (key, store) pair: on a split city the work ledger and the
 	// binding both count under "city", and they are two stores to read, not one.
@@ -2413,6 +2434,12 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		}
 		if _, seen := group.templates[template]; !seen {
 			group.templates[template] = struct{}{}
+			if target.claimView != nil {
+				if group.claimViews == nil {
+					group.claimViews = make(map[string]beads.StoreReader)
+				}
+				group.claimViews[template] = target.claimView
+			}
 			if _, known := templateGroups[template]; !known {
 				templateOrder = append(templateOrder, template)
 			}
@@ -2462,11 +2489,13 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			group.byTemplate[template] = append(group.byTemplate[template], b)
 		}
 	}
+	probes := claimViewProbe{}
 	for _, template := range templateOrder {
 		seen := make(map[string]struct{})
 		var rows []beads.Bead
 		rowStoreKeys := make(map[string]string)
 		rowBindingResident := make(map[string]bool)
+		rowClaimViews := make(map[string]beads.StoreReader)
 		for _, group := range templateGroups[template] {
 			for _, b := range group.byTemplate[template] {
 				if _, dup := seen[b.ID]; dup {
@@ -2476,6 +2505,9 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				rows = append(rows, b)
 				rowStoreKeys[b.ID] = group.storeKey
 				rowBindingResident[b.ID] = group.classBinding
+				if view := group.claimViews[template]; view != nil {
+					rowClaimViews[b.ID] = view
+				}
 			}
 		}
 		// The claim reader merges these legs and serves them in the canonical
@@ -2496,6 +2528,20 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			// directory can claim it.
 			if specErr == nil && spec != nil && rank >= config.RoutedReadyClaimWindow {
 				continue
+			}
+			// The claim's own question for a cross-store row (#5857): a seat
+			// of this template resolves the id in the claim view, so a row the
+			// view already holds closed, in progress or assigned is not
+			// demand — the seat would be refused and drain, every tick, for as
+			// long as the stale replica stays ready. The row keeps its rank,
+			// so a shadowed row in front of a worktree-bound one still holds
+			// that row behind the claim window, exactly as the seat reads it.
+			if view := rowClaimViews[b.ID]; view != nil {
+				verdict, _ := probes.check(view, b.ID)
+				if verdict == claimViewShadow {
+					probes.noteShadowed(b.ID)
+					continue
+				}
 			}
 			counts[template]++
 			entry := demand[template]
@@ -2547,7 +2593,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			demand[template] = entry
 		}
 	}
-	return counts, demand, partialTemplates, errs
+	return counts, demand, partialTemplates, errs, probes.stats
 }
 
 // collectedDemand is what one demand pass's collectors read: custom

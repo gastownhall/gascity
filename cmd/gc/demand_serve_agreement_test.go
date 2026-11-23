@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -536,6 +539,166 @@ type countingUpdateStore struct {
 func (s *countingUpdateStore) Update(id string, opts beads.UpdateOpts) error {
 	s.updates++
 	return s.Store.Update(id, opts)
+}
+
+// recordingClaimViewStore records the ids a demand pass resolved through a
+// claim view, so a test can assert exactly which cross-store rows the claim's
+// own question was asked for (#5857).
+type recordingClaimViewStore struct {
+	beads.Store
+	gets []string
+}
+
+func (s *recordingClaimViewStore) Get(id string) (beads.Bead, error) {
+	s.gets = append(s.gets, id)
+	return s.Store.Get(id)
+}
+
+func (s *recordingClaimViewStore) getIDs() []string {
+	out := make([]string, len(s.gets))
+	copy(out, s.gets)
+	return out
+}
+
+// TestDefaultScaleDemandCountsOnlyRowsTheClaimCanWin is the cross-store form of
+// the T-A property (#5857): a rig pool's demand pass reads its own rig store
+// and the city store, but a seat's claim CAS resolves a cross-store row's id in
+// the pool's own store. A row that store already holds closed, in progress or
+// assigned is refused before any write, so counting it mints a seat that reads
+// it, is refused, drains and is replaced, every tick, for as long as the stale
+// replica stays ready. The row the claim can win is exactly the row counted.
+func TestDefaultScaleDemandCountsOnlyRowsTheClaimCanWin(t *testing.T) {
+	cfg := agreementConfig()
+	cityStore := beads.NewMemStore()
+	cityStore.HonorExplicitIDs = true
+	rigStore := beads.NewMemStore()
+	rigStore.HonorExplicitIDs = true
+	claimView := &recordingClaimViewStore{Store: rigStore}
+
+	routed := func(id string) beads.Bead {
+		return beads.Bead{
+			ID: id, Title: "row " + id, Type: "task",
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+		}
+	}
+	seed := func(t *testing.T, store *beads.MemStore, bead beads.Bead) {
+		t.Helper()
+		if _, err := store.Create(bead); err != nil {
+			t.Fatalf("seeding %s: %v", bead.ID, err)
+		}
+	}
+	// A copy in the rig store whose state the claim cannot win: assigned (W),
+	// in progress (V) or closed (X, and the window rows below).
+	shadow := func(t *testing.T, id, assignee, status string) {
+		t.Helper()
+		seed(t, rigStore, routed(id))
+		if assignee != "" {
+			who := assignee
+			if err := rigStore.Update(id, beads.UpdateOpts{Assignee: &who}); err != nil {
+				t.Fatalf("assigning %s: %v", id, err)
+			}
+		}
+		switch status {
+		case "in_progress":
+			inProgress := "in_progress"
+			if err := rigStore.Update(id, beads.UpdateOpts{Status: &inProgress}); err != nil {
+				t.Fatalf("advancing %s: %v", id, err)
+			}
+		case "closed":
+			if err := rigStore.Close(id); err != nil {
+				t.Fatalf("closing %s: %v", id, err)
+			}
+		}
+	}
+
+	// X (#5857): open and unassigned in the city store, closed and assigned in
+	// the rig store the seat's claim resolves ids in — the stale-replica shape
+	// that minted 2,658 seats. Not counted, and absent from WorkBeadIDs and
+	// StoreRefs.
+	seed(t, cityStore, routed("x"))
+	shadow(t, "x", "other-session", "closed")
+	// Z: ready in BOTH stores. The own leg wins the dedup, so it is counted
+	// once from the rig store and the claim view is never asked about it.
+	seed(t, cityStore, routed("z"))
+	seed(t, rigStore, routed("z"))
+	// W: a rig copy that is open but assigned to another session.
+	seed(t, cityStore, routed("w"))
+	shadow(t, "w", "someone", "")
+	// V: a rig copy that is in progress.
+	seed(t, cityStore, routed("v"))
+	shadow(t, "v", "", "in_progress")
+	// Window parity: RoutedReadyClaimWindow shadowed rows ranked ahead of a
+	// worktree-bound row keep that bound row behind the claim window. A fix
+	// that dropped the shadowed rows from the ranked list before counting
+	// would pull the bound row to rank 0 and count it, disagreeing with what
+	// the seat's bounded claim read serves.
+	for i := 0; i < config.RoutedReadyClaimWindow; i++ {
+		id := fmt.Sprintf("win-%02d", i)
+		seed(t, cityStore, routed(id))
+		shadow(t, id, "", "closed")
+	}
+	bound := routed("win-bound")
+	for k, v := range map[string]string{
+		beadmeta.WorkDirMetadataKey:            "/wt/r1/w-bound",
+		beadmeta.WorktreeRepoMetadataKey:       "/rigs/r1",
+		beadmeta.WorktreeRootMetadataKey:       "/wt/r1",
+		beadmeta.WorkBranchMetadataKey:         "wt/w-bound",
+		beadmeta.WorktreeBaseRefMetadataKey:    "main",
+		beadmeta.WorktreeBaseSHAMetadataKey:    "4a43c56500000000000000000000000000000000",
+		beadmeta.WorktreeCreatorMetadataKey:    "provisioner",
+		beadmeta.WorktreeOwnerMetadataKey:      "provisioner",
+		beadmeta.WorktreeGenerationMetadataKey: "g1",
+		beadmeta.WorktreeLifecycleMetadataKey:  "active",
+	} {
+		bound.Metadata[k] = v
+	}
+	seed(t, cityStore, bound)
+
+	targets := []defaultScaleCheckTarget{
+		{template: agreementTemplate, store: rigStore, storeKey: "rig:rig"},
+	}
+	targets = append(targets, crossStoreDemandLegs([]defaultScaleCheckTarget{
+		{template: agreementTemplate, store: cityStore, storeKey: "city"},
+	}, claimView)...)
+
+	counts, demand, partialTemplates, errs, _ := defaultScaleCheckCountsAndDemand(cfg, targets, newReadyDemandCache())
+
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v, want none", errs)
+	}
+	if len(partialTemplates) != 0 {
+		t.Fatalf("partialTemplates = %v, want none", partialTemplates)
+	}
+	entry := demand[agreementTemplate]
+	if got := counts[agreementTemplate]; got != 1 {
+		t.Fatalf("counts[%s] = %d, want 1 (z only; full demand=%+v)", agreementTemplate, got, entry)
+	}
+	if want := []string{"z"}; !reflect.DeepEqual(entry.WorkBeadIDs, want) {
+		t.Fatalf("WorkBeadIDs = %v, want %v: x/w/v and the window rows are not rows the claim can win", entry.WorkBeadIDs, want)
+	}
+	if got := entry.StoreRefs["z"]; got != "rig:rig" {
+		t.Fatalf("StoreRefs[z] = %q, want %q: the own leg wins the dedup for a row both stores hold", got, "rig:rig")
+	}
+	for _, id := range []string{"x", "w", "v", "win-bound"} {
+		if _, listed := entry.StoreRefs[id]; listed {
+			t.Fatalf("StoreRefs lists %s: a shadowed or window-bound row is not demand", id)
+		}
+	}
+	// The claim view is asked about exactly the cross-store rows that were
+	// withheld: never about z (the own leg won it) and never about the
+	// window-bound row (the window check skips it before any probe).
+	probed := claimView.getIDs()
+	if slices.Contains(probed, "z") {
+		t.Fatalf("claim view probed z, which the own leg already counts: %v", probed)
+	}
+	if slices.Contains(probed, "win-bound") {
+		t.Fatalf("claim view probed win-bound, which the claim window already withholds: %v", probed)
+	}
+	for _, id := range []string{"x", "w", "v"} {
+		if !slices.Contains(probed, id) {
+			t.Fatalf("claim view did not probe %s: %v", id, probed)
+		}
+	}
 }
 
 // TestGoPredicateAndGeneratedQueryAgreeRowByRow is the reader-agreement

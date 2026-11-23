@@ -224,7 +224,7 @@ func runDemandCollectors(cfg *config.City, store beads.Store, newCache func() *r
 	run.Routed, run.RoutedPartial = slices.Sorted(slices.Values(ids(routed))), routedPartial
 	targets := []defaultScaleCheckTarget{{template: "worker", storeKey: "city", store: store}}
 	demandCache := newCache()
-	counts, _, partials, errs := defaultScaleCheckCountsAndDemand(cfg, targets, demandCache)
+	counts, _, partials, errs, _ := defaultScaleCheckCountsAndDemand(cfg, targets, demandCache)
 	run.ScaleCounts, run.ScalePartials, run.ScaleErrs = counts, partials, errorTexts(errs)
 	_, namedPartials, namedErrs := defaultNamedSessionDemand(targets, cfg, "", demandCache)
 	run.NamedPartials, run.NamedErrs = namedPartials, errorTexts(namedErrs)
@@ -476,7 +476,7 @@ func TestV2DemandLaneLegReadsRecordingOnly(t *testing.T) {
 	rec.Sources[keyOf(sourceDemand, cache)] = sourceResult{EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{open}, ReadyAllErr: errDemandBackingDown}}}
 	reads = newV2DemandReads(now, rec)
 	targets := []defaultScaleCheckTarget{{template: "worker", storeKey: "city", store: cache}}
-	counts, _, partials, _ := defaultScaleCheckCountsAndDemand(cfg, targets, newReadyDemandCacheWithReads(reads))
+	counts, _, partials, _, _ := defaultScaleCheckCountsAndDemand(cfg, targets, newReadyDemandCacheWithReads(reads))
 	if counts["worker"] != 0 || !partials["worker"] {
 		t.Errorf("failed recorded Ready: worker demand = %d, partials = %v; want 0 and worker partial", counts["worker"], partials)
 	}

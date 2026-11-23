@@ -28,7 +28,7 @@ import (
 func poolDemandForEnv(t *testing.T, e legAgreementEnv) (demandTargets, map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
 	t.Helper()
 	targets := buildDemandTargets(e.cityName, e.cityPath, e.cfg, e.leading(), e.rigs, nil, nil, controllerQueryRuntimeEnv, io.Discard)
-	counts, demand, partials, errs := defaultScaleCheckCountsAndDemand(e.cfg, targets.defaultScaleTargets, newReadyDemandCache())
+	counts, demand, partials, errs, _ := defaultScaleCheckCountsAndDemand(e.cfg, targets.defaultScaleTargets, newReadyDemandCache())
 	return targets, counts, demand, partials, errs
 }
 
@@ -250,7 +250,7 @@ func TestPoolScaleCheckRefusedCityIsPartialNotSilent(t *testing.T) {
 	seedRoutedWork(t, store, "worker", "leading row")
 
 	targets := buildDemandTargets(cfg.Workspace.Name, cityPath, cfg, store, nil, nil, nil, controllerQueryRuntimeEnv, io.Discard)
-	counts, _, partials, errs := defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, newReadyDemandCache())
+	counts, _, partials, errs, _ := defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, newReadyDemandCache())
 	if len(errs) == 0 || !partials["worker"] {
 		t.Fatalf("refused city: errs=%v partials=%v, want the plan error and worker partial", errs, partials)
 	}

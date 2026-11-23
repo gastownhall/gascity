@@ -95,7 +95,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 	if len(targets.defaultScaleTargets) > 0 {
 		var errs []error
 		c.DefaultProbed = true
-		c.DefaultCounts, c.DefaultDemand, c.DefaultPartials, errs = defaultScaleCheckCountsAndDemand(env.Cfg, targets.defaultScaleTargets, cache)
+		c.DefaultCounts, c.DefaultDemand, c.DefaultPartials, errs, _ = defaultScaleCheckCountsAndDemand(env.Cfg, targets.defaultScaleTargets, cache)
 		// Work this pass already reads as claimed is not new demand: v2's probe
 		// rows can be a recording older than the claim read
 		// (demand_claimed_work.go). The cut runs before the guards, so a row a

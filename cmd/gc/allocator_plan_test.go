@@ -133,7 +133,7 @@ func TestAllocator_DefaultDemand_UnionsOwnRigAndCityLegsDedupByID(t *testing.T) 
 		{template: "worker", storeKey: "city", store: shared},
 		{template: "worker", storeKey: "rig-a", store: shared},
 	}
-	counts, demand, partials, errs := defaultScaleCheckCountsAndDemand(cfg, targets, newReadyDemandCache())
+	counts, demand, partials, errs, _ := defaultScaleCheckCountsAndDemand(cfg, targets, newReadyDemandCache())
 	if len(errs) > 0 || len(partials) > 0 {
 		t.Fatalf("collector errs=%v partials=%v", errs, partials)
 	}

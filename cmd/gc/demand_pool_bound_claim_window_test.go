@@ -159,7 +159,7 @@ func runWarmCustomPass(t *testing.T, e legAgreementEnv, customCount int) warmCus
 	c.ColdWakeTemplates, c.NamedOnDemandTemplates, c.NameOnlyTemplates = pass.targets.coldWakeTemplates, pass.targets.namedOnDemandTemplates, pass.targets.nameOnlyTemplates
 	if len(pass.targets.defaultScaleTargets) > 0 {
 		c.DefaultProbed = true
-		c.DefaultCounts, c.DefaultDemand, c.DefaultPartials, pass.errs = defaultScaleCheckCountsAndDemand(e.cfg, pass.targets.defaultScaleTargets, newReadyDemandCache())
+		c.DefaultCounts, c.DefaultDemand, c.DefaultPartials, pass.errs, _ = defaultScaleCheckCountsAndDemand(e.cfg, pass.targets.defaultScaleTargets, newReadyDemandCache())
 	}
 	pass.merged = mergeCollectedDemand(e.cfg, pass.collected)
 	return pass

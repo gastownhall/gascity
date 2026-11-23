@@ -268,7 +268,10 @@ const (
 	WorkSweep
 
 	// WorkScope is Scope's work store alone: a rig-scoped GET /v0/beads, the
-	// city ledger store_health measures, status's city ready leg.
+	// city ledger store_health measures, status's city ready leg, and the
+	// demand claim view (#5857): the pool's own store, which the demand pass
+	// reads by id through the plan's federated leg as the residence probe it
+	// is.
 	WorkScope
 )
 
