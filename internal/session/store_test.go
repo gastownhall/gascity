@@ -1036,3 +1036,158 @@ func TestReserveCurrentClaimUnchangedWritesNothing(t *testing.T) {
 		})
 	}
 }
+
+// legacyCurrentClaimFixture builds the session store over a backing store that
+// cannot fence the pointer: either the wrapper hides the metadata-CAS
+// capability entirely, or the CAS it offers refuses with
+// beads.ErrConditionalWriteUnsupported (DoltLite's read store refuses every
+// conditional verb).
+func legacyCurrentClaimFixture(t *testing.T, pointer string, refusingCAS bool) (*Store, *beads.MemStore, *beadstest.OpRecordingStore) {
+	t.Helper()
+	var meta map[string]string
+	if pointer != "" {
+		meta = map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: pointer}
+	}
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{sessionBeadFixture("s-1", "open", meta)}, nil)
+	rec := beadstest.NewOpRecordingStore(mem)
+	if refusingCAS {
+		mem.DisableConditionalWrites = true
+		return NewStore(beads.SessionStore{Store: rec}), mem, rec
+	}
+	// An interface-embedding wrapper promotes no optional capability and
+	// declares no resolution target, so the CAS is out of reach.
+	return NewStore(beads.SessionStore{Store: struct{ beads.Store }{rec}}), mem, rec
+}
+
+// TestReserveCurrentClaimLegacyStore is AC-4: on a store without metadata CAS
+// the reserve still compares against the caller's expected value, writing one
+// single-key SetMetadata when the pointer holds it and nothing when it does not.
+func TestReserveCurrentClaimLegacyStore(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		refusingCAS bool
+	}{
+		{name: "no CAS capability"},
+		{name: "CAS refuses as unsupported", refusingCAS: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("pointer holds expected", func(t *testing.T) {
+				is, mem, rec := legacyCurrentClaimFixture(t, "X", tc.refusingCAS)
+				got, err := is.ReserveCurrentClaim("s-1", "X", "A")
+				if err != nil {
+					t.Fatalf("ReserveCurrentClaim: %v", err)
+				}
+				if got != CurrentClaimLegacy {
+					t.Fatalf("reserve = %q, want %q", got, CurrentClaimLegacy)
+				}
+				writes := currentClaimWrites(rec)
+				if writes[beadstest.OpSetMetadata] != 1 || writes[beadstest.OpSetMetadataBatch] != 0 {
+					t.Fatalf("issued writes: %v, want exactly one SetMetadata", writes)
+				}
+				if p := currentClaimPointer(t, mem); p != "A" {
+					t.Fatalf("pointer = %q, want %q", p, "A")
+				}
+			})
+			t.Run("pointer moved off expected", func(t *testing.T) {
+				is, mem, rec := legacyCurrentClaimFixture(t, "B", tc.refusingCAS)
+				got, err := is.ReserveCurrentClaim("s-1", "X", "A")
+				if err != nil {
+					t.Fatalf("ReserveCurrentClaim: %v", err)
+				}
+				if got != CurrentClaimConflict {
+					t.Fatalf("reserve = %q, want %q", got, CurrentClaimConflict)
+				}
+				writes := currentClaimWrites(rec)
+				if writes[beadstest.OpSetMetadata] != 0 || writes[beadstest.OpSetMetadataBatch] != 0 {
+					t.Fatalf("issued writes: %v, want none", writes)
+				}
+				if p := currentClaimPointer(t, mem); p != "B" {
+					t.Fatalf("pointer = %q, want %q", p, "B")
+				}
+			})
+		})
+	}
+}
+
+// TestClearCurrentClaimLegacyStore pins the rollback clear on a store without
+// metadata CAS: it writes the empty value with one SetMetadata only while the
+// raw stored value still equals the stamp it was asked to remove, and a stale
+// clear writes nothing and leaves the later stamp.
+func TestClearCurrentClaimLegacyStore(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		refusingCAS bool
+	}{
+		{name: "no CAS capability"},
+		{name: "CAS refuses as unsupported", refusingCAS: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("pointer holds own stamp", func(t *testing.T) {
+				is, mem, rec := legacyCurrentClaimFixture(t, "A", tc.refusingCAS)
+				got, err := is.ClearCurrentClaim("s-1", "A")
+				if err != nil {
+					t.Fatalf("ClearCurrentClaim: %v", err)
+				}
+				if got != CurrentClaimLegacy {
+					t.Fatalf("clear = %q, want %q", got, CurrentClaimLegacy)
+				}
+				writes := currentClaimWrites(rec)
+				if writes[beadstest.OpSetMetadata] != 1 || writes[beadstest.OpSetMetadataBatch] != 0 {
+					t.Fatalf("issued writes: %v, want exactly one SetMetadata", writes)
+				}
+				if p := currentClaimPointer(t, mem); p != "" {
+					t.Fatalf("pointer = %q, want empty", p)
+				}
+			})
+			t.Run("later stamp", func(t *testing.T) {
+				is, mem, rec := legacyCurrentClaimFixture(t, "B", tc.refusingCAS)
+				got, err := is.ClearCurrentClaim("s-1", "A")
+				if err != nil {
+					t.Fatalf("ClearCurrentClaim: %v", err)
+				}
+				if got != CurrentClaimConflict {
+					t.Fatalf("clear = %q, want %q", got, CurrentClaimConflict)
+				}
+				writes := currentClaimWrites(rec)
+				if writes[beadstest.OpSetMetadata] != 0 || writes[beadstest.OpSetMetadataBatch] != 0 {
+					t.Fatalf("issued writes: %v, want none", writes)
+				}
+				if p := currentClaimPointer(t, mem); p != "B" {
+					t.Fatalf("pointer = %q, want %q", p, "B")
+				}
+			})
+		})
+	}
+}
+
+// TestReserveCurrentClaimRawExpected pins that expected is compared against the
+// raw stored value, on both the fenced and the legacy path: a pointer stored as
+// " X" is matched by " X", not by its trimmed form.
+func TestReserveCurrentClaimRawExpected(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		build func(t *testing.T) (*Store, *beads.MemStore)
+	}{
+		{name: "fenced", build: func(t *testing.T) (*Store, *beads.MemStore) {
+			is, mem, _ := currentClaimFixture(t, " X")
+			return is, mem
+		}},
+		{name: "legacy", build: func(t *testing.T) (*Store, *beads.MemStore) {
+			is, mem, _ := legacyCurrentClaimFixture(t, " X", false)
+			return is, mem
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is, mem := tc.build(t)
+			if got, err := is.ReserveCurrentClaim("s-1", "X", "A"); err != nil || got != CurrentClaimConflict {
+				t.Fatalf("reserve with trimmed expected = %q, %v; want %q", got, err, CurrentClaimConflict)
+			}
+			if got, err := is.ReserveCurrentClaim("s-1", " X", "A"); err != nil || (got != CurrentClaimSwapped && got != CurrentClaimLegacy) {
+				t.Fatalf("reserve with raw expected = %q, %v; want a write", got, err)
+			}
+			if p := currentClaimPointer(t, mem); p != "A" {
+				t.Fatalf("pointer = %q, want %q", p, "A")
+			}
+		})
+	}
+}

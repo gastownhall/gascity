@@ -662,6 +662,10 @@ const (
 	// CurrentClaimConflict means the pointer held neither the expected nor the
 	// requested value; nothing was written.
 	CurrentClaimConflict CurrentClaimOutcome = "conflict"
+	// CurrentClaimLegacy means the store offers no metadata compare-and-set,
+	// the pointer held the expected value when read, and an unconditional
+	// single-key write replaced it. The compare and the write are not atomic.
+	CurrentClaimLegacy CurrentClaimOutcome = "legacy"
 )
 
 // ReserveCurrentClaim points the session's current-claim pointer at beadID,
@@ -675,6 +679,10 @@ const (
 // write (validatedBead), and the write targets the canonical id that read
 // returned: bd's fuzzy id resolver would otherwise let the post-claim stamp land
 // on a prefix-colliding session bead.
+//
+// On a store without metadata CAS the reserve compares expected against the
+// value it just read and writes one single-key SetMetadata, reporting
+// CurrentClaimLegacy; the compare and the write are then not atomic.
 //
 // A transport error is returned as-is and never classified: the caller cannot
 // know whether it committed. Retrying with the same expected value is safe, as
@@ -715,6 +723,18 @@ func (s *Store) swapCurrentClaim(id, expected, next string) (CurrentClaimOutcome
 		return CurrentClaimUnchanged, nil
 	}
 	outcome, err := beads.ApplyMetadataCAS(s.store, b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, expected, next)
+	if errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		// A store that cannot fence the pointer (no metadata CAS, or one that
+		// refuses every conditional verb) still honors expected: compare it
+		// against the value just read, then write once.
+		if b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey] != expected {
+			return CurrentClaimConflict, nil
+		}
+		if err := s.setMetadataValue(b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, next); err != nil {
+			return "", err
+		}
+		return CurrentClaimLegacy, nil
+	}
 	if err != nil {
 		return "", err
 	}
