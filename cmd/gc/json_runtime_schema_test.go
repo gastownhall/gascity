@@ -129,6 +129,93 @@ func TestDirectJSONWriterPayloadsValidateDeclaredSchemas(t *testing.T) {
 			validateJSONAgainstResultSchema(t, tc.command, stdout.Bytes())
 		})
 	}
+
+	t.Run("status optional contracts", func(t *testing.T) {
+		// Cover populated and omitted families independently of the empty-city
+		// producer case above. Unknown fields remain forbidden at every level.
+		rich := []byte(`{
+			"schema_version":"1","ok":true,"city_name":"test-city",
+			"workspace":{"name":"test-city","path":"/city"},"city_path":"/city",
+			"controller":{"running":false},"running":false,"suspended":false,
+			"health":{"usable":true,"degraded":false},"agents":[],
+			"rigs":[{"name":"rig","path":"/city/rig","suspended":false,"default_sling_targets":["worker"]}],
+			"summary":{"total_agents":0,"running_agents":0,"store_health":{
+				"path":"/city/.beads","size_bytes":12,"live_rows":0,"live_rows_unknown":true,
+				"ratio_mb_per_row":0,"warning":false,"threshold_mb_per_row":1,
+				"last_gc_at":"","last_gc_status":""}},
+			"_cache_age_s":2,
+			"runtime_sessions":{"schema":"gascity.runtime-sessions/v1","observed_at":"2026-10-08T00:00:00Z",
+				"provider_complete":false,"sessions":[{"id":"sid","template":"worker","agent_name":"worker",
+					"runtime_name":"","provider":"fake","running":false}]},
+			"conditional_writes":{"mode":"auto","origin":"config","effective":"degraded",
+				"stores":[{"store_id":"city","kind":"bd","probe":"incapable","latch":"unlatched",
+					"capable":false,"reason":"unsupported"}],
+				"notices":[{"kind":"pending_restart","flag_key":"beads.conditional_writes",
+					"env_var":"","config_value":"auto","env_value":"","message":"restart pending"}]}
+		}`)
+		variants := []struct {
+			name   string
+			mutate func(map[string]any)
+			valid  bool
+		}{
+			{name: "rich", valid: true},
+			{name: "omitted", valid: true, mutate: func(v map[string]any) {
+				for _, key := range []string{"runtime_sessions", "conditional_writes", "_cache_age_s"} {
+					delete(v, key)
+				}
+				delete(v["summary"].(map[string]any), "store_health")
+				delete(v["rigs"].([]any)[0].(map[string]any), "default_sling_targets")
+			}},
+			{name: "null sessions", valid: true, mutate: func(v map[string]any) {
+				v["runtime_sessions"].(map[string]any)["sessions"] = nil
+			}},
+			{name: "empty sessions", valid: true, mutate: func(v map[string]any) {
+				v["runtime_sessions"].(map[string]any)["sessions"] = []any{}
+			}},
+			{name: "top unknown", mutate: func(v map[string]any) { v["unknown"] = true }},
+			{name: "null projection", mutate: func(v map[string]any) { v["runtime_sessions"] = nil }},
+			{name: "projection unknown", mutate: func(v map[string]any) {
+				v["runtime_sessions"].(map[string]any)["unknown"] = true
+			}},
+			{name: "projection missing required", mutate: func(v map[string]any) {
+				delete(v["runtime_sessions"].(map[string]any), "provider_complete")
+			}},
+			{name: "sessions wrong type", mutate: func(v map[string]any) {
+				v["runtime_sessions"].(map[string]any)["sessions"] = "wrong"
+			}},
+			{name: "row unknown", mutate: func(v map[string]any) {
+				v["runtime_sessions"].(map[string]any)["sessions"].([]any)[0].(map[string]any)["unknown"] = true
+			}},
+			{name: "row wrong type", mutate: func(v map[string]any) {
+				v["runtime_sessions"].(map[string]any)["sessions"].([]any)[0].(map[string]any)["running"] = "false"
+			}},
+			{name: "store health wrong type", mutate: func(v map[string]any) {
+				v["summary"].(map[string]any)["store_health"].(map[string]any)["live_rows"] = "0"
+			}},
+			{name: "conditional store unknown", mutate: func(v map[string]any) {
+				v["conditional_writes"].(map[string]any)["stores"].([]any)[0].(map[string]any)["unknown"] = true
+			}},
+		}
+		for _, variant := range variants {
+			t.Run(variant.name, func(t *testing.T) {
+				var payload map[string]any
+				if err := json.Unmarshal(rich, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if variant.mutate != nil {
+					variant.mutate(payload)
+				}
+				data, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = validateJSONAgainstResultSchemaE([]string{"status"}, data)
+				if (err == nil) != variant.valid {
+					t.Fatalf("valid = %v, want %v; error = %v", err == nil, variant.valid, err)
+				}
+			})
+		}
+	})
 }
 
 func TestJSONResultStructsExposeExplicitOKField(t *testing.T) {

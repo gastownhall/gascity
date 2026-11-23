@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCityStatusJSONSchemaDeclaresEveryField keeps the published
@@ -28,12 +29,40 @@ func TestCityStatusJSONSchemaDeclaresEveryField(t *testing.T) {
 	assertCityStatusSchemaMatchesType(t, "$", schema, reflect.TypeOf(StatusJSON{}))
 }
 
+// schemaTypeAllows reports whether a schema node's declared type admits the
+// JSON type a Go kind maps to. A node may declare a union (e.g. ["array",
+// "null"]) for a nullable field; the Go type still maps to one JSON type, so
+// the union must contain it.
+func schemaTypeAllows(declared any, want string) bool {
+	switch d := declared.(type) {
+	case string:
+		return d == want
+	case []any:
+		for _, v := range d {
+			if s, ok := v.(string); ok && s == want {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
 // assertCityStatusSchemaMatchesType walks one schema node against the Go type
 // it describes, recursing through pointers, slice items and struct fields.
 func assertCityStatusSchemaMatchesType(t *testing.T, path string, node map[string]any, typ reflect.Type) {
 	t.Helper()
 	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
+	}
+	if typ == reflect.TypeOf(time.Time{}) {
+		// time.Time marshals to an RFC 3339 string, not the object its struct
+		// kind implies, so the schema declares the emitted string.
+		if node["type"] != "string" {
+			t.Errorf("%s: schema type = %v, want string for time.Time", path, node["type"])
+		}
+		return
 	}
 	wantType := map[reflect.Kind]string{
 		reflect.Struct: "object", reflect.Slice: "array", reflect.String: "string", reflect.Bool: "boolean",
@@ -43,7 +72,7 @@ func assertCityStatusSchemaMatchesType(t *testing.T, path string, node map[strin
 		t.Errorf("%s: %s has kind %s, which this check does not map to a JSON type", path, typ, typ.Kind())
 		return
 	}
-	if _, isConst := node["const"]; !isConst && node["type"] != wantType {
+	if _, isConst := node["const"]; !isConst && !schemaTypeAllows(node["type"], wantType) {
 		t.Errorf("%s: schema type = %v, want %s for %s", path, node["type"], wantType, typ)
 	}
 	switch typ.Kind() {
