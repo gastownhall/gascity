@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 func TestApplyConvoyFields(t *testing.T) {
@@ -85,7 +86,7 @@ func TestSetConvoyFields(t *testing.T) {
 	}
 
 	fields := ConvoyFields{Owner: "mayor", Target: "main"}
-	if err := SetConvoyFields(store, b.ID, fields); err != nil {
+	if err := SetConvoyFields(beadstest.Work(store), b.ID, fields); err != nil {
 		t.Fatal(err)
 	}
 

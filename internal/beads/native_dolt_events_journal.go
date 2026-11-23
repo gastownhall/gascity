@@ -10,6 +10,8 @@ import (
 
 	beadslib "github.com/steveyegge/beads"
 	"gopkg.in/yaml.v3"
+
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 // openNativeDoltStorage opens the best-available library storage for beadsDir
@@ -46,37 +48,19 @@ func openNativeDoltStorage(ctx context.Context, beadsDir string) (beadslib.Stora
 // or an unparseable value falls through to the next source, as it does in bd.
 //
 // It reads BD_EVENTS_JOURNAL bare, as the open it serves sees the environment:
-// its caller is inside an open window and already holds nativeDoltOpenEnvMu.
-// A caller outside any window uses ambientEventsJournalEnabledFor, or
-// tryAmbientEventsJournalEnabledFor when it must not wait for a window to end.
+// its caller is inside the open's projection window. A caller outside any
+// window uses ambientEventsJournalEnabledFor.
 func nativeEventsJournalEnabledFor(beadsDir string) bool {
 	return eventsJournalEnabledFor(beadsDir, os.LookupEnv)
 }
 
 // ambientEventsJournalEnabledFor is nativeEventsJournalEnabledFor for a caller
-// outside any open window. It reads BD_EVENTS_JOURNAL under
-// nativeDoltOpenEnvMu, as AmbientNativeDoltOpenEnv reads its keys: a proxied
-// native open withholds the whole BD_ namespace for its window, and a bare
-// read that landed inside one would resolve the scope's config alone.
+// outside any open window. It reads BD_EVENTS_JOURNAL through execenv.LookupEnv,
+// as AmbientNativeDoltOpenEnv reads its keys: a proxied native open withholds
+// the whole BD_ namespace for its window, and a bare read that landed inside one
+// would resolve the scope's config alone. The read never waits for the open.
 func ambientEventsJournalEnabledFor(beadsDir string) bool {
-	return eventsJournalEnabledFor(beadsDir, func(key string) (string, bool) {
-		nativeDoltOpenEnvMu.Lock()
-		defer nativeDoltOpenEnvMu.Unlock()
-		return os.LookupEnv(key)
-	})
-}
-
-// tryAmbientEventsJournalEnabledFor is ambientEventsJournalEnabledFor without
-// the wait: while an open holds nativeDoltOpenEnvMu — for the whole library
-// open, which a slow endpoint can stretch to that open's full budget — it
-// resolves nothing and reports ok false.
-func tryAmbientEventsJournalEnabledFor(beadsDir string) (enabled, ok bool) {
-	if !nativeDoltOpenEnvMu.TryLock() {
-		return false, false
-	}
-	value, present := os.LookupEnv("BD_EVENTS_JOURNAL")
-	nativeDoltOpenEnvMu.Unlock()
-	return eventsJournalEnabledFor(beadsDir, func(string) (string, bool) { return value, present }), true
+	return eventsJournalEnabledFor(beadsDir, execenv.LookupEnv)
 }
 
 // eventsJournalEnabledFor is the resolution both share, with the environment

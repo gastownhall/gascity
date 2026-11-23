@@ -157,12 +157,12 @@ func warmBindClaimText(cfg *config.City, s beads.Bead) string {
 // delivers at the slot's boundary, and the marker records that it was proposed,
 // or given up on. A proposed notice is also recorded in warmBindNoticeTriggerKey
 // until it is withdrawn (withdrawWarmBindNotice).
-func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store beads.Store, session *beads.Bead, claimText string, probe warmClaimTriggerProbe) {
+func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store beads.Store, cfg *config.City, session *beads.Bead, claimText string, probe warmClaimTriggerProbe) {
 	if sp == nil || store == nil || session == nil || probe == nil {
 		return
 	}
-	if strings.TrimSpace(session.Metadata["pool_managed"]) != "true" {
-		return // pool slots only
+	if strings.TrimSpace(session.Metadata["pool_managed"]) != "true" && !isCollapsedCanonicalSingletonPoolBead(cfg, *session) {
+		return // pool slots only, including one a named session took over
 	}
 	name := strings.TrimSpace(session.Metadata["session_name"])
 	if name == "" {
@@ -348,7 +348,8 @@ func warmBindNoticeEpisode(i int) string {
 // waiting for its idle input prompt so it never injects mid-turn: a warm slot
 // with unclaimed work is normally already idle (the wait returns at once);
 // the bound only bites on a slot still finishing prior work. It reports
-// whether the nudge was delivered. On failure (a TUI race, a transient) the
+// whether the nudge was delivered (runtime.NudgeDelivered: a delivery whose
+// turn start went unobserved counts). On failure (a TUI race, a transient) the
 // marker stays unset so a later tick retries; the unclaimed gate keeps that
 // retry safe (a claimed bead stops matching), and manual re-nudge remains the
 // final escape hatch, as it was at the poller's give-up. A slot waiting on a
@@ -362,7 +363,7 @@ func nudgeWarmBindSlot(ctx context.Context, sp runtime.Provider, name, triggerID
 	if waiter, ok := sp.(runtime.IdleWaitProvider); ok {
 		_ = waiter.WaitForIdle(ctx, name, warmBindNudgeIdleTimeout)
 	}
-	if err := sp.Nudge(name, runtime.TextContent(claimText)); err != nil {
+	if err := sp.Nudge(name, runtime.TextContent(claimText)); !runtime.NudgeDelivered(err) {
 		log.Printf("warm-bind claim nudge: %s failed for trigger %s: %v", name, triggerID, err)
 		return false
 	}

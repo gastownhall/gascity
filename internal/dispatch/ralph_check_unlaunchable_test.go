@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
 
@@ -124,9 +125,9 @@ func TestRunRalphCheckUnlaunchableScriptIsDriftPending(t *testing.T) {
 			}
 			check := beads.Bead{ID: "check-unlaunchable", Type: "task", Metadata: meta}
 			subject := beads.Bead{ID: "run-unlaunchable", Type: "task"}
-			opts := ProcessOptions{CityPath: cityPath}
+			opts := ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}
 
-			_, err := runRalphCheck(store, check, subject, 1, opts)
+			_, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, opts)
 			if !errors.Is(err, ErrControlDriftPending) {
 				t.Fatalf("runRalphCheck error = %v, want ErrControlDriftPending", err)
 			}
@@ -136,13 +137,22 @@ func TestRunRalphCheckUnlaunchableScriptIsDriftPending(t *testing.T) {
 			if !errors.Is(err, tc.wantRoot) {
 				t.Fatalf("runRalphCheck error = %v, lost the underlying %v", err, tc.wantRoot)
 			}
+			// The dispatcher announces the refusal to operators; it needs the
+			// unresolved path as data, not as a substring of the message.
+			var unlaunchable *UnlaunchableCheckError
+			if !errors.As(err, &unlaunchable) {
+				t.Fatalf("runRalphCheck error = %v (%T), want an *UnlaunchableCheckError", err, err)
+			}
+			if unlaunchable.CheckPath != checkPath {
+				t.Fatalf("UnlaunchableCheckError.CheckPath = %q, want the stamped gc.check_path %q", unlaunchable.CheckPath, checkPath)
+			}
 			msg := err.Error()
 			if !strings.Contains(msg, check.ID) || !strings.Contains(msg, "resolving check path") {
 				t.Fatalf("error %q must name the bead and \"resolving check path\"", msg)
 			}
 			// The cmd layer freezes bookkeeping on a verbatim repeat, so the
 			// refusal text must be stable across sweeps.
-			_, again := runRalphCheck(store, check, subject, 1, opts)
+			_, again := runRalphCheck(beadstest.Graph(store), check, subject, 1, opts)
 			if again == nil || again.Error() != msg {
 				t.Fatalf("second runRalphCheck error = %v, want verbatim repeat %q", again, msg)
 			}
@@ -240,12 +250,15 @@ func TestRunRalphCheckSecurityRefusalsStayTerminal(t *testing.T) {
 			check := beads.Bead{ID: "check-refused", Type: "task", Metadata: meta}
 			subject := beads.Bead{ID: "run-refused", Type: "task"}
 
-			_, err := runRalphCheck(beads.NewMemStore(), check, subject, 1, ProcessOptions{CityPath: cityPath})
+			_, err := runRalphCheck(beadstest.Graph(beads.NewMemStore()), check, subject, 1, ProcessOptions{Work: beadstest.Work(beads.NewMemStore()), CityPath: cityPath})
 			if err == nil {
 				t.Fatal("runRalphCheck = nil error, want a terminal refusal")
 			}
 			if errors.Is(err, ErrControlPending) {
 				t.Fatalf("runRalphCheck error = %v, a security refusal must not be pending", err)
+			}
+			if errors.As(err, new(*UnlaunchableCheckError)) {
+				t.Fatalf("runRalphCheck error = %v, a security refusal must not be announced as an unlaunchable check", err)
 			}
 		})
 	}
@@ -328,17 +341,23 @@ func TestProcessRalphControlUnlaunchableCheckStaysOpen(t *testing.T) {
 	cityPath := t.TempDir()
 	checkPath := ".gc/scripts/checks/verify.sh"
 	store, control := newUnlaunchableCheckRalphControl(t, checkPath)
-	opts := ProcessOptions{CityPath: cityPath}
+	opts := ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}
 	beadsBefore := countAllBeads(t, store)
 
-	_, err := ProcessControl(store, control, opts)
+	_, err := ProcessControl(beadstest.Graph(store), control, opts)
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending", err)
+	}
+	// The compiled lane wraps the check error ("running check: ..."); the
+	// typed refusal the dispatcher announces must survive that wrap.
+	var unlaunchable *UnlaunchableCheckError
+	if !errors.As(err, &unlaunchable) || unlaunchable.CheckPath != checkPath {
+		t.Fatalf("ProcessControl error = %v, want an *UnlaunchableCheckError naming %q", err, checkPath)
 	}
 	assertUnlaunchableRalphControlHeldOpen(t, store, control.ID, beadsBefore)
 
 	writeExecutableScript(t, filepath.Join(cityPath, checkPath), "#!/bin/sh\nexit 0\n")
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), opts)
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts)
 	if err != nil {
 		t.Fatalf("ProcessControl after shipping the script: %v", err)
 	}
@@ -365,10 +384,10 @@ func TestProcessRalphControlNonExecutableCheckRecoversAfterChmod(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	store, control := newUnlaunchableCheckRalphControl(t, checkPath)
-	opts := ProcessOptions{CityPath: cityPath}
+	opts := ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}
 	beadsBefore := countAllBeads(t, store)
 
-	_, err := ProcessControl(store, control, opts)
+	_, err := ProcessControl(beadstest.Graph(store), control, opts)
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending", err)
 	}
@@ -380,7 +399,7 @@ func TestProcessRalphControlNonExecutableCheckRecoversAfterChmod(t *testing.T) {
 	if err := os.Chmod(scriptPath, 0o755); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), opts)
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts)
 	if err != nil {
 		t.Fatalf("ProcessControl after chmod: %v", err)
 	}
@@ -409,7 +428,7 @@ func TestProcessRalphControlRemovedWorkDirStoreCopyIsNotHeld(t *testing.T) {
 		t.Fatalf("set work_dir: %v", err)
 	}
 
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl error = %v, want the failed start graded, not held open", err)
 	}
@@ -438,7 +457,7 @@ func TestProcessRalphCheckUnlaunchableScriptStaysOpen(t *testing.T) {
 	mustClose(t, store, run1.ID)
 	beadsBefore := countAllBeads(t, store)
 
-	_, err := ProcessControl(store, mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	_, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, check1.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending", err)
 	}
@@ -474,7 +493,7 @@ func TestProcessRalphCheckLaunchClearsHealedPendingBudget(t *testing.T) {
 	}
 	mustClose(t, store, run1.ID)
 
-	result, err := ProcessControl(store, mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, check1.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}

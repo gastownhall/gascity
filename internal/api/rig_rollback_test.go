@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rig"
 )
@@ -70,7 +71,7 @@ func TestRigCreateAsyncRollbackDropsThenMarks(t *testing.T) {
 
 	// The durable record reached rolled_back (drop-then-mark: teardown ran first).
 	city := filepath.Clean(state.CityPath())
-	recBead, err := lookupIdemRecord(state.cityBeadStore, city, "req-rb-0001")
+	recBead, err := lookupIdemRecord(beadstest.Work(state.cityBeadStore), city, "req-rb-0001")
 	if err != nil {
 		t.Fatalf("lookup idem record: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestRigCreateAsyncTeardownFailureLeavesInFlight(t *testing.T) {
 	waitForEventType(t, state.eventProv, events.RequestFailed, 3*time.Second)
 
 	city := filepath.Clean(state.CityPath())
-	recBead, err := lookupIdemRecord(state.cityBeadStore, city, "req-stuck-1")
+	recBead, err := lookupIdemRecord(beadstest.Work(state.cityBeadStore), city, "req-stuck-1")
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -142,7 +143,7 @@ func TestRigCreateAsyncRetryPoisonReclones(t *testing.T) {
 	waitForEventType(t, state.eventProv, events.RequestFailed, 3*time.Second)
 
 	city := filepath.Clean(state.CityPath())
-	first, _ := lookupIdemRecord(state.cityBeadStore, city, "req-poison-1")
+	first, _ := lookupIdemRecord(beadstest.Work(state.cityBeadStore), city, "req-poison-1")
 	if first == nil || first.Metadata[metaIdemState] != idemStateRolledBack || first.Metadata[metaIdemCreatedDir] == "" {
 		t.Fatalf("after attempt 1 record = %v, want rolled_back with created_dir", first)
 	}
@@ -157,7 +158,7 @@ func TestRigCreateAsyncRetryPoisonReclones(t *testing.T) {
 
 	// The record is now succeeded, and the pre-drop tore down the prior debris.
 	waitFor(t, time.Second, "record succeeded after re-clone", func() bool {
-		r, _ := lookupIdemRecord(state.cityBeadStore, city, "req-poison-1")
+		r, _ := lookupIdemRecord(beadstest.Work(state.cityBeadStore), city, "req-poison-1")
 		return r != nil && r.Metadata[metaIdemState] == idemStateSucceeded
 	})
 	teardowns := state.teardownManifests()
@@ -195,7 +196,7 @@ func (f *fakeSweepDeps) TeardownPartialRig(_ context.Context, m RigProvisionMani
 // manifest key, modeling a crashed provision the boot sweep must reconcile.
 func seedInFlightRecord(t *testing.T, store beads.Store, city, requestID, rigName, createdDir string) string {
 	t.Helper()
-	id, err := createIdemRecord(store, city, requestID, "digest-"+requestID, "0", rigName, idemStateInFlight)
+	id, err := createIdemRecord(beadstest.Work(store), city, requestID, "digest-"+requestID, "0", rigName, idemStateInFlight)
 	if err != nil {
 		t.Fatalf("create idem record: %v", err)
 	}
@@ -215,7 +216,7 @@ func TestSweepOrphanRigProvisionsDropsThenMarks(t *testing.T) {
 	id := seedInFlightRecord(t, store, city, "req-orphan-1", "orphrig", "/city/a/rigs/orphrig")
 
 	deps := &fakeSweepDeps{} // RigComplete false ⇒ partial
-	if err := SweepOrphanRigProvisions(context.Background(), store, city, deps); err != nil {
+	if err := SweepOrphanRigProvisions(context.Background(), beadstest.Work(store), city, deps); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -237,7 +238,7 @@ func TestSweepOrphanRigProvisionsReconcilesCompleteForward(t *testing.T) {
 	id := seedInFlightRecord(t, store, city, "req-complete-1", "goodrig", "/city/b/rigs/goodrig")
 
 	deps := &fakeSweepDeps{complete: map[string][2]string{"goodrig": {"gr", "main"}}}
-	if err := SweepOrphanRigProvisions(context.Background(), store, city, deps); err != nil {
+	if err := SweepOrphanRigProvisions(context.Background(), beadstest.Work(store), city, deps); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -261,7 +262,7 @@ func TestSweepOrphanRigProvisionsTeardownFailureLeavesInFlight(t *testing.T) {
 	id := seedInFlightRecord(t, store, city, "req-fail-1", "failrig", "/city/c/rigs/failrig")
 
 	deps := &fakeSweepDeps{teardownErr: errors.New("disk error")}
-	err := SweepOrphanRigProvisions(context.Background(), store, city, deps)
+	err := SweepOrphanRigProvisions(context.Background(), beadstest.Work(store), city, deps)
 	if err == nil {
 		t.Fatal("sweep returned nil, want a joined teardown error")
 	}
@@ -276,11 +277,11 @@ func TestSweepOrphanRigProvisionsTeardownFailureLeavesInFlight(t *testing.T) {
 func TestSweepOrphanRigProvisionsIgnoresTerminalRecords(t *testing.T) {
 	store := beads.NewMemStore()
 	const city = "/city/d"
-	sid, _ := createIdemRecord(store, city, "req-s", "d", "0", "srig", idemStateSucceeded)
-	rid, _ := createIdemRecord(store, city, "req-r", "d", "0", "rrig", idemStateRolledBack)
+	sid, _ := createIdemRecord(beadstest.Work(store), city, "req-s", "d", "0", "srig", idemStateSucceeded)
+	rid, _ := createIdemRecord(beadstest.Work(store), city, "req-r", "d", "0", "rrig", idemStateRolledBack)
 
 	deps := &fakeSweepDeps{}
-	if err := SweepOrphanRigProvisions(context.Background(), store, city, deps); err != nil {
+	if err := SweepOrphanRigProvisions(context.Background(), beadstest.Work(store), city, deps); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if len(deps.teardowns) != 0 {

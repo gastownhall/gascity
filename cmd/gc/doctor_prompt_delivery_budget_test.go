@@ -501,6 +501,39 @@ func TestPromptDeliveryBudgetCheck_SuspendedAgentSkipped(t *testing.T) {
 	}
 }
 
+// TestPromptDeliveryBudgetCheck_ImplicitAgentMeasuresBuiltinWorkerPrompt pins
+// that the check sizes the startup prompt an implicit provider agent launches
+// with: it carries no prompt_template, yet starts with the core pack's builtin
+// worker prompt, so an oversized builtin prompt on a runtime with no post-start
+// delivery hard-fails for that agent.
+func TestPromptDeliveryBudgetCheck_ImplicitAgentMeasuresBuiltinWorkerPrompt(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+	// A stand-in core pack whose graph-worker prompt (the default formula_v2
+	// pick) is oversized; the bundled pack's prompt clears the budget.
+	coreDir := t.TempDir()
+	writePromptFile(t, coreDir, "pack.toml", "[pack]\nname = \"core\"\nschema = 2\n")
+	writePromptFile(t, coreDir, filepath.Join("assets", "prompts", "graph-worker.md"), strings.Repeat("a", 100000))
+	agent := config.Agent{Name: "claude", Provider: "claude", Implicit: true, StartCommand: "true", PromptMode: "arg", Session: "subprocess"}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		PackDirs:  []string{coreDir},
+		Agents:    []config.Agent{agent},
+	}
+	if got := startupPromptTemplate(cfg, &agent); got != filepath.Join(coreDir, "assets", "prompts", "graph-worker.md") {
+		t.Fatalf("startupPromptTemplate = %q, want the stand-in core graph-worker prompt", got)
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusError {
+		t.Fatalf("implicit agent with an oversized builtin prompt: status = %v, want StatusError; message=%q details=%v", res.Status, res.Message, res.Details)
+	}
+	details := joinedDetails(res)
+	if !strings.Contains(details, agent.QualifiedName()+": hard-fail") {
+		t.Errorf("details missing hard-fail for implicit agent %q: %v", agent.QualifiedName(), res.Details)
+	}
+}
+
 // The wiring is the fix: promptDeliveryBudgetDoctorCheck only runs at all if
 // buildDoctorChecks registers it, mirroring
 // TestBuildDoctorChecksRegistersRigWorktreesCheck's pattern for a different

@@ -498,7 +498,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			continue
 		}
 		var budget *promptBudgetJSON
-		if strictMode && a.PromptTemplate != "" {
+		if strictMode && startupPromptTemplate(cfg, &a) != "" {
 			var budgetErr error
 			budget, budgetErr = reportPromptDeliveryBudget(rendered.Text, &a, cfg, resolved, stderr)
 			if budgetErr != nil {
@@ -639,11 +639,13 @@ func primeHookSessionStart(ctx primeHookContext) bool {
 // hookIdentityEnv are the environment markers that show gc, rather than a
 // human, started the process a hook is running inside. gc's session lifecycle
 // sets the session and agent variables and its managed hook wrappers set
-// GC_MANAGED_SESSION_HOOK. The codex and antigravity overlays do bake
-// GC_MANAGED_SESSION_HOOK=1 into their staged `gc prime --hook` command, so a
-// human-launched session there passes this gate — those two also set
-// GC_HOOK_EVENT_NAME=SessionStart and stay covered by the live-session gate
-// below.
+// GC_MANAGED_SESSION_HOOK. Every overlay that bakes GC_MANAGED_SESSION_HOOK=1
+// into its staged `gc prime --hook` command (claude, codex, antigravity,
+// gemini, kiro, kimi, pi, omp) lets a human-launched session there pass this
+// gate. Each also sets GC_HOOK_EVENT_NAME=SessionStart on that same invocation,
+// which keeps it covered by the live-session gate below. The marker must never
+// ride a non-SessionStart invocation whose output reaches the model; pi's
+// PreCompact use is safe only because pi discards that output.
 var hookIdentityEnv = []string{
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
@@ -786,6 +788,9 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 		// survives suppression — managed SessionStart hooks still carry it. Folded
 		// into the single write below to keep exactly one provider hook context.
 		prompt += hookContextSuffix
+		if prompt != "" {
+			prompt += primeHookPlatformNote
+		}
 	}
 	if hookMode && hookFormat != "" {
 		if err := writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt); err == nil && afterDelivery != nil {
@@ -1133,6 +1138,25 @@ func primeBuiltinPromptFile(cfg *config.City, a *config.Agent) string {
 		return filepath.Join(coreDir, "assets", "prompts", "graph-worker.md")
 	case a.SupportsInstanceExpansion() || isPoolInstance(cfg, *a):
 		return filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+	}
+	return ""
+}
+
+// startupPromptTemplate returns the template file a session of a starts with,
+// or "" when it starts with the beacon alone. An explicit prompt_template wins
+// (a [[patches.agent]] one on an implicit agent included); otherwise an
+// implicit agent gets primeBuiltinPromptFile's pick, and any other agent gets
+// nothing. Every consumer that renders or sizes a session's startup prompt
+// takes the template through this helper, because reading
+// Agent.PromptTemplate directly misses an implicit agent's builtin prompt.
+func startupPromptTemplate(cfg *config.City, a *config.Agent) string {
+	switch {
+	case a == nil:
+		return ""
+	case a.PromptTemplate != "":
+		return a.PromptTemplate
+	case a.Implicit && cfg != nil:
+		return primeBuiltinPromptFile(cfg, a)
 	}
 	return ""
 }

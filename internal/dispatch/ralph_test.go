@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
 
@@ -194,7 +195,7 @@ func TestRunRalphCheckPackRelativeCheckPathWorkDirFallback(t *testing.T) {
 		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
 	})
 
-	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	result, err := runRalphCheck(beadstest.Graph(store), control, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("runRalphCheck: %v (the pack-relative check_path should fall back to the store root)", err)
 	}
@@ -240,7 +241,7 @@ func TestRunRalphCheckWorkDirRelativeCheckPathKeepsPrecedence(t *testing.T) {
 		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
 	})
 
-	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	result, err := runRalphCheck(beadstest.Graph(store), control, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("runRalphCheck: %v", err)
 	}
@@ -284,7 +285,7 @@ func TestRunRalphCheckEnvTracksSubject(t *testing.T) {
 		t.Fatalf("test setup: subject and control share ID %q", subject.ID)
 	}
 
-	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	result, err := runRalphCheck(beadstest.Graph(store), control, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("runRalphCheck: %v", err)
 	}
@@ -329,7 +330,7 @@ func TestProcessRalphCheckHardSubjectFailureTerminatesWithoutRetry(t *testing.T)
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -384,7 +385,7 @@ func TestProcessRalphCheckSoftSubjectFailureStillRetries(t *testing.T) {
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -441,7 +442,7 @@ func TestProcessRalphCheckFinishesInterruptedSettle(t *testing.T) {
 				t.Fatalf("close logical: %v", err)
 			}
 
-			result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+			result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if err != nil {
 				t.Fatalf("ProcessControl(check1): %v", err)
 			}

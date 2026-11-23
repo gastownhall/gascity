@@ -9,16 +9,38 @@ import (
 )
 
 // gastownExamplePath resolves the bundled example city used as a --from source.
+// It resolves against the repository root, not the working directory, because
+// clearGCEnv moves the working directory into a temp dir.
 func gastownExamplePath(t *testing.T) string {
 	t.Helper()
-	p, err := filepath.Abs(filepath.Join("..", "..", "examples", "gastown"))
-	if err != nil {
-		t.Fatalf("resolving examples/gastown: %v", err)
-	}
+	p := filepath.Join(gcRepoRootFromEnv(), "examples", "gastown")
 	if _, err := os.Stat(filepath.Join(p, "city.toml")); err != nil {
 		t.Skipf("example source missing: %v", err)
 	}
 	return p
+}
+
+// TestGastownExamplePathResolvesAfterClearGCEnv pins that the example city
+// stays reachable once clearGCEnv has run. clearGCEnv moves the working
+// directory into a temp dir, so a helper that resolves the example against the
+// cwd silently skips every test that calls it.
+func TestGastownExamplePathResolvesAfterClearGCEnv(t *testing.T) {
+	var sub *testing.T
+	var got string
+	t.Run("after clearGCEnv", func(st *testing.T) {
+		sub = st
+		clearGCEnv(st)
+		got = gastownExamplePath(st)
+	})
+	if sub.Skipped() {
+		t.Fatal("gastownExamplePath skipped after clearGCEnv: the example city must resolve independent of the working directory")
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("gastownExamplePath = %q, want an absolute path", got)
+	}
+	if _, err := os.Stat(filepath.Join(got, "city.toml")); err != nil {
+		t.Fatalf("example city.toml missing under %s: %v", got, err)
+	}
 }
 
 // TestInitFromPinsHostedDoltEndpoint verifies that `gc init --from` honors an
