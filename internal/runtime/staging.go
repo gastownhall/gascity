@@ -234,10 +234,11 @@ func trackedOverlayGitEnv() []string {
 // hook-entry matchers and leave a permanent codex-hooks-drift hybrid.
 //
 // Not a global invariant: for a persistent (non-task) agent the home dir is
-// also the session workDir, and session-start staging reaches these same paths
-// through the non-skipping StageProviderOverlayDir (tmux.stageStartFiles,
-// StageSessionWorkDir). A hybrid can therefore reappear at session start and is
-// converged by the next tick — permanent drift becomes transient.
+// also the session workDir, and session-start staging (tmux.stageStartFiles,
+// StageSessionWorkDir) reaches these same paths: the only mergeable files it
+// withholds are those in Config.SkipStackedHookPaths. A hybrid can therefore
+// reappear at session start and is converged by the next tick — permanent
+// drift becomes transient.
 func StageProviderOverlayDirSkippingMergeable(srcDir, dstDir string, providers []string, warnings io.Writer, opts ...StageOption) error {
 	skip := func(relPath string, isDir bool) bool {
 		return !isDir && overlay.IsMergeablePath(relPath)

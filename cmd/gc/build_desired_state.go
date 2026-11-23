@@ -7766,13 +7766,13 @@ func materializeProviderOverlaysBeforeFingerprint(
 	//
 	// "Sole writer" is scoped to the tick on purpose. For a persistent
 	// (non-task) agent the home dir is also the session workDir, and
-	// session-start staging writes these same files through the NON-skipping
-	// path — internal/runtime/tmux.stageStartFiles and
-	// runtime.StageSessionWorkDir (subprocess/acp) both call
-	// StageProviderOverlayDir with a nil skip. So a hybrid document can
-	// reappear at session start; the next tick converges it. That turns the
-	// permanent drift this fix targets into a transient one, which is the
-	// actual invariant — not that nothing else ever writes these paths.
+	// session-start staging writes these same files without the installer
+	// skip — internal/runtime/tmux.stageStartFiles and
+	// runtime.StageSessionWorkDir (subprocess/acp) withhold no mergeable file
+	// but those in Config.SkipStackedHookPaths. So a hybrid document can
+	// reappear at session start; the next tick converges it. That turns the permanent
+	// drift this fix targets into a transient one, which is the actual
+	// invariant — not that nothing else ever writes these paths.
 	//
 	// Versioned hook files are also excluded, via hooks.PreserveManagedFile.
 	// Staging has no version check and writes no backup, so without this it
@@ -7805,7 +7805,7 @@ func materializeProviderOverlaysBeforeFingerprint(
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
-	retireStackedProjectHooks(workDir, qualifiedName, stackedSkips, stderr)
+	retireStackedProjectHooks(workDir, bp.cityPath, qualifiedName, stackedSkips, stderr)
 }
 
 func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, fpExtra map[string]string) (TemplateParams, error) {

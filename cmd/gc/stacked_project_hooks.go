@@ -20,9 +20,10 @@ import (
 // Stacked project hooks (#5872). Some provider CLIs (codex) load a user-level
 // hook file AND every project-level one and run the hooks of both. gc stages
 // its project-level copy as the deliberate fallback for users with no user
-// hooks; when the user layer a host-local session loads already provides every
-// gc hook kind that copy would carry, staging it makes each gc hook fire twice.
-// The decision below withholds the project copy for exactly that case.
+// hooks; when the user layer a host-local session loads already runs every gc
+// hook that copy would carry, alike and in the current form
+// (hooks.ProjectHooksCoveredByUserLayer), staging it makes each gc hook fire
+// twice. The decision below withholds the project copy for exactly that case.
 
 // stackedHookAgent is what the stacked project-hook decision needs to know
 // about one agent.
@@ -46,8 +47,40 @@ type stackedHookVerdict struct {
 	family string
 	// skip reports that the agent's sessions must not receive the file.
 	skip bool
-	// userPath is the user-level hook file that covers it when skip is set.
+	// staleUser reports that the file stays only because the user layer
+	// carries some of gc's hooks in an older form (hooks.UserLayerStale).
+	staleUser bool
+	// userPath is the user-level hook file the verdict read when skip or
+	// staleUser is set.
 	userPath string
+	// userDoc is the content of userPath the verdict read when skip is set:
+	// retiring the project file strips only the gc hooks it runs.
+	userDoc []byte
+}
+
+// skipsIn reports whether the verdict withholds rel from workDir. A path whose
+// project file in workDir is the very user-level file the verdict read is
+// kept: that file is gc's own staged copy, so withholding and retiring it
+// would leave the session with no gc hooks until the next build restaged it.
+func (v stackedHookVerdict) skipsIn(workDir, rel string) bool {
+	return v.skip && !stackedHookSameFile(v.userPath, filepath.Join(workDir, filepath.FromSlash(rel)))
+}
+
+// stackedHookSameFile reports whether a and b name one file: the same path
+// once cleaned and resolved, or the same file on disk when both exist.
+func stackedHookSameFile(a, b string) bool {
+	if samePath(a, b) {
+		return true
+	}
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bInfo, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(aInfo, bInfo)
 }
 
 // stackedHookReadFunc reads a user-level hook file.
@@ -59,9 +92,9 @@ type stackedHookReadFunc func(path string) ([]byte, error)
 // controller host's filesystem (so the user layer gc probes is the one the
 // session loads), no installer owns the path (install_agent_hooks naming the
 // provider keeps the installer its sole writer), and
-// hooks.ProjectHooksCoveredByUserLayer holds for the overlay sources. A user
-// file that cannot be read or parsed keeps the fallback and is reported on
-// stderr.
+// hooks.ProjectHooksCoveredByUserLayer reports the overlay sources covered. A
+// user file that cannot be read or parsed keeps the fallback and is reported
+// on stderr.
 func stackedProjectHookVerdicts(in stackedHookAgent, read stackedHookReadFunc, stderr io.Writer) map[string]stackedHookVerdict {
 	if in.agent == nil || in.resolved == nil {
 		return nil
@@ -124,7 +157,7 @@ func stackedProjectHookVerdicts(in stackedHookAgent, read stackedHookReadFunc, s
 	resolver := func(name string) string { return config.BuiltinFamily(name, in.providers) }
 	installed := hooks.InstalledWorkDirPaths(installHooks, resolver)
 	hostLocal := canStage1Materialize(materializationRuntimeFor(in.city, in.cityName, in.cityPath, in.sessionProvider), in.agent)
-	getenv := stackedHookGetenv(in.workspace, in.resolved, in.agent)
+	getenv := stackedHookGetenv(in.city, in.workspace, in.resolved, in.agent)
 
 	out := make(map[string]stackedHookVerdict, len(candidates))
 	for rel, c := range candidates {
@@ -149,13 +182,16 @@ func stackedProjectHookVerdicts(in stackedHookAgent, read stackedHookReadFunc, s
 			fmt.Fprintf(stderr, "agent %q: %s user hooks: reading %s: %v\n", in.qualifiedName, c.family, userPath, err) //nolint:errcheck
 			continue
 		}
-		covered, err := hooks.ProjectHooksCoveredByUserLayer(c.family, in.cityPath, userDoc, c.sources)
+		coverage, err := hooks.ProjectHooksCoveredByUserLayer(c.family, in.cityPath, userDoc, c.sources)
 		if err != nil {
 			fmt.Fprintf(stderr, "agent %q: %s user hooks %s: %v\n", in.qualifiedName, c.family, userPath, err) //nolint:errcheck
 			continue
 		}
-		if covered {
-			out[rel] = stackedHookVerdict{family: c.family, skip: true, userPath: userPath}
+		switch coverage {
+		case hooks.UserLayerCovers:
+			out[rel] = stackedHookVerdict{family: c.family, skip: true, userPath: userPath, userDoc: userDoc}
+		case hooks.UserLayerStale:
+			out[rel] = stackedHookVerdict{family: c.family, staleUser: true, userPath: userPath}
 		}
 	}
 	return out
@@ -178,7 +214,8 @@ func stackedHookSkipPaths(verdicts map[string]stackedHookVerdict) []string {
 // agentCfg must not stage at start, for start paths that build
 // runtime.Config outside a desired-state build. It computes only the agent's
 // own verdicts; withholding a file at session start never removes one, so a
-// work-dir sibling that still wants the file keeps it.
+// work-dir sibling that still wants the file keeps it, and so does a work dir
+// whose project file is itself the user-level file the verdict read.
 func cityStackedHookSkipPaths(cfg *config.City, cityPath, cityName string, agentCfg *config.Agent, resolved *config.ResolvedProvider, qualifiedName string, packDirs []string, overlayDir string) []string {
 	if cfg == nil {
 		return nil
@@ -199,19 +236,13 @@ func cityStackedHookSkipPaths(cfg *config.City, cityPath, cityName string, agent
 }
 
 // stackedHookGetenv resolves environment variables the way a host session
-// inherits them: the operator-authored env layers resolveTemplate folds into
-// the session (workspace, provider, agent) over the controller's own process
-// environment. gc sets neither HOME nor CODEX_HOME for sessions.
-func stackedHookGetenv(workspace *config.Workspace, resolved *config.ResolvedProvider, a *config.Agent) func(string) string {
-	var workspaceEnv map[string]string
-	if workspace != nil {
-		workspaceEnv = workspace.Env
-	}
-	var providerEnv map[string]string
-	if resolved != nil {
-		providerEnv = resolved.Env
-	}
-	env := mergeEnv(expandEnvMap(workspaceEnv), expandEnvMap(providerEnv), expandEnvMap(a.Env))
+// inherits them: the config-authored env layers resolveTemplate folds into the
+// session (sessionConfigEnvFor: workspace, provider and agent, then the
+// selected upstream) over the controller's own process environment. gc sets
+// neither HOME nor CODEX_HOME for sessions.
+func stackedHookGetenv(city *config.City, workspace *config.Workspace, resolved *config.ResolvedProvider, a *config.Agent) func(string) string {
+	layers := sessionConfigEnvFor(city, workspace, resolved, a)
+	env := mergeEnv(layers.operator, layers.upstream)
 	return func(key string) string {
 		if v, ok := env[key]; ok {
 			return v
@@ -286,7 +317,8 @@ func (bp *agentBuildParams) stackedHookInputs(cfgAgent *config.Agent, resolved *
 
 // agentStackedHookVerdicts returns qualifiedName's verdicts, computed once per
 // build. When report is set, the warnings computing them produced are written
-// to stderr, once per build.
+// to stderr, once per build, and each stale user hooks file is named once per
+// process.
 func (bp *agentBuildParams) agentStackedHookVerdicts(cfgAgent *config.Agent, resolved *config.ResolvedProvider, qualifiedName string, report bool, stderr io.Writer) map[string]stackedHookVerdict {
 	s := bp.stackedHooks
 	if s == nil {
@@ -294,7 +326,11 @@ func (bp *agentBuildParams) agentStackedHookVerdicts(cfgAgent *config.Agent, res
 		if report && stderr != nil {
 			w = stderr
 		}
-		return stackedProjectHookVerdicts(bp.stackedHookInputs(cfgAgent, resolved, qualifiedName), nil, w)
+		verdicts := stackedProjectHookVerdicts(bp.stackedHookInputs(cfgAgent, resolved, qualifiedName), nil, w)
+		if report && stderr != nil {
+			hintStaleStackedUserHooks(stderr, qualifiedName, verdicts)
+		}
+		return verdicts
 	}
 	s.mu.Lock()
 	entry, ok := s.verdicts[qualifiedName]
@@ -321,8 +357,34 @@ func (bp *agentBuildParams) agentStackedHookVerdicts(cfgAgent *config.Agent, res
 		if warn {
 			io.WriteString(stderr, entry.warnings) //nolint:errcheck
 		}
+		hintStaleStackedUserHooks(stderr, qualifiedName, entry.verdicts)
 	}
 	return entry.verdicts
+}
+
+// stackedHookStaleHintsSeen holds the user-level hook files a stale-hooks hint
+// has named in this process, so each is named once.
+var stackedHookStaleHintsSeen sync.Map
+
+// hintStaleStackedUserHooks names, once per process, each user-level hook file
+// that keeps one of qualifiedName's project hook files staged only because it
+// carries gc's hooks in an older form: the provider then runs each gc hook
+// twice, and only the user can update the file.
+func hintStaleStackedUserHooks(stderr io.Writer, qualifiedName string, verdicts map[string]stackedHookVerdict) {
+	rels := make([]string, 0, len(verdicts))
+	for rel, v := range verdicts {
+		if v.staleUser {
+			rels = append(rels, rel)
+		}
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		v := verdicts[rel]
+		if _, seen := stackedHookStaleHintsSeen.LoadOrStore(v.userPath, struct{}{}); seen {
+			continue
+		}
+		fmt.Fprintf(stderr, "agent %q: %s user hooks %s carry gc's hooks in an older form, so gc keeps staging %s and %s runs each gc hook twice; update gc's hooks there to the current form, or remove them, to stop the duplicates\n", qualifiedName, v.family, v.userPath, rel, v.family) //nolint:errcheck
+	}
 }
 
 // configuredAgentsInWorkDir returns the indexes into bp.agents of the
@@ -354,7 +416,9 @@ func (bp *agentBuildParams) configuredAgentsInWorkDir(workDir string) []int {
 // stackedHookSkips returns the stacked project hook paths the agent's
 // sessions in workDir must not receive on this build. A path the agent skips
 // is kept when any other configured agent sharing workDir stages it and does
-// not skip it, so one tick never stages a file another agent's tick retires.
+// not skip it, so one tick never stages a file another agent's tick retires,
+// and when its project file in workDir is the user-level file the verdict
+// read (stackedHookVerdict.skipsIn).
 func (bp *agentBuildParams) stackedHookSkips(cfgAgent *config.Agent, resolved *config.ResolvedProvider, qualifiedName, workDir string, stderr io.Writer) map[string]stackedHookVerdict {
 	if bp == nil || cfgAgent == nil || resolved == nil || workDir == "" {
 		return nil
@@ -362,7 +426,7 @@ func (bp *agentBuildParams) stackedHookSkips(cfgAgent *config.Agent, resolved *c
 	own := bp.agentStackedHookVerdicts(cfgAgent, resolved, qualifiedName, true, stderr)
 	skips := make(map[string]stackedHookVerdict)
 	for rel, v := range own {
-		if v.skip {
+		if v.skipsIn(workDir, rel) {
 			skips[rel] = v
 		}
 	}
@@ -376,7 +440,7 @@ func (bp *agentBuildParams) stackedHookSkips(cfgAgent *config.Agent, resolved *c
 			continue
 		}
 		for rel, v := range bp.agentStackedHookVerdicts(other, otherResolved, other.QualifiedName(), false, nil) {
-			if !v.skip {
+			if !v.skipsIn(workDir, rel) {
 				delete(skips, rel)
 			}
 		}
@@ -387,12 +451,15 @@ func (bp *agentBuildParams) stackedHookSkips(cfgAgent *config.Agent, resolved *c
 	return skips
 }
 
-// retireStackedProjectHooks removes the gc-managed entries a previous tick or
-// session start staged into each skipped project hook file in workDir: an
-// all-managed copy is deleted, a copy that also holds user-authored entries
-// is rewritten with only those. A git-tracked copy is user-owned and left
-// alone, as is a copy that cannot be parsed.
-func retireStackedProjectHooks(workDir, qualifiedName string, skips map[string]stackedHookVerdict, stderr io.Writer) {
+// retireStackedProjectHooks removes from each skipped project hook file in
+// workDir the gc-managed entries a previous tick or session start staged that
+// the user layer the verdict read already runs (hooks.StripManagedProjectHooks):
+// a copy left with no entry is deleted, a copy that still holds others (its
+// user-authored entries, or gc hooks the user layer does not run, such as one
+// under another matcher or bound to another city) is rewritten with only
+// those. A git-tracked copy is user-owned and left alone, as is a copy that
+// cannot be parsed.
+func retireStackedProjectHooks(workDir, cityPath, qualifiedName string, skips map[string]stackedHookVerdict, stderr io.Writer) {
 	rels := make([]string, 0, len(skips))
 	for rel := range skips {
 		rels = append(rels, rel)
@@ -412,7 +479,7 @@ func retireStackedProjectHooks(workDir, qualifiedName string, skips map[string]s
 		if runtime.OverlayPathMayBeTracked(workDir, rel) {
 			continue
 		}
-		rest, empty, changed, err := hooks.StripManagedProjectHooks(v.family, data)
+		rest, empty, changed, err := hooks.StripManagedProjectHooks(v.family, cityPath, v.userDoc, data)
 		if err != nil {
 			fmt.Fprintf(stderr, "agent %q: leaving %s in place: %v\n", qualifiedName, path, err) //nolint:errcheck
 			continue

@@ -551,11 +551,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 10: Merge environment layers. Workspace.Env sits between
 	// passthrough and provider so a per-provider/agent/patch entry can
 	// still override a workspace-wide default.
-	var workspaceEnv map[string]string
-	if p.workspace != nil {
-		workspaceEnv = p.workspace.Env
-	}
-	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	configEnv := sessionConfigEnvFor(p.city, p.workspace, resolved, cfgAgent)
+	env := mergeEnv(passthroughEnv(), configEnv.operator, agentEnv)
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
@@ -563,8 +560,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// resolved provider, agent) — excluding passthrough and the generated
 	// agentEnv plumbing — so a resolved config env change fingerprints as
 	// Launch-tier identity instead of a no-op.
-	operatorEnv := mergeEnv(expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env))
-	operatorEnv = convergence.ScrubTokenEnv(operatorEnv)
+	operatorEnv := convergence.ScrubTokenEnv(configEnv.operator)
 
 	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
 	// env LAST so it is authoritative for the model-serving keys, and after
@@ -616,7 +612,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 		// Raw env is the harness-specific escape hatch, merged LAST (wins over the
 		// abstract render and ambient/agent env for the keys it sets).
-		for k, v := range expandEnvMap(spec.Env) {
+		for k, v := range configEnv.upstream {
 			env[k] = v
 		}
 	}
@@ -876,6 +872,37 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		params.CityRuntimes = p.city.Runtimes
 	}
 	return params, nil
+}
+
+// sessionConfigEnv holds the config-authored env layers resolveTemplate folds
+// into an agent's session, each $VAR-expanded. operator merges the workspace,
+// resolved provider and agent env in that precedence; upstream is the raw env
+// of the agent's selected [upstreams] entry, which resolveTemplate applies
+// after every other layer (nil when the agent selects none or the city does
+// not declare it). Code that needs a session's value for a key without
+// building the session reads it from these layers, so it gets the value the
+// session does.
+type sessionConfigEnv struct {
+	operator map[string]string
+	upstream map[string]string
+}
+
+// sessionConfigEnvFor returns the config-authored env layers of a session of a.
+func sessionConfigEnvFor(city *config.City, workspace *config.Workspace, resolved *config.ResolvedProvider, a *config.Agent) sessionConfigEnv {
+	var workspaceEnv, providerEnv map[string]string
+	if workspace != nil {
+		workspaceEnv = workspace.Env
+	}
+	if resolved != nil {
+		providerEnv = resolved.Env
+	}
+	layers := sessionConfigEnv{operator: mergeEnv(expandEnvMap(workspaceEnv), expandEnvMap(providerEnv), expandEnvMap(a.Env))}
+	if city != nil && a.Upstream != "" {
+		if spec, ok := city.Upstreams[a.Upstream]; ok {
+			layers.upstream = expandEnvMap(spec.Env)
+		}
+	}
+	return layers
 }
 
 // isOperationalScript reports whether rel (a slash-separated path relative to
