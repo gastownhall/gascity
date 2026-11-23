@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -87,6 +88,9 @@ func waitForManagedDoltProcessExit(pid int, timeout time.Duration, alive func(in
 }
 
 func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedState bool) (managedDoltStopReport, error) {
+	if err := managedDoltNativeIdentitySupported(); err != nil {
+		return managedDoltStopReport{}, err
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStopReport{}, err
@@ -97,8 +101,18 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	}
 	report := managedDoltStopReport{}
 	targetPID := 0
+	// identityErr accumulates every undecided ownership check; lastIdentityErr
+	// holds only the most recent call's, so a single check site can tell
+	// "not ours" from "cannot tell".
+	var identityErr, lastIdentityErr error
 	strictTarget := func(pid int) bool {
-		return pid > 0 && managedDoltProcessControllable(pid, layout)
+		controllable, err := managedDoltProcessControllableFn(pid, layout)
+		lastIdentityErr = err
+		if err != nil {
+			identityErr = errors.Join(identityErr, err)
+			return false
+		}
+		return pid > 0 && controllable
 	}
 	switch {
 	case info.ManagedPID > 0 && info.ManagedOwned && strictTarget(info.ManagedPID):
@@ -108,6 +122,14 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	}
 	lockWindow := managedDoltLockReleaseTimeoutFn(cityPath)
 	if targetPID <= 0 {
+		// No target because ownership could not be decided is not the same as
+		// no target because nothing of ours is running. Clearing the runtime
+		// and PID state here would erase the only record of a server that may
+		// still be serving — and still writing to the data dir a caller is
+		// about to treat as released.
+		if identityErr != nil {
+			return report, fmt.Errorf("cannot confirm whether the live dolt process is ours; refusing to clear managed state: %w", identityErr)
+		}
 		// No controllable server process, but a crashed server's flushing
 		// descendant can still hold the store lock. The stop contract says
 		// success means the data dir is released — fail closed instead of
@@ -131,8 +153,8 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	report.HadPID = true
 	report.PID = targetPID
 	if managedStopPIDAlive(targetPID) {
-		killErr := syscall.Kill(targetPID, syscall.SIGTERM)
-		if killErr != nil && killErr != syscall.ESRCH {
+		killErr := platformKill(targetPID, syscall.SIGTERM)
+		if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
 			return report, fmt.Errorf("signal %d with SIGTERM: %w", targetPID, killErr)
 		}
 		if killErr == nil {
@@ -160,8 +182,8 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 		// (cmdline/data-dir/cwd), which a reused unrelated PID fails.
 		if strictTarget(targetPID) {
 			report.Forced = true
-			killErr := syscall.Kill(targetPID, syscall.SIGKILL)
-			if killErr != nil && killErr != syscall.ESRCH {
+			killErr := platformKill(targetPID, syscall.SIGKILL)
+			if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
 				return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, killErr)
 			}
 			if killErr == nil {
@@ -169,6 +191,11 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 			}
 			waitForManagedDoltProcessExit(targetPID, time.Second, managedStopPIDAlive)
 		} else {
+			// An ownership read that failed is not evidence the PID was
+			// reused: the process is still alive and may still be ours.
+			if lastIdentityErr != nil {
+				return report, fmt.Errorf("cannot confirm whether pid %d is still ours after SIGTERM; refusing to clear managed state: %w", targetPID, lastIdentityErr)
+			}
 			managedDoltCleanupLogf("skipping SIGKILL of pid %d: no longer an owned managed dolt process (PID reused)", targetPID)
 		}
 	}
@@ -178,6 +205,9 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	// still guarantees the dir is released before we report success.
 	if strictTarget(targetPID) {
 		return report, fmt.Errorf("pid %d still alive after forced stop", targetPID)
+	}
+	if lastIdentityErr != nil {
+		return report, fmt.Errorf("cannot confirm whether pid %d is still ours after SIGTERM; refusing to clear managed state: %w", targetPID, lastIdentityErr)
 	}
 	// The server process is gone, but descendants (e.g. dolt gc workers) can
 	// still hold the store lock while finishing a write. Block until release
@@ -240,12 +270,26 @@ func managedDoltStopFields(report managedDoltStopReport) []string {
 	}
 }
 
-func managedDoltProcessControllable(pid int, layout managedDoltRuntimeLayout) bool {
+// managedDoltProcessControllableFn is the ownership check the stop path uses;
+// tests replace it to make ownership undecidable at a chosen point.
+var managedDoltProcessControllableFn = managedDoltProcessControllable
+
+// managedDoltProcessControllable reports whether pid is a live process this
+// city may signal.
+//
+// A non-nil error means ownership could not be decided while the process is
+// still alive. Callers must not read that as "not ours": the two answers lead
+// to opposite actions — skip the kill and clear the state, versus refuse and
+// leave the record intact.
+func managedDoltProcessControllable(pid int, layout managedDoltRuntimeLayout) (bool, error) {
 	if pid <= 0 || !managedStopPIDAlive(pid) {
-		return false
+		return false, nil
 	}
-	owned, _ := inspectManagedDoltOwnership(pid, layout)
-	return owned
+	owned, _, err := inspectManagedDoltOwnership(pid, layout)
+	if err != nil {
+		return false, err
+	}
+	return owned, nil
 }
 
 func managedStopPIDAlive(pid int) bool {

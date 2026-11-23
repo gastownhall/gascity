@@ -132,7 +132,10 @@ func nativeListPushableStatus(status string) bool {
 // A Live read is a lifecycle gate asking for the backing's own answer, and
 // every other backing gives the RAW status for Live Status:"open": BdStore
 // passes --status=open to bd, while SQLiteStore, DoltliteReadStore and MemStore
-// match the stored status exactly. The callers are written against that
+// match the stored status exactly. SQLiteStore stores only gc's three
+// statuses, so it records a deferral as its defer_until alone, and its raw
+// open also leaves out a row deferred into the future
+// (sqliteListLeavesOutDeferred). The callers are written against that
 // answer: the controller's demand reads; the seat-work gates (config-drift
 // deferral, max session age, slot-freeable, the drain-ack close gate); route
 // recovery; and the orphan sweep. To them a blocked or deferred bead is
@@ -158,8 +161,8 @@ func nativeListPushableStatus(status string) bool {
 // List fallback, or the raw one when that List is Live.
 //
 // CachingStore's Live stale-row sweep (staleLiveCacheIDs) skips a cached row
-// whose SourceStatus is another status, so the parked rows this leaves out
-// cost no read.
+// whose SourceStatus is another status, or that is deferred into the future,
+// so the parked rows this leaves out cost no read.
 //
 // This is the one plan predicate that is not a superset of the query: it
 // leaves out rows that ApplyListQuery's folded "open" would keep. That is
@@ -250,13 +253,14 @@ func (s *NativeDoltStore) loadListPushableTypes(ctx context.Context) {
 // type: the wire's validation problem, or the local filter builder's
 // unknown-type error, which carries no sentinel.
 func nativeListTypeRefused(err error) bool {
-	return errors.Is(err, issueops.ErrValidation) || strings.Contains(err.Error(), "invalid issue type")
+	return errors.Is(err, issueops.ErrValidation) || IsIssueTypeRefused(err)
 }
 
 // NativeListRequestKeyed reports whether req carries a predicate that narrows
 // the backend's candidate set below the whole ledger. A request without one
 // returns every row of both tiers, closed rows included, and is the full walk
-// the list-request tripwire counts.
+// the list-request tripwire counts. An IDFilter is one: the exact batch read
+// (GetExactBatch) narrows its listing to the ids it reads.
 func NativeListRequestKeyed(req issueops.ListRequest) bool {
 	return req.IDFilter != "" ||
 		req.ParentID != "" ||
@@ -272,7 +276,8 @@ func NativeListRequestKeyed(req issueops.ListRequest) bool {
 type ListRequestStats struct {
 	// Lists is the number of List calls the store served.
 	Lists int64
-	// Requests is the number of backend listing requests those calls issued.
+	// Requests is the number of backend listing requests the store issued: its
+	// List calls' and its exact batch reads' (GetExactBatch).
 	Requests int64
 	// Unkeyed is the number of requests that carried no narrowing predicate
 	// and therefore read the whole ledger.

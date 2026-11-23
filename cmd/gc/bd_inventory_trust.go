@@ -15,16 +15,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/gastownhall/gascity/internal/bdflags"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -92,6 +89,10 @@ type bdBinaryID struct {
 
 // statBdBinary resolves bdPath's symlinks and identifies the file.
 func statBdBinary(bdPath string) (bdBinaryID, error) {
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. The verdict cache identifies the physical binary file, so
+	// a missing, broken-link or looping bd path must fail here instead of
+	// falling back to its lexical spelling (TestBdBinaryIdentityStillRejectsUnresolvablePaths).
 	abs, err := filepath.EvalSymlinks(bdPath)
 	if err != nil {
 		return bdBinaryID{}, fmt.Errorf("resolving bd binary %s: %w", bdPath, err)
@@ -99,20 +100,11 @@ func statBdBinary(bdPath string) (bdBinaryID, error) {
 	if abs, err = filepath.Abs(abs); err != nil {
 		return bdBinaryID{}, err
 	}
-	// x/sys/unix, not syscall: syscall.Stat_t names the times Mtimespec and
-	// Ctimespec on darwin, unix.Stat_t names them Mtim and Ctim everywhere.
-	var st unix.Stat_t
-	if err := unix.Stat(abs, &st); err != nil {
+	id, err := statBdBinaryFile(abs)
+	if err != nil {
 		return bdBinaryID{}, fmt.Errorf("reading bd binary %s: %w", abs, err)
 	}
-	return bdBinaryID{
-		Path:  abs,
-		Dev:   uint64(st.Dev), //nolint:unconvert // Darwin's field is signed int32.
-		Ino:   st.Ino,
-		Size:  st.Size,
-		MTime: st.Mtim.Nano(),
-		CTime: st.Ctim.Nano(),
-	}, nil
+	return id, nil
 }
 
 // bdTrustCacheEntry is one cached verdict, or one remembered walk failure.
@@ -190,14 +182,11 @@ func lockBdTrustCache(cityPath string) (func(), error) {
 	}
 	deadline := time.Now().Add(bdWalkDeadline + 30*time.Second)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		release, busy, err := tryLockBdTrustCacheFile(f)
 		if err == nil {
-			return func() {
-				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-				_ = f.Close()
-			}, nil
+			return release, nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
+		if !busy {
 			_ = f.Close()
 			return nil, fmt.Errorf("locking %s: %w", path, err)
 		}
@@ -532,13 +521,7 @@ func bdHelpRunnerFor(bdPath, home string) bdHelpRunner {
 		cmd.Dir = home
 		cmd.Env = env
 		cmd.Stdin = nil
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			if cmd.Process == nil {
-				return nil
-			}
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		cancelBdCommandAsGroup(cmd)
 		cmd.WaitDelay = 2 * time.Second
 		out, err := cmd.CombinedOutput()
 		return string(out), err
@@ -595,8 +578,8 @@ func recordBdVouchUsed(cityPath, bdPath, sum, inventory string) {
 }
 
 // bdSplitRefusalEvent is the gc_bd.refused event: one per split-city gc bd
-// refusal, so a refusal swallowed by a script's `|| true` (wisp-compact.sh,
-// the deacon's mol burn) still shows up in the city's event log, and so the
+// refusal, so a refusal swallowed by a script's `|| true` (for example
+// a pack script's mol burn) still shows up in the city's event log, and so the
 // allowlist's burn-in can see which commands callers actually need.
 const bdSplitRefusalEvent = "gc_bd.refused"
 
@@ -741,11 +724,16 @@ func bdBindingDependents(cityPath string, ids []string) (map[string][]string, er
 				out[id] = append(out[id], d.IssueID)
 			}
 		}
-		gates, err := bdOpenCrossStoreGatesNaming(binding.Store, id)
+		// A cross-store gate is a graph bead, and the sole class binding holds
+		// the relocated classes, graph among them. The binding is still a raw
+		// residency leg, so this relabels it (typed-store T7 types it).
+		gates, err := dispatch.OpenCrossStoreGatesNaming(beads.GraphStore{Store: binding.Store}, id)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("listing the binding's open gates waiting on %s: %w", id, err)
 		}
-		out[id] = append(out[id], gates...)
+		for _, gate := range gates {
+			out[id] = append(out[id], gate.ID)
+		}
 	}
 	return out, nil
 }
@@ -771,50 +759,13 @@ func bdGuardRead(cityPath string, cfg *config.City, target execStoreTarget, args
 	cmd := exec.CommandContext(ctx, bdPath, args...)
 	cmd.Dir = target.ScopeRoot
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	cancelBdCommandAsGroup(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, bdTruncateUTF8(strings.TrimSpace(stderr.String()), 400))
-	}
-	return out, nil
-}
-
-// bdCrossStoreGateLabel labels an S3b cross-store drain gate
-// (dispatch.CrossStoreGateLabel in #8360).
-const bdCrossStoreGateLabel = "gc:cross-store-gate"
-
-// bdOpenCrossStoreGatesNaming returns the ids of the open cross-store gates
-// in store that wait on blockerID. It is the same query as #8360's
-// dispatch.OpenCrossStoreGatesNaming (label, open status, the
-// gc.cross_store_blocker metadata, live, both tiers).
-// TODO(#8360): call dispatch.OpenCrossStoreGatesNaming once #8360 is on main.
-func bdOpenCrossStoreGatesNaming(store beads.Store, blockerID string) ([]string, error) {
-	blockerID = strings.TrimSpace(blockerID)
-	if store == nil || blockerID == "" {
-		return nil, nil
-	}
-	gates, err := store.List(beads.ListQuery{
-		Label:    bdCrossStoreGateLabel,
-		Status:   "open",
-		Metadata: map[string]string{beadmeta.CrossStoreBlockerMetadataKey: blockerID},
-		Live:     true,
-		TierMode: beads.TierBoth,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing the binding's open gates waiting on %s: %w", blockerID, err)
-	}
-	out := make([]string, 0, len(gates))
-	for _, g := range gates {
-		out = append(out, g.ID)
 	}
 	return out, nil
 }

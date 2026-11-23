@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -54,7 +55,7 @@ func TestOperatorStartRereadsTheRowUnderItsLease(t *testing.T) {
 	hs.afterGet = func() { ran = true; runTx(context.Background(), p, it, effectSpecs[it.Kind], nil) }
 	sp := &attachRaceSP{Fake: runtime.NewFake(), onIsRunning: func() { hs.armed = true }}
 	city := p.World.CityPath
-	err := session.NewManagerWithOptions(hs, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
+	err := session.NewManagerWithOptions(beadstest.Sessions(hs), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
 	got, gerr := store.Get(it.Key.ID)
 	if gerr != nil {
 		t.Fatal(gerr)
@@ -78,12 +79,12 @@ func TestOperatorStartRefusesAKillFenceWrittenBeforeItsLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	sp := &attachRaceSP{Fake: runtime.NewFake(), onIsRunning: func() {
-		if _, err := session.WriteKillFence(store, b.ID, time.Now().UTC()); err != nil {
+		if _, err := session.WriteKillFence(beadstest.Sessions(store), b.ID, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}}
 	city := t.TempDir()
-	err = session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{})
+	err = session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{})
 	if !errors.Is(err, session.ErrSessionKillPending) || sp.Fake.IsRunning("s-gc-1") {
 		t.Fatalf("attach err %v, running %t: want ErrSessionKillPending and nothing started", err, sp.Fake.IsRunning("s-gc-1"))
 	}
@@ -104,12 +105,12 @@ func TestInterruptRestartRereadsTheRowUnderTheLentLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	sp.onIsRunning = func() {
-		if _, err := session.WriteKillFence(store, b.ID, time.Now().UTC()); err != nil {
+		if _, err := session.WriteKillFence(beadstest.Sessions(store), b.ID, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	city := t.TempDir()
-	m := session.NewManagerWithOptions(store, sp, session.WithCityPath(city))
+	m := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city))
 	_, err = m.Submit(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "hello", "pi", runtime.Config{}, session.SubmitIntentInterruptNow)
 	if !errors.Is(err, session.ErrSessionKillPending) || sp.Fake.IsRunning("s-gc-1") {
 		t.Fatalf("submit err %v, running %t: want the restart refused under the lent lease (ErrSessionKillPending) and nothing restarted", err, sp.Fake.IsRunning("s-gc-1"))
@@ -145,7 +146,7 @@ func TestOperatorStartFailedRereadIsAPlainError(t *testing.T) {
 	fs := &failNthGetStore{MemStore: store, n: 2} // the lease's record read, then the re-read
 	sp := &attachRaceSP{Fake: runtime.NewFake(), onIsRunning: func() { fs.armed = true }}
 	city := t.TempDir()
-	err = session.NewManagerWithOptions(fs, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{})
+	err = session.NewManagerWithOptions(beadstest.Sessions(fs), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{})
 	if err == nil || !strings.Contains(err.Error(), "under its lease") {
 		t.Fatalf("attach err %v, want the failed re-read under the lease", err)
 	}

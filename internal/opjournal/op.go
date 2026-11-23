@@ -65,6 +65,9 @@ const (
 	// back. Older builds read it as failed{other}.
 	ReasonRestartNotStarted = "restart_not_started"
 	RefusedReasonPrefix     = "refused:"
+	// ReasonRefusedAction closes a respond whose action the pending prompt
+	// does not offer, or whose answer the runtime refused as invalid.
+	ReasonRefusedAction = RefusedReasonPrefix + "action"
 )
 
 // MaxRefusedWhyLen is the longest <why> a refused:<why> reason can carry and

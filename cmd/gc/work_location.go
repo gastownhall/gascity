@@ -21,6 +21,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -207,7 +208,8 @@ func (l WorkLegs) workStore() beads.Store { return l.work }
 // (byIDOwnerRowForTopology over l's topology): a relocated class binding
 // before the work ledger, so a stale pre-migration copy co-resident in the
 // ledger never answers, then the serving rigs and the work store. It reads
-// through that store's Live handle, past any cache. No store ref is
+// through the owner's live reader (beads.LiveFor), past any cache and any
+// class layer above it. No store ref is
 // consulted: a slot's gc.trigger_bead_store_ref names the demand leg, which on
 // a split city is the work ledger even for a step that lives only in the
 // binding (ga-bmfmt, the warm-bind probe's trap). found is false on a clean
@@ -225,14 +227,12 @@ func (l WorkLegs) readLive(id string) (beads.Bead, bool, error) {
 		return beads.Bead{}, false, nil
 	case err != nil:
 		return beads.Bead{}, false, err
-	case owner.Store == nil:
+	case beads.IsNilStore(owner.Resident):
+		// A zero handle: no store owns the id (a reserved namespace no
+		// binding serves). Read, it would panic.
 		return beads.Bead{}, false, nil
 	}
-	live := beads.HandlesFor(owner.Store).Live
-	if live == nil {
-		return beads.Bead{}, false, nil
-	}
-	b, err := live.Get(id)
+	b, err := beads.LiveFor(owner.Resident).Get(id)
 	switch {
 	case errors.Is(err, beads.ErrNotFound):
 		return beads.Bead{}, false, nil
@@ -258,9 +258,11 @@ type workScope interface {
 }
 
 // ReleaseScope is the narrow set: the bead ID, session_name, the configured
-// named identity and the stable alias (sessionAssignmentIdentifiersForConfig).
-// It is the only set work is released under, and it gates closing a seat
-// whose runtime is dead. A transient pool slot alias is never in it.
+// named identity, the stable alias, and a requalified named session's prior
+// bare identity and its named session's runtime name
+// (sessionAssignmentIdentifiersForConfig). It is the only set work is
+// released under, and it gates closing a seat whose runtime is dead. A
+// transient pool slot alias is never in it.
 type ReleaseScope struct{ ids []string }
 
 // RefuseScope is the wide set: ReleaseScope plus the current alias and the
@@ -325,4 +327,47 @@ func refuseScope(info sessionpkg.Info, cfg *config.City) RefuseScope {
 		}
 	}
 	return RefuseScope{ids: drainAckAssigneeIdentities(info, cfg)}
+}
+
+// legsTriggerResolver reads a bead by id from the store that owns it among
+// legs (WorkLegs.readLive: the class binding, the serving rigs, the city work
+// store), for the start path's trigger reads. nil when legs are unusable (a
+// refused city, or no work store), which keeps the sessions-store read.
+func legsTriggerResolver(legs WorkLegs) warmClaimTriggerResolver {
+	if legs.unusable() != nil {
+		return nil
+	}
+	return func(id string) (beads.Bead, error) {
+		b, found, err := legs.readLive(id)
+		switch {
+		case err != nil:
+			return beads.Bead{}, err
+		case !found:
+			return beads.Bead{}, fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+		}
+		return b, nil
+	}
+}
+
+// wispGCRoots is the pass's readers over l, the census (wispGCLegs): the
+// legs with a store that is not graph, in plan order, by ref, as the work
+// arm and the holder walk select them. A leg set that cannot be read reads
+// the graph placement alone, and answers no work leg.
+func (l WorkLegs) wispGCRoots(stores storeref.Stores, graph beads.StoreReader) wispGCRoots {
+	if err := l.unusable(); err != nil {
+		roots := wispGCGraphRoots(stores, graph)
+		roots.planErr = err
+		return roots
+	}
+	var refs []storeref.StoreRef
+	census := map[string]beads.StoreReader{}
+	for _, leg := range l.plan.Legs { // residency:allow — the census plan's own legs, in eachLeg's order; refs and stores only
+		if leg.Leg.Store == nil || beads.SameStore(leg.Leg.Store, graph) { // residency:allow — the same leg's store
+			continue
+		}
+		ref := string(leg.Leg.Ref)
+		refs = append(refs, leg.Leg.Ref)
+		census[ref] = leg.Leg.Store // residency:allow — the same leg's store
+	}
+	return planWispGCRoots(stores, graph, refs, census)
 }

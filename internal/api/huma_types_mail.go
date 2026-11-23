@@ -29,8 +29,9 @@ type MailListBody struct {
 // MailListOutput is the response envelope for mail list and thread endpoints.
 type MailListOutput struct {
 	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
-	Body      MailListBody
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheRefresh
+	Body MailListBody
 }
 
 // --- Mail types ---
@@ -126,8 +127,9 @@ type MailCountInput struct {
 // the shortfall rather than returning 500 and losing the count
 // entirely.
 type MailCountOutput struct {
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
-	Body      struct {
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheRefresh
+	Body struct {
 		Total         int      `json:"total" doc:"Total message count."`
 		Unread        int      `json:"unread" doc:"Unread message count."`
 		Partial       bool     `json:"partial,omitempty" doc:"True when one or more rig providers failed and the counts are not authoritative."`

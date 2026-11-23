@@ -379,13 +379,12 @@ type gitWorktree interface {
 	WorktreeList() ([]git.Worktree, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
-	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
 
 // NestedWorktreePruneCheck identifies nested git worktrees inside agent
 // home worktrees that are safely reclaimable: no uncommitted changes,
-// no unpushed commits, no stashed work. These reproduce from the remote
+// no unpushed commits. These reproduce from the remote
 // via `git worktree add path origin/<branch>`, so removing the local
 // directory is non-destructive.
 //
@@ -575,7 +574,7 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	details = append(details, safe...)
 	details = append(details, unsafe...)
 	r.Details = details
-	r.FixHint = "run `gc doctor --fix` to remove safely-prunable nested worktrees (mechanical: only those with clean work tree, no unpushed commits, no stashes)"
+	r.FixHint = "run `gc doctor --fix` to remove safely-prunable nested worktrees (mechanical: only those with clean work tree, no unpushed commits)"
 	return r
 }
 
@@ -587,7 +586,7 @@ func (c *NestedWorktreePruneCheck) CanFix() bool { return true }
 // broken worktree does not strand the rest — operators run --fix to
 // reclaim disk, and partial success is more useful than zero progress.
 // Returns the joined errors of all failed removals, or nil on full
-// success. Worktrees marked unsafe (uncommitted / unpushed / stashed)
+// success. Worktrees marked unsafe (uncommitted / unpushed)
 // are never touched.
 func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 	var errs []error
@@ -619,8 +618,11 @@ func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 // classifyNested runs the safety gates on a candidate nested worktree
 // and returns a finding describing whether it is safe to remove and,
 // if not, the first reason it was rejected. Order of checks matches
-// the user's manual recovery procedure: probe git, then status, log,
-// stash. Any probe error rejects the candidate with a visible reason:
+// the user's manual recovery procedure: probe git, then status, log.
+// There is deliberately no stash gate: refs/stash lives in the shared
+// git-common-dir, so `git stash list` answers "does anyone in this repo
+// have a stash", never "does this worktree", and removing a worktree
+// never touches it. Any probe error rejects the candidate with a visible reason:
 // "can't tell" is not safe enough for a destructive fix.
 func classifyNested(newGit func(string) gitWorktree, path, parent, branch string) nestedWorktreeFinding {
 	f := nestedWorktreeFinding{path: path, parent: parent, branch: branch}
@@ -641,16 +643,6 @@ func classifyNested(newGit func(string) gitWorktree, path, parent, branch string
 	}
 	if hasUnpushed {
 		f.reason = "has unpushed commits"
-		return f
-	}
-	hasStashes, err := gw.HasStashesResult()
-	if err != nil {
-		f.reason = fmt.Sprintf("stash probe failed: %v", err)
-		f.probeErr = true
-		return f
-	}
-	if hasStashes {
-		f.reason = "has stashed work"
 		return f
 	}
 	f.safeToRm = true

@@ -183,6 +183,13 @@ func RespondKey(raised Fact) (string, error) {
 	return composedKey("respond key", respondKeyPrefix+raised.ID)
 }
 
+// IsRespondKey reports whether key is in respond:, the namespace RespondKey
+// keys a lane respond in. A request under such a key answers only the raising
+// the key names: in a conversation, the key derives the id of a principal's
+// op answering that raising (DeriveID), so any other row under it would
+// refuse every answer to the raising as key reuse.
+func IsRespondKey(key string) bool { return strings.HasPrefix(key, respondKeyPrefix) }
+
 // validateRespondShape checks a lane respond op's own fields: a
 // RespondPayload, the occurrence it answers and the at_most_once guarantee.
 // It is part of validateRequestShape, so a stored lane respond this build
