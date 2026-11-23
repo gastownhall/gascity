@@ -1426,6 +1426,19 @@ func TestExecutionBackstopNeverDrainsAStartedSeatWaitingOnAHuman(t *testing.T) {
 	if delivered != idleClaimNudgeMaxAttempts {
 		t.Fatalf("nudges over an 8h approval wait = %d, want the attempt cap %d; stdout=%s", delivered, idleClaimNudgeMaxAttempts, f.stdout.String())
 	}
+	// The started seat's recovery is the held-claim default naming its
+	// claim — never the claim-line fallback the unstarted branch sends,
+	// and never a --drain-ack (an ack on a claim hook's answer is how
+	// started work was lost, mc-ilr3b).
+	want := fmt.Sprintf(defaultHeldClaimNudge, f.work.ID)
+	for i, text := range f.nudgesDelivered() {
+		if text != want || text == ladderClaimedNudge {
+			t.Fatalf("nudge %d = %q, want the held-claim default [%q], not the claim-line fallback", i, text, want)
+		}
+		if strings.Contains(text, "--drain-ack") {
+			t.Fatalf("nudge %d carries --drain-ack: %q", i, text)
+		}
+	}
 	if len(f.drained) != 0 || f.stalledEvents() != 0 {
 		t.Fatalf("drains %v, step_stalled %d; want neither for a seat waiting on a human", f.drained, f.stalledEvents())
 	}
