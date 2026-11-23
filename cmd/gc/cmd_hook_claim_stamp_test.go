@@ -42,26 +42,44 @@ func noopPublishRunMap(string, string, ...string) error {
 }
 
 // sessionClaimSpy captures the (sessionID, beadID) a claim records on the
-// CLAIMING SESSION's bead through the StampSessionClaim seam, and lets a test
-// inject an error to prove the stamp never fails the claim.
+// CLAIMING SESSION's bead through the ReserveSessionClaim seam, and lets a test
+// inject an error to prove the reserve never fails the claim.
 type sessionClaimSpy struct {
 	calls     int
 	sessionID string
 	beadID    string
 	// beadIDs records every bead id written through the seam in order, so a test
-	// can assert a stamp is followed by a clear (empty id) rather than only seeing
-	// the last write.
+	// can assert a reserve is followed by a clear (empty id) rather than only
+	// seeing the last write.
 	beadIDs []string
+	// expected records the expected value each reserve was fenced on.
+	expected []hookClaimExpected
 	// cleared records the stamp each clear named as its expected value.
 	cleared []string
-	err     error
+	// err fails every call. errs and outcomes script successive reserves
+	// instead: call i returns errs[i] when it is non-nil, else outcomes[i];
+	// past their end a reserve swaps.
+	err      error
+	errs     []error
+	outcomes []session.CurrentClaimOutcome
 }
 
-func (s *sessionClaimSpy) fn(sessionID, beadID string) error {
+// reserve is the spy's ReserveSessionClaim.
+func (s *sessionClaimSpy) reserve(sessionID string, expected hookClaimExpected, beadID string) (session.CurrentClaimOutcome, error) {
+	i := len(s.expected)
 	s.calls++
 	s.sessionID, s.beadID = sessionID, beadID
 	s.beadIDs = append(s.beadIDs, beadID)
-	return s.err
+	s.expected = append(s.expected, expected)
+	switch {
+	case s.err != nil:
+		return "", s.err
+	case i < len(s.errs) && s.errs[i] != nil:
+		return "", s.errs[i]
+	case i < len(s.outcomes):
+		return s.outcomes[i], nil
+	}
+	return session.CurrentClaimSwapped, nil
 }
 
 // clear is the spy's ClearSessionClaim: it records the clear as an empty bead
@@ -85,10 +103,13 @@ func noopStampWorkMeta(context.Context, string, []string, string, string, map[st
 	return nil
 }
 
-// noopStampSessionClaim suppresses the session-bead claim back-channel stamp so
-// claim tests that don't assert on it stay hermetic — the default seam resolves
-// the city and opens the session store, which a test binary deliberately refuses.
-func noopStampSessionClaim(string, string) error { return nil }
+// noopReserveSessionClaim suppresses the session-bead claim back-channel
+// reserve so claim tests that don't assert on it stay hermetic — the default seam
+// resolves the city and opens the session store, which a test binary
+// deliberately refuses.
+func noopReserveSessionClaim(string, hookClaimExpected, string) (session.CurrentClaimOutcome, error) {
+	return session.CurrentClaimSwapped, nil
+}
 
 // popClaimedAt extracts and validates the write-once gc.claimed_at entry from
 // a fresh-claim patch, returning the remaining keys so the caller can assert
@@ -150,8 +171,8 @@ func poolClaimOps(runner string, claimedMeta map[string]string, branch string, s
 			meta[beadmeta.SessionNameMetadataKey] = "gc__role-mc-sess1"
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: meta}, nil
 		},
-		PublishRunMap:     noopPublishRunMap,
-		StampSessionClaim: noopStampSessionClaim,
+		PublishRunMap:       noopPublishRunMap,
+		ReserveSessionClaim: noopReserveSessionClaim,
 	}
 }
 
@@ -216,10 +237,10 @@ func TestDoHookClaimStampsSessionIdentityOnAdoption(t *testing.T) {
 			t.Error("Claim must not be called on the existing-assignment path")
 			return beads.Bead{}, false, nil
 		},
-		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" }, // no worktree
-		StampWorkMeta:     spy.fn,
-		PublishRunMap:     noopPublishRunMap,
-		StampSessionClaim: noopStampSessionClaim,
+		ResolveWorkBranch:   func(hookClaimWorkTree) string { return "" }, // no worktree
+		StampWorkMeta:       spy.fn,
+		PublishRunMap:       noopPublishRunMap,
+		ReserveSessionClaim: noopReserveSessionClaim,
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -549,7 +570,7 @@ func TestDoHookClaimStampsCurrentClaimOnSession(t *testing.T) {
 		"bd-hw-pool",
 		&stampMetaSpy{},
 	)
-	ops.StampSessionClaim = sessSpy.fn
+	ops.ReserveSessionClaim = sessSpy.reserve
 
 	var stdout, stderr bytes.Buffer
 	if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
@@ -591,10 +612,10 @@ func TestDoHookClaimStampsCurrentClaimOnAdoption(t *testing.T) {
 						Metadata: map[string]string{"gc.routed_to": "worker"},
 					}, true, nil
 				},
-				ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
-				StampWorkMeta:     noopStampWorkMeta,
-				PublishRunMap:     noopPublishRunMap,
-				StampSessionClaim: sessSpy.fn,
+				ResolveWorkBranch:   func(hookClaimWorkTree) string { return "" },
+				StampWorkMeta:       noopStampWorkMeta,
+				PublishRunMap:       noopPublishRunMap,
+				ReserveSessionClaim: sessSpy.reserve,
 			}
 			var stdout, stderr bytes.Buffer
 			if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
@@ -621,7 +642,7 @@ func TestDoHookClaimStampsCurrentClaimForControlBead(t *testing.T) {
 		"bd-hc-check",
 		metaSpy,
 	)
-	ops.StampSessionClaim = sessSpy.fn
+	ops.ReserveSessionClaim = sessSpy.reserve
 
 	var stdout, stderr bytes.Buffer
 	if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
@@ -646,7 +667,7 @@ func TestDoHookClaimSkipsCurrentClaimWhenNoSessionID(t *testing.T) {
 		"bd-hw-nosess",
 		&stampMetaSpy{},
 	)
-	ops.StampSessionClaim = sessSpy.fn
+	ops.ReserveSessionClaim = sessSpy.reserve
 	opts := poolClaimOpts()
 	opts.Env = []string{"GC_SESSION_NAME=gc__role-mc-sess1"} // GC_SESSION_ID absent
 
@@ -671,7 +692,7 @@ func TestDoHookClaimCurrentClaimStampFailureDoesNotFailClaim(t *testing.T) {
 		"bd-hw-err",
 		&stampMetaSpy{},
 	)
-	ops.StampSessionClaim = sessSpy.fn
+	ops.ReserveSessionClaim = sessSpy.reserve
 
 	var stdout, stderr bytes.Buffer
 	if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
@@ -796,5 +817,84 @@ func TestHookClaimRollbackKeepsLaterWinnersPointer(t *testing.T) {
 	}
 	if got := currentClaimPointerOf(t, mem); got != "hw-b" {
 		t.Fatalf("pointer = %q, want %q: the rollback erased the later claim's stamp; stderr=%s", got, "hw-b", stderr.String())
+	}
+}
+
+// TestHookClaimConcurrentMintsDeliverExactlyOnce is AC-6: two claim runs of one
+// session both read the pointer as "X" before their work queries and both mint.
+// The first run's reserve swaps the pointer and it delivers; the second run's
+// reserve conflicts, so it gives its bead back as current_claim_lost, prints no
+// result, leaves the drain-ack alone and exits 1.
+func TestHookClaimConcurrentMintsDeliverExactlyOnce(t *testing.T) {
+	front, mem := currentClaimSession(t, "X")
+	opts := currentClaimHookOptions()
+	opts.CurrentClaimExpected = hookClaimExpected{Value: "X", Known: true}
+
+	first := &turnBoundClaimRecorder{}
+	var firstOut, firstErr bytes.Buffer
+	firstCode := doHookClaim("query", "/rig", opts, currentClaimHookOps(t, first, currentClaimRoutedWork("hw-a"), front), &firstOut, &firstErr)
+
+	second := &turnBoundClaimRecorder{}
+	var secondOut, secondErr bytes.Buffer
+	secondCode := doHookClaim("query", "/rig", opts, currentClaimHookOps(t, second, currentClaimRoutedWork("hw-b"), front), &secondOut, &secondErr)
+
+	if firstCode != 0 {
+		t.Fatalf("first run code = %d, want 0; stderr=%s", firstCode, firstErr.String())
+	}
+	if got := decodeTurnBoundResult(t, firstOut.String()); got.BeadID != "hw-a" {
+		t.Fatalf("first run result = %+v, want hw-a delivered", got)
+	}
+	if len(first.releases) != 0 {
+		t.Fatalf("first run releases = %v, want none", first.releases)
+	}
+	if secondCode != 1 {
+		t.Fatalf("second run code = %d, want 1; stdout=%q stderr=%s", secondCode, secondOut.String(), secondErr.String())
+	}
+	if secondOut.Len() != 0 {
+		t.Fatalf("second run stdout = %q, want no result line", secondOut.String())
+	}
+	if len(second.releases) != 1 || second.releases[0] != "hw-b" {
+		t.Fatalf("second run releases = %v, want [hw-b]", second.releases)
+	}
+	if len(second.claimReleased) != 1 || second.claimReleased[0].Reason != hookClaimReleaseReasonCurrentClaimLost {
+		t.Fatalf("second run claim_released = %+v, want one with reason %q", second.claimReleased, hookClaimReleaseReasonCurrentClaimLost)
+	}
+	if second.drainAcked {
+		t.Fatal("second run consumed --drain-ack")
+	}
+	if got := currentClaimPointerOf(t, mem); got != "hw-a" {
+		t.Fatalf("pointer = %q, want hw-a", got)
+	}
+}
+
+// TestHookClaimReserveRetriesThenDelivers pins the reserve's error contract: an
+// error is retried with the same expected value (a committed attempt reads back
+// unchanged), and a reserve that never answers is reported and the claim
+// delivered, as the stamp always was.
+func TestHookClaimReserveRetriesThenDelivers(t *testing.T) {
+	sessSpy := &sessionClaimSpy{errs: []error{errors.New("dolt boom")}, outcomes: []session.CurrentClaimOutcome{session.CurrentClaimUnchanged}}
+	ops := poolClaimOps(
+		`[{"id":"hw-retry","status":"open","metadata":{"gc.routed_to":"worker"}}]`,
+		map[string]string{"gc.routed_to": "worker"},
+		"bd-hw-retry",
+		&stampMetaSpy{},
+	)
+	ops.ReserveSessionClaim = sessSpy.reserve
+	opts := poolClaimOpts()
+	opts.CurrentClaimExpected = hookClaimExpected{Value: "X", Known: true}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := decodeTurnBoundResult(t, stdout.String()); got.BeadID != "hw-retry" {
+		t.Fatalf("result = %+v, want hw-retry delivered", got)
+	}
+	want := []hookClaimExpected{{Value: "X", Known: true}, {Value: "X", Known: true}}
+	if !reflect.DeepEqual(sessSpy.expected, want) {
+		t.Fatalf("reserve attempts expected %+v, want %+v", sessSpy.expected, want)
+	}
+	if strings.Contains(stderr.String(), "recording current claim") {
+		t.Fatalf("stderr = %q, want no diagnostic for a reserve that answered on retry", stderr.String())
 	}
 }

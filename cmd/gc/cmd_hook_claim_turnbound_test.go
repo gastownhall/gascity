@@ -709,7 +709,7 @@ func TestHookClaimClearsSessionCurrentClaimOnUndeliveredUnwind(t *testing.T) {
 				return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.session_id": "mc-sess1"}}, nil
 			}
 			sessSpy := &sessionClaimSpy{}
-			ops.StampSessionClaim = sessSpy.fn
+			ops.ReserveSessionClaim = sessSpy.reserve
 			ops.ClearSessionClaim = sessSpy.clear
 			// The release override proves clear-before-release: by the time the work
 			// bead is given back, the stamp must already have been cleared.
@@ -759,7 +759,7 @@ func TestHookClaimStraddleLeavesSessionClaimUntouched(t *testing.T) {
 	rec := &turnBoundClaimRecorder{}
 	ops := rec.ops(t, turnBoundRoutedWork)
 	sessSpy := &sessionClaimSpy{}
-	ops.StampSessionClaim = sessSpy.fn
+	ops.ReserveSessionClaim = sessSpy.reserve
 	ops.ClearSessionClaim = sessSpy.clear
 	clock := time.Now()
 	ops.Now = func() time.Time { return clock }

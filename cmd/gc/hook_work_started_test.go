@@ -200,7 +200,10 @@ func (l *startedLog) ops(output string, row *startedRow, record hookRecordWorkSt
 			l.add("step_started:" + step.ID)
 			l.stepStarted = append(l.stepStarted, step.ID)
 		},
-		StampSessionClaim: func(_, beadID string) error { l.add("current:" + beadID); return nil },
+		ReserveSessionClaim: func(_ string, _ hookClaimExpected, beadID string) (session.CurrentClaimOutcome, error) {
+			l.add("current:" + beadID)
+			return session.CurrentClaimSwapped, nil
+		},
 		EmitClaimReleased: func(hookClaimReleaseRecord) {},
 		PublishRunMap:     func(string, string, ...string) error { return nil },
 		StampWorkMeta:     func(context.Context, string, []string, string, string, map[string]string) error { return nil },

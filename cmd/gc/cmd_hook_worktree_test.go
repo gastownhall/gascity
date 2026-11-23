@@ -286,8 +286,8 @@ func TestHookClaimWorktreeReceiptIncludesWorktreeFields(t *testing.T) {
 			bead.Metadata[beadmeta.WorkBranchMetadataKey] = "gc/rig/ga-work"
 			return hookProvisionedWorktree{WorkDir: bead.Metadata[beadmeta.WorkDirMetadataKey], WorkBranch: bead.Metadata[beadmeta.WorkBranchMetadataKey]}, bead, nil
 		},
-		StampSessionClaim: func(string, string) error { return nil },
-		PublishRunMap:     func(string, string, ...string) error { return nil },
+		ReserveSessionClaim: noopReserveSessionClaim,
+		PublishRunMap:       func(string, string, ...string) error { return nil },
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker",

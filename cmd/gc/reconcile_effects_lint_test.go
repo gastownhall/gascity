@@ -38,7 +38,7 @@ import (
 var effectBannedMethods = []string{
 	"ApplyPatch", "ApplyPatchInfo", "UpdateMetadataInfo", "SetMetadata", "SetMetadataBatch", "SetMarker", "SetState",
 	"Sleep", "SetWaitHold", "SetPinAwake", "RecordCurrentBead",
-	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
+	"ReserveCurrentClaim", "ClearCurrentClaim", "DropCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CommitClose",
 	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch", "ApplyPatchIfLifecycleUnchangedUnder",
 	"RollbackPendingCreateAtomicallyUnder", "CommitStartedIfCurrentUnder", "Commit",

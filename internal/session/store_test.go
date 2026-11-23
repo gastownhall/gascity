@@ -359,77 +359,62 @@ func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
 	}
 }
 
-// TestSetCurrentClaimEmitsSingleKeySetMetadata proves SetCurrentClaim stamps the
-// claimed work-bead id as a single-key SetMetadata of
-// beadmeta.CurrentClaimBeadIDMetadataKey — the same shape as RecordCurrentBead,
-// and deliberately a DIFFERENT key so the self-claim lane and the reconciler's
-// wake-time assignment lane cannot clobber each other.
-func TestSetCurrentClaimEmitsSingleKeySetMetadata(t *testing.T) {
-	b := sessionBeadFixture("s-1", "open", nil)
-	is, rec := recordingStore(t, b)
+// TestReserveCurrentClaimWritesTheClaimKey proves the reserve writes
+// beadmeta.CurrentClaimBeadIDMetadataKey — deliberately a DIFFERENT key from
+// RecordCurrentBead's, so the self-claim lane and the reconciler's wake-time
+// assignment lane cannot clobber each other.
+func TestReserveCurrentClaimWritesTheClaimKey(t *testing.T) {
+	is, mem, _ := currentClaimFixture(t, "")
 
-	wrote, err := is.SetCurrentClaim("s-1", "gcg-42")
+	outcome, err := is.ReserveCurrentClaim("s-1", "", "gcg-42")
 	if err != nil {
-		t.Fatalf("SetCurrentClaim: %v", err)
+		t.Fatalf("ReserveCurrentClaim: %v", err)
 	}
-	if !wrote {
-		t.Fatal("SetCurrentClaim reported no write for a fresh stamp")
+	if outcome != CurrentClaimSwapped {
+		t.Fatalf("ReserveCurrentClaim = %q, want %q", outcome, CurrentClaimSwapped)
 	}
-	c := rec.CallsForOp("SetMetadata")
-	if len(c) != 1 {
-		t.Fatalf("SetMetadata calls = %d, want 1 (ops=%v)", len(c), opsOf(rec.Calls()))
+	if got := currentClaimPointer(t, mem); got != "gcg-42" {
+		t.Errorf("pointer = %q, want gcg-42", got)
 	}
-	if c[0].ID != "s-1" || c[0].Key != beadmeta.CurrentClaimBeadIDMetadataKey || c[0].Value != "gcg-42" {
-		t.Errorf("SetCurrentClaim call = (%q,%q,%q), want (s-1,%q,gcg-42)",
-			c[0].ID, c[0].Key, c[0].Value, beadmeta.CurrentClaimBeadIDMetadataKey)
+	b, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatalf("reading session bead: %v", err)
 	}
-	if c[0].Key == CurrentBeadIDKey {
-		t.Errorf("SetCurrentClaim wrote the reconciler's %q key", CurrentBeadIDKey)
-	}
-	if n := len(rec.CallsForOp("SetMetadataBatch")); n != 0 {
-		t.Errorf("SetCurrentClaim emitted %d batch writes, want a single-key write", n)
+	if v, ok := b.Metadata[CurrentBeadIDKey]; ok {
+		t.Errorf("ReserveCurrentClaim wrote the reconciler's %q key (%q)", CurrentBeadIDKey, v)
 	}
 }
 
-// TestSetCurrentClaimSkipsWhenUnchanged pins the idempotence guard: the claim
-// path re-stamps on every hook tick through its adoption branches, so an
-// already-current value must issue no write at all.
-func TestSetCurrentClaimSkipsWhenUnchanged(t *testing.T) {
+// TestDropCurrentClaimClearsAnyValue proves the cascades' unfenced clear empties
+// the pointer whatever it names through one single-key SetMetadata, and writes
+// nothing when it is already empty.
+func TestDropCurrentClaimClearsAnyValue(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"})
 	is, rec := recordingStore(t, b)
 
-	wrote, err := is.SetCurrentClaim("s-1", "gcg-42")
-	if err != nil {
-		t.Fatalf("SetCurrentClaim: %v", err)
-	}
-	if wrote {
-		t.Error("SetCurrentClaim reported a write for an unchanged value")
-	}
-	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
-		t.Errorf("unchanged stamp emitted %d writes, want 0", n)
-	}
-}
-
-// TestSetCurrentClaimClearsWithEmptyValue proves the release side of the stamp:
-// clearing writes an empty value through the same single-key op, so a session
-// that no longer owns work stops naming a bead it cannot close.
-func TestSetCurrentClaimClearsWithEmptyValue(t *testing.T) {
-	b := sessionBeadFixture("s-1", "open", map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"})
-	is, rec := recordingStore(t, b)
-
-	if _, err := is.SetCurrentClaim("s-1", ""); err != nil {
-		t.Fatalf("SetCurrentClaim clear: %v", err)
+	if err := is.DropCurrentClaim("s-1"); err != nil {
+		t.Fatalf("DropCurrentClaim: %v", err)
 	}
 	c := rec.CallsForOp("SetMetadata")
 	if len(c) != 1 || c[0].Key != beadmeta.CurrentClaimBeadIDMetadataKey || c[0].Value != "" {
 		t.Fatalf("clear = %#v, want one SetMetadata(%s,\"\")", c, beadmeta.CurrentClaimBeadIDMetadataKey)
+	}
+	if n := len(rec.CallsForOp("SetMetadataBatch")); n != 0 {
+		t.Errorf("DropCurrentClaim emitted %d batch writes, want a single-key write", n)
 	}
 	got, err := is.CurrentClaimBeadID("s-1")
 	if err != nil {
 		t.Fatalf("CurrentClaimBeadID: %v", err)
 	}
 	if got != "" {
-		t.Errorf("CurrentClaimBeadID after clear = %q, want empty", got)
+		t.Errorf("CurrentClaimBeadID after drop = %q, want empty", got)
+	}
+
+	if err := is.DropCurrentClaim("s-1"); err != nil {
+		t.Fatalf("DropCurrentClaim (empty): %v", err)
+	}
+	if n := len(rec.CallsForOp("SetMetadata")); n != 1 {
+		t.Errorf("dropping an empty pointer wrote; SetMetadata calls = %d, want 1", n)
 	}
 }
 
@@ -466,8 +451,11 @@ func TestCurrentClaimRefusesANonSessionBead(t *testing.T) {
 	rec := beadstest.NewRecordingStore(mem)
 	is := NewStore(beads.SessionStore{Store: rec})
 
-	if _, err := is.SetCurrentClaim("wb-1", "gcg-42"); !errors.Is(err, ErrSessionNotFound) {
-		t.Fatalf("SetCurrentClaim on a non-session bead = %v, want ErrSessionNotFound", err)
+	if _, err := is.ReserveCurrentClaim("wb-1", "", "gcg-42"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("ReserveCurrentClaim on a non-session bead = %v, want ErrSessionNotFound", err)
+	}
+	if err := is.DropCurrentClaim("wb-1"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("DropCurrentClaim on a non-session bead = %v, want ErrSessionNotFound", err)
 	}
 	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
 		t.Errorf("refused stamp still wrote %d times", n)

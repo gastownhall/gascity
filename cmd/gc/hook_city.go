@@ -89,8 +89,8 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.ResolveSessionWorkDir = func(sessionID string) string {
 		return resolveSessionWorkDirVia(h.sessionFront, sessionID)
 	}
-	ops.StampSessionClaim = func(sessionID, beadID string) error {
-		return stampSessionCurrentClaimVia(h.sessionFront, sessionID, beadID)
+	ops.ReserveSessionClaim = func(sessionID string, expected hookClaimExpected, beadID string) (session.CurrentClaimOutcome, error) {
+		return reserveSessionCurrentClaimVia(h.sessionFront, sessionID, expected, beadID)
 	}
 	ops.ClearSessionClaim = func(sessionID, expected string) (session.CurrentClaimOutcome, error) {
 		return clearSessionCurrentClaimVia(h.sessionFront, sessionID, expected)
