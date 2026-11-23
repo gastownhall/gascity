@@ -810,3 +810,54 @@ func writeClaimLoopCityConfig(t *testing.T, tomlPath string, maxActive int) {
 		t.Fatalf("write config: %v", err)
 	}
 }
+
+// TestClaimLoopGuardHoldsClosedTargetStreak (#5857): seats spawned for a stale
+// city replica whose owning store has the row closed each report the closed
+// target as a claim failure with the same text, so three of them trip the
+// guard, which withholds the row from the pool's default demand and alerts.
+func TestClaimLoopGuardHoldsClosedTargetStreak(t *testing.T) {
+	const template, beadID = "rig/worker", "canary-8a1"
+	h := newClaimLoopHarness(t)
+	for seat := 1; seat <= claimLoopTripFailures; seat++ {
+		opts := hookClaimOptions{
+			Assignee:           fmt.Sprintf("%s-%d", template, seat),
+			IdentityCandidates: []string{fmt.Sprintf("%s-%d", template, seat)},
+			RouteTargets:       []string{template},
+			Env:                []string{"GC_TEMPLATE=" + template, fmt.Sprintf("GC_SESSION_ID=seat-%d", seat)},
+		}
+		ops := hookClaimOps{
+			Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+				return beads.Bead{ID: beadID, Status: "closed", Assignee: "rig/worker-owner"}, false, nil
+			},
+			EmitClaimFailed: func(id string, o hookClaimOptions, err error) {
+				if evt, ok := claimFailedEvent(id, o, err); ok {
+					evt.Ts = h.now
+					h.guard.observe(evt)
+				}
+			},
+			EmitClaimRejected: func(string, string, string) {},
+		}
+		routed := []beads.Bead{{ID: beadID, Status: "open", Metadata: map[string]string{"gc.routed_to": template}}}
+		var stdout, stderr bytes.Buffer
+		if res := claimFirstEligibleHookCandidate(routed, opts, ops, "/rig", &stdout, &stderr); res.terminal || !res.claimsErrored {
+			t.Fatalf("seat %d: result = %+v, want a non-terminal claims_errored skip", seat, res)
+		}
+		h.advance(time.Minute)
+	}
+	counts := map[string]int{template: 1}
+	demand := map[string]scaleCheckDemand{template: {Count: 1, WorkBeadIDs: []string{beadID}}}
+	gotCounts, gotDemand := h.guard.withhold(counts, demand)
+	if gotCounts[template] != 0 || len(gotDemand[template].WorkBeadIDs) != 0 {
+		t.Fatalf("withhold = %v / %v, want %s withheld from %s's demand", gotCounts, gotDemand[template].WorkBeadIDs, beadID, template)
+	}
+	if len(h.alerts) != 1 || h.alerts[0].Type != events.BeadClaimLoopHeld || h.alerts[0].Subject != beadID {
+		t.Fatalf("alerts = %+v, want one %s for %s", h.alerts, events.BeadClaimLoopHeld, beadID)
+	}
+	var payload events.BeadClaimLoopHeldPayload
+	if err := json.Unmarshal(h.alerts[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Template != template || payload.Error != errHookClaimTargetClosed.Error() {
+		t.Fatalf("alert payload = %+v, want %s and %q", payload, template, errHookClaimTargetClosed)
+	}
+}
