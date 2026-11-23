@@ -1211,6 +1211,14 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			continue
 		}
 		if !ok {
+			// A closed canonical row is not a race lost to a live claimant:
+			// the served row is a stale copy, and every seat spawned for it is
+			// refused alike, so it is the claim-loop guard's input (#5857).
+			if hookClaimTargetClosed(claimed) {
+				reportHookClaimTargetClosed(candidate, claimed, opts, ops, stderr)
+				claimsErrored = true
+				continue
+			}
 			reportHookClaimRejected(candidate, claimed, opts, ops)
 			continue
 		}
