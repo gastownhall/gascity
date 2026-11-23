@@ -978,3 +978,40 @@ func TestHookClaimLiveClaimantStaysAClaimRejection(t *testing.T) {
 		t.Fatalf("claim rejections = %+v, want exactly gcg-1 lost to bd.other-1 by bd.dog-1", rejections)
 	}
 }
+
+// TestClaimLoopGuardHoldsClosedTargetStreak is the #5857 backstop made whole
+// (AC-7): three distinct seats of one template fail their claim of the same
+// bead the same way — each with errHookClaimTargetClosed, the seat-free
+// sentinel the routed tier now reports when the canonical row is closed — and
+// the guard stops counting the bead as the template's spawn demand and raises
+// bead.claim_loop_held, ending the spawn loop the stale replica minted. The
+// sentinel's seat-free text is what lets the identical-error streak form
+// across the seats: a text naming the holder or the seat would read as a
+// different failure per seat and never trip.
+func TestClaimLoopGuardHoldsClosedTargetStreak(t *testing.T) {
+	h := newClaimLoopHarness(t)
+	closedErr := errHookClaimTargetClosed.Error()
+	for i := 1; i < claimLoopTripFailures; i++ {
+		h.fail(loopTemplate, loopWisp, closedErr)
+		if h.held(loopTemplate) {
+			t.Fatalf("held after %d failure(s), want the hold only at %d", i, claimLoopTripFailures)
+		}
+	}
+	h.fail(loopTemplate, loopWisp, closedErr)
+	if !h.held(loopTemplate) {
+		t.Fatalf("not held after %d distinct seats failed the same claim with %q", claimLoopTripFailures, closedErr)
+	}
+	if len(h.alerts) != 1 {
+		t.Fatalf("alerts = %d, want exactly one bead.claim_loop_held", len(h.alerts))
+	}
+	alert := h.alerts[0]
+	var payload events.BeadClaimLoopHeldPayload
+	if err := json.Unmarshal(alert.Payload, &payload); err != nil {
+		t.Fatalf("alert payload: %v", err)
+	}
+	if alert.Type != events.BeadClaimLoopHeld || alert.Subject != loopWisp ||
+		payload.Template != loopTemplate || payload.Error != claimLoopComparable(closedErr) || payload.Failures != claimLoopTripFailures {
+		t.Fatalf("alert = %s subject=%s payload=%+v, want %s subject=%s with the sentinel's comparable text",
+			alert.Type, alert.Subject, payload, events.BeadClaimLoopHeld, loopWisp)
+	}
+}
