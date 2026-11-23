@@ -27,6 +27,7 @@ none requires per-city configuration.
 | **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
 | **`notify-on-claims-stalled`** | **event `agent.claims_stalled`** | **Mail the escalation recipient when an agent's seats stop claiming their work (once per stall episode)** |
 | **`notify-on-claims-resumed`** | **event `agent.claims_resumed`** | **Resolve that incident and mail a short note when the agent claims its work again** |
+| **`notify-on-drain-ack-loop`** | **event `session.drain_acked_with_assigned_work`** | **Mail the escalation recipient when one bead keeps drain-acking with a started claim kept (once per bead)** |
 
 The **event-driven nudge orders** are documented in detail below.
 
@@ -197,6 +198,48 @@ output names the override.
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
 | `GC_NOTIFY_CLAIMS_STALL_LOOKBACK` | `15m` | Event lookback window |
+| `GC_ESCALATION_RECIPIENT` | `human` | Who is mailed |
+
+## `notify-on-drain-ack-loop`
+
+**Why.** A session that drain-acks while keeping an in_progress claim it
+started stays assigned to it, so the next wake hands it the same claim. A
+turn cap or a handoff makes one such stop ordinary; a bead the seat cannot
+finish (misrouted, or beyond the template) makes it a loop that nothing in the
+city ends by itself. The controller records each stop and does not judge it;
+this order tells a person.
+
+**Event contract.** Triggers on `session.drain_acked_with_assigned_work` and
+runs `assets/scripts/notify-drain-ack-loop.sh`. The payload's `reason` says
+the stop's shape, in precedence order: `restart_requested` (the stop completed
+a restart request), `started_claim_kept` (the session kept an in_progress
+claim its started records name, on no dispatch hold), else
+`drain_acked_with_assigned_work`. The script counts only `started_claim_kept`
+stops:
+
+- each bead's cycles inside the window are counted across its sessions; one
+  session's events less than a minute apart are one cycle;
+- a bead with at least the threshold of cycles is read again and mailed only
+  while it is still `in_progress`, assigned to a session those events name,
+  and carries neither `hold:mayor` nor `hold:external`;
+- the incident key and fingerprint are the bead, so one loop mails once
+  (`escalate.sh` reminds once a day while it lasts).
+
+The mail names the bead, its sessions and template, and gives the park
+command, `bd set-state <id> hold=mayor --reason "drain-ack loop"`: the seat's
+next own drain-ack then releases the claim (open, unassigned, held). The
+script never writes the bead.
+
+**Loud-fail.** A window or threshold it cannot use, an events or bead read
+that fails or does not decode, or an undeliverable mail exits non-zero with
+the cause on stderr; a failed read mails nothing.
+
+**Configuration** (all optional):
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `GC_DRAIN_ACK_LOOP_WINDOW` | `1h` | Window the cycles are counted in |
+| `GC_DRAIN_ACK_LOOP_THRESHOLD` | `3` | Cycles of one bead that make a loop |
 | `GC_ESCALATION_RECIPIENT` | `human` | Who is mailed |
 
 ## Dependencies
