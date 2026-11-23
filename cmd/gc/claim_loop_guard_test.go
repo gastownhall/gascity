@@ -931,3 +931,50 @@ func TestHookClaimClosedCanonicalRowIsAClaimFailure(t *testing.T) {
 		}
 	})
 }
+
+// TestHookClaimLiveClaimantStaysAClaimRejection pins change 2's boundary
+// (#5857): the closed-target rule narrows only the stale-replica shape. A CAS
+// refused because another live session holds the bead in progress is a real
+// lost race — bead.claim_rejected exactly as before, no bead.claim_failed —
+// and an otherwise empty hook drains a healthy no_work rather than
+// claims_errored.
+func TestHookClaimLiveClaimantStaysAClaimRejection(t *testing.T) {
+	type failure struct {
+		beadID string
+		err    error
+	}
+	var failed []failure
+	var rejections []struct{ beadID, existing, attempted string }
+	ops := hookClaimOps{
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "bd.other-1"}, false, nil
+		},
+		EmitClaimFailed: func(beadID string, _ hookClaimOptions, err error) {
+			failed = append(failed, failure{beadID, err})
+		},
+		EmitClaimRejected: func(beadID, existing, attempted string) {
+			rejections = append(rejections, struct{ beadID, existing, attempted string }{beadID, existing, attempted})
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	routed := []beads.Bead{{ID: "gcg-1", Status: "open", Metadata: map[string]string{"gc.routed_to": "bd.dog"}}}
+	opts := hookClaimOptions{
+		Assignee:           "bd.dog-1",
+		IdentityCandidates: []string{"bd.dog-1"},
+		RouteTargets:       []string{"bd.dog"},
+		Env:                []string{"GC_TEMPLATE=bd.dog"},
+		JSON:               true,
+		DrainAck:           true,
+	}
+	var stdout, stderr bytes.Buffer
+	res := claimFirstEligibleHookCandidate(routed, opts, ops, "/city", &stdout, &stderr)
+	if res.terminal || res.claimsErrored {
+		t.Fatalf("routed tier = %+v, want a non-terminal result with no claim error: a live claimant is a lost race, not a failure", res)
+	}
+	if len(failed) != 0 {
+		t.Fatalf("claim failures = %+v: a live claimant must not reach the claim-loop guard", failed)
+	}
+	if len(rejections) != 1 || rejections[0].beadID != "gcg-1" || rejections[0].existing != "bd.other-1" || rejections[0].attempted != "bd.dog-1" {
+		t.Fatalf("claim rejections = %+v, want exactly gcg-1 lost to bd.other-1 by bd.dog-1", rejections)
+	}
+}
