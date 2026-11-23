@@ -74,6 +74,22 @@ func stampSessionCurrentClaimVia(front sessionFrontGetter, sessionID, beadID str
 	return err
 }
 
+// hookClearSessionCurrentClaim empties the current-claim pointer of the
+// session identified by sessionID while it still names expected. It is the
+// production implementation of the hookClaimOps.ClearSessionClaim seam.
+func hookClearSessionCurrentClaim(sessionID, expected string) (session.CurrentClaimOutcome, error) {
+	return clearSessionCurrentClaimVia(sessionCurrentClaimFrontDoor, sessionID, expected)
+}
+
+// clearSessionCurrentClaimVia is hookClearSessionCurrentClaim through front.
+func clearSessionCurrentClaimVia(front sessionFrontGetter, sessionID, expected string) (session.CurrentClaimOutcome, error) {
+	sessFront, err := front()
+	if err != nil {
+		return "", err
+	}
+	return sessFront.ClearCurrentClaim(sessionID, expected)
+}
+
 // hookSessionDrainPending reports whether the session identified by sessionID is
 // already draining. It is the production implementation of the
 // hookClaimOps.DrainPending seam — the F-D claim fence's only input.

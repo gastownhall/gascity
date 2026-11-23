@@ -92,6 +92,9 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.StampSessionClaim = func(sessionID, beadID string) error {
 		return stampSessionCurrentClaimVia(h.sessionFront, sessionID, beadID)
 	}
+	ops.ClearSessionClaim = func(sessionID, expected string) (session.CurrentClaimOutcome, error) {
+		return clearSessionCurrentClaimVia(h.sessionFront, sessionID, expected)
+	}
 	ops.EmitClaimRejected = func(beadID, existingClaimant, attemptedClaimant string) {
 		emitClaimRejected(h.recorder(), beadID, existingClaimant, attemptedClaimant)
 	}

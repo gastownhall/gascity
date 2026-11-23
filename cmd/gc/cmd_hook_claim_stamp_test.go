@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // stampMetaSpy captures the (beadID, assignee, patch) a claim writes through the
@@ -51,6 +52,8 @@ type sessionClaimSpy struct {
 	// can assert a stamp is followed by a clear (empty id) rather than only seeing
 	// the last write.
 	beadIDs []string
+	// cleared records the stamp each clear named as its expected value.
+	cleared []string
 	err     error
 }
 
@@ -59,6 +62,19 @@ func (s *sessionClaimSpy) fn(sessionID, beadID string) error {
 	s.sessionID, s.beadID = sessionID, beadID
 	s.beadIDs = append(s.beadIDs, beadID)
 	return s.err
+}
+
+// clear is the spy's ClearSessionClaim: it records the clear as an empty bead
+// id in beadIDs, and the stamp it named in cleared.
+func (s *sessionClaimSpy) clear(sessionID, expected string) (session.CurrentClaimOutcome, error) {
+	s.calls++
+	s.sessionID, s.beadID = sessionID, ""
+	s.beadIDs = append(s.beadIDs, "")
+	s.cleared = append(s.cleared, expected)
+	if s.err != nil {
+		return "", s.err
+	}
+	return session.CurrentClaimSwapped, nil
 }
 
 // noopStampWorkMeta suppresses the work-bead identity stamp so claim tests that
@@ -670,5 +686,115 @@ func TestDoHookClaimCurrentClaimStampFailureDoesNotFailClaim(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "recording current claim hw-err on session mc-sess1") {
 		t.Errorf("stderr = %q, want the failed back-channel write surfaced", stderr.String())
+	}
+}
+
+// currentClaimSession builds the session front door every current-claim fence
+// test claims through: an in-memory store holding the session bead
+// hookCurrentSessionID with its current-claim pointer reading pointer. The
+// backing store is returned so a test can move the pointer as another claim
+// run of the same session would.
+func currentClaimSession(t *testing.T, pointer string) (*session.Store, *beads.MemStore) {
+	t.Helper()
+	meta := map[string]string{"state": string(session.StateActive)}
+	if pointer != "" {
+		meta[beadmeta.CurrentClaimBeadIDMetadataKey] = pointer
+	}
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:       hookCurrentSessionID,
+		Type:     session.BeadType,
+		Status:   "open",
+		Title:    "session",
+		Labels:   []string{session.LabelSession},
+		Metadata: meta,
+	}}, nil)
+	return session.NewStore(beads.SessionStore{Store: mem}), mem
+}
+
+// currentClaimPointerOf reads the session's raw current-claim pointer.
+func currentClaimPointerOf(t *testing.T, mem *beads.MemStore) string {
+	t.Helper()
+	b, err := mem.Get(hookCurrentSessionID)
+	if err != nil {
+		t.Fatalf("reading session bead: %v", err)
+	}
+	return b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]
+}
+
+// moveCurrentClaim points the session's current claim at beadID, as another
+// claim run of the same session does when it wins the pointer.
+func moveCurrentClaim(t *testing.T, mem *beads.MemStore, beadID string) {
+	t.Helper()
+	if err := mem.SetMetadata(hookCurrentSessionID, beadmeta.CurrentClaimBeadIDMetadataKey, beadID); err != nil {
+		t.Errorf("moving the current claim to %s: %v", beadID, err)
+	}
+}
+
+// currentClaimRoutedWork is one open, routed, claimable candidate id.
+func currentClaimRoutedWork(id string) string {
+	return `[{"id":"` + id + `","status":"open","metadata":{"gc.routed_to":"worker"}}]`
+}
+
+// currentClaimHookOps is rec's claim ops with the session seams a real
+// invocation wires (hookCity.claimOps) over front, so the claim reads and
+// writes the current-claim pointer exactly as production does. Only the work
+// store and the event sinks are stubbed.
+func currentClaimHookOps(t *testing.T, rec *turnBoundClaimRecorder, output string, front *session.Store) hookClaimOps {
+	t.Helper()
+	base := rec.ops(t, output)
+	ops := (&hookCity{front: front}).claimOps()
+	ops.Runner, ops.Claim, ops.Release, ops.DrainAck = base.Runner, base.Claim, base.Release, base.DrainAck
+	ops.EmitExecutionStepStarted = base.EmitExecutionStepStarted
+	ops.EmitClaimWindowExpired = base.EmitClaimWindowExpired
+	ops.EmitClaimReleased = base.EmitClaimReleased
+	ops.PublishRunMap, ops.StampWorkMeta, ops.ResolveWorkBranch = base.PublishRunMap, base.StampWorkMeta, base.ResolveWorkBranch
+	ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, error) {
+		return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: hookCurrentSessionID}}, nil
+	}
+	ops.EmitWorkStartedUnrecorded = func(string, string, string, error) {}
+	ops.EmitClaimRejected = func(string, string, string) {}
+	ops.EmitClaimFailed = func(string, hookClaimOptions, error) {}
+	ops.EmitHookClaimReclaimedStale = func(string, string, string) {}
+	return ops
+}
+
+// currentClaimHookOptions is a claim run of the session hookCurrentSessionID.
+func currentClaimHookOptions() hookClaimOptions {
+	return hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		Env:          []string{"GC_SESSION_ID=" + hookCurrentSessionID},
+		DrainAck:     true,
+		JSON:         true,
+	}
+}
+
+// TestHookClaimRollbackKeepsLaterWinnersPointer is AC-5: a minted claim whose
+// result cannot be delivered gives its bead back, but its rollback clears the
+// session's current-claim pointer only while the pointer still names that
+// bead. Another run of the same session moved the pointer on in between, so
+// the later stamp stands.
+func TestHookClaimRollbackKeepsLaterWinnersPointer(t *testing.T) {
+	front, mem := currentClaimSession(t, "X")
+	rec := &turnBoundClaimRecorder{}
+	ops := currentClaimHookOps(t, rec, currentClaimRoutedWork("hw-a"), front)
+	// The run-map publish runs between the stamp and the result write: the
+	// other run takes the pointer there.
+	ops.PublishRunMap = func(string, string, ...string) error {
+		moveCurrentClaim(t, mem, "hw-b")
+		return nil
+	}
+
+	var stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", currentClaimHookOptions(), ops, brokenPipeWriter{}, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if len(rec.releases) != 1 || rec.releases[0] != "hw-a" {
+		t.Fatalf("releases = %v, want [hw-a]", rec.releases)
+	}
+	if got := currentClaimPointerOf(t, mem); got != "hw-b" {
+		t.Fatalf("pointer = %q, want %q: the rollback erased the later claim's stamp; stderr=%s", got, "hw-b", stderr.String())
 	}
 }
