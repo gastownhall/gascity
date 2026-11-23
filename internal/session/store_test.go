@@ -1010,3 +1010,29 @@ func TestClearCurrentClaimRefusesEmptyExpected(t *testing.T) {
 		t.Fatalf("pointer = %q, want B", got)
 	}
 }
+
+// TestReserveCurrentClaimUnchangedWritesNothing is AC-3: the claim path
+// re-serves an adopted bead on every hook tick, so a reserve for the bead the
+// pointer already names reports CurrentClaimUnchanged and issues no write of
+// any kind — not even a compare-and-set — whatever the expected value.
+func TestReserveCurrentClaimUnchangedWritesNothing(t *testing.T) {
+	for _, expected := range []string{"A", "X", ""} {
+		t.Run("expected="+expected, func(t *testing.T) {
+			is, mem, rec := currentClaimFixture(t, "A")
+
+			outcome, err := is.ReserveCurrentClaim("s-1", expected, "A")
+			if err != nil {
+				t.Fatalf("ReserveCurrentClaim: %v", err)
+			}
+			if outcome != CurrentClaimUnchanged {
+				t.Fatalf("reserve = %q, want %q", outcome, CurrentClaimUnchanged)
+			}
+			if w := currentClaimWrites(rec); len(w) != 0 {
+				t.Errorf("unchanged reserve issued writes: %v", w)
+			}
+			if got := currentClaimPointer(t, mem); got != "A" {
+				t.Fatalf("pointer = %q, want A", got)
+			}
+		})
+	}
+}

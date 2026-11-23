@@ -701,11 +701,18 @@ func (s *Store) ClearCurrentClaim(id, expected string) (CurrentClaimOutcome, err
 }
 
 // swapCurrentClaim is the fenced write shared by the current-claim writers: it
-// moves the pointer from expected to next.
+// moves the pointer from expected to next, and writes nothing when the pointer
+// already holds next.
 func (s *Store) swapCurrentClaim(id, expected, next string) (CurrentClaimOutcome, error) {
 	b, err := s.validatedBead(id)
 	if err != nil {
 		return "", err
+	}
+	// The claim path re-serves an adopted bead on every hook tick; a pointer
+	// that already names it is left alone, so the re-serve emits no
+	// bead.updated.
+	if strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == next {
+		return CurrentClaimUnchanged, nil
 	}
 	outcome, err := beads.ApplyMetadataCAS(s.store, b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, expected, next)
 	if err != nil {
