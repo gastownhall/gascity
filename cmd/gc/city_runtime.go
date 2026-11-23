@@ -1449,6 +1449,7 @@ var legacyTickPhases = []tickPhase{
 	{name: "fs_pressure_gate", run: (*CityRuntime).tickFSPressureGate},
 	{name: "managed_dolt_preflight", run: (*CityRuntime).tickManagedDoltPreflight},
 	{name: "wake_orders_lane", run: (*CityRuntime).tickWakeOrdersLane},
+	{name: "store_watchdog_lanes", run: (*CityRuntime).tickRecordStoreWatchdogLanes},
 	{name: "runtime_inventory_lane", run: (*CityRuntime).tickRecordInventoryLane},
 	{name: "recover_unrouted_work_routes", run: (*CityRuntime).tickRecoverUnroutedWorkRoutes},
 	{name: "load_session_snapshot", run: (*CityRuntime).tickLoadSessionSnapshot},
@@ -1681,6 +1682,18 @@ func (cr *CityRuntime) tickWakeOrdersLane(p *tickPass) bool {
 	passAt, passReason, passRan := ordersLane.lastPass()
 	addBackstopAgeFields(ordersFields, passAt, passReason, passRan)
 	p.recordPhase(TraceSiteControllerTickPhase, "wake_orders_lane", phaseStart, ordersFields)
+	return false
+}
+
+// tickRecordStoreWatchdogLanes records the store watchdog lanes, which run on
+// goroutines of their own (store_watchdog_lanes.go): the tick's record is
+// where their liveness shows, each lane's completed-pass age and last status
+// apart from the orders lane's.
+func (cr *CityRuntime) tickRecordStoreWatchdogLanes(p *tickPass) bool {
+	if p.trace != nil {
+		phaseStart := time.Now()
+		p.recordPhase(TraceSiteControllerTickPhase, "store_watchdog_lanes", phaseStart, cr.storeWatchdogLaneTickFields())
+	}
 	return false
 }
 

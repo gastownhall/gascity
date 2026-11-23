@@ -30,6 +30,7 @@ import (
 // several patrols is divided with it):
 //   - the patrol tick and the startup retry
 //   - the orders lane's pace
+//   - the store watchdog lanes' pace (each watchdog keeps its own interval)
 //   - the runtime-inventory lane's pace, observation max age and read-budget
 //     window
 //   - the drain restart timeout, above its 5 minute floor only

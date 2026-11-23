@@ -91,3 +91,18 @@ func TestStoreWatchdogLanesRunBelowFSPressureThreshold(t *testing.T) {
 		}
 	}
 }
+
+// A pass the FS gate sheds is not a completed pass: the lane's age keeps
+// growing while its last status says why.
+func TestStoreWatchdogLanePressureSkippedPassIsNotACompletedPass(t *testing.T) {
+	now := time.Now()
+	store := beads.NewMemStoreFrom(100, storeWatchdogSeed(now), nil)
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{})
+	withFakePressureFile(t, []byte(samplePressureHigh), nil)
+	t.Setenv(fsPressureThresholdEnv, "")
+	lane := cr.storeWatchdogLaneOf(storeWatchdogOrderTrackingRetention)
+	cr.runStoreWatchdogLanePass(context.Background(), lane)
+	if st := lane.status(); st.completed || st.last != storeWatchdogPassPressureSkipped {
+		t.Fatalf("status after a shed pass = %q completed=%v, want %q and no completed pass", st.last, st.completed, storeWatchdogPassPressureSkipped)
+	}
+}

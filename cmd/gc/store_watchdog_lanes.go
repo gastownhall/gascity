@@ -43,6 +43,56 @@ type storeWatchdogLane struct {
 	// forces its passes independently of the tick, the orders lane and the
 	// other watchdog lanes.
 	fsPressure fsPressureEpisode
+
+	// The last attempt's status and the last completed pass, for the tick
+	// trace (statusMu). Only work that finished uncanceled is a completed
+	// pass, so a lane shed by pressure, suspended, canceled or blocked in a
+	// store call shows a growing age.
+	statusMu    sync.Mutex
+	lastStatus  storeWatchdogPassStatus
+	lastAt      time.Time
+	completedAt time.Time
+	completed   bool
+}
+
+// storeWatchdogPassStatus is how a lane's pass attempt ended.
+type storeWatchdogPassStatus string
+
+const (
+	storeWatchdogPassNotDue          storeWatchdogPassStatus = "not_due"
+	storeWatchdogPassSuspended       storeWatchdogPassStatus = "suspended"
+	storeWatchdogPassPressureSkipped storeWatchdogPassStatus = "pressure_skipped"
+	storeWatchdogPassCanceled        storeWatchdogPassStatus = "canceled"
+	// storeWatchdogPassAborted is a pass whose work never returned: it
+	// panicked, and safeTick recovered it.
+	storeWatchdogPassAborted   storeWatchdogPassStatus = "aborted"
+	storeWatchdogPassCompleted storeWatchdogPassStatus = "completed"
+)
+
+// storeWatchdogLaneStatus is a snapshot of a lane's status.
+type storeWatchdogLaneStatus struct {
+	last        storeWatchdogPassStatus
+	lastAt      time.Time
+	completedAt time.Time
+	completed   bool
+}
+
+// noteStatus records how an attempt ended at at; a completed one is also the
+// lane's last completed pass.
+func (l *storeWatchdogLane) noteStatus(status storeWatchdogPassStatus, at time.Time) {
+	l.statusMu.Lock()
+	defer l.statusMu.Unlock()
+	l.lastStatus, l.lastAt = status, at
+	if status == storeWatchdogPassCompleted {
+		l.completedAt, l.completed = at, true
+	}
+}
+
+// status returns the lane's status snapshot.
+func (l *storeWatchdogLane) status() storeWatchdogLaneStatus {
+	l.statusMu.Lock()
+	defer l.statusMu.Unlock()
+	return storeWatchdogLaneStatus{last: l.lastStatus, lastAt: l.lastAt, completedAt: l.completedAt, completed: l.completed}
 }
 
 // storeWatchdogKey names one store watchdog.
@@ -89,7 +139,13 @@ var storeWatchdogSpecs = []storeWatchdogSpec{
 	},
 }
 
-const storeWatchdogLaneSafeTickTrigger = "store-watchdog-lane"
+const (
+	// storeWatchdogLaneSafeTickTrigger names a lane in safeTick panic lines.
+	storeWatchdogLaneSafeTickTrigger = "store-watchdog-lane"
+	// storeWatchdogLaneTraceTrigger is the trace-cycle trigger for a due
+	// pass; the cycle's trigger detail is the watchdog key.
+	storeWatchdogLaneTraceTrigger TraceTickTrigger = "store_watchdog"
+)
 
 // storeWatchdogLanesOf returns this runtime's store watchdog lanes, creating
 // them on first use so a directly-constructed CityRuntime needs no wiring.
@@ -155,6 +211,11 @@ func (cr *CityRuntime) startStoreWatchdogLanes(ctx context.Context) storeWatchdo
 // pressure, then the watchdog body against the published config. A skipped
 // pass advances no watchdog clock, so the watchdog stays due and the next
 // pass after the city resumes or the pressure episode forces it runs.
+//
+// Every attempt records its status for the tick. A not-due or suspended
+// attempt does no I/O and writes no trace; a due attempt of a live city is a
+// trace cycle of its own, triggered store_watchdog with the watchdog as its
+// detail, whether the pressure gate sheds it or its work runs.
 func (cr *CityRuntime) runStoreWatchdogLanePass(ctx context.Context, lane *storeWatchdogLane) {
 	if ctx.Err() != nil {
 		return
@@ -166,18 +227,79 @@ func (cr *CityRuntime) runStoreWatchdogLanePass(ctx context.Context, lane *store
 	}
 	now := time.Now()
 	if !lane.spec.due(cr, now) {
+		lane.noteStatus(storeWatchdogPassNotDue, now)
 		return
 	}
 	cfg := cr.serviceConfigSnapshot()
 	// A suspended city's watchdogs read no store: every one reads every
 	// scope's store, restarting the proxies suspension retired.
 	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
+		lane.noteStatus(storeWatchdogPassSuspended, now)
 		return
 	}
+
+	key := string(lane.spec.key)
+	trace := cr.beginStoreWatchdogTrace(cfg, lane.spec.key)
+	status := storeWatchdogPassAborted
+	defer func() {
+		lane.noteStatus(status, time.Now())
+		completion := TraceCompletionAborted
+		if status == storeWatchdogPassCompleted || status == storeWatchdogPassPressureSkipped {
+			completion = TraceCompletionCompleted
+		}
+		trace.end(completion, traceRecordPayload{"phase": "store_watchdog", "watchdog": key, "status": string(status)})
+	}()
+
 	// Only a due pass of a live city counts toward the lane's pressure
 	// episode, so not-due attempts neither shed nor force anything.
-	if lane.fsPressure.shouldSkip(cr.stderr, nil, storeWatchdogLaneSafeTickTrigger+":"+string(lane.spec.key), lane.spec.work) {
+	if lane.fsPressure.shouldSkip(cr.stderr, trace, storeWatchdogLaneSafeTickTrigger+":"+key, lane.spec.work) {
+		status = storeWatchdogPassPressureSkipped
 		return
 	}
+	if ctx.Err() != nil {
+		status = storeWatchdogPassCanceled
+		return
+	}
+	start := time.Now()
 	lane.spec.run(cr, ctx, cfg, now)
+	status, outcome := storeWatchdogPassCompleted, TraceOutcomeComplete
+	if ctx.Err() != nil {
+		status, outcome = storeWatchdogPassCanceled, TraceOutcomeCanceled
+	}
+	trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, outcome, key, time.Since(start),
+		map[string]any{"watchdog": key, "status": string(status)})
+}
+
+// beginStoreWatchdogTrace opens the trace cycle of one due pass of the
+// watchdog key, or returns nil when tracing is off.
+func (cr *CityRuntime) beginStoreWatchdogTrace(cfg *config.City, key storeWatchdogKey) *sessionReconcilerTraceCycle {
+	if cr.trace == nil {
+		return nil
+	}
+	return cr.trace.beginCycle(sessionReconcilerTraceCycleInfo{
+		TickTrigger:   string(storeWatchdogLaneTraceTrigger),
+		TriggerDetail: string(key),
+		CityPath:      cr.cityPath,
+	}, cfg, nil)
+}
+
+// storeWatchdogLaneTickFields are the tick record's fields for the store
+// watchdog lanes, each lane's under its key: the age of its last completed
+// pass (backstop_ran false when it has none), and its last attempt's status
+// and that attempt's age.
+func (cr *CityRuntime) storeWatchdogLaneTickFields() map[string]any {
+	fields := map[string]any{}
+	for _, lane := range cr.storeWatchdogLanesOf() {
+		st := lane.status()
+		laneFields := map[string]any{}
+		addBackstopAgeFields(laneFields, st.completedAt, "", st.completed)
+		if st.last != "" {
+			laneFields["last_status"] = string(st.last)
+			laneFields["last_status_age_seconds"] = int(time.Since(st.lastAt).Round(time.Second) / time.Second)
+		}
+		for k, v := range laneFields {
+			fields[string(lane.spec.key)+"_"+k] = v
+		}
+	}
+	return fields
 }

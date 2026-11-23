@@ -148,8 +148,9 @@ controller tick: a due order never waits behind session reconciliation, and
 the tick never waits on order gates.
 
 - **Startup.** `run()` dispatches once synchronously before the cold-start
-  session reconcile (MAINT-008), then starts the lane, so orders keep
-  dispatching while that reconcile runs.
+  session reconcile (MAINT-008), then starts the lane and the store
+  watchdog lanes, so orders keep dispatching and the watchdogs keep running
+  while that reconcile runs.
 - **Wakes and the duty cycle.** Each controller tick that gets past its
   FS-pressure gate wakes the lane at the point where the tick used to
   dispatch. A wake starts a pass at once if the lane has been idle, since
@@ -174,15 +175,15 @@ the tick never waits on order gates.
   config change waits for the lane's own forced pass, up to
   `maxConsecutiveFSPressureSkips`+1 passes. After the gate, a pass runs
   the managed-Dolt preflight and the periodic order rescan, installs any
-  staged dispatcher (a reload's, or the rescan's), runs the
-  tracking/nudge-mail watchdogs, and calls `dispatch()`. The preflight
+  staged dispatcher (a reload's, or the rescan's), and calls `dispatch()`.
+  It runs no store watchdog: those have lanes of their own (below). The preflight
   waits at most 30 seconds for a Dolt recover, counted from when the
   recover started; past that the pass carries on and the recover keeps
   running, so a slow recover never holds up dispatch. A panic
   is recovered per pass (`safeTick`). Each pass is its own trace cycle
   with trigger `orders`.
 - **Reloads never wait on a pass.** A pass holds the lane's `passMu` for the
-  live dispatcher, the retired dispatchers and the watchdog clocks. A config
+  live dispatcher and the retired dispatchers. A config
   reload stages the rebuilt dispatcher and installs it at once if the lane
   is idle. Otherwise the next pass installs it, draining the outgoing
   dispatcher first. A pass already in flight when the reload lands
@@ -192,7 +193,7 @@ the tick never waits on order gates.
   always stages; a same-revision reload stages only when its rescan finds
   the order set changed; a superseded reload never stages. Each pass reads
   the generation and the one config snapshot the whole pass uses (trace,
-  rescan, watchdogs) as a pair, under the lock the bump takes, so no stage
+  rescan, dispatch) as a pair, under the lock the bump takes, so no stage
   lands between them. The rescan stages its result only if the generation
   is unchanged, so a rescan of pre-reload config can never overwrite the
   reload's dispatcher.
@@ -208,6 +209,44 @@ the tick never waits on order gates.
   give the age and trigger of the lane's last pass that reached dispatch.
   Passes the FS gate skips do not count, so an age that keeps growing means
   the lane is stuck or starved by pressure.
+
+**Store watchdogs (their own lanes):**
+
+The stale order-tracking sweep, the closed order-tracking retention prune
+and the nudge/mail sweep read and mutate every scope's store and need no
+order dispatcher, so none of them runs in an orders pass: a slow prune
+cannot delay dispatch, dispatcher installation or another watchdog. Each
+runs on its own lane (`cmd/gc/store_watchdog_lanes.go`), one instance of one
+lane type per watchdog.
+
+- **Pace.** A lane's first pass is one patrol interval after `run()` starts
+  it, and each later pass one patrol interval after the previous pass ended,
+  so passes on one lane never overlap. The watchdog's own clock decides
+  whether a pass is due, which keeps the watchdog intervals (30 seconds for
+  the tracking sweep, 15 minutes for retention, five minutes for nudge/mail);
+  a lane owns its watchdog's clocks.
+- **A pass** that is not due does nothing else: no I/O, no pressure sample,
+  no trace. A due pass in a suspended city reads no store. Otherwise the
+  pass applies the FS-pressure gate on the lane's own episode (lanes shed
+  and force independently of each other, the tick and the orders lane, and
+  log `skipping <work>` once per episode), then runs the watchdog. A skipped
+  pass advances no watchdog clock, so the watchdog stays due. A panic is
+  recovered per pass (`safeTick`).
+- **Shutdown.** `run()` cancels every lane, then joins them, before the
+  stores close, so a lane blocked in a store call does not hold up the
+  others. The tracking and retention calls are not interruptible and finish
+  first. The nudge/mail watchdog passes the lane's context to the nudge
+  queue's maintenance and runs no mail sweep once it is canceled.
+- **Visibility.** Each due pass of a live city is its own trace cycle with
+  trigger `store_watchdog` and the watchdog key as its detail; the work's
+  operation record carries its duration and status, and a canceled or
+  panicked pass ends the cycle aborted. Each tick records a
+  `store_watchdog_lanes` operation with, per lane under its key, the age of
+  its last completed pass (`<key>_backstop_ran`,
+  `<key>_backstop_age_seconds`) and its last attempt's status
+  (`<key>_last_status`: `not_due`, `suspended`, `pressure_skipped`,
+  `canceled`, `aborted` or `completed`). Only work that finished uncanceled
+  refreshes the age.
 
 **Trigger evaluation and dispatch (on each lane pass):**
 
@@ -368,6 +407,7 @@ Violations indicate bugs.
 | `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `MaxSeqFromLabels()` |
 | `internal/orders/scanner.go` | `Scan()` -- discovers orders across formula layers with priority override |
 | `cmd/gc/orders_lane.go` | The orders lane: duty-cycle wake pacing and backstop timer, `runOrdersLanePass()`, the FS-pressure gate, dispatcher staging and install, the order-set generation guard |
+| `cmd/gc/store_watchdog_lanes.go` | The store watchdog lanes: one per tracking sweep, retention prune and nudge/mail sweep, each with its due gate, suspension skip, FS-pressure episode, trace cycle and status |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`, `dispatch()`, `dispatchOne()`, `dispatchExec()`, `dispatchWisp()`, `effectiveTimeout()`, `rigExclusiveLayers()`, `qualifyPool()`, `ExecRunner`, `shellExecRunner` |
 | `cmd/gc/cmd_order.go` | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()`, `bdCursorFunc()` |
 

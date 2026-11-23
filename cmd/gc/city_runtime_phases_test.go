@@ -389,6 +389,7 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 			wantOps: []string{
 				"controller.tick.phase managed_dolt_preflight",
 				"controller.tick.phase wake_orders_lane",
+				"controller.tick.phase store_watchdog_lanes",
 				"controller.tick.phase runtime_inventory_lane",
 				"controller.tick.phase recover_unrouted_work_routes",
 				"session_snapshot.load load_session_snapshot.initial",
@@ -488,6 +489,7 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 			wantOps: []string{
 				"controller.tick.phase managed_dolt_preflight",
 				"controller.tick.phase wake_orders_lane",
+				"controller.tick.phase store_watchdog_lanes",
 				"controller.tick.phase recover_unrouted_work_routes",
 				"session_snapshot.load load_session_snapshot.initial",
 				"controller.tick.phase cleanup_dead_runtime_session_corpses",
@@ -582,6 +584,7 @@ func TestCityRuntimeTickLegacyPhaseSequenceUnchanged(t *testing.T) {
 		"fs_pressure_gate",
 		"managed_dolt_preflight",
 		"wake_orders_lane",
+		"store_watchdog_lanes",
 		"runtime_inventory_lane",
 		"recover_unrouted_work_routes",
 		"load_session_snapshot",
@@ -805,6 +808,7 @@ func TestCityRuntimeTickV2RunsMaintenancePhasesOnly(t *testing.T) {
 		"fs_pressure_gate",
 		"managed_dolt_preflight",
 		"wake_orders_lane",
+		"store_watchdog_lanes",
 		"runtime_inventory_lane",
 		"recover_unrouted_work_routes",
 		"load_session_snapshot",
@@ -836,6 +840,7 @@ func TestCityRuntimeTickV2RunsMaintenancePhasesOnly(t *testing.T) {
 	assertLinesEqual(t, "v2 tick operation records", tickOperationRecords(t, cr), []string{
 		"controller.tick.phase managed_dolt_preflight",
 		"controller.tick.phase wake_orders_lane",
+		"controller.tick.phase store_watchdog_lanes",
 		"controller.tick.phase runtime_inventory_lane",
 		"controller.tick.phase recover_unrouted_work_routes",
 		"session_snapshot.load load_session_snapshot.initial",

@@ -449,3 +449,193 @@ func TestNudgeMailSweepLaneSweepsNothingAfterCanceledMaintenance(t *testing.T) {
 		t.Fatalf("stderr logs the cancellation as a failure:\n%s", out)
 	}
 }
+
+// slowClosedHistoryStore makes every closed-status List (the retention
+// prune's history read) take at least delay.
+type slowClosedHistoryStore struct {
+	beads.Store
+	delay time.Duration
+}
+
+func (s *slowClosedHistoryStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "closed" {
+		time.Sleep(s.delay)
+	}
+	return s.Store.List(q)
+}
+
+// storeWatchdogTraceRecords closes cr's tracer and returns the store watchdog
+// cycles' operation and result records, by the watchdog each cycle's trigger
+// detail names. It fails on any orders cycle: no test that calls it runs an
+// orders pass.
+func storeWatchdogTraceRecords(t *testing.T, cr *CityRuntime, traceRoot string) (ops, results map[storeWatchdogKey][]SessionReconcilerTraceRecord) {
+	t.Helper()
+	if err := cr.trace.Close(); err != nil {
+		t.Fatalf("closing the tracer: %v", err)
+	}
+	records, err := ReadTraceRecords(traceCityRuntimeDir(traceRoot), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	// Only a cycle's start record carries its trigger; the rest share its
+	// tick ID.
+	cycles := map[string]storeWatchdogKey{}
+	for _, r := range records {
+		if r.RecordType != TraceRecordCycleStart {
+			continue
+		}
+		if r.TickTrigger == ordersLaneTraceTrigger {
+			t.Fatalf("an orders cycle in a watchdog-only run: %+v", r)
+		}
+		if r.TickTrigger == storeWatchdogLaneTraceTrigger {
+			cycles[r.TickID] = storeWatchdogKey(r.TriggerDetail)
+		}
+	}
+	ops = map[storeWatchdogKey][]SessionReconcilerTraceRecord{}
+	results = map[storeWatchdogKey][]SessionReconcilerTraceRecord{}
+	for _, r := range records {
+		key, ok := cycles[r.TickID]
+		if !ok {
+			continue
+		}
+		switch r.RecordType {
+		case TraceRecordOperation:
+			ops[key] = append(ops[key], r)
+		case TraceRecordCycleResult:
+			results[key] = append(results[key], r)
+		}
+	}
+	return ops, results
+}
+
+// Each due pass is a trace cycle of its own, triggered store_watchdog and
+// detailed with its watchdog: its operation record names the watchdog and
+// carries the work's duration, and the cycle ends completed. A pass that is
+// not due writes no trace at all.
+func TestStoreWatchdogLanePassesTraceTheirOwnCycles(t *testing.T) {
+	now := time.Now()
+	const slow = 30 * time.Millisecond
+	store := &slowClosedHistoryStore{Store: beads.NewMemStoreFrom(100, storeWatchdogSeed(now), nil), delay: slow}
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{})
+	traceRoot := t.TempDir()
+	cr.trace = newSessionReconcilerTraceManager(traceRoot, "test-city", io.Discard)
+	lanes := cr.storeWatchdogLanesOf()
+	for range 2 {
+		for _, lane := range lanes {
+			cr.runStoreWatchdogLanePass(context.Background(), lane)
+		}
+	}
+
+	ops, results := storeWatchdogTraceRecords(t, cr, traceRoot)
+	for _, lane := range lanes {
+		key := lane.spec.key
+		if len(ops[key]) != 1 || len(results[key]) != 1 {
+			t.Fatalf("%s: %d operation and %d result records, want one of each for its one due pass", key, len(ops[key]), len(results[key]))
+		}
+		op := ops[key][0]
+		if op.Fields["operation_name"] != string(key) || op.Fields["watchdog"] != string(key) || op.Fields["status"] != string(storeWatchdogPassCompleted) {
+			t.Fatalf("%s operation record fields = %v, want the watchdog named and status completed", key, op.Fields)
+		}
+		res := results[key][0]
+		if res.CompletionStatus != TraceCompletionCompleted || res.Fields["watchdog"] != string(key) || res.Fields["status"] != string(storeWatchdogPassCompleted) {
+			t.Fatalf("%s cycle result = %s %v, want completed with the watchdog and its status", key, res.CompletionStatus, res.Fields)
+		}
+	}
+	if d := ops[storeWatchdogOrderTrackingRetention][0].DurationMS; d < slow.Milliseconds() {
+		t.Fatalf("retention operation duration = %dms, want at least the %dms its history read took", d, slow.Milliseconds())
+	}
+}
+
+// Only a pass whose work finished uncanceled refreshes a lane's completed-pass
+// time. A suspended pass, a pass canceled mid-work and a pass still blocked
+// in its store call leave it where it was; the tick reports each lane's age
+// and last status on its own, and a canceled pass's cycle ends aborted.
+func TestStoreWatchdogLaneCompletedPassIgnoresUnfinishedWork(t *testing.T) {
+	now := time.Now()
+	seed := append(storeWatchdogSeed(now), mailSeed("mail-stale", now.Add(-nudgeMailSweepDefaultMailTTL-time.Minute)))
+	store := newClosedHistoryBlockingStore(beads.NewMemStoreFrom(100, seed, nil))
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{})
+	traceRoot := t.TempDir()
+	cr.trace = newSessionReconcilerTraceManager(traceRoot, "test-city", io.Discard)
+	sweep := cr.storeWatchdogLaneOf(storeWatchdogOrderTrackingSweep)
+	retention := cr.storeWatchdogLaneOf(storeWatchdogOrderTrackingRetention)
+	nudge := cr.storeWatchdogLaneOf(storeWatchdogNudgeMailSweep)
+	assertStatus := func(lane *storeWatchdogLane, want storeWatchdogPassStatus, wantCompleted bool) {
+		t.Helper()
+		st := lane.status()
+		if st.last != want || st.completed != wantCompleted {
+			t.Fatalf("%s status = %q completed=%v, want %q completed=%v", lane.spec.key, st.last, st.completed, want, wantCompleted)
+		}
+	}
+
+	live := cr.cfg
+	suspended := *live
+	suspended.Workspace.Suspended = true
+	cr.cfg = &suspended
+	cr.runStoreWatchdogLanePass(context.Background(), nudge)
+	assertStatus(nudge, storeWatchdogPassSuspended, false)
+	cr.serviceStateMu.Lock()
+	cr.cfg = live
+	cr.serviceStateMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cr.maintainNudgeQueue = func(mctx context.Context, _ beads.NudgesStore, _ time.Time) error {
+		cancel()
+		return mctx.Err()
+	}
+	cr.runStoreWatchdogLanePass(ctx, nudge)
+	assertStatus(nudge, storeWatchdogPassCanceled, false)
+
+	retentionDone := make(chan struct{})
+	go func() {
+		defer close(retentionDone)
+		cr.runStoreWatchdogLanePass(context.Background(), retention)
+	}()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(store.release) }) }
+	t.Cleanup(func() {
+		release()
+		awaitClose(t, retentionDone, "the retention pass finishing after release")
+	})
+	awaitClose(t, store.entered, "the retention watchdog reaching its closed-history read")
+	if retention.status().completed {
+		t.Fatal("a retention pass still blocked in its store call counts as completed")
+	}
+	release()
+	awaitClose(t, retentionDone, "the retention pass finishing after release")
+	assertStatus(retention, storeWatchdogPassCompleted, true)
+
+	cr.runStoreWatchdogLanePass(context.Background(), sweep)
+	completedAt := sweep.status().completedAt
+	cr.runStoreWatchdogLanePass(context.Background(), sweep)
+	assertStatus(sweep, storeWatchdogPassNotDue, true)
+	if got := sweep.status().completedAt; !got.Equal(completedAt) {
+		t.Fatalf("a not-due pass moved the completed-pass time from %v to %v", completedAt, got)
+	}
+
+	fields := cr.storeWatchdogLaneTickFields()
+	for k, want := range map[string]any{
+		"order_tracking_sweep_backstop_ran":     true,
+		"order_tracking_sweep_last_status":      string(storeWatchdogPassNotDue),
+		"order_tracking_retention_backstop_ran": true,
+		"order_tracking_retention_last_status":  string(storeWatchdogPassCompleted),
+		"nudge_mail_sweep_backstop_ran":         false,
+		"nudge_mail_sweep_last_status":          string(storeWatchdogPassCanceled),
+	} {
+		if fields[k] != want {
+			t.Fatalf("tick field %s = %v, want %v; fields: %v", k, fields[k], want, fields)
+		}
+	}
+	if _, ok := fields["nudge_mail_sweep_backstop_age_seconds"]; ok {
+		t.Fatalf("a lane with no completed pass reports an age: %v", fields)
+	}
+	if _, ok := fields["order_tracking_retention_backstop_age_seconds"]; !ok {
+		t.Fatalf("a lane with a completed pass reports no age: %v", fields)
+	}
+
+	_, results := storeWatchdogTraceRecords(t, cr, traceRoot)
+	if got := results[storeWatchdogNudgeMailSweep]; len(got) != 1 || got[0].CompletionStatus != TraceCompletionAborted || got[0].Fields["status"] != string(storeWatchdogPassCanceled) {
+		t.Fatalf("nudge/mail cycle results = %+v, want one aborted canceled cycle and none for the suspended pass", got)
+	}
+}
