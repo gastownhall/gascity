@@ -767,3 +767,37 @@ func TestSupervisorFallthroughUnknownHostingUnboundAPIPortReachesSupervisor(t *t
 		}
 	}
 }
+
+// hostingModeName names mode for a subtest; the unknown mode is "".
+func hostingModeName(mode controllerHostingMode) string {
+	if mode == controllerHostingUnknown {
+		return "unknown"
+	}
+	return string(mode)
+}
+
+// TestAPIClientUnboundAPIPortTakesLocalFallback pins #5761 for apiClient: a
+// live controller that identifies as standalone, or one of unknown hosting
+// mode, whose city.toml names a loopback [api] port nothing listens on gets
+// nil (the caller's local fallback), the same answer as with no [api] port,
+// without resolving the supervisor-managed client.
+func TestAPIClientUnboundAPIPortTakesLocalFallback(t *testing.T) {
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() { apiRouteControllerIdentityHook, apiRouteSupervisorClientHook = origIdentity, origSup })
+	for _, mode := range []controllerHostingMode{controllerHostingStandalone, controllerHostingUnknown} {
+		t.Run(hostingModeName(mode), func(t *testing.T) {
+			t.Setenv("GC_NO_API", "")
+			apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+				return controllerIdentityReply{PID: 4242, HostingMode: mode}
+			}
+			apiRouteSupervisorClientHook = func(string) *api.Client {
+				t.Errorf("supervisor client resolved for apiClient")
+				return api.NewClient("http://supervisor.sentinel:1")
+			}
+			dir := writeCityTOMLForRoute(t, t.TempDir(), apiPortCityTOML(unboundLoopbackPort(t)))
+			if c := apiClient(dir); c != nil {
+				t.Fatalf("apiClient = %p, want nil: nothing listens on the [api] port", c)
+			}
+		})
+	}
+}
