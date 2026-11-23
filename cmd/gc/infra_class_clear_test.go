@@ -143,6 +143,116 @@ func TestAnUnclearedMigratedCityRefusesBootAndTheMigrationRepairsIt(t *testing.T
 	}
 }
 
+// TestAMigratedCityWhoseRetainedCopyDivergedIsRepairedByTheClear pins the
+// repair path for the population #5987 measured: a city an older build
+// migrated kept the work store's copies, and a step that was closed through
+// the binding then diverged — the dead-assignee release sweep reopened the
+// work row and cleared its assignee. Divergence must not change the verdict:
+// containment is status-blind (infraCopyManifest.Match keys on id and
+// created_at only), so boot refuses with retained-copies naming the clear,
+// and the clear repairs the city — the binding keeps its closed row, the
+// diverged work row leaves for the retained-source backup, and the next boot
+// serves. A diverged pair that came back HeldDifferent or unproven would be a
+// pair the named command can no longer repair.
+func TestAMigratedCityWhoseRetainedCopyDivergedIsRepairedByTheClear(t *testing.T) {
+	cityPath := t.TempDir()
+	source := stubInfraMigrationSource(t)
+	root := mustCreateInfraBead(t, source, beads.Bead{Title: "wf root", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	step := mustCreateInfraBead(t, source, beads.Bead{Title: "wf step", Type: "task", Metadata: beads.StringMap{"gc.root_bead_id": root.ID}})
+	if got := coordclass.Classify(step); got != coordclass.ClassGraph {
+		t.Fatalf("the seeded step classifies as %v, want graph", got)
+	}
+	inProgress := "in_progress"
+	if err := source.Update(step.ID, beads.UpdateOpts{Status: &inProgress, Assignee: stringPtr("manager-2-pool")}); err != nil {
+		t.Fatalf("assigning the step: %v", err)
+	}
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+
+	var log bytes.Buffer
+	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("the v1.5.0-style cutover = %s, want converged: %s", got.Outcome, log.String())
+	}
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+
+	// Close the step through the binding the way the by-id door's update verb
+	// does (`gc bd update --set-metadata gc.outcome=pass --status closed`) ...
+	closed := "closed"
+	binding := openMigratedDestination(t, target)
+	if err := binding.Update(step.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}}); err != nil {
+		t.Fatalf("closing %s in the binding: %v", step.ID, err)
+	}
+	// ... and diverge the retained work row the way the dead-assignee release
+	// sweep did on the live city: reopened with its assignee cleared.
+	open := "open"
+	if err := source.Update(step.ID, beads.UpdateOpts{Status: &open, Assignee: stringPtr("")}); err != nil {
+		t.Fatalf("reopening %s in the work store: %v", step.ID, err)
+	}
+	if got, err := source.Get(step.ID); err != nil || got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("the work copy of %s = (%q, %q, %v), want open and unassigned; the divergence did not take", step.ID, got.Status, got.Assignee, err)
+	}
+
+	log.Reset()
+	report := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{})
+	if report.Outcome != infraMigrationRetained {
+		t.Fatalf("boot outcome = %s, want retained-copies; a diverged retained pair must refuse boot exactly like an identical one: %s", report.Outcome, log.String())
+	}
+	if report.serving() {
+		t.Fatal("the retained-copies outcome serves")
+	}
+	if !slices.Contains(report.Retained, step.ID) {
+		t.Fatalf("retained = %v, want it to hold the diverged step %s", report.Retained, step.ID)
+	}
+	if slices.Contains(report.Stranded, step.ID) || slices.Contains(report.HeldDifferent, step.ID) {
+		t.Fatalf("the diverged step %s is Stranded (%v) or HeldDifferent (%v); containment is status-blind, so a diverged retained pair must stay Retained", step.ID, report.Stranded, report.HeldDifferent)
+	}
+	advice := infraMigrationOperatorAdvice(report, "gc start")
+	if !strings.Contains(advice, storageClearInstruction()) {
+		t.Fatalf("the refusal does not name the repair command %q: %s", storageClearInstruction(), advice)
+	}
+
+	log.Reset()
+	repaired := migrateInfraClasses(t, cityPath, cfg, &log)
+	if repaired.Outcome != infraMigrationConverged {
+		t.Fatalf("re-run outcome = %s, want converged: %s", repaired.Outcome, log.String())
+	}
+	if repaired.Clear.Cleared != 2 {
+		t.Fatalf("the re-run cleared %d row(s), want the root and the step: %s", repaired.Clear.Cleared, log.String())
+	}
+	if _, err := source.Get(step.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the repair left the step's work row behind (err=%v)", err)
+	}
+	fresh, err := openInfraDestination(target)
+	if err != nil {
+		t.Fatalf("opening the binding after the repair: %v", err)
+	}
+	defer closeBeadStoreHandle(fresh) //nolint:errcheck
+	bound, err := fresh.Get(step.ID)
+	if err != nil || bound.Status != "closed" || bound.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("the binding's copy of %s after the repair = (%q, outcome %q, err %v), want closed with gc.outcome=pass; the clear must not touch the binding", step.ID, bound.Status, bound.Metadata[beadmeta.OutcomeMetadataKey], err)
+	}
+	backup, present, err := readInfraRetainedBackup(target)
+	if err != nil || !present {
+		t.Fatalf("reading the retained-source backup: present=%v err=%v", present, err)
+	}
+	var backedUp *infraBackupEntry
+	for i := range backup {
+		if backup[i].Bead.ID == step.ID {
+			backedUp = &backup[i]
+		}
+	}
+	if backedUp == nil {
+		t.Fatalf("the backup does not hold the step %s", step.ID)
+	}
+	if backedUp.Bead.Status != "open" || backedUp.Bead.Assignee != "" {
+		t.Fatalf("the backup holds the step as %q assigned %q; it must hold the diverged work row (open, unassigned), not a stale copy of it", backedUp.Bead.Status, backedUp.Bead.Assignee)
+	}
+
+	log.Reset()
+	if got := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{}); got.Outcome != infraMigrationConverged {
+		t.Fatalf("boot after the repair = %s, want converged: %s", got.Outcome, log.String())
+	}
+}
+
 // TestTheClearRefusesRowsTheProvenCopyNeverCarried pins that a strand is never
 // cleared: nothing proves the binding holds it, so removing it would delete the
 // only copy. The retained copies beside it stay too — the clear is all or
