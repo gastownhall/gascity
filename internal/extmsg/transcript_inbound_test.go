@@ -2,6 +2,8 @@ package extmsg
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -112,4 +114,96 @@ func TestHandleOutboundTranscriptFaultRetriesRecordingWithoutResending(t *testin
 		t.Fatalf("TranscriptEntry = nil, want the recording retried after the ambiguous create")
 	}
 	assertUniqueSequences(t, store, map[string]string{"ext-msg-1": "1"})
+}
+
+// persistentBumpFaultStore fails every transcript-head advancement until the
+// fault clears, like a store outage that outlasts the append's bounded
+// recovery: the entry create commits, but nothing can publish it.
+type persistentBumpFaultStore struct {
+	beads.Store
+	faulted bool
+}
+
+func (s *persistentBumpFaultStore) SetMetadataBatch(id string, metadata map[string]string) error {
+	if s.faulted && metadata["next_sequence"] != "" {
+		return errors.New("invalid connection")
+	}
+	return s.Store.SetMetadataBatch(id, metadata)
+}
+
+// TestHandleInboundPersistentFaultStaysRetryableWithoutNotification covers a
+// publication fault that survives the append's bounded recovery and the
+// inbound retry: the request fails with the contextual retryable fault before
+// any event or notification, the committed entry stays stored, and once the
+// fault clears a later retry publishes that entry without duplication.
+func TestHandleInboundPersistentFaultStaysRetryableWithoutNotification(t *testing.T) {
+	freezeTestClock(t)
+	store := &persistentBumpFaultStore{Store: beads.NewMemStore(), faulted: true}
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
+	ref := testConversationRef()
+
+	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		AgentName:    "rig-a/helper",
+		Now:          testNow(),
+	}); err != nil {
+		t.Fatalf("Bind(agent): %v", err)
+	}
+
+	inboundEvents := 0
+	deps := InboundDeps{
+		Services: fabric,
+		EmitEvent: func(eventType, _ string, _ events.Payload) {
+			if eventType == events.ExtMsgInbound {
+				inboundEvents++
+			}
+		},
+	}
+	inbound := func(id, text string) (*InboundResult, error) {
+		return HandleInboundNormalized(context.Background(), deps, ExternalInboundMessage{
+			Conversation:      ref,
+			ProviderMessageID: id,
+			Actor:             ExternalActor{ID: "user-1", DisplayName: "User One"},
+			Text:              text,
+			ReceivedAt:        testNow(),
+		})
+	}
+
+	// The fault outlasts the bounded recovery: the request fails with the
+	// contextual retryable fault, before any event or notification.
+	_, err := inbound("msg-1", "hello")
+	if err == nil {
+		t.Fatal("HandleInboundNormalized(msg-1) under a persistent publication fault succeeded, want a retryable error")
+	}
+	if !strings.Contains(err.Error(), "transcript append retryable fault") {
+		t.Fatalf("error = %v, want the contextual transcript retryable fault", err)
+	}
+	if inboundEvents != 0 {
+		t.Fatalf("inbound events = %d, want none while the entry is unpublished", inboundEvents)
+	}
+
+	// The entry committed before the publication stalled: fill-before-publish
+	// leaves it stored, so a blind resend would mint a duplicate sequence.
+	entries, err := store.List(beads.ListQuery{Label: labelTranscriptBase})
+	if err != nil {
+		t.Fatalf("List transcript entries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Metadata["provider_message_id"] != "msg-1" {
+		t.Fatalf("stored entries = %+v, want the one committed msg-1 entry", entries)
+	}
+
+	// Once the fault clears, the retry publishes the stored entry: the same
+	// provider message comes back exactly once, with no duplicate sequence.
+	store.faulted = false
+	second, err := inbound("msg-1", "hello")
+	if err != nil {
+		t.Fatalf("HandleInboundNormalized(msg-1) after the fault cleared: %v", err)
+	}
+	if second == nil || second.TranscriptEntry == nil || second.TranscriptEntry.Sequence != 1 {
+		t.Fatalf("retried entry = %+v, want the stored msg-1 entry at sequence 1", second)
+	}
+	if inboundEvents != 1 {
+		t.Fatalf("inbound events after retry = %d, want 1", inboundEvents)
+	}
+	assertUniqueSequences(t, store, map[string]string{"msg-1": "1"})
 }

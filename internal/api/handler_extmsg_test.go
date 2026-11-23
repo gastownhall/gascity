@@ -764,3 +764,150 @@ func TestExtMsgInboundTranscriptRecoveryReturns2xxWithOneEventAndOneNotification
 		t.Fatalf("transcript entries = %+v, want one m1 entry at sequence 1", entries)
 	}
 }
+
+// extmsgPersistentBumpFaultStore fails every transcript-head advancement —
+// the metadata write that publishes an entry — until the fault clears, like a
+// store outage that outlasts the append's bounded recovery.
+type extmsgPersistentBumpFaultStore struct {
+	beads.Store
+	faulted bool
+}
+
+func (s *extmsgPersistentBumpFaultStore) SetMetadataBatch(id string, metadata map[string]string) error {
+	if s.faulted && metadata["next_sequence"] != "" {
+		return errors.New("database is locked")
+	}
+	return s.Store.SetMetadataBatch(id, metadata)
+}
+
+// TestExtMsgInboundTranscriptRecoveryPersistentFaultReturns5xxWithoutNotification
+// pins the adapter-facing inbound contract over a publication fault that
+// survives the domain's bounded recovery: the request answers 5xx with the
+// contextual retryable fault and neither an event nor a member notification —
+// so the adapter retries — and the committed entry stays stored, so the
+// retry publishes it without duplication once the fault clears.
+func TestExtMsgInboundTranscriptRecoveryPersistentFaultReturns5xxWithoutNotification(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
+
+	target := createTestSession(t, fs.cityBeadStore, fs.sp, "Receiver")
+	faulted := &extmsgPersistentBumpFaultStore{Store: fs.cityBeadStore, faulted: true}
+	services := extmsg.NewServices(beadstest.Mail(faulted), beadstest.Sessions(fs.cityBeadStore))
+	fs.extmsgSvc = &services
+	fs.adapterReg = extmsg.NewAdapterRegistry()
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "scope-1",
+		Provider:       "telegram",
+		AccountID:      "acct-1",
+		ConversationID: "chat-1",
+		Kind:           extmsg.ConversationDM,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	now := time.Now().UTC()
+	if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    target.ID,
+		Now:          now,
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+		Caller:       caller,
+		Conversation: ref,
+		SessionID:    target.ID,
+		Owner:        extmsg.MembershipOwnerManual,
+		Now:          now,
+	}); err != nil {
+		t.Fatalf("EnsureMembership: %v", err)
+	}
+
+	targetBead, err := fs.cityBeadStore.Get(target.ID)
+	if err != nil {
+		t.Fatalf("Get(target): %v", err)
+	}
+	targetName := targetBead.Metadata["session_name"]
+
+	// The publication fault outlasts the bounded recovery: the request fails
+	// 5xx with the contextual retryable fault, before any event or
+	// notification, so the adapter retries.
+	req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(inboundNormalizedBodyWithID(t, "m1", "hello")))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("persistent fault: status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "transcript append retryable fault") {
+		t.Fatalf("persistent fault: body lacks the contextual retryable fault; body: %s", rec.Body.String())
+	}
+	srv.waitForBackground()
+
+	inboundEvents := 0
+	for _, ev := range fs.eventProv.(*events.Fake).Events {
+		if ev.Type == events.ExtMsgInbound {
+			inboundEvents++
+		}
+	}
+	if inboundEvents != 0 {
+		t.Fatalf("ExtMsgInbound events under the fault = %d, want 0", inboundEvents)
+	}
+	notifications := 0
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Nudge" && call.Name == targetName {
+			notifications++
+		}
+	}
+	if notifications != 0 {
+		t.Fatalf("member notifications under the fault = %d, want 0", notifications)
+	}
+
+	// The entry committed before the publication stalled: fill-before-publish
+	// leaves it stored, so a blind resend would mint a duplicate sequence.
+	stored, err := faulted.List(beads.ListQuery{Label: "gc:extmsg-transcript"})
+	if err != nil {
+		t.Fatalf("List transcript entries: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Metadata["provider_message_id"] != "m1" {
+		t.Fatalf("stored entries under the fault = %+v, want the one committed m1 entry", stored)
+	}
+
+	// The fault clears; the adapter's retry publishes the stored entry exactly
+	// once, with no duplicate sequence.
+	faulted.faulted = false
+	req2 := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(inboundNormalizedBodyWithID(t, "m1", "hello")))
+	rec2 := httptest.NewRecorder()
+	srv.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("retry after the fault cleared: status = %d, want %d; body: %s", rec2.Code, http.StatusOK, rec2.Body.String())
+	}
+	srv.waitForBackground()
+
+	for _, ev := range fs.eventProv.(*events.Fake).Events {
+		if ev.Type == events.ExtMsgInbound {
+			inboundEvents++
+		}
+	}
+	if inboundEvents != 1 {
+		t.Fatalf("ExtMsgInbound events after the retry = %d, want 1", inboundEvents)
+	}
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Nudge" && call.Name == targetName {
+			notifications++
+		}
+	}
+	if notifications != 1 {
+		t.Fatalf("member notifications after the retry = %d, want 1", notifications)
+	}
+
+	entries, err := services.Transcript.List(context.Background(), extmsg.ListTranscriptInput{
+		Caller:       caller,
+		Conversation: ref,
+	})
+	if err != nil {
+		t.Fatalf("List transcript: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ProviderMessageID != "m1" || entries[0].Sequence != 1 {
+		t.Fatalf("transcript entries after the retry = %+v, want one m1 entry at sequence 1", entries)
+	}
+}
