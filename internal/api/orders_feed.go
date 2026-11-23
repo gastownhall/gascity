@@ -74,10 +74,8 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 	var requestedScopeErr error
 
 	for _, info := range stores {
-		if info.store == nil {
-			continue
-		}
-		openBeads, err := listActiveWorkflowProjectionBeads(info.store)
+		// Strict: the open-row read carried no marker.
+		openBeads, err := listActiveWorkflowProjectionBeads(info.leg.Strict)
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err
@@ -99,22 +97,15 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
 		}
 
-		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
-		// rows only as pre-split copies, so beads.RelicRead counts the read as
-		// debt; on the class binding the same read is legitimate.
-		// One leg of the workflowStores federation (graph, city, rigs): each
-		// leg lists only the roots it holds.
-		var roots []beads.Bead
-		err = beads.RelicRead(func() error {
-			var listErr error
-			roots, listErr = info.store.List(beads.ListQuery{
-				Metadata: map[string]string{
-					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
-					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
-				},
-				IncludeClosed: true,
-			})
-			return listErr
+		// One leg of the workflowStores federation (graph, city, rigs), read
+		// in its plan role (a scope leg of a split city is a relic leg, S4
+		// debt): each leg lists only the roots it holds.
+		roots, err := info.leg.Reader.List(beads.ListQuery{
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			},
+			IncludeClosed: true,
 		})
 		if err != nil {
 			log.Printf("api: workflow run projection closed-root list failed for %s: %v", info.ref, err)
@@ -143,7 +134,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			}
 
 			runBeads := append([]beads.Bead{bead}, openChildrenByRoot[bead.ID]...)
-			children, childErr := info.store.List(beads.ListQuery{
+			children, childErr := info.leg.Strict.List(beads.ListQuery{
 				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: bead.ID},
 				IncludeClosed: true,
 			})
@@ -207,10 +198,8 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 	var requestedScopeErr error
 
 	for _, info := range stores {
-		if info.store == nil {
-			continue
-		}
-		openBeads, err := listActiveWorkflowProjectionBeads(info.store)
+		// Strict: the open-row read carried no marker.
+		openBeads, err := listActiveWorkflowProjectionBeads(info.leg.Strict)
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err
@@ -232,28 +221,21 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
 		}
 
-		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
-		// rows only as pre-split copies, so beads.RelicRead counts the read as
-		// debt; on the class binding the same read is legitimate.
-		// One leg of the workflowStores federation (graph, city, rigs): each
-		// leg lists only the roots it holds.
-		var roots []beads.Bead
-		err = beads.RelicRead(func() error {
-			var listErr error
-			roots, listErr = info.store.List(beads.ListQuery{
-				Metadata: map[string]string{
-					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
-					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
-				},
-				IncludeClosed: true,
-				// The root-only projection reads only id/status/created/metadata,
-				// never labels, so skip the per-root label hydration on this
-				// closed-history scan — same rows and order, less work per root
-				// (gascity#3253). Bounding this scan further is not contract-safe
-				// because the feed orders by computed status rank, not created_at.
-				SkipLabels: true,
-			})
-			return listErr
+		// One leg of the workflowStores federation (graph, city, rigs), read
+		// in its plan role (a scope leg of a split city is a relic leg, S4
+		// debt): each leg lists only the roots it holds.
+		roots, err := info.leg.Reader.List(beads.ListQuery{
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			},
+			IncludeClosed: true,
+			// The root-only projection reads only id/status/created/metadata,
+			// never labels, so skip the per-root label hydration on this
+			// closed-history scan — same rows and order, less work per root
+			// (gascity#3253). Bounding this scan further is not contract-safe
+			// because the feed orders by computed status rank, not created_at.
+			SkipLabels: true,
 		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
@@ -323,7 +305,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 // reappears on the next patrol.
 var activeWorkflowProjectionStatuses = []string{"in_progress", "open"}
 
-func listActiveWorkflowProjectionBeads(store beads.Store) ([]beads.Bead, error) {
+func listActiveWorkflowProjectionBeads(store beads.FederatedReader) ([]beads.Bead, error) {
 	// One Live, status-scoped read per active status, unioned by ID.
 	//
 	// The old raw scan could not gate status at all (gc-4zb): mapBdStatus folds
@@ -362,7 +344,7 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 	// only graph the tracking beads would still be missed; the orders leg is
 	// appended here and deduplicated, so a city that serves both classes from
 	// one binding — the shape this build supports — reads it once.
-	stores := appendOrdersClassStoreInfo(workflowStores(state), state, workflowCityScopeRef(state.CityName()))
+	stores := appendOrdersClassStoreInfo(workflowWritableStores(state), state, workflowCityScopeRef(state.CityName()))
 	allOrders := state.OrdersAll()
 	orderByScopedName := make(map[string]orders.Order, len(allOrders))
 	for _, order := range allOrders {

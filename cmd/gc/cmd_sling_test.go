@@ -288,15 +288,14 @@ func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) (slingD
 		cfg.FormulaLayers.City = []string{sharedTestFormulaDir}
 	}
 	var stdout, stderr bytes.Buffer
-	return slingDeps{
+	return slingDepsWithStore(slingDeps{
 		CityName: "test-city",
 		CityPath: sharedTestCityDir,
 		Cfg:      cfg,
 		SP:       sp,
 		Runner:   runner,
-		Store:    newSlingTestStore(),
 		StoreRef: "city:test-city",
-	}, &stdout, &stderr
+	}, newSlingTestStore()), &stdout, &stderr
 }
 
 //nolint:unused // retained for future sling path-resolution scenarios
@@ -455,6 +454,14 @@ func TestSlingJSONFromResult(t *testing.T) {
 	}
 }
 
+// slingDepsWithStore is deps over one store s, as a single-store city wires
+// it at city scope: s is the work store, and the graph and sessions stores
+// collapse onto it.
+func slingDepsWithStore(deps slingDeps, s beads.Store) slingDeps {
+	deps.Store, deps.GraphStore, deps.Sessions = beadstest.Work(s), beadstest.Graph(s), beadstest.Sessions(s)
+	return deps
+}
+
 func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -588,7 +595,7 @@ func TestShellSlingRunnerOverridesInheritedBDEnv(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 
-	out, err := shellSlingRunner("", `printf '%s|%s|%s|%s' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$BEADS_DOLT_SERVER_HOST" "$BEADS_DOLT_SERVER_PORT"`, map[string]string{
+	out, err := shellSlingRunner("", slingRunnerPrintStoreEnvCommand, map[string]string{
 		"GC_DOLT_HOST":           "rig-db.example.com",
 		"GC_DOLT_PORT":           "3307",
 		"BEADS_DOLT_SERVER_HOST": "rig-db.example.com",
@@ -606,7 +613,7 @@ func TestShellSlingRunnerStripsInheritedSecrets(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghs_should_not_leak")
 	t.Setenv("OPENAI_API_KEY", "sk-should-not-leak")
 
-	out, err := shellSlingRunner("", `printf '%s|%s' "${GITHUB_TOKEN:-unset}" "${OPENAI_API_KEY:-unset}"`, nil)
+	out, err := shellSlingRunner("", slingRunnerPrintSecretsCommand, nil)
 	if err != nil {
 		t.Fatalf("shellSlingRunner: %v", err)
 	}
@@ -680,7 +687,7 @@ func TestDoSlingRefusesCrossStoreRoute(t *testing.T) {
 	runner := newFakeRunner()
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
 	deps.CityPath = cityPath
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	deps.StoreRef = "city:test-city"
 	opts := testOpts(cfg.Agents[0], "HQ-1")
 	opts.Force = true
@@ -721,13 +728,12 @@ func TestCliBeadRouterAllowsSameStoreRoute(t *testing.T) {
 	if _, err := store.Create(beads.Bead{ID: "RIG-1", Type: "task", Status: "open"}); err != nil {
 		t.Fatalf("seed RIG-1: %v", err)
 	}
-	deps := &slingDeps{
+	deps := ptr(slingDepsWithStore(slingDeps{
 		CityName: "test-city",
 		CityPath: cityPath,
 		Cfg:      cfg,
-		Store:    store,
 		StoreRef: "rig:alpha",
-	}
+	}, store))
 	router := cliBeadRouter{deps: deps}
 
 	if err := router.Route(context.Background(), sling.RouteRequest{
@@ -758,13 +764,12 @@ func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	if _, err := store.Create(beads.Bead{ID: "HQ-2", Type: "task", Status: "open"}); err != nil {
 		t.Fatalf("seed HQ-2: %v", err)
 	}
-	deps := &slingDeps{
+	deps := ptr(slingDepsWithStore(slingDeps{
 		CityName: "test-city",
 		CityPath: cityPath,
 		Cfg:      cfg,
-		Store:    store,
 		StoreRef: "city:test-city",
-	}
+	}, store))
 	router := cliBeadRouter{deps: deps}
 
 	if err := router.Route(context.Background(), sling.RouteRequest{
@@ -1185,7 +1190,7 @@ func TestDoSlingNudgePoolMemberUsesBeadDerivedSessionName(t *testing.T) {
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir()
 	store := newSlingTestStore()
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	sessionBead, err := store.Create(beads.Bead{
 		Title:  "pool session",
 		Type:   sessionBeadType,
@@ -1456,7 +1461,7 @@ func TestBuiltInSlingSlotSuffixedTargetNormalizesRoutedTo(t *testing.T) {
 	}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	store := newSlingTestStore()
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	deps.StoreRef = "rig:saitoc"
 
 	created, err := store.Create(beads.Bead{Title: "slot-routed work", Type: "task"})
@@ -1500,7 +1505,7 @@ func TestBuiltInSlingSlotSuffixedTargetRefusesCrossStoreRoute(t *testing.T) {
 	}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	store := newSlingTestStore()
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	deps.StoreRef = "city:test-city"
 
 	created, err := store.Create(beads.Bead{Title: "slot-routed work", Type: "task"})
@@ -1546,7 +1551,7 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 	}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	store := newSlingTestStore()
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	// The bead lives in the saitoc rig store (single physical store reused
 	// below as both source and rig store for the scale_check probe), so
 	// align StoreRef accordingly. Without this, the cross-store guard
@@ -4323,9 +4328,9 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
-	}, nil)
+	}, nil))
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
 	code := doSling(opts, deps, deps.Store, stdout, stderr)
@@ -4385,9 +4390,9 @@ version = 1
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
-	}, nil)
+	}, nil))
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "root-only"
 	code := doSling(opts, deps, deps.Store, stdout, stderr)
@@ -4482,9 +4487,9 @@ func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Source", Type: "task", Status: "open", Priority: priorityPtr(4)},
-	}, nil)
+	}, nil))
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
 	code := doSling(opts, deps, nil, stdout, stderr)
@@ -4574,9 +4579,9 @@ title = "Do work"
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
-	}, nil)
+	}, nil))
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(a, "BL-42")
@@ -4726,7 +4731,7 @@ title = "Do work"
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 		{
 			ID:     "wf-existing",
@@ -4739,7 +4744,7 @@ title = "Do work"
 				"gc.source_bead_id":   "BL-42",
 			},
 		},
-	}, nil)
+	}, nil))
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(a, "BL-42")
@@ -4781,10 +4786,10 @@ title = "Do work"
 	q.childrenOf["CVY-1"] = []beads.Bead{{ID: "BL-1", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "CVY-1", Title: "Batch", Type: "convoy", Status: "open"},
 		{ID: "BL-1", Title: "Child", Type: "task", Status: "open"},
-	}, nil)
+	}, nil))
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(a, "CVY-1")
@@ -4849,7 +4854,7 @@ title = "Do work"
 	q.childrenOf["CVY-1"] = []beads.Bead{{ID: "BL-1", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "CVY-1", Title: "Batch", Type: "convoy", Status: "open"},
 		{ID: "BL-1", Title: "Child", Type: "task", Status: "open"},
 		{
@@ -4863,7 +4868,7 @@ title = "Do work"
 				"gc.source_bead_id":   "BL-1",
 			},
 		},
-	}, nil)
+	}, nil))
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(a, "CVY-1")
@@ -5178,10 +5183,9 @@ func TestSlingDirectSessionResolverReportsDeferredNamedStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCityConfig: %v", err)
 	}
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
+	// The resolver is handed the session-class store, as sling's callers hand
+	// it one: the store a named session materializes into.
+	store := openCitySessionStoreForTest(t, cityDir)
 
 	var stderr bytes.Buffer
 	var deps slingDeps
@@ -5332,9 +5336,9 @@ title = "Do work"
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
-	}, nil)
+	}, nil))
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
 
@@ -5734,10 +5738,10 @@ func TestOnFormulaAutoBurnStaleMolecule(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{{ID: "MOL-1", Type: "molecule", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 		{ID: "MOL-1", Type: "molecule", Status: "open"},
-	}, nil)
+	}, nil))
 
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
@@ -5759,7 +5763,7 @@ func TestOnFormulaMetadataAttachmentSkipsIdempotentRetry(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{{ID: "BL-42", Title: "Work", Type: "task", Status: "open"}}, nil)
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{{ID: "BL-42", Title: "Work", Type: "task", Status: "open"}}, nil))
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
 
@@ -6157,12 +6161,12 @@ func TestBatchAutoBurnStaleMolecules(t *testing.T) {
 	q.childrenOf["BL-2"] = []beads.Bead{{ID: "MOL-1", Type: "molecule", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "CVY-1", Title: "Batch", Type: "convoy", Status: "open"},
 		{ID: "BL-1", Title: "One", Type: "task", Status: "open"},
 		{ID: "BL-2", Title: "Two", Type: "task", Status: "open"},
 		{ID: "MOL-1", Type: "molecule", Status: "open"},
-	}, nil)
+	}, nil))
 
 	opts := testOpts(a, "CVY-1")
 	opts.OnFormula = "code-review"
@@ -6208,9 +6212,9 @@ needs = ["prep"]
 	a := config.Agent{Name: "polecat", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
-	}, nil)
+	}, nil))
 
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "multi-step"
@@ -6299,7 +6303,7 @@ func TestBatchOnPartialCookFailure(t *testing.T) {
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	createCount := 0
-	deps.Store = &selectiveErrStore{
+	deps = slingDepsWithStore(deps, &selectiveErrStore{
 		Store: beads.NewMemStoreFrom(1, []beads.Bead{
 			{ID: "BL-1", Title: "One", Type: "task", Status: "open"},
 			{ID: "BL-2", Title: "Two", Type: "task", Status: "open"},
@@ -6315,7 +6319,7 @@ func TestBatchOnPartialCookFailure(t *testing.T) {
 			}
 			return nil
 		},
-	}
+	})
 	opts := testOpts(a, "CVY-1")
 	opts.OnFormula = "code-review"
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
@@ -6434,7 +6438,7 @@ func TestDryRunSingleBead(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Title: "Implement login page", Type: "task", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.DryRun = true
 	code := doSling(opts, deps, q, stdout, stderr)
@@ -6486,7 +6490,7 @@ func TestDryRunSingleBeadExpandsSlingQuerySummary(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "FR-42", Title: "Implement login page", Type: "task", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("FR-42")
+	deps = slingDepsWithStore(deps, seededStore("FR-42"))
 	opts := testOpts(a, "FR-42")
 	opts.DryRun = true
 	code := doSling(opts, deps, q, stdout, stderr)
@@ -6543,7 +6547,7 @@ func TestDryRunOnFormula(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{} // no molecule children
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
 	opts.DryRun = true
@@ -6620,7 +6624,7 @@ func TestDryRunOnFormulaGraphV2(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{} // no molecule children
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
 	opts.DryRun = true
@@ -6707,7 +6711,7 @@ func TestDryRunOnFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{}
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	root := seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
 
 	opts := testOpts(a, "BL-42")
@@ -6748,7 +6752,7 @@ func TestDryRunOnFormulaForceSkipsConvoyTrackedWorkflowPreCheck(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{}
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
 
 	opts := testOpts(a, "BL-42")
@@ -6792,7 +6796,7 @@ func TestDryRunDefaultFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{}
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	root := seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
 
 	opts := testOpts(a, "BL-42")
@@ -6831,7 +6835,7 @@ func TestDryRunOnFormulaPreCheckInconclusiveOnLookupError(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{}
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = depListFailingStore{Store: seededStore("BL-42")}
+	deps = slingDepsWithStore(deps, depListFailingStore{Store: seededStore("BL-42")})
 
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
@@ -6860,7 +6864,7 @@ func TestDryRunMultiSessionConfig(t *testing.T) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.DryRun = true
 	code := doSling(opts, deps, nil, stdout, stderr)
@@ -6959,10 +6963,12 @@ func TestDryRunConvoyUsesTracksMembers(t *testing.T) {
 	})
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	opts := testOpts(a, "CVY-1")
 	opts.DryRun = true
-	code := doSlingBatch(opts, deps, store, stdout, stderr)
+	// The work store, as `gc sling` passes it: a convoy's tracks-only members
+	// are read through convoy.MembersIn over the work store.
+	code := doSlingBatch(opts, deps, deps.Store, stdout, stderr)
 
 	if code != 0 {
 		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
@@ -7018,7 +7024,7 @@ func TestDryRunLeafTaskViaBatchDispatchOnFormula(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{} // no molecule children
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
 	opts.DryRun = true
@@ -7114,7 +7120,7 @@ func TestDryRunNudgeRunning(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = slingDepsWithStore(deps, seededStore("BL-1"))
 	opts := testOpts(a, "BL-1")
 	opts.Nudge = true
 	opts.DryRun = true
@@ -7148,7 +7154,7 @@ func TestDryRunNudgeNotRunning(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = slingDepsWithStore(deps, seededStore("BL-1"))
 	opts := testOpts(a, "BL-1")
 	opts.Nudge = true
 	opts.DryRun = true
@@ -7170,7 +7176,7 @@ func TestDryRunNoMutations(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.DryRun = true
 	code := doSling(opts, deps, nil, stdout, stderr)
@@ -7190,7 +7196,7 @@ func TestDryRunSuspendedWarning(t *testing.T) {
 	a := config.Agent{Name: "mayor", Suspended: true, MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = slingDepsWithStore(deps, seededStore("BL-1"))
 	opts := testOpts(a, "BL-1")
 	opts.DryRun = true
 	code := doSling(opts, deps, nil, stdout, stderr)
@@ -7221,7 +7227,7 @@ func TestDryRunOnExistingMolecule(t *testing.T) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
 	opts.DryRun = true
@@ -7257,7 +7263,7 @@ func TestDryRunDefaultFormulaExistingMolecule(t *testing.T) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.DryRun = true
 	code := doSling(opts, deps, q, stdout, stderr)
@@ -7287,7 +7293,7 @@ func TestDryRunNilQuerier(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.DryRun = true
 	code := doSling(opts, deps, nil, stdout, stderr)
@@ -7538,7 +7544,7 @@ func TestDoSlingNoConvoyRepeatIsIdempotent(t *testing.T) {
 	t.Cleanup(func() { slingPokeController = oldPoke })
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 
 	opts := testOpts(a, "BL-42")
 	opts.NoConvoy = true
@@ -7603,7 +7609,7 @@ func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
 	t.Cleanup(func() { slingPokeController = oldPoke })
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
 		{
 			ID:       "BL-42",
@@ -7613,7 +7619,7 @@ func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
 			ParentID: "WF-1",
 			Metadata: map[string]string{"gc.routed_to": "mayor"},
 		},
-	}, nil)
+	}, nil))
 
 	opts := testOpts(a, "BL-42")
 	code := doSling(opts, deps, deps.Store, stdout, stderr)
@@ -7632,6 +7638,45 @@ func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
 		t.Fatalf("stdout = %q, want idempotent skip", stdout.String())
+	}
+}
+
+// TestSlingReroutesAssignedSingleSessionBead covers a bead assigned to a
+// single-session agent while gc.routed_to still names another target (here a
+// pool it was handed off from). Slinging it to the assignee must write
+// gc.routed_to = target rather than skip as idempotent, or the agent's routed
+// work query never finds the bead.
+func TestSlingReroutesAssignedSingleSessionBead(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
+		{
+			ID:       "BL-42",
+			Title:    "handed-off work",
+			Type:     "task",
+			Status:   "open",
+			ParentID: "WF-1",
+			Assignee: "mayor",
+			Metadata: map[string]string{"gc.routed_to": "reviewers"},
+		},
+	}, nil))
+
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Fatalf("stdout = %q, want no idempotent skip", stdout.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", "mayor")
+	if !strings.Contains(stderr.String(), "re-routing") {
+		t.Errorf("stderr = %q, want re-routing warning", stderr.String())
 	}
 }
 
@@ -7780,7 +7825,7 @@ func TestDryRunIdempotentBead(t *testing.T) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
 	opts := testOpts(a, "BL-42")
 	opts.DryRun = true
 	code := doSling(opts, deps, q, stdout, stderr)
@@ -7819,7 +7864,7 @@ func TestDryRunClosedRoutedBeadStaysIdempotent(t *testing.T) {
 	t.Run("single bead", func(t *testing.T) {
 		runner := newFakeRunner()
 		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-		deps.Store = seededStore("BL-42")
+		deps = slingDepsWithStore(deps, seededStore("BL-42"))
 		opts := testOpts(a, "BL-42")
 		opts.DryRun = true
 		code := doSling(opts, deps, &fakeQuerier{bead: closed, parent: &convoy}, stdout, stderr)
@@ -8082,7 +8127,7 @@ func TestDryRunCrossRigSection(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "FE-123", Type: "task", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("FE-123")
+	deps = slingDepsWithStore(deps, seededStore("FE-123"))
 	// The target reads rig:hello-world; align StoreRef so the cross-store
 	// guard (now also run in dry-run, #6075) does not refuse the route.
 	// This test exercises only the prefix-based Cross-rig preview.
@@ -8166,7 +8211,7 @@ func TestDryRunRefusesCrossStoreRoute(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "FE-123", Type: "task", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("FE-123")
+	deps = slingDepsWithStore(deps, seededStore("FE-123"))
 	opts := testOpts(a, "FE-123")
 	opts.DryRun = true
 	code := doSling(opts, deps, q, stdout, stderr)
@@ -8364,7 +8409,7 @@ func TestDefaultFormulaApplied(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil)
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil))
 	opts := testOpts(a, "HW-42")
 	code := doSling(opts, deps, nil, stdout, stderr)
 
@@ -8405,7 +8450,7 @@ func TestDefaultFormulaAppliedFromInheritedPackDefault(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "hw", InheritedDefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil)
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil))
 	opts := testOpts(a, "HW-42")
 	code := doSling(opts, deps, nil, stdout, stderr)
 
@@ -8615,7 +8660,7 @@ func TestDefaultFormulaDryRun(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("HW-42")
+	deps = slingDepsWithStore(deps, seededStore("HW-42"))
 	opts := testOpts(a, "HW-42")
 	opts.DryRun = true
 	code := doSling(opts, deps, nil, stdout, stderr)
@@ -8655,7 +8700,7 @@ func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForPolecatFormula(t *
 		},
 	}
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "SC-1", nil, config.Agent{Name: "polecat", Dir: "scamper"}, deps)
 
@@ -8678,7 +8723,7 @@ func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForHyphenatedPrefix(t
 		},
 	}
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "agent-diagnostics-hnn", nil, config.Agent{Name: "polecat"}, deps)
 
@@ -8734,7 +8779,7 @@ func TestBuildSlingFormulaVarsUsesBeadTargetForPolecatFormula(t *testing.T) {
 		},
 	}
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps)
 
@@ -8763,7 +8808,7 @@ func TestBuildSlingFormulaVarsUsesAncestorTargetForPolecatFormula(t *testing.T) 
 		},
 	}
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps)
 
@@ -8789,7 +8834,7 @@ func TestBuildSlingFormulaVarsIgnoresNonConvoyAncestorTarget(t *testing.T) {
 		},
 	}
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps)
 
@@ -8824,7 +8869,7 @@ func TestBuildSlingFormulaVarsSkipsNonConvoyAncestorTargetAndUsesConvoyAncestor(
 		},
 	}
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps)
 
@@ -8842,7 +8887,7 @@ func TestBuildSlingFormulaVarsUsesRigDefaultBranchWhenTargetMissing(t *testing.T
 		},
 	}
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = &recordingStore{Store: beads.NewMemStore()}
+	deps = slingDepsWithStore(deps, &recordingStore{Store: beads.NewMemStore()})
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps)
 
@@ -8864,7 +8909,7 @@ func TestBuildSlingFormulaVarsPreservesSlashesInRigDefaultBranch(t *testing.T) {
 		},
 	}
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = &recordingStore{Store: beads.NewMemStore()}
+	deps = slingDepsWithStore(deps, &recordingStore{Store: beads.NewMemStore()})
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps)
 
@@ -8903,7 +8948,7 @@ func TestBuildSlingFormulaVarsPreservesExplicitValues(t *testing.T) {
 		},
 	}
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42",
 		[]string{"issue=custom-1", "base_branch=release/1.2"}, config.Agent{Name: "polecat", Dir: "hw"}, deps)
@@ -9032,7 +9077,7 @@ func TestBuildSlingFormulaVarsInjectsIssueAndBaseBranch(t *testing.T) {
 			},
 		},
 	}
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 
 	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, a, deps)
 
@@ -9626,6 +9671,216 @@ func TestCmdSlingMultiDefaultTargetsEmptyEntryRejected(t *testing.T) {
 	}
 }
 
+// claimedRoutedElsewhereStore seeds id open, assigned to "mayor" and routed to
+// "reviewers": the target claims it but its route is stale, so a sling to mayor
+// re-routes it without attaching a formula.
+func claimedRoutedElsewhereStore(id string) beads.Store {
+	return beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:       id,
+		Title:    id,
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor",
+		Metadata: map[string]string{"gc.routed_to": "reviewers"},
+	}}, nil)
+}
+
+func TestSlingDryRunClaimedBeadRoutedElsewhereShowsRerouteOnly(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("code-review")}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps = slingDepsWithStore(deps, claimedRoutedElsewhereStore("BL-1"))
+	opts := testOpts(a, "BL-1")
+	opts.DryRun = true
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Re-route only:") {
+		t.Errorf("dry run should say the claimed bead is only re-routed; got:\n%s", out)
+	}
+	if strings.Contains(out, "Default formula:") || strings.Contains(out, "gc formula cook") {
+		t.Errorf("dry run should not preview a formula attach onto claimed work; got:\n%s", out)
+	}
+	if !strings.Contains(out, "bd update 'BL-1' --set-metadata gc.routed_to=mayor") {
+		t.Errorf("dry run should still show the route command; got:\n%s", out)
+	}
+
+	// With --reassign the live run clears the claim and attaches the formula.
+	stdout.Reset()
+	opts.Reassign = true
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("dry run --reassign returned %d; stderr: %s", code, stderr.String())
+	}
+	if out := stdout.String(); strings.Contains(out, "Re-route only:") || !strings.Contains(out, "Default formula:") {
+		t.Errorf("dry run --reassign should preview the formula attach; got:\n%s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("dry run executed commands: %v", runner.calls)
+	}
+}
+
+func TestSlingDryRunBatchClaimedChildRoutedElsewhereShowsRerouteOnly(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	children := []beads.Bead{
+		{ID: "BL-1", Status: "open", Assignee: "mayor", Metadata: map[string]string{"gc.routed_to": "reviewers"}},
+		{ID: "BL-2", Status: "open"},
+	}
+	q.childrenOf["CVY-1"] = children
+	for _, c := range children {
+		q.beadsByID[c.ID] = c
+	}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	opts := testOpts(a, "CVY-1")
+	opts.OnFormula = "code-review"
+	opts.DryRun = true
+	if code := doSlingBatch(opts, deps, q, stdout, stderr); code != 0 {
+		t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "BL-1 (open) → would re-route only") {
+		t.Errorf("claimed child BL-1 should preview a re-route only; got:\n%s", out)
+	}
+	if strings.Contains(out, "gc formula cook code-review --attach BL-1") {
+		t.Errorf("dry run should not cook a formula onto claimed BL-1; got:\n%s", out)
+	}
+	if !strings.Contains(out, "gc formula cook code-review --attach BL-2") {
+		t.Errorf("dry run should still cook for unclaimed BL-2; got:\n%s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("dry run executed commands: %v", runner.calls)
+	}
+}
+
+func TestSlingDryRunBatchAllChildrenRouteOnlyOmitsFormulaSection(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		onFormula string
+		agent     config.Agent
+		header    string
+	}{
+		{"on formula", "code-review", config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, "Attach formula (per open child):"},
+		{"default formula", "", config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("code-review")}, "Default formula (per open child):"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+			q := newFakeChildQuerier()
+			q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+			child := beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor", Metadata: map[string]string{"gc.routed_to": "reviewers"}}
+			q.childrenOf["CVY-1"] = []beads.Bead{child}
+			q.beadsByID[child.ID] = child
+
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+			opts := testOpts(tc.agent, "CVY-1")
+			opts.OnFormula = tc.onFormula
+			opts.DryRun = true
+			if code := doSlingBatch(opts, deps, q, stdout, stderr); code != 0 {
+				t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+			}
+			out := stdout.String()
+			if !strings.Contains(out, "BL-1 (open) → would re-route only") {
+				t.Errorf("claimed child BL-1 should preview a re-route only; got:\n%s", out)
+			}
+			if strings.Contains(out, tc.header) || strings.Contains(out, "Would run:") {
+				t.Errorf("no child gets a formula, so the formula section should be omitted; got:\n%s", out)
+			}
+			if !strings.Contains(out, "Route commands (not executed):") {
+				t.Errorf("dry run should still show the route commands; got:\n%s", out)
+			}
+			if len(runner.calls) != 0 {
+				t.Errorf("dry run executed commands: %v", runner.calls)
+			}
+		})
+	}
+}
+
+// An open child already routed to the target is skipped by the live batch
+// (no cook, no route command), so the dry run must not preview either for it.
+// With --force the live batch routes it again, and so does the preview.
+func TestSlingDryRunBatchAlreadyRoutedChildPreviewsNoCookOrRoute(t *testing.T) {
+	newQuerier := func(children ...beads.Bead) *fakeChildQuerier {
+		q := newFakeChildQuerier()
+		q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+		q.childrenOf["CVY-1"] = children
+		for _, c := range children {
+			q.beadsByID[c.ID] = c
+		}
+		return q
+	}
+	routed := beads.Bead{ID: "BL-1", Status: "open", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "mayor"}}
+	fresh := beads.Bead{ID: "BL-2", Status: "open", ParentID: "CVY-1"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	t.Run("skipped child left out", func(t *testing.T) {
+		runner := newFakeRunner()
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+		opts := testOpts(a, "CVY-1")
+		opts.OnFormula = "code-review"
+		opts.DryRun = true
+		if code := doSlingBatch(opts, deps, newQuerier(routed, fresh), stdout, stderr); code != 0 {
+			t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "BL-1 (open) → already routed (skip)") {
+			t.Errorf("BL-1 should be listed as already routed; got:\n%s", out)
+		}
+		if strings.Contains(out, "--attach BL-1") || strings.Contains(out, "'BL-1'") {
+			t.Errorf("dry run previews a cook or route for skipped BL-1; got:\n%s", out)
+		}
+		if !strings.Contains(out, "gc formula cook code-review --attach BL-2") || !strings.Contains(out, "'BL-2'") {
+			t.Errorf("dry run should still cook and route BL-2; got:\n%s", out)
+		}
+		if len(runner.calls) != 0 {
+			t.Errorf("dry run executed commands: %v", runner.calls)
+		}
+	})
+
+	t.Run("every child skipped", func(t *testing.T) {
+		runner := newFakeRunner()
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+		opts := testOpts(a, "CVY-1")
+		opts.OnFormula = "code-review"
+		opts.DryRun = true
+		if code := doSlingBatch(opts, deps, newQuerier(routed), stdout, stderr); code != 0 {
+			t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if strings.Contains(out, "Attach formula (per open child):") || strings.Contains(out, "Route commands (not executed):") {
+			t.Errorf("no child is cooked or routed, so neither section should print; got:\n%s", out)
+		}
+	})
+
+	t.Run("force routes it", func(t *testing.T) {
+		runner := newFakeRunner()
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+		opts := testOpts(a, "CVY-1")
+		opts.OnFormula = "code-review"
+		opts.Force = true
+		opts.DryRun = true
+		if code := doSlingBatch(opts, deps, newQuerier(routed), stdout, stderr); code != 0 {
+			t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if strings.Contains(out, "already routed (skip)") {
+			t.Errorf("--force routes BL-1 again, so it should not be listed as skipped; got:\n%s", out)
+		}
+		if !strings.Contains(out, "gc formula cook code-review --attach BL-1") || !strings.Contains(out, "'BL-1'") {
+			t.Errorf("--force dry run should cook and route BL-1; got:\n%s", out)
+		}
+	})
+}
+
 // Review 6a: on a single-store bd-1.0.5 city the bead-policy layer maps the
 // wisp policy onto the ephemeral tier, which bd's own wisp GC (`gc bd mol wisp
 // gc --age`) reaps by age. The attached root-only wisp keeps its gc.kind=wisp
@@ -9644,7 +9899,7 @@ func TestAttachedRootOnlyWispIsNotEphemeralOnABd105City(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	runner := newFakeRunner()
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+	deps = slingDepsWithStore(deps, wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg))
 	src, err := deps.Store.Create(beads.Bead{Title: "Work", Type: "task"})
 	if err != nil {
 		t.Fatal(err)
