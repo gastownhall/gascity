@@ -36,6 +36,7 @@ go_library(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/deps",
         "//internal/testpolicy/waiverclock",
     ],
 )

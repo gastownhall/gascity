@@ -14,6 +14,26 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 	})
 }
 
+// CreatePinned persists b with exactly b.ID through the backing store's
+// pinned-create capability, then updates the cache. A backing that cannot pin
+// ids refuses ErrPinnedCreateUnsupported before anything is written — the
+// cache never falls back to an ordinary create that would mint (the fallback
+// is a caller decision, not a wrapper one). The capability resolves through
+// the conditional backing, so a target-declaring policy wrapper between the
+// cache and the leaf hides nothing (PinnedIDCreator).
+func (c *CachingStore) CreatePinned(b Bead) (Bead, error) {
+	creator, ok := PinnedIDCreatorFor(c.conditionalBacking())
+	if !ok {
+		return Bead{}, ErrPinnedCreateUnsupported
+	}
+	if _, err := validatePinnedID(b); err != nil {
+		return Bead{}, err
+	}
+	return c.createWith(func() (Bead, error) {
+		return creator.CreatePinned(b)
+	})
+}
+
 // CreateWithStorage passes through a policy-selected storage class to backing
 // stores that support table-specific creates, then updates the cache.
 func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {

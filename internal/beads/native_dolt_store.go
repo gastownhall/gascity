@@ -1487,6 +1487,25 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 	return s.create(b, false)
 }
 
+// CreatePinned persists b with exactly b.ID, refusing a duplicate ID without
+// modifying the existing occupant. It is the pinned-create capability over
+// the same insert-only explicit-id path Create serves, so the namespace fence
+// and the storage layer's duplicate refusal apply unchanged
+// (PinnedIDCreator).
+func (s *NativeDoltStore) CreatePinned(b Bead) (Bead, error) {
+	// Ahead of the id validation, not after it: a read-only handle must refuse
+	// for the reason it is read-only, not report an argument problem it would
+	// never have acted on anyway (mirrors CreateWithForeignID).
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, err
+	}
+	if _, err := validatePinnedID(b); err != nil {
+		return Bead{}, err
+	}
+	noteSessionCreate(b)
+	return s.create(b, false)
+}
+
 // CreateWithForeignID persists a new bead KEEPING its explicit id whatever
 // prefix it carries, for the store-migration copy path. Refusing a preserved id
 // there would leave the beads it carries nowhere at all. It satisfies
