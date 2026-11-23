@@ -178,3 +178,13 @@ func TestHookCurrentDocIdiomPrefersClaimOverTriggerHint(t *testing.T) {
 		t.Error("documented idiom still consults the frozen GC_TRIGGER_BEAD_ID hint before the claim")
 	}
 }
+
+// TestHookCurrentDocNamesNoTriggerEnv pins that the Long help text no longer
+// documents $GC_TRIGGER_BEAD_ID: no session shell carries a trigger id
+// (#5738), so the help must not describe one as present on any seat.
+func TestHookCurrentDocNamesNoTriggerEnv(t *testing.T) {
+	long := newHookCurrentCmd(io.Discard, io.Discard).Long
+	if strings.Contains(long, "GC_TRIGGER_") {
+		t.Errorf("help text still documents a GC_TRIGGER_* shell variable; got:\n%s", long)
+	}
+}

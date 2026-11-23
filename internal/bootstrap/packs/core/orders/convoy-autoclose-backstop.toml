@@ -9,6 +9,12 @@
 # run reads every open convoy and its members, so it runs hourly rather than
 # on the sweep's one-minute pass.
 #
+# The same walk retires a drain's unit convoys once their drain control has
+# closed. No member close ever completes them, because a drain never closes
+# the items they track, and a drain closed by any path but its own close (a
+# canceled or settled workflow root, a scope abort, a quarantine, run cancel,
+# an operator) leaves them open; this walk is what closes those.
+#
 # The timeout is explicit because a full walk outlasts the 300s exec default:
 # one over 4,249 open convoys took about 614s. A run killed at the default
 # starts over from the lowest convoy ID the next time and never reaches the

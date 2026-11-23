@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,24 +66,55 @@ func preWakeCommit(
 // errPreWakeSuperseded refuses a PreWake whose row moved since it was read.
 var errPreWakeSuperseded = errors.New("pre-wake refused: the session row moved since it was read, or its runtime lease was taken over")
 
-// preWakeCommitUnder is preWakeCommit as a compare-and-swap (NEW-6): the
-// incarnation lands only on a re-read row whose lifecycle facts are still
-// info's and that still records lease, fenced at that read's revision. A
-// moved row writes nothing and returns errPreWakeSuperseded. Without a
-// conditional writer the check is the re-read alone.
+// preWakeCommitUnder is preWakeCommit as the row's incarnation mint
+// (sessions.Store.MintIncarnation, I-MINT): PreWakePatch lands with the new
+// generation and token only on a re-read row whose lifecycle facts,
+// generation and token are still info's and that still records lease, fenced
+// at that read's revision, with g+1 computed from that read. The patch, the
+// continuation reset it consumes and the wake trace are decided on that read
+// too, never on info: a reset marker that a writer outside the in-process
+// mutation lock records or clears after info was read is consumed whole or
+// not at all. A moved or closed row writes nothing and returns
+// errPreWakeSuperseded. Without a conditional writer the check is the re-read
+// alone. It returns the minted incarnation, which the runtime-only start runs
+// under, and the batch it wrote.
 func preWakeCommitUnder(
 	info sessions.Info,
 	sessFront *sessions.Store,
 	clk clock.Clock,
 	lease *sessions.RuntimeLease,
-) (newGen int, token string, fold sessions.MetadataPatch, err error) {
-	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
-		applied, err := sessFront.ApplyPatchIfLifecycleUnchangedUnder(info, batch, lease)
-		if err == nil && !applied {
-			err = errPreWakeSuperseded
-		}
-		return err
+) (inc sessions.Incarnation, fold sessions.MetadataPatch, err error) {
+	name := info.SessionNameMetadata
+	if !sessions.IsSessionNameSyntaxValid(name) {
+		return sessions.Incarnation{}, nil, fmt.Errorf("invalid session_name %q", name)
+	}
+	now := clk.Now()
+	var resetPrior map[string]string
+	freshWake := false
+	inc, err = sessFront.MintIncarnation(context.Background(), lease, sessions.MintRequest{
+		Expect: info,
+		By:     sessions.ActorController,
+		Now:    now,
+		// The mint's generation, token, epoch and last_woke_at win over the
+		// patch's, which are decided on the same read.
+		Patch: func(fresh sessions.Info, _ sessions.Incarnation) sessions.MetadataPatch {
+			_, _, batch, class := preWakePatch(fresh, now, "")
+			fold = class.Into(fresh.ID, batch)
+			resetPrior = freshWakeResetPriorValues(fresh)
+			freshWake = fresh.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(fresh)
+			return fold
+		},
+		FreshContext: shouldBumpContinuationEpoch,
 	})
+	switch {
+	case errors.Is(err, sessions.ErrMintSuperseded) || errors.Is(err, sessions.ErrMintClosed):
+		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w: %w", errPreWakeSuperseded, err)
+	case err != nil:
+		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w", err)
+	}
+	maps.Copy(fold, inc.IdentityPatch())
+	traceFreshWakeMetadataReset(name, resetPrior, fold, freshWake)
+	return inc, fold, nil
 }
 
 func preWakeCommitWith(
@@ -317,6 +349,67 @@ func drainReasonCancelable(reason string) bool {
 		reason != executionStalledDrainReason && reason != idleRespawnDrainReason
 }
 
+// suspendDrainResumeWakeReason reports whether a wake evaluation is config
+// demand that ends an in-flight suspend drain after city suspension lifts.
+// Only reasons that city suspension itself suppresses qualify. Assigned work,
+// on-demand queue demand, pending interaction, and attach must not abort a
+// suspend drain: those are exactly the signals a scaled-out session is
+// required to ignore.
+func suspendDrainResumeWakeReason(eval wakeEvaluation) bool {
+	if len(eval.Reasons) == 0 {
+		return false
+	}
+	switch eval.Reason {
+	case "named-always", "explicit-wake", "min-active":
+		return true
+	default:
+		return strings.HasPrefix(eval.Reason, "scaled:")
+	}
+}
+
+// cancelResumedSuspendDrains cancels in-flight suspend drains once the city
+// is no longer suspended and config demand wants the session up. Suspend
+// drains stay non-cancelable in drainReasonCancelable so assigned work,
+// pending interaction, and a still-suspended city cannot abort them.
+// executePlannedStarts runs before the drain scan, so without this cancel a
+// replacement started on the resume tick is observed as still running and
+// armed with GC_DRAIN_ACK; the next tick then stops it. Call this after
+// planned starts and before advanceSessionDrainsWithSessionsTraced.
+func cancelResumedSuspendDrains(
+	dt *drainTracker,
+	sp runtime.Provider,
+	infoLookup func(id string) (sessions.Info, bool),
+	wakeEvals map[string]wakeEvaluation,
+	cfg *config.City,
+	citySuspended bool,
+	trace *sessionReconcilerTraceCycle,
+) {
+	if dt == nil || citySuspended {
+		return
+	}
+	for id, ds := range dt.all() {
+		if ds == nil || ds.reason != "suspended" {
+			continue
+		}
+		eval, ok := wakeEvals[id]
+		if !ok || !suspendDrainResumeWakeReason(eval) {
+			continue
+		}
+		info, ok := infoLookup(id)
+		if !ok {
+			continue
+		}
+		if !cancelSessionDrainIfInfo(info, sp, dt, func(reason string) bool {
+			return reason == "suspended"
+		}) {
+			continue
+		}
+		if trace != nil {
+			trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), info.SessionNameMetadata, nil)
+		}
+	}
+}
+
 func pendingDrainReasonCancelable(reason string) bool {
 	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
 }
@@ -393,6 +486,12 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 		return err
 	}
 	if err := sp.SetMeta(name, "GC_DRAIN_ACK", "1"); err != nil {
+		if runtime.OnlyMetadataNotMirrored(err) {
+			// An ack that landed is an ack; only the runtime's view of it lags,
+			// and the log reports that.
+			log.Printf("session wake: setting reconciler drain ack metadata GC_DRAIN_ACK for %s: %v", name, err)
+			return nil
+		}
 		_ = clearReconcilerDrainAckMetadata(sp, name)
 		return err
 	}
@@ -416,7 +515,11 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
-			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			// A removal that landed is a removal; only the runtime's view of it
+			// lags, and the log above reports that.
+			if !runtime.OnlyMetadataNotMirrored(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -838,7 +941,8 @@ func advanceSessionDrainsWithSessionsTraced(
 
 		// Cancellation check: if wake reasons reappeared, cancel the in-memory
 		// drain. Orphaned, suspended, and ordinary config-drift drains are not
-		// canceled here.
+		// canceled here. A suspend drain whose city suspension has already
+		// lifted is canceled by cancelResumedSuspendDrains before this scan.
 		if drainReasonCancelable(ds.reason) {
 			if eval, ok := wakeEvals[info.ID]; ok && len(eval.Reasons) > 0 {
 				dt.clearIdleProbe(id)

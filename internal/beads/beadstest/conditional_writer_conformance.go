@@ -89,6 +89,7 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		conformanceRowBackedMutationFlavors(t, name, open)
 	}
 	conformanceStaleRevisionIsPreconditionFailed(t, name, open, opts)
+	conformanceZeroRevisionRefusedAfterMutation(t, name, open)
 	conformanceConditionalSuccessPaths(t, name, open)
 	conformanceCASEmptyExpectedClaimsAbsentOrEmpty(t, name, open)
 	conformanceCASValueMismatchIsFalseNil(t, name, open)
@@ -501,6 +502,51 @@ func conformanceStaleRevisionIsPreconditionFailed(t *testing.T, name string, ope
 		// The bead must still exist (every stale write was rejected).
 		if _, err := s.Get(id); err != nil {
 			t.Fatalf("bead vanished after rejected conditional writes: %v", err)
+		}
+	})
+}
+
+// conformanceZeroRevisionRefusedAfterMutation asserts zero is a real token,
+// compared exactly: once a whole-row mutation has moved the bead on, each
+// *IfMatch verb fenced at zero is refused with a typed PreconditionFailedError
+// without mutating, like any stale token. A store that read zero as "no
+// token" and wrote unfenced fails here.
+func conformanceZeroRevisionRefusedAfterMutation(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+	t.Run(name+"/zero_revision_refused_after_mutation", func(t *testing.T) {
+		s := open(t)
+		w := conformanceWriterFor(t, s)
+		b, err := s.Create(beads.Bead{Title: "zero"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := b.ID
+		if err := s.SetMetadata(id, "k", "moved"); err != nil {
+			t.Fatal(err)
+		}
+		if rev := conformanceRevOf(t, s, id); rev == 0 {
+			t.Fatal("mutated bead reads revision 0, want a nonzero token")
+		}
+
+		assertRefused := func(verb string, err error) {
+			t.Helper()
+			var pfe *beads.PreconditionFailedError
+			if !errors.As(err, &pfe) {
+				t.Fatalf("%s at revision 0 on a mutated bead: got %v, want *PreconditionFailedError", verb, err)
+			}
+			if pfe.Expected != 0 {
+				t.Fatalf("%s: PreconditionFailedError.Expected = %d, want 0 (the caller's revision)", verb, pfe.Expected)
+			}
+		}
+
+		assertRefused("UpdateIfMatch", w.UpdateIfMatch(id, 0, beads.UpdateOpts{Title: conformanceStrPtr("x")}))
+		assertRefused("CloseIfMatch", w.CloseIfMatch(id, 0))
+		assertRefused("DeleteIfMatch", w.DeleteIfMatch(id, 0))
+		got, err := s.Get(id)
+		if err != nil {
+			t.Fatalf("bead vanished after refused zero-revision writes: %v", err)
+		}
+		if got.Title != "zero" || got.Status == "closed" {
+			t.Fatalf("bead after refused zero-revision writes: title %q status %q, want title %q and not closed", got.Title, got.Status, "zero")
 		}
 	})
 }

@@ -512,14 +512,44 @@ func (q *wrappedNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudge
 	return items, err
 }
 
+// ClaimBatch is the queue's batch claim, classified exactly as ClaimDue: an
+// empty batch is an idle queue, and a batch delivered beside a partial-result
+// error is a healthy claim. A resumed batch that lost a member to another
+// claimant returns nothing; that too lost nothing the next pass cannot take.
+func (q *wrappedNudgeQueue) ClaimBatch(target ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
+	items, err := q.NudgeQueue.ClaimBatch(target, now)
+	q.emitter.emit(ClassEventClaim, "ClaimBatch", partialOutcomeFor(err))
+	return items, err
+}
+
+// Lookup is a read by id; a partial result is a healthy read.
+func (q *wrappedNudgeQueue) Lookup(ids []string, now time.Time) (map[string]nudgequeue.Bucket, error) {
+	buckets, err := q.NudgeQueue.Lookup(ids, now)
+	q.emitter.emit(ClassEventRead, "Lookup", partialOutcomeFor(err))
+	return buckets, err
+}
+
+// DueKeys is the owner's discovery read; a partial result is a healthy read.
+func (q *wrappedNudgeQueue) DueKeys(now time.Time) ([]string, error) {
+	keys, err := q.NudgeQueue.DueKeys(now)
+	q.emitter.emit(ClassEventRead, "DueKeys", partialOutcomeFor(err))
+	return keys, err
+}
+
+func (q *wrappedNudgeQueue) Empty() (bool, error) {
+	empty, err := q.NudgeQueue.Empty()
+	q.emitter.observe(ClassEventRead, "Empty", err)
+	return empty, err
+}
+
 func (q *wrappedNudgeQueue) Ack(ids []string, sessionID, outcome, detail string) error {
 	err := q.NudgeQueue.Ack(ids, sessionID, outcome, detail)
 	q.emitter.observe(ClassEventWrite, "Ack", err)
 	return err
 }
 
-func (q *wrappedNudgeQueue) ReleaseClaims(ids []string) error {
-	err := q.NudgeQueue.ReleaseClaims(ids)
+func (q *wrappedNudgeQueue) ReleaseClaims(ids []string, notBefore time.Time) error {
+	err := q.NudgeQueue.ReleaseClaims(ids, notBefore)
 	q.emitter.observe(ClassEventWrite, "ReleaseClaims", err)
 	return err
 }

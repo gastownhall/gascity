@@ -18,6 +18,9 @@ type SupervisorUnitOwnership struct {
 	UnitActive bool
 	// UnitPID is the MainPID systemd tracks for Unit (0 if unknown).
 	UnitPID int
+	// ProbeErr is why the live PID's process ancestry could not be read, if
+	// it could not. An "outside_unit" Status is then unverified.
+	ProbeErr error
 }
 
 // SupervisorUnitOwnershipCheck verifies that a live supervisor process is
@@ -71,6 +74,14 @@ func (c *SupervisorUnitOwnershipCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusOK
 		r.Message = fmt.Sprintf("supervisor (PID %d) is owned by systemd unit %s", c.supervisorPID, c.ownership.Unit)
 	default:
+		if c.ownership.ProbeErr != nil {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf(
+				"could not verify that systemd unit %s (unit PID %d) owns the supervisor (PID %d): %v",
+				c.ownership.Unit, c.ownership.UnitPID, c.supervisorPID, c.ownership.ProbeErr,
+			)
+			return r
+		}
 		r.Status = StatusError
 		r.Message = fmt.Sprintf(
 			"supervisor is running (PID %d) outside its systemd unit %s (unit PID %d, unit active=%v) — systemd's Restart=always is not protecting it",

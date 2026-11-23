@@ -19,6 +19,11 @@ API projects over.
 - **<a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/reference/schema/events.json" target="_blank" rel="noopener">events.json</a>** —
   the `gc events` JSONL line schema. It references DTO components in
   `openapi.json`, so the API remains the source of truth.
+- **The running supervisor** serves the spec for its own version at
+  `GET /openapi.json` and `GET /openapi.yaml` (OpenAPI 3.1), with OpenAPI 3.0
+  downgrades at `/openapi-3.0.json` and `/openapi-3.0.yaml`, and an interactive
+  reference page at `/docs`. The page's viewer loads from `unpkg.com`, so the
+  browser needs internet access.
 
 ## Endpoint families
 
@@ -74,6 +79,18 @@ The spec is the full reference. A brief summary of the surfaces:
   `GET /v0/city/{cityName}/events/stream` at city scope.
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
+
+## Agent counts
+
+Several endpoints report an agent count, and each counts something different:
+
+| Endpoint | Field | What it counts |
+|----------|-------|----------------|
+| `GET /v0/city/{cityName}` | `agent_count` | Agent entries in the city's composed config: a rig-scoped agent once per rig, a pool once. |
+| `GET /v0/city/{cityName}/status` | `agents.total`, and `agent_count` (deprecated, the same number) | Agent rows after pool expansion: every slot of a bounded pool (`max_active_sessions` of them), and the running or recorded sessions of an unlimited pool. |
+| `GET /v0/city/{cityName}/agents` | `total` (no `agent_count`) | The rows returned after the `rig`, `pool` and `running` filters: every slot of a bounded pool, and the running sessions of an unlimited pool, or one row under the pool's own name when none is running. |
+| `GET /v0/city/{cityName}/rigs`, `GET /v0/city/{cityName}/rig/{name}` | `agent_count` on each rig | That rig's agent rows: every slot of a bounded pool, and the running sessions of an unlimited pool. |
+| `GET /v0/city/{cityName}/config` | `patches.agent_count` | The `[[patches.agent]]` blocks the config declares, not agents. `/config/defaults` reports no `patches`. |
 
 ## Request and response headers
 
@@ -369,6 +386,14 @@ a question — has a *pending interaction*. `GET /v0/city/{cityName}/pending`
 lists them; `GET /v0/city/{cityName}/session/{id}/pending` returns one in
 full; `POST /v0/city/{cityName}/session/{id}/respond` answers it.
 
+A question dialog (`kind` `question`) lists the options it can be answered
+with in `options`. Answer it with `POST .../respond` and `action` `select`,
+`text` naming one of those options by label (or by number, when no option
+carries that label), and the question's `request_id`. A page that lists no
+options — a multi-select page, or one whose options show previews — is
+answered in the session's terminal, as are free-text and chat rows. A
+`respond` the page does not offer returns 409 `invalid_interaction`.
+
 The city event stream (and the supervisor stream, tagged with the city)
 also carries each change as an event, so a client does not have to poll:
 
@@ -398,6 +423,35 @@ restarts it rebuilds what it has announced from that log, so it announces
 nothing twice and clears what was answered while it was down. A client
 connecting without a cursor starts at the head of the log, so it should
 read `GET /v0/city/{cityName}/pending` once and apply events from there.
+
+### Session List Changes
+
+A client that shows the city's sessions can follow the event stream
+instead of polling `GET /v0/city/{cityName}/sessions`:
+
+| Event | Fires when | Payload |
+|---|---|---|
+| `session.created` | a session joins the open set: it was created, or a closed session was reopened | `SessionCreatedPayload`: `session_id`, `template`, `title`, `alias`, `agent_name` |
+| `session.closed` | a session leaves the open set: it closed | `SessionClosedPayload`: the same fields plus `reason`, the close reason the session records |
+
+Each fires once per transition, for sessions created or closed by any
+path (the CLI, the API, or the orchestrator's own pools), whether or not
+a client is watching. Each also agrees with the session list when it
+fires: a late or out-of-date report of a session's state announces
+nothing. The envelope's `subject` and `session_id` are the session ID.
+Read the session list once when you connect, then apply these events;
+reconnect with `Last-Event-ID` (or `after_seq` / `after_cursor`) to get
+the transitions you missed.
+
+Treat the events as idempotent updates to the list you read:
+
+- After the orchestrator restarts, an open session is announced as
+  created the first time it changes, and a close can be announced a
+  second time.
+- A transition that happens while the orchestrator is down can be missed.
+- A session that closes and reopens, or reopens and closes, before the
+  orchestrator has processed the first change is announced only in the
+  state it ends in.
 
 ### Transport vs Semantic Type
 

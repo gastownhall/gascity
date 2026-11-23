@@ -3,7 +3,6 @@ package formula
 import (
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // extOrder is the within-layer extension precedence used by Resolve:
@@ -36,11 +35,7 @@ func ResolveWithSource(src Source, layers []string, name string) (string, bool) 
 	}
 	// Strip any known extension the caller may have passed (e.g. "loop-flow.toml"
 	// → "loop-flow") so name+ext never doubles it (GitHub #3704).
-	if trimmed, ok := TrimTOMLFilename(name); ok {
-		name = trimmed
-	} else {
-		name = strings.TrimSuffix(name, FormulaExtJSON)
-	}
+	name = TrimFormulaExt(name)
 	for i := len(layers) - 1; i >= 0; i-- {
 		for _, ext := range extOrder {
 			path := filepath.Join(layers[i], name+ext)

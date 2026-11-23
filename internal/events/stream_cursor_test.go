@@ -52,20 +52,24 @@ func newMembershipConsumer(t *testing.T, providers map[string]Provider, resume s
 
 // sync reconciles the watched cities with providers the way the supervisor
 // stream does: a city with a known position resumes there, a new one starts at
-// its head.
+// its head, and each joins the cursor before its watcher attaches.
 func (c *membershipConsumer) sync(providers map[string]Provider) {
 	c.t.Helper()
 	c.cursor.Retain(providers)
-	started, err := c.w.Sync(providers, func(city string, p Provider) (uint64, error) {
-		if seq, ok := c.cursor.Resume(city); ok {
-			return seq, nil
+	_, err := c.w.Sync(providers, func(city string, p Provider) (uint64, error) {
+		seq, ok := c.cursor.Resume(city)
+		if !ok {
+			var err error
+			if seq, err = p.LatestSeq(); err != nil {
+				return 0, err
+			}
 		}
-		return p.LatestSeq()
+		c.cursor.Attach(map[string]uint64{city: seq})
+		return seq, nil
 	})
 	if err != nil {
 		c.t.Fatalf("Sync: %v", err)
 	}
-	c.cursor.Attach(started)
 }
 
 // next delivers the next event, dropping any the cursor already delivered.

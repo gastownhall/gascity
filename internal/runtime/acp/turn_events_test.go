@@ -333,6 +333,40 @@ func TestTurnEventsStalledSubscriberDoesNotBlockPrompts(t *testing.T) {
 	}
 }
 
+// TestTurnEventsOpeningATurnHandsBackTheLoss pins that setActivePrompt
+// returns, and resets, the loss its turn's started event hands back instead
+// of logging it: Nudge opens the turn with stdinMu held, where a stderr write
+// would let a blocked stderr stall every stdin writer.
+func TestTurnEventsOpeningATurnHandsBackTheLoss(t *testing.T) {
+	p := newTestProvider(t)
+	ch := subscribeTurns(t, p)
+	sc := newSessionConn(nil, nil, nil, 10, nil)
+	attachTestTurns(p, sc, "s", "")
+
+	const turns = turnEventBuffer // two events per turn: overflows by half
+	for i := range int64(turns) {
+		sc.setActivePrompt(i + 1)
+		respondTo(sc, i+1, `{"stopReason":"end_turn"}`)
+	}
+	for range turnEventBuffer {
+		nextTurnEvent(t, ch)
+	}
+
+	lost, ok := sc.setActivePrompt(turns + 1)
+	if !ok {
+		t.Fatal("setActivePrompt on a live connection = false")
+	}
+	if lost != turns {
+		t.Fatalf("lost = %d, want the %d dropped events handed back for the caller to log", lost, turns)
+	}
+	sc.mu.Lock()
+	held := sc.turnEventsLost
+	sc.mu.Unlock()
+	if held != 0 {
+		t.Fatalf("connection still holds %d dropped events after handing them back, want 0", held)
+	}
+}
+
 func TestTurnEventsSurviveProductionWrapping(t *testing.T) {
 	seam := NewSeamBackedWithDir(shortTempDir(t), Config{})
 	tep, ok := seam.(runtime.TurnEventProvider)

@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -21,10 +23,6 @@ import (
 func TestServerReachableReflectsDoltExit(t *testing.T) {
 	t.Parallel()
 
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
-
 	root := repoRootForLint(t)
 	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	scriptBytes, err := os.ReadFile(scriptPath)
@@ -33,6 +31,7 @@ func TestServerReachableReflectsDoltExit(t *testing.T) {
 	}
 	src := string(scriptBytes)
 	serverSQL := extractShellFunction(t, src, "server_sql")
+	doltClient := extractShellFunction(t, src, "dolt_client")
 	serverReachable := extractShellFunction(t, src, "server_reachable")
 
 	cases := []struct {
@@ -52,6 +51,7 @@ func TestServerReachableReflectsDoltExit(t *testing.T) {
 			// connect_host is overridden so the test exercises only the
 			// reachability decision, not host resolution.
 			script := "connect_host() { printf '127.0.0.1'; }\n" +
+				doltClient + "\n" +
 				serverSQL + "\n" +
 				serverReachable + "\n" +
 				"server_reachable\n"

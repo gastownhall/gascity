@@ -94,14 +94,13 @@ func openNudgeBeadStoreOwned(cityPath string) (beads.NudgesStore, beads.Store, e
 	if err != nil {
 		return beads.NudgesStore{}, nil, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, store, nil
+	return cliStores(cityPath, store).Nudges(), store, nil
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's
 // front door (internal/nudgequeue.Store). The bead is a SHADOW of the flock'd
 // state.json queue; the front door confines the Item<->Bead codec, leaving these
-// cmd/gc helpers as thin adapters that keep the methods callable inside the
-// withNudgeQueueState transaction.
+// cmd/gc helpers as thin adapters. None is called inside the queue's flock.
 func nudgeFrontDoor(store beads.NudgesStore) *nudgequeue.Store {
 	return nudgequeue.NewStore(store)
 }

@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // Interleaving tests for the request-scoped root view (ga-vnycm2.18 Phase 2).
@@ -135,7 +136,7 @@ func newScopedRetryFixture(t *testing.T, withScopeChecks bool) scopedRetryFixtur
 func (f scopedRetryFixture) processRetry(t *testing.T, before func()) {
 	t.Helper()
 	hooked := &firstWriteHookStore{Store: f.store, before: before}
-	if _, err := ProcessControl(hooked, mustGetBead(t, f.store, f.retry.ID), ProcessOptions{}); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(hooked), mustGetBead(t, f.store, f.retry.ID), ProcessOptions{Work: beadstest.Work(hooked)}); err != nil {
 		t.Fatalf("ProcessControl(retry): %v", err)
 	}
 	if !hooked.fired && before != nil {
@@ -166,7 +167,7 @@ func TestRootViewSiblingClosingAfterTheViewOnlyDelaysTheScopeClose(t *testing.T)
 	if got := mustGetBead(t, interleaved.store, interleaved.body.ID).Status; got != "open" {
 		t.Fatalf("body status after the retry = %q, want open: the retry's view showed the member open, so it must not close the scope", got)
 	}
-	if _, err := ReconcileClosedScopeMember(interleaved.store, interleaved.member.ID); err != nil {
+	if _, err := ReconcileClosedScopeMember(beadstest.Graph(interleaved.store), interleaved.member.ID); err != nil {
 		t.Fatalf("member reconcile: %v", err)
 	}
 
@@ -198,7 +199,7 @@ func TestRootViewSiblingClosingAfterTheViewWithScopeChecksMatchesUninterrupted(t
 			f.processRetry(t, nil)
 		}
 		for _, check := range f.checks {
-			if _, err := ProcessControl(f.store, mustGetBead(t, f.store, check.ID), ProcessOptions{}); err != nil {
+			if _, err := ProcessControl(beadstest.Graph(f.store), mustGetBead(t, f.store, check.ID), ProcessOptions{Work: beadstest.Work(f.store)}); err != nil {
 				t.Fatalf("ProcessControl(scope-check %s): %v", check.ID, err)
 			}
 		}
@@ -240,7 +241,7 @@ func TestRootViewOperatorReopenAfterTheViewMatchesTheLiveRead(t *testing.T) {
 		t.Fatalf("body status after the retry = %q, want open", got)
 	}
 	// The retry's scope-check runs next and sees the reopened member.
-	result, err := ProcessControl(f.store, mustGetBead(t, f.store, f.checks[0].ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(f.store), mustGetBead(t, f.store, f.checks[0].ID), ProcessOptions{Work: beadstest.Work(f.store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
@@ -282,7 +283,7 @@ func TestRootViewIsReadOncePerInvocationAndNeverAcrossInvocations(t *testing.T) 
 
 	f := newScopedRetryFixture(t, true)
 	counting := &callCountingStore{Store: f.store}
-	if _, err := ProcessControl(counting, mustGetBead(t, f.store, f.retry.ID), ProcessOptions{}); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(counting), mustGetBead(t, f.store, f.retry.ID), ProcessOptions{Work: beadstest.Work(counting)}); err != nil {
 		t.Fatalf("ProcessControl(retry): %v", err)
 	}
 	rootLists := 0
@@ -298,7 +299,7 @@ func TestRootViewIsReadOncePerInvocationAndNeverAcrossInvocations(t *testing.T) 
 	// A member closed after that invocation is seen by the next one.
 	f.workerClose(t, f.member.ID)
 	counting.reset()
-	if _, err := ProcessControl(counting, mustGetBead(t, f.store, f.checks[1].ID), ProcessOptions{}); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(counting), mustGetBead(t, f.store, f.checks[1].ID), ProcessOptions{Work: beadstest.Work(counting)}); err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
 	if got := mustGetBead(t, f.store, f.checks[1].ID).Status; got != "closed" {

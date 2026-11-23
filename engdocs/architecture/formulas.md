@@ -225,6 +225,13 @@ the final var map. Precedence (highest wins):
 3. Routing-injected defaults (`issue`, `rig_name`, `base_branch`, `target_branch`, ...)
 4. Formula-declared `[vars.<name>].default`
 
+Formula orders take the same route: `orderFormulaVars`
+(`cmd/gc/order_dispatch.go`) merges the order's dispatch args, the
+`formula_vars` of the order's rig, and `rig_name` / `binding_name` /
+`binding_prefix` with the same precedence, both on the controller path
+(`dispatchWisp`) and in `gc order run`. The binding is the declaring
+pack's, set only when that pack has exactly one import binding.
+
 `gc formula show --rig <name>` surfaces active rig defaults as
 `(rig default="...")` next to the var description so operators can verify
 what will actually substitute before dispatch.

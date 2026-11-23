@@ -1,5 +1,5 @@
 import type { RunLane } from 'gas-city-dashboard-shared';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import type { BadgeSeverity } from '../../attention/compose';
 import { attentionListItemProps } from '../../attention/routeHighlight';
 import { formatRelative } from '../../hooks/time';

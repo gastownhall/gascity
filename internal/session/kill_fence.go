@@ -29,9 +29,11 @@ const KillPendingReason = "kill-pending"
 
 // KillPendingGrace bounds how long a kill fence is honored. The killer (`gc
 // session kill`, or the API kill through KillFenced) clears the fence as soon
-// as the provider Stop returns, so an honored fence normally lives for one
-// Stop. The bound only matters when that killer died mid-kill: past it the row is ordinary asleep state again and the normal
-// drift heal and wake rules take over.
+// as the provider Stop returns and its runtime lease is released (CONTRACT
+// v5.10p), so an honored fence normally lives for one Stop. The bound only
+// matters when that killer died mid-kill, or its lease release failed: past
+// it the row is ordinary asleep state again and the normal drift heal and
+// wake rules take over.
 const KillPendingGrace = 5 * time.Minute
 
 // KillPendingPatch is the durable kill intent: SleepPatch(now, "killed") plus
@@ -107,7 +109,7 @@ var ErrKillFenceSuperseded = errors.New("session row changed underneath the kill
 // on the revision of the row it observed, so it cannot silently overwrite a
 // transition that landed between the read and the write; otherwise it is the
 // same unconditional batch write the post-kill sync always was.
-func WriteKillFence(store beads.Store, sessionID string, now time.Time) (*KillFence, error) {
+func WriteKillFence(store beads.SessionStore, sessionID string, now time.Time) (*KillFence, error) {
 	patch := KillPendingPatch(now)
 	patch["synced_at"] = now.UTC().Format(time.RFC3339)
 	fence := &KillFence{sessionID: sessionID, sleptAt: patch["slept_at"]}
@@ -152,7 +154,7 @@ func (f *KillFence) Owns(b beads.Bead) bool {
 // Clear lifts the fence after the runtime is confirmed gone. The row keeps the
 // asleep/killed intent; only the kill-pending marker goes, handing the session
 // back to the ordinary lifecycle rules (which is what restarts it).
-func (f *KillFence) Clear(store beads.Store) error {
+func (f *KillFence) Clear(store beads.SessionStore) error {
 	return ApplyKillFencePatch(store, f.sessionID, func(b beads.Bead) (map[string]string, bool) {
 		if !f.Owns(b) {
 			return nil, false
@@ -165,7 +167,7 @@ func (f *KillFence) Clear(store beads.Store) error {
 // alive, so the row does not claim a runtime is gone when it is not. It only
 // touches a row that still carries this kill's fence: if anything else has
 // rewritten the row since, that newer state is left alone.
-func (f *KillFence) Rollback(store beads.Store) error {
+func (f *KillFence) Rollback(store beads.SessionStore) error {
 	return ApplyKillFencePatch(store, f.sessionID, func(b beads.Bead) (map[string]string, bool) {
 		if !f.Owns(b) {
 			return nil, false
@@ -188,7 +190,7 @@ func (f *KillFence) Rollback(store beads.Store) error {
 // resolves a conditional writer (re-reading and re-deciding on a precondition
 // failure), unconditionally otherwise. decide returning false means the row no
 // longer qualifies and nothing is written (ErrKillFenceSuperseded).
-func ApplyKillFencePatch(store beads.Store, sessionID string, decide func(beads.Bead) (map[string]string, bool)) error {
+func ApplyKillFencePatch(store beads.SessionStore, sessionID string, decide func(beads.Bead) (map[string]string, bool)) error {
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {
 		return err
@@ -270,7 +272,9 @@ type KillReport struct {
 // KillFencedReport is KillFenced with a warning sink, for a caller that
 // reports to its own operator (`gc session kill`'s stderr). A caller that
 // holds the runtime lease already (`gc session kill --force` past a hung
-// holder) lends it in by.Lease.
+// holder) lends it in by.Lease. A fenced kill that stopped the runtime ends
+// the lease, a lent one too, before it lifts the fence (CONTRACT v5.10p);
+// the caller's own Release is then a no-op.
 func (m *Manager) KillFencedReport(ctx context.Context, by Actor, id string, kill func(context.Context, Actor) error, warn func(string)) (KillReport, error) {
 	var report KillReport
 	if err := m.checkActor(by); err != nil {
@@ -335,6 +339,15 @@ func (m *Manager) KillFencedReport(ctx context.Context, by Actor, id string, kil
 		return report, killErr
 	}
 	if fence != nil {
+		// The fence covers the whole kill (CONTRACT v5.10p): it lifts only
+		// once the lease, the kill's own or a lent one, is released, record
+		// and flock, so a controller pass that reads the lift never finds
+		// the name busy. A release that failed leaves the fence in place,
+		// to lapse at KillPendingGrace.
+		if err := lease.ReleaseChecked(); err != nil {
+			warn(fmt.Sprintf("releasing the runtime lease on session %s: %v; its kill fence lapses after %v", id, err, KillPendingGrace))
+			return report, nil
+		}
 		if err := fence.Clear(m.store); err != nil {
 			warn(fmt.Sprintf("releasing kill fence on session %s: %v", id, err))
 		}

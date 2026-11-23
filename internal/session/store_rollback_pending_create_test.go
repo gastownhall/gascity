@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -86,7 +87,7 @@ func TestRollbackPendingCreateAtomicallyRetriesALostPostCloseFence(t *testing.T)
 			}}
 			front := NewStore(beads.SessionStore{Store: hooked})
 
-			closed, postClosed, err := front.RollbackPendingCreateAtomically(info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
+			closed, postClosed, err := front.RollbackPendingCreateAtomically(context.Background(), info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
 			if err != nil || !closed || !postClosed {
 				t.Fatalf("RollbackPendingCreateAtomically = (%v, %v, %v), want (true, true, nil)", closed, postClosed, err)
 			}
@@ -120,7 +121,7 @@ func TestRollbackPendingCreateAtomicallyLeavesAReopenedRowItsName(t *testing.T) 
 			}}
 			front := NewStore(beads.SessionStore{Store: hooked})
 
-			closed, postClosed, err := front.RollbackPendingCreateAtomically(info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
+			closed, postClosed, err := front.RollbackPendingCreateAtomically(context.Background(), info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
 			if err != nil || !closed || postClosed {
 				t.Fatalf("RollbackPendingCreateAtomically = (%v, %v, %v), want (true, false, nil)", closed, postClosed, err)
 			}
@@ -143,7 +144,7 @@ func TestRollbackPendingCreateAtomicallyReportsUnsupportedWithoutWriting(t *test
 	created, info := seedRollbackPendingSession(t, store)
 	front := NewStore(beads.SessionStore{Store: store})
 
-	closed, postClosed, err := front.RollbackPendingCreateAtomically(info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
+	closed, postClosed, err := front.RollbackPendingCreateAtomically(context.Background(), info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
 	if closed || postClosed || !beads.IsConditionalWriteUnsupported(err) {
 		t.Fatalf("RollbackPendingCreateAtomically = (%v, %v, %v), want (false, false, unsupported)", closed, postClosed, err)
 	}

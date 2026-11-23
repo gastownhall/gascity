@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -149,15 +150,25 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 	}
 	lock, err := syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, c.cityPath, lock); err != nil {
 		return err
 	}
 	if _, err := installLockedImports(c.cityPath); err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	return nil
+}
+
+// withCredentialFixHint wraps an auth-classified import fetch failure so
+// gc doctor --fix reports the same credential remediation gc import install
+// prints; any other error is returned unchanged.
+func withCredentialFixHint(err error) error {
+	if hint, ok := credentialHint(err); ok {
+		return &doctor.FixHintError{Err: err, Hint: hint}
+	}
+	return err
 }
 
 // supersededBundledPinDetails reports bundled imports pinned at a
@@ -451,6 +462,7 @@ func legacyPublicPackSubpath(subpath string) (string, bool) {
 	return "", false
 }
 
+//nolint:unparam // fs seam is intentional for command tests and symmetry with the other import helpers.
 func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[string]wave1PublicPackImportTarget) (bool, error) {
 	for packName, target := range targets {
 		if strings.TrimSpace(packName) == "" || strings.TrimSpace(target.Binding) == "" {
@@ -576,6 +588,7 @@ func rewriteLegacyPublicPackImportMap(cityPath string, imports map[string]config
 
 	var rewrites []legacyPublicPackRewrite
 	targetBindings := make(map[string]wave1PublicPackImportTarget)
+	targetOwners := make(map[string]string)
 	for _, name := range legacyNames {
 		packName := legacy[name]
 		target, ok := targets[packName]
@@ -584,7 +597,16 @@ func rewriteLegacyPublicPackImportMap(cityPath string, imports map[string]config
 		}
 		to := ""
 		if !target.Remove {
+			// The migration target supplies the durable source and pin, but
+			// the legacy declaration owns the composition options. Preserve
+			// those options (including agent narrowing) while relocating the
+			// source so --fix cannot silently widen the roster.
+			target.Import = preserveImportOptions(target.Import, imports[name])
+			if prior, seen := targetBindings[target.Binding]; seen && !sameImport(prior.Import, target.Import) {
+				return false, nil, fmt.Errorf("legacy imports %q and %q both migrate to %q with different options; reconcile by hand", targetOwners[target.Binding], name, target.Binding)
+			}
 			targetBindings[target.Binding] = target
+			targetOwners[target.Binding] = name
 			to = target.Binding
 		}
 		rewrites = append(rewrites, legacyPublicPackRewrite{From: name, To: to})
@@ -607,7 +629,19 @@ func rewriteLegacyPublicPackImportMap(cityPath string, imports map[string]config
 
 func sameImport(a, b config.Import) bool {
 	return strings.TrimSpace(a.Source) == strings.TrimSpace(b.Source) &&
-		strings.TrimSpace(a.Version) == strings.TrimSpace(b.Version)
+		strings.TrimSpace(a.Version) == strings.TrimSpace(b.Version) &&
+		a.Export == b.Export &&
+		a.ImportIsTransitive() == b.ImportIsTransitive() &&
+		strings.TrimSpace(a.Shadow) == strings.TrimSpace(b.Shadow) &&
+		slices.Equal(a.AgentsExclude, b.AgentsExclude)
+}
+
+func preserveImportOptions(target, existing config.Import) config.Import {
+	target.Export = existing.Export
+	target.Transitive = existing.Transitive
+	target.Shadow = existing.Shadow
+	target.AgentsExclude = append([]string(nil), existing.AgentsExclude...)
+	return target
 }
 
 func replaceImportOrderWithTargets(order []string, rewrites []legacyPublicPackRewrite) []string {
