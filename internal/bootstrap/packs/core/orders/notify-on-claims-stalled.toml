@@ -1,0 +1,20 @@
+# notify-on-claims-stalled mails the escalation recipient when the
+# controller's claims-stall guard finds an agent template whose seats stopped
+# claiming the work routed to them (agent.claims_stalled): several seats in a
+# row failed to start, or woke and never claimed while the work waited. The
+# guard has already held the template's spawns back; this order is how a
+# person hears of it. Without it the
+# alert reaches only the event log: on 2026-10-31 a review lane stood dead for
+# ten hours while ~1,400 seats came and went and nobody was told.
+#
+# Mail rides escalate.sh with the stall's episode as the incident key, so one
+# episode mails once (reminded daily while it lasts), however many probe
+# alerts the guard raises during it. See
+# assets/scripts/notify-claims-stall.sh.
+#
+# Mechanical (an event read and a mail send), no LLM judgment: exec order.
+[order]
+description = "Mail the escalation recipient when an agent's seats stop claiming their work"
+trigger = "event"
+on = "agent.claims_stalled"
+exec = "$PACK_DIR/assets/scripts/notify-claims-stall.sh"

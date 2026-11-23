@@ -99,17 +99,27 @@ func (f *extMsgConversationFlags) conversationRefIfSet(cityPath string) (*extmsg
 	return &ref, nil
 }
 
-// extMsgClient resolves the city and returns its API client, failing with
-// a uniform message when the API is unavailable.
+// extMsgClient resolves the city and returns the API client for an extmsg
+// binding mutation. Bindings are live controller state with no local
+// fallback, so it routes as a mutation (supervisorFallthroughMutationAPIClient):
+// a supervisor requiring only read grants still takes the POST, and a live
+// controller of unknown hosting mode without a usable [api] port reaches the
+// supervisor. A supervisor requiring city write grants is refused up front:
+// gc mints no grant, so it would refuse the mutation. Any other unresolved
+// client names its routing reason.
 func extMsgClient(verb string, stderr io.Writer) (*api.Client, string, bool) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc extmsg %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
 		return nil, "", false
 	}
-	c := apiClient(cityPath)
+	c, reason := supervisorFallthroughMutationAPIClient(cityPath)
+	if c == nil && reason == "grant-required" {
+		fmt.Fprintf(stderr, "gc extmsg %s: the supervisor requires a signed city write grant (%s), which gc cannot attach to this command yet\n", verb, reason) //nolint:errcheck // best-effort stderr
+		return nil, "", false
+	}
 	if c == nil {
-		fmt.Fprintf(stderr, "gc extmsg %s: requires the city API server (no local fallback for conversation bindings)\n", verb) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc extmsg %s: requires the city API server (%s; no local fallback for conversation bindings)\n", verb, reason) //nolint:errcheck // best-effort stderr
 		return nil, "", false
 	}
 	return c, cityPath, true

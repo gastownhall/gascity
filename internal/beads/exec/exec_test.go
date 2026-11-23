@@ -718,6 +718,31 @@ esac
 	}
 }
 
+// TestUpdate_unsetMetadataIsRefusedBeforeTheScriptRuns pins the exec
+// protocol's refusal of a metadata unset. Its update document has no removal
+// field, so a script would see only the sets and report success with the key
+// still set; the whole update is refused before the script is asked.
+func TestUpdate_unsetMetadataIsRefusedBeforeTheScriptRuns(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "update-ran")
+	script := writeScript(t, dir, `
+case "$1" in
+  update) touch "`+marker+`" ;;
+esac
+exit 0
+`)
+	err := NewStore(script).Update("EX-1", beads.UpdateOpts{
+		Metadata:      map[string]string{"kept": "v"},
+		UnsetMetadata: []string{"gone"},
+	})
+	if !errors.Is(err, beads.ErrUnsetMetadataUnsupported) {
+		t.Fatalf("Update with UnsetMetadata = %v, want ErrUnsetMetadataUnsupported", err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the provider script ran its update (stat: %v); the refusal must come before any write", statErr)
+	}
+}
+
 func TestUpdate_assigneeRoundTripsThroughConformanceScript(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available")

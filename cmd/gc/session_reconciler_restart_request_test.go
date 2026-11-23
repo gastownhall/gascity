@@ -91,6 +91,18 @@ func (e *restartRequestTestEnv) reconcile(sessions []beads.Bead) {
 	e.reconcileWithPoolDesiredAndDrainOps(sessions, poolDesired, nil)
 }
 
+// reconcileWithDrainOps is reconcile with the controller's drain ops dops,
+// through which the reconciler reads the runtime restart hint.
+func (e *restartRequestTestEnv) reconcileWithDrainOps(sessions []beads.Bead, dops drainOps) {
+	poolDesired := make(map[string]int)
+	for _, tp := range e.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	e.reconcileWithPoolDesiredAndDrainOps(sessions, poolDesired, dops)
+}
+
 func (e *restartRequestTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads.Bead, poolDesired map[string]int, dops drainOps) {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	_ = reconcileSessionBeadsAtPath(
@@ -795,8 +807,8 @@ func TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSe
 
 // TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession
 // covers Fix 1 end-to-end: doHandoffWithOutcome on a pinned always-mode
-// session with a working persistRestart must land continuation_reset_pending
-// on the session bead, and that persisted state must be exactly what lets the
+// session records the fenced row request (SG-3), which lands
+// continuation_reset_pending on the session bead, and that persisted state must be exactly what lets the
 // reconciler's explicit-reset escape hatch actually stop the pinned session
 // on its next pass (mirrors
 // TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSession,
@@ -835,26 +847,20 @@ func TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession(t *
 	}
 
 	dops := newDrainOps(env.sp)
-	persistCalled := false
-	persistRestart := func() error {
-		persistCalled = true
-		// Stands in for Manager.RequestFreshRestart (out of scope here):
-		// what doHandoffWithOutcome actually depends on is that a working
-		// persistRestart lands continuation_reset_pending on the bead.
-		return env.store.SetMetadata(session.ID, "continuation_reset_pending", "true")
-	}
+	const token = "tok-pinned-live"
+	env.setSessionMetadata(&session, map[string]string{"instance_token": token})
+	restart := testRowFirstRestart("gc handoff", sessionName, dops, nil)
+	restart.token = token
+	restart.record = sessionRestartRecorder(t.TempDir(), env.store, env.sp, env.cfg, sessionName)
 
 	var stdout, stderr bytes.Buffer
-	outcome := doHandoffWithOutcome(env.store, env.store, env.rec, dops, persistRestart,
+	outcome := doHandoffWithOutcome(env.store, env.store, env.rec, dops, restart,
 		sessionName, sessionName, []string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
 	}
 	if !outcome.restartRequested {
-		t.Fatal("restartRequested = false, want true for pinned always-mode session with working persistRestart")
-	}
-	if !persistCalled {
-		t.Fatal("persistRestart was not called for pinned always-mode session")
+		t.Fatal("restartRequested = false, want true for pinned always-mode session with a recorded restart")
 	}
 	if !strings.Contains(stdout.String(), "requesting restart") {
 		t.Errorf("stdout = %q, want restart-requested confirmation", stdout.String())

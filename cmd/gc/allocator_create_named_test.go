@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -618,6 +619,27 @@ func TestCreateEffect_NamedReopenRefusesALiveRuntimeTheLaggedPlanMissed(t *testi
 	}
 }
 
+// Kills a reopen's fresh read taken at a zero time or without the
+// template's process names (the #7764 review): a zero since lets the leaf
+// answer from its last listing, the cached read that wrote seed 335's
+// reopen over a live runtime. The read asks for a read at or after the
+// reopen's own time, with the process names its template resolves.
+func TestCreateEffect_NamedReopenReadsFreshWithItsProcessNames(t *testing.T) {
+	cfg := namedTestCity(config.Agent{Name: "mayor", StartCommand: "true", ProcessNames: []string{"mayor-agent"}}, config.NamedSession{Template: "mayor", Mode: "always"}, nil)
+	store := fencedMemStore(t)
+	seedClosedNamedRow(t, store, cfg, nil)
+	h := newNamedHarness(t, t.TempDir(), nil)
+	h.reserve(t, "c1")
+	leaf := &recordingLeaf{simProvider: newSimProvider()}
+	h.runAll(t, &createPass{cfg: cfg, sp: leaf, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+	if e := h.entry(t); !e.Landed {
+		t.Fatalf("settlement %+v, want the free name's row reopened", e)
+	}
+	if len(leaf.sinces) == 0 || !leaf.sinces[0].Equal(namedEffectNow.UTC()) || !slices.Equal(leaf.names[0], []string{"mayor-agent"}) {
+		t.Fatalf("the leaf's reads asked since %v with names %v, want the first at %v with [mayor-agent]", leaf.sinces, leaf.names, namedEffectNow.UTC())
+	}
+}
+
 // Kills a context that ends during the reopen's fresh runtime read taken as
 // a redecided refusal, which backs the identity off: it is an abandoned
 // no-write.
@@ -711,7 +733,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 	cfg := mayorCity()
 	t.Run("fenced", func(t *testing.T) {
 		mem := beads.NewMemStore()
-		if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		closed := seedClosedNamedRow(t, mem, cfg, nil)
@@ -758,7 +780,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 }
 
 // revisionlessListStore reads its rows back from List with no revision, as
-// the native store does: there, Get is the only read that carries one.
+// BdStore does (mc-3c8h5): there, Get is the only read that carries one.
 type revisionlessListStore struct{ beads.Store }
 
 func (s revisionlessListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
@@ -800,7 +822,7 @@ func TestCreateEffect_NamedReopenFencesOnTheLiveReReadOfTheRow(t *testing.T) {
 }
 
 // Kills a reopen that re-reads the row through the cache: a cached row's
-// revision lags (a List-primed native row carries none), so the CAS must be
+// revision lags (a List-primed bd row carries none), so the CAS must be
 // taken on a live read.
 func TestCreateEffect_NamedReopenReReadsTheRowLive(t *testing.T) {
 	cfg := mayorCity()
@@ -1136,7 +1158,7 @@ func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 				ID: "gc-bait", Title: "bait", Status: "open", Labels: []string{sessionBeadLabel},
 				Metadata: map[string]string{"template": "mayor", "session_name": "bait"},
 			}}, nil)
-			if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			target := ""
@@ -1329,7 +1351,7 @@ func TestCreateEffect_NamedConcurrentWithCLIMaterializeYieldsOneCanonical(t *tes
 			store, cityPath := beads.NewMemStore(), t.TempDir()
 			seedClosedNamedRow(t, store, cfg, nil)
 			race(t, store, cityPath, func() {
-				if _, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor"); err != nil {
+				if _, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor", nil); err != nil {
 					t.Errorf("CLI materialize: %v", err)
 				}
 			})
@@ -1593,7 +1615,7 @@ type namedCondStore struct {
 func newNamedCondStore(t *testing.T) *namedCondStore {
 	t.Helper()
 	mem := beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return &namedCondStore{MemStore: mem}
@@ -1949,7 +1971,7 @@ func adoptLiveRunIn(t *testing.T, dir string, store beads.Store, prep func(sp *s
 func fencedMemStore(t *testing.T) *beads.MemStore {
 	t.Helper()
 	mem := beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return mem

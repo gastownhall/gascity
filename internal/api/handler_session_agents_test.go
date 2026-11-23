@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -18,7 +19,7 @@ import (
 
 func createTranscriptBackedSession(t *testing.T, store beads.Store, sp *runtime.Fake, workDir string) session.Info {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(store, sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "default", Title: "Transcript Backed", Command: "echo test", WorkDir: workDir, Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {

@@ -467,7 +467,12 @@ else.
    `init()` in the domain package that owns the event (e.g.
    `internal/api/event_payloads.go` for mail/bead;
    `internal/extmsg/events.go` for extmsg).
-4. Commit. Pre-commit regenerates the discriminated-union wire
+4. Decide who may author it (Worker, Controller or Ledger; DES-BX
+   D13) and register its authorship: add it to `builtinAuthorship`
+   in `internal/events/authorship.go` for a type declared in
+   `events.go`, or call `events.RegisterAuthorship(constant, class)`
+   from an `init()` beside a declaration elsewhere.
+5. Commit. Pre-commit regenerates the discriminated-union wire
    schema; generated clients gain the new typed variant
    automatically.
 
@@ -483,6 +488,9 @@ Skipping any step lands on a CI failure, not a production bug:
 | Spec/client method-shape drift | Layer 2 round-trip tests (`genclient_roundtrip_test.go`) |
 | End-to-end binary wire regression | Layer 3 integration tests (`//go:build integration`) |
 | New event-type constant without registered payload | `TestEveryKnownEventTypeHasRegisteredPayload` |
+| Known event type without registered authorship | `TestEveryKnownEventTypeHasAnAuthorship` |
+| Type declared in `events.go` without registered authorship | `TestEveryDeclaredEventTypeHasAnAuthorship` |
+| Event type emitted anywhere in the module without registered authorship | `TestEverySDKEventTypeHasAnAuthorship` (`cmd/gc`) |
 | Hard-coded SPA `/v0/...` path outside typed client | TypeScript build (`satisfies SpecPath` in `api.ts`) |
 
 ## 6. Tooling landscape

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
@@ -240,6 +241,9 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return "", fmt.Errorf("exec mail provider %s: %w", args[0], err)
+	}
 	cmd.WaitDelay = 2 * time.Second
 
 	var stdout, stderr bytes.Buffer

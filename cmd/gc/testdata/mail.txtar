@@ -10,6 +10,8 @@ env GC_BEADS=file
 env GC_DOLT=skip
 env GC_SESSION=fake
 
+# gc init writes a born-split city: mail lives in the infrastructure store
+# under .gc/store, whose ids start gcg-, not in the work ledger.
 exec gc init $WORK/bright-lights
 cd $WORK/bright-lights
 
@@ -17,7 +19,7 @@ cd $WORK/bright-lights
 
 # Human sends a durable message to the configured agent.
 exec gc mail send mayor 'hey, are you still there?'
-stdout 'Sent message bl-1 to mayor'
+stdout 'Sent message gcg-1 to mayor'
 
 exec gc mail check mayor
 
@@ -28,7 +30,7 @@ stdout 'hey, are you still there?'
 # The configured agent can reply and a fresh human process sees it.
 env GC_ALIAS=mayor
 exec gc mail send human 'yes, still working'
-stdout 'Sent message bl-2 to human'
+stdout 'Sent message gcg-[0-9]+ to human'
 
 env GC_ALIAS=
 exec gc mail inbox

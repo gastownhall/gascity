@@ -2,8 +2,8 @@
 // suites import only lib/inbound.mjs + lib/gc-client.mjs, so nothing exercised
 // the part of the bridge that actually reaches into the installed openclaw
 // packages — including resolveChunkExport, which scans @openclaw/imessage's
-// hash-named dist chunks for createIMessageRpcClient and is the most fragile
-// seam across openclaw releases. This test loads both connector surfaces after
+// hash-named dist chunks for createIMessageRpcClient and sendMessageIMessage and
+// is the most fragile seam across openclaw releases. This test loads both connector surfaces after
 // `npm ci` and asserts every function the bridges call resolves, then drives the
 // resolved RPC client to pin the close contract bridge.mjs relies on
 // (watchDaemonClose): its own stop() during shutdown is not an unexpected close,
@@ -62,7 +62,7 @@ test('resolveChunkExport finds a mangled-alias export in an .mjs chunk, past chu
 test('loadIMessageConnector resolves every function the iMessage bridge calls', async () => {
   const oc = await loadIMessageConnector()
   assertFns(oc, [
-    'sendMessageIMessage',
+    'sendMessageIMessage', // resolved via dist chunk scan since 2026.10
     'probeIMessage',
     'createIMessageRpcClient', // resolved via dist chunk scan — the fragile seam
     'resolveIMessageInboundConversationId',
