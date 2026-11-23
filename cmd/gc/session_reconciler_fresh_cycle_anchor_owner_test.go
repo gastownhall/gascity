@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -16,7 +17,13 @@ import (
 // defer the cycle: the live anchor's owner must decide it.
 func freshCycleAnchorOwnerEnv(t *testing.T) (*restartRequestTestEnv, beads.Bead, string, *beads.MemStore, beads.Bead) {
 	t.Helper()
-	env, session, name := freshCycleReproEnv(t, nil)
+	// Pool template and runtime-name owners must be distinct test cases.
+	env, session, name := freshCycleReproEnvIn(t, config.Workspace{
+		Name: "test-city", SessionTemplate: "{{.City}}-{{.Agent}}",
+	}, nil)
+	if name == session.Metadata["template"] {
+		t.Fatal("fixture runtime name must differ from its template")
+	}
 	// Production supplies the ready flag with the assigned/open snapshot;
 	// omitting it would filter the anchor out before the cycle guard runs.
 	env.startOptions = append(env.startOptions, withReadyAssignedFlags([]bool{true}))
