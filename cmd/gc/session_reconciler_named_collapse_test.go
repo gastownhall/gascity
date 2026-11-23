@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,13 +20,24 @@ import (
 // namedSuspendConfirmTicks consecutive ticks confirm the spec is genuinely
 // gone; suspend-class drains are revertible, so a 1-tick confirmation buffer is
 // safe and cheap.
+//
+// The collapse keeps the [[named_session]] entry and drops its backing
+// [[agent]] for the tick, so the row stays a configured name and the drain is
+// suspend-class ("suspended"), not "orphaned" — the revertible class the
+// confirmation buffer exists for. The entry is on_demand so the row carries no
+// standing config wake of its own; the drain's lifecycle is observed in
+// isolation. Once the drain begins it must converge monotonically: it stays
+// tracked on the same generation while the spec is absent, stops the runtime
+// and completes once its deadline passes, and no later tick begins or cancels
+// it again.
 func TestReconcileSessionBeads_NamedSessionTransientSpecCollapseDeferred(t *testing.T) {
 	env := newReconcilerTestEnv(t)
-	// cfg has the agent template but NO [[named_session]] entry this tick —
-	// modeling the transient collapse where the named spec briefly vanishes.
+	// cfg keeps the [[named_session]] entry but its backing [[agent]] is
+	// absent this tick — the transient collapse that makes the spec
+	// unresolvable while the row stays a configured name.
 	env.cfg = &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "warlord", StartCommand: "true"}},
+		Workspace:     config.Workspace{Name: "test-city"},
+		NamedSessions: []config.NamedSession{{Template: "warlord", Mode: "on_demand"}},
 	}
 	sessionName := "warlord"
 	_ = env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"})
@@ -33,7 +45,7 @@ func TestReconcileSessionBeads_NamedSessionTransientSpecCollapseDeferred(t *test
 	env.setSessionMetadata(&session, map[string]string{
 		namedSessionMetadataKey:      "true",
 		namedSessionIdentityMetadata: "warlord",
-		namedSessionModeMetadata:     "always",
+		namedSessionModeMetadata:     "on_demand",
 		"state":                      "active",
 		// Past the wake grace: the undesired arm spares a runtime the wake family
 		// started moments ago (ga-qgtb3). The subject here is the #3630
@@ -50,10 +62,55 @@ func TestReconcileSessionBeads_NamedSessionTransientSpecCollapseDeferred(t *test
 		t.Fatalf("named session %q must stay running through a single-tick spec collapse", sessionName)
 	}
 
-	// Tick 2 (still absent): now confirmed across N consecutive ticks → drain proceeds.
+	// Tick 2 (still absent): now confirmed across N consecutive ticks → drain
+	// proceeds, as a suspend-class drain (the agent stays configured, so the
+	// spec collapse reads as a suspend, not an orphan).
 	env.reconcile([]beads.Bead{session})
-	if ds := env.dt.get(session.ID); ds == nil {
-		t.Fatal("named session should be drained after namedSuspendConfirmTicks consecutive spec-absent ticks")
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatalf("named session should be drained after namedSuspendConfirmTicks consecutive spec-absent ticks\nstdout:\n%s\nstderr:\n%s", env.stdout.String(), env.stderr.String())
+	}
+	if ds.reason != "suspended" {
+		t.Fatalf("spec collapse of a configured named session must drain as \"suspended\", got reason=%q", ds.reason)
+	}
+	generation := ds.generation
+
+	// Tick 3 (still absent, drain in flight): the tracked drain must persist —
+	// neither re-begun (a second begin would reset its confirmation premise)
+	// nor canceled (nothing released the suspend) — while the runtime stays up
+	// and the drain's ack arms against it.
+	env.reconcile([]beads.Bead{session})
+	ds = env.dt.get(session.ID)
+	if ds == nil || ds.reason != "suspended" || ds.generation != generation {
+		t.Fatalf("the in-flight suspend drain must stay tracked on the same generation, got %+v", ds)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("named session %q must stay running while the suspend drain is in flight", sessionName)
+	}
+
+	// Past the drain deadline the drain converges: the timeout stop ends the
+	// runtime and the drain completes — no begin/cancel loop may restart it.
+	env.clk.Time = env.clk.Time.Add(defaultDrainTimeout + time.Minute)
+	env.reconcile([]beads.Bead{session})
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("named session %q must be stopped once the suspend drain's deadline passes", sessionName)
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("the suspend drain must complete once the runtime stopped, still tracked: %+v", *ds)
+	}
+
+	// A further tick must not resurrect the drain against the stopped row: the
+	// spec is still absent, but the drain has already run to completion.
+	env.clk.Time = env.clk.Time.Add(time.Minute)
+	env.reconcile([]beads.Bead{session})
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("no drain may begin again after the suspend drain completed, got %+v", *ds)
+	}
+	if got := strings.Count(env.stdout.String(), "Draining session 'warlord': suspended"); got != 1 {
+		t.Fatalf("the suspend drain must begin exactly once, got %d begin lines\nstdout:\n%s", got, env.stdout.String())
+	}
+	if strings.Contains(env.stdout.String(), "Canceled") {
+		t.Fatalf("nothing may cancel the spec-collapse suspend drain\nstdout:\n%s", env.stdout.String())
 	}
 }
 
