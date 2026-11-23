@@ -77,16 +77,18 @@ pre-compaction hook is installed because Antigravity does not expose one.
   `beforeSubmitPrompt` can only return `continue`/`user_message` (its hook
   output must be JSON). `gc nudge drain` and `gc mail check` treat a
   successful stdout write as delivery: they terminalize the drained nudges
-  and archive auto-handoff mail. With the output discarded, that silently
-  lost them. The plain (non-`--inject`) `nudge drain` acks what it prints
+  and archive auto-handoff mail. With the output discarded, every item they
+  print is lost. The plain (non-`--inject`) `nudge drain` acks what it prints
   too, so there is no safe form of either command to run from these hooks.
   Queued nudges still reach these sessions through the supervisor's nudge
   dispatcher (or the per-session poller), which types them in; unread mail
   gets no hook-time injection on them, which in effect it never had.
   `TestDiscardedOutputOverlaysRunNoConsumptiveHooks` pins it. Overlay staging
-  never removes a hook, so `Install` replaces every released copy of these two
-  files that still runs them (backing the old bytes up to `.bak`); the frozen
-  shapes live in `released_hook_shapes.go` and
+  never removes a hook, so `Install` replaces every released Copilot copy and
+  every released Cursor copy from v1.3.0 on that still runs them (backing the
+  old bytes up to `.bak`). The two Cursor documents released before v1.3.0 are
+  left alone, and `TestInstallLeavesUnadoptedReleasedHooks` pins that. The
+  frozen shapes live in `released_hook_shapes.go` and
   `TestInstallUpgradesReleasedDiscardedOutputHooks` pins them.
 
 - **kiro pre-compaction** — Kiro's hook config (under
