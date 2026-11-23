@@ -1500,15 +1500,16 @@ func graphBindingResidentScope(cityPath string, cfg *config.City, beadID string)
 //
 // The binding leg runs in front of the scan for the reason resolveOwningStoreDir
 // states: a relocated class binding is not one of the city's directories, so a
-// directory scan answers a relocated id from the frozen copy the migration
-// retained. That matters more here than for a read — the view this returns is
+// directory scan answers a relocated id from the work store — not-found on a
+// cleared city, or the frozen copy on a city an older build migrated and nobody
+// cleared. That matters more here than for a read — the view this returns is
 // the one delete-source and reopen-source WRITE the source bead's metadata
 // through, and clearing workflow_id on the frozen twin leaves the live row still
 // pointing at a workflow that no longer exists.
 //
 // A binding hit skips the uniqueness rule for the city's own retained copy,
-// which is dual residency working as designed, and still refuses a rig holding
-// the same id, which never is.
+// which is the dual residency an older build's migration left, and still
+// refuses a rig holding the same id, which no migration leaves.
 func findUniqueBeadAcrossStoresView(cityPath, beadID string) (convoyStoreView, beads.Bead, error) {
 	cfg, err := loadCityConfig(cityPath, os.Stderr)
 	if err != nil {
@@ -3748,10 +3749,11 @@ func resolveSourceWorkflowWriteTarget(cfg *config.City, cityPath string, target 
 		role:  convoyViewClassBinding,
 	}}
 	write.others = appendSourceWorkflowCopy(write.others, write.owning, selected)
-	// The migration copied OUT of the city work ledger and deleted nothing, so
-	// the frozen twin of a binding-owned id is there whether or not the operator
-	// named it. Reaching it here is what makes the unscoped run and the
-	// --store-ref city run end in the same state.
+	// On a city an older build migrated and nobody cleared, the migration
+	// copied OUT of the city work ledger and deleted nothing, so the frozen
+	// twin of a binding-owned id is there whether or not the operator named it.
+	// Reaching it here is what makes the unscoped run and the --store-ref city
+	// run end in the same state.
 	if !slices.ContainsFunc(write.others, func(view convoyStoreView) bool { return samePath(view.path, cityPath) }) {
 		cityView, _, err := openSourceWorkflowStoreRef(cfg, cityPath, "city")
 		if err != nil {

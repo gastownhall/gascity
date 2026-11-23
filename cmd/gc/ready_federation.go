@@ -26,10 +26,10 @@ package main
 //     canonical (priority, created_at, id) for a caching-wrapped work store and
 //     for the canonical relocated binding (beads.SQLiteStore) alike.
 //   - Dedupe: the FIRST leg to return an id wins. The graph leg is merged last,
-//     so a bead co-resident in the work store and the binding — the documented
-//     steady state of a migrated city, where `gc storage migrate` preserves ids
-//     and never deletes back — resolves to the work store's row on both
-//     surfaces.
+//     so a bead co-resident in the work store and the binding — a city an older
+//     build migrated and nobody cleared, which boot refuses; `gc storage
+//     migrate` now clears the work store's copies — resolves to the work
+//     store's row on both surfaces.
 //
 // # Where this deliberately diverges: no partial tier
 //

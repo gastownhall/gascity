@@ -141,11 +141,12 @@ func PrefixOwner(id string, stores []beads.Store) beads.Store {
 // tree now plans ByID over a Topology and executes it with ResolveOwnerRow,
 // which is not a stylistic preference: the PrefixOwner step below routes on the
 // id's OWN prefix, ahead of whatever order the caller assembled its list in, and
-// `gc storage migrate` copies-and-retains while PRESERVING ids. So for every
-// infrastructure bead minted before a cutover — which keeps its work-era prefix
-// — this function returns the work store and the caller reads the frozen
-// pre-migration row, successfully, with status and revision as of the cutover
-// and no error to notice (ga-cu12x). A plan has no such fast path: the binding
+// `gc storage migrate` PRESERVES ids. So for every infrastructure bead minted
+// before a cutover — which keeps its work-era prefix — this function returns
+// the work store, and the caller reads not-found on a cleared city or, on a
+// city an older build migrated and nobody cleared, the frozen pre-migration
+// row, successfully, with status and revision as of the cutover and no error to
+// notice (ga-cu12x). A plan has no such fast path: the binding
 // leads for an id inside its reserved namespace and every unretired binding is
 // probed ahead of work for an id inside none.
 //

@@ -1034,12 +1034,13 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 //
 // This is a DRAIN gauge, not the residence probe's retirement condition — the
 // two parted company in ga-qdt5y.19. Retirement asks whether the binding can
-// hold an id at all, and a closed relic still answers yes: the migration never
-// deleted the work store's frozen pre-migration copy, so retiring on the last
-// CLOSE would serve that id from the frozen copy forever. So the verdict counts
-// closed residents (storeref.LegacyResidents) and this count deliberately does
-// not — an operator draining a migrated city needs a number that reaches zero,
-// and the widened one never can.
+// hold an id at all, and a closed relic still answers yes, so retiring on the
+// last CLOSE would send that id to the work store: not-found on a cleared city,
+// or the frozen pre-migration copy forever on one an older build migrated and
+// nobody cleared. So the verdict counts closed residents
+// (storeref.LegacyResidents) and this count deliberately does not — an operator
+// draining a migrated city needs a number that reaches zero, and the widened
+// one never can.
 //
 // What reaching zero means, then, is that the carried-across work is finished,
 // not that the per-read cost is gone. A city that migrated any beads keeps its

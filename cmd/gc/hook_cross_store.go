@@ -813,9 +813,10 @@ func bestRankedCandidate(ranked []hookRankedCandidate) (hookRankedStore, bool) {
 			bestRank, haveBest = crossRank, true
 			bestTied = append(bestTied[:0], hookRankedStore{out: winner.out, store: winner.store, id: winner.id})
 		case crossRank == bestRank && !hookTiedIDSeen(bestTied, winner.id):
-			// A migrated bead (`gc storage migrate` copies, never deletes) can be
-			// ready from more than one store under the SAME id: the same row, not
-			// two tied pieces of work. Rotating across a duplicate would put a
+			// A migrated bead on a city an older build migrated and nobody cleared
+			// (that `gc storage migrate` copied and kept the source) can be ready
+			// from more than one store under the SAME id: the same row, not two
+			// tied pieces of work. Rotating across a duplicate would put a
 			// later store ahead of the primary for no reason — nothing about the
 			// work differs — and breaks the rig-first-city-last fan-out order the
 			// class-escalation claim loop depends on. An empty id (unidentifiable

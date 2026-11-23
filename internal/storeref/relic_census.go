@@ -20,11 +20,12 @@ package storeref
 // so a failed read answers "relics".
 //
 // The verdict counts every resident, open or closed. Closing a relic does not
-// make it unreachable — it is still shown, reopened, claimed and written by id,
-// and `gc storage migrate` never deletes the work store's pre-migration copy —
-// so a rule that retired the probe when the last relic CLOSED would send that
-// id back to a frozen copy that reads OPEN forever (ga-qdt5y.19). Because
-// nothing ever deletes a relic, the widened verdict is MONOTONE: a binding that
+// make it unreachable — it is still shown, reopened, claimed and written by id
+// — so a rule that retired the probe when the last relic CLOSED would send that
+// id back to the work store: not-found on a cleared city, or a frozen copy
+// that reads OPEN forever on one an older build migrated and nobody cleared
+// (ga-qdt5y.19). Because nothing ever deletes a relic from the binding, the
+// widened verdict is MONOTONE: a binding that
 // has ever held a resident holds one for good. Staleness can therefore only
 // keep a probe alive, never retire one, which is what makes reading it once per
 // process sound rather than merely cheap.
@@ -166,11 +167,11 @@ func legacyResidentVerdict(store beads.Store, prefixes []string) (bool, error) {
 // The DEFAULT is the whole of the difference: both forms read the same
 // closed-inclusive census, and they have to, because a closed relic is exactly
 // as reachable by id as an open one — it is still shown, reopened, claimed and
-// written by id, and `gc storage migrate` never deleted the work store's
-// pre-migration copy. A proof that stopped at the last CLOSE would leave the
+// written by id. A proof that stopped at the last CLOSE would leave the
 // binding with a probe HasLegacyResidents keeps and nothing may enforce, and
-// that id's next read would be answered by the frozen copy, OPEN forever with
-// pre-migration fields (ga-qdt5y.19).
+// that id's next read would go to the work store: not-found on a cleared
+// city, or the frozen copy, OPEN forever with pre-migration fields, on one an
+// older build migrated and nobody cleared (ga-qdt5y.19).
 //
 // Sharing the census makes the two verdicts monotone together: proof implies
 // the pessimistic bit for every binding, in the field and in the decision

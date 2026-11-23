@@ -26,8 +26,10 @@ package main
 //
 // What differs from the by-id door is the ORDER of the probe, and the difference
 // is load-bearing on the one id a probe order can disagree about: a CO-RESIDENT
-// bead, which is the documented steady state of a migrated city because the
-// migration copies and never deletes back.
+// bead. A served city holds none, because `gc storage migrate` clears the work
+// store's copies after the proven copy; a city an older build migrated keeps
+// them until `gc storage migrate --from-work --fleet-stopped` clears them, and
+// boot refuses it meanwhile.
 //
 //   - storeref.ClassCandidates and bdByIDClassDoor lead with the class store.
 //     Their caller holds only an id.

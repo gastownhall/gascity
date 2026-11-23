@@ -341,15 +341,15 @@ func revalidateContinuation(target backstopTarget) (backstopResolution, beads.Be
 	// target.Store — the leg the row was read from, which is not necessarily
 	// the scope target.StoreRef names (see the owner note below). planClass
 	// (internal/storeref/resolve.go) is the PLACEMENT contract, not a residency
-	// one: `gc storage migrate` preserves ids and never deletes back
-	// (cmd/gc/census_residency.go), so a relocated row stays co-resident in the
-	// work ledger beside its binding. Both legs canonicalize to city:<name>, so
-	// the copies share a group, and — sameContinuationClaimCandidate not
-	// comparing Store — the fold keeps the first leg in census order, which is
-	// the work ledger. This guard therefore re-reads that leg, and on a
-	// pre-relocation residue it can still pass on a stale row. Pre-existing and
-	// unchanged by the owner-ref split; tracked with the rest of the
-	// leg-vs-owner grouping work in ga-m4sj2.
+	// one: `gc storage migrate` preserves ids, and on a city an older build
+	// migrated and nobody cleared (cmd/gc/census_residency.go) a relocated row
+	// stays co-resident in the work ledger beside its binding. Both legs
+	// canonicalize to city:<name>, so the copies share a group, and —
+	// sameContinuationClaimCandidate not comparing Store — the fold keeps the
+	// first leg in census order, which is the work ledger. This guard therefore
+	// re-reads that leg, and on a pre-relocation residue it can still pass on a
+	// stale row. Pre-existing and unchanged by the owner-ref split; tracked
+	// with the rest of the leg-vs-owner grouping work in ga-m4sj2.
 	live := beads.HandlesFor(target.Store).Live
 	if live == nil {
 		return backstopResolutionHold, beads.Bead{}

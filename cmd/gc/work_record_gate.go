@@ -41,11 +41,13 @@ import (
 //
 // The DUAL-RESIDENT case is why the split matters rather than being a redundant
 // double-gate. `gc storage migrate` copies every non-work bead with its id
-// preserved and keeps the source (readInfraSnapshot / infra_class_migrate.go),
-// and coordclass.Classify routes ANY bead carrying gc.root_bead_id to ClassGraph
+// preserved, and a city an older build migrated keeps the source row too
+// (readInfraSnapshot / infra_class_migrate.go) — a state the clear that follows
+// a proven copy now removes (#7074) and boot refuses to serve — and
+// coordclass.Classify routes ANY bead carrying gc.root_bead_id to ClassGraph
 // (isWorkflowMetadata) — including a plain task-typed molecule work step with no
-// gc.kind, which is exactly isWorkRecordGatedBead's population. On a migrated
-// city those steps exist in BOTH stores. The gate always validates the row the
+// gc.kind, which is exactly isWorkRecordGatedBead's population. On such a city
+// those steps exist in BOTH stores. The gate always validates the row the
 // close is about to write: the fall-through path validates the work store's
 // retained copy it is closing, and the door validates the class copy it is
 // closing. Neither validates the other store's stale row, because neither
@@ -55,9 +57,9 @@ import (
 // now answer it the same way: the CLI door resolves a dual resident to the
 // CLASS copy through its own residence probe, and internal/api resolves it
 // through the residency resolver's ByID plan, which leads with the binding for
-// exactly this reason. The retained work copy stays reachable through raw bd
-// against the work scope, and it still has to be drained; that reconciliation
-// is the sweep's job, not this gate's.
+// exactly this reason. The retained work copy, on a city that still holds one,
+// stays reachable through raw bd against the work scope, and it still has to be
+// drained; that reconciliation is the sweep's job, not this gate's.
 
 // workRecordEnforceEnvVar gates whether work-record violations block the close
 // (enforce) or are logged only (warn-only, the default).

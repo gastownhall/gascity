@@ -786,12 +786,13 @@ func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]co
 // not once per process, because each invocation is a fresh answer and has to
 // carry its own caveat.
 //
-// The caveat says both halves, because on a converged city the omission is not
-// the whole hazard. The migration RETAINED a frozen copy of every row it moved,
-// and it is the binding's answer that supersedes those copies — so while the
-// refusal stands they are no longer superseded and print as live rows in place
-// of the ones that are missing. A convoy the city closed in the binding lists
-// open again for exactly as long as the binding cannot be read.
+// The caveat says both halves, because on a city an older build migrated and
+// nobody cleared the omission is not the whole hazard. That migration RETAINED
+// a frozen copy of every row it moved, and it is the binding's answer that
+// supersedes those copies — so while the refusal stands they are no longer
+// superseded and print as live rows in place of the ones that are missing. A
+// convoy the city closed in the binding lists open again for exactly as long as
+// the binding cannot be read.
 //
 // "Only READ" is the whole precondition, so the caller set is named rather than
 // assumed: `gc beads list`, `gc convoy list`, and `gc convoy stranded`, none of
@@ -862,10 +863,12 @@ func convoyBindingOwnedIDs(binding beads.Store, ids []string) (map[string]bool, 
 //
 // Ids are unique only WITHIN a store, so this is not an id dedupe: a city and a
 // rig that each mint "gc-1" hold two different beads and both belong in the
-// output. The one place an id means the same bead twice is the migration, which
-// copies a class into the binding with ids preserved and deletes nothing — so
-// the migration source's copy is a frozen duplicate of a row the binding now
-// owns. That pair, and only that pair, collapses, with the binding winning.
+// output. The one place an id means the same bead twice is a migration by an
+// older build, which copied a class into the binding with ids preserved and
+// deleted nothing — so until `gc storage migrate --from-work --fleet-stopped`
+// clears it, the migration source's copy is a frozen duplicate of a row the
+// binding now owns. That pair, and only that pair, collapses, with the binding
+// winning.
 //
 // Which is why the supersede question is asked of the BINDING and only about the
 // migration source's ids, rather than read off the two row sets. A rig's id is
@@ -973,10 +976,11 @@ func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, open
 // binding is resolved first, through the shared residency contract.
 //
 // A binding hit returns without consulting the ambiguity rule, deliberately.
-// Dual residency is not ambiguity: the migration copies with ids preserved and
-// deletes nothing, so a relocated bead is SUPPOSED to exist twice and there is
-// a known winner. Refusing it as ambiguous would break every convoy command on
-// exactly the cities that completed the migration.
+// Dual residency is not ambiguity: a migration by an older build copied with
+// ids preserved and deleted nothing, so until the clear removes the work
+// store's copy a relocated bead exists twice and there is a known winner.
+// Refusing it as ambiguous would break every convoy command on exactly the
+// cities that completed such a migration.
 //
 // The directory reported for a binding hit is the CITY's, not the binding's,
 // and that is not a fudge. Callers map this directory to a store-ref
