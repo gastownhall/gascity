@@ -501,6 +501,99 @@ func TestNudgeMailSweepLaneSweepsNothingAfterCanceledMaintenance(t *testing.T) {
 	}
 }
 
+// The shutdown story end to end: a nudge/mail lane pass parked inside queue
+// maintenance when run()'s context is canceled finishes its parked
+// maintenance, sweeps nothing after it, and run() returns only once the
+// join has waited for that pass.
+func TestRunShutdownAbortsNudgeMailSweepMidMaintenance(t *testing.T) {
+	t.Setenv(fsPressureThresholdEnv, "100")
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Daemon.PatrolInterval = "10ms"
+	sp := runtime.NewFake()
+	reconcileEntered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releaseStartup := func() { releaseOnce.Do(func() { close(release) }) }
+	cr, runtimeErr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			enterOnce.Do(func() { close(reconcileEntered) })
+			<-release
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if runtimeErr != nil {
+		t.Fatalf("building the city runtime: %v", runtimeErr)
+	}
+	cr.od = &recordingOrderDispatcher{}
+	now := time.Now()
+	store := beads.NewMemStoreFrom(100, []beads.Bead{mailSeed("mail-stale", now.Add(-nudgeMailSweepDefaultMailTTL-time.Minute))}, nil)
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = store
+	cr.setControllerState(cs)
+
+	maintainEntered := make(chan struct{})
+	releaseMaintain := make(chan struct{})
+	var maintainOnce, releaseMaintainOnce sync.Once
+	unparkMaintain := func() { releaseMaintainOnce.Do(func() { close(releaseMaintain) }) }
+	var maintainCalls atomic.Int64
+	cr.maintainNudgeQueue = func(context.Context, beads.NudgesStore, time.Time) error {
+		maintainCalls.Add(1)
+		maintainOnce.Do(func() { close(maintainEntered) })
+		// The parked call ignores its context, like a synchronous store
+		// call: it returns only when released.
+		<-releaseMaintain
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		cr.run(ctx)
+	}()
+	t.Cleanup(func() {
+		unparkMaintain()
+		releaseStartup()
+		cancel()
+		<-runDone
+	})
+	awaitClose(t, reconcileEntered, "the cold-start reconcile reaching its desired-state build")
+	awaitClose(t, maintainEntered, "the nudge/mail lane reaching its queue maintenance")
+
+	// Shutdown lands while the pass is parked inside the maintenance.
+	cancel()
+	releaseStartup()
+	select {
+	case <-runDone:
+		t.Fatal("run() returned while the nudge/mail lane pass was still parked in queue maintenance")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unparkMaintain()
+	awaitClose(t, runDone, "run() returning after shutdown (joining the parked nudge/mail lane pass)")
+
+	if got := maintainCalls.Load(); got != 1 {
+		t.Fatalf("queue maintenance calls = %d, want 1: the parked pass must not be followed by another", got)
+	}
+	if got := statusOf(t, store, "mail-stale"); got != "open" {
+		t.Fatalf("stale mail bead status after shutdown = %q, want open: the canceled pass must not sweep", got)
+	}
+}
+
 // slowClosedHistoryStore makes every closed-status List (the retention
 // prune's history read) take at least delay.
 type slowClosedHistoryStore struct {
