@@ -33,10 +33,11 @@ import (
 
 // newScreenTurnFixture is a lane fixture for a session of provider over a
 // tmux profile whose screen readings the fixture's fake answers
-// (runtime.Fake.ScreenTurnRunning, runtime.Fake.ScreenReadErrors).
-func newScreenTurnFixture(t *testing.T, provider string) (*laneFixture, laneExecDeps, *opjournal.Store) {
+// (runtime.Fake.ScreenTurnRunning, runtime.Fake.ScreenReadErrors); opts
+// adjust its row after the provider is set.
+func newScreenTurnFixture(t *testing.T, provider string, opts ...laneFixtureOpt) (*laneFixture, laneExecDeps, *opjournal.Store) {
 	t.Helper()
-	f := newLaneFixture(t, func(meta map[string]string) { meta["provider"] = provider })
+	f := newLaneFixture(t, append([]laneFixtureOpt{func(meta map[string]string) { meta["provider"] = provider }}, opts...)...)
 	st := f.laneStore(t)
 	deps := f.deps(st)
 	deps.sp = runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: f.sp})

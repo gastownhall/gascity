@@ -224,7 +224,11 @@
               "agent-is-foreign",
               "storage-vouch-bd",
               "storage-remote-stage-mark",
-              "storage-remote-stage-unmark"
+              "storage-remote-stage-unmark",
+              "storage-snapshot",
+              "storage-snapshot-restore",
+              "storage-split",
+              "analyze-work-record"
             ]
           },
           "event_id": {

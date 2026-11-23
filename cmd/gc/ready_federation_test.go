@@ -398,11 +398,11 @@ func TestReadyRefusesAnUnreadableSuspensionState(t *testing.T) {
 }
 
 // TestReadyComposesTheCityConfigOncePerInvocation pins the config half of
-// reuse within one command. On a bd-backed city each rig open resolves the
-// pinned bd (workspacePinnedBdBinary), which composed the whole city config
-// again — 22 composed loads per `gc ready` on maintainer-city. The opener here
-// makes the same load inside every rig open; the invocation memo must answer
-// all of them from the one load the command already made.
+// reuse within one command. A rig open may compose the whole city config
+// again, so N rig opens would cost N composed loads. The opener here makes
+// that load inside every rig open; the invocation memo must answer all of them
+// from the one load the command already made. (The bd pin itself no longer
+// composes: workspacePinnedBdBinary reads the root city.toml alone.)
 //
 // Not parallel: composedCityConfigLoads and the opener seam are process-wide.
 func TestReadyComposesTheCityConfigOncePerInvocation(t *testing.T) {

@@ -85,7 +85,10 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		if isAgentEffectivelySuspendedWith(c.cfg, c.cityPath, &a, suspendState) {
 			continue
 		}
-		if a.PromptTemplate == "" {
+		// An implicit agent carries no prompt_template but still starts with
+		// a builtin worker prompt, so take the template launch would render.
+		promptTemplate := startupPromptTemplate(c.cfg, &a)
+		if promptTemplate == "" {
 			continue
 		}
 		// Launch never delivers a startup prompt to an agent whose prompt is
@@ -100,7 +103,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		// cannot be read (a directory, a file without read permission) is
 		// not caught there; it renders below and is reported with the read
 		// error.
-		if _, err := os.Stat(promptTemplateSourcePath(c.cityPath, a.PromptTemplate)); err != nil {
+		if _, err := os.Stat(promptTemplateSourcePath(c.cityPath, promptTemplate)); err != nil {
 			continue
 		}
 
@@ -136,7 +139,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		packDirs := c.cfg.PackDirsForRig(ctx.RigName)
 
 		var renderErrs bytes.Buffer
-		prompt := renderPrompt(fsys.OSFS{}, c.cityPath, cityName, a.PromptTemplate, ctx, c.cfg.Workspace.SessionTemplate, &renderErrs, packDirs, fragments, nil)
+		prompt := renderPrompt(fsys.OSFS{}, c.cityPath, cityName, promptTemplate, ctx, c.cfg.Workspace.SessionTemplate, &renderErrs, packDirs, fragments, nil)
 		// Measure the startup prompt launch would send: the beacon is
 		// prepended exactly as resolveTemplate does. Its timestamp is
 		// fixed-width, so the zero time yields the same byte count. The
@@ -169,7 +172,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		case delivery.OversizedFallback:
 			note(doctor.StatusWarning, fmt.Sprintf("%s: nudge-fallback: prompt exceeds the delivery budget for runtime %q; falls back to a post-start nudge (configured_mode=%s effective_mode=%s raw_bytes=%d raw_limit=%d argv_bytes=%d argv_limit=%d)", a.QualifiedName(), effProvider, configuredMode, delivery.EffectiveMode, delivery.RawBytes, maxPromptSuffixRawBytes, delivery.ArgvBytes, maxPromptSuffixQuotedBytes))
 		case renderErrs.Len() > 0:
-			note(doctor.StatusWarning, promptRenderWarningDetail(a.QualifiedName(), a.PromptTemplate, prompt != "", renderErrs.String()))
+			note(doctor.StatusWarning, promptRenderWarningDetail(a.QualifiedName(), promptTemplate, prompt != "", renderErrs.String()))
 		}
 	}
 

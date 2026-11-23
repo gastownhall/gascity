@@ -57,12 +57,53 @@ the drain-pending hint, so a claim makes no socket call.
 
 ### Admission
 
-Since the cutover (C9), a city that selects `v2` latches it from config
-alone, and its passes act. The latch still refuses v2 when the composed
-config enables a feature v2 defers (`v2LatchRefusals`: `depends_on`,
+Since the cutover (C9), a city that selects `v2` latches it from config,
+and its passes act. The latch still refuses v2 when the composed config
+enables a feature v2 defers (`v2LatchRefusals`: `depends_on`,
 `max_session_age`, chat auto-suspend, an unadmitted runtime), and a city
 whose class stores fail C0.7 does not boot. An explicit `v2` that is
 refused never falls back to legacy: set `session_reconciler = "legacy"`.
+
+v2 runs on tmux, acp and subprocess (the allowlist,
+`v2SessionRuntimesAdmitted`), and on an exec session runtime
+(`exec:<script>`, or a pack's `[runtimes.<name>]`) whose live handshake is
+v2-ready: it declares `observe.v1` and `report-attachment`, and
+`observe.v1` obliges `observe`, `inventory` and `kill-object`
+(`cmd/gc/exec_runtime_readiness.go`; PAR-EXEC). Any other exec runtime is
+refused, the refusal's fix naming the capabilities its handshake lacks, or
+the error that kept it from being read. `input-fence` is not required:
+doctor warns when v2 runs without it.
+
+The handshake is the one thing the admission decision reads that is not
+config. `execReadiness` runs `<script> protocol` (10s bound, the city's
+name and path in its env, as the provider runs it) once per version of the
+script file (its resolved path, size, modification time and inode) and
+city, and remembers the answer: a handshake until the file changes, an
+error for the handshake's 30s retry window. Concurrent latches that miss
+wait for one probe. Within one process the latch, a provider swap
+(`v2ProviderSwapRefusal`), the default resolution and doctor share that
+answer, so they agree; each process (`gc start`, the controller it starts,
+`gc doctor`) probes once for itself, and C0.8 catches a script that answers
+the built provider otherwise. The same handshake's
+`locality` decides whether an `exec:` or pack runtime counts as remote for
+the storage verbs (`execRuntimeDeclaresLocal`; absent or unknown is remote).
+
+At boot, C0.8 asks the provider the city built, not the probe: every leaf
+that reports v2 readiness (`runtime.V2ReadinessReporter`) must have no
+gaps in its own handshake. A gap refuses the boot (alert `boot-refused`:
+the script answers the provider otherwise than it answered the probe) and
+forgets the remembered handshakes, so the next latch probes again (an unset
+key then falls back to legacy); a handshake that cannot be read is retried
+with the boot backoff, no sooner than the provider's 30s handshake retry.
+A v2 provider swap runs the same check on the provider it would swap to,
+and refuses on a gap or an unread handshake.
+
+An unset key on a v2-ready exec runtime resolves to v2 like any other
+admitted runtime (owner decision D6): the handshake opted the city in, so
+the controller logs it at boot, a reload that makes it the pending mode says
+so, and the `daemon-session-reconciler` check warns until
+`session_reconciler` is set. An `exec:` or pack runtime is remote for the
+storage verbs unless its handshake declares `locality: "local"`.
 
 v2 accepts and ignores the identity circuit breaker and the two stall
 timeouts (`v2IgnoredSettings`, mc-ymynp): the work ladder replaces them,
@@ -71,7 +112,7 @@ controller logs each one as deprecated at boot, and doctor warns. Legacy
 still honours them, and only a legacy controller refuses a wake for an open
 respawn circuit (`wakeWillNotStart`).
 
-An unset key resolves from config alone too (`resolveReconcilerMode`,
+An unset key resolves from config too, with the same exec probe (`resolveReconcilerMode`,
 `cmd/gc/reconcile_mode.go`, with `v2DefaultFallbacks` in
 `cmd/gc/reconcile_default.go`), so the latch, `gc start` and doctor agree.
 It is v2 unless `v2DefaultFallbacks` names a reason, and then legacy, with
@@ -353,7 +394,7 @@ Every other field is cumulative or current.
 
 | Fields | What |
 |---|---|
-| `boot` | What boot still waits on: `capabilities` (C0.7's read of the class stores has not passed), `census` (the boot census has not passed), `gate` (no pass has completed with the boot gate open), `ready`, or `no-store` (MAINT-003: the startup step found no bead store, so no workers; latched) |
+| `boot` | What boot still waits on: `capabilities` (C0.7's read of the class stores has not passed), `runtime` (C0.8's read of the exec runtimes' handshakes has not passed), `census` (the boot census has not passed), `gate` (no pass has completed with the boot gate open), `ready`, or `no-store` (MAINT-003: the startup step found no bead store, so no workers; latched) |
 | `keys`, `depth_hot`, `depth_resync`, `processing`, `dirty`, `deferred`, `timers` | Queue state |
 | `oldest_hot_ms`, `oldest_resync_ms`, `longest_in_flight_ms` | The oldest queued key per lane, and the longest reconcile in flight |
 | `adds`, `dropped_adds` | Accepted adds by reason kind since the last record; adds refused after shutdown |
@@ -511,7 +552,7 @@ whatever main already has.
 | A5 | A drain-ack stop finalizes only on proven, complete runtime absence. Every re-kill re-certifies first. The close is atomic and comes before the stop | GUAR-005 | The drain-ack tests in `session_reconciler_test.go` | **Adopt** at P4.2. A partial or uncertain observation never finalizes |
 | A6 | Never terminate an attached user's pane, and kill only the exact certified pane | GUAR-006 | `TestAutoSuspendSkipsAttachedSessions` | **Adopt** at P4.2 (drain and stop) and P4.4 (chat auto-suspend) |
 | A7 | Nudges never inject unguarded keystrokes: every tmux send-keys is wrapped in an if-shell token guard | GUAR-007 | None. **Unmet on main under both reconcilers**: tmux nudges call send-keys with no guard (`SendKeysDebounced` for the text and the Enter, and `sendLiteralText`, in `internal/runtime/tmux/tmux.go`) | **Adopt; owner P4 (nudge delivery)**. The gap is in the effect path, so v2 does not widen it, but P4.3's nudge effects must add the guard, and A7 is unmet until they do |
-| A8 | Each due nudge is claimed by one deliverer at a time and delivered at least once, to the right session, across a controller restart. A nudge is delivered again only after an attempt whose outcome is unknown: a crash, timeout or lost acknowledgement between the delivery and its ack, such as an API crash at X12's K3, or a failed close at K5, followed by a same-key retry. A conversation-lane repeat (a re-take after a lapsed lease, or the take of an op released after an attempt whose outcome is unknown) reuses the op's delivery key (`gc:<key>`), unless the runtime refused that key, which a runtime does only for a key that never landed. Every other lane take mints a new key, one after a definite non-delivery included. A nudge-queue repeat reuses the key its batch was pinned to at claim (`DeliveryBatch`), except in two cases: when the bookkeeping for a withheld member of the batch fails (dead-lettering it on a fence mismatch, or withdrawing it), the rest of the batch goes out under a new key (`rekeyQueuedNudgesAfterFailedBookkeeping`), and the hook drain (`claimDueQueuedNudgesForTarget`) delivers into the agent's hook output with no key. A runtime that deduplicates by key (`Caps.Dedup`) drops a repeat under the same key, so the effect lands at most once per key. An adopted legacy API op runs again under its one key, `gc:<op id>:1` (`legacyop.Admission.DeliveryKey`), and such a runtime drops that repeat only when the first run sent the message live. A message the first run queued is delivered by the queue under the queue's own key (`worker.MessageRequest.DeliveryKey`): the retry's lookup misses it, and the message is delivered again (open bug ga-udhujn). The two nudge-queue exceptions and the legacy op's queued message can land twice even on such a runtime. On every runtime, the conversation lane records on the op the last attempt whose outcome is unknown (`maybe_delivered`). The lane's repeat to a `Caps.Dedup` runtime looks its key up first, and a delivery the runtime already holds is replayed, not sent again. On a runtime that cannot deduplicate, the lane's redelivered text carries the plain line "(this message may repeat an earlier one)", with no id: as the text's last line or, in a batch of only notices rendered as a system-reminder block (tmux and the hook), as the last line inside the block (`RenderDelivery`). No nudge-queue or legacy-op repeat carries that line. A lane op declared `at_most_once` is never delivered again: its ambiguous attempt closes `failed{ambiguous_delivery}`. Once NQ-3b wires the queue-mode shim (`cmd/gc/nudge_queue_shim.go`, no production caller yet), a mode switch adds repeats. A move clears an item's `DeliveryBatch`, so an item whose send under the old key had an unknown outcome repeats under a new key, which a `Caps.Dedup` runtime cannot drop. Three others follow no unknown outcome: a claimant still on the old mode can deliver an item the shim also moves, a crash between the move's two steps can deliver an item twice when the destination delivers the copy before the move re-runs, and the open duplicate ga-c9fwn7 queues a wait reminder again after the beads queue delivered it | GUAR-008 | The store-backed nudge queue: `TestClaimDueQueuedNudgesClaimsOnceUntilAck`, `TestBeadsNudgeQueueClaimHasExactlyOneWinner`, `TestDispatchAllQueuedNudgesDeliversAndAcks`. The two claim tests prove a claim has one winner until its ack, and the dispatch test proves one injection on a fault-free dispatch. None injects a fault between the delivery and its ack, and none crosses a restart. The file queue (in production) and the beads queue (no production caller yet) are both at least once (DES-NQ §9, as the header of `cmd/gc/nudge_queue_shim.go` records): a delivery whose ack is lost stays in flight until its lease expires, then is redelivered (`cmd/gc/nudge_queue_lock_policy.go`). X12 (`test/conversationlane/x12_matrix_test.go`) accepts more than one execution only in the window between an effect and its ack (API K3 or K5 with a retry) | **Adopt, amended**, at P4.3. Exactly-once delivery is not a goal: no path can close the gap between an effect and its ack, and a keystroke runtime has no key to deduplicate on. A restart-crossing test of the at-least-once bound is still owed. Until P4.3 the nudge patrol fallback runs as maintenance in both modes |
+| A8 | Each due nudge is claimed by one deliverer at a time and delivered at least once, to the right session, across a controller restart. A nudge is delivered again only after an attempt whose outcome is unknown: a crash, timeout or lost acknowledgement between the delivery and its ack, such as an API crash at X12's K3, or a failed close at K5, followed by a same-key retry. A conversation-lane repeat (a re-take after a lapsed lease, or the take of an op released after an attempt whose outcome is unknown) reuses the op's delivery key (`gc:<key>`), unless the runtime refused that key, which a runtime does only for a key that never landed. Every other lane take mints a new key, one after a definite non-delivery included. A nudge-queue repeat reuses the key its batch was pinned to at claim (`DeliveryBatch`), except in two cases: when the bookkeeping for a withheld member of the batch fails (dead-lettering it on a fence mismatch, or withdrawing it), the rest of the batch goes out under a new key (`rekeyQueuedNudgesAfterFailedBookkeeping`), and the hook drain (`claimDueQueuedNudgesForTarget`) delivers into the agent's hook output with no key. A runtime that deduplicates by key (`Caps.Dedup`) drops a repeat under the same key, so the effect lands at most once per key. An adopted legacy API op runs again under its one key, `gc:<op id>:1` (`legacyop.Admission.DeliveryKey`), and such a runtime drops that repeat only when the first run sent the message live. A message the first run queued is delivered by the queue under the queue's own key (`worker.MessageRequest.DeliveryKey`): the retry's lookup misses it, and the message is delivered again (open bug ga-udhujn). The two nudge-queue exceptions and the legacy op's queued message can land twice even on such a runtime. On every runtime, the conversation lane records on the op the last attempt whose outcome is unknown (`maybe_delivered`). The lane's repeat to a `Caps.Dedup` runtime looks its key up first, and a delivery the runtime already holds is replayed, not sent again. On a runtime that cannot deduplicate, the lane's redelivered text carries the plain line "(this message may repeat an earlier one)", with no id: as the text's last line or, in a batch of only notices rendered as a system-reminder block (tmux and the hook), as the last line inside the block (`RenderDelivery`). No nudge-queue or legacy-op repeat carries that line. A lane op declared `at_most_once` is never delivered again: its ambiguous attempt closes `failed{ambiguous_delivery}`. | GUAR-008 | The store-backed nudge queue: `TestClaimDueQueuedNudgesClaimsOnceUntilAck`, `TestBeadsNudgeQueueClaimHasExactlyOneWinner`, `TestDispatchAllQueuedNudgesDeliversAndAcks`. The two claim tests prove a claim has one winner until its ack, and the dispatch test proves one injection on a fault-free dispatch. None injects a fault between the delivery and its ack, and none crosses a restart. The file queue (in production) and the beads queue (no production caller yet) are both at least once (DES-NQ §9): a delivery whose ack is lost stays in flight until its lease expires, then is redelivered (`cmd/gc/nudge_queue_lock_policy.go`). X12 (`test/conversationlane/x12_matrix_test.go`) accepts more than one execution only in the window between an effect and its ack (API K3 or K5 with a retry) | **Adopt, amended**, at P4.3. Exactly-once delivery is not a goal: no path can close the gap between an effect and its ack, and a keystroke runtime has no key to deduplicate on. A restart-crossing test of the at-least-once bound is still owed. Until P4.3 the nudge patrol fallback runs as maintenance in both modes |
 | A9 | Routed work gets a pool member: reuse the oldest idle member, else grow, else fall back at the cap. Manual and dependency-only sole members are refused | GUAR-009 | `build_desired_state_test.go` | **Adopt** at P3 (allocator). Caps count the cache plus the intent ledger |
 | A10/A11 | A session waiting on a dependency starts once when the dependency closes. A canceled or revoked wait starts nothing | GUAR-010 | None | **Adopt** at P4.3, through a router dependency-to-waiter index. The cancellation is re-read before the start |
 | A12 | On ambiguous input, refuse with zero effects: no writes, no runtime calls | GUAR-011 | Scattered fail-closed checks; no zero-effect counters | **Adopt as house style** for every P3/P4 decide. Each refusal test asserts a zero-effect counter. The P2 skeleton meets it vacuously (`TestV2TraceOnlyControllersWriteNothing`) |

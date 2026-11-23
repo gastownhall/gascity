@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -22,14 +23,14 @@ func TestExistingGraphV2RootTakesOnlyARoot(t *testing.T) {
 	if _, err := store.Create(beads.Bead{Title: "forged", Type: "task", Metadata: map[string]string{beadmeta.Graphv2RootKeyMetadataKey: "k"}}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := existingGraphV2Root(store, recipe); err != nil || got != nil {
+	if got, err := existingGraphV2Root(beadstest.Graph(store), recipe); err != nil || got != nil {
 		t.Fatalf("existingGraphV2Root = %+v (%v), want none", got, err)
 	}
 	root, err := store.Create(beads.Bead{Title: "root", Type: "task", Metadata: map[string]string{beadmeta.Graphv2RootKeyMetadataKey: "k", beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := existingGraphV2Root(store, recipe); err != nil || got == nil || got.RootID != root.ID {
+	if got, err := existingGraphV2Root(beadstest.Graph(store), recipe); err != nil || got == nil || got.RootID != root.ID {
 		t.Fatalf("existingGraphV2Root = %+v (%v), want %s", got, err, root.ID)
 	}
 }

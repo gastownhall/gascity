@@ -42,7 +42,7 @@ func askReconcilerMode(t *testing.T, wake *controllerWake) string {
 // newControllerWiring to the reply a reader outside the controller decodes:
 // the answer is the latch, not a read of city.toml.
 func TestControllerPublishesItsLatchedReconcilerMode(t *testing.T) {
-	legacy, err := newControllerWiring(&config.City{}, noEnv, io.Discard)
+	legacy, err := newControllerWiring(&config.City{}, "", noEnv, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -161,7 +161,7 @@ func answeredBy(t *testing.T, wake *controllerWake) func(string) ([]byte, error)
 // with the caller's legs; a controller that predates the verb, and replies
 // that name no known mode, leave it unknown with the reason.
 func TestQueryControllerReconcilerModeReadsTheControllersAnswer(t *testing.T) {
-	legacy, err := newControllerWiring(&config.City{}, noEnv, io.Discard)
+	legacy, err := newControllerWiring(&config.City{}, "", noEnv, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}

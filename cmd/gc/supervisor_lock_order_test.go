@@ -148,7 +148,7 @@ shutdown_timeout = "100ms"
 	prevEnv := reconcilerModeLookupEnv
 	t.Cleanup(func() { reconcilerModeLookupEnv = prevEnv })
 	reconcilerModeLookupEnv = envOf(map[string]string{"GC_BEADS_CONDITIONAL_WRITES": "auto"})
-	if res, err := resolveReconcilerMode(mustLoadCityConfig(t, cityPath), reconcilerModeLookupEnv); err != nil || res.Reason != reconcilerDefaultV2 {
+	if res, err := resolveReconcilerMode(mustLoadCityConfig(t, cityPath), "", reconcilerModeLookupEnv); err != nil || res.Reason != reconcilerDefaultV2 {
 		t.Skipf("fixture does not resolve to the v2 default here: %+v %v", res, err)
 	}
 

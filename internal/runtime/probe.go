@@ -13,6 +13,26 @@ const (
 	ProbeUnknown
 )
 
+// HostCapabilities describes what a runtime guarantees about its sessions'
+// relationship to the controller's host. The zero value guarantees nothing,
+// which is the safe reading for a runtime that does not say.
+//
+// Unlike [ProviderCapabilities], which a constructed provider reports, these
+// are declared where the runtime's selection name is registered
+// (internal/runtime/registry), so config-time decisions — skill and MCP
+// materialization — can read them without constructing a provider.
+type HostCapabilities struct {
+	// SharesHostFilesystem is true when session processes run on the
+	// controller's host as the controller's user and read its filesystem at
+	// the same paths, so files the controller writes under an agent's scope
+	// root are what the agent reads.
+	SharesHostFilesystem bool
+	// RunsHostPreStart is true when the runtime executes the start config's
+	// PreStart commands on the controller host before launching the agent,
+	// failing the start when one fails.
+	RunsHostPreStart bool
+}
+
 // ProviderCapabilities describes what a runtime provider can report.
 // Not all providers support all wake-reason inputs.
 type ProviderCapabilities struct {
