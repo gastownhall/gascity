@@ -28,14 +28,21 @@ import (
 // The patrol interval paces attempts; the watchdog's own clock decides
 // whether an attempt is due, so the watchdog intervals (30 s for the tracking
 // sweep, 15 minutes for retention, five minutes for nudge/mail) are unchanged.
-// A pass that is not due does nothing else, and a suspended city's passes
-// reach no store. Passes on one lane never overlap,
+// A pass that is not due does nothing else, a suspended city's passes reach
+// no store, and under FS pressure each lane sheds due passes on its own
+// episode (fsPressureEpisode). Passes on one lane never overlap,
 // and lanes never wait on each other or on the orders lane.
 type storeWatchdogLane struct {
 	spec storeWatchdogSpec
 
-	// passMu serializes passes, and guards the watchdog's clocks.
+	// passMu serializes passes, and guards the watchdog's clocks and
+	// fsPressure.
 	passMu sync.Mutex
+
+	// fsPressure is the lane's own FS pressure episode: the lane sheds and
+	// forces its passes independently of the tick, the orders lane and the
+	// other watchdog lanes.
+	fsPressure fsPressureEpisode
 }
 
 // storeWatchdogKey names one store watchdog.
@@ -146,9 +153,10 @@ func (cr *CityRuntime) startStoreWatchdogLanes(ctx context.Context) storeWatchdo
 }
 
 // runStoreWatchdogLanePass is one pass of lane: nothing unless the watchdog
-// is due, nothing in a suspended city, then the watchdog body against the
-// published config. A skipped pass advances no watchdog clock, so the next
-// pass after the city resumes runs.
+// is due, nothing in a suspended city, nothing while the lane sheds FS
+// pressure, then the watchdog body against the published config. A skipped
+// pass advances no watchdog clock, so the watchdog stays due and the next
+// pass after the city resumes or the pressure episode forces it runs.
 func (cr *CityRuntime) runStoreWatchdogLanePass(ctx context.Context, lane *storeWatchdogLane) {
 	if ctx.Err() != nil {
 		return
@@ -166,6 +174,11 @@ func (cr *CityRuntime) runStoreWatchdogLanePass(ctx context.Context, lane *store
 	// A suspended city's watchdogs read no store: every one reads every
 	// scope's store, restarting the proxies suspension retired.
 	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
+		return
+	}
+	// Only a due pass of a live city counts toward the lane's pressure
+	// episode, so not-due attempts neither shed nor force anything.
+	if lane.fsPressure.shouldSkip(cr.stderr, nil, storeWatchdogLaneSafeTickTrigger+":"+string(lane.spec.key), lane.spec.work) {
 		return
 	}
 	lane.spec.run(cr, ctx, cfg, now)

@@ -143,8 +143,9 @@ func (cr *CityRuntime) resetFSPressureEpisode() {
 
 // shouldSkipTickForFSPressure gates only the patrol/poke tick path after
 // config reload and before managed-Dolt preflight, session sync, demand
-// build, and reconciliation. Order dispatch runs on its own lane and applies
-// the same gate there (ordersLaneShouldSkipForFSPressureLocked). Pressure-skipped
+// build, and reconciliation. Order dispatch and the store watchdogs run on
+// lanes of their own and apply the same rule there, each on its own
+// fsPressureEpisode. Pressure-skipped
 // ticks still drain already queued convergence requests; nudge-dispatch,
 // control-dispatcher, socket-driven convergence requests, and manual reload
 // refreshes are separate high-priority paths and are not covered by this gate.
@@ -173,5 +174,46 @@ func (cr *CityRuntime) shouldSkipTickForFSPressure(trace *sessionReconcilerTrace
 	cr.fsPressureEpisodeLogged = true
 	recordFSPressureSkippedTickTrace(trace, trigger, status, cr.fsPressureConsecutiveSkips)
 	recordFSPressureSkippedTickEvent(cr.rec, cr.cityName, trigger, status, cr.fsPressureConsecutiveSkips, fsPressureOutcomeSkipped)
+	return true
+}
+
+// fsPressureEpisode is one lane's run of consecutive passes shed under FS
+// pressure: the tick's rule (skip while pressure is high, force a pass after
+// maxConsecutiveFSPressureSkips so the work cannot starve) on counters of the
+// lane's own. Lanes shed independently and end an episode only when they see
+// pressure drop or force a pass, so a tick or another lane forced through
+// every few seconds never resets this lane's count. The zero value is an
+// empty episode; the owning lane serializes calls.
+type fsPressureEpisode struct {
+	skips  int
+	logged bool
+}
+
+// shouldSkip reports whether a pass of work should be shed now. It logs the
+// skip once per episode and the forced pass every time, naming work, and
+// records the decision on trace under trigger. The supervisor skipped-tick
+// event stays the tick's, so its counts keep meaning ticks.
+func (e *fsPressureEpisode) shouldSkip(stderr io.Writer, trace *sessionReconcilerTraceCycle, trigger, work string) bool {
+	status, ok := currentFSPressureStatus(stderr)
+	if !ok || !status.High {
+		*e = fsPressureEpisode{}
+		return false
+	}
+	if e.skips >= maxConsecutiveFSPressureSkips {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), forcing %s after %d skipped passes\n", //nolint:errcheck // best-effort stderr
+				status.Avg60, status.Threshold, work, e.skips)
+		}
+		recordFSPressureForcedTickTrace(trace, trigger, status, e.skips)
+		*e = fsPressureEpisode{}
+		return false
+	}
+	e.skips++
+	if !e.logged && stderr != nil {
+		fmt.Fprintf(stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), skipping %s\n", //nolint:errcheck // best-effort stderr
+			status.Avg60, status.Threshold, work)
+	}
+	e.logged = true
+	recordFSPressureSkippedTickTrace(trace, trigger, status, e.skips)
 	return true
 }

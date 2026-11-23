@@ -130,9 +130,9 @@ func (s *closedHistoryBlockingStore) List(q beads.ListQuery) ([]beads.Bead, erro
 // watchdog due and the order rescan, index migration and managed-Dolt
 // preflight out of the way. Its empty city path skips the retention
 // watchdog's backup-age check, as on every directly-built test runtime.
-func storeWatchdogTestRuntime(t *testing.T, store beads.Store, od orderDispatcher, patrol string) *CityRuntime {
+func storeWatchdogTestRuntime(t *testing.T, store beads.Store, od orderDispatcher) *CityRuntime {
 	t.Helper()
-	cr := ordersLaneTestRuntime(t, od, patrol, nil)
+	cr := ordersLaneTestRuntime(t, od, "1h", nil)
 	cr.cityPath = ""
 	cr.standaloneCityStore = store
 	cr.wispIndexMigrationApplied = true
@@ -149,7 +149,7 @@ func TestStoreWatchdogLanesRunWhileRetentionIsBlocked(t *testing.T) {
 	seed := append(storeWatchdogSeed(now), mailSeed("mail-stale", now.Add(-nudgeMailSweepDefaultMailTTL-time.Minute)))
 	store := newClosedHistoryBlockingStore(beads.NewMemStoreFrom(100, seed, nil))
 	od := &recordingOrderDispatcher{}
-	cr := storeWatchdogTestRuntime(t, store, od, "1h")
+	cr := storeWatchdogTestRuntime(t, store, od)
 	ctx := context.Background()
 
 	retentionDone := make(chan struct{})
@@ -308,7 +308,7 @@ func TestStoreWatchdogLanesRunDuringColdStartReconcile(t *testing.T) {
 func TestStoreWatchdogLanePassKeepsWatchdogIntervals(t *testing.T) {
 	now := time.Now()
 	store := &watchdogOpCountingStore{Store: beads.NewMemStoreFrom(100, storeWatchdogSeed(now), nil)}
-	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{}, "1h")
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{})
 	for _, lane := range cr.storeWatchdogLanesOf() {
 		cr.runStoreWatchdogLanePass(context.Background(), lane)
 	}
@@ -339,7 +339,7 @@ func TestStoreWatchdogLanePassKeepsWatchdogIntervals(t *testing.T) {
 func TestStoreWatchdogLanesSkipSuspendedCity(t *testing.T) {
 	now := time.Now()
 	store := &watchdogOpCountingStore{Store: beads.NewMemStoreFrom(100, storeWatchdogSeed(now), nil)}
-	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{}, "1h")
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{})
 	suspended := *cr.cfg
 	suspended.Workspace.Suspended = true
 	cr.cfg = &suspended
