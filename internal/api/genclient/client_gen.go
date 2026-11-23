@@ -5361,6 +5361,24 @@ type RunsListOutputBody struct {
 	StatusCounts RunStatusCounts `json:"status_counts"`
 }
 
+// RuntimeSessionStatus defines model for RuntimeSessionStatus.
+type RuntimeSessionStatus struct {
+	AgentName   string `json:"agent_name"`
+	Id          string `json:"id"`
+	Provider    string `json:"provider"`
+	Running     bool   `json:"running"`
+	RuntimeName string `json:"runtime_name"`
+	Template    string `json:"template"`
+}
+
+// RuntimeSessions defines model for RuntimeSessions.
+type RuntimeSessions struct {
+	ObservedAt       time.Time               `json:"observed_at"`
+	ProviderComplete bool                    `json:"provider_complete"`
+	Schema           string                  `json:"schema"`
+	Sessions         *[]RuntimeSessionStatus `json:"sessions"`
+}
+
 // ScopeGroup defines model for ScopeGroup.
 type ScopeGroup = map[string]interface{}
 
@@ -7320,6 +7338,7 @@ type StatusBody struct {
 
 	// Running Number of running agent processes.
 	Running             int64                      `json:"running"`
+	RuntimeSessions     *RuntimeSessions           `json:"runtime_sessions,omitempty"`
 	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty"`
 	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty"`
 

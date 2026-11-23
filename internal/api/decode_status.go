@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 )
 
 // statusViewFromGen translates the generated StatusBody (served by GET
@@ -23,6 +24,16 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 			TotalAgents:   int(body.Agents.Total),
 			RunningAgents: int(body.Agents.Running),
 		},
+	}
+	if body.RuntimeSessions != nil {
+		p := body.RuntimeSessions
+		out.RuntimeSessions = &observation.RuntimeSessions{Schema: p.Schema, ObservedAt: p.ObservedAt, ProviderComplete: p.ProviderComplete}
+		if p.Sessions != nil {
+			out.RuntimeSessions.Sessions = make([]observation.RuntimeSessionStatus, 0, len(*p.Sessions))
+			for _, row := range *p.Sessions {
+				out.RuntimeSessions.Sessions = append(out.RuntimeSessions.Sessions, observation.RuntimeSessionStatus{ID: row.Id, Template: row.Template, AgentName: row.AgentName, RuntimeName: row.RuntimeName, Provider: row.Provider, Running: row.Running})
+			}
+		}
 	}
 	if body.Partial != nil {
 		out.Partial = *body.Partial

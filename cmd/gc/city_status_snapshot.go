@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -59,6 +60,7 @@ func observeStatusTargetsParallel(
 }
 
 type cityStatusSnapshot struct {
+	RuntimeSessions *observation.RuntimeSessions
 	CityName        string
 	CityPath        string
 	EffectiveAPIURL string
@@ -491,6 +493,7 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	degraded := len(signals) > 0
 	running := snapshot.Controller.Running
 	return StatusJSON{
+		RuntimeSessions:   snapshot.RuntimeSessions,
 		SchemaVersion:     "1",
 		OK:                true,
 		CityName:          snapshot.CityName,
