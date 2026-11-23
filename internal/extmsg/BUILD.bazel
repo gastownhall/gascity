@@ -52,6 +52,7 @@ go_test(
         "system_reminder_test.go",
         "testenv_import_test.go",
         "transcript_backfill_test.go",
+        "transcript_inbound_test.go",
         "transcript_lockpools_test.go",
         "transcript_publish_test.go",
         "transcript_sequence_test.go",
