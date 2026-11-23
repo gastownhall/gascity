@@ -1624,6 +1624,7 @@ go_test(
         "cwd_fallback_guard_test.go",
         "dead_assignee_event_test.go",
         "dead_assignee_repair_test.go",
+        "demand_claim_view_test.go",
         "demand_claimed_work_test.go",
         "demand_cross_store_gate_test.go",
         "demand_divergence_test.go",
