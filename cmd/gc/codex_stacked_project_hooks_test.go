@@ -321,3 +321,79 @@ func TestCodexProjectHooksFallbackWhenUserLayerDoesNotCover(t *testing.T) {
 		})
 	}
 }
+
+// TestCodexStackedHooksGuardsKeepTodaysStaging pins the cases the stacked
+// project-hook decision must leave alone even when a covering user hooks file
+// exists: runtimes whose sessions do not read the controller host's
+// filesystem (k8s, hybrid, an acp agent), an installer that owns the file
+// (install_agent_hooks naming codex) and a provider whose hook files do not
+// stack (claude). Each stages and fingerprints exactly as with no user file.
+// These pass on the pre-change code by design: they guard the decision's
+// scope, not a regression it fixes.
+func TestCodexStackedHooksGuardsKeepTodaysStaging(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(cfg *config.City)
+		// acpRouting runs the tick on a session provider that routes ACP.
+		acpRouting bool
+	}{
+		{name: "k8s session provider", mutate: func(cfg *config.City) { cfg.Session.Provider = "k8s" }},
+		{name: "hybrid session provider", mutate: func(cfg *config.City) { cfg.Session.Provider = "hybrid" }},
+		{name: "acp agent", mutate: func(cfg *config.City) {
+			spec := cfg.Providers["codex"]
+			spec.SupportsACP = boolPtr(true)
+			cfg.Providers["codex"] = spec
+			cfg.Agents[0].Session = "acp"
+		}, acpRouting: true},
+		{name: "install_agent_hooks names codex", mutate: func(cfg *config.City) { cfg.Agents[0].InstallAgentHooks = []string{"codex"} }},
+		{name: "claude agent", mutate: func(cfg *config.City) {
+			cfg.Providers["claude"] = config.ProviderSpec{Command: "echo", PromptMode: "none"}
+			cfg.Agents[0].Provider = "claude"
+		}},
+	}
+	type outcome struct {
+		present bool
+		content string
+		core    string
+	}
+	observe := func(t *testing.T, cityPath string, cfg *config.City, acpRouting bool) (outcome, string) {
+		t.Helper()
+		var sp runtime.Provider = runtime.NewFake()
+		if acpRouting {
+			sp = transportFake{runtime.NewFake()}
+		}
+		var stderr strings.Builder
+		result := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, sp, nil, &stderr)
+		if len(result.State) != 1 {
+			t.Fatalf("desired state size = %d, want 1; stderr:\n%s", len(result.State), stderr.String())
+		}
+		_, tp := onlyDesiredSession(t, result.State)
+		workHook := filepath.Join(tp.WorkDir, ".codex", "hooks.json")
+		got := outcome{core: runtime.CoreFingerprint(templateParamsToConfig(tp))}
+		data, err := os.ReadFile(workHook)
+		switch {
+		case err == nil:
+			got.present, got.content = true, string(data)
+		case !os.IsNotExist(err):
+			t.Fatalf("read %s: %v", workHook, err)
+		}
+		return got, workHook
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			userHooks := isolateCodexUserHome(t)
+			cityPath, cfg := codexHookStagingCity(t)
+			tc.mutate(cfg)
+			baseline, workHook := observe(t, cityPath, cfg, tc.acpRouting)
+			if err := os.Remove(workHook); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("remove baseline project hooks: %v", err)
+			}
+
+			writeStackedTestFile(t, userHooks, coveringUserHooks(t, "a3558786"))
+			got, _ := observe(t, cityPath, cfg, tc.acpRouting)
+			if got != baseline {
+				t.Fatalf("covering user hooks changed staging:\n got %+v\nwant %+v (no user file)", got, baseline)
+			}
+		})
+	}
+}
