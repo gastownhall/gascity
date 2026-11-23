@@ -220,18 +220,24 @@ fi
 
 # Backup freshness: check each database's newest restorable backup, read from
 # the backup remote's manifest. See backup_commit_mtime_for_db.
-# Every user database is in scope. DBs without a configured <db>-backup
-# remote are reported as a coverage gap rather than silently excluded —
-# the exclusion is how unconfigured production DBs went unbacked-up until
-# journal corruption made them unrecoverable (#3176). mol-dog-backup.sh
-# auto-configures the remote on its next run, so this warning self-heals
-# unless the backup dog itself is failing.
+# Every user database is in scope. A database counts as covered when it
+# registers bd's "default" backup (what mol-dog-backup.sh configures through
+# `bd backup init`) or the legacy <db>-backup remote — the same names journal
+# recovery restores from. DBs with neither are reported as a coverage gap
+# rather than silently excluded — the exclusion is how unconfigured
+# production DBs went unbacked-up until journal corruption made them
+# unrecoverable (#3176). The gap does not always heal on its own:
+# mol-dog-backup.sh registers a backup only when bd reports no destination,
+# and bd answers from .beads/dolt-backup.json, not from the database. A
+# database restored from backup comes back with no backup registered while
+# that file survives, so journal recovery registers the backup again itself,
+# and this warning is what reports a database still missing one.
 BACKUP_ELIGIBLE_DBS=""
 BACKUP_STALE_ITEMS=""
 for db in $USER_DBS; do
     db_dir="$DOLT_DATA_DIR/$db"
     if [ -d "$db_dir/.dolt" ]; then
-        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
+        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qxF -e default -e "${db}-backup"); then
             BACKUP_ELIGIBLE_DBS="$BACKUP_ELIGIBLE_DBS $db"
         else
             append_backup_stale "$db backup remote missing"

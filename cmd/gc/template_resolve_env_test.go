@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"maps"
 	"os"
@@ -557,5 +558,40 @@ func TestResolveTemplateScrubsControllerTokenFromOperatorEnv(t *testing.T) {
 		t.Errorf("OperatorEnv omits %s; want present and pinned empty, same as Env", convergence.TokenEnvVar)
 	} else if val != "" {
 		t.Errorf("OperatorEnv[%s] = %q, want empty (a config-authored literal must not survive into the fingerprint hash-preimage)", convergence.TokenEnvVar, val)
+	}
+}
+
+// TestResolveTemplateAgentEnvWithholdsOpenCodePermissionDefault pins the
+// documented override for the opencode preset's OPENCODE_PERMISSION default:
+// an agent without env inherits the preset catch-all, and an agent setting the
+// key to "" resolves it present and empty, which the session runtimes treat
+// as withhold so the project's opencode.json permission rules apply.
+func TestResolveTemplateAgentEnvWithholdsOpenCodePermissionDefault(t *testing.T) {
+	base := "builtin:opencode"
+	providers := map[string]config.ProviderSpec{"opencode": {Base: &base}}
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{name: "preset default", env: nil, want: `{"*":"allow"}`},
+		{name: "agent withholds", env: map[string]string{"OPENCODE_PERMISSION": ""}, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params := acpOmittedArgsBuildParams(t, providers, &bytes.Buffer{})
+			agent := &config.Agent{Name: "worker", Provider: "opencode", Env: tc.env}
+			tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate: %v", err)
+			}
+			got, ok := tp.Env["OPENCODE_PERMISSION"]
+			if !ok {
+				t.Fatalf("OPENCODE_PERMISSION missing from session env, want %q", tc.want)
+			}
+			if got != tc.want {
+				t.Fatalf("OPENCODE_PERMISSION = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

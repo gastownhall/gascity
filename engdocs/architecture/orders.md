@@ -175,7 +175,10 @@ the tick never waits on order gates.
   `maxConsecutiveFSPressureSkips`+1 passes. After the gate, a pass runs
   the managed-Dolt preflight and the periodic order rescan, installs any
   staged dispatcher (a reload's, or the rescan's), runs the
-  tracking/nudge-mail watchdogs, and calls `dispatch()`. A panic
+  tracking/nudge-mail watchdogs, and calls `dispatch()`. The preflight
+  waits at most 30 seconds for a Dolt recover, counted from when the
+  recover started; past that the pass carries on and the recover keeps
+  running, so a slow recover never holds up dispatch. A panic
   is recovered per pass (`safeTick`). Each pass is its own trace cycle
   with trigger `orders`.
 - **Reloads never wait on a pass.** A pass holds the lane's `passMu` for the
@@ -316,7 +319,16 @@ Violations indicate bugs.
   order-run beads. Formula orders stamp the wisp root or failure tracking
   bead; exec orders stamp the tracking bead before the command runs. Subsequent
   trigger checks use `AfterSeq` filtering to avoid reprocessing
-  already-handled events.
+  already-handled events. The dispatcher also keeps an in-memory floor per
+  event order: the event head it read before a check that matched nothing.
+  A check reads past the larger of the run cursor and the floor, so it reads
+  only the events recorded since the previous check, and an order whose event
+  stays absent never rescans the event history. An order that has never run
+  starts at the head read when its dispatcher was built, before the
+  controller records `controller.started`, so events recorded between boot
+  and its first check still fire it. Floors and starts carry across
+  dispatcher rebuilds; a check that cannot read the log is logged and moves
+  nothing.
 
 - **Dispatch goroutines are drained on controller exit**: Each due
   order launches a goroutine whose completion is tracked by an
@@ -460,6 +472,21 @@ boundaries.
   replay the same event. Trade-off: a controller crash after the cursor stamp
   and before exec start drops that event for idempotent exec orders; for
   non-idempotent exec orders this is the safer failure mode.
+
+- **A never-run event order does not backfill**: an event order that has no
+  run cursor starts at the event head read when its dispatcher was built:
+  at controller start, before the controller records `controller.started`,
+  or at the reload or rescan that added the order. Events recorded before
+  then do not fire it; every matching event recorded after does, however
+  many passes the order's first check waits. A rebuild keeps the start and
+  the floor of every order the previous dispatcher had. Both are memory
+  only: after a controller restart, an order that has run reads once from
+  its run cursor, catching up on events recorded while no controller
+  watched, and one that has not starts at the new controller's head. An
+  order that last ran long ago pays that read once per restart.
+  `gc order check` and `GET /v0/orders/check` evaluate from the run cursor
+  alone: they do not see the dispatcher's floor, and for an order that has
+  never run they read the whole retained history.
 
 - **No hot-add of orders**: Order discovery runs on controller
   start and config reload (via fsnotify). Adding a new

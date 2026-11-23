@@ -8,6 +8,10 @@ package main
 // would let the heal orphan it. The awake heal rests on the inventory reading
 // the row's own runtime alive.
 //
+// A21's parked clear (ga-ylpbsy.16) is one too: it rests on A21's closable
+// read (freshClosable), so it clears a parked seat's stranded marker only
+// while the fresh read still finds nothing live under the row's name.
+//
 // So the heal is a transaction (runTx) that needs the runtime: under the
 // runtime name lock, which a v2 start holds across its provider Start (an
 // abandoned start until that call returns, P3), and the row's session
@@ -64,9 +68,9 @@ func healCause(v txView) string {
 	switch rt := v.RT; {
 	case rt.Class == rtUnsupported:
 		return causeLivenessUnsupported
-	case v.It.Reason == decideAwakeHeal && (!rt.Alive() || compareIdentity(v.Row, rt.Identity) != identityCurrent):
+	case (v.It.Reason == decideAwakeHeal || v.It.Reason == decideSatisfiedWake) && (!rt.Alive() || compareIdentity(v.Row, rt.Identity) != identityCurrent):
 		return causeRuntimeNotOwn
-	case v.It.Reason == decideAwakeHeal:
+	case v.It.Reason == decideAwakeHeal || v.It.Reason == decideSatisfiedWake:
 	case rt.Class == rtUnknown:
 		return causeLivenessUnknown
 	case v.It.Reason == decideSquatterHeal && !squatterProven(v.Row, rt):

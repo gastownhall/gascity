@@ -83,7 +83,7 @@ func agreementRows() []agreementRow {
 			// is the #2763 shape the fallback exists for — a root-only molecule
 			// whose root IS the unit of work. This one was compiled with real
 			// child steps, so gc.workflow_expanded is stamped and the root is
-			// only ever claimable via gc.routed_to (#5900). Counting it would
+			// no longer executable itself (#5900). Counting it would
 			// be permanent demand for a row every worker's claim matcher
 			// refuses: seat spawns, hook reads empty, drains, counted again.
 			name: "fully-expanded workflow root with only run_target",
@@ -91,6 +91,31 @@ func agreementRows() []agreementRow {
 				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
 				beadmeta.RunTargetMetadataKey:        agreementTemplate,
 				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			name: "fully-expanded workflow root with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-root", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.RoutedToMetadataKey:         agreementTemplate,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			name: "scope latch with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-scope", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindScope,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			name: "spec latch with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-spec", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindSpec,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
 			}},
 			wantServable: false,
 		},
@@ -532,8 +557,8 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 	query := agent.EffectiveWorkQueryFor(config.QueryTopology{})
 	args := tierThreeReaderArgs(t, query, agreementTemplate)
 
-	opts, metaWant := parseReadyArgsForTest(t, args)
-	legacyOpts, legacyMetaWant := parseReadyArgsForTest(t, tierThreeLegacyReaderArgs(t, query, agreementTemplate))
+	matches := parseReadyArgsForTest(t, args)
+	legacyMatches := parseReadyArgsForTest(t, tierThreeLegacyReaderArgs(t, query, agreementTemplate))
 	assertLegacyTierFilterUnchanged(t, query)
 
 	for _, row := range append(agreementRows(), holdLabelAgreementRows()...) {
@@ -541,7 +566,7 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 			bead := postCanonicalizeBead(cfg, row.bead)
 
 			_, counted := demandServableForTemplates(cfg, bead, templates)
-			served := workerIsServed(bead, opts, metaWant) || legacyWorkflowTierServes(bead, legacyOpts, legacyMetaWant)
+			served := workerIsServed(bead, matches) || legacyWorkflowTierServes(bead, legacyMatches)
 
 			if counted != served {
 				t.Fatalf("AGREEMENT VIOLATED for %s: the Go demand predicate says %v, the generated pool-demand query form says %v",
@@ -563,8 +588,8 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 // still speak for (workflowRunTargetFallbackEligible, #5900). Mirroring those
 // jq clauses here is the single restatement in this conformance, and
 // assertLegacyTierFilterUnchanged is what keeps it honest.
-func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) bool {
-	if !workerIsServed(bead, opts, metaWant) {
+func legacyWorkflowTierServes(bead beads.Bead, matches func(beads.Bead) bool) bool {
+	if !workerIsServed(bead, matches) {
 		return false
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.WorkflowExpandedMetadataKey]) == "true" {
@@ -573,18 +598,18 @@ func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metada
 	return strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey]) == ""
 }
 
-// workerIsServed is what the WORKER ends up holding: the reader's own filter
-// (filterReadyBeads, behind `gc ready`) and then the hook's Go post-filter over
+// workerIsServed is what the WORKER ends up holding: the reader's own row
+// predicate (readywork.Query.Matcher, behind `gc ready`) and then the hook's Go
+// post-filter over
 // that output (filterUnreadyHookCandidates). Both are production code and both
 // are part of the serving path — comparing the demand predicate against only the
 // first would miss every exclusion the hook applies afterwards, which is exactly
 // where the two use different comparisons (see demandRowServable).
-func workerIsServed(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) bool {
-	readerServed := filterReadyBeads([]beads.Bead{bead}, opts, metaWant)
-	if len(readerServed) != 1 {
+func workerIsServed(bead beads.Bead, matches func(beads.Bead) bool) bool {
+	if !matches(bead) {
 		return false
 	}
-	encoded, err := json.Marshal(readerServed)
+	encoded, err := json.Marshal([]beads.Bead{bead})
 	if err != nil {
 		return false
 	}
@@ -700,23 +725,84 @@ func splitShellWords(s string) []string {
 }
 
 // parseReadyArgsForTest parses argv through the REAL `gc ready` flag surface and
-// the real metadata-filter parser, so the conformance runs the production
-// serving semantics rather than a test's reading of them.
-func parseReadyArgsForTest(t *testing.T, args []string) (readyOpts, []metadataFieldFilter) {
+// returns the reader's real row predicate, so the conformance runs the
+// production serving semantics rather than a test's reading of them.
+func parseReadyArgsForTest(t *testing.T, args []string) func(beads.Bead) bool {
 	t.Helper()
-	var opts readyOpts
+	var opts readyFlags
 	var includeEphemeral, jsonOut bool
 	cmd := &cobra.Command{Use: "ready"}
 	registerReadyFlags(cmd, &opts, &includeEphemeral, &jsonOut)
 	if err := cmd.Flags().Parse(args); err != nil {
 		t.Fatalf("parsing the generated tier's flags %v: %v", args, err)
 	}
-	if len(opts.metadataFields) == 0 {
+	if len(opts.query.MetadataFields) == 0 {
 		t.Fatalf("parsed no metadata filters from %v; the conformance would pass vacuously", args)
 	}
-	metaWant, err := parseMetadataFieldFilters(opts.metadataFields)
+	matches, err := opts.query.Matcher()
 	if err != nil {
-		t.Fatalf("parsing metadata filters: %v", err)
+		t.Fatalf("compiling the generated tier's query: %v", err)
 	}
-	return opts, metaWant
+	return matches
+}
+
+// A bd status=blocked row reads back as "open" with bd's raw status kept in
+// SourceStatus, and the seat's ready query excludes it whatever its
+// dependencies. The claimability predicate must therefore name it as its own
+// cause, ahead of the is_blocked projection (so an explicit false cannot mask
+// the status) and behind the deferral and hold causes (so such a row keeps the
+// classification and bucket it had).
+func TestClassifyDemandRowClaimabilityStatusBlocked(t *testing.T) {
+	now := time.Now()
+	future := now.Add(time.Hour)
+	blockedTrue, blockedFalse := true, false
+	for _, tt := range []struct {
+		name string
+		bead beads.Bead
+		want demandRowClaimability
+	}{
+		{"status blocked, no projection", beads.Bead{Status: "open", SourceStatus: "blocked"}, demandRowStatusBlocked},
+		{"status blocked, projection false", beads.Bead{Status: "open", SourceStatus: "blocked", IsBlocked: &blockedFalse}, demandRowStatusBlocked},
+		{"status blocked, projection true", beads.Bead{Status: "open", SourceStatus: "blocked", IsBlocked: &blockedTrue}, demandRowStatusBlocked},
+		{"status blocked and held", beads.Bead{Status: "open", SourceStatus: "blocked", Labels: []string{beadmeta.DispatchHoldLabels[0]}}, demandRowHeld},
+		{"status blocked and deferred", beads.Bead{Status: "open", SourceStatus: "blocked", DeferUntil: &future}, demandRowDeferred},
+
+		// Regression pins: a row without the recorded status classifies as before.
+		// An EMPTY SourceStatus means the store reported none (memstore, sqlite,
+		// exec, or after a status patch), which is not status-blocked.
+		{"no recorded status, no projection", beads.Bead{Status: "open"}, demandRowBlockednessUnproven},
+		{"no recorded status, projection true", beads.Bead{Status: "open", IsBlocked: &blockedTrue}, demandRowBlockednessUnproven},
+		{"no recorded status, projection false", beads.Bead{Status: "open", IsBlocked: &blockedFalse}, demandRowClaimable},
+		{"recorded status open, projection false", beads.Bead{Status: "open", SourceStatus: "open", IsBlocked: &blockedFalse}, demandRowClaimable},
+		{"recorded status open, no projection", beads.Bead{Status: "open", SourceStatus: "open"}, demandRowBlockednessUnproven},
+		{"held", beads.Bead{Status: "open", Labels: []string{beadmeta.DispatchHoldLabels[0]}}, demandRowHeld},
+		{"deferred", beads.Bead{Status: "open", DeferUntil: &future}, demandRowDeferred},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyDemandRowClaimability(tt.bead, now); got != tt.want {
+				t.Errorf("classifyDemandRowClaimability = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Wire-to-classification pin: a bd row with status "blocked", decoded by the
+// production BdStore read, must classify as status-blocked. BdStore folds the
+// status to "open"; if a later edit to its status normalization stopped keeping
+// the raw status, the cause would silently disconnect from the predicate. The
+// native-store decode is pinned where it lives, in internal/beads.
+func TestBdStatusBlockedRowClassifiesAsStatusBlocked(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`[{"id":"bd-x","title":"parked","status":"blocked","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+	}
+	got, err := beads.NewBdStore("/city", runner).Get("bd-x")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" || got.IsBlocked != nil {
+		t.Fatalf("decoded row = status %q, IsBlocked %v; want the folded production shape (open, no projection)", got.Status, got.IsBlocked)
+	}
+	if cause := classifyDemandRowClaimability(got, time.Now()); cause != demandRowStatusBlocked {
+		t.Fatalf("classifyDemandRowClaimability(bd blocked row) = %q, want %q", cause, demandRowStatusBlocked)
+	}
 }

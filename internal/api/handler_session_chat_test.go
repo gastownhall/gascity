@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -113,7 +114,7 @@ func TestBuildSessionResumeAppliesTemplateOverridesToExplicitResumeCommand(t *te
 			},
 		},
 	}
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "codex-provider", Title: "chat", Command: "codex --ask-for-approval on-request", WorkDir: "/tmp/workdir", Provider: "codex-provider", Env: nil, Resume: session.ProviderResume{
 		ResumeFlag:    "resume",
 		ResumeStyle:   "subcommand",

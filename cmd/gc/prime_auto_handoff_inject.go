@@ -29,11 +29,19 @@ type primeHookContextInjection struct {
 // the caller already proved for this SessionStart; the mail context reuses
 // both instead of resolving the city, opening its store, and reading the
 // session again.
-func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
+//
+// step, when non-nil, is the step reminder lookup the caller started for
+// cityPath; nil reads the reminder here.
+func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, step *wispStepLookup, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
-	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath)}
+	// The step reminder's answer is taken last: its lookup has been in flight
+	// since the hook started, and the SessionStart mail read below does not
+	// depend on it, so reading the mail first overlaps the two instead of
+	// starting the read only once the answer is in. The reminder still leads
+	// the text.
+	var mail primeHookContextInjection
 	if primeHookSessionStart(hookContext) {
 		var startMail sessionStartMail
 		if sessionStart != nil {
@@ -41,9 +49,9 @@ func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, ho
 		} else {
 			startMail = sessionStartMailFromCity(stderr)
 		}
-		injection.text += startMail.autoHandoff.text
+		mail.text += startMail.autoHandoff.text
 		if consumeHandoff {
-			injection.afterDelivery = startMail.autoHandoff.afterDelivery
+			mail.afterDelivery = startMail.autoHandoff.afterDelivery
 		}
 		// dip-bj7pgj: an autonomous/promptless restart runs this SessionStart
 		// hook but never the UserPromptSubmit mail hook, so also surface ordinary
@@ -53,10 +61,10 @@ func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, ho
 		// and it excludes the auto-handoff messages already rendered above so a
 		// beadmail-backed ordinary provider does not double-render them.
 		if !startMail.ownSessionClosed {
-			injection.text += primeUnreadMailInjectionFromInbox(startMail.autoHandoffIDs, startMail.ordinaryProvider, startMail.inbox)
+			mail.text += primeUnreadMailInjectionFromInbox(startMail.autoHandoffIDs, startMail.ordinaryProvider, startMail.inbox)
 		}
 	}
-	return injection
+	return primeHookContextInjection{text: step.contentFor(cityPath) + mail.text, afterDelivery: mail.afterDelivery}
 }
 
 // sessionStartMail is the mail a SessionStart hook surfaces: the auto-handoff
@@ -218,7 +226,7 @@ func sessionStartMailInjection(store beads.Store, live *session.Info, cityPath s
 		return sessionStartMail{}
 	}
 	cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
+	msgStore := cliMailStore(store, cfg, cityPath)
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	// The ordinary provider is exactly what openCityMailProvider would build:
 	// the same name precedence as mailProviderName (GC_MAIL, then [mail]
@@ -233,7 +241,10 @@ func sessionStartMailInjection(store beads.Store, live *session.Info, cityPath s
 		ordinaryMailProvider = newMailProviderNamedWithSessionStore(providerName, msgStore, sessStore, true)
 	}
 	startMail := sessionStartMail{ordinaryProvider: ordinaryMailProvider}
-	mp := beadmail.NewWithStores(msgStore, sessStore)
+	// The handoff archive below consumes what it injected, so with message
+	// listed it withdraws the handoffs' lane notices, as gc mail check
+	// --inject's archive does through openCityMailProvider.
+	mp := withBeadMailNoticeWithdrawal(beadmail.NewWithStores(msgStore, beads.SessionStore{Store: sessStore}), sessStore, cfg, stderr)
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	var (
 		target resolvedMailTarget

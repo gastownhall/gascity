@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // backlogDepthCheck reports the city store's claimable backlog depth by
@@ -46,7 +47,7 @@ func (c *backlogDepthCheck) WarmupEligible() bool { return false }
 type backlogBreakdown struct {
 	total        int          // every status=open bead (the "raw" population)
 	controlPlane int          // type=session / gc:session: the session registry
-	notification int          // nudge:/mail: chores, type=message, gc:nudge
+	notification int          // nudge:/mail: chores, type=message, gc:nudge, gc:nudge-queue
 	epic         int          // epic parents: containers, not claimable leaves
 	other        int          // deferred, dep-blocked, or other infra/excluded Ready-tier types
 	real         []beads.Bead // genuinely claimable Ready-tier work
@@ -59,11 +60,13 @@ func isControlPlaneBacklogBead(b beads.Bead) bool {
 }
 
 // isNotificationBacklogBead reports whether a bead is a short-lived delivery
-// chore (nudge or mail) rather than durable backlog. It mirrors the
-// nudge-mail-reaper notification predicate: the nudge:/mail: title prefix, the
-// gc:nudge label, and the mail bead type.
+// chore (nudge or mail) rather than durable backlog. It is a deliberate
+// superset of the nudge-mail-reaper notification predicate (the nudge:/mail:
+// title prefix, the gc:nudge label, and the mail bead type): it also counts a
+// beads nudge queue record, the same chore in beads queue mode, which the
+// beads queue retires and sweeps itself.
 func isNotificationBacklogBead(b beads.Bead) bool {
-	if beadmail.IsMessageBead(b) || hasLabel(b.Labels, nudgeBeadLabel) {
+	if beadmail.IsMessageBead(b) || hasLabel(b.Labels, nudgeBeadLabel) || storebinding.IsNudgeQueueRecord(b) {
 		return true
 	}
 	title := strings.TrimSpace(b.Title)

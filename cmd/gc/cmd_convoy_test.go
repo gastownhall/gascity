@@ -6,18 +6,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -332,7 +340,7 @@ func TestConvoyListAcrossStores(t *testing.T) {
 	_, _ = rigStore.Create(beads.Bead{Title: "rig task", ParentID: "gc-1"})
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyListAcrossStores([]convoyStoreView{{store: cityStore}, {store: rigStore}}, false, &stdout, &stderr)
+	code := doConvoyListAcrossStores([]convoyStoreView{{store: cityStore}, {store: rigStore}}, convoyListOptions{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -357,7 +365,7 @@ func TestConvoyListJSON(t *testing.T) {
 	_ = store.Close("gc-3")
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, true, &stdout, &stderr)
+	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{jsonOut: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyListAcrossStores --json = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -395,7 +403,7 @@ func TestConvoyListJSONEmpty(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, true, &stdout, &stderr)
+	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{jsonOut: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyListAcrossStores --json = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -840,6 +848,52 @@ func TestConvoyAdd(t *testing.T) {
 	requireConvoyTrack(t, store, "gc-1", "gc-3")
 }
 
+// TestConvoyAddMultipleIDs pins GH#8422: every bead id given is tracked, not
+// just the first.
+func TestConvoyAddMultipleIDs(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "probe A"})               // gc-2
+	_, _ = store.Create(beads.Bead{Title: "probe B"})               // gc-3
+	_, _ = store.Create(beads.Bead{Title: "probe C"})               // gc-4
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyAdd(store, []string{"gc-1", "gc-2", "gc-3", "gc-4"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyAdd = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Added 3 issue(s) to convoy gc-1") {
+		t.Errorf("stdout = %q, want a 3-issue add confirmation", stdout.String())
+	}
+	requireConvoyTrack(t, store, "gc-1", "gc-2")
+	requireConvoyTrack(t, store, "gc-1", "gc-3")
+	requireConvoyTrack(t, store, "gc-1", "gc-4")
+}
+
+// TestConvoyAddJSONMultipleIDs pins the JSON leg of GH#8422: issue_ids
+// reports every id tracked, not just the first.
+func TestConvoyAddJSONMultipleIDs(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "probe A"})               // gc-2
+	_, _ = store.Create(beads.Bead{Title: "probe B"})               // gc-3
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyAddJSON(store, []string{"gc-1", "gc-2", "gc-3"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyAddJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result convoyActionResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal result: %v; stdout: %s", err, stdout.String())
+	}
+	if len(result.IssueIDs) != 2 || result.IssueIDs[0] != "gc-2" || result.IssueIDs[1] != "gc-3" {
+		t.Errorf("result.IssueIDs = %v, want [gc-2 gc-3]", result.IssueIDs)
+	}
+	requireConvoyTrack(t, store, "gc-1", "gc-2")
+	requireConvoyTrack(t, store, "gc-1", "gc-3")
+}
+
 func TestConvoyAddNotConvoy(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "just a task"}) // type=task
@@ -1175,7 +1229,9 @@ func TestConvoyCheckAcrossStores(t *testing.T) {
 // timer as the core pack's convoy-autoclose-backstop order, so its store
 // list leaves the suspended rigs out, as the order-tracking sweep's does
 // (TestOrderTrackingSweepTargetsSkipSuspendedRigs). A store the city or an
-// awake rig also reads stays in, and the interactive readers keep every store.
+// awake rig also reads stays in, and the fan-out readers (gc convoy list,
+// gc workflow delete) keep every store. By-id resolution leaves suspended rigs
+// out too; see TestResolveOwningStoreDirLeavesSuspendedRigStoresUnopened.
 func TestConvoyCheckStoreCandidatesSkipSuspendedRigs(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_SUSPENDED", "")
@@ -1197,7 +1253,180 @@ func TestConvoyCheckStoreCandidatesSkipSuspendedRigs(t *testing.T) {
 		t.Fatalf("skipped rigs = %v, want %v", skipped, want)
 	}
 	if all := convoyStoreCandidates(cfg, "/city", ""); !slices.Contains(all, "/rigs/beta") {
-		t.Fatalf("the interactive readers' candidates lost the suspended rig's store: %v", all)
+		t.Fatalf("the fan-out readers' candidates lost the suspended rig's store: %v", all)
+	}
+}
+
+// suspendedRigByIDCity is a city with an awake rig (alpha, prefix "al"), a
+// suspended rig with a store of its own (beta, prefix "be"), and a suspended
+// rig sharing alpha's store (gamma). Each named store is a memstore keyed by
+// its directory; opened records every directory the resolver opens.
+func suspendedRigByIDCity(t *testing.T) (cfg *config.City, stores map[string]*beads.MemStore, opened *[]string, openStore func(string) (beads.Store, error)) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_SUSPENDED", "")
+	cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "/rigs/alpha", Prefix: "al"},
+			{Name: "beta", Path: "/rigs/beta", Prefix: "be", SuspendedOnStart: true},
+			{Name: "gamma", Path: "/rigs/alpha", Prefix: "ga", SuspendedOnStart: true},
+		},
+	}
+	stores = map[string]*beads.MemStore{}
+	for _, dir := range []string{"/city", "/rigs/alpha", "/rigs/beta"} {
+		store := beads.NewMemStore()
+		store.HonorExplicitIDs = true
+		stores[dir] = store
+	}
+	opened = &[]string{}
+	openStore = func(dir string) (beads.Store, error) {
+		*opened = append(*opened, dir)
+		store, ok := stores[dir]
+		if !ok {
+			t.Fatalf("unexpected store dir %q", dir)
+		}
+		return store, nil
+	}
+	return cfg, stores, opened, openStore
+}
+
+// TestResolveOwningStoreDirLeavesSuspendedRigStoresUnopened: by-id resolution
+// is a periodic reader too (bd's on-close autoclose, the supervisor's sweep,
+// execution-fact emission, convoy status run by orders), and on a bd-owned
+// proxied rig any read of the store restarts the pair the controller stopped
+// when the rig was suspended. So the uniqueness probe leaves a suspended rig's
+// store unopened, even when it holds the same id; awake stores are still
+// probed in full.
+func TestResolveOwningStoreDirLeavesSuspendedRigStoresUnopened(t *testing.T) {
+	cfg, stores, opened, openStore := suspendedRigByIDCity(t)
+	if _, err := stores["/rigs/alpha"].Create(beads.Bead{ID: "al-7", Title: "awake work"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stores["/rigs/beta"].Create(beads.Bead{ID: "al-7", Title: "a copy only a probe of the suspended rig would see"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store, dir, err := resolveOwningStoreDir("al-7", cfg, "/city", openStore)
+	if err != nil {
+		t.Fatalf("resolveOwningStoreDir: %v", err)
+	}
+	if store != stores["/rigs/alpha"] || dir != "/rigs/alpha" {
+		t.Fatalf("resolved to %q, want /rigs/alpha", dir)
+	}
+	if slices.Contains(*opened, "/rigs/beta") {
+		t.Fatalf("opened %v: the suspended rig's store was opened to answer for an id it does not own", *opened)
+	}
+	if want := []string{"/rigs/alpha", "/city"}; !slices.Equal(*opened, want) {
+		t.Fatalf("opened %v, want every awake store %v", *opened, want)
+	}
+}
+
+// TestResolveOwningStoreDirStillProbesAwakeStoresForUniqueness: leaving the
+// suspended stores out does not weaken the uniqueness contract among the
+// awake ones.
+func TestResolveOwningStoreDirStillProbesAwakeStoresForUniqueness(t *testing.T) {
+	cfg, stores, _, openStore := suspendedRigByIDCity(t)
+	for _, dir := range []string{"/city", "/rigs/alpha"} {
+		if _, err := stores[dir].Create(beads.Bead{ID: "al-7", Title: "one of two awake copies"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, _, err := resolveOwningStoreDir("al-7", cfg, "/city", openStore)
+	if err == nil || !strings.Contains(err.Error(), "exists in multiple stores") {
+		t.Fatalf("resolveOwningStoreDir = %v, want the uniqueness refusal", err)
+	}
+}
+
+// TestResolveOwningStoreDirReadsASuspendedRigForItsOwnID: an id whose prefix
+// routes to a suspended rig is a question about that rig's bead, so its store
+// is read. Only the probes for ids that route elsewhere are left out.
+func TestResolveOwningStoreDirReadsASuspendedRigForItsOwnID(t *testing.T) {
+	cfg, stores, _, openStore := suspendedRigByIDCity(t)
+	if _, err := stores["/rigs/beta"].Create(beads.Bead{ID: "be-3", Title: "suspended rig work"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store, dir, err := resolveOwningStoreDir("be-3", cfg, "/city", openStore)
+	if err != nil {
+		t.Fatalf("resolveOwningStoreDir: %v", err)
+	}
+	if store != stores["/rigs/beta"] || dir != "/rigs/beta" {
+		t.Fatalf("resolved to %q, want /rigs/beta", dir)
+	}
+}
+
+// byIDSuspendedRigCity is a file-store city with an awake rig (ops) and a
+// suspended rig (dormant), each holding a bead under one ops id. A by-id
+// resolution that probed the suspended rig would refuse the id as ambiguous;
+// one that leaves it alone answers from ops.
+func byIDSuspendedRigCity(t *testing.T) (cityDir string, id string) {
+	t.Helper()
+	cityDir = convoyCheckRigCity(t, `
+[[rigs]]
+name = "ops"
+path = "ops"
+prefix = "OP"
+
+[[rigs]]
+name = "dormant"
+path = "dormant"
+prefix = "DM"
+`, "ops", "dormant")
+	ops, err := openScopeLocalFileStoreForCity(filepath.Join(cityDir, "ops"), cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bead, err := ops.Create(beads.Bead{Title: "ops task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Minting under ops' prefix is how the dormant rig comes to hold the
+	// same id: two ledgers disagreeing, which only a probe of it would see.
+	dormant, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityDir, "dormant", ".gc", "beads.json"), beads.WithFileStoreIDPrefix("OP"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	twin, err := dormant.Create(beads.Bead{Title: "dormant task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if twin.ID != bead.ID {
+		t.Fatalf("the fixture minted %s and %s; the collision needs one id", bead.ID, twin.ID)
+	}
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "dormant", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, bead.ID
+}
+
+// TestAutocloseOwningStoreLeavesASuspendedRigUnprobed covers the background
+// by-id callers: bd's on-close autoclose hooks and the supervisor's autoclose
+// sweep resolve through autocloseOwningStore, and execution-fact emission
+// falls back to it on a primary-store miss.
+func TestAutocloseOwningStoreLeavesASuspendedRigUnprobed(t *testing.T) {
+	cityDir, id := byIDSuspendedRigCity(t)
+
+	store, dir, ok := autocloseOwningStore(id, cityDir)
+	if !ok {
+		t.Fatalf("autocloseOwningStore(%s) found no owner; the suspended rig's copy was probed", id)
+	}
+	if want := filepath.Join(cityDir, "ops"); !samePath(dir, want) {
+		t.Fatalf("autocloseOwningStore(%s) dir = %q, want %q", id, dir, want)
+	}
+	if got, err := store.Get(id); err != nil || got.Title != "ops task" {
+		t.Fatalf("owning store Get(%s) = %+v, %v; want the ops copy", id, got, err)
+	}
+
+	emit := executionEmitStore(beads.NewMemStore(), cityDir)
+	got, err := emit.Get(id)
+	if err != nil {
+		t.Fatalf("executionEmitStore Get(%s) on a primary miss: %v", id, err)
+	}
+	if got.Title != "ops task" {
+		t.Fatalf("executionEmitStore Get(%s) = %q, want the ops copy", id, got.Title)
 	}
 }
 
@@ -1911,7 +2140,7 @@ func TestConvoyAutocloseHappyPath(t *testing.T) {
 	_ = store.Close("gc-3")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, testStores(store, nil), convoyAutocloseHomes{}, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
 
 	out := stdout.String()
 	if !strings.Contains(out, `Auto-closed convoy gc-1 "batch"`) {
@@ -1939,7 +2168,7 @@ func TestConvoyAutocloseTracksDeps(t *testing.T) {
 	_ = store.Close("gc-4")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, testStores(store, nil), convoyAutocloseHomes{}, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
 
 	out := stdout.String()
 	if !strings.Contains(out, `Auto-closed convoy gc-2 "batch"`) {
@@ -1962,7 +2191,7 @@ func TestConvoyAutocloseOwnedSkip(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, testStores(store, nil), convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	if strings.Contains(stdout.String(), "Auto-closed") {
 		t.Errorf("owned convoy should NOT be auto-closed: %q", stdout.String())
@@ -1980,7 +2209,7 @@ func TestConvoyAutocloseNoParent(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-1", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, testStores(store, nil), convoyAutocloseHomes{}, events.Discard, "gc-1", &stdout, &bytes.Buffer{})
 
 	if stdout.String() != "" {
 		t.Errorf("no-parent bead should produce no output, got %q", stdout.String())
@@ -1994,7 +2223,7 @@ func TestConvoyAutocloseNotConvoy(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, testStores(store, nil), convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	if stdout.String() != "" {
 		t.Errorf("non-convoy parent should produce no output, got %q", stdout.String())
@@ -2014,7 +2243,7 @@ func TestConvoyAutoclosePartialSiblings(t *testing.T) {
 	_ = store.Close("gc-2")                                            // only one sibling closed
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, testStores(store, nil), convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	if strings.Contains(stdout.String(), "Auto-closed") {
 		t.Errorf("partial siblings should NOT auto-close: %q", stdout.String())
@@ -2039,7 +2268,7 @@ func TestConvoyAutocloseStampsCloseReason(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, testStores(store, nil), convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	b, err := store.Get("gc-1")
 	if err != nil {
@@ -2076,6 +2305,138 @@ func TestConvoyCheckStampsCloseReason(t *testing.T) {
 	}
 	if got := b.Metadata["close_reason"]; got != convoyAutocloseReason {
 		t.Errorf("metadata.close_reason = %q, want %q", got, convoyAutocloseReason)
+	}
+}
+
+// seedDrainUnitConvoys mints in store a drain control and, for each row
+// status, an open item and the unit convoy that tracks it, the shape a drain's
+// expansion leaves, and records the rows in the control's manifest. It returns
+// the control, its units and their items, in row order.
+func seedDrainUnitConvoys(t *testing.T, store beads.Store, statuses ...string) (beads.Bead, []beads.Bead, []beads.Bead) {
+	t.Helper()
+	control, err := store.Create(beads.Bead{Title: "drain", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindDrain}})
+	requireNoError(t, err)
+	type manifestRow struct {
+		Index        int    `json:"index"`
+		MemberID     string `json:"member_id"`
+		UnitKey      string `json:"unit_key"`
+		UnitConvoyID string `json:"unit_convoy_id"`
+		Status       string `json:"status"`
+	}
+	manifest := struct {
+		Version int           `json:"version"`
+		Rows    []manifestRow `json:"rows"`
+	}{Version: 1}
+	var units, items []beads.Bead
+	for i, status := range statuses {
+		item, err := store.Create(beads.Bead{Title: fmt.Sprintf("item %d", i), Type: "task"})
+		requireNoError(t, err)
+		key := fmt.Sprintf("%s:unit:%d:%s", control.ID, i, item.ID)
+		unit, err := store.Create(beads.Bead{
+			Title: fmt.Sprintf("drain unit %d for %s", i, item.ID),
+			Type:  "convoy",
+			Metadata: map[string]string{
+				beadmeta.SyntheticMetadataKey:      "true",
+				beadmeta.SyntheticKindMetadataKey:  "drain-unit-convoy",
+				beadmeta.DrainControlIDMetadataKey: control.ID,
+				beadmeta.DrainUnitKeyMetadataKey:   key,
+			},
+		})
+		requireNoError(t, err)
+		requireNoError(t, store.DepAdd(unit.ID, item.ID, "tracks"))
+		manifest.Rows = append(manifest.Rows, manifestRow{Index: i, MemberID: item.ID, UnitKey: key, UnitConvoyID: unit.ID, Status: status})
+		units = append(units, unit)
+		items = append(items, item)
+	}
+	data, err := json.Marshal(manifest)
+	requireNoError(t, err)
+	requireNoError(t, store.SetMetadata(control.ID, beadmeta.DrainManifestMetadataKey, string(data)))
+	return beadByID(t, store, control.ID), units, items
+}
+
+// TestConvoyCheckRetiresTheUnitConvoysOfAClosedDrain pins the level-triggered
+// retirement of drain unit convoys (dispatch.DrainUnitConvoyRetirement). A
+// drain never closes the items its units track, so the children rule never
+// completes a unit, and a drain closed by any path but its own close leaves its
+// units open. The check closes every open unit whose drain control has closed,
+// with its row's verdict and the retirement reason, through the plain close and
+// the fenced one alike. It leaves the items, an open drain's units and a unit
+// whose drain control no store holds alone.
+func TestConvoyCheckRetiresTheUnitConvoysOfAClosedDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store func(t *testing.T) beads.Store
+	}{
+		{name: "unconditional close", store: func(*testing.T) beads.Store { return beads.NewMemStore() }},
+		{name: "fenced close", store: func(t *testing.T) beads.Store {
+			m := beads.NewMemStore()
+			stampedMemStore(t, m)
+			return m
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := tc.store(t)
+			closedDrain, retired, items := seedDrainUnitConvoys(t, store, "succeeded", "failed", "wired")
+			requireNoError(t, store.Close(closedDrain.ID))
+			_, running, _ := seedDrainUnitConvoys(t, store, "wired")
+			orphan, err := store.Create(beads.Bead{
+				Title: "drain unit 0 for a drain no store holds",
+				Type:  "convoy",
+				Metadata: map[string]string{
+					beadmeta.SyntheticKindMetadataKey:  "drain-unit-convoy",
+					beadmeta.DrainControlIDMetadataKey: "gc-999",
+				},
+			})
+			requireNoError(t, err)
+
+			var stdout, stderr bytes.Buffer
+			if code := doConvoyCheck(store, events.Discard, &stdout, &stderr); code != 0 {
+				t.Fatalf("doConvoyCheck = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			for i, want := range []string{beadmeta.OutcomePass, beadmeta.OutcomeFail, beadmeta.OutcomeSkipped} {
+				unit := beadByID(t, store, retired[i].ID)
+				if unit.Status != "closed" || unit.Metadata[beadmeta.OutcomeMetadataKey] != want || unit.Metadata["close_reason"] != dispatch.DrainUnitRetiredCloseReason {
+					t.Errorf("unit %s = status %q gc.outcome %q close_reason %q, want closed/%s with the retirement reason",
+						unit.ID, unit.Status, unit.Metadata[beadmeta.OutcomeMetadataKey], unit.Metadata["close_reason"], want)
+				}
+				if !strings.Contains(stdout.String(), "Auto-closed convoy "+unit.ID) {
+					t.Errorf("stdout does not announce %s:\n%s", unit.ID, stdout.String())
+				}
+				if item := beadByID(t, store, items[i].ID); item.Status == "closed" {
+					t.Errorf("item %s closed; the check retires the unit, not the item it tracks", item.ID)
+				}
+			}
+			if unit := beadByID(t, store, running[0].ID); unit.Status == "closed" {
+				t.Errorf("unit %s of an open drain closed", unit.ID)
+			}
+			if unit := beadByID(t, store, orphan.ID); unit.Status == "closed" {
+				t.Errorf("unit %s closed although no store holds its drain control", unit.ID)
+			}
+			if !strings.Contains(stdout.String(), "3 convoy(s) auto-closed") {
+				t.Errorf("stdout = %q, want three auto-closed convoys", stdout.String())
+			}
+		})
+	}
+}
+
+// TestConvoyCheckNamesADrainUnitWhoseDrainManifestDoesNotParse pins that a
+// closed drain whose manifest does not parse is a failure the check names, not
+// a verdict it invents: the unit stays open and the check exits 1.
+func TestConvoyCheckNamesADrainUnitWhoseDrainManifestDoesNotParse(t *testing.T) {
+	store := beads.NewMemStore()
+	drain, units, _ := seedDrainUnitConvoys(t, store, "succeeded")
+	requireNoError(t, store.SetMetadata(drain.ID, beadmeta.DrainManifestMetadataKey, "{not json"))
+	requireNoError(t, store.Close(drain.ID))
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheck(store, events.Discard, &stdout, &stderr); code != 1 {
+		t.Fatalf("doConvoyCheck = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), units[0].ID) || !strings.Contains(stderr.String(), drain.ID) {
+		t.Errorf("stderr does not name the unit %s and its drain %s: %s", units[0].ID, drain.ID, stderr.String())
+	}
+	if unit := beadByID(t, store, units[0].ID); unit.Status == "closed" {
+		t.Errorf("unit %s closed although its drain's manifest does not parse", unit.ID)
 	}
 }
 
@@ -2302,7 +2663,7 @@ func TestConvoyFieldsRoundTrip(t *testing.T) {
 		Target:   "integration/gc-1",
 	}
 
-	if err := setConvoyFields(store, "gc-1", fields); err != nil {
+	if err := setConvoyFields(beadstest.Work(store), "gc-1", fields); err != nil {
 		t.Fatalf("setConvoyFields: %v", err)
 	}
 
@@ -2322,7 +2683,7 @@ func TestConvoyFieldsPartial(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
 
 	fields := ConvoyFields{Owner: "mayor"}
-	if err := setConvoyFields(store, "gc-1", fields); err != nil {
+	if err := setConvoyFields(beadstest.Work(store), "gc-1", fields); err != nil {
 		t.Fatalf("setConvoyFields: %v", err)
 	}
 
@@ -2341,7 +2702,7 @@ func TestConvoyFieldsEmpty(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
 
 	// Set empty fields — should be a no-op.
-	if err := setConvoyFields(store, "gc-1", ConvoyFields{}); err != nil {
+	if err := setConvoyFields(beadstest.Work(store), "gc-1", ConvoyFields{}); err != nil {
 		t.Fatalf("setConvoyFields: %v", err)
 	}
 
@@ -2354,7 +2715,7 @@ func TestConvoyFieldsEmpty(t *testing.T) {
 
 func TestConvoyFieldsNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	err := setConvoyFields(store, "gc-999", ConvoyFields{Owner: "mayor"})
+	err := setConvoyFields(beadstest.Work(store), "gc-999", ConvoyFields{Owner: "mayor"})
 	if err == nil {
 		t.Error("setConvoyFields on nonexistent bead should return error")
 	}
@@ -2488,6 +2849,7 @@ func okConvoyListHandler(_ *testing.T) http.Handler {
 				"total":     2,
 				"closed":    1,
 				"complete":  false,
+				"child_ids": []string{"gc-2", "gc-3"},
 			})
 		default:
 			http.NotFound(w, r)
@@ -2635,7 +2997,7 @@ func TestRouteConvoyList_SixRowMatrix(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := routeConvoyList(cityPath, c, tc.nilReason, false, &stdout, &stderr)
+			code := routeConvoyList(cityPath, c, tc.nilReason, convoyListOptions{}, &stdout, &stderr)
 			if code != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
 			}
@@ -2925,39 +3287,53 @@ func assertRouteLog(t *testing.T, stderrStr, wantRoute, wantReason string) {
 	}
 }
 
-func TestRouteConvoyList_StaleBannerOver30s(t *testing.T) {
+func TestRouteConvoyList_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeConvoyTestCity(t)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
-		w.Header().Set("Content-Type", "application/json")
-		if strings.HasSuffix(r.URL.Path, "/convoys") {
-			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0}) //nolint:errcheck
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-	c := api.NewCityScopedClient(srv.URL, "test-city")
+	for _, rows := range []int{0, 1} {
+		t.Run(fmt.Sprintf("rows=%d", rows), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				setBehindCacheHeaders(w)
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/convoys"):
+					items := []map[string]any{}
+					if rows > 0 {
+						items = append(items, map[string]any{"id": "gc-1", "title": "old", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"})
+					}
+					json.NewEncoder(w).Encode(map[string]any{"items": items, "total": len(items)}) //nolint:errcheck
+				case strings.HasSuffix(r.URL.Path, "/convoy/gc-1/check"):
+					json.NewEncoder(w).Encode(map[string]any{"convoy_id": "gc-1", "total": 0, "closed": 0, "complete": false}) //nolint:errcheck
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c := api.NewCityScopedClient(srv.URL, "test-city")
 
-	var stdout, stderr bytes.Buffer
-	if code := routeConvoyList(cityPath, c, "", false, &stdout, &stderr); code != 0 {
-		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
-	}
-	// Zero-convoy list prints "No open convoys" and returns early without
-	// surfacing the cache-age banner. Assert the empty case path is correct
-	// and that the stale banner appears when there is at least one row.
-	if !strings.Contains(stdout.String(), "No open convoys") {
-		t.Errorf("empty list output missing marker:\n%s", stdout.String())
+			var stdout, stderr bytes.Buffer
+			if code := routeConvoyList(cityPath, c, "", convoyListOptions{}, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+			}
+			// The zero-convoy list prints "No open convoys" and no footer.
+			if rows == 0 {
+				if !strings.Contains(stdout.String(), "No open convoys") {
+					t.Errorf("empty list output missing marker:\n%s", stdout.String())
+				}
+				assertNoCacheAgeFooter(t, stdout.String(), stderr.String())
+				return
+			}
+			assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
+		})
 	}
 }
 
-func TestRouteConvoyStatus_StaleBannerOver30s(t *testing.T) {
+func TestRouteConvoyStatus_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"convoy":   map[string]any{"id": "gc-1", "title": "old", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"},
@@ -2973,9 +3349,7 @@ func TestRouteConvoyStatus_StaleBannerOver30s(t *testing.T) {
 	if code := routeConvoyStatus(cityPath, "gc-1", c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 func TestRouteConvoyStatus_WorkflowConvoyFallsBack(t *testing.T) {
@@ -3116,7 +3490,7 @@ func TestConvoyListReadsTheBindingRow(t *testing.T) {
 	cityPath, _, _, _ := relocatedConvoyCity(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+	if code := doConvoyListFallback(cityPath, convoyListOptions{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
 	}
 	out := stdout.String()
@@ -3145,7 +3519,7 @@ func TestConvoyListDropsTheFrozenCopyOfAConvoyTheBindingClosed(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+	if code := doConvoyListFallback(cityPath, convoyListOptions{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
 	}
 	out := stdout.String()
@@ -3326,7 +3700,7 @@ func TestConvoyListKeepsARigConvoyThatCollidesWithABindingID(t *testing.T) {
 	rigHoldingID(t, cityPath, convoyID, "the rig's own convoy", "convoy")
 
 	var stdout, stderr bytes.Buffer
-	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+	if code := doConvoyListFallback(cityPath, convoyListOptions{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
 	}
 	out := stdout.String()
@@ -3597,5 +3971,899 @@ func TestConvoyBindingOwnedIDsKeepsOneQueryUnderTheCap(t *testing.T) {
 	}
 	if len(binding.batches) != 1 {
 		t.Errorf("the probe issued %d queries for %d candidates, want 1", len(binding.batches), len(ids))
+	}
+}
+
+// --- gc convoy list: synthetic convoys, pagination, store opens ---
+
+// syntheticConvoyMetadata is the stamp graph.v2's single-item input convoy and
+// the drain-unit convoy carry.
+func syntheticConvoyMetadata() map[string]string {
+	return map[string]string{beadmeta.SyntheticMetadataKey: "true"}
+}
+
+// TestConvoyListHidesSyntheticConvoysByDefault pins the default listing to
+// the convoys a person made: the synthetic convoys the system mints for
+// formula launches (thousands on a busy city) are left out, and the output
+// says how many were.
+func TestConvoyListHidesSyntheticConvoysByDefault(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})                                    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()}) // gc-2
+	_, _ = store.Create(beads.Bead{Title: "unit for y", Type: "convoy", Metadata: syntheticConvoyMetadata()})  // gc-3
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "release train") {
+		t.Errorf("stdout missing the hand-made convoy:\n%s", out)
+	}
+	for _, hidden := range []string{"input for x", "unit for y"} {
+		if strings.Contains(out, hidden) {
+			t.Errorf("stdout lists synthetic convoy %q by default:\n%s", hidden, out)
+		}
+	}
+	if !strings.Contains(out, "2 synthetic convoy(s) hidden") || !strings.Contains(out, "--include-synthetic") {
+		t.Errorf("stdout does not say how many synthetic convoys were hidden or how to list them:\n%s", out)
+	}
+}
+
+// TestConvoyListIncludeSyntheticListsThem pins the opt-in: --include-synthetic
+// lists every open convoy and has nothing hidden to report.
+func TestConvoyListIncludeSyntheticListsThem(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})
+	_, _ = store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()})
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{includeSynthetic: true}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"release train", "input for x"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q with --include-synthetic:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "hidden") {
+		t.Errorf("stdout reports hidden convoys with --include-synthetic:\n%s", out)
+	}
+}
+
+// TestConvoyListOnlySyntheticSaysSo pins the empty table's wording when every
+// open convoy is synthetic: "No open convoys" alone would be a lie.
+func TestConvoyListOnlySyntheticSaysSo(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()})
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "No open convoys") || !strings.Contains(out, "1 synthetic convoy(s) hidden") {
+		t.Errorf("stdout = %q, want the empty marker and the hidden count", out)
+	}
+}
+
+// TestConvoyListJSONHidesSyntheticConvoys pins the --json projection: the
+// synthetic convoys are left out of convoys and counted in
+// summary.hidden_synthetic, and --include-synthetic puts them back.
+func TestConvoyListJSONHidesSyntheticConvoys(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})                                    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()}) // gc-2
+
+	for _, tc := range []struct {
+		name       string
+		opts       convoyListOptions
+		wantIDs    []string
+		wantHidden int
+	}{
+		{name: "default", opts: convoyListOptions{jsonOut: true}, wantIDs: []string{"gc-1"}, wantHidden: 1},
+		{name: "include-synthetic", opts: convoyListOptions{jsonOut: true, includeSynthetic: true}, wantIDs: []string{"gc-1", "gc-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, tc.opts, &stdout, &stderr); code != 0 {
+				t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			var result convoyListResultJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+			}
+			var ids []string
+			for _, c := range result.Convoys {
+				ids = append(ids, c.ID)
+			}
+			if !slices.Equal(ids, tc.wantIDs) {
+				t.Errorf("convoys = %v, want %v", ids, tc.wantIDs)
+			}
+			if result.Summary.Total != len(tc.wantIDs) || result.Summary.HiddenSynthetic != tc.wantHidden {
+				t.Errorf("summary = %+v, want total %d hidden_synthetic %d", result.Summary, len(tc.wantIDs), tc.wantHidden)
+			}
+		})
+	}
+}
+
+// TestConvoyListCommandIncludeSyntheticFlag drives the cobra command end to
+// end on a file-store city, so the flag is proven wired, not just honored by
+// the helper.
+func TestConvoyListCommandIncludeSyntheticFlag(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "release train", Type: "convoy"}); err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()}); err != nil {
+		t.Fatalf("create synthetic convoy: %v", err)
+	}
+
+	for _, tc := range []struct {
+		args      []string
+		wantTotal int
+	}{
+		{args: []string{"convoy", "list", "--json"}, wantTotal: 1},
+		{args: []string{"convoy", "list", "--json", "--include-synthetic"}, wantTotal: 2},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(tc.args, &stdout, &stderr); code != 0 {
+			t.Fatalf("run %v = %d; stderr=%s stdout=%s", tc.args, code, stderr.String(), stdout.String())
+		}
+		var result convoyListResultJSON
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("run %v: stdout is not JSON: %v\n%s", tc.args, err, stdout.String())
+		}
+		if result.Summary.Total != tc.wantTotal || len(result.Convoys) != tc.wantTotal {
+			t.Errorf("run %v: %d convoys (summary %+v), want %d", tc.args, len(result.Convoys), result.Summary, tc.wantTotal)
+		}
+	}
+}
+
+// convoyListAPIFixture serves /convoys as two pages — a hand-made convoy then
+// a synthetic one — and /convoy/{id}/check for either, counting the checks per
+// convoy id.
+type convoyListAPIFixture struct {
+	mu     sync.Mutex
+	checks map[string]int
+}
+
+func (f *convoyListAPIFixture) handler(t *testing.T) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/convoys"):
+			if r.URL.Query().Get("cursor") == "" {
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"items":       []map[string]any{{"id": "gc-1", "title": "release train", "issue_type": "convoy", "status": "open"}},
+					"total":       2,
+					"next_cursor": "page-2",
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items": []map[string]any{{"id": "gc-2", "title": "input for x", "issue_type": "convoy", "status": "open", "metadata": syntheticConvoyMetadata()}},
+				"total": 2,
+			})
+		case strings.HasSuffix(r.URL.Path, "/check"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v0/city/test-city/convoy/"), "/check")
+			f.mu.Lock()
+			f.checks[id]++
+			f.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"convoy_id": id, "total": 1, "closed": 0, "child_ids": []string{id + "-member"}}) //nolint:errcheck
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// TestRouteConvoyListAPIHidesSyntheticAndSkipsTheirChecks pins the API lane:
+// it reads every page of /convoys, leaves the synthetic convoys out, and asks
+// /convoy/{id}/check only about the convoys it lists — a check per synthetic
+// convoy is thousands of round trips on a busy city.
+func TestRouteConvoyListAPIHidesSyntheticAndSkipsTheirChecks(t *testing.T) {
+	cityPath := writeConvoyTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+
+	for _, tc := range []struct {
+		name       string
+		opts       convoyListOptions
+		wantIDs    []string
+		wantChecks map[string]int
+		wantHidden int
+	}{
+		{name: "default", opts: convoyListOptions{jsonOut: true}, wantIDs: []string{"gc-1"}, wantChecks: map[string]int{"gc-1": 1}, wantHidden: 1},
+		{name: "include-synthetic", opts: convoyListOptions{jsonOut: true, includeSynthetic: true}, wantIDs: []string{"gc-1", "gc-2"}, wantChecks: map[string]int{"gc-1": 1, "gc-2": 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := &convoyListAPIFixture{checks: map[string]int{}}
+			srv := httptest.NewServer(fixture.handler(t))
+			defer srv.Close()
+			c := api.NewCityScopedClient(srv.URL, "test-city")
+
+			var stdout, stderr bytes.Buffer
+			if code := routeConvoyList(cityPath, c, "", tc.opts, &stdout, &stderr); code != 0 {
+				t.Fatalf("routeConvoyList = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+			}
+			assertRouteLog(t, stderr.String(), "api", "")
+			var result convoyListResultJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+			}
+			var ids []string
+			for _, c := range result.Convoys {
+				ids = append(ids, c.ID)
+			}
+			if !slices.Equal(ids, tc.wantIDs) {
+				t.Errorf("convoys = %v, want %v (second page dropped or synthetic filter wrong)", ids, tc.wantIDs)
+			}
+			if result.Summary.HiddenSynthetic != tc.wantHidden {
+				t.Errorf("summary.hidden_synthetic = %d, want %d", result.Summary.HiddenSynthetic, tc.wantHidden)
+			}
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			if !maps.Equal(fixture.checks, tc.wantChecks) {
+				t.Errorf("/check calls = %v, want %v", fixture.checks, tc.wantChecks)
+			}
+		})
+	}
+}
+
+// TestRouteConvoyListAPITextNotesHiddenSynthetic pins the API lane's human
+// output to the same hidden-count note the local lane prints.
+func TestRouteConvoyListAPITextNotesHiddenSynthetic(t *testing.T) {
+	cityPath := writeConvoyTestCity(t)
+	fixture := &convoyListAPIFixture{checks: map[string]int{}}
+	srv := httptest.NewServer(fixture.handler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeConvoyList(cityPath, c, "", convoyListOptions{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("routeConvoyList = %d; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "release train") || strings.Contains(out, "input for x") {
+		t.Errorf("stdout should list only the hand-made convoy:\n%s", out)
+	}
+	if !strings.Contains(out, "1 synthetic convoy(s) hidden") {
+		t.Errorf("stdout missing the hidden-synthetic note:\n%s", out)
+	}
+}
+
+// TestAllConvoyStoreOpensReuseTheLoadedConfig pins openAllConvoyStoresAt, the
+// opener of gc beads list and show and gc convoy stranded on the local lane,
+// to the one config load it already makes: each convoy store it opens (the
+// city's and every rig's) used to reload city.toml and every pack include
+// inside the open, one full load per store per invocation.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestAllConvoyStoreOpensReuseTheLoadedConfig(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+
+	before := loadCityConfigCalls.Load()
+	stores, code := openAllConvoyStoresAt(cityDir, io.Discard, "gc convoy stranded")
+	if code != 0 {
+		t.Fatalf("openAllConvoyStoresAt = %d, want 0", code)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("opening %d convoy stores loaded the city config %d more times, want 0: the opens must reuse the config the command loaded", len(stores), grew)
+	}
+	if want := 1 + len(readyCountedRigNames); len(stores) != want {
+		t.Fatalf("opened %d convoy stores, want %d (city + each rig)", len(stores), want)
+	}
+}
+
+// TestConvoyStatusStoreOpensReuseTheLoadedConfig is the same pin for the
+// by-id resolution gc convoy status takes, which probes every convoy store
+// for the id.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestConvoyStatusStoreOpensReuseTheLoadedConfig(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	cityStore, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	convoy, err := cityStore.Create(beads.Bead{Title: "release train", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	var stderr bytes.Buffer
+	if _, code := openConvoyStoreByIDAt(convoy.ID, cityDir, &stderr, "gc convoy status"); code != 0 {
+		t.Fatalf("openConvoyStoreByIDAt = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("resolving %s across the convoy stores loaded the city config %d more times, want 0", convoy.ID, grew)
+	}
+}
+
+// TestConvoyCreateRigFlagPlacesEmptyConvoyInRigStore: an empty convoy
+// created with an explicit --rig must land in that rig's store, so later
+// `gc convoy add` of the rig's beads can resolve them (ga-84bnjr, #8696).
+func TestConvoyCreateRigFlagPlacesEmptyConvoyInRigStore(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\npath = " + strconv.Quote(rigDir) + "\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run convoy create --rig frontend = %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	var created struct {
+		ConvoyID string `json:"convoy_id"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &created); err != nil || created.ConvoyID == "" {
+		t.Fatalf("stdout is not a convoy create JSON result: %v\n%s", err, stdout.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	if _, err := rigStore.Get(created.ConvoyID); err != nil {
+		cityStore, cerr := openStoreAtForCity(cityDir, cityDir)
+		where := "unknown"
+		if cerr == nil {
+			if _, gerr := cityStore.Get(created.ConvoyID); gerr == nil {
+				where = "city store"
+			}
+		}
+		t.Fatalf("convoy %s created with --rig frontend is not in the frontend rig store (found in: %s): %v", created.ConvoyID, where, err)
+	}
+}
+
+// convoyRigFlagScopes names the fixture stores of convoyRigFlagCity, relative
+// to the city directory ("" is the city store).
+var convoyRigFlagScopes = []string{"", "frontend", "backend"}
+
+// convoyRigFlagCity is a file-store city for gc convoy create --rig: the
+// frontend (fe) and backend (be) rigs are bound through .gc/site.toml and own
+// scope-local stores, and ghost (gh) is declared without a path binding.
+func convoyRigFlagCity(t *testing.T) string {
+	t.Helper()
+	cityDir := convoyCheckRigCity(t, `
+[[rigs]]
+name = "frontend"
+prefix = "fe"
+
+[[rigs]]
+name = "backend"
+prefix = "be"
+
+[[rigs]]
+name = "ghost"
+prefix = "gh"
+`, convoyRigFlagScopes[1:]...)
+	site := "workspace_name = \"demo\"\n"
+	for _, rig := range convoyRigFlagScopes[1:] {
+		site += fmt.Sprintf("\n[[rig]]\nname = %s\npath = %s\n", strconv.Quote(rig), strconv.Quote(filepath.Join(cityDir, rig)))
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(site), 0o644); err != nil {
+		t.Fatalf("binding the fixture rigs in .gc/site.toml: %v", err)
+	}
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_DIR", "")
+	return cityDir
+}
+
+// convoyRigFlagStore opens the fixture store at cityDir/scope.
+func convoyRigFlagStore(t *testing.T, cityDir, scope string) beads.Store {
+	t.Helper()
+	store, err := openStoreAtForCity(filepath.Join(cityDir, scope), cityDir)
+	if err != nil {
+		t.Fatalf("opening the %q store: %v", scope, err)
+	}
+	return store
+}
+
+// convoyRigFlagIssue creates an issue in the fixture store at cityDir/scope,
+// minted under that scope's prefix.
+func convoyRigFlagIssue(t *testing.T, cityDir, scope string) string {
+	t.Helper()
+	issue, err := convoyRigFlagStore(t, cityDir, scope).Create(beads.Bead{Title: scope + " task"})
+	if err != nil {
+		t.Fatalf("creating an issue in the %q store: %v", scope, err)
+	}
+	return issue.ID
+}
+
+// convoyRigFlagCreate runs `gc <args> --json` and returns the created
+// convoy's ID, failing the test unless it exits 0.
+func convoyRigFlagCreate(t *testing.T, args ...string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := run(append(args, "--json"), &stdout, &stderr); code != 0 {
+		t.Fatalf("gc %s = %d; stderr=%s stdout=%s", strings.Join(args, " "), code, stderr.String(), stdout.String())
+	}
+	var created struct {
+		ConvoyID string `json:"convoy_id"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &created); err != nil || created.ConvoyID == "" {
+		t.Fatalf("gc %s: stdout is not a convoy create JSON result: %v\n%s", strings.Join(args, " "), err, stdout.String())
+	}
+	return created.ConvoyID
+}
+
+// requireConvoyOnlyIn fails unless convoyID is in the fixture store at
+// cityDir/want and in no other fixture store.
+func requireConvoyOnlyIn(t *testing.T, cityDir, convoyID, want string) {
+	t.Helper()
+	for _, scope := range convoyRigFlagScopes {
+		_, err := convoyRigFlagStore(t, cityDir, scope).Get(convoyID)
+		switch {
+		case scope == want && err != nil:
+			t.Errorf("convoy %s is not in the %q store: %v", convoyID, want, err)
+		case scope != want && err == nil:
+			t.Errorf("convoy %s is in the %q store, want only the %q store", convoyID, scope, want)
+		}
+	}
+}
+
+// TestConvoyCreateRigFlagPlacesEmptyConvoy: an explicit --rig chooses the
+// store of an empty convoy, matched by name the way gc bd and gc formula match
+// it, whether the city comes from --city or from the environment.
+func TestConvoyCreateRigFlagPlacesEmptyConvoy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args func(cityDir string) []string
+	}{
+		{"explicit city", func(cityDir string) []string { return []string{"--city", cityDir, "--rig", "frontend"} }},
+		{"case variant", func(cityDir string) []string { return []string{"--city", cityDir, "--rig", "FRONTEND"} }},
+		{"padded name", func(cityDir string) []string { return []string{"--city", cityDir, "--rig", " frontend "} }},
+		{"city from env", func(string) []string { return []string{"--rig", "frontend"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := convoyRigFlagCity(t)
+			args := append(tc.args(cityDir), "convoy", "create", "frontend batch")
+			convoyID := convoyRigFlagCreate(t, args...)
+			requireConvoyOnlyIn(t, cityDir, convoyID, "frontend")
+		})
+	}
+
+	t.Run("human output", func(t *testing.T) {
+		cityDir := convoyRigFlagCity(t)
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("gc convoy create --rig frontend = %d; stderr=%s", code, stderr.String())
+		}
+		fields := strings.Fields(stdout.String())
+		if len(fields) < 3 || fields[0] != "Created" || fields[1] != "convoy" {
+			t.Fatalf("stdout = %q, want \"Created convoy <id> ...\"", stdout.String())
+		}
+		requireConvoyOnlyIn(t, cityDir, fields[2], "frontend")
+	})
+}
+
+// TestConvoyCreateRigFlagEmptyConvoyAcceptsRigIssues: gc convoy add looks the
+// issue up in the convoy's own store, so an empty convoy created with --rig
+// can later track that rig's issues, on the human and JSON output paths.
+func TestConvoyCreateRigFlagEmptyConvoyAcceptsRigIssues(t *testing.T) {
+	cityDir := convoyRigFlagCity(t)
+	issueID := convoyRigFlagIssue(t, cityDir, "frontend")
+	jsonIssueID := convoyRigFlagIssue(t, cityDir, "frontend")
+	convoyID := convoyRigFlagCreate(t, "--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityDir, "convoy", "add", convoyID, issueID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy add %s %s = %d; stderr=%s stdout=%s", convoyID, issueID, code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Added "+issueID+" to convoy "+convoyID) {
+		t.Fatalf("stdout = %q, want it to report adding %s to %s", stdout.String(), issueID, convoyID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--city", cityDir, "convoy", "add", convoyID, jsonIssueID, "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy add %s %s --json = %d; stderr=%s stdout=%s", convoyID, jsonIssueID, code, stderr.String(), stdout.String())
+	}
+	var added struct {
+		ConvoyID string   `json:"convoy_id"`
+		IssueIDs []string `json:"issue_ids"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &added); err != nil || added.ConvoyID != convoyID || len(added.IssueIDs) != 1 || added.IssueIDs[0] != jsonIssueID {
+		t.Fatalf("stdout is not a convoy add JSON result for %s: %v\n%s", jsonIssueID, err, stdout.String())
+	}
+
+	store := convoyRigFlagStore(t, cityDir, "frontend")
+	requireConvoyTrack(t, store, convoyID, issueID)
+	requireConvoyTrack(t, store, convoyID, jsonIssueID)
+}
+
+// TestConvoyCreateRigFlagTracksMatchingIssue: --rig agreeing with the store
+// an issue's prefix routes to creates the convoy there, tracking the issue,
+// on the JSON and human output paths.
+func TestConvoyCreateRigFlagTracksMatchingIssue(t *testing.T) {
+	cityDir := convoyRigFlagCity(t)
+	issueID := convoyRigFlagIssue(t, cityDir, "frontend")
+	convoyID := convoyRigFlagCreate(t, "--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch", issueID)
+
+	requireConvoyOnlyIn(t, cityDir, convoyID, "frontend")
+	requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, "frontend"), convoyID, issueID)
+
+	t.Run("human output", func(t *testing.T) {
+		cityDir := convoyRigFlagCity(t)
+		issueID := convoyRigFlagIssue(t, cityDir, "frontend")
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch", issueID}, &stdout, &stderr); code != 0 {
+			t.Fatalf("gc convoy create --rig frontend %s = %d; stderr=%s", issueID, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "tracking 1 issue") {
+			t.Fatalf("stdout = %q, want it to report tracking 1 issue", stdout.String())
+		}
+		fields := strings.Fields(stdout.String())
+		if len(fields) < 3 || fields[0] != "Created" || fields[1] != "convoy" {
+			t.Fatalf("stdout = %q, want \"Created convoy <id> ...\"", stdout.String())
+		}
+		requireConvoyOnlyIn(t, cityDir, fields[2], "frontend")
+		requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, "frontend"), fields[2], issueID)
+	})
+}
+
+// requireNoConvoys fails if any fixture store of convoyRigFlagCity holds a
+// convoy.
+func requireNoConvoys(t *testing.T, cityDir string) {
+	t.Helper()
+	for _, scope := range convoyRigFlagScopes {
+		convoys, err := convoyRigFlagStore(t, cityDir, scope).List(beads.ListQuery{Type: "convoy", IncludeClosed: true})
+		if err != nil {
+			t.Fatalf("listing convoys in the %q store: %v", scope, err)
+		}
+		if len(convoys) > 0 {
+			t.Errorf("the %q store holds convoys %v after a refused create", scope, convoys)
+		}
+	}
+}
+
+// TestConvoyCreateRigFlagRejectsUnresolvableRig: a non-empty --rig that names
+// no rig, or a rig without a path binding, fails before any store is written.
+// Values are rig names only: the city name and path-looking values that are
+// not rig names are unknown rigs.
+func TestConvoyCreateRigFlagRejectsUnresolvableRig(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rig     func(cityDir string) string
+		wantErr string
+	}{
+		{"unknown name", func(string) string { return "nope" }, `rig "nope" not found`},
+		{"unbound rig", func(string) string { return "ghost" }, "rig \"ghost\" is declared but has no path binding — run `gc rig add <dir> --name ghost` to bind it"},
+		{"city name", func(string) string { return "demo" }, `rig "demo" not found`},
+		{"relative path", func(string) string { return "./frontend" }, `rig "./frontend" not found`},
+		{"trailing slash", func(string) string { return "frontend/" }, `rig "frontend/" not found`},
+		{"bare directory", func(string) string { return "docs" }, `rig "docs" not found`},
+		{"absolute path", func(cityDir string) string { return filepath.Join(cityDir, "frontend") }, "not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := convoyRigFlagCity(t)
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"--city", cityDir, "--rig", tc.rig(cityDir), "convoy", "create", "batch"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("gc convoy create --rig %q exited 0; stdout=%s", tc.rig(cityDir), stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "gc convoy create: ") || !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Errorf("stderr = %q, want a gc convoy create error containing %q", stderr.String(), tc.wantErr)
+			}
+			requireNoConvoys(t, cityDir)
+		})
+	}
+}
+
+// TestConvoyCreateRigFlagRejectsConflictingIssue: an issue whose prefix routes
+// to a store other than --rig's fails before any store is written, naming the
+// rig, the issue and the store the issue routes to. Issues spanning stores
+// still get the mixed-store error first.
+func TestConvoyCreateRigFlagRejectsConflictingIssue(t *testing.T) {
+	routedStore := regexp.MustCompile(`which routes to store "([^"]*)"`)
+	for _, tc := range []struct {
+		name      string
+		rig       string
+		issue     func(cityDir string) string
+		wantScope string
+		city      func(t *testing.T) string
+	}{
+		{"other rig's issue", "backend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "frontend") }, "frontend", convoyRigFlagCity},
+		{"city issue", "frontend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "") }, "", convoyRigFlagCity},
+		{"unknown prefix", "frontend", func(string) string { return "zz-1" }, "", convoyRigFlagCity},
+		{"legacy layout, rig with its own store, city issue", "backend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "") }, "", convoyRigFlagLegacyCity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := tc.city(t)
+			issueID := tc.issue(cityDir)
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"--city", cityDir, "--rig", tc.rig, "convoy", "create", "batch", issueID}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("gc convoy create --rig %s %s exited 0; stdout=%s", tc.rig, issueID, stdout.String())
+			}
+			want := fmt.Sprintf("gc convoy create: --rig %q conflicts with issue %s, which routes to store ", tc.rig, issueID)
+			if !strings.Contains(stderr.String(), want) || !strings.Contains(stderr.String(), "a convoy and its issues must share one store") {
+				t.Errorf("stderr = %q, want it to contain %q and the one-store rule", stderr.String(), want)
+			}
+			if m := routedStore.FindStringSubmatch(stderr.String()); m == nil || !samePath(m[1], filepath.Join(cityDir, tc.wantScope)) {
+				t.Errorf("stderr = %q, want it to name the routed store %s", stderr.String(), filepath.Join(cityDir, tc.wantScope))
+			}
+			requireNoConvoys(t, cityDir)
+		})
+	}
+
+	t.Run("mixed issues", func(t *testing.T) {
+		cityDir := convoyRigFlagCity(t)
+		fe, be := convoyRigFlagIssue(t, cityDir, "frontend"), convoyRigFlagIssue(t, cityDir, "backend")
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "batch", fe, be}, &stdout, &stderr); code == 0 {
+			t.Fatalf("gc convoy create --rig frontend %s %s exited 0; stdout=%s", fe, be, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "issues span multiple stores") {
+			t.Errorf("stderr = %q, want the mixed-store error", stderr.String())
+		}
+		requireNoConvoys(t, cityDir)
+	})
+}
+
+// convoyRigFlagLegacyCity is convoyRigFlagCity on the legacy shared file
+// layout: the city has no scoped-roots marker and frontend no store of its
+// own, so an open of the frontend rig reaches the city store, while backend
+// keeps its own store.
+func convoyRigFlagLegacyCity(t *testing.T) string {
+	t.Helper()
+	cityDir := convoyRigFlagCity(t)
+	for _, path := range []string{fileStoreLayoutMarkerPath(cityDir), filepath.Join(cityDir, "frontend", ".gc", "beads.json")} {
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("moving the fixture to the legacy shared layout: %v", err)
+		}
+	}
+	return cityDir
+}
+
+// TestConvoyCreateRigFlagLegacySharedFileStore: on the legacy shared file
+// layout a rig without a store of its own opens the city store, so --rig
+// naming it agrees with the city's issues and the convoy tracks them there,
+// as the same create without --rig does.
+func TestConvoyCreateRigFlagLegacySharedFileStore(t *testing.T) {
+	cityDir := convoyRigFlagLegacyCity(t)
+	issueID := convoyRigFlagIssue(t, cityDir, "")
+	convoyID := convoyRigFlagCreate(t, "--city", cityDir, "--rig", "frontend", "convoy", "create", "batch", issueID)
+	requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, ""), convoyID, issueID)
+}
+
+// TestConvoyCreateStoreDir: the store is compared by root, not by rig name, so
+// rigs bound to the same directory through a relative, an absolute or a
+// symlinked path agree, and an issue routed elsewhere conflicts. Every scope
+// here is a bd store of its own.
+func TestConvoyCreateStoreDir(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityPath := t.TempDir()
+	for _, dir := range []string{"frontend", "backend"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linked := filepath.Join(t.TempDir(), "linked-frontend")
+	if err := os.Symlink(filepath.Join(cityPath, "frontend"), linked); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "frontend", Prefix: "fe", Path: "frontend"},
+		{Name: "web", Prefix: "wb", Path: filepath.Join(cityPath, "frontend")},
+		{Name: "linked", Prefix: "ln", Path: linked},
+		{Name: "backend", Prefix: "be", Path: "backend"},
+		{Name: "ghost", Prefix: "gh"},
+	}}
+	frontend, backend := filepath.Join(cityPath, "frontend"), filepath.Join(cityPath, "backend")
+	for _, tc := range []struct {
+		name     string
+		rig      string
+		issueIDs []string
+		want     string
+		wantErr  string
+	}{
+		{name: "no rig, no issues", want: cityPath},
+		{name: "no rig, rig issue", issueIDs: []string{"fe-1"}, want: frontend},
+		{name: "whitespace rig", rig: "  ", issueIDs: []string{"be-1"}, want: backend},
+		{name: "rig, no issues", rig: "frontend", want: frontend},
+		{name: "case variant", rig: "Frontend", want: frontend},
+		{name: "absolute alias", rig: "web", issueIDs: []string{"fe-1"}, want: frontend},
+		{name: "symlinked alias", rig: "linked", issueIDs: []string{"fe-1", "wb-2"}, want: frontend},
+		{name: "relative binding", rig: "frontend", issueIDs: []string{"ln-1"}, want: frontend},
+		{name: "other rig's issue", rig: "backend", issueIDs: []string{"fe-1"}, wantErr: `--rig "backend" conflicts with issue fe-1, which routes to store `},
+		{name: "later issue conflicts", rig: "frontend", issueIDs: []string{"fe-1", "be-2"}, wantErr: `--rig "frontend" conflicts with issue be-2`},
+		{name: "city issue", rig: "frontend", issueIDs: []string{"gc-1"}, wantErr: `--rig "frontend" conflicts with issue gc-1`},
+		{name: "unknown rig", rig: "nope", wantErr: `rig "nope" not found`},
+		{name: "unbound rig", rig: "ghost", wantErr: `rig "ghost" is declared but has no path binding`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convoyCreateStoreDir(cfg, cityPath, tc.rig, tc.issueIDs)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("convoyCreateStoreDir(%q, %v) = %q, %v; want error containing %q", tc.rig, tc.issueIDs, got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("convoyCreateStoreDir(%q, %v): %v", tc.rig, tc.issueIDs, err)
+			}
+			if !samePath(got, tc.want) {
+				t.Errorf("convoyCreateStoreDir(%q, %v) = %q, want %q", tc.rig, tc.issueIDs, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConvoyCreateStoreDirComparesOpenedStores: --rig and the issues are
+// compared by the store an open of each scope reaches. On the legacy shared
+// file layout a rig without a store of its own opens the city store, so it
+// agrees with the city's issues. A rig with its own file store, a bd rig, a rig
+// of a city on the scoped-roots layout, and a rig session's file store at the
+// root of a bd city each stay apart from them.
+func TestConvoyCreateStoreDirComparesOpenedStores(t *testing.T) {
+	routedStore := regexp.MustCompile(`which routes to store "([^"]*)"`)
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "shared", Prefix: "sh", Path: "shared"},
+		{Name: "own", Prefix: "ow", Path: "own"},
+		{Name: "bdrig", Prefix: "br", Path: "bdrig"},
+	}}
+	for _, tc := range []struct {
+		name     string
+		provider string // the city's [beads] provider
+		scoped   bool   // the city carries the scoped-roots layout marker
+		session  bool   // GC_BEADS=file scoped to the shared rig, as in that rig's sessions
+		rig      string
+		issueID  string
+		conflict bool
+		routedTo string // the store a conflicting issue routes to, relative to the city
+	}{
+		{name: "legacy layout, shared rig, city issue", provider: "file", rig: "shared", issueID: "gc-1"},
+		{name: "legacy layout, shared rig, own-store rig's issue", provider: "file", rig: "shared", issueID: "ow-1", conflict: true, routedTo: "own"},
+		{name: "legacy layout, own-store rig, city issue", provider: "file", rig: "own", issueID: "gc-1", conflict: true},
+		{name: "legacy layout, bd rig, city issue", provider: "file", rig: "bdrig", issueID: "gc-1", conflict: true},
+		{name: "scoped layout, rig without a store, city issue", provider: "file", scoped: true, rig: "shared", issueID: "gc-1", conflict: true},
+		{name: "rig session over a bd city, city issue", provider: "bd", session: true, rig: "shared", issueID: "gc-1", conflict: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+			cityPath := t.TempDir()
+			writeProviderAwareTestCity(t, cityPath, fmt.Sprintf("[workspace]\nname = \"demo\"\n\n[beads]\nprovider = %q\n", tc.provider))
+			if tc.scoped {
+				if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, dir := range []string{"shared", filepath.Join("bdrig", ".beads")} {
+				if err := os.MkdirAll(filepath.Join(cityPath, dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ensurePersistedScopeLocalFileStore(filepath.Join(cityPath, "own")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cityPath, "bdrig", ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"br"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.session {
+				t.Setenv("GC_BEADS", "file")
+				t.Setenv("GC_BEADS_SCOPE_ROOT", filepath.Join(cityPath, "shared"))
+			}
+
+			got, err := convoyCreateStoreDir(cfg, cityPath, tc.rig, []string{tc.issueID})
+			if !tc.conflict {
+				if err != nil {
+					t.Fatalf("convoyCreateStoreDir(%q, %s): %v", tc.rig, tc.issueID, err)
+				}
+				if want := filepath.Join(cityPath, tc.rig); !samePath(got, want) {
+					t.Errorf("convoyCreateStoreDir(%q, %s) = %q, want %q", tc.rig, tc.issueID, got, want)
+				}
+				return
+			}
+			want := fmt.Sprintf("--rig %q conflicts with issue %s, which routes to store ", tc.rig, tc.issueID)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("convoyCreateStoreDir(%q, %s) = %q, %v; want an error containing %q", tc.rig, tc.issueID, got, err, want)
+			}
+			if m := routedStore.FindStringSubmatch(err.Error()); m == nil || !samePath(m[1], filepath.Join(cityPath, tc.routedTo)) {
+				t.Errorf("error %q, want it to name the routed store %s", err, filepath.Join(cityPath, tc.routedTo))
+			}
+		})
+	}
+}
+
+// TestConvoyCreateWithoutRigFlagKeepsDefaultPlacement: without a non-empty
+// --rig the convoy shares the first issue's store, else lands in the city
+// store; an ambient GC_RIG or a working directory inside a rig does not move
+// it.
+func TestConvoyCreateWithoutRigFlagKeepsDefaultPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		args      func(cityDir string) []string
+		setup     func(t *testing.T, cityDir string)
+		withIssue bool
+		wantScope string
+	}{
+		{name: "no rig, no issues", args: func(cityDir string) []string { return []string{"--city", cityDir} }, wantScope: ""},
+		{name: "no rig, frontend issue", args: func(cityDir string) []string { return []string{"--city", cityDir} }, withIssue: true, wantScope: "frontend"},
+		{name: "empty rig, no issues", args: func(cityDir string) []string { return []string{"--city", cityDir, "--rig", ""} }, wantScope: ""},
+		{name: "empty rig, frontend issue", args: func(cityDir string) []string { return []string{"--city", cityDir, "--rig="} }, withIssue: true, wantScope: "frontend"},
+		{name: "whitespace rig, no issues", args: func(cityDir string) []string { return []string{"--city", cityDir, "--rig", "  "} }, wantScope: ""},
+		{name: "whitespace rig, frontend issue", args: func(cityDir string) []string { return []string{"--city", cityDir, "--rig", "  "} }, withIssue: true, wantScope: "frontend"},
+		{
+			name:      "ambient GC_RIG, city from env",
+			args:      func(string) []string { return nil },
+			setup:     func(t *testing.T, _ string) { t.Setenv("GC_RIG", "backend") },
+			wantScope: "",
+		},
+		{
+			name:      "ambient GC_RIG, frontend issue",
+			args:      func(cityDir string) []string { return []string{"--city", cityDir} },
+			setup:     func(t *testing.T, _ string) { t.Setenv("GC_RIG", "backend") },
+			withIssue: true,
+			wantScope: "frontend",
+		},
+		{
+			name:      "cwd inside a rig",
+			args:      func(cityDir string) []string { return []string{"--city", cityDir} },
+			setup:     func(t *testing.T, cityDir string) { t.Chdir(filepath.Join(cityDir, "backend")) },
+			wantScope: "",
+		},
+		{
+			name: "cwd inside a rig, city from env",
+			args: func(string) []string { return nil },
+			setup: func(t *testing.T, cityDir string) {
+				t.Setenv("GC_CITY", cityDir)
+				t.Chdir(filepath.Join(cityDir, "frontend"))
+			},
+			wantScope: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := convoyRigFlagCity(t)
+			args := append(tc.args(cityDir), "convoy", "create", "batch")
+			issueID := ""
+			if tc.withIssue {
+				issueID = convoyRigFlagIssue(t, cityDir, "frontend")
+				args = append(args, issueID)
+			}
+			if tc.setup != nil {
+				tc.setup(t, cityDir)
+			}
+			convoyID := convoyRigFlagCreate(t, args...)
+			requireConvoyOnlyIn(t, cityDir, convoyID, tc.wantScope)
+			if issueID != "" {
+				requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, tc.wantScope), convoyID, issueID)
+			}
+		})
 	}
 }

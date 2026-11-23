@@ -2,9 +2,12 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -95,8 +98,9 @@ func (in claudeInput) equal(other claudeInput) bool {
 // below it, and the rule that closes it. Rows of the transcript start with the
 // same glyph but are not framed by rules, and neither is the "❯ 1. Yes" cursor
 // of a permission menu. Text drawn dim (the "Try ..." placeholder, prompt
-// suggestions) must already have been removed (see stripDimText). It reports
-// false when no framed input box is on screen.
+// suggestions) and the runtime's red error text must already have been
+// removed (see stripDimText). It reports false when no framed input box is on
+// screen.
 func readClaudeInput(lines []string) (claudeInput, bool) {
 	for i := len(lines) - 1; i >= 1; i-- {
 		if !isDialogRule(lines[i-1]) || !matchesPromptPrefix(lines[i], DefaultReadyPromptPrefix) {
@@ -120,15 +124,49 @@ func readClaudeInput(lines []string) (claudeInput, bool) {
 
 // stripDimText removes the escape sequences from a line captured with
 // capture-pane -e, and with them every character drawn with the dim (faint)
-// attribute. Claude Code draws its input placeholder ("Try \"write a test for
-// <filepath>\"") and prompt suggestions dim; they are not a draft, and Ctrl-U
-// cannot delete them.
+// attribute or in the terminal's basic red. Claude Code draws its input
+// placeholder ("Try \"write a test for <filepath>\"") and prompt suggestions
+// dim; they are not a draft, and Ctrl-U cannot delete them. On an empty input
+// box the cursor sits on the placeholder's first character, which is drawn
+// reverse video rather than dim ("Press up to edit queued messages" while a
+// message waits behind a running turn): a single reverse-video cell followed
+// directly by dim text is that cursor and goes with the placeholder. A
+// reverse-video run followed by anything else, or longer than one cell, is the
+// cursor on or after typed text, or highlighted text, and stays.
+//
+// Basic red (SGR 31) is the color Bun, the runtime Claude Code ships on, writes
+// its own errors in, straight to the terminal: a response whose gzip body will
+// not decompress prints "Decompression error: ZlibError" at the cursor, which
+// Claude Code parks in its empty input box. Claude Code never drew those cells,
+// so no key changes them, and they stay until it next repaints the row
+// (ga-c2zv71a2). Claude Code's default themes draw every color, typed text
+// included, as 256-color or RGB codes. Its ANSI themes use basic red for
+// errors and for some letters of a highlighted keyword, whose other letters
+// still read. Other colors stay: Claude Code colors typed text too (a
+// highlighted keyword, a slash command).
 func stripDimText(line string) string {
 	var b strings.Builder
-	dim := false
+	var attrs sgrAttrs
+	// cursor holds a reverse-video run until the next visible character
+	// shows whether a dim placeholder follows it.
+	var cursor strings.Builder
+	settle := func(beforeDim bool) {
+		if !beforeDim || utf8.RuneCountInString(cursor.String()) != 1 {
+			b.WriteString(cursor.String())
+		}
+		cursor.Reset()
+	}
 	for i := 0; i < len(line); {
 		if line[i] != 0x1b {
-			if !dim {
+			switch {
+			case attrs.dim:
+				settle(true)
+			case attrs.red:
+				settle(false)
+			case attrs.reverse:
+				cursor.WriteByte(line[i])
+			default:
+				settle(false)
 				b.WriteByte(line[i])
 			}
 			i++
@@ -144,7 +182,7 @@ func stripDimText(line string) string {
 				j++
 			}
 			if j < len(line) && line[j] == 'm' {
-				dim = applySGRDim(dim, line[i+2:j])
+				attrs = attrs.apply(line[i+2 : j])
 			}
 			i = j + 1
 		case ']': // OSC (e.g. a hyperlink): ends with BEL or ESC \.
@@ -160,22 +198,44 @@ func stripDimText(line string) string {
 			i += 2
 		}
 	}
+	settle(false)
 	return b.String()
 }
 
-// applySGRDim returns whether text is dim after the SGR parameters params.
-func applySGRDim(dim bool, params string) bool {
+// sgrAttrs are the SGR attributes stripDimText tracks.
+type sgrAttrs struct {
+	dim     bool // SGR 2, cleared by 22
+	reverse bool // SGR 7, cleared by 27
+	red     bool // foreground SGR 31, cleared by 39 or any other foreground
+}
+
+// apply returns a after the SGR parameters params; an empty list resets.
+func (a sgrAttrs) apply(params string) sgrAttrs {
 	if params == "" {
-		return false
+		return sgrAttrs{}
 	}
 	parts := strings.Split(params, ";")
 	for k := 0; k < len(parts); k++ {
 		switch parts[k] {
-		case "", "0", "22":
-			dim = false
+		case "", "0":
+			a = sgrAttrs{}
 		case "2":
-			dim = true
+			a.dim = true
+		case "22":
+			a.dim = false
+		case "7":
+			a.reverse = true
+		case "27":
+			a.reverse = false
+		case "31":
+			a.red = true
+		case "30", "32", "33", "34", "35", "36", "37", "39",
+			"90", "91", "92", "93", "94", "95", "96", "97":
+			a.red = false
 		case "38", "48", "58": // extended color: 5;n or 2;r;g;b
+			if parts[k] == "38" {
+				a.red = false
+			}
 			if k+1 < len(parts) {
 				switch parts[k+1] {
 				case "5":
@@ -186,7 +246,7 @@ func applySGRDim(dim bool, params string) bool {
 			}
 		}
 	}
-	return dim
+	return a
 }
 
 // readInput captures target and reads its input box.
@@ -201,10 +261,10 @@ func (t *Tmux) readInput(target string) (claudeInput, bool, error) {
 
 // captureInputLines captures the last promptObservationLines rows of target
 // for callers that read the input box. It differs from CapturePaneLines in
-// three ways: -e keeps the escape sequences, so dim text can be told apart; -J
-// joins a row tmux wrapped with the row it continues on, so a long draft reads
-// as one line rather than one per pane row; and stripDimText then removes the
-// escape sequences along with the dim text.
+// three ways: -e keeps the escape sequences, so dim and red text can be told
+// apart; -J joins a row tmux wrapped with the row it continues on, so a long
+// draft reads as one line rather than one per pane row; and stripDimText then
+// removes the escape sequences along with the dim and red text.
 func (t *Tmux) captureInputLines(target string) ([]string, error) {
 	out, err := t.run("capture-pane", "-p", "-e", "-J", "-t", paneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 	if err != nil {
@@ -273,29 +333,121 @@ func (t *Tmux) isClaudeTarget(target string) bool {
 
 // clearInputBeforePaste empties the input box of session's pane target before
 // a nudge pastes into it. The caller holds the nudge lock and has checked that
-// no client is attached. For Claude it clears the whole draft and verifies it,
-// checking before every key that no client has attached since: a human who
-// attaches mid-clear stops it with an error wrapping
-// runtime.ErrInputClearSkipped, and the nudge must not paste onto what is left
-// of the draft (#5192). When the input box cannot be read, and for other
-// providers, it sends the single Ctrl-U it always has.
-func (t *Tmux) clearInputBeforePaste(session, target string) error {
+// no client is attached. look runs before every key the clear sends, and its
+// error stops the clear: a permission prompt or question dialog that opened
+// since the caller's last look owns the pane's input, and the clear's keys
+// would reach it instead of the input box (#8150). For Claude it clears the
+// whole draft and verifies it, checking before every key that no client has
+// attached since: a human who attaches mid-clear stops it with an error
+// wrapping runtime.ErrInputClearSkipped, and the nudge must not paste onto
+// what is left of the draft (#5192). When the input box cannot be read, and
+// for other providers, it sends the single Ctrl-U it always has.
+func (t *Tmux) clearInputBeforePaste(ctx context.Context, session, target string, look func() error) error {
 	if t.isClaudeTarget(target) {
 		in, ok, err := t.readInput(target)
 		if err == nil && ok {
-			return t.emptyInput(target, in, func() error { return t.noClientAttached(session) })
+			return t.emptyInput(ctx, target, in, func() error {
+				if err := t.noClientAttached(session); err != nil {
+					return err
+				}
+				return look()
+			})
 		}
 	}
-	if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
+	if err := look(); err != nil {
+		return err
+	}
+	if _, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "C-u"); err != nil {
 		return err
 	}
 	time.Sleep(50 * time.Millisecond)
 	return nil
 }
 
+// clearHeldDraft empties target's composer of the message a nudge typed
+// before a running turn held its interrupting submit back for the whole
+// confirm window (see nudgeSession). The draft is gc's own, so it is cleared
+// with a client attached too. Codex's Ctrl-U deletes one line of a draft at a
+// time (the cursor's line, or the line break before an empty one), so it
+// presses Ctrl-U until the composer reads empty (see emptyComposer). mayType
+// runs before every press and stops the clear with its error.
+func (t *Tmux) clearHeldDraft(ctx context.Context, target string, mayType func() error) error {
+	read := func() ([]string, error) { return t.captureInputLines(target) }
+	press := func() error {
+		if err := mayType(); err != nil {
+			return err
+		}
+		_, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "C-u")
+		return err
+	}
+	return emptyComposer(read, press, time.Sleep)
+}
+
+// emptyComposer presses Ctrl-U until the live composer in read's capture
+// reads empty (paneShowsDrainedComposer). After each press it waits for the
+// composer to redraw. It fails when no composer is on screen, when two
+// presses in a row leave the composer unchanged while it still holds text,
+// when the pane can no longer be read, when press fails, or after
+// inputMaxCtrlU presses.
+func emptyComposer(read func() ([]string, error), press func() error, sleep func(time.Duration)) error {
+	lines, err := read()
+	if err != nil {
+		return fmt.Errorf("reading the composer: %w", err)
+	}
+	stalled := 0
+	for presses := 0; !paneShowsDrainedComposer(lines); presses++ {
+		before, ok := liveComposerRows(lines)
+		if !ok {
+			return errors.New("no composer on screen to clear")
+		}
+		if presses >= inputMaxCtrlU || stalled >= inputStalledCtrlU {
+			return fmt.Errorf("composer still holds %q after %d Ctrl-U", firstNRunes(strings.Join(before, " "), 80), presses)
+		}
+		if err := press(); err != nil {
+			return fmt.Errorf("clearing the composer: %w", err)
+		}
+		changed := false
+		for waited := time.Duration(0); waited < inputRedrawWait; waited += inputRedrawPoll {
+			sleep(inputRedrawPoll)
+			if lines, err = read(); err != nil {
+				return fmt.Errorf("reading the composer while clearing it: %w", err)
+			}
+			if after, _ := liveComposerRows(lines); !slices.Equal(after, before) {
+				changed = true
+				break
+			}
+		}
+		if changed {
+			stalled = 0
+		} else {
+			stalled++
+		}
+	}
+	return nil
+}
+
+// liveComposerRows returns lines from the live composer, the last row that
+// starts with a known family's composer prompt (stagedDraftMarkers), to the
+// end, and whether there is one. Rows above it are the transcript and the
+// turn's status, which redraw on their own while a turn runs.
+func liveComposerRows(lines []string) ([]string, bool) {
+	live := -1
+	for i, line := range lines {
+		for _, marker := range stagedDraftMarkers {
+			if matchesPromptPrefix(line, marker.promptPrefix) {
+				live = i
+			}
+		}
+	}
+	if live < 0 {
+		return nil, false
+	}
+	return lines[live:], true
+}
+
 // emptyInput clears in from target's input box. mayType, when set, runs
 // before every press and stops the clear with its error.
-func (t *Tmux) emptyInput(target string, in claudeInput, mayType func() error) error {
+func (t *Tmux) emptyInput(ctx context.Context, target string, in claudeInput, mayType func() error) error {
 	read := func() (claudeInput, bool, error) { return t.readInput(target) }
 	press := func() error {
 		if mayType != nil {
@@ -304,7 +456,7 @@ func (t *Tmux) emptyInput(target string, in claudeInput, mayType func() error) e
 			}
 		}
 		args := append([]string{"send-keys", "-t", paneTarget(target)}, inputClearKeys...)
-		_, err := t.run(args...)
+		_, err := t.runCtx(ctx, args...)
 		return err
 	}
 	return emptyClaudeInput(in, read, press, time.Sleep)
@@ -358,7 +510,7 @@ func (t *Tmux) ClearInput(ctx context.Context, session string, restoreWindow tim
 			return fmt.Errorf("reading input box: %w", err)
 		}
 		if ok && !in.empty() {
-			return t.emptyInput(target, in, mayType)
+			return t.emptyInput(ctx, target, in, mayType)
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {

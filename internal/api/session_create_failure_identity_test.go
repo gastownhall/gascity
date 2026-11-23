@@ -39,7 +39,7 @@ func TestSessionCreateFailureAfterCreateNamesTheSession(t *testing.T) {
 	}
 	accepted := decodeAsyncAccepted(t, rec.Body)
 
-	failed := waitForRequestFailed(t, fs.eventProv, accepted.RequestID, testEventTimeout)
+	failed := waitForRequestFailed(t, fs.eventProv, accepted.RequestID)
 
 	created, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
 	if err != nil {

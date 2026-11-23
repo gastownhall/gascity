@@ -85,3 +85,19 @@ func TestConversationRetainedIsAConflict(t *testing.T) {
 		t.Errorf("humaSessionManagerError = %v, want 409 conversation_retained: %s", got, err)
 	}
 }
+
+// TestTurnInterruptUnsupportedIsNotImplemented: a runtime that cannot
+// interrupt the session's turn answers 501 turn_interrupt_unsupported in both
+// error mappers, not the 500 the store-error fallback gives.
+func TestTurnInterruptUnsupportedIsNotImplemented(t *testing.T) {
+	err := fmt.Errorf("stop: %w", session.ErrTurnInterruptUnsupported)
+	rec := httptest.NewRecorder()
+	writeSessionManagerError(rec, err)
+	if rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), "turn_interrupt_unsupported") {
+		t.Errorf("writeSessionManagerError = %d %s, want 501 turn_interrupt_unsupported", rec.Code, rec.Body.String())
+	}
+	var se huma.StatusError
+	if got := humaSessionManagerError(err); !errors.As(got, &se) || se.GetStatus() != http.StatusNotImplemented || !strings.Contains(got.Error(), "turn_interrupt_unsupported") {
+		t.Errorf("humaSessionManagerError = %v, want 501 turn_interrupt_unsupported", got)
+	}
+}

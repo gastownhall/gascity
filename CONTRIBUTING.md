@@ -1,7 +1,8 @@
 # Contributing to Gas City
 
-Gas City is experimental software, but the repo is now structured for external
-contributors. Before making changes, read:
+Gas City is open source under the MIT license and stewarded by
+[Gas City, Inc.](https://gascity.com) It is experimental software, but the repo
+is structured for external contributors. Before making changes, read:
 
 - [docs/index.mdx](docs/index.mdx)
 - [engdocs/contributors/index.md](engdocs/contributors/index.md)
@@ -43,7 +44,8 @@ CI runs Bazel, so a change is ready when the Bazel tiers it touches pass:
 | Imports, packages, or files added/removed | `make bazel-sync`, then commit the regenerated BUILD files |
 
 Narrow while iterating: `bazel test //internal/config:config_test`.
-`go test ./internal/config -run TestX` is fine as a quick inner loop, but it
+`go test ./internal/config -run TestX` is fine as a human's quick inner loop
+(agents run tests only with `bazel test`: AGENTS.md "Build and test"), but it
 is not what CI enforces: it runs none of the nogo, format, generated-artifact
 or policy targets. Each `make` target above has a plain-Go twin
 (`make test-go`, `make check-go`, `make test-acceptance-go`,
@@ -58,9 +60,23 @@ committed spec never drifts from what the server actually serves. It also
 runs nogo (lint and vet) over the staged Go packages
 (`make lint-changed LINT_CHANGED_SCOPE=staged`) and `make check-docs` for
 Markdown/docs/spec changes. The pre-push hook runs `bazel test //...` when a
-push changes Go sources; if it has to fall back to plain `go test` (no
-Bazel installed, or no Go at `/usr/local/go` for the cache mode) it says so
-loudly, because that suite is not what CI enforces.
+push changes Go sources.
+
+Both hooks fall back to a plain-Go twin (`make test-fast-parallel` for the
+push, `make check-docs-go` for docs) when this host cannot run Bazel-built
+test binaries: Bazel is not installed, there is no Go at `/usr/local/go` for
+the push's cache mode, or the host's dynamic loader cannot resolve the ICU 74
+runtime that `MODULE.bazel`'s sysroot pins (a host with only a newer ICU).
+The fallback is announced before it runs, naming the reason, what CI still
+enforces and the knob that forces Bazel, because that run is not what CI
+gates on: nogo, formatting, generated-artifact and policy targets, and
+Bazel's hermetic view of the docs inputs, are CI-only until you can run
+Bazel. Two knobs choose the engine, `GC_PREPUSH_SUITE=auto|rbe|cache|go` and
+`GC_PRECOMMIT_DOCS=auto|bazel|go`; neither has a value that skips the check,
+and an explicit value is never replaced. To get Bazel back, use a remote
+executor or make `libicu74` resolvable to the loader (TESTING.md "Hosts that
+cannot load the pinned ICU runtime"). Do not reach for a blanket `git commit
+--no-verify`, which skips the gates that do run on your host.
 
 **Dashboard SPA.** The dashboard at `internal/api/dashboardspa/web/` is a
 TypeScript SPA that talks directly to the supervisor's OpenAPI-typed
@@ -200,7 +216,7 @@ When updating docs:
 
 ### Docs link conventions
 
-`docs/` is published to **[docs.gascityhall.com](https://docs.gascityhall.com)**
+`docs/` is published to **[docs.gascity.com](https://docs.gascity.com)**
 via Mintlify — it is **not** meant to be read directly on GitHub. The published
 site serves **route-based, extensionless URLs**, so internal page links must be
 written that way:
@@ -305,7 +321,7 @@ Before tagging a release, run the macOS smoke test on a Mac:
 
 ```bash
 ./scripts/smoke-macos.sh                     # latest release, arm64
-GC_VERSION=v0.13.4 ./scripts/smoke-macos.sh  # specific version
+GC_VERSION=vX.Y.Z ./scripts/smoke-macos.sh  # a specific release
 GC_ARCH=amd64 ./scripts/smoke-macos.sh       # Intel binary
 ```
 
@@ -390,7 +406,7 @@ remove them.
 | `status/human-review-required` | Opt-out from auto-merge; waits for a co-maintainer |
 | `needs-architectural-review` | Permanent hold pending architectural review; blocks auto-merge |
 | `status/needs-bugflow` | Bugflow investigation requested on an issue |
-| `needs-mac`, `needs-review-formulas` | Run optional CI lanes on this PR |
+| `needs-mac`, `needs-review-formulas` | Run optional CI lanes on this PR (`needs-mac` adds the full Mac tier; the Mac smoke tier runs on every non-docs PR) |
 
 ## Questions
 

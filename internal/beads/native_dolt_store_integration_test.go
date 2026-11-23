@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/test/dolttest"
 	_ "github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
@@ -124,6 +126,74 @@ func TestNativeDoltStoreEphemeralMailSend(t *testing.T) {
 	}
 }
 
+// TestNativeDoltStoreClaimsAnAssignedWispThroughTheUpdateOperation pins S24-G
+// on a real store. issueops.Claimer misses a wisp id, so Claim claims it
+// through the update operation: the assignee claims its own assigned wisp (the
+// hook claims a ready assignment with its assignee as the actor), a re-claim
+// by the same assignee succeeds again, and another actor's claim is a lost
+// claim that leaves the holder in place. Wisp-plane resolution and the
+// claim's compare-and-set on the wisp table live in beads; a drift there would
+// make every assigned wisp step a silent skip in the hook while every spy test
+// stays green.
+func TestNativeDoltStoreClaimsAnAssignedWispThroughTheUpdateOperation(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "wisp-claim", "gc")
+
+	wisp, err := store.Create(Bead{
+		Title:     "assigned wisp step",
+		Type:      "task",
+		Assignee:  "builder",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create assigned wisp: %v", err)
+	}
+	if !wisp.Ephemeral {
+		t.Fatalf("Ephemeral = false on created bead %s, want a wisp", wisp.ID)
+	}
+
+	for _, attempt := range []string{"claim", "re-claim"} {
+		claimed, ok, err := store.Claim(wisp.ID, "builder")
+		if err != nil || !ok {
+			t.Fatalf("%s: Claim(%s, builder) = (%+v, %v, %v), want (bead, true, nil)", attempt, wisp.ID, claimed, ok, err)
+		}
+		if claimed.ID != wisp.ID || claimed.Status != "in_progress" || claimed.Assignee != "builder" {
+			t.Fatalf("%s: claimed = %+v, want %s in_progress for builder", attempt, claimed, wisp.ID)
+		}
+		got, err := store.Get(wisp.ID)
+		if err != nil {
+			t.Fatalf("%s: Get(%s): %v", attempt, wisp.ID, err)
+		}
+		if got.Status != "in_progress" || got.Assignee != "builder" || !got.Ephemeral {
+			t.Fatalf("%s: Get(%s) = %+v, want the claimed wisp", attempt, wisp.ID, got)
+		}
+	}
+
+	lost, ok, err := store.Claim(wisp.ID, "intruder")
+	if err != nil || ok || lost.ID != "" {
+		t.Fatalf("Claim(%s, intruder) = (%+v, %v, %v), want a lost claim (zero, false, nil)", wisp.ID, lost, ok, err)
+	}
+	got, err := store.Get(wisp.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after the lost claim: %v", wisp.ID, err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "builder" {
+		t.Fatalf("Get(%s) after the lost claim = %+v, want builder still holding it", wisp.ID, got)
+	}
+}
+
 // testRawDBGetter matches beadslib's internal storage.RawDBAccessor without
 // bringing that implementation detail into production code.
 type testRawDBGetter interface {
@@ -214,34 +284,55 @@ func assertNativeIDDefaultAbsent(t *testing.T, db *sql.DB, table string) {
 	}
 }
 
+// testDoltPortPick chooses the port startTestDoltServer hands to dolt; tests
+// replace it to force a lost race.
+var testDoltPortPick = pickUnreservedTestDoltPort
+
+// pickUnreservedTestDoltPort returns a port that is free right now, chosen
+// outside the ports a test must never bind or reach (3307, 45865, 8123).
+func pickUnreservedTestDoltPort() (int, error) {
+	for range 50 {
+		candidate := 20000 + rand.IntN(40000)
+		if reservedDoltTestPorts[candidate] {
+			continue
+		}
+		lis, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(candidate))
+		if err != nil {
+			continue
+		}
+		if err := lis.Close(); err != nil {
+			return 0, fmt.Errorf("release test port: %w", err)
+		}
+		return candidate, nil
+	}
+	return 0, errors.New("no free port outside the reserved ones")
+}
+
 // startTestDoltServer launches a throwaway server for tests that need the raw
 // SQL accessor exposed by upstream's server-mode Dolt store.
-func startTestDoltServer(t *testing.T) int {
+func startTestDoltServer(t testing.TB) int {
 	t.Helper()
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skip("dolt binary not in PATH")
 	}
 
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick free port: %v", err)
-	}
-	port := lis.Addr().(*net.TCPAddr).Port
-	if err := lis.Close(); err != nil {
-		t.Fatalf("release test port: %v", err)
-	}
-
 	dataDir := t.TempDir()
-	cmd := exec.Command(doltBin, "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir)
-	cmd.Env = append(os.Environ(), "DOLT_ROOT_PATH="+dataDir)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start dolt sql-server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltBin,
+		Args: func(port int) []string {
+			return []string{"sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir}
+		},
+		Env: append(os.Environ(), "DOLT_ROOT_PATH="+dataDir),
+		// The picker is the reserved-port one: it stays a seam so a test can
+		// make the first pick a port something else already holds.
+		PickPort: func() (int, error) { return testDoltPortPick() },
 	})
+	t.Cleanup(func() {
+		_ = srv.Process.Kill()
+		<-srv.Exited
+	})
+	port := srv.Port
 
 	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port))
 	if err != nil {

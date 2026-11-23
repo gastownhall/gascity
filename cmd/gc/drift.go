@@ -209,6 +209,12 @@ type restartHelpers struct {
 	// Production starts a backgrounded child via os/exec with
 	// backgroundSysProcAttr.
 	Spawn func(exe string, argv ...string) error
+
+	// KeepTmuxSockets refuses, before anything is stopped, a restart whose
+	// replacement would keep its tmux sockets in another directory than
+	// the running supervisor does. Production uses
+	// refuseSupervisorRestartTmuxSocketDirMove; nil checks nothing.
+	KeepTmuxSockets func(spec restartSpec) error
 }
 
 // restartSupervisor restarts the gascity-supervisor process. Behavior
@@ -232,6 +238,11 @@ type restartHelpers struct {
 func restartSupervisor(spec restartSpec, h restartHelpers) error {
 	if spec.SystemdManaged && spec.LaunchdManaged {
 		return fmt.Errorf("restartSupervisor: supervisor cannot be both systemd- and launchd-managed")
+	}
+	if h.KeepTmuxSockets != nil {
+		if err := h.KeepTmuxSockets(spec); err != nil {
+			return err
+		}
 	}
 	if spec.SystemdManaged {
 		if h.Systemctl == nil {
