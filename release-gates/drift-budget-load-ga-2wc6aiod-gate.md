@@ -12,7 +12,7 @@ gate_tree: `aaff21636d4f8de18bdd0451aeacd5b85af10889`
 gate_base_kind: current-tip
 merge_state: clean (origin/main@cb9a2621ae17eb4b09b1e4d3c71079623486ff8b)
 merge_validation: raw merge build, nogo/vet and full suite; MPR must validate the current merge result and required PR CI before merging.
-deploy_mode: remote; base_branch: main; push_remote: fork
+deploy_mode: remote; base_branch: main; push_remote: origin
 
 | # | Criterion | Result and evidence |
 |---|---|---|
@@ -89,7 +89,7 @@ Native floor is inside the canonical wrapper; remote-class admission does not im
 
 ## Required CI accounting
 
-ci_required_closure: python3 /home/jaword/projects/gc-management/packs/actual/deployer/scripts/ci_required_triggers.py /var/tmp/gc-merge-ga-2wc6aiod.yjt6507d cb9a2621ae17eb4b09b1e4d3c71079623486ff8b ca8edba465a82bda10f050b5af231d12c635bbc3 fork; exit0; merged workflow blob fa2c1f1b1466278b2eed8f4288d5a4f8eb3cc612; 6 LEAF jobs need a status; the rest are rolled up through their needs.
+ci_required_closure: python3 /home/jaword/projects/gc-management/packs/actual/deployer/scripts/ci_required_triggers.py /var/tmp/gc-merge-ga-2wc6aiod.yjt6507d cb9a2621ae17eb4b09b1e4d3c71079623486ff8b ca8edba465a82bda10f050b5af231d12c635bbc3 origin; exit0; merged workflow blob fa2c1f1b1466278b2eed8f4288d5a4f8eb3cc612; 6 LEAF jobs need a status; the rest are rolled up through their needs.
 | Job | Status | Evidence |
 |---|---|---|
 | runner-policy | LOCAL-PASS | /var/tmp/gc-deploy-ga-2wc6aiod.a4agstn6/required-ci/runner-policy.stdout; exact workflow run commands rc0, steps in /var/tmp/gc-deploy-ga-2wc6aiod.a4agstn6/required-ci/runner-policy-steps.json |
@@ -108,3 +108,5 @@ A gate PASS authorizes PR-open only. MPR must require CI / required green and th
 CI collector bookkeeping recovery: /var/tmp/gc-deploy-ga-2wc6aiod.a4agstn6/ci-accounting-reviewed.json independently accounts the unflushed final NOT-TRIGGERED pack row. Raw evidence remains unchanged; no suite or CI job was re-run.
 
 All per-job logs and artifact receipts are retained under /var/tmp/gc-deploy-ga-2wc6aiod.a4agstn6.
+
+Publication accounting: a fresh origin dry run succeeded. The same-repo ci_required_triggers.py invocation returned byte-identical leaf jobs and triggers to the original fork invocation; both outputs are retained in required-ci/closure{,-origin}.stdout under the evidence directory. Gate source, pinned merge tree and runtime evidence are unchanged.
