@@ -33,6 +33,8 @@ type suspendDrainFixture struct {
 	rig   string
 	dops  drainOps
 	extra []suspendDrainRow
+	// work is the work beads every tick hands the reconciler.
+	work []beads.Bead
 }
 
 // suspendDrainRow is one live named session the fixture ticks.
@@ -141,7 +143,7 @@ func (f *suspendDrainFixture) reconcile(t *testing.T, sp runtime.Provider, store
 	reconcileSessionBeadsAtPath(
 		context.Background(), f.env.city, rows, f.env.desiredState,
 		configuredSessionNames(f.env.cfg, "", f.env.store), f.env.cfg, sp, f.env.store,
-		f.dops, nil, nil, nil, f.env.dt, poolDesired, storeQueryPartial, nil, "",
+		f.dops, f.work, nil, nil, f.env.dt, poolDesired, storeQueryPartial, nil, "",
 		nil, f.env.clk, f.env.rec, 0, 0, &f.env.stdout, &f.env.stderr,
 		append(append([]startExecutionOption{}, f.env.startOptions...), opts...)...,
 	)
@@ -387,5 +389,109 @@ func TestReconcileSessionBeads_ResumeReleaseRunsUnderPartialStoreQuery(t *testin
 	f.reconcile(t, f.env.sp, true)
 	waitAsyncStopsForTest(t, f.env.stops)
 
+	f.assertReleased(t, stops)
+}
+
+// AC-5: a tracked suspended drain whose runtime is gone and whose ack is
+// unreadable (a destroyed runtime) does not survive to the drain scan of the
+// resume tick, so the scan cannot complete it over the replacement's creating
+// row while the async start is still in flight.
+func TestReconcileSessionBeads_ResumeReplacementSurvivesSuspendDrainOnDestroyedRuntime(t *testing.T) {
+	f := newSuspendDrainFixture(t)
+	f.armSuspendDrain(t)
+	if err := f.env.sp.Stop(f.name); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	f.env.sp.GetMetaErrors[f.name] = map[string]error{"GC_DRAIN_ACK": runtime.ErrSessionNotFound}
+	gated := &gatedStartProvider{Fake: f.env.sp, startSignals: make(chan string, 32), releaseByName: make(map[string]chan struct{})}
+	starts := &asyncStartTracker{}
+	t.Cleanup(func() {
+		gated.release(f.name)
+		starts.wait(-1)
+	})
+
+	f.setCitySuspended(t, false)
+	f.reconcile(t, gated, false, withAsyncStartExecution(), withAsyncStartTracker(starts))
+
+	select {
+	case <-gated.startSignals:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the resume tick planned no replacement start; stdout:\n%s\nstderr:\n%s", f.env.stdout.String(), f.env.stderr.String())
+	}
+	if ds := f.env.dt.get(f.id); ds != nil {
+		t.Fatalf("drain still tracked after the resume tick: %+v", *ds)
+	}
+	// The re-woken row carries no pending_create_claim (only a newly created
+	// row does); what must hold is that it stays creating, not slept by a
+	// drain completion, until its own commit.
+	info := f.env.sessionInfo(f.id)
+	if info.MetadataState != string(sessionpkg.StateCreating) || info.SleepReason != "" || info.SleptAt != "" {
+		t.Fatalf("replacement row state=%q sleep_reason=%q slept_at=%q, want creating until its own commit\nstdout:\n%s\nstderr:\n%s",
+			info.MetadataState, info.SleepReason, info.SleptAt, f.env.stdout.String(), f.env.stderr.String())
+	}
+
+	gated.release(f.name)
+	if !starts.wait(10 * time.Second) {
+		t.Fatal("the replacement start did not finish")
+	}
+	info = f.env.sessionInfo(f.id)
+	if !f.env.sp.IsRunning(f.name) || info.MetadataState != string(sessionpkg.StateActive) {
+		t.Fatalf("replacement running=%v state=%q sleep_reason=%q, want it committed and running\nstderr:\n%s",
+			f.env.sp.IsRunning(f.name), info.MetadataState, info.SleepReason, f.env.stderr.String())
+	}
+}
+
+// AC-5: with open assigned work and no ack on the runtime (its write never
+// landed), only the tracked drain remains, so the armed-ack release cannot
+// fire; the row's forward pass still voids the drain on the resume tick, and
+// no later tick resurrects it.
+func TestReconcileSessionBeads_ResumeVoidsSuspendDrainUnderAssignedWorkDemand(t *testing.T) {
+	f := newSuspendDrainFixture(t)
+	f.armSuspendDrain(t)
+	if err := clearReconcilerDrainAckMetadata(f.env.sp, f.name); err != nil {
+		t.Fatalf("clearReconcilerDrainAckMetadata: %v", err)
+	}
+	task, err := f.env.store.Create(beads.Bead{Title: "assigned task", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(task): %v", err)
+	}
+	status, assignee := "in_progress", f.template
+	if err := f.env.store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(task): %v", err)
+	}
+	if task, err = f.env.store.Get(task.ID); err != nil {
+		t.Fatalf("Get(task): %v", err)
+	}
+	f.work = []beads.Bead{task}
+	stops := f.env.sp.CountCalls("Stop", f.name)
+
+	f.setCitySuspended(t, false)
+	f.tick(t)
+
+	f.assertReleased(t, stops)
+	f.env.clk.Time = f.env.clk.Time.Add(time.Minute)
+	f.tick(t)
+	f.assertReleased(t, stops)
+}
+
+// AC-5 (guard): a live row whose armed ack cannot be read is out of the
+// armed-ack release's reach; its forward pass voids the tracked drain and
+// clears the ack, so no later tick re-arms it.
+func TestReconcileSessionBeads_ResumeVoidsTrackedSuspendDrainWhenAckReadFails(t *testing.T) {
+	f := newSuspendDrainFixture(t)
+	f.armSuspendDrain(t)
+	stops := f.env.sp.CountCalls("Stop", f.name)
+	f.env.sp.GetMetaErrors[f.name] = map[string]error{"GC_DRAIN_ACK": errors.New("meta read failed")}
+
+	f.setCitySuspended(t, false)
+	f.tick(t)
+
+	f.assertNotStopped(t, stops)
+	if ds := f.env.dt.get(f.id); ds != nil {
+		t.Fatalf("drain tracked after the resume tick: %+v", *ds)
+	}
+	delete(f.env.sp.GetMetaErrors[f.name], "GC_DRAIN_ACK")
+	f.env.clk.Time = f.env.clk.Time.Add(time.Minute)
+	f.tick(t)
 	f.assertReleased(t, stops)
 }

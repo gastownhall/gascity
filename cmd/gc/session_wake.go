@@ -806,6 +806,23 @@ func suspendDrainReleased(reason, suspendCause string) bool {
 	return reason == drainSuspended && suspendCause == ""
 }
 
+// cancelReleasedDrain cancels a tracked drain whose premise an operator's
+// resume released: it clears the drain's ack (when one was set) and its idle
+// probe, untracks it, and records the cancel. It writes no row state, so the
+// resumed row keeps whatever this tick's wake decision gives it.
+func cancelReleasedDrain(dt *drainTracker, sp runtime.Provider, ds *drainState, info sessions.Info, cfg *config.City, trace *sessionReconcilerTraceCycle) {
+	name := info.SessionNameMetadata
+	dt.clearIdleProbe(info.ID)
+	if ds.ackSet {
+		_ = clearReconcilerDrainAckMetadata(sp, name)
+	}
+	dt.remove(info.ID)
+	telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+	if trace != nil {
+		trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
+	}
+}
+
 func advanceSessionDrainsWithSessionsTraced(
 	cityPath string,
 	dt *drainTracker,
@@ -862,15 +879,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		// An operator's resume consumed the hold this drain was for: cancel
 		// it, so neither its ack nor its completion acts on the resumed row.
 		if userHoldDrainReleased(ds.reason, info) {
-			dt.clearIdleProbe(id)
-			if ds.ackSet {
-				_ = clearReconcilerDrainAckMetadata(sp, name)
-			}
-			dt.remove(id)
-			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
-			if trace != nil {
-				trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
-			}
+			cancelReleasedDrain(dt, sp, ds, info, cfg, trace)
 			continue
 		}
 

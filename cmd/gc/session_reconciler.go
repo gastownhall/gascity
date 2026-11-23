@@ -4637,6 +4637,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// fairness (#2574-class). A NEW writer added between one of those writers and
 		// this append would NOT be reflected in this value-typed snapshot; keep any
 		// such writer's fold ahead of the append (or refresh the twin) if one is added.
+		// A resume voids a suspended drain (CONTRACT v5 §12.2 #3 ruling 4):
+		// once no operator suspend covers the row, cancel its tracked drain
+		// before the wake pass, so the drain neither stops the resumed
+		// runtime nor clobbers its replacement start.
+		if dt != nil {
+			if ds := dt.get(id); ds != nil && ds.reason == drainSuspended && suspendDrainReleased(ds.reason, operatorSuspendCause(cfg, cityPath, infoByID[id], suspState)) {
+				cancelReleasedDrain(dt, sp, ds, infoByID[id], cfg, trace)
+			}
+		}
 		wakeTargets = append(wakeTargets, wakeTarget{info: infoByID[id], tp: tp, alive: alive})
 	}
 	recordPhase(TraceSiteSessionReconcileForwardPass, "session_reconcile.forward_pass", phaseStart, map[string]any{
