@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // drainAckSeed creates the work a drain-acking seat keeps and returns the
@@ -137,6 +138,12 @@ func TestDrainAckAnomalyReasonShapes(t *testing.T) {
 		{"AC-1 a started in_progress claim", drainAckSeed{status: "in_progress", rowMeta: startedBy}, "started_claim_kept"},
 		{"AC-2 a started claim kept by a restart", drainAckSeed{status: "in_progress", rowMeta: startedBy, restart: true}, "restart_requested"},
 		{"AC-2 open work kept by a restart", drainAckSeed{status: "open", restart: true}, "restart_requested"},
+		{"AC-3 an open preassigned row", drainAckSeed{status: "open", rowMeta: startedBy}, "drain_acked_with_assigned_work"},
+		{"AC-3 an in_progress claim the row never started", drainAckSeed{status: "in_progress"}, "drain_acked_with_assigned_work"},
+		{"AC-3 an in_progress claim started records name another bead", drainAckSeed{status: "in_progress", rowMeta: func(string, string) map[string]string {
+			return map[string]string{executionClaimStartedKey: "tok-3|gc-elsewhere"}
+		}}, "drain_acked_with_assigned_work"},
+		{"AC-3 a started claim on a dispatch hold", drainAckSeed{status: "in_progress", labels: []string{"hold:mayor"}, rowMeta: startedBy}, "drain_acked_with_assigned_work"},
 	} {
 		for _, e := range []struct {
 			name string
@@ -157,4 +164,13 @@ func TestDrainAckAnomalyReasonShapes(t *testing.T) {
 			})
 		}
 	}
+	// A work_started cell the release cannot decode reads as naming every
+	// claim (recordedUnread); the cell is a CAS-only key, so the row is
+	// built, not written.
+	t.Run("AC-1 a claim an unreadable work_started cell may name", func(t *testing.T) {
+		kept := beads.Bead{ID: "gc-9", Status: "in_progress"}
+		if got := drainAckAnomalyReason(sessionpkg.Info{ID: "gc-1", WorkStartedRaw: "{not json"}, kept, false); got != api.DrainAckReasonStartedClaimKept {
+			t.Errorf("reason = %q, want %q", got, api.DrainAckReasonStartedClaimKept)
+		}
+	})
 }
