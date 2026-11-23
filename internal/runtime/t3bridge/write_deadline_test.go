@@ -473,3 +473,362 @@ func TestStartRollsBackItsWorktreeWhenCtxExpiresDuringCreate(t *testing.T) {
 		t.Fatalf("removeWorktree = %+v, want cwd /rig and the path the create returned", removed)
 	}
 }
+
+// countdownCtx is a ctx that reports itself live for its first live Err calls
+// and context.Canceled from then on. Start asks its own ctx only at its phase
+// boundaries (every RPC it makes runs on context.Background), so live is the
+// number of boundaries a start may pass, and a test ends the ctx at any one of
+// them without a timer. Done is never closed: Start does not select on it.
+type countdownCtx struct {
+	context.Context
+	mu    sync.Mutex
+	live  int
+	asked int
+}
+
+// newCountdownCtx returns a ctx whose Err is nil live times, then context.Canceled.
+func newCountdownCtx(live int) *countdownCtx {
+	return &countdownCtx{Context: context.Background(), live: live}
+}
+
+// Err is nil for the first live calls and context.Canceled for every later one.
+func (c *countdownCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.asked++
+	if c.asked > c.live {
+		return context.Canceled
+	}
+	return nil
+}
+
+// questions is how many times the ctx has been asked whether it ended.
+func (c *countdownCtx) questions() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.asked
+}
+
+// countCommands is how many of the dispatched command types are typ.
+func countCommands(types []string, typ string) int {
+	n := 0
+	for _, got := range types {
+		if got == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// runPhasedStart runs a fresh Start (no worktree, no thread to reuse) with a
+// startup prompt and a nudge against the shared fake T3 server, on a ctx that
+// stays live for its first live boundary checks. The start has seven of them:
+// entry, the snapshot read, project.create, thread.create, the event watcher,
+// the startup prompt turn and the nudge turn.
+func runPhasedStart(t *testing.T, live int) (*Provider, *t3BridgeTestServer, *countdownCtx, error) {
+	t.Helper()
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	t.Cleanup(server.Close)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	t.Cleanup(func() { p.stopEventWatcher("phase-session") })
+	ctx := newCountdownCtx(live)
+	err := p.Start(ctx, "phase-session", runtime.Config{
+		WorkDir:      "/tmp/phase-work",
+		Command:      "codex",
+		PromptSuffix: "gc prime --hook",
+		Nudge:        "Check mail and hook status, then act accordingly.",
+		Env: map[string]string{
+			"GC_ALIAS":    "phase-agent",
+			"GC_TEMPLATE": "phase-agent",
+			"GC_PROVIDER": "codex",
+			"GC_MODEL":    "gpt-5.4",
+		},
+	})
+	return p, server, ctx, err
+}
+
+// Kills a Start that drops one of its phase-boundary ctx checks, or moves it:
+// the ctx ends after live boundaries, and the start must stop at the next one
+// with exactly the requests before that boundary sent and none after it.
+// Dropping or moving any check shifts every later row.
+func TestStartStopsAtEachPhaseBoundaryOnceCtxEnds(t *testing.T) {
+	rows := []struct {
+		name          string
+		live          int
+		snapshotReads int
+		projects      int
+		threads       int
+		turns         int
+		watchers      int
+	}{
+		{name: "entry", live: 0},
+		{name: "snapshot read", live: 1},
+		{name: "project create", live: 2, snapshotReads: 1},
+		{name: "thread create", live: 3, snapshotReads: 1, projects: 1},
+		{name: "event watcher", live: 4, snapshotReads: 1, projects: 1, threads: 1},
+		{name: "startup prompt turn", live: 5, snapshotReads: 1, projects: 1, threads: 1, watchers: 1},
+		{name: "nudge turn", live: 6, snapshotReads: 1, projects: 1, threads: 1, turns: 1, watchers: 1},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			p, server, ctx, err := runPhasedStart(t, row.live)
+			assertStartCtxError(t, err, context.Canceled, "phase-session")
+			if got := ctx.questions(); got != row.live+1 {
+				t.Fatalf("Start asked its ctx %d times, want %d: it stops asking once a check fails", got, row.live+1)
+			}
+			types := server.commandTypes()
+			if got := server.snapshotCalls(); got != row.snapshotReads {
+				t.Fatalf("snapshot reads = %d, want %d (commands %v)", got, row.snapshotReads, types)
+			}
+			for typ, want := range map[string]int{
+				"project.create":    row.projects,
+				"thread.create":     row.threads,
+				"thread.turn.start": row.turns,
+			} {
+				if got := countCommands(types, typ); got != want {
+					t.Fatalf("%s commands = %d, want %d (commands %v)", typ, got, want, types)
+				}
+			}
+			p.mu.Lock()
+			watchers := len(p.watchers)
+			p.mu.Unlock()
+			if watchers != row.watchers {
+				t.Fatalf("event watchers = %d, want %d", watchers, row.watchers)
+			}
+		})
+	}
+
+	t.Run("completes while every boundary is live", func(t *testing.T) {
+		_, server, ctx, err := runPhasedStart(t, 7)
+		if err != nil {
+			t.Fatalf("Start = %v, want nil on a ctx that never ended", err)
+		}
+		if got := ctx.questions(); got != 7 {
+			t.Fatalf("Start asked its ctx %d times, want 7 boundaries", got)
+		}
+		if got := countCommands(server.commandTypes(), "thread.turn.start"); got != 2 {
+			t.Fatalf("thread.turn.start commands = %d, want 2 (the startup prompt and the nudge)", got)
+		}
+	})
+}
+
+// Kills a Start that creates its worktree without asking its ctx first: a ctx
+// that ends right after the entry check must stop the start before it asks T3
+// for anything.
+func TestStartChecksCtxBeforeCreatingAWorktree(t *testing.T) {
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_BEARER_TOKEN", "")
+	peer := newStartPeer(t, 0)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_WS_URL", peer.wsURL())
+
+	ctx := newCountdownCtx(1)
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	err := p.Start(ctx, "ctx-session", runtime.Config{
+		WorkDir: "/wt/want",
+		Env:     map[string]string{"GC_STARTUP_ENVELOPE": startEnvelope(t)},
+	})
+	assertStartCtxError(t, err, context.Canceled, "ctx-session")
+	if got := ctx.questions(); got != 2 {
+		t.Fatalf("Start asked its ctx %d times, want 2: the entry check and the one before the worktree create", got)
+	}
+	if tags := peer.seenTags(); len(tags) != 0 {
+		t.Fatalf("Start sent %v after its ctx ended before the worktree create, want no RPC", tags)
+	}
+}
+
+// Kills a Start that checks its ctx inside the reuse branch: a thread's reuse
+// is not interrupted once it begins, so a ctx that ends right after the
+// snapshot read must not stop it.
+func TestStartDoesNotCheckCtxInsideTheReuseBranch(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"projects": []interface{}{
+			map[string]interface{}{"id": "project-1", "workspaceRoot": "/tmp/reuse-work"},
+		},
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id":        "thread-1",
+				"projectId": "project-1",
+				"title":     "reuse-agent · reuse-session",
+				"model":     "gpt-5.4",
+				"customMetadata": map[string]interface{}{
+					"gc.agent":           "reuse-agent",
+					"gc.sessionName":     "reuse-session",
+					"gc.startupTemplate": "reuse-agent",
+					"gc.startupWorkDir":  "/tmp/reuse-work",
+					"gc.runtimeProvider": "codex",
+					"gc.startupModel":    "gpt-5.4",
+				},
+				"session": map[string]interface{}{"status": "ready"},
+			},
+		},
+	})
+	t.Cleanup(server.Close)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	t.Cleanup(func() { p.stopEventWatcher("reuse-session") })
+	ctx := newCountdownCtx(2) // the entry check and the one before the snapshot read pass
+	err := p.Start(ctx, "reuse-session", runtime.Config{
+		WorkDir:      "/tmp/reuse-work",
+		Command:      "codex",
+		PromptSuffix: "gc prime --hook",
+		Nudge:        "Check mail and hook status, then act accordingly.",
+		Env: map[string]string{
+			"GC_ALIAS":    "reuse-agent",
+			"GC_TEMPLATE": "reuse-agent",
+			"GC_PROVIDER": "codex",
+			"GC_MODEL":    "gpt-5.4",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start(reuse) = %v, want nil: a reuse in progress is not interrupted", err)
+	}
+	if got := ctx.questions(); got != 2 {
+		t.Fatalf("Start asked its ctx %d times, want 2: no check belongs inside the reuse branch", got)
+	}
+	types := server.commandTypes()
+	if countCommands(types, "thread.meta.update") == 0 {
+		t.Fatalf("no thread.meta.update in %v: the start did not take the reuse branch", types)
+	}
+	for _, typ := range []string{"project.create", "thread.create", "thread.turn.start"} {
+		if got := countCommands(types, typ); got != 0 {
+			t.Fatalf("%s commands = %d in %v, want 0 on a reused thread", typ, got, types)
+		}
+	}
+}
+
+// Kills a joined error that drops the candidate whose write stalled: the call
+// that fails every candidate names each of them, the stalled one included, so
+// an operator reading the error can tell which URL hung.
+func TestRPCCallOnceNamesTheStalledCandidateInItsJoinedError(t *testing.T) {
+	shrinkWriteTimeout(t, stalledWriteTimeout)
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_BEARER_TOKEN", "")
+	stalled := newStalledWSPeer(t)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = []string{closedLoopbackWSURL(t), closedLoopbackWSURL(t)}
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_WS_URL", stalled)
+
+	err := callBounded(t, stalledWriteTimeout+2*time.Second)
+	if err == nil {
+		t.Fatal("rpcCallOnceCtx = nil, want every candidate to fail")
+	}
+	if !strings.Contains(err.Error(), stalled) {
+		t.Fatalf("error = %v, want it to name the stalled candidate %s", err, stalled)
+	}
+}
+
+// Kills a token fetch that stores its result without the auth lock: the store
+// is the one step of the two-phase fetch that writes the shared cache, so it
+// must wait for the lock like every reader does. The fake token server takes
+// the auth lock itself once the caller has dropped it for the POST, answers,
+// and keeps the lock until released; the caller's store must not finish while
+// that lock is held, and must finish, and be served from the cache, after it.
+func TestIssueWebSocketTokenStoreWaitsForTheAuthLock(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	var mu sync.Mutex
+	requests := 0
+	srv := newLoopbackServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		first := requests == 1
+		mu.Unlock()
+		if !first {
+			http.Error(w, "unexpected second token request", http.StatusInternalServerError)
+			return
+		}
+		if err := lockBridgeAuth(r.Context()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer unlockBridgeAuth()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"token":     "tok-stored",
+			"expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		close(held)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}), false)
+	t.Cleanup(srv.Close)
+	// Registered after srv.Close, so it runs first: Close waits for the parked handler.
+	t.Cleanup(letGo)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	type result struct {
+		token string
+		err   error
+	}
+	done := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	go func() {
+		tok, err := issueT3WebSocketToken(ctx, wsURL)
+		done <- result{tok, err}
+	}()
+	select {
+	case <-held:
+	case r := <-done:
+		t.Fatalf("the fetch ended (%q, %v) before the token server held the auth lock: the caller kept the lock across its POST", r.token, r.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the token server never took the auth lock")
+	}
+	select {
+	case r := <-done:
+		t.Fatalf("the fetch returned (%q, %v) while the auth lock was held elsewhere: its cache store did not wait for the lock", r.token, r.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	letGo()
+	select {
+	case r := <-done:
+		if r.err != nil || r.token != "tok-stored" {
+			t.Fatalf("the fetch after the lock was released = %q, %v, want tok-stored", r.token, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fetch never finished after the auth lock was released")
+	}
+	tok, err := issueT3WebSocketToken(t.Context(), wsURL)
+	if err != nil || tok != "tok-stored" {
+		t.Fatalf("second fetch = %q, %v, want the cached tok-stored", tok, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("token requests = %d, want 1: the store left the cache empty", requests)
+	}
+}
