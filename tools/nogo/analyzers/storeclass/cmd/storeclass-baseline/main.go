@@ -46,6 +46,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -88,15 +89,9 @@ func run(repo string, write, initial bool, out io.Writer) error {
 		return err
 	}
 	dir := filepath.Join(repo, "tools", "nogo", "analyzers", "storeclass")
-	tl, pkgs, err := census(repo)
+	tl, err := checkedCensus(repo, storeclass.Default.Allow, out)
 	if err != nil {
 		return err
-	}
-	if _, err := fmt.Fprintf(out, "%s\nallowlisted files: %d findings in %d rows (allowed.txt)\n", summary(tl.rows), countFindings(tl.allowed), len(tl.allowed)); err != nil {
-		return err
-	}
-	if stale := staleAllows(storeclass.Default.Allow, pkgs); len(stale) > 0 {
-		return fmt.Errorf("the allowlist (config.go) names packages the module does not have; drop them:\n  %s", strings.Join(stale, "\n  "))
 	}
 
 	ceilingPath := filepath.Join(dir, "ceiling.txt")
@@ -130,6 +125,27 @@ func run(repo string, write, initial bool, out io.Writer) error {
 	}
 	_, err = fmt.Fprintf(out, "wrote %s, %s and %s\n", files[0].path, files[1].path, files[2].path)
 	return err
+}
+
+// checkedCensus is census over repo, printed to out, with allow (the
+// allowlist) judged against what it loaded: an entry for a package the module
+// does not have, or a tagged entry (Allow.Tag) its tag's build compiles no
+// file for, is an error.
+func checkedCensus(repo string, allow []storeclass.Allow, out io.Writer) (tally, error) {
+	tl, pkgs, compiled, err := census(repo)
+	if err != nil {
+		return tally{}, err
+	}
+	if _, err := fmt.Fprintf(out, "%s\nallowlisted files: %d findings in %d rows (allowed.txt)\n", summary(tl.rows), countFindings(tl.allowed), len(tl.allowed)); err != nil {
+		return tally{}, err
+	}
+	if stale := staleAllows(allow, pkgs); len(stale) > 0 {
+		return tally{}, fmt.Errorf("the allowlist (config.go) names packages the module does not have; drop them:\n  %s", strings.Join(stale, "\n  "))
+	}
+	if stale := staleTaggedAllows(allow, compiled); len(stale) > 0 {
+		return tally{}, fmt.Errorf("the allowlist (config.go) names tagged files no build of their tag alone compiles; drop the tag or the entry:\n  %s", strings.Join(stale, "\n  "))
+	}
+	return tl, nil
 }
 
 // censusFile is one file the generator writes, and its text from the census.
@@ -203,26 +219,32 @@ func (t tally) add(f storeclass.Finding) {
 // every configuration that compiles it (a gotags test or binary compiles its
 // dependencies with the tag too), so the tally holds the union: each key's
 // count from whichever variant compiles its file. pkgs is every module
-// package a variant loaded, module-relative.
-func census(repo string) (tally, map[string]bool, error) {
+// package a variant loaded, module-relative; files is, per build tag ("" for
+// the untagged build), every module-relative production file it compiled.
+func census(repo string) (tally, map[string]bool, map[string]map[string]bool, error) {
 	tags, err := repoBuildTags(repo)
 	if err != nil {
-		return tally{}, nil, err
+		return tally{}, nil, nil, err
 	}
 	merged := newTally()
 	pkgs := map[string]bool{}
+	files := map[string]map[string]bool{}
 	for _, tag := range append([]string{""}, tags...) {
-		variant, loaded, err := censusWith(repo, tag)
+		variant, loaded, compiled, err := censusWith(repo, tag)
 		if err != nil {
-			return tally{}, nil, err
+			return tally{}, nil, nil, err
 		}
 		mergeVariant(merged.rows, variant.rows)
 		mergeVariant(merged.allowed, variant.allowed)
 		for _, p := range loaded {
 			pkgs[p] = true
 		}
+		files[tag] = map[string]bool{}
+		for _, f := range compiled {
+			files[tag][f] = true
+		}
 	}
-	return merged, pkgs, nil
+	return merged, pkgs, files, nil
 }
 
 // staleAllows is the package of each allowlist entry that names no package
@@ -236,6 +258,38 @@ func staleAllows(allow []storeclass.Allow, pkgs map[string]bool) []string {
 	}
 	sort.Strings(stale)
 	return slices.Compact(stale)
+}
+
+// staleTaggedAllows is each tagged allowlist entry (Allow.Tag) that matches
+// no file the build of its tag compiles in its package, or a file the
+// untagged build compiles too (the untagged nogo pass judges that one, so
+// the tag only hides a stale entry), as "package/file (tag)", sorted. files
+// is census's: per tag ("" untagged), the module-relative files compiled. A
+// nogo pass cannot judge a tagged entry, so this is where it is judged.
+func staleTaggedAllows(allow []storeclass.Allow, files map[string]map[string]bool) []string {
+	var stale []string
+	matches := func(a storeclass.Allow, tag string) bool {
+		for f := range files[tag] {
+			dir, base := path.Split(f)
+			if ok, err := path.Match(a.File, base); err == nil && ok && strings.TrimSuffix(dir, "/") == a.Package {
+				return true
+			}
+		}
+		return false
+	}
+	for _, a := range allow {
+		if a.Tag == "" || a.File == "" {
+			continue
+		}
+		switch {
+		case !matches(a, a.Tag):
+			stale = append(stale, fmt.Sprintf("%s/%s (%s)", a.Package, a.File, a.Tag))
+		case matches(a, ""):
+			stale = append(stale, fmt.Sprintf("%s/%s (%s; the untagged build compiles it too)", a.Package, a.File, a.Tag))
+		}
+	}
+	sort.Strings(stale)
+	return stale
 }
 
 // countFindings is the sum of rows' counts.
@@ -256,9 +310,10 @@ func mergeVariant(merged, rows map[storeclass.Key]int) {
 	}
 }
 
-// censusWith is one build-tag variant's tally, and the module-relative path
-// of every package it loaded.
-func censusWith(repo, tag string) (tally, []string, error) {
+// censusWith is one build-tag variant's tally, the module-relative path of
+// every package it loaded, and the module-relative path of every production
+// file it compiled.
+func censusWith(repo, tag string) (tally, []string, []string, error) {
 	cfg := &packages.Config{
 		Mode:  packages.LoadSyntax,
 		Dir:   repo,
@@ -270,16 +325,19 @@ func censusWith(repo, tag string) (tally, []string, error) {
 	}
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return tally{}, nil, fmt.Errorf("loading packages (tags %q): %w", tag, err)
+		return tally{}, nil, nil, fmt.Errorf("loading packages (tags %q): %w", tag, err)
 	}
 	// The untagged tree must type-check. A tag alone can leave a package
 	// that needs a combination of tags uncompilable; no Bazel target builds
 	// it that way, so a tagged variant skips it.
-	var loadErrs, loaded []string
+	var loadErrs, loaded, compiled []string
 	var ok []*packages.Package
 	for _, p := range pkgs {
 		if rel, in := moduleRel(p.PkgPath); in {
 			loaded = append(loaded, rel)
+			for _, f := range p.GoFiles {
+				compiled = append(compiled, path.Join(rel, filepath.Base(f)))
+			}
 		}
 		if len(p.Errors) == 0 {
 			ok = append(ok, p)
@@ -290,20 +348,20 @@ func censusWith(repo, tag string) (tally, []string, error) {
 		}
 	}
 	if tag == "" && len(loadErrs) > 0 {
-		return tally{}, nil, fmt.Errorf("type-checking the tree:\n  %s", strings.Join(loadErrs, "\n  "))
+		return tally{}, nil, nil, fmt.Errorf("type-checking the tree:\n  %s", strings.Join(loadErrs, "\n  "))
 	}
 	tl := newTally()
 	a := storeclass.NewCollector(storeclass.Default, tl.add)
 	graph, err := checker.Analyze([]*analysis.Analyzer{a}, ok, nil)
 	if err != nil {
-		return tally{}, nil, err
+		return tally{}, nil, nil, err
 	}
 	for act := range graph.All() {
 		if act.Err != nil {
-			return tally{}, nil, fmt.Errorf("%s: %w", act.Package.PkgPath, act.Err)
+			return tally{}, nil, nil, fmt.Errorf("%s: %w", act.Package.PkgPath, act.Err)
 		}
 	}
-	return tl, loaded, nil
+	return tl, loaded, compiled, nil
 }
 
 // moduleRel is pkgPath relative to the gascity module, "." for its root, and

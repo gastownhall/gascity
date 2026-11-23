@@ -824,12 +824,12 @@ func TestDrainAckStrictConfig(t *testing.T) {
 		if tc.refused {
 			cfg.ChatSessions.IdleTimeout = "30m"
 		}
-		if got := drainAckStrictConfig(cfg); got != tc.want {
+		if got := drainAckStrictConfig(cfg, ""); got != tc.want {
 			t.Errorf("drainAckStrictConfig(%q, refused %v) = %v, want %v", tc.value, tc.refused, got, tc.want)
 		}
 	}
 	// An unset key that resolves to v2 (mc-dpo2b) is as strict as "v2".
-	if cfg := v2DefaultCity(nil); !drainAckStrictConfig(cfg) {
+	if cfg := v2DefaultCity(nil); !drainAckStrictConfig(cfg, "") {
 		t.Error("drainAckStrictConfig(unset, resolving to v2) = false, want true")
 	}
 	if _, strict := drainAckCityMode(t.TempDir()); strict {
@@ -845,11 +845,11 @@ func TestDrainAckStrictConfigReadsTheProcessEnv(t *testing.T) {
 	original := reconcilerModeLookupEnv
 	t.Cleanup(func() { reconcilerModeLookupEnv = original })
 	reconcilerModeLookupEnv = envOf(nil)
-	if !drainAckStrictConfig(v2DefaultCity(nil)) {
+	if !drainAckStrictConfig(v2DefaultCity(nil), "") {
 		t.Fatal("drainAckStrictConfig(default-v2 city, empty env) = false, want true")
 	}
 	reconcilerModeLookupEnv = envOf(map[string]string{"GC_BEADS_CONDITIONAL_WRITES": "off"})
-	if drainAckStrictConfig(v2DefaultCity(nil)) {
+	if drainAckStrictConfig(v2DefaultCity(nil), "") {
 		t.Error("drainAckStrictConfig(default-v2 city, GC_BEADS_CONDITIONAL_WRITES=off) = true, want the legacy fallback")
 	}
 }

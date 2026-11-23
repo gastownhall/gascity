@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 func TestClassHandleCapabilityConformanceMemStore(t *testing.T) {
@@ -28,6 +29,46 @@ func TestClassHandleCapabilityConformanceFileStore(t *testing.T) {
 		}
 		return s
 	})
+}
+
+func TestClassHandleCapabilityConformanceSQLiteStore(t *testing.T) {
+	RunClassHandleCapabilityConformance(t, openSQLite)
+}
+
+// The conformance over stores stamped require: ResolveConditionalWriter
+// through every handle and leg layer must find the stamp and answer the
+// store's writer, not read an unset mode and answer none (a fenced write that
+// silently became unconditional).
+func TestClassHandleCapabilityConformanceRequireMemStore(t *testing.T) {
+	RunClassHandleCapabilityConformance(t, func(t *testing.T) beads.Store {
+		return stampRequire(t, "MemStore", beads.NewMemStore())
+	})
+}
+
+func TestClassHandleCapabilityConformanceRequireSQLiteStore(t *testing.T) {
+	RunClassHandleCapabilityConformance(t, func(t *testing.T) beads.Store {
+		return stampRequire(t, "SQLiteStore", openSQLite(t))
+	})
+}
+
+func openSQLite(t *testing.T) beads.Store {
+	t.Helper()
+	s, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	return s
+}
+
+func stampRequire(t *testing.T, kind string, s beads.Store) beads.Store {
+	t.Helper()
+	if err := beads.StampOpenedStore(s, kind, gate.Require, false, nil, nil); err != nil {
+		t.Fatalf("StampOpenedStore(%s, require): %v", kind, err)
+	}
+	if w, _, err := beads.ResolveConditionalWriter(s); err != nil || w == nil {
+		t.Fatalf("fixture: %s stamped require resolves %v, %v; want its writer", kind, w, err)
+	}
+	return s
 }
 
 func TestSingleStoreMintsEveryClassOverOneStore(t *testing.T) {

@@ -1,7 +1,6 @@
 package herdr
 
 import (
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -18,10 +17,9 @@ type launchSpec struct {
 	// detection, prompt/wait delivery, and status-backed liveness.
 	Kind string
 	Args []string
-	// Raw is the fallback: the command is typed into the pane shell as
-	// `exec /bin/sh -c <Raw>` so the pane dies with the command (tmux parity).
-	// Only pane-level tracking is available; the sidecar pane binding is the
-	// session handle.
+	// Raw is the fallback: the command is typed into the pane shell so the pane
+	// dies with the command (tmux parity); see launchRaw. Only pane-level
+	// tracking is available; the sidecar pane binding is the session handle.
 	Raw string
 }
 
@@ -49,14 +47,14 @@ func launchSpecFor(command string) launchSpec {
 	if command == "" {
 		return launchSpec{}
 	}
-	if strings.ContainsAny(command, launchShellMetachars) {
+	if strings.ContainsAny(command, launchShellMetachars) || !launchSyntaxPortable(command) {
 		return launchSpec{Raw: command}
 	}
 	parts := shellquote.Split(command)
 	if len(parts) == 0 {
 		return launchSpec{Raw: command}
 	}
-	if kind := filepath.Base(parts[0]); herdrAgentKinds[kind] {
+	if kind := agentKindOf(parts[0]); herdrAgentKinds[kind] {
 		return launchSpec{Kind: kind, Args: parts[1:]}
 	}
 	return launchSpec{Raw: command}

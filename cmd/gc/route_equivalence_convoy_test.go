@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // Route equivalence for gc convoy list and gc convoy status (#8453): the
@@ -316,6 +318,20 @@ func (s failingConvoyRigState) BeadStores() map[string]beads.Store {
 	m := s.controllerState.BeadStores()
 	m[s.rig] = convoyCheckFailStore{Store: beads.NewMemStore(), failConvoyList: true}
 	return m
+}
+
+// Stores adds the failing rig store to the controller's rig scopes, minted
+// over the controller's city store and routes as its own Stores is.
+func (s failingConvoyRigState) Stores() storeref.Stores {
+	s.mu.RLock()
+	cityPath, routes, work := s.cityPath, s.storageRoutes, s.cityBeadStore
+	rigs := maps.Clone(s.beadStores)
+	s.mu.RUnlock()
+	if rigs == nil {
+		rigs = map[string]beads.Store{}
+	}
+	rigs[s.rig] = convoyCheckFailStore{Store: beads.NewMemStore(), failConvoyList: true}
+	return mintCityStores(cityPath, routes, nil, work, storeref.RigLegs(rigs), nil)
 }
 
 // TestConvoyListRouteEquivalenceFailsOnAFailedRig pins that a store whose

@@ -205,6 +205,17 @@ provider = "copilot"
 upstream = "copilot-custom"
 ```
 
+Copilot sessions launch with `--yolo --no-ask-user`. Copilot's `ask_user` tool
+opens a question prompt in the pane, and an unattended worker would wait at it
+indefinitely. To restore the tool for an agent you attach to and talk with,
+such as the `mayor`, opt in:
+
+```toml
+# agent.toml
+provider = "copilot"
+option_defaults = { ask_user = "on" }   # off (default) · on
+```
+
 ### Sourcegraph AMP — `provider = "amp"`
 
 Reads `AMP_URL` and `AMP_API_KEY`.
