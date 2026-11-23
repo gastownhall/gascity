@@ -116,7 +116,7 @@ func WriteFileIfChangedAtomic(fs FS, path string, data []byte, perm os.FileMode)
 				if !snapshot.hasID {
 					return WriteFileAtomic(fs, path, data, perm)
 				}
-				currentID, ok := fileIdentityFromInfo(info)
+				currentID, ok := currentFileIdentity(fs, path, info)
 				if !ok || currentID != snapshot.id {
 					return WriteFileAtomic(fs, path, data, perm)
 				}
@@ -139,7 +139,7 @@ func WriteFileIfContentOrModeChangedAtomic(fs FS, path string, data []byte, perm
 				if !snapshot.hasID {
 					return WriteFileAtomic(fs, path, data, perm)
 				}
-				currentID, ok := fileIdentityFromInfo(info)
+				currentID, ok := currentFileIdentity(fs, path, info)
 				if !ok || currentID != snapshot.id {
 					return WriteFileAtomic(fs, path, data, perm)
 				}
@@ -181,6 +181,25 @@ func ComparableMode(mode os.FileMode) os.FileMode {
 
 func fileIdentityFromInfo(info os.FileInfo) (fileIdentity, bool) {
 	return fileIdentityFromSys(info.Sys())
+}
+
+// pathFileIdentityReader is implemented by filesystems whose Lstat result does
+// not carry the file identity, so it must be read from the path itself.
+type pathFileIdentityReader interface {
+	pathFileIdentity(name string) (fileIdentity, bool)
+}
+
+// currentFileIdentity returns the identity of the file at path, which info
+// describes. A Unix FileInfo carries it in Sys; on Windows os.Lstat leaves it
+// unloaded, so the filesystem reads it from the path instead.
+func currentFileIdentity(fs FS, path string, info os.FileInfo) (fileIdentity, bool) {
+	if id, ok := fileIdentityFromInfo(info); ok {
+		return id, true
+	}
+	if reader, ok := fs.(pathFileIdentityReader); ok {
+		return reader.pathFileIdentity(path)
+	}
+	return fileIdentity{}, false
 }
 
 func fileIdentityFromSys(sys any) (fileIdentity, bool) {

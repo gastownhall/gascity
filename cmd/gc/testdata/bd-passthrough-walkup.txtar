@@ -20,6 +20,22 @@ exec gc bd list
 stdout 'pwd=.*/city/frontend root=.*/city/frontend prefix=fe argv=list$'
 stderr 'answering from the rig "frontend" store'
 
+# Explicit city paths converge on the same store as walk-up discovery. Keep
+# relative/absolute cases independent of symlink capability on this host.
+cd $WORK
+exec gc --city=./city bd show demo-abc
+stdout 'pwd=.*/city root=.*/city prefix=demo argv=show demo-abc$'
+exec gc --city=$WORK/city bd show demo-abc
+stdout 'pwd=.*/city root=.*/city prefix=demo argv=show demo-abc$'
+
+[symlink] symlink city-alias -> city
+[symlink] exec gc --city=./city-alias bd show demo-abc
+[symlink] stdout 'pwd=.*/city root=.*/city prefix=demo argv=show demo-abc$'
+
+# Canonical comparison must not turn a missing city into a usable store.
+! exec gc --city=$WORK/missing-city bd list
+stderr 'missing-city'
+
 -- bin/bd --
 #!/bin/sh
 echo "pwd=$(pwd -P) root=$GC_STORE_ROOT prefix=$GC_BEADS_PREFIX argv=$*"

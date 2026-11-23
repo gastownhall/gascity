@@ -196,6 +196,9 @@ func TestDismissMidSessionDialogsSendsExpectedKeys(t *testing.T) {
 			if !reflect.DeepEqual(sent, tt.wantKeys) {
 				t.Errorf("sent keys = %v, want %v", sent, tt.wantKeys)
 			}
+			if showing := MidSessionDialogShowing(tt.pane); showing != tt.wantDismissed {
+				t.Errorf("MidSessionDialogShowing = %v, want %v: the look must agree with the dismissal", showing, tt.wantDismissed)
+			}
 		})
 	}
 }

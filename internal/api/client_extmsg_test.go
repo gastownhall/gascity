@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestClientBindExtMsgConversationHandoff(t *testing.T) {
@@ -18,7 +19,7 @@ func TestClientBindExtMsgConversationHandoff(t *testing.T) {
 		Replace      bool                   `json:"replace"`
 	}
 	var gotHeader string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/alpha/extmsg/bind" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
@@ -35,7 +36,7 @@ func TestClientBindExtMsgConversationHandoff(t *testing.T) {
 			BoundAt:           time.Now().UTC(),
 			BindingGeneration: 2,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	ref := extmsg.ConversationRef{
@@ -69,7 +70,7 @@ func TestClientBindExtMsgConversationHandoff(t *testing.T) {
 }
 
 func TestClientBindExtMsgConversationPreservesSessionName(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/alpha/extmsg/bind" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
@@ -90,7 +91,7 @@ func TestClientBindExtMsgConversationPreservesSessionName(t *testing.T) {
 			BoundAt:           time.Now().UTC(),
 			BindingGeneration: 1,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	ref := extmsg.ConversationRef{
@@ -124,7 +125,7 @@ func TestClientUnbindExtMsgConversationByAgent(t *testing.T) {
 		SessionID    string                  `json:"session_id"`
 		AgentName    string                  `json:"agent_name"`
 	}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/alpha/extmsg/unbind" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
@@ -135,7 +136,7 @@ func TestClientUnbindExtMsgConversationByAgent(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"unbound": []extmsg.SessionBindingRecord{{ID: "bind-9", AgentName: gotBody.AgentName, Status: extmsg.BindingEnded}},
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")

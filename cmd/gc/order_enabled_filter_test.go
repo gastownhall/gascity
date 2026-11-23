@@ -50,6 +50,27 @@ func TestBuildOrderDispatcherOverrideDisablesOrder(t *testing.T) {
 	requireOrderNames(t, mad.aa, "keep")
 }
 
+func TestBuildOrderDispatcherSkipsFileDisabledOrder(t *testing.T) {
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	path := filepath.Join(cityDir, "orders", "off.toml")
+	if err := os.WriteFile(path, []byte(`[order]
+exec = "scripts/off.sh"
+trigger = "cooldown"
+interval = "1m"
+enabled = false
+`), 0o644); err != nil {
+		t.Fatalf("write order: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("buildOrderDispatcher returned nil; stderr: %s", stderr.String())
+	}
+	mad := ad.(*memoryOrderDispatcher)
+	requireOrderNames(t, mad.aa, "keep")
+}
+
 func TestControllerStateOrdersOverrideDisablesOrder(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir, cfg := newOrderEnabledFilterCity(t)
@@ -121,7 +142,9 @@ func TestCmdOrderHistoryIncludesOverrideDisabledOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.Create(beads.Bead{Title: "drop run", Type: "task", Labels: []string{"order-run:drop"}})
+	// A run record carries order-tracking beside its order-run label, as
+	// orders.(*Store).CreateRun writes it.
+	run, err := store.Create(beads.Bead{Title: "drop run", Type: "task", Labels: []string{"order-run:drop", labelOrderTracking}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +209,7 @@ func writeOrderEnabledFilterFixture(t *testing.T, cityDir, name string) {
 		t.Fatalf("mkdir orders: %v", err)
 	}
 	content := `[order]
-exec = "scripts/` + name + `.sh"
+exec = "scripts/` + name + `"
 trigger = "cooldown"
 interval = "1m"
 `

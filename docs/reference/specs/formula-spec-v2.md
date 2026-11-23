@@ -719,12 +719,14 @@ participates.
 after each iteration closes, the orchestrator runs the configured script.
 Exit 0 closes the step; an infrastructure outcome — a run stopped at its
 timeout, exit 75, or the narrow stderr fallback described below — re-runs the
-script without spending an attempt; any other nonzero exit is a "not yet" verdict that spawns the next
-iteration while budget remains, and exhaustion closes the step as failed.
+script without spending an attempt; exit 78 holds the step open until the
+script's environment is fixed; any other nonzero exit is a "not yet" verdict
+that spawns the next iteration while budget remains, and exhaustion closes the
+step as failed.
 
 | Key | Purpose |
 |---|---|
-| `max_attempts` | Total run/check attempts including the first (≥ 1) |
+| `max_attempts` | Total run/check attempts including the first (≥ 1); an integer, or a `"{{name}}"` var placeholder resolved at compile time |
 | `check.mode` | Checker implementation; only `"exec"` is supported |
 | `check.path` | Repo-relative or absolute script path to execute |
 | `check.timeout` | Script execution bound (e.g. `"2m"`); takes precedence over the step's `timeout` |
@@ -747,6 +749,17 @@ mode = "exec"
 path = "scripts/verify.sh"
 timeout = "2m"
 ```
+
+`max_attempts` may instead name a formula var, written as a single
+`"{{name}}"` placeholder (`max_attempts = "{{attempts}}"`). The compiler
+substitutes the var's value (the caller's `--var`, else the declared default)
+before materialization, so the control bead and spec sidecar carry a literal
+count. In an expansion template the var resolves against the expansion's vars
+(its defaults and the rule's or step's overrides) before the invoking
+formula's; when one expansion invokes another, the outer expansion's vars come
+before the root formula's. The value must be an integer ≥ 1; a missing,
+non-integer, or smaller value fails compilation, unless the step's `condition`
+(section 1.5) excludes the check. Any other string is a parse error.
 
 Materialization: the compiler emits a spec sidecar (`<step>.spec`, kind
 `spec`, carrying the serialized step definition), the first iteration
@@ -794,7 +807,8 @@ that run as an infrastructure outcome rather than a verdict:
 |---|---|---|
 | `0` | Pass — the step closes | n/a |
 | `75` | Infrastructure unreachable; the check produced no verdict | **No** — re-run attempt-free |
-| any other nonzero carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
+| any other nonzero except `78` carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
+| `78` | The check cannot run on this machine as configured (for example, a module its interpreter needs is missing); the check produced no verdict | **No**, and no infrastructure budget either. The step stays open and the steps that need it stay blocked; the first non-blank stderr line, clipped, is included in `gc.control_pending_reason`. Re-run every sweep until it exits with any other status |
 | any other nonzero | Fail — the verdict is "not yet" | Yes |
 | none: the script ran past `check.timeout` and was stopped | No verdict | **No** — re-run attempt-free under the same budget |
 | none: the script could not start (for example, its working directory is gone) | Graded as a failure | Yes |
@@ -816,12 +830,41 @@ typed infrastructure error strings on **stderr**
 matched only against stderr, and is not a stable interface — a script that
 needs this behavior should exit 75.
 
-Scope (non-normative for other lanes): this reclassification is applied by
-the ralph check lane described in this section. The other condition
-consumers — trigger conditions, hybrid dispatch, and `gc converge` — still
-read a nonzero gate as a genuine verdict. Each lane opts in separately,
-because "re-run without cost" only means something where there is an attempt
-budget to protect.
+**A check that cannot run here — exit 78.** A third thing a script may need
+to say is "I cannot run on this machine as it is configured": the interpreter
+it calls is missing a module it imports, or a tool it needs is not on the
+`PATH` the orchestrator gives check scripts. That is not a verdict, and
+unlike exit 75 it is not transient: re-running the script changes nothing
+until an operator changes the machine or the city configuration. Exit status
+**78** (`EX_CONFIG` from `sysexits.h`, the code the repository's own scripts
+use for missing operator configuration) declares it. The orchestrator treats
+such a run exactly like a script it could not launch (below): the step stays
+open, the steps that need it stay blocked, the first non-blank line of the
+script's stderr (clipped, and with any controller secret it echoed redacted)
+is included in `gc.control_pending_reason`, and after the stall budget a
+single `control.stalled` event is emitted. Neither a `max_attempts` attempt
+nor the infrastructure budget is spent. Once the environment is fixed, the
+next sweep re-runs the check and the loop resumes where it was. Exit 78 is
+held even when stderr also carries one of the typed infrastructure strings:
+the status the script chose wins over the fallback.
+
+Use 78 only when re-running cannot help. A content problem must still exit
+with an ordinary nonzero status, or the step waits for an operator who has
+nothing to fix. A script that passes a child's exit status through (`cmd ||
+exit $?`, or a failing command under `set -e`) can exit 78 without meaning
+to, so map child failures to the script's own codes. Put the diagnostic an operator needs on
+the first stderr line and keep that line stable across runs: a line that
+changes every run is re-recorded on every sweep and keeps the orchestrator
+from idling. Since a held check is re-run on every sweep, exit 78 before doing
+expensive work.
+
+Scope (non-normative for other lanes): the exit 75 reclassification and the
+exit 78 hold are applied by the ralph check lane described in this section,
+on both the compiled kind `ralph` control and the legacy kind `check` bead.
+The other condition consumers — trigger conditions, hybrid dispatch, and
+`gc converge` — still read a nonzero gate as a genuine verdict. Each lane opts
+in separately, because "re-run without cost" only means something where there
+is an attempt budget to protect.
 
 **A check that cannot be launched.** When `check.path` names a script that is
 missing, is not a regular file, or is not executable, the orchestrator never
@@ -829,9 +872,13 @@ runs it, so there is no exit status to read. The step stays open rather than
 failing: the fix is out of band (ship the script, `chmod +x` it), and closing
 the step would release the steps that need it. The orchestrator re-checks the
 step every sweep; once the script can run, the step resumes and spends attempts
-normally. If the script is still unlaunchable when the stall budget elapses (15
-minutes by default), the orchestrator emits a single `control.stalled` event
-with `error_class = "pending"` and keeps waiting. It records no `order.failed`.
+normally. On the first sweep that cannot launch the script, the orchestrator
+emits a `control.check_unlaunchable` event naming the step's bead, its
+`check.path`, and the reason. It emits the event again only when the reason
+changes, such as a missing script that ships without its execute bit. If the
+script is still unlaunchable when the stall budget elapses (15 minutes by
+default), the orchestrator emits a single `control.stalled` event with
+`error_class = "pending"` and keeps waiting. It records no `order.failed`.
 A script that is missing because the step's working directory was removed, and
 that exists nowhere else, is held open the same way. Restoring the directory
 heals it; shipping a copy under the city or store root does not. The script

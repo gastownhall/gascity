@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "ok",
+    "total_gated",
+    "covered",
+    "missing",
+    "coverage"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "total_gated": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "covered": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "missing": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "coverage": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "missing_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": true
+}

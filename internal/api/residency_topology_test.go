@@ -15,13 +15,11 @@ import (
 func TestAPIResidencyTopologyIsSingleStoreOnADefaultCity(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	s := &Server{state: state}
-
-	topo := s.residencyTopology()
+	topo := state.Stores().Topology()
 	if !topo.IsSingleStore() {
 		t.Fatalf("a default city produced %d bindings, want none", len(topo.Bindings))
 	}
-	if topo.Work.Store != state.cityBeadStore {
+	if topo.Work.Store != state.CityBeadStore() {
 		t.Fatal("the work leg is not the city store")
 	}
 	plan, err := storeref.Plan(storeref.ByID{ID: "ga-1"}, topo)
@@ -33,10 +31,9 @@ func TestAPIResidencyTopologyIsSingleStoreOnADefaultCity(t *testing.T) {
 	}
 }
 
-// A whole-split city: every class accessor the State surface exposes resolves
-// to ONE non-work store, and that store becomes one binding carrying all five
-// infrastructure classes — messaging included, even though this plane cannot
-// observe it (see completeObservedClasses).
+// A whole-split city: every class handle the State surface mints resolves to
+// ONE non-work store, and that store is one binding carrying all five
+// infrastructure classes, named as the CLI and controller planes name it.
 func TestAPIResidencyTopologyGroupsTheWholeSplitIntoOneBinding(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
@@ -45,9 +42,7 @@ func TestAPIResidencyTopologyGroupsTheWholeSplitIntoOneBinding(t *testing.T) {
 	state.sessionsBeadStore = binding
 	state.ordersBeadStore = binding
 	state.nudgesBeadStore = binding
-	s := &Server{state: state}
-
-	topo := s.residencyTopology()
+	topo := state.Stores().Topology()
 	if len(topo.Bindings) != 1 {
 		t.Fatalf("got %d bindings, want 1 — the whole split is ONE store", len(topo.Bindings))
 	}
@@ -84,16 +79,14 @@ func TestAPIResidencyTopologyGroupsTheWholeSplitIntoOneBinding(t *testing.T) {
 	}
 }
 
-// A binding carrying only SOME observable classes is described as observed:
-// the whole-split completion must not round a per-class arrangement up.
+// A binding carrying only SOME classes is described as it is: a per-class
+// arrangement is not rounded up to the whole split.
 func TestAPIResidencyTopologyDoesNotRoundUpAPartialSplit(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
 	graph := beads.NewMemStore()
 	state.graphBeadStore = graph
-	s := &Server{state: state}
-
-	topo := s.residencyTopology()
+	topo := state.Stores().Topology()
 	if len(topo.Bindings) != 1 {
 		t.Fatalf("got %d bindings, want 1", len(topo.Bindings))
 	}
@@ -112,9 +105,7 @@ func TestAPIResidencyTopologyCarriesTheStandingRefusal(t *testing.T) {
 	state.sessionsBeadStore = refusing
 	state.ordersBeadStore = refusing
 	state.nudgesBeadStore = refusing
-	s := &Server{state: state}
-
-	topo := s.residencyTopology()
+	topo := state.Stores().Topology()
 	if topo.Refused == nil {
 		t.Fatal("a refusing binding produced a topology with no refusal — the deleted-[storage] trap")
 	}
