@@ -282,6 +282,11 @@ func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 // left session-start staging as its first writer, after the fingerprint, and
 // the next tick drained the fresh session for config drift.
 func TestMaterializeProviderOverlays_StagesUninstalledMergeableCodexHook(t *testing.T) {
+	// The #5872 stack-aware decision probes the controller host's user-level
+	// codex hooks; pin it to a home with none so the fallback (staging) arm is
+	// the one under test, whatever the test runner's machine carries.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "")
 	workDir := materializeCodexOverlayForTest(t, nil)
 	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); err != nil {
 		t.Fatalf("staging skipped .codex/hooks.json that no installer writes on the tick: %v", err)
