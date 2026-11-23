@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,4 +96,91 @@ func TestOrdersPassRunsNoStoreWatchdogs(t *testing.T) {
 	}
 	assertStoreWatchdogClocksZero(t, cr)
 	assertStoreWatchdogSeedUntouched(t, store)
+}
+
+// closedHistoryBlockingStore parks every closed-status List (the retention
+// prune's history read) until release is closed.
+type closedHistoryBlockingStore struct {
+	beads.Store
+	entered     chan struct{}
+	enteredOnce sync.Once
+	release     chan struct{}
+}
+
+func newClosedHistoryBlockingStore(inner beads.Store) *closedHistoryBlockingStore {
+	return &closedHistoryBlockingStore{Store: inner, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (s *closedHistoryBlockingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "closed" {
+		s.enteredOnce.Do(func() { close(s.entered) })
+		<-s.release
+	}
+	return s.Store.List(q)
+}
+
+// storeWatchdogTestRuntime is ordersLaneTestRuntime over store, with every
+// watchdog due and the order rescan, index migration and managed-Dolt
+// preflight out of the way. Its empty city path skips the retention
+// watchdog's backup-age check, as on every directly-built test runtime.
+func storeWatchdogTestRuntime(t *testing.T, store beads.Store, od orderDispatcher, patrol string) *CityRuntime {
+	t.Helper()
+	cr := ordersLaneTestRuntime(t, od, patrol, nil)
+	cr.cityPath = ""
+	cr.standaloneCityStore = store
+	cr.wispIndexMigrationApplied = true
+	cr.orderRescanLast = time.Now()
+	cr.managedDoltOwned = func(string) (bool, error) { return false, nil }
+	return cr
+}
+
+// A retention prune blocked in its closed-history read holds nothing else:
+// the startup dispatch, an orders-lane pass and the tracking and nudge/mail
+// lanes each finish their work while it stays parked.
+func TestStoreWatchdogLanesRunWhileRetentionIsBlocked(t *testing.T) {
+	now := time.Now()
+	seed := append(storeWatchdogSeed(now), mailSeed("mail-stale", now.Add(-nudgeMailSweepDefaultMailTTL-time.Minute)))
+	store := newClosedHistoryBlockingStore(beads.NewMemStoreFrom(100, seed, nil))
+	od := &recordingOrderDispatcher{}
+	cr := storeWatchdogTestRuntime(t, store, od, "1h")
+	ctx := context.Background()
+
+	retentionDone := make(chan struct{})
+	go func() {
+		defer close(retentionDone)
+		cr.runStoreWatchdogLanePass(ctx, cr.storeWatchdogLaneOf(storeWatchdogOrderTrackingRetention))
+	}()
+	t.Cleanup(func() {
+		close(store.release)
+		awaitClose(t, retentionDone, "the retention pass finishing after release")
+	})
+	awaitClose(t, store.entered, "the retention watchdog reaching its closed-history read")
+
+	othersDone := make(chan struct{})
+	go func() {
+		defer close(othersDone)
+		cr.dispatchOrders(ctx, cr.cityPath)
+		cr.runOrdersLanePass(ctx, cr.cityPath, ordersLaneReasonCadence)
+		cr.runStoreWatchdogLanePass(ctx, cr.storeWatchdogLaneOf(storeWatchdogOrderTrackingSweep))
+		cr.runStoreWatchdogLanePass(ctx, cr.storeWatchdogLaneOf(storeWatchdogNudgeMailSweep))
+	}()
+	awaitClose(t, othersDone, "dispatch and the tracking and nudge/mail lanes while retention is blocked")
+
+	select {
+	case <-retentionDone:
+		t.Fatal("the retention pass finished before release: the test did not hold it")
+	default:
+	}
+	if got := od.calls.Load(); got != 2 {
+		t.Fatalf("dispatcher calls = %d, want 2 (startup dispatch and one lane pass)", got)
+	}
+	for id, want := range map[string]string{"stale-open": "closed", "mail-stale": "closed"} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != want {
+			t.Fatalf("%s status = %q, want %q while retention is blocked", id, got.Status, want)
+		}
+	}
 }

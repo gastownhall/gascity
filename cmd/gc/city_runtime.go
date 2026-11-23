@@ -199,10 +199,15 @@ type CityRuntime struct {
 	claimStallOnce sync.Once
 
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
-	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
-	// clocks below; created on first use.
+	// od, retiredOrderDispatchers and the order-set bookkeeping; created on
+	// first use.
 	ordersLane     *ordersLane
 	ordersLaneOnce sync.Once
+	// storeWatchdogLanes run the store watchdogs, one lane each, off both the
+	// tick and the orders lane (store_watchdog_lanes.go). Each lane owns its
+	// watchdog's clocks below; created on first use.
+	storeWatchdogLanes     []*storeWatchdogLane
+	storeWatchdogLanesOnce sync.Once
 	// workGCLane runs the wisp GC's work arm off the tick (wisp_gc_work_lane.go).
 	workGCLane     *workGCLane
 	workGCLaneOnce sync.Once
@@ -228,6 +233,12 @@ type CityRuntime struct {
 	// critical section, before the generation and config are read.
 	inOrderPassConfig func(*ordersLane)
 
+	// Store watchdog clocks. Each is owned by its watchdog's lane
+	// (store_watchdog_lanes.go): the tracking sweep lane owns the
+	// orderSweepWatchdog* fields, the retention lane
+	// orderTrackingRetentionWatchdogLast, and the nudge/mail lane
+	// nudgeMailSweepWatchdogLast. Read them only from that lane's pass or
+	// after joining it.
 	orderSweepWatchdogLast time.Time
 	// orderSweepWatchdogNotClosedDue is when the stale watchdog next reads
 	// every not-closed tracking bead; the zero value is due on the next pass.
@@ -2241,10 +2252,10 @@ func orderSetChangeSummary(oldOrders, newOrders []orders.Order) string {
 // and every stale not-closed one, a tracking bead parked by hand included, on
 // its first pass and then once every
 // orderTrackingSweepWatchdogNotClosedInterval, sooner after a not-closed pass
-// that did not complete. The orders lane runs it with its pass's config
-// snapshot.
+// that did not complete. Its store watchdog lane runs it with the pass's
+// config snapshot.
 func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.Time) {
-	if !cr.orderSweepWatchdogLast.IsZero() && now.Sub(cr.orderSweepWatchdogLast) < clock.Backstop(orderTrackingSweepWatchdogInterval) {
+	if !cr.orderTrackingSweepWatchdogDue(now) {
 		return
 	}
 	cr.orderSweepWatchdogLast = now
@@ -2313,6 +2324,13 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	}
 }
 
+// orderTrackingSweepWatchdogDue reports whether the stale tracking watchdog
+// may run at now: on its first pass, then once every
+// orderTrackingSweepWatchdogInterval.
+func (cr *CityRuntime) orderTrackingSweepWatchdogDue(now time.Time) bool {
+	return cr.orderSweepWatchdogLast.IsZero() || now.Sub(cr.orderSweepWatchdogLast) >= clock.Backstop(orderTrackingSweepWatchdogInterval)
+}
+
 // scheduleOrderSweepWatchdogNotClosed sets when the stale watchdog next reads
 // every not-closed tracking bead, after a not-closed pass at now. After a pass
 // that completed it is orderTrackingSweepWatchdogNotClosedInterval away. After
@@ -2350,11 +2368,10 @@ func bulkDeleteMaxAge(_ *config.City) time.Duration {
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
-// orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The orders
-// lane runs it with its pass's config snapshot.
+// orderTrackingRetentionWatchdogDeleteBudget beads per invocation. Its store
+// watchdog lane runs it with the pass's config snapshot.
 func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now time.Time) {
-	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
-		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
+	if !cr.orderTrackingRetentionWatchdogDue(now) {
 		return
 	}
 	cr.orderTrackingRetentionWatchdogLast = now
@@ -2388,6 +2405,13 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now t
 	if deleted > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// orderTrackingRetentionWatchdogDue reports whether the retention watchdog may
+// run at now: on its first pass, then once every
+// orderTrackingRetentionWatchdogInterval.
+func (cr *CityRuntime) orderTrackingRetentionWatchdogDue(now time.Time) bool {
+	return cr.orderTrackingRetentionWatchdogLast.IsZero() || now.Sub(cr.orderTrackingRetentionWatchdogLast) >= orderTrackingRetentionWatchdogInterval
 }
 
 const (
@@ -2443,11 +2467,11 @@ func warnIfClosedOrderTrackingBacklogLarge(stores []beads.Store, stderr io.Write
 }
 
 // runNudgeMailSweepWatchdog closes stale nudge and mail beads, at most once
-// every nudgeMailSweepWatchdogInterval. The orders lane runs it with its pass's
-// config snapshot, so it resolves stores from cfg rather than through the
-// cr.cfg accessors.
+// every nudgeMailSweepWatchdogInterval. Its store watchdog lane runs it with
+// the pass's config snapshot, so it reads TTLs from cfg rather than through
+// the cr.cfg accessors.
 func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time) {
-	if !cr.nudgeMailSweepWatchdogLast.IsZero() && now.Sub(cr.nudgeMailSweepWatchdogLast) < nudgeMailSweepWatchdogInterval {
+	if !cr.nudgeMailSweepWatchdogDue(now) {
 		return
 	}
 	cr.nudgeMailSweepWatchdogLast = now
@@ -2490,6 +2514,12 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	if total > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog closed %d nudge bead(s), %d mail bead(s)\n", cr.logPrefix, result.NudgeClosed, result.MailClosed) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// nudgeMailSweepWatchdogDue reports whether the nudge/mail watchdog may run at
+// now: on its first pass, then once every nudgeMailSweepWatchdogInterval.
+func (cr *CityRuntime) nudgeMailSweepWatchdogDue(now time.Time) bool {
+	return cr.nudgeMailSweepWatchdogLast.IsZero() || now.Sub(cr.nudgeMailSweepWatchdogLast) >= nudgeMailSweepWatchdogInterval
 }
 
 func (cr *CityRuntime) orderTrackingSweepStores(cfg *config.City) ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it

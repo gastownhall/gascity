@@ -790,6 +790,7 @@ go_library(
         "store_health.go",
         "store_rollout.go",
         "store_target_exec.go",
+        "store_watchdog_lanes.go",
         "stranded_claims.go",
         "strict_warnings.go",
         "subagent_kill_guard.go",
