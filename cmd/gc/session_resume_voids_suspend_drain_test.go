@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -117,6 +120,14 @@ func (f *suspendDrainFixture) setCitySuspended(t *testing.T, suspended bool) {
 // tick runs one legacy reconciler tick over every fixture row as stored.
 func (f *suspendDrainFixture) tick(t *testing.T) {
 	t.Helper()
+	f.reconcile(t, f.env.sp, false)
+	waitAsyncStopsForTest(t, f.env.stops)
+}
+
+// reconcile is tick through sp, with storeQueryPartial and extra
+// start-execution options, and without waiting for queued drain-ack stops.
+func (f *suspendDrainFixture) reconcile(t *testing.T, sp runtime.Provider, storeQueryPartial bool, opts ...startExecutionOption) {
+	t.Helper()
 	var rows []beads.Bead
 	poolDesired := make(map[string]int)
 	for _, r := range append([]suspendDrainRow{f.suspendDrainRow}, f.extra...) {
@@ -127,8 +138,13 @@ func (f *suspendDrainFixture) tick(t *testing.T) {
 		rows = append(rows, got)
 		poolDesired[r.template]++
 	}
-	f.env.reconcileWithPoolDesiredAndDrainOps(rows, poolDesired, f.dops)
-	waitAsyncStopsForTest(t, f.env.stops)
+	reconcileSessionBeadsAtPath(
+		context.Background(), f.env.city, rows, f.env.desiredState,
+		configuredSessionNames(f.env.cfg, "", f.env.store), f.env.cfg, sp, f.env.store,
+		f.dops, nil, nil, nil, f.env.dt, poolDesired, storeQueryPartial, nil, "",
+		nil, f.env.clk, f.env.rec, 0, 0, &f.env.stdout, &f.env.stderr,
+		append(append([]startExecutionOption{}, f.env.startOptions...), opts...)...,
+	)
 }
 
 // armSuspendDrain runs the city-suspend tick and asserts its premise: a
@@ -303,4 +319,73 @@ func TestReconcileSessionBeads_ResumeReleasesOnlyRowsNoSuspendCovers(t *testing.
 
 	f.assertReleased(t, freeStops)
 	f.row(held).assertHonored(t, heldStops)
+}
+
+// AC-4: an armed suspended ack the restarted controller no longer tracks is
+// cleared once no operator suspend covers the row.
+func TestReconcileSessionBeads_ResumeClearsUntrackedSuspendAckAfterControllerRestart(t *testing.T) {
+	f := newSuspendDrainFixture(t)
+	f.armSuspendDrain(t)
+	stops := f.env.sp.CountCalls("Stop", f.name)
+	f.env.dt = newDrainTracker()
+
+	f.setCitySuspended(t, false)
+	f.tick(t)
+
+	f.assertReleased(t, stops)
+}
+
+// AC-4 (edge): a refused ack clear is logged, leaves the runtime up with the
+// ack armed, and the next tick's release retries the clear without a stop.
+func TestReconcileSessionBeads_ResumeReleaseSurvivesFailedAckClear(t *testing.T) {
+	f := newSuspendDrainFixture(t)
+	f.armSuspendDrain(t)
+	stops := f.env.sp.CountCalls("Stop", f.name)
+	// Every key the clear removes is refused, so no partial clear can strand
+	// the ack as a bare legacy flag.
+	ackKeys := []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	}
+	f.env.sp.RemoveMetaErrors[f.name] = map[string]error{}
+	for _, key := range ackKeys {
+		f.env.sp.RemoveMetaErrors[f.name][key] = errors.New("remove denied")
+	}
+
+	f.setCitySuspended(t, false)
+	f.tick(t)
+
+	f.assertNotStopped(t, stops)
+	if want := "clearing released " + drainSuspended + " drain ack for " + f.name; !strings.Contains(f.env.stderr.String(), want) {
+		t.Fatalf("stderr lacks %q: the failed clear must be logged\nstderr:\n%s", want, f.env.stderr.String())
+	}
+	if ack, err := f.env.sp.GetMeta(f.name, "GC_DRAIN_ACK"); err != nil || ack != "1" {
+		t.Fatalf("GC_DRAIN_ACK = %q, err %v after the refused clear; want it armed for the retry", ack, err)
+	}
+
+	for _, key := range ackKeys {
+		delete(f.env.sp.RemoveMetaErrors[f.name], key)
+	}
+	f.env.clk.Time = f.env.clk.Time.Add(time.Minute)
+	f.tick(t)
+
+	f.assertReleased(t, stops)
+}
+
+// AC-4 (edge): the release reads the ack metadata and suspension state, not
+// the bead store, so a partial store query on the resume tick does not defer
+// it.
+func TestReconcileSessionBeads_ResumeReleaseRunsUnderPartialStoreQuery(t *testing.T) {
+	f := newSuspendDrainFixture(t)
+	f.armSuspendDrain(t)
+	stops := f.env.sp.CountCalls("Stop", f.name)
+
+	f.setCitySuspended(t, false)
+	f.reconcile(t, f.env.sp, true)
+	waitAsyncStopsForTest(t, f.env.stops)
+
+	f.assertReleased(t, stops)
 }
