@@ -781,7 +781,7 @@ func recordDrainAckAssignedWorkEvent(
 			strandedBead.ID,
 			template,
 			strandedBead.Status,
-			drainAckAnomalyReason(info, strandedBead),
+			drainAckAnomalyReason(info, strandedBead, info.RestartRequested == "true"),
 		),
 	})
 }
