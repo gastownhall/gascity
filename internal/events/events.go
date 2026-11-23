@@ -55,10 +55,13 @@ const (
 	BeadClaimReleased = "bead.claim_released"
 	// BeadClaimFailed fires when gc hook --claim skips a routed candidate
 	// because the claim write itself failed: not a lost race (that is
-	// BeadClaimRejected) but an error. The seat goes on to its other
-	// candidates and, if none claims, drains claims_errored. The payload names
-	// the seat (template, session, runtime epoch) and the error text. It is
-	// the input of the controller's claim-loop guard
+	// BeadClaimRejected) but an error. It also fires when the claim was
+	// refused and the canonical row it resolved is closed: a stale served
+	// copy refuses every seat spawned for it alike (#5857), though a row
+	// closed after the work query read it reports the same. The seat goes on
+	// to its other candidates and, if none claims, drains claims_errored. The
+	// payload names the seat (template, session, runtime epoch) and the error
+	// text. It is the input of the controller's claim-loop guard
 	// (cmd/gc/claim_loop_guard.go): the same bead failing the same way for
 	// every seat a template spawns is a spawn loop, not a slow claim.
 	BeadClaimFailed = "bead.claim_failed"

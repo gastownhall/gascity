@@ -37,7 +37,10 @@ import (
 // holds closed history; and, when the config has any, the custom
 // scale_check commands (I5). On a split city it also judges every gate leg's
 // Ready through the cross-store gate, the exact legs' included, and records it
-// gated (demand_cross_store_gate.go): judging a row reads other stores.
+// gated (demand_cross_store_gate.go): judging a row reads other stores. And it
+// asks each claim view about the rows of the cross-store legs a rig pool's
+// default probe reads, and records the verdicts (demand_claim_view.go):
+// asking reads the pool's own store.
 //
 // The source deadline bounds only how long a pass waits before it publishes;
 // it never decides whether a read counts. Each read stores its result when it
@@ -121,17 +124,20 @@ const (
 	sourceDemand      sourceKind = iota // sourcePayload.Leg
 	sourceClosedNamed                   // sourcePayload.ClosedNamed
 	sourceScaleCheck                    // sourcePayload.ScaleCheck
+	sourceClaimView                     // sourcePayload.ClaimView
 	// sourceNone is a step's legs when it reads no recorded leg.
 	sourceNone sourceKind = -1
 )
 
 // sourceKey names one source: its kind and the store behind the policy front
 // door (demandLabelKey), or for the scale_check source the config it runs, so
-// a run of an older config is never published.
+// a run of an older config is never published, or for a claim-view source the
+// view's store key.
 type sourceKey struct {
 	kind  sourceKind
 	store beads.Store
 	cfg   *config.City
+	view  string
 }
 
 func keyOf(kind sourceKind, store beads.Store) sourceKey {
@@ -141,11 +147,19 @@ func keyOf(kind sourceKind, store beads.Store) sourceKey {
 	return sourceKey{kind: kind, store: store}
 }
 
+// claimViewSourceKey names the claim-view source of the view whose store key
+// is viewKey (demandClaimView).
+func claimViewSourceKey(viewKey string) sourceKey {
+	return sourceKey{kind: sourceClaimView, view: viewKey}
+}
+
 // sourcePayload is what a source read: only its kind's field is set.
 type sourcePayload struct {
 	Leg         legRecording
 	ClosedNamed session.ClosedNamedSessionBeadIndex
 	ScaleCheck  *scaleCheckResult
+	// ClaimView is a claim view's verdicts by row id (recordDemandClaimView).
+	ClaimView map[string]demandClaimViewVerdict
 }
 
 // sourceResult is one source's latest ended read: when it started (C5.4(3))
@@ -222,7 +236,12 @@ func (r *externalReadsRecording) fresh(s sourceResult, now time.Time) bool {
 // errDemandRecordingMissing when the recording holds none and
 // errDemandRecordingStale when it is no longer fresh at now.
 func (r *externalReadsRecording) lookup(kind sourceKind, store beads.Store, now time.Time) (sourceResult, error) {
-	s, ok := r.source(keyOf(kind, store))
+	return r.lookupKey(keyOf(kind, store), now)
+}
+
+// lookupKey is lookup by the source's key.
+func (r *externalReadsRecording) lookupKey(key sourceKey, now time.Time) (sourceResult, error) {
+	s, ok := r.source(key)
 	switch {
 	case !ok:
 		return sourceResult{}, errDemandRecordingMissing
@@ -327,6 +346,9 @@ type externalReadsEnv struct {
 	// store by name, ownScaleCheckTarget the control binding), so the lane
 	// records them too rather than assume every target is a census leg.
 	ProbeStores []beads.Store
+	// ClaimViews are the claim views the default probe's cross-store legs
+	// are asked of, each with its legs (demandClaimViewSets).
+	ClaimViews []demandClaimViewLegs
 	// Sessions is the open session census the stamp and the assigned-work
 	// canonicalization read; nil leaves both inert, as in legacy.
 	Sessions *sessionBeadSnapshot
@@ -734,6 +756,10 @@ func (l *externalReadsLane) scaleCheckOf(key sourceKey, res sourceResult, ok boo
 // own, since the pass reads an exact leg's other demand from its cache but
 // cannot judge its rows without reading other stores. One gate serves the
 // pass, so a blocker is read once however many legs it holds back.
+//
+// Each claim view is a source of its own, so one store that stops answering
+// leaves only its own pools' rows unanswered. The views share one live Ready of
+// each cross-store leg per pass.
 func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 	var out []externalSource
 	add := func(key sourceKey, read func() (sourcePayload, error)) {
@@ -769,6 +795,13 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.Store) })
 			r.gateReady(gate, own)
 			return sourcePayload{Leg: r}, nil
+		})
+	}
+	legReady := newLaneLegReady()
+	for _, set := range env.ClaimViews {
+		add(claimViewSourceKey(set.view.key), func() (sourcePayload, error) {
+			verdicts, err := recordDemandClaimView(env.Cfg, set, legReady.read)
+			return sourcePayload{ClaimView: verdicts}, err
 		})
 	}
 	if env.CityStore != nil && env.Cfg != nil && slices.ContainsFunc(env.Cfg.NamedSessions, func(n config.NamedSession) bool { return n.Mode == "on_demand" }) {

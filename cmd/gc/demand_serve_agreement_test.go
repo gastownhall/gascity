@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"path/filepath"
@@ -809,34 +810,98 @@ func TestBdStatusBlockedRowClassifiesAsStatusBlocked(t *testing.T) {
 	}
 }
 
-// claimViewProbeStore is a claim view that counts the Get probes a demand pass
-// issues and fails the ones a test names.
+// claimViewProbeStore is a claim view that reads by id as a bd or native Dolt
+// store does: a batch of ids in one round trip (beads.ExactBatchGetter). It
+// counts its reads by id and the ids each one asks, holds every read for
+// latency, and fails every read that asks an id a test names, as a failed
+// round trip fails its whole batch.
 type claimViewProbeStore struct {
 	beads.Store
-	mu   sync.Mutex
-	gets map[string]int
-	fail map[string]error
+	// latency holds each read by id, a Get or a batch, for that long: a
+	// round trip to the ledger. Set it before the store is read.
+	latency time.Duration
+	mu      sync.Mutex
+	reads   int
+	// widest is the most ids one read by id asked about.
+	widest int
+	gets   map[string]int
+	fail   map[string]error
 }
+
+var _ beads.ExactBatchGetter = (*claimViewProbeStore)(nil)
 
 func newClaimViewProbeStore(inner beads.Store) *claimViewProbeStore {
 	return &claimViewProbeStore{Store: inner, gets: map[string]int{}, fail: map[string]error{}}
 }
 
-func (s *claimViewProbeStore) Get(id string) (beads.Bead, error) {
+// ask counts one read by id of ids and, after the store's latency, returns
+// the error a test named for any of them.
+func (s *claimViewProbeStore) ask(ids ...string) error {
 	s.mu.Lock()
-	s.gets[id]++
-	err := s.fail[id]
+	s.reads++
+	s.widest = max(s.widest, len(ids))
+	var err error
+	for _, id := range ids {
+		s.gets[id]++
+		if err == nil {
+			err = s.fail[id]
+		}
+	}
 	s.mu.Unlock()
-	if err != nil {
+	if s.latency > 0 {
+		<-time.After(s.latency)
+	}
+	return err
+}
+
+func (s *claimViewProbeStore) Get(id string) (beads.Bead, error) {
+	if err := s.ask(id); err != nil {
 		return beads.Bead{}, err
 	}
 	return s.Store.Get(id)
 }
 
+// GetExactBatch reads ids in one round trip: the rows the store holds, and
+// every other id unresolved.
+func (s *claimViewProbeStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	if err := s.ask(ids...); err != nil {
+		return nil, nil, err
+	}
+	found := make(map[string]beads.Bead, len(ids))
+	var unresolved []string
+	for _, id := range ids {
+		b, err := s.Store.Get(id)
+		switch {
+		case err == nil:
+			found[id] = b
+		case errors.Is(err, beads.ErrNotFound):
+			unresolved = append(unresolved, id)
+		default:
+			return nil, nil, err
+		}
+	}
+	return found, unresolved, nil
+}
+
+// probes is how many reads by id asked about id.
 func (s *claimViewProbeStore) probes(id string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.gets[id]
+}
+
+// readsByID is how many reads by id the store served; a batch is one.
+func (s *claimViewProbeStore) readsByID() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
+// widestRead is the most ids one read by id asked about.
+func (s *claimViewProbeStore) widestRead() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.widest
 }
 
 // mustCreateRow creates b in store with its explicit id, then moves it to
@@ -926,6 +991,9 @@ func TestDefaultScaleDemandCountsOnlyRowsTheClaimCanWin(t *testing.T) {
 	if got := rig.probes("canary-z"); got != 0 {
 		t.Fatalf("claim view probed canary-z %d times; a row the own leg already counts needs no probe", got)
 	}
+	if got := rig.readsByID(); got != 1 {
+		t.Fatalf("claim view read %d times by id, want 1: a pass asks a view about all of its rows in one read", got)
+	}
 }
 
 // TestDemandClaimViewsAskEachRowOnce: one pass asks a claim view about an id
@@ -935,9 +1003,11 @@ func TestDemandClaimViewsAskEachRowOnce(t *testing.T) {
 	rigMem.HonorExplicitIDs = true
 	mustCreateRow(t, rigMem, beads.Bead{ID: "canary-x", Title: "x", Type: "task", Assignee: "other-session"}, "closed")
 	rig := newClaimViewProbeStore(rigMem)
-	views := newDemandClaimViews()
+	view := demandClaimView{reader: rig, key: "rig:rig"}
+	question := demandClaimViewQuestion{view: view, id: "canary-x"}
+	views := askDemandClaimViews(legacyDemandReads{}, []demandClaimViewQuestion{question, question})
 	for i := 0; i < 2; i++ {
-		if ok, err := views.claimable(rig, "rig:rig", "canary-x"); ok || err != nil {
+		if ok, err := views.claimable(view, "canary-x"); ok || err != nil {
 			t.Fatalf("claimable(canary-x) = %v, %v; want shadowed without error", ok, err)
 		}
 	}

@@ -1426,7 +1426,8 @@ func buildDemandTargets(
 				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
 				// As there, a city row counts only when the seat's claim, which
-				// resolves the id in the rig store first, can win it (#5857).
+				// on a federated-ready city resolves the id in the rig store
+				// first, can win it (#5857).
 				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 					city := crossStoreDemandLegs(cityTargets(template), ownTarget)
 					if namedSessionMode != "always" {
@@ -1483,12 +1484,13 @@ func buildDemandTargets(
 			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
 			// may live in the city store (vp-kvp cross-store delivery), which
 			// the own-rig probe above cannot see. Add a city-store probe so the
-			// pool's demand reflects routed work in either store. A seat
-			// claims a city row by resolving its id in the pool's own store
-			// first, so a city row counts only when that claim can win it:
-			// the rig store has no copy of the id, or holds it open and
-			// unassigned. A stale city replica of a rig bead closed or held
-			// there is not demand (#5857; crossStoreDemandLegs).
+			// pool's demand reflects routed work in either store. On a
+			// federated-ready city a seat claims a city row by resolving its
+			// id in the pool's own store first, so a city row counts only
+			// when that claim can win it: the rig store has no copy of the
+			// id, or holds it open and unassigned. A stale city replica of a
+			// rig bead closed or held there is not demand (#5857;
+			// demand_claim_view.go).
 			//
 			// NOT gated on isCold. This probe began as a cold-wake assist (a
 			// sleeping pool can't discover city-store demand), but gating it on
@@ -2483,7 +2485,11 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			group.byTemplate[template] = append(group.byTemplate[template], b)
 		}
 	}
-	views := newDemandClaimViews()
+	// Each template's rows, and the claim-view questions of those inside its
+	// claim window read through a cross-store leg, are gathered before any is
+	// asked: the pass asks them in one batch (askDemandClaimViews), then counts.
+	templateRows := make(map[string][]scaleDemandRow, len(templateOrder))
+	var questions []demandClaimViewQuestion
 	for _, template := range templateOrder {
 		seen := make(map[string]struct{})
 		var rows []beads.Bead
@@ -2511,8 +2517,8 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		// serves it, so the seat placed for a bead finds it in its window.
 		beads.SortBeadsReadyOrder(rows)
 		for rank, b := range rows {
-			storeKey := rowStoreKeys[b.ID]
-			spec, specErr := worktreeSpecForBead(b, storeKey)
+			row := scaleDemandRow{bead: b, storeKey: rowStoreKeys[b.ID], bindingResident: rowBindingResident[b.ID]}
+			row.spec, row.specErr = worktreeSpecForBead(b, row.storeKey)
 			// A seat for a row bound to a managed worktree starts in that
 			// worktree and takes only that row, so it is useful only while
 			// the row is inside the claim window the seat reads. Behind the
@@ -2521,16 +2527,29 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			// once claims advance the window to it. A row bound to no
 			// worktree stays demand at any rank: any seat in the pool's own
 			// directory can claim it.
-			if specErr == nil && spec != nil && rank >= config.RoutedReadyClaimWindow {
+			if row.specErr == nil && row.spec != nil && rank >= config.RoutedReadyClaimWindow {
 				continue
 			}
 			// A row read through a cross-store leg is demand only if a seat's
 			// claim can win it in the store the seat claims in. A shadowed row
 			// keeps its rank: it still occupies the claim window the seat reads.
-			if view, crossStore := rowClaimViews[b.ID]; crossStore {
-				claimable, viewErr := views.claimable(view.reader, view.key, b.ID)
+			// Only the window's rows are asked (demandClaimViewWindow): one
+			// behind it counts as a row with no claim view does, until claims
+			// advance the window to it.
+			if view, crossStore := rowClaimViews[b.ID]; crossStore && rank < demandClaimViewWindow {
+				row.claimView = &view
+				questions = append(questions, demandClaimViewQuestion{view: view, id: b.ID})
+			}
+			templateRows[template] = append(templateRows[template], row)
+		}
+	}
+	views := askDemandClaimViews(cache.demandReads(), questions)
+	for _, template := range templateOrder {
+		for _, row := range templateRows[template] {
+			if view := row.claimView; view != nil {
+				claimable, viewErr := views.claimable(*view, row.bead.ID)
 				if viewErr != nil {
-					errs = append(errs, demandClaimViewError(template, b.ID, view.key, viewErr))
+					errs = append(errs, demandClaimViewError(template, row.bead.ID, view.key, viewErr))
 					partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
 				}
 				if !claimable {
@@ -2539,56 +2558,76 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			}
 			counts[template]++
 			entry := demand[template]
-			entry.Count++
-			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
-			if entry.Titles == nil {
-				entry.Titles = make(map[string]string)
-			}
-			entry.Titles[b.ID] = b.Title
-			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
-				if entry.Packs == nil {
-					entry.Packs = make(map[string]string)
-				}
-				entry.Packs[b.ID] = pack
-			}
-			if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
-				if entry.Workspaces == nil {
-					entry.Workspaces = make(map[string]string)
-				}
-				entry.Workspaces[b.ID] = workspace
-			}
-			if entry.StoreRefs == nil {
-				entry.StoreRefs = make(map[string]string)
-			}
-			entry.StoreRefs[b.ID] = storeKey
-			if rowBindingResident[b.ID] {
-				if entry.BindingResident == nil {
-					entry.BindingResident = make(map[string]bool)
-				}
-				entry.BindingResident[b.ID] = true
-			}
-			if specErr != nil {
-				if entry.WorktreeErrors == nil {
-					entry.WorktreeErrors = make(map[string]string)
-				}
-				entry.WorktreeErrors[b.ID] = specErr.Error()
-			} else if spec != nil {
-				if entry.WorktreeSpecs == nil {
-					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
-				}
-				entry.WorktreeSpecs[b.ID] = spec
-			}
-			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
-				if entry.ParentSIDs == nil {
-					entry.ParentSIDs = make(map[string]string)
-				}
-				entry.ParentSIDs[b.ID] = parentSID
-			}
+			entry.add(row)
 			demand[template] = entry
 		}
 	}
 	views.trace(cache)
 	return counts, demand, partialTemplates, errs
+}
+
+// scaleDemandRow is one ready row a template's default probe counts unless its
+// claim view refuses it: the row, the store key and binding residence of the
+// leg that served it, its worktree binding, and, for a row read through a
+// cross-store leg, the claim view its claim resolves it in.
+type scaleDemandRow struct {
+	bead            beads.Bead
+	storeKey        string
+	bindingResident bool
+	spec            *worktree.Spec
+	specErr         error
+	claimView       *demandClaimView
+}
+
+// add counts row in the template's demand and names it: its id, title, pack,
+// workspace, store, binding residence, worktree and fork parent.
+func (entry *scaleCheckDemand) add(row scaleDemandRow) {
+	b := row.bead
+	entry.Count++
+	entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+	if entry.Titles == nil {
+		entry.Titles = make(map[string]string)
+	}
+	entry.Titles[b.ID] = b.Title
+	if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+		if entry.Packs == nil {
+			entry.Packs = make(map[string]string)
+		}
+		entry.Packs[b.ID] = pack
+	}
+	if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
+		if entry.Workspaces == nil {
+			entry.Workspaces = make(map[string]string)
+		}
+		entry.Workspaces[b.ID] = workspace
+	}
+	if entry.StoreRefs == nil {
+		entry.StoreRefs = make(map[string]string)
+	}
+	entry.StoreRefs[b.ID] = row.storeKey
+	if row.bindingResident {
+		if entry.BindingResident == nil {
+			entry.BindingResident = make(map[string]bool)
+		}
+		entry.BindingResident[b.ID] = true
+	}
+	if row.specErr != nil {
+		if entry.WorktreeErrors == nil {
+			entry.WorktreeErrors = make(map[string]string)
+		}
+		entry.WorktreeErrors[b.ID] = row.specErr.Error()
+	} else if row.spec != nil {
+		if entry.WorktreeSpecs == nil {
+			entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+		}
+		entry.WorktreeSpecs[b.ID] = row.spec
+	}
+	if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
+		if entry.ParentSIDs == nil {
+			entry.ParentSIDs = make(map[string]string)
+		}
+		entry.ParentSIDs[b.ID] = parentSID
+	}
 }
 
 // collectedDemand is what one demand pass's collectors read: custom

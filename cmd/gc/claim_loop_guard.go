@@ -14,10 +14,12 @@ package main
 // failure's cause:
 //
 //   - Input: bead.claim_failed, which `gc hook --claim` records for each routed
-//     candidate it skips because the claim write failed (template, seat, bead,
-//     error text), read off the city's event journal by the same feed as the
-//     delta lanes. A seat is a session and its runtime epoch, so a session
-//     woken again for the same bead counts again.
+//     candidate it skips because the claim write failed, or because the claim
+//     was refused by a closed canonical row (#5857: a stale served copy, or a
+//     row closed after the work query read it) (template, seat, bead, error
+//     text), read off the city's event journal by the same feed as the delta
+//     lanes. A seat is a session and its runtime epoch, so a session woken
+//     again for the same bead counts again.
 //   - Trip: claimLoopTripFailures distinct seats of one template failing to
 //     claim one bead with the SAME error text, the first and the last within
 //     claimLoopWindow. Until a hold begins, a different error starts a new

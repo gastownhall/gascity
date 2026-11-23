@@ -360,10 +360,12 @@ func gatherGates(g *endpointCapacityGuard, cfg *config.City, rows []censusRow) m
 
 // k1Env is the external-reads lane's env for the planner's environment:
 // dg's stores and census, with the default scale_check target stores the
-// demand gather probes.
+// demand gather probes and the claim views its cross-store legs are asked of.
 func k1Env(e gatherEnv, env *reconcileEnv, suspendedRigPaths map[string]bool, dg demandGatherEnv) externalReadsEnv {
 	targets := buildDemandTargets(e.CityName, e.CityPath, env.Cfg, dg.CityStore, dg.RigStores, suspendedRigPaths, dg.OpenSessions, noProbeEnv, io.Discard)
-	return k1EnvWith(e, env, suspendedRigPaths, dg, demandProbeStores(targets))
+	k1 := k1EnvWith(e, env, suspendedRigPaths, dg, demandProbeStores(targets))
+	k1.ClaimViews = demandClaimViewSets(targets.defaultScaleTargets)
+	return k1
 }
 
 // demandProbeStores are targets' default scale-check probe stores, named

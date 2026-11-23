@@ -1629,6 +1629,7 @@ go_test(
         "dead_assignee_repair_test.go",
         "demand_claim_view_legs_test.go",
         "demand_claim_view_partial_test.go",
+        "demand_claim_view_reads_test.go",
         "demand_claim_view_test.go",
         "demand_claimed_work_test.go",
         "demand_cross_store_gate_test.go",

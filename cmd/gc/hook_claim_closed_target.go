@@ -11,11 +11,13 @@ import (
 
 // errHookClaimTargetClosed is the claim failure a routed candidate records
 // when its claim CAS was refused and the canonical row the claim resolved is
-// closed. The row the work query served is a stale copy of work its owning
-// store has finished, so every seat spawned for it is refused the same way.
-// The text names no seat, so the claim-loop guard's identical-error streak
-// forms across the seats that keep being spawned for it.
-var errHookClaimTargetClosed = errors.New("claim refused: the row the claim resolves is closed in its owning store; the served row is a stale copy")
+// closed. Its usual cause is a stale served copy of work its owning store has
+// finished, which refuses every seat spawned for it alike (#5857); a row closed
+// between the work query and the claim reads the same. The text states only
+// what the hook knows and names no seat, so the claim-loop guard's
+// identical-error streak forms across the seats that keep being spawned for a
+// stale copy.
+var errHookClaimTargetClosed = errors.New("claim refused: the canonical row is closed")
 
 // hookClaimTargetClosed reports whether a refused routed claim's readback is
 // the closed canonical row: a claim no seat can win.

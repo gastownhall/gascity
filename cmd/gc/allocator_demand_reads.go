@@ -17,9 +17,10 @@ import (
 )
 
 // The controller-demand read seam (CONTRACT C0.4 as amended by AM6). Legacy's
-// demand collectors read through six calls: the live open List, the cached
-// List, the live and the cached unfiltered Ready, the Ready limit, and the
-// closed named-session index. They
+// demand collectors read through seven calls: the live open List, the cached
+// List, the live and the cached unfiltered Ready, the Ready limit, the closed
+// named-session index, and the claim views a rig pool's cross-store rows are
+// asked of (demand_claim_view.go). They
 // take them from a demandReads, threaded through readyDemandCache (its reads
 // field) and as a parameter of collectOpenUnassignedRoutedWork, so the v2
 // allocator can run the same collectors, with every partial rule they carry,
@@ -60,6 +61,10 @@ type demandReads interface {
 	// ClosedNamedIndex is the city store's closed named-session index
 	// (readyAssignedWorkAssignees). It reads closed history.
 	ClosedNamedIndex(store beads.Store) (session.ClosedNamedSessionBeadIndex, error)
+	// ClaimViews answers one pass's claim-view questions, each (view, id)
+	// once: whether a seat claiming the id in the view can win it. Every
+	// question gets a verdict; one the reads cannot answer carries the error.
+	ClaimViews(questions []demandClaimViewQuestion) map[demandClaimViewKey]demandClaimViewVerdict
 }
 
 // demandReadsOrLegacy treats a nil reads as legacy.
@@ -113,6 +118,11 @@ func (legacyDemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedName
 	return session.BuildClosedNamedSessionBeadIndex(beads.SessionStore{Store: store})
 }
 
+// ClaimViews reads every view live, waiting at most demandClaimViewDeadline.
+func (legacyDemandReads) ClaimViews(questions []demandClaimViewQuestion) map[demandClaimViewKey]demandClaimViewVerdict {
+	return askDemandClaimViewsLive(questions, demandClaimViewDeadline)
+}
+
 // demandLegCache classifies a demand leg: its CachingStore, behind the
 // bead-policy front door, and whether the leg is exact (the cache's backing
 // declares beads.CachedReadExact). A leg with no CachingStore is not exact.
@@ -155,6 +165,11 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 //     exact. Missing or expired, it is the zero index with an error, which
 //     readyAssignedWorkAssignees reads as no closed phantom (fail open, as
 //     legacy does on a failed read).
+//   - ClaimViews: the verdicts as the lane recorded them, for every view,
+//     exact or not (v2ClaimView). A view not recorded, or recorded stale, is
+//     a partial result, and a row a failed recording has no verdict for takes
+//     its error. A row a fresh, error-free recording has no verdict for has
+//     not been asked yet and is claimable.
 //
 // A strict read the cache refuses (a dirty row, a busy or unprimed cache) is
 // a PartialResultError; an exact leg never reads strict alone. Reads are
@@ -319,6 +334,14 @@ func (r *v2DemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamed
 		return session.ClosedNamedSessionBeadIndex{}, &beads.PartialResultError{Op: "v2 demand " + shape, Err: err}
 	}
 	return s.ClosedNamed, s.Err
+}
+
+func (r *v2DemandReads) ClaimViews(questions []demandClaimViewQuestion) map[demandClaimViewKey]demandClaimViewVerdict {
+	verdicts := make(map[demandClaimViewKey]demandClaimViewVerdict, len(questions))
+	for _, q := range questions {
+		verdicts[q.key()] = v2ClaimView(r.rec, r.now, q.view.key, q.id)
+	}
+	return verdicts
 }
 
 // recorded serves a lane-fed leg's live read from the external-reads
