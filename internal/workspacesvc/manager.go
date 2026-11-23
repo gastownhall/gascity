@@ -568,25 +568,43 @@ func (m *Manager) Restart(name string) error {
 
 // AuthorizeAndServeHTTP routes /svc/{name}/... requests to the matching
 // service instance using one registry snapshot for authorization and dispatch.
+// The registry lock is held only while that snapshot is read, and the instance
+// serves the request after it is released, so a request a service holds open
+// (a stream, or a process that never answers) does not stall Tick, Reload,
+// Restart, Close or the requests queued behind them.
 func (m *Manager) AuthorizeAndServeHTTP(name string, w http.ResponseWriter, r *http.Request, authorize func(Status) bool) bool {
 	subpath, ok := serviceSubpath(r.URL.Path, name)
 	if !ok {
 		return false
 	}
+	status, inst, ok := m.routeSnapshot(name)
+	if !ok {
+		return false
+	}
+	if authorize != nil && !authorize(status) {
+		return true
+	}
+	if inst == nil {
+		return false
+	}
+	return inst.HandleHTTP(w, r, subpath)
+}
+
+// routeSnapshot reads the status and instance of service name under one
+// registry lock, and reports false when no such service is configured. The
+// instance is nil when the service has none or the manager is closed.
+func (m *Manager) routeSnapshot(name string) (Status, Instance, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	e, ok := m.entries[name]
 	if !ok {
-		return false
+		return Status{}, nil, false
 	}
-	if authorize != nil && !authorize(e.status) {
-		return true
+	if m.closed {
+		return e.status, nil, true
 	}
-	if m.closed || e.inst == nil {
-		return false
-	}
-	return e.inst.HandleHTTP(w, r, subpath)
+	return e.status, e.inst, true
 }
 
 // ServeHTTP routes /svc/{name}/... requests to the matching service instance.
