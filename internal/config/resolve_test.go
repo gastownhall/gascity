@@ -45,6 +45,31 @@ func explicitBuiltins(names ...string) map[string]ProviderSpec {
 
 // --- ResolveProvider tests ---
 
+// not_ready_markers is provider data. The builtin copilot ships the text
+// Copilot prints when it drops a submitted prompt before its managed policy
+// loads; a provider based on it inherits that, and its own list
+// replaces it.
+func TestResolveProviderNotReadyMarkers(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"copilot":  {Base: basePtr("builtin:copilot")},
+		"inherits": {Base: basePtr("builtin:copilot")},
+		"replaces": {Base: basePtr("builtin:copilot"), NotReadyMarkers: []string{"still warming up"}},
+	}
+	for name, want := range map[string][]string{
+		"copilot":  {"policy is still loading"},
+		"inherits": {"policy is still loading"},
+		"replaces": {"still warming up"},
+	} {
+		rp, err := ResolveProvider(&Agent{Name: "worker", Provider: name}, nil, custom, lookPathOnly("copilot"))
+		if err != nil {
+			t.Fatalf("ResolveProvider(%s): %v", name, err)
+		}
+		if !reflect.DeepEqual(rp.NotReadyMarkers, want) {
+			t.Errorf("%s NotReadyMarkers = %q, want %q", name, rp.NotReadyMarkers, want)
+		}
+	}
+}
+
 func TestResolveProviderAgentStartCommand(t *testing.T) {
 	delay := 1250
 	emitsPermissionWarning := true
@@ -2404,6 +2429,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		PromptFlag:             "--prompt",
 		ReadyDelayMs:           5000,
 		ReadyPromptPrefix:      "$ ",
+		NotReadyMarkers:        []string{"not ready"},
 		ProcessNames:           []string{"custom"},
 		EmitsPermissionWarning: boolPtr(true),
 		AcceptStartupDialogs:   boolPtr(true),

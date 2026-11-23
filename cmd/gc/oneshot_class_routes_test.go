@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -847,7 +848,7 @@ func TestEmitFormulaCookExecutionFactsReadsTheConvoyFromTheWorkLeg(t *testing.T)
 	}
 
 	var stderr bytes.Buffer
-	emitFormulaCookExecutionFacts(graph, work, cityPath, &molecule.Result{RootID: root.ID, GraphWorkflow: true}, &stderr)
+	emitFormulaCookExecutionFacts(beadstest.Work(graph), beadstest.Work(work), cityPath, &molecule.Result{RootID: root.ID, GraphWorkflow: true}, &stderr)
 
 	recorded, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
 	if err != nil {

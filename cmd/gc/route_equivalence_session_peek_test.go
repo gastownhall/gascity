@@ -203,18 +203,6 @@ func peekRouteErrorLine(stderr string) string {
 	return ""
 }
 
-// peekRouteDropCacheFooter drops the API route's declared freshness footer.
-func peekRouteDropCacheFooter(stdout string) string {
-	lines := strings.SplitAfter(stdout, "\n")
-	kept := lines[:0]
-	for _, line := range lines {
-		if !strings.HasPrefix(line, "(cache age: ") {
-			kept = append(kept, line)
-		}
-	}
-	return strings.Join(kept, "")
-}
-
 func TestSessionPeekRouteEquivalence(t *testing.T) {
 	c := newPeekRouteCity(t)
 	type row struct {
@@ -253,8 +241,8 @@ func TestSessionPeekRouteEquivalence(t *testing.T) {
 				if localExit != r.wantExit || apiExit != r.wantExit {
 					t.Fatalf("exit local=%d api=%d, want %d\nlocal stderr:\n%s\napi stderr:\n%s", localExit, apiExit, r.wantExit, localErr, apiErr)
 				}
-				if got := peekRouteDropCacheFooter(apiOut); got != localOut {
-					t.Fatalf("stdout differs:\nlocal: %q\napi:   %q", localOut, got)
+				if apiOut != localOut {
+					t.Fatalf("stdout differs:\nlocal: %q\napi:   %q", localOut, apiOut)
 				}
 				if want := "cmd=session peek " + r.apiRoute; !strings.Contains(apiErr, want) {
 					t.Fatalf("api stderr = %q, want %q", apiErr, want)

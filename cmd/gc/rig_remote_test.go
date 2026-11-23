@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func remoteRigTarget(url string) *remoteTarget {
@@ -42,7 +43,7 @@ func acceptThenSucceed(t *testing.T, captureBody *string) *httptest.Server {
 	t.Helper()
 	var mu sync.Mutex
 	reqID := ""
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost:
 			b, _ := io.ReadAll(r.Body)
@@ -65,7 +66,7 @@ func acceptThenSucceed(t *testing.T, captureBody *string) *httptest.Server {
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
-	}))
+	})))
 }
 
 // requestIDFromBody extracts the request_id from a rig-create POST body.
@@ -79,10 +80,10 @@ func requestIDFromBody(b []byte) string {
 
 // The remote path refuses modes that need local client state, before any wire call.
 func TestCmdRigAddRemote_RefusalMatrix(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("server must not be contacted for a refused mode")
 		w.WriteHeader(500)
-	}))
+	})))
 	defer srv.Close()
 	client := func() *api.Client { return remoteTestClient(t, srv.URL) }
 	tgt := remoteRigTarget(srv.URL)
@@ -219,7 +220,7 @@ func TestCmdRigAddRemote_JSONParity(t *testing.T) {
 // A lost stream prints the CLIENT request_id, an idempotent re-POST recipe, and
 // the body-independent passive-watch recipe lines.
 func TestCmdRigAddRemote_WaitErrorRecipe(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			b, _ := io.ReadAll(r.Body)
 			w.Header().Set("Content-Type", "application/json")
@@ -228,7 +229,7 @@ func TestCmdRigAddRemote_WaitErrorRecipe(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusNotFound) // permanent stream status ⇒ lost stream
-	}))
+	})))
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
@@ -256,7 +257,7 @@ func TestCmdRigAddRemote_WaitErrorRecipe(t *testing.T) {
 // watch (re-POSTing your body under another request's in-flight id would 409),
 // seeded from the server-supplied event_cursor.
 func TestCmdRigAddRemote_ConflictRecipe(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -268,7 +269,7 @@ func TestCmdRigAddRemote_ConflictRecipe(t *testing.T) {
 				{"location": "body.event_cursor", "value": "9"},
 			},
 		})
-	}))
+	})))
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
@@ -322,7 +323,7 @@ func recipeFlag(t *testing.T, recipe, flag string) string {
 func TestCmdRigAddRemote_WaitRecipeReplaysSameDigest(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []map[string]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			b, _ := io.ReadAll(r.Body)
 			var body map[string]string
@@ -342,7 +343,7 @@ func TestCmdRigAddRemote_WaitRecipeReplaysSameDigest(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
-	}))
+	})))
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
@@ -380,7 +381,7 @@ func TestCmdRigAddRemote_WaitRecipeReplaysSameDigest(t *testing.T) {
 // Fix #7: a credential-bearing git URL is redacted and shell-quoted in the recipe
 // on BOTH the human (stderr) and --json (stdout) paths.
 func TestCmdRigAddRemote_RecipeRedactsAndQuotesCredential(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			b, _ := io.ReadAll(r.Body)
 			w.Header().Set("Content-Type", "application/json")
@@ -389,7 +390,7 @@ func TestCmdRigAddRemote_RecipeRedactsAndQuotesCredential(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusNotFound) // ⇒ wait error ⇒ recipe printed
-	}))
+	})))
 	defer srv.Close()
 
 	const secretURL = "https://user:s3cr3t-token@github.com/o/web.git"
@@ -432,10 +433,10 @@ func TestRenderRemoteRigAddError_DeadlineHonest(t *testing.T) {
 
 // A JSON-mode resolve/refusal returns a machine-readable error object.
 func TestCmdRigAddRemote_JSONRefusal(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("server must not be contacted")
 		w.WriteHeader(500)
-	}))
+	})))
 	defer srv.Close()
 
 	var out, errb bytes.Buffer

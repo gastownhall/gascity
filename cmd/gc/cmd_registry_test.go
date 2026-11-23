@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/credentialprovider"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestBuildRegistryPublishRequestUsesCleanPushedGitHubHead(t *testing.T) {
@@ -457,7 +458,7 @@ func TestBuildRegistryPublishRequestIgnoresPoisonedGitEnv(t *testing.T) {
 
 func TestSubmitRegistryPublishRequestSendsAuthenticatedPayload(t *testing.T) {
 	var got registryPublishRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s", r.Method)
 		}
@@ -485,7 +486,7 @@ func TestSubmitRegistryPublishRequestSendsAuthenticatedPayload(t *testing.T) {
 				"registryEntry": {"release": {"hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
 			}
 		}`))
-	}))
+	})))
 	defer server.Close()
 
 	submitted, err := submitRegistryPublishRequest(
@@ -518,7 +519,7 @@ func TestSubmitRegistryPublishRequestSendsAuthenticatedPayload(t *testing.T) {
 }
 
 func TestSubmitRegistryPublishRequestSendsBearerToken(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer gcr_test_token" {
 			t.Fatalf("Authorization = %q", got)
 		}
@@ -538,7 +539,7 @@ func TestSubmitRegistryPublishRequestSendsBearerToken(t *testing.T) {
 				"repository": {"fullName": "gastownhall/demo-packs"}
 			}
 		}`))
-	}))
+	})))
 	defer server.Close()
 
 	submitted, err := submitRegistryPublishRequest(
@@ -569,7 +570,7 @@ func TestRegistryLoginStoresVerifiedToken(t *testing.T) {
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/me" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
@@ -578,7 +579,7 @@ func TestRegistryLoginStoresVerifiedToken(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"user":{"id":"usr_test","handle":"publisher","displayName":"Publisher"}}`))
-	}))
+	})))
 	defer server.Close()
 	registryPublishHTTPClient = server.Client()
 
@@ -618,7 +619,7 @@ func TestDoRegistryPublishUsesStoredLoginToken(t *testing.T) {
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer gcr_stored_token" {
 			t.Fatalf("Authorization = %q", got)
 		}
@@ -632,7 +633,7 @@ func TestDoRegistryPublishUsesStoredLoginToken(t *testing.T) {
 				"repository": {"fullName": "gastownhall/demo-packs"}
 			}
 		}`))
-	}))
+	})))
 	defer server.Close()
 	registryPublishHTTPClient = server.Client()
 	if err := writeRegistryConfiguredToken(server.URL, "gcr_stored_token"); err != nil {
@@ -1344,7 +1345,7 @@ func TestDoRegistryPublishValidateFailsOnValidationError(t *testing.T) {
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"publishRequest": {
@@ -1355,7 +1356,7 @@ func TestDoRegistryPublishValidateFailsOnValidationError(t *testing.T) {
 				"validationError": "pack.toml is missing a description"
 			}
 		}`))
-	}))
+	})))
 	defer server.Close()
 	registryPublishHTTPClient = server.Client()
 	if err := writeRegistryConfiguredToken(server.URL, "gcr_stored_token"); err != nil {
@@ -1387,7 +1388,7 @@ func TestDoRegistryPublishValidateFailsOnRejectedStatus(t *testing.T) {
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"publishRequest": {
@@ -1398,7 +1399,7 @@ func TestDoRegistryPublishValidateFailsOnRejectedStatus(t *testing.T) {
 				"requestedVersion": "0.2.0"
 			}
 		}`))
-	}))
+	})))
 	defer server.Close()
 	registryPublishHTTPClient = server.Client()
 	if err := writeRegistryConfiguredToken(server.URL, "gcr_stored_token"); err != nil {
@@ -1432,7 +1433,7 @@ func TestDoRegistryPublishStoredTokenSurvivesPartialCookieEnv(t *testing.T) {
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer gcr_stored_token" {
 			t.Fatalf("Authorization = %q, want stored bearer token", got)
 		}
@@ -1445,7 +1446,7 @@ func TestDoRegistryPublishStoredTokenSurvivesPartialCookieEnv(t *testing.T) {
 				"requestedVersion": "0.2.0"
 			}
 		}`))
-	}))
+	})))
 	defer server.Close()
 	registryPublishHTTPClient = server.Client()
 	if err := writeRegistryConfiguredToken(server.URL, "gcr_stored_token"); err != nil {
@@ -1482,7 +1483,7 @@ func TestDoRegistryPublishUsesGitHubActionsOIDC(t *testing.T) {
 	}
 
 	var sawMint bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/actions/oidc":
 			if got := r.Header.Get("Authorization"); got != "Bearer actions-request-token" {
@@ -1530,7 +1531,7 @@ func TestDoRegistryPublishUsesGitHubActionsOIDC(t *testing.T) {
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-	}))
+	})))
 	defer server.Close()
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", server.URL+"/actions/oidc")
 	registryPublishHTTPClient = server.Client()
@@ -1563,7 +1564,7 @@ func TestDoRegistryPublishUsesGitHubActionsOIDCWithoutUpstream(t *testing.T) {
 	defer func() { registryPublishHTTPClient = oldClient }()
 
 	var sawMint bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/actions/oidc":
 			w.Header().Set("Content-Type", "application/json")
@@ -1608,7 +1609,7 @@ func TestDoRegistryPublishUsesGitHubActionsOIDCWithoutUpstream(t *testing.T) {
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-	}))
+	})))
 	defer server.Close()
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", server.URL+"/actions/oidc")
 	registryPublishHTTPClient = server.Client()
@@ -1843,7 +1844,7 @@ func TestRegistryGitHubActionsRepoRef(t *testing.T) {
 }
 
 func TestRegistryPublishDevAuthFetchesLocalSession(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/dev/sign-in":
 			if r.URL.Query().Get("handle") != "cli-test" {
@@ -1862,7 +1863,7 @@ func TestRegistryPublishDevAuthFetchesLocalSession(t *testing.T) {
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-	}))
+	})))
 	defer server.Close()
 
 	auth, err := registryPublishDevAuth(t.Context(), server.Client(), server.URL, "cli-test")
@@ -2098,7 +2099,7 @@ func TestDoRegistryPublishUsesEnvironmentToken(t *testing.T) {
 	oldClient := registryPublishHTTPClient
 	defer func() { registryPublishHTTPClient = oldClient }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer gcr_env_token" {
 			t.Fatalf("Authorization = %q", got)
 		}
@@ -2112,7 +2113,7 @@ func TestDoRegistryPublishUsesEnvironmentToken(t *testing.T) {
 				"repository": {"fullName": "gastownhall/demo-packs"}
 			}
 		}`))
-	}))
+	})))
 	defer server.Close()
 	registryPublishHTTPClient = server.Client()
 
@@ -2143,7 +2144,7 @@ func TestDoRegistryWhoamiUsesStoredDefaultRegistryURL(t *testing.T) {
 		return nil, nil
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/me" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
@@ -2152,7 +2153,7 @@ func TestDoRegistryWhoamiUsesStoredDefaultRegistryURL(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"user":{"id":"usr_test","handle":"publisher","displayName":"Publisher"}}`))
-	}))
+	})))
 	defer server.Close()
 	registryPublishHTTPClient = server.Client()
 	if err := writeRegistryConfiguredToken(server.URL, "gcr_default_token"); err != nil {
@@ -2317,11 +2318,11 @@ func TestSaveRegistryCLIConfigAtomicallyTightensPermissions(t *testing.T) {
 }
 
 func TestRegistryFetchCurrentUserReportsHTTPStatusForNonJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte("<html><body>Bad gateway</body></html>"))
-	}))
+	})))
 	defer server.Close()
 
 	_, err := registryFetchCurrentUser(t.Context(), server.Client(), server.URL, "tok")
@@ -2334,11 +2335,11 @@ func TestRegistryFetchCurrentUserReportsHTTPStatusForNonJSON(t *testing.T) {
 }
 
 func TestSubmitRegistryPublishRequestReportsHTTPStatusForNonJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("<html>upstream unavailable</html>"))
-	}))
+	})))
 	defer server.Close()
 
 	_, err := submitRegistryPublishRequest(
@@ -2361,7 +2362,7 @@ func TestSubmitRegistryPublishRequestReportsHTTPStatusForNonJSON(t *testing.T) {
 }
 
 func TestRegistryPublishFetchCSRFReturnsToken(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/me" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -2371,7 +2372,7 @@ func TestRegistryPublishFetchCSRFReturnsToken(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"csrfToken":"csrf-token"}`))
-	}))
+	})))
 	defer server.Close()
 
 	csrf, err := registryPublishFetchCSRF(t.Context(), server.Client(), server.URL, "session-csrf")
@@ -2384,11 +2385,11 @@ func TestRegistryPublishFetchCSRFReturnsToken(t *testing.T) {
 }
 
 func TestRegistryPublishFetchCSRFReportsHTTPStatusForNonJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte("<html><body>Bad gateway</body></html>"))
-	}))
+	})))
 	defer server.Close()
 
 	_, err := registryPublishFetchCSRF(t.Context(), server.Client(), server.URL, "session-csrf")
@@ -2404,10 +2405,10 @@ func TestRegistryPublishFetchCSRFReportsHTTPStatusForNonJSON(t *testing.T) {
 }
 
 func TestRegistryPublishFetchCSRFRejectsMissingToken(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"csrfToken":"   "}`))
-	}))
+	})))
 	defer server.Close()
 
 	_, err := registryPublishFetchCSRF(t.Context(), server.Client(), server.URL, "session-csrf")
@@ -2590,11 +2591,11 @@ func TestRegistryPollDeviceToken(t *testing.T) {
 		{"proxy html error", http.StatusBadGateway, `<html>bad gateway</html>`, "", 0, false, "HTTP 502"},
 	}
 	for _, tc := range cases {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(tc.status)
 			_, _ = w.Write([]byte(tc.body))
-		}))
+		})))
 		token, interval, pending, err := registryPollDeviceToken(t.Context(), server.Client(), server.URL, "device-code-test")
 		server.Close()
 		if tc.wantErr != "" {
@@ -2622,7 +2623,7 @@ func TestRegistryPollDeviceToken(t *testing.T) {
 func TestRegistryDeviceLoginCompletesAfterPending(t *testing.T) {
 	var mu sync.Mutex
 	var codeRequests, tokenRequests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/cli/device/code":
@@ -2671,7 +2672,7 @@ func TestRegistryDeviceLoginCompletesAfterPending(t *testing.T) {
 			t.Errorf("unexpected path %s", r.URL.Path)
 			http.Error(w, "unexpected path", http.StatusNotFound)
 		}
-	}))
+	})))
 	defer server.Close()
 
 	var stdout bytes.Buffer
@@ -2714,7 +2715,7 @@ func TestRegistryBrowserLoginHandlerRejectsInvalidCallbacks(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resultCh := make(chan browserLoginResult, 1)
-			server := httptest.NewServer(registryBrowserLoginHandler(state, resultCh))
+			server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(registryBrowserLoginHandler(state, resultCh)))
 			defer server.Close()
 
 			var body io.Reader
@@ -2745,7 +2746,7 @@ func TestRegistryBrowserLoginHandlerRejectsInvalidCallbacks(t *testing.T) {
 func TestRegistryBrowserLoginHandlerDeliversValidCallback(t *testing.T) {
 	const state = "test-state-token"
 	resultCh := make(chan browserLoginResult, 1)
-	server := httptest.NewServer(registryBrowserLoginHandler(state, resultCh))
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(registryBrowserLoginHandler(state, resultCh)))
 	defer server.Close()
 
 	body := `{"token":"gcr_browser_token","registry":"https://registry.example","state":"test-state-token"}`
@@ -2768,7 +2769,7 @@ func TestRegistryBrowserLoginHandlerDeliversValidCallback(t *testing.T) {
 }
 
 func TestRegistryBrowserLoginHandlerServesCallbackPage(t *testing.T) {
-	server := httptest.NewServer(registryBrowserLoginHandler("state", make(chan browserLoginResult, 1)))
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(registryBrowserLoginHandler("state", make(chan browserLoginResult, 1))))
 	defer server.Close()
 
 	resp, err := server.Client().Get(server.URL + "/callback")

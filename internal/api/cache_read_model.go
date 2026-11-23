@@ -5,22 +5,13 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// cachedListStore is the optional read-model cache capability: a store that can
-// answer a ListQuery from its in-memory cache, reporting whether the cache was
-// clean enough to serve it. The session read model now peeks this seam inside
-// session.Store.ListAll; other read-model consumers (agents, orders) still assert
-// it directly on the raw store.
-type cachedListStore interface {
-	CachedList(beads.ListQuery) ([]beads.Bead, bool)
-}
-
 // sessionReadModelListings is the typed read-model feed: the cache-first union
 // (session.Store.ListAllWithResponses) projected to (Info, PersistedResponse)
 // rows, wrapped in the same partial-result envelope as sessionReadModelRows. It
 // is the typed twin of sessionReadModelRows — the pre-joined pair per row means
 // the response builder never needs a bead index to re-attach the persisted
 // projection. The cache-first tier (#3939/#3941) is preserved inside
-// Store.ListAll: a warm cachedListStore serves the whole list with zero
+// Store.ListAll: a warm beads.CachedLister serves the whole list with zero
 // store.List calls (pinned by TestSessionReadModelListingsWarmCacheZeroStoreList).
 //
 // stateFilter is the caller's list filter, applied later by

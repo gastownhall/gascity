@@ -60,8 +60,12 @@ first heartbeat:
 ```bash
 gc bd update "$WORK_BEAD_ID" --claim
 ```
-`--claim` is idempotent and self-assigns regardless of current state, so this is
-safe even if the bead was already claimed some other way. Then run
+`--claim` is safe to repeat when you already hold the bead, but it is not a
+takeover: it fails when another agent already holds the bead. A failed claim
+means the bead is not yours: someone else holds it, or it is no longer open. Do
+not work it, and do not record an outcome on it or close it (step 3 is for a
+bead you hold): mail `{{escalation_target}}` the bead id and the claim's error,
+then stop. After a successful claim, run
 `gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any shell command you
 expect to run for many minutes (long builds, test sweeps). It refreshes your
 claim's lease so the dashboard can tell you are alive and working rather than
