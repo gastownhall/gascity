@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -61,6 +62,48 @@ func TestDrainAckAnomalyReasonShapes(t *testing.T) {
 				return api.SessionDrainAckedWithAssignedWorkPayload{Reason: v2DrainAckReason(t, []string{"restart_requested", "true"}, v2SeedStartedClaim)}
 			},
 			want: "restart_requested",
+		},
+		{
+			name: "legacy keeps an open preassigned row: generic",
+			reason: func(t *testing.T) api.SessionDrainAckedWithAssignedWorkPayload {
+				return legacyDrainAckReason(t, seedOpenPreassignedRow)
+			},
+			want: "drain_acked_with_assigned_work",
+		},
+		{
+			name: "v2 keeps an open preassigned row: generic",
+			reason: func(t *testing.T) api.SessionDrainAckedWithAssignedWorkPayload {
+				return api.SessionDrainAckedWithAssignedWorkPayload{Reason: v2DrainAckReason(t, nil, v2SeedOpenPreassignedRow)}
+			},
+			want: "drain_acked_with_assigned_work",
+		},
+		{
+			name: "legacy keeps an unstarted in_progress claim: generic",
+			reason: func(t *testing.T) api.SessionDrainAckedWithAssignedWorkPayload {
+				return legacyDrainAckReason(t, seedUnstartedInProgressClaim)
+			},
+			want: "drain_acked_with_assigned_work",
+		},
+		{
+			name: "v2 keeps an unstarted in_progress claim: generic",
+			reason: func(t *testing.T) api.SessionDrainAckedWithAssignedWorkPayload {
+				return api.SessionDrainAckedWithAssignedWorkPayload{Reason: v2DrainAckReason(t, nil, v2SeedUnstartedInProgressClaim)}
+			},
+			want: "drain_acked_with_assigned_work",
+		},
+		{
+			name: "legacy keeps a held started claim: generic",
+			reason: func(t *testing.T) api.SessionDrainAckedWithAssignedWorkPayload {
+				return legacyDrainAckReason(t, seedHeldStartedClaim)
+			},
+			want: "drain_acked_with_assigned_work",
+		},
+		{
+			name: "v2 keeps a held started claim: generic",
+			reason: func(t *testing.T) api.SessionDrainAckedWithAssignedWorkPayload {
+				return api.SessionDrainAckedWithAssignedWorkPayload{Reason: v2DrainAckReason(t, nil, v2SeedHeldStartedClaim)}
+			},
+			want: "drain_acked_with_assigned_work",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,12 +208,65 @@ func v2DrainAckReason(t *testing.T, extraMeta []string, setup func(t *testing.T,
 	return payload.Reason
 }
 
+// seedOpenPreassignedRow plants an open bead assigned to the session that
+// the row never started: work routed to the seat before any claim.
+func seedOpenPreassignedRow(t *testing.T, env *reconcilerTestEnv, row *beads.Bead) beads.Bead {
+	t.Helper()
+	return mustCreateDrainAckBead(t, env.store, beads.Bead{Title: "preassigned work", Type: "task"}, "open", row.ID)
+}
+
+// seedUnstartedInProgressClaim plants an in_progress bead assigned to the
+// session whose started records do not name it: a claim the row never
+// started, a live sibling's shape.
+func seedUnstartedInProgressClaim(t *testing.T, env *reconcilerTestEnv, row *beads.Bead) beads.Bead {
+	t.Helper()
+	return mustCreateDrainAckBead(t, env.store, beads.Bead{Title: "unstarted claim", Type: "task"}, "in_progress", row.ID)
+}
+
+// seedHeldStartedClaim plants a started claim carrying a dispatch hold: a
+// bead the release gives back as it always has, hold and all.
+func seedHeldStartedClaim(t *testing.T, env *reconcilerTestEnv, row *beads.Bead) beads.Bead {
+	t.Helper()
+	kept := mustCreateDrainAckBead(t, env.store,
+		beads.Bead{Title: "held started claim", Type: "task", Labels: []string{beadmeta.HoldMayorLabel}}, "in_progress", row.ID)
+	casSetMeta(t, env.store, row.ID, session.WorkStartedKey, session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{
+		Store: "city", Bead: kept.ID, Via: session.WorkStartedViaClaim,
+	})))
+	return kept
+}
+
 // v2SeedStartedClaim plants the v2 stop's started-claim shape: an
 // in_progress bead assigned to the row whose own work_started cell names
 // it.
 func v2SeedStartedClaim(t *testing.T, store beads.Store, id string) {
 	t.Helper()
 	kept := mustCreateDrainAckBead(t, store, beads.Bead{Title: "started work", Type: "task"}, "in_progress", id)
+	casSetMeta(t, store, id, session.WorkStartedKey, session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{
+		Store: "city", Bead: kept.ID, Via: session.WorkStartedViaClaim,
+	})))
+}
+
+// v2SeedOpenPreassignedRow plants the v2 stop's preassigned shape: an
+// open bead assigned to the row the row never started.
+func v2SeedOpenPreassignedRow(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	mustCreateDrainAckBead(t, store, beads.Bead{Title: "preassigned work", Type: "task"}, "open", id)
+}
+
+// v2SeedUnstartedInProgressClaim plants the v2 stop's unstarted-claim
+// shape: an in_progress bead assigned to the row whose started records
+// do not name it.
+func v2SeedUnstartedInProgressClaim(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	mustCreateDrainAckBead(t, store, beads.Bead{Title: "unstarted claim", Type: "task"}, "in_progress", id)
+}
+
+// v2SeedHeldStartedClaim plants the v2 stop's held-claim shape: a started
+// claim carrying a dispatch hold.
+func v2SeedHeldStartedClaim(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	kept := mustCreateDrainAckBead(t, store,
+		beads.Bead{Title: "held started claim", Type: "task", Labels: []string{beadmeta.HoldMayorLabel}}, "in_progress", id)
 	casSetMeta(t, store, id, session.WorkStartedKey, session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{
 		Store: "city", Bead: kept.ID, Via: session.WorkStartedViaClaim,
 	})))
