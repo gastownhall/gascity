@@ -9213,6 +9213,10 @@
       "SessionDrainAckedWithAssignedWorkPayload": {
         "additionalProperties": false,
         "properties": {
+          "assignee": {
+            "description": "The work bead's assignee at emission time: the identity this session holds it under. It differs from session_id when the session claimed the bead under its alias, configured named identity or session name.",
+            "type": "string"
+          },
           "bead_id": {
             "description": "ID of the work bead still holding this session as its assignee.",
             "type": "string"

@@ -2075,6 +2075,7 @@ export const zSessionDemandClaimDivergencePayload = z.object({
 });
 
 export const zSessionDrainAckedWithAssignedWorkPayload = z.object({
+    assignee: z.string().optional(),
     bead_id: z.string(),
     bead_status: z.string().optional(),
     reason: z.string().optional(),

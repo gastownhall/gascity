@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,10 +16,22 @@ const notifyDrainAckLoopScriptPath = "assets/scripts/notify-drain-ack-loop.sh"
 const drainAckLoopBead = "gc-42"
 
 // drainAckEvent is one session.drain_acked_with_assigned_work event, as
-// `gc events` prints it, for drainAckLoopBead from session at ts.
+// `gc events` prints it, for drainAckLoopBead from session at ts, held under
+// the session's own ID.
 func drainAckEvent(seq int, ts time.Time, session, reason string) string {
-	return fmt.Sprintf(`{"seq":%d,"type":"session.drain_acked_with_assigned_work","ts":%q,"actor":"gc","subject":"worker","message":"session drain-acked while still assigned to work bead","session_id":%q,"payload":{"session_id":%q,"bead_id":%q,"template":"worker","bead_status":"in_progress","reason":%q}}`,
-		seq, ts.UTC().Format(time.RFC3339Nano), session, session, drainAckLoopBead, reason)
+	return drainAckEventOf(drainAckLoopBead, seq, ts, session, session, reason)
+}
+
+// drainAckEventOf is one session.drain_acked_with_assigned_work event for
+// bead from session at ts, held under assignee; an empty assignee is left
+// out of the payload, as a gc that recorded none prints it.
+func drainAckEventOf(bead string, seq int, ts time.Time, session, assignee, reason string) string {
+	held := ""
+	if assignee != "" {
+		held = fmt.Sprintf(`"assignee":%q,`, assignee)
+	}
+	return fmt.Sprintf(`{"seq":%d,"type":"session.drain_acked_with_assigned_work","ts":%q,"actor":"gc","subject":"worker","message":"session drain-acked while still assigned to work bead","session_id":%q,"payload":{"session_id":%q,"bead_id":%q,%s"template":"worker","bead_status":"in_progress","reason":%q}}`,
+		seq, ts.UTC().Format(time.RFC3339Nano), session, session, bead, held, reason)
 }
 
 // loopCycles is n started_claim_kept events for drainAckLoopBead from
@@ -36,35 +49,53 @@ func loopCycles(n int) []string {
 // loopBeadJSON is `gc bd show gc-42 --json` for the bead in status, assigned
 // to assignee, with labels.
 func loopBeadJSON(status, assignee string, labels ...string) string {
+	return beadJSON(drainAckLoopBead, status, assignee, labels...)
+}
+
+// beadJSON is `gc bd show <id> --json` for bead id in status, assigned to
+// assignee, with labels.
+func beadJSON(id, status, assignee string, labels ...string) string {
 	quoted := make([]string, len(labels))
 	for i, l := range labels {
 		quoted[i] = fmt.Sprintf("%q", l)
 	}
 	return fmt.Sprintf(`[{"id":%q,"title":"misrouted work","status":%q,"assignee":%q,"labels":[%s]}]`,
-		drainAckLoopBead, status, assignee, strings.Join(quoted, ","))
+		id, status, assignee, strings.Join(quoted, ","))
 }
 
 // drainAckLoopRig is one run's scratch: the fake gc (events from
-// events.jsonl, the bead from bead.json) and a stub escalate.sh that
-// records each call's argv, one argument per line, ending "--".
+// events.jsonl, each bead from bead-<id>.json) and a stub escalate.sh that
+// records each call's argv, one argument per line, ending "--". The fake gc
+// prints every event whatever --since says, unless honorSince gave it a now.
 type drainAckLoopRig struct {
 	work, binDir, gcLog, escalate, escalateLog string
 }
 
+// drainAckSinceFilter is the fake gc's --since: the events at or after now
+// less the window, a duration like 24h or 1h30m.
+const drainAckSinceFilter = `def secs: [scan("([0-9]+)([hms])")] | map((.[0] | tonumber) * ({"h": 3600, "m": 60, "s": 1}[.[1]])) | add;
+def epoch: sub("\\.[0-9]+"; "") | fromdateiso8601;
+select((.ts | epoch) >= (($now | epoch) - ($since | secs)))
+`
+
 func newDrainAckLoopRig(t *testing.T, events []string, bead string) drainAckLoopRig {
 	t.Helper()
 	r := drainAckLoopRig{work: t.TempDir()}
-	write := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(r.work, name), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("events.jsonl", strings.Join(events, "\n")+"\n")
-	write("bead.json", bead+"\n")
-	r.binDir, r.gcLog = fakeGCBin(t, `case "$1 $2 $3" in
-"events --type session.drain_acked_with_assigned_work") cat "`+filepath.Join(r.work, "events.jsonl")+`" ;;
-"bd show `+drainAckLoopBead+`") cat "`+filepath.Join(r.work, "bead.json")+`" ;;
+	r.write(t, "events.jsonl", strings.Join(events, "\n")+"\n")
+	r.addBead(t, drainAckLoopBead, bead)
+	r.write(t, "since.jq", drainAckSinceFilter)
+	at := func(name string) string { return "'" + filepath.Join(r.work, name) + "'" }
+	r.binDir, r.gcLog = fakeGCBin(t, `case "$1 $2" in
+"events --type")
+	if [ "$3" != session.drain_acked_with_assigned_work ] || [ "$4" != --since ]; then
+		echo "fake gc: unexpected call: $*" >&2; exit 1
+	fi
+	if [ -f `+at("now")+` ]; then
+		jq -c --arg since "$5" --arg now "$(cat `+at("now")+`)" -f `+at("since.jq")+` `+at("events.jsonl")+`
+	else
+		cat `+at("events.jsonl")+`
+	fi ;;
+"bd show") cat '`+r.work+`'/bead-"$3".json ;;
 *) echo "fake gc: unexpected call: $*" >&2; exit 1 ;;
 esac
 `)
@@ -75,6 +106,28 @@ esac
 		t.Fatal(err)
 	}
 	return r
+}
+
+// write puts body in the rig's file name.
+func (r drainAckLoopRig) write(t *testing.T, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(r.work, name), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// addBead is what the fake gc prints for `gc bd show <id> --json`; a bead
+// the rig has no file for fails its read.
+func (r drainAckLoopRig) addBead(t *testing.T, id, shown string) {
+	t.Helper()
+	r.write(t, "bead-"+id+".json", shown+"\n")
+}
+
+// honorSince makes the fake gc print only the events inside --since at now,
+// as gc events reads the window back from the current time.
+func (r drainAckLoopRig) honorSince(t *testing.T, now time.Time) {
+	t.Helper()
+	r.write(t, "now", now.UTC().Format(time.RFC3339))
 }
 
 func (r drainAckLoopRig) run(t *testing.T, env ...string) (string, error) {
@@ -142,13 +195,18 @@ func argAfter(argv []string, flag string) string {
 // cycles of one bead inside the window, the bead still in_progress,
 // assigned to the looping session and unheld, escalate once under a
 // per-bead incident key and fingerprint, with a message that names the bead,
-// the session, the template and the count and gives the park command; the
-// script writes nothing to the bead. A second firing passes the same
-// fingerprint, so escalate.sh keeps it quiet.
+// the session, its assignee, the template, the count and the default 24h
+// window and gives the park command through gc bd; the script writes nothing
+// to the bead and mails without a word on stderr. A second firing passes the
+// same fingerprint, so escalate.sh keeps it quiet.
 func TestNotifyDrainAckLoopEscalatesOnce(t *testing.T) {
 	r := newDrainAckLoopRig(t, loopCycles(3), loopBeadJSON("in_progress", "gc-1"))
-	if out, err := r.run(t); err != nil {
+	out, err := r.run(t)
+	if err != nil {
 		t.Fatalf("notify-drain-ack-loop: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "notify-drain-ack-loop: ") {
+		t.Errorf("output %q, want nothing from the script when it mails the loop", out)
 	}
 	calls := r.escalations(t)
 	if len(calls) != 1 {
@@ -166,16 +224,17 @@ func TestNotifyDrainAckLoopEscalatesOnce(t *testing.T) {
 		t.Errorf("--subject = %q, want it to name the bead", subject)
 	}
 	for _, want := range []string{
-		drainAckLoopBead, "misrouted work", "gc-1", "worker", "3 drain-ack cycles", "1h",
-		"bd set-state " + drainAckLoopBead + " hold=mayor",
+		drainAckLoopBead, "misrouted work", "Session(s): gc-1", "Assignee: gc-1", "Template: worker",
+		"3 drain-ack cycles in the last 24h",
+		"  gc bd set-state " + drainAckLoopBead + " hold=mayor",
 	} {
 		if !strings.Contains(message, want) {
 			t.Errorf("escalation %q does not contain %q", message, want)
 		}
 	}
 	for _, call := range r.gcCalls(t) {
-		if !strings.HasPrefix(call, "gc_events_--type_session.drain_acked_with_assigned_work_--since_1h") && call != "gc_bd_show_"+drainAckLoopBead+"_--json" {
-			t.Errorf("gc call %q: the script may only read the events and the bead", call)
+		if call != "gc_events_--type_session.drain_acked_with_assigned_work_--since_24h" && call != "gc_bd_show_"+drainAckLoopBead+"_--json" {
+			t.Errorf("gc call %q: the script may only read the events over the default 24h window and the bead", call)
 		}
 	}
 
@@ -189,7 +248,10 @@ func TestNotifyDrainAckLoopEscalatesOnce(t *testing.T) {
 }
 
 // TestNotifyDrainAckLoopStaysQuiet: what is not a loop of a parkable bead
-// escalates nothing.
+// escalates nothing. A bead that reached the threshold but is not parkable
+// is named on stderr with the reason, so a skip is never silent; below the
+// threshold the run says nothing. The hold labels compare trimmed and
+// case-insensitively, as the controller's dispatch-hold check does.
 func TestNotifyDrainAckLoopStaysQuiet(t *testing.T) {
 	at := time.Date(2026, 11, 23, 6, 0, 0, 0, time.UTC)
 	working := loopBeadJSON("in_progress", "gc-1")
@@ -197,29 +259,169 @@ func TestNotifyDrainAckLoopStaysQuiet(t *testing.T) {
 		name   string
 		events []string
 		bead   string
+		skip   string // the stderr reason; empty when no bead reached the threshold
 	}{
-		{"two cycles", loopCycles(2), working},
-		{"one of three is a restart handoff", append(loopCycles(2),
-			drainAckEvent(9, at.Add(time.Hour), "gc-1", "restart_requested")), working},
-		{"one of three is generic assigned work", append(loopCycles(2),
-			drainAckEvent(9, at.Add(time.Hour), "gc-1", "drain_acked_with_assigned_work")), working},
-		{"two events of one session 10s apart count once", append(loopCycles(2),
-			drainAckEvent(9, at.Add(5*time.Minute+10*time.Second), "gc-1", "started_claim_kept")), working},
-		{"the bead closed since", loopCycles(3), loopBeadJSON("closed", "gc-1")},
-		{"the bead is held", loopCycles(3), loopBeadJSON("in_progress", "gc-1", "hold:mayor")},
-		{"the bead is held external", loopCycles(3), loopBeadJSON("in_progress", "gc-1", "hold:external")},
-		{"the bead was reassigned", loopCycles(3), loopBeadJSON("in_progress", "gc-7")},
-		{"the bead was released", loopCycles(3), loopBeadJSON("open", "")},
+		{name: "two cycles", events: loopCycles(2), bead: working},
+		{name: "one of three is a restart handoff", events: append(loopCycles(2),
+			drainAckEvent(9, at.Add(time.Hour), "gc-1", "restart_requested")), bead: working},
+		{name: "one of three is generic assigned work", events: append(loopCycles(2),
+			drainAckEvent(9, at.Add(time.Hour), "gc-1", "drain_acked_with_assigned_work")), bead: working},
+		{name: "two events of one session 10s apart count once", events: append(loopCycles(2),
+			drainAckEvent(9, at.Add(5*time.Minute+10*time.Second), "gc-1", "started_claim_kept")), bead: working},
+		{name: "the bead closed since", events: loopCycles(3), bead: loopBeadJSON("closed", "gc-1"), skip: "it is closed, not in_progress"},
+		{name: "the bead is held", events: loopCycles(3), bead: loopBeadJSON("in_progress", "gc-1", "hold:mayor"), skip: "it is on hold:mayor"},
+		{name: "the bead is held external", events: loopCycles(3), bead: loopBeadJSON("in_progress", "gc-1", "hold:external"), skip: "it is on hold:external"},
+		{name: "the bead is held, the label padded and in capitals", events: loopCycles(3), bead: loopBeadJSON("in_progress", "gc-1", " Hold:Mayor "), skip: "it is on hold:mayor"},
+		{name: "the bead was reassigned", events: loopCycles(3), bead: loopBeadJSON("in_progress", "gc-7"), skip: "it is assigned to gc-7, not to an identity its counted cycles recorded (gc-1)"},
+		{name: "the bead was released", events: loopCycles(3), bead: loopBeadJSON("open", ""), skip: "it is open, not in_progress; it is unassigned"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newDrainAckLoopRig(t, c.events, c.bead)
-			if out, err := r.run(t); err != nil {
+			out, err := r.run(t)
+			if err != nil {
 				t.Fatalf("notify-drain-ack-loop: %v\n%s", err, out)
 			}
 			if calls := r.escalations(t); len(calls) != 0 {
 				t.Fatalf("escalate.sh calls = %q, want none", calls)
 			}
+			if c.skip == "" {
+				if strings.Contains(out, "notify-drain-ack-loop: ") {
+					t.Errorf("output %q, want nothing below the threshold", out)
+				}
+				return
+			}
+			if want := "notify-drain-ack-loop: not mailing bead " + drainAckLoopBead + " after 3 cycles: " + c.skip + "\n"; !strings.Contains(out, want) {
+				t.Errorf("output %q, want the skip named: %q", out, want)
+			}
 		})
+	}
+}
+
+// TestNotifyDrainAckLoopMatchesTheClaimIdentity: a seat claims its work under
+// its alias, configured named identity or session name before its session
+// bead ID, so the events' session_id is often not the bead's assignee. The
+// bead counts as held by its loop under any assignee its counted events
+// recorded, or under one of their sessions when an event recorded none (a gc
+// from before the payload carried it); under any other identity it is
+// skipped.
+func TestNotifyDrainAckLoopMatchesTheClaimIdentity(t *testing.T) {
+	cycles := func(assignee string) []string {
+		start := time.Date(2026, 11, 23, 6, 0, 0, 0, time.UTC)
+		var out []string
+		for i := 0; i < 3; i++ {
+			out = append(out, drainAckEventOf(drainAckLoopBead, i+1, start.Add(time.Duration(i)*5*time.Minute), "gc-1", assignee, "started_claim_kept"))
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name     string
+		events   []string
+		assignee string // the bead's assignee when it is read again
+		mailed   bool
+		skip     string
+	}{
+		{name: "held under the alias the events recorded", events: cycles("gascity/furiosa"), assignee: "gascity/furiosa", mailed: true},
+		{name: "events that recorded no assignee match by session", events: cycles(""), assignee: "gc-1", mailed: true},
+		{
+			name: "held under another alias since", events: cycles("gascity/furiosa"), assignee: "gascity/nux",
+			skip: "it is assigned to gascity/nux, not to an identity its counted cycles recorded (gascity/furiosa, gc-1)",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newDrainAckLoopRig(t, c.events, loopBeadJSON("in_progress", c.assignee))
+			out, err := r.run(t)
+			if err != nil {
+				t.Fatalf("notify-drain-ack-loop: %v\n%s", err, out)
+			}
+			calls := r.escalations(t)
+			if !c.mailed {
+				if len(calls) != 0 {
+					t.Errorf("escalate.sh calls = %q, want none", calls)
+				}
+				if want := "not mailing bead " + drainAckLoopBead + " after 3 cycles: " + c.skip; !strings.Contains(out, want) {
+					t.Errorf("output %q, want the skip named: %q", out, want)
+				}
+				return
+			}
+			if len(calls) != 1 {
+				t.Fatalf("escalate.sh calls = %q, want one (output %q)", calls, out)
+			}
+			message := strings.Join(calls[0], "\n")
+			for _, want := range []string{"Session(s): gc-1", "Assignee: " + c.assignee} {
+				if !strings.Contains(message, want) {
+					t.Errorf("escalation %q does not contain %q", message, want)
+				}
+			}
+		})
+	}
+}
+
+// TestNotifyDrainAckLoopDefaultWindowHoldsLadderPacedCycles: the work ladder
+// paces a loop (nudges backing off from 3m to a 60m cap before a recycle), so
+// its cycles run 70 minutes and more apart, as in the live loop this order
+// was built for. The default window holds three such cycles and mails; a 1h
+// window, with gc events reading the window back from now, holds only the
+// last one.
+func TestNotifyDrainAckLoopDefaultWindowHoldsLadderPacedCycles(t *testing.T) {
+	start := time.Date(2026, 11, 23, 6, 0, 0, 0, time.UTC)
+	const gap = 70 * time.Minute
+	var events []string
+	for i := 0; i < 3; i++ {
+		events = append(events, drainAckEvent(i+1, start.Add(time.Duration(i)*gap), "gc-1", "started_claim_kept"))
+	}
+	now := start.Add(2*gap + time.Minute) // a minute after the third cycle
+	for _, c := range []struct {
+		name   string
+		env    []string
+		mailed bool
+	}{
+		{name: "the default window", mailed: true},
+		{name: "a 1h window", env: []string{"GC_DRAIN_ACK_LOOP_WINDOW=1h"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newDrainAckLoopRig(t, events, loopBeadJSON("in_progress", "gc-1"))
+			r.honorSince(t, now)
+			out, err := r.run(t, c.env...)
+			if err != nil {
+				t.Fatalf("notify-drain-ack-loop: %v\n%s", err, out)
+			}
+			calls := r.escalations(t)
+			if !c.mailed {
+				if len(calls) != 0 {
+					t.Errorf("escalate.sh calls = %q, want none: the window holds one cycle", calls)
+				}
+				return
+			}
+			if len(calls) != 1 || !strings.Contains(argAfter(calls[0], "--message"), "3 drain-ack cycles in the last 24h") {
+				t.Fatalf("escalate.sh calls = %q, want one naming 3 cycles in the last 24h (output %q)", calls, out)
+			}
+		})
+	}
+}
+
+// TestNotifyDrainAckLoopReadsEveryBeadBeforeMailing: every looping bead is
+// read before any mail is sent, so a later bead's failed read fails the run
+// with no mail at all, even for an earlier bead that would be mailed.
+func TestNotifyDrainAckLoopReadsEveryBeadBeforeMailing(t *testing.T) {
+	const second = "gc-43" // read after gc-42; the rig has no bead file for it
+	start := time.Date(2026, 11, 23, 6, 0, 0, 0, time.UTC)
+	events := loopCycles(3)
+	for i := 0; i < 3; i++ {
+		events = append(events, drainAckEventOf(second, 10+i, start.Add(time.Duration(i)*5*time.Minute), "gc-2", "gc-2", "started_claim_kept"))
+	}
+	r := newDrainAckLoopRig(t, events, loopBeadJSON("in_progress", "gc-1"))
+	out, err := r.run(t)
+	if err == nil {
+		t.Fatalf("notify-drain-ack-loop succeeded, want the failed read of %s to fail it\n%s", second, out)
+	}
+	if !strings.Contains(out, "notify-drain-ack-loop: reading bead "+second+" failed") {
+		t.Errorf("output %q does not give the failed read of %s", out, second)
+	}
+	if calls := r.escalations(t); len(calls) != 0 {
+		t.Errorf("escalate.sh calls = %q, want none once a read failed", calls)
+	}
+	if calls := r.gcCalls(t); !slices.Contains(calls, "gc_bd_show_"+drainAckLoopBead+"_--json") {
+		t.Errorf("gc calls = %q, want %s read before %s", calls, drainAckLoopBead, second)
 	}
 }
 
@@ -287,7 +489,7 @@ func TestNotifyDrainAckLoopFailsLoud(t *testing.T) {
 	}{
 		{name: "the events read fails", events: loopCycles(3), bead: working, breaks: "events.jsonl", want: "reading session.drain_acked_with_assigned_work events"},
 		{name: "the events are not JSON", events: []string{"not json"}, bead: working, want: "decoding session.drain_acked_with_assigned_work events"},
-		{name: "the bead read fails", events: loopCycles(3), bead: working, breaks: "bead.json", want: "reading bead " + drainAckLoopBead},
+		{name: "the bead read fails", events: loopCycles(3), bead: working, breaks: "bead-" + drainAckLoopBead + ".json", want: "reading bead " + drainAckLoopBead},
 		{name: "the bead is not JSON", events: loopCycles(3), bead: "not json", want: "decoding bead " + drainAckLoopBead},
 		{name: "the bead read names no bead", events: loopCycles(3), bead: "[]", want: "decoding bead " + drainAckLoopBead},
 		{name: "a zero threshold", env: []string{"GC_DRAIN_ACK_LOOP_THRESHOLD=0"}, events: loopCycles(3), bead: working, want: "GC_DRAIN_ACK_LOOP_THRESHOLD", noGC: true},

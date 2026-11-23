@@ -519,6 +519,7 @@ func (WorkerOperationEventPayload) IsEventPayload() {}
 type SessionDrainAckedWithAssignedWorkPayload struct {
 	SessionID  string `json:"session_id" doc:"Canonical session bead ID for the session that drain-acked."`
 	BeadID     string `json:"bead_id" doc:"ID of the work bead still holding this session as its assignee."`
+	Assignee   string `json:"assignee,omitempty" doc:"The work bead's assignee at emission time: the identity this session holds it under. It differs from session_id when the session claimed the bead under its alias, configured named identity or session name."`
 	Template   string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
 	BeadStatus string `json:"bead_status,omitempty" doc:"Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim)."`
 	Reason     string `json:"reason,omitempty" doc:"Shape of the drain-acked stop, in precedence order: 'restart_requested' when the stop completed a restart request; 'started_claim_kept' when the session kept an in_progress claim its started records name (and no dispatch hold); else 'drain_acked_with_assigned_work'."`
@@ -543,12 +544,13 @@ const (
 func (SessionDrainAckedWithAssignedWorkPayload) IsEventPayload() {}
 
 // SessionDrainAckedWithAssignedWorkPayloadJSON builds the JSON wire form for
-// attachment to an events.Event.Payload field. Template, BeadStatus, and
-// Reason are emitted only when non-empty.
-func SessionDrainAckedWithAssignedWorkPayloadJSON(sessionID, beadID, template, beadStatus, reason string) json.RawMessage {
+// attachment to an events.Event.Payload field. Assignee, Template,
+// BeadStatus, and Reason are emitted only when non-empty.
+func SessionDrainAckedWithAssignedWorkPayloadJSON(sessionID, beadID, assignee, template, beadStatus, reason string) json.RawMessage {
 	b, _ := json.Marshal(SessionDrainAckedWithAssignedWorkPayload{
 		SessionID:  sessionID,
 		BeadID:     beadID,
+		Assignee:   assignee,
 		Template:   template,
 		BeadStatus: beadStatus,
 		Reason:     reason,

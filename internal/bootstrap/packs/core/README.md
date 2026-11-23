@@ -214,21 +214,30 @@ runs `assets/scripts/notify-drain-ack-loop.sh`. The payload's `reason` says
 the stop's shape, in precedence order: `restart_requested` (the stop completed
 a restart request), `started_claim_kept` (the session kept an in_progress
 claim its started records name, on no dispatch hold), else
-`drain_acked_with_assigned_work`. The script counts only `started_claim_kept`
-stops:
+`drain_acked_with_assigned_work`. Its `assignee` is the identity the session
+held the bead under: a seat claims work under its alias, configured named
+identity or session name before its session bead ID, so it is often not the
+`session_id`. The script counts only `started_claim_kept` stops:
 
 - each bead's cycles inside the window are counted across its sessions; one
-  session's events less than a minute apart are one cycle;
+  session's events less than a minute apart are one cycle. The work ladder
+  paces the loop (its nudges back off from 3m to a 60m cap before it recycles
+  the seat), so cycles run tens of minutes to hours apart, and the default
+  window is a day;
 - a bead with at least the threshold of cycles is read again and mailed only
-  while it is still `in_progress`, assigned to a session those events name,
-  and carries neither `hold:mayor` nor `hold:external`;
+  while it is still `in_progress`, assigned to an identity those events
+  recorded (an `assignee`, or a `session_id`), and carries neither
+  `hold:mayor` nor `hold:external` (compared trimmed and case-insensitively,
+  as the controller compares them);
+- a bead that reached the threshold but is not mailed is named on stderr with
+  the reason;
 - the incident key and fingerprint are the bead, so one loop mails once
   (`escalate.sh` reminds once a day while it lasts).
 
-The mail names the bead, its sessions and template, and gives the park
-command, `bd set-state <id> hold=mayor --reason "drain-ack loop"`: the seat's
-next own drain-ack then releases the claim (open, unassigned, held). The
-script never writes the bead.
+The mail names the bead, its sessions, its assignee and template, and gives
+the park command, `gc bd set-state <id> hold=mayor --reason "drain-ack loop"`:
+the seat's next own drain-ack then releases the claim (open, unassigned,
+held). The script never writes the bead.
 
 **Loud-fail.** A window or threshold it cannot use, an events or bead read
 that fails or does not decode, or an undeliverable mail exits non-zero with
@@ -238,7 +247,7 @@ the cause on stderr; a failed read mails nothing.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `GC_DRAIN_ACK_LOOP_WINDOW` | `1h` | Window the cycles are counted in |
+| `GC_DRAIN_ACK_LOOP_WINDOW` | `24h` | Window the cycles are counted in |
 | `GC_DRAIN_ACK_LOOP_THRESHOLD` | `3` | Cycles of one bead that make a loop |
 | `GC_ESCALATION_RECIPIENT` | `human` | Who is mailed |
 

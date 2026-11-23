@@ -575,6 +575,11 @@ const timelineFingerprintV7 = "fix #8079 (mc-vg1pe): FingerprintVersion v7 moves
 // session.ClosePatch now writes beside closed_at on a close.
 const timelineUsageCloseMarker = "fix #6672 (ga-q8t65w): a close stamps the usage close marker the usage lane settles"
 
+// timelineDrainAckAssignee admits the assignee session.drain_acked_with_assigned_work
+// carries in legacy's outcomes: each section moved by the payload's assignee
+// alone, the session name the fixture's seat holds its work under.
+const timelineDrainAckAssignee = "fix #9450 (ga-0g50v3): session.drain_acked_with_assigned_work carries the kept bead's assignee"
+
 // timelineRulingRefs are the rulings a later entry may name: the owner's
 // O-rulings (O7 itself admits no change), CONTRACT §12.2 rows in the form
 // "§12.2 row N" (timelineSection122), and a legacy behavior change a
@@ -614,6 +619,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a managed suspend drains, then wake", "fix #7417 (mc-esqo7)", "61f2ce80feb0"},
 	{"a managed suspend drains, then wake", "fix #7590 (mc-esqo7): the drain's sleep keeps suspended_at (the Sleep cell, NEW2-5)", "e6e0e6743019"},
 	{"a managed suspend drains, then wake", timelineFingerprintV7, "da6d33776ea5"},
+	{"a managed suspend drains, then wake", timelineDrainAckAssignee, "6338f87b0c21"},
 	{"a manual create read between its two writes", timelineGoldenBaseline, "8c2d0f4552c4"},
 	{"a manual create read between its two writes", timelineFingerprintV7, "544ff5662fa5"},
 	{"a provider swap stops the runtime", timelineGoldenBaseline, "68a5d9d9b0ef"},
@@ -624,6 +630,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a waiter sleeps", timelineGoldenBaseline, "6b615dd20429"},
 	{"a waiter sleeps", "fix #7590 (mc-q6x43): the sleep keeps the wait's intent (D-J 3)", "064ac1bc84b8"},
 	{"a waiter sleeps", timelineFingerprintV7, "45ab826dd96e"},
+	{"a waiter sleeps", timelineDrainAckAssignee, "9dce7ec5f6f5"},
 	{"an idle on-demand named session sleeps", timelineGoldenBaseline, "2752bd8f4cc4"},
 	{"an unwanted row inside, then past, the wake grace", timelineGoldenBaseline, "c4d3c5eb08a0"},
 	{"an unwanted row inside, then past, the wake grace", timelineUsageCloseMarker, "0455d530d7e3"},
@@ -1450,9 +1457,9 @@ func operatorTimeline() []timelineFixture {
 			"seed": tlAliasSeed(),
 			"wait": tlMerged(waitDrained, map[string]string{
 				"provider:SetMeta s-gc-1": "drain-env-clears", "provider:RemoveMeta s-gc-1": "drain-env-clears", "provider:Stop s-gc-1": "drain-stop-lag",
-				`event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}`: "drain-stop-lag",
-				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                 "drain-stop-lag",
-				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`:                                                               "drain-stop-lag",
+				`event:session.drain_acked_with_assigned_work worker {"assignee":"s-gc-1","bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}`: "drain-stop-lag",
+				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                                     "drain-stop-lag",
+				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`:                                                                                   "drain-stop-lag",
 			}),
 			"the wait turns ready": tlMerged(tlIdent(), map[string]string{
 				"row:gc-1:*waitsleep": "wait-sleep-lag", "provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears",

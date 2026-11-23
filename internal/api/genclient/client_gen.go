@@ -5541,6 +5541,9 @@ type SessionDemandClaimDivergencePayload struct {
 
 // SessionDrainAckedWithAssignedWorkPayload defines model for SessionDrainAckedWithAssignedWorkPayload.
 type SessionDrainAckedWithAssignedWorkPayload struct {
+	// Assignee The work bead's assignee at emission time: the identity this session holds it under. It differs from session_id when the session claimed the bead under its alias, configured named identity or session name.
+	Assignee *string `json:"assignee,omitempty"`
+
 	// BeadId ID of the work bead still holding this session as its assignee.
 	BeadId string `json:"bead_id"`
 

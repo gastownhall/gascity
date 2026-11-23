@@ -779,6 +779,7 @@ func recordDrainAckAssignedWorkEvent(
 		Payload: api.SessionDrainAckedWithAssignedWorkPayloadJSON(
 			info.ID,
 			strandedBead.ID,
+			strandedBead.Assignee,
 			template,
 			strandedBead.Status,
 			drainAckAnomalyReason(info, strandedBead, info.RestartRequested == "true"),

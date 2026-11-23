@@ -4007,6 +4007,10 @@ export type SessionDemandClaimDivergencePayload = {
 
 export type SessionDrainAckedWithAssignedWorkPayload = {
     /**
+     * The work bead's assignee at emission time: the identity this session holds it under. It differs from session_id when the session claimed the bead under its alias, configured named identity or session name.
+     */
+    assignee?: string;
+    /**
      * ID of the work bead still holding this session as its assignee.
      */
     bead_id: string;
