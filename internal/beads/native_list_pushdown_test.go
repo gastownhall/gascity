@@ -751,8 +751,8 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 		sort.SliceStable(all, func(i, j int) bool {
 			return readerOrderLess(issueForOrder(all[i]), issueForOrder(all[j]), defaultOrder)
 		})
-		for i := 0; i < 50; i++ {
-			query := randomPushdownQuery(rng)
+		check := func(query ListQuery) {
+			t.Helper()
 			got, err := store.List(query)
 			if err != nil {
 				t.Fatalf("List(%+v): %v", query, err)
@@ -770,6 +770,20 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 			if gotIDs, wantIDs := beadIDsInOrder(got), beadIDsInOrder(want); !slices.Equal(gotIDs, wantIDs) {
 				t.Fatalf("List(%+v)\n got  %v\n want %v", query, gotIDs, wantIDs)
 			}
+		}
+		for i := 0; i < 50; i++ {
+			query := randomPushdownQuery(rng)
+			check(query)
+			// The same query narrowed to a small id set, drawn without touching
+			// the random stream: two present rows, an absent id and a duplicate.
+			withIDs := query
+			withIDs.IDs = []string{
+				fmt.Sprintf("gc-%03d", (i*7+40)%len(rows)),
+				fmt.Sprintf("gc-%03d", (i*13+50)%len(rows)),
+				"gc-absent",
+				fmt.Sprintf("gc-%03d", (i*7+40)%len(rows)),
+			}
+			check(withIDs)
 		}
 	}
 }
@@ -1075,4 +1089,239 @@ func sortedBeadIDs(items []Bead) []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// idListRowsForTest is one task row per id, created a second apart in the
+// order given, so created order is never decided by the id tie-break.
+func idListRowsForTest(ids ...string) []*beadslib.Issue {
+	t0 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	rows := make([]*beadslib.Issue, 0, len(ids))
+	for i, id := range ids {
+		rows = append(rows, &beadslib.Issue{
+			ID: id, Title: id, Status: beadslib.StatusOpen, IssueType: "task",
+			CreatedAt: t0.Add(time.Duration(i) * time.Second),
+		})
+	}
+	return rows
+}
+
+// IDs is a Go-side residual filter (ListQuery.Matches): the request carries no
+// ID predicate. A backing limit under it would cut the page before the ID
+// filter runs, so an earlier nonmatching row would take a requested row's
+// place and the listing would silently drop it.
+func TestNativeDoltStoreListIDsSurviveAPushedLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rows  []*beadslib.Issue
+		query ListQuery
+		want  []string
+	}{
+		{
+			name:  "created asc: an earlier nonmatching row",
+			rows:  idListRowsForTest("gc-early", "gc-wanted"),
+			query: ListQuery{IDs: []string{"gc-wanted"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 1},
+			want:  []string{"gc-wanted"},
+		},
+		{
+			name:  "created desc with the backing-limit opt-in: a later nonmatching row",
+			rows:  idListRowsForTest("gc-wanted", "gc-late"),
+			query: ListQuery{IDs: []string{"gc-wanted"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, AllowBackingCreatedLimit: true, Limit: 1},
+			want:  []string{"gc-wanted"},
+		},
+		{
+			name:  "created asc: the limit cuts the matched set, not the ledger",
+			rows:  idListRowsForTest("gc-a", "gc-b", "gc-c", "gc-d", "gc-e"),
+			query: ListQuery{IDs: []string{"gc-d", "gc-b", "gc-e", "gc-missing"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 2},
+			want:  []string{"gc-b", "gc-d"},
+		},
+		{
+			name:  "created desc with the opt-in: the limit cuts the matched set, not the ledger",
+			rows:  idListRowsForTest("gc-a", "gc-b", "gc-c", "gc-d", "gc-e"),
+			query: ListQuery{IDs: []string{"gc-a", "gc-b", "gc-d", "gc-missing"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, AllowBackingCreatedLimit: true, Limit: 2},
+			want:  []string{"gc-d", "gc-b"},
+		},
+		{
+			name:  "created desc without the opt-in",
+			rows:  idListRowsForTest("gc-a", "gc-b", "gc-c", "gc-d", "gc-e"),
+			query: ListQuery{IDs: []string{"gc-a", "gc-b", "gc-d"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, Limit: 2},
+			want:  []string{"gc-d", "gc-b"},
+		},
+		{
+			name:  "duplicate ids match once",
+			rows:  idListRowsForTest("gc-a", "gc-b", "gc-c"),
+			query: ListQuery{IDs: []string{"gc-c", "gc-c", "gc-b", "gc-b"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 5},
+			want:  []string{"gc-b", "gc-c"},
+		},
+		{
+			name:  "only absent ids answer nothing",
+			rows:  idListRowsForTest("gc-a", "gc-b"),
+			query: ListQuery{IDs: []string{"gc-missing"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 1},
+			want:  []string{},
+		},
+		{
+			name:  "a zero limit answers every matched row",
+			rows:  idListRowsForTest("gc-a", "gc-b", "gc-c", "gc-d"),
+			query: ListQuery{IDs: []string{"gc-d", "gc-b"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc},
+			want:  []string{"gc-b", "gc-d"},
+		},
+		{
+			name:  "a singleton empty id matches no row",
+			rows:  idListRowsForTest("gc-a", "gc-b"),
+			query: ListQuery{IDs: []string{""}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 1},
+			want:  []string{},
+		},
+		{
+			name:  "whitespace and comma ids are literal, not a normalized list",
+			rows:  idListRowsForTest("gc-a", "gc-b", "gc-a, gc-b"),
+			query: ListQuery{IDs: []string{" gc-a", "gc-b ", "gc-a,gc-b", "gc-a, gc-b"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 1},
+			want:  []string{"gc-a, gc-b"},
+		},
+		{
+			name:  "empty IDs under AllowScan is no ID filter and keeps the pushed limit",
+			rows:  idListRowsForTest("gc-a", "gc-b", "gc-c"),
+			query: ListQuery{IDs: []string{}, AllowScan: true, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 2},
+			want:  []string{"gc-a", "gc-b"},
+		},
+		{
+			name: "closed, ephemeral and no-history rows match under TierBoth",
+			rows: func() []*beadslib.Issue {
+				rows := idListRowsForTest("gc-early", "gc-closed", "gc-wisp", "gc-nohist", "gc-late")
+				closedAt := rows[1].CreatedAt
+				rows[1].Status, rows[1].ClosedAt = beadslib.StatusClosed, &closedAt
+				rows[2].Ephemeral = true
+				rows[3].NoHistory = true
+				return rows
+			}(),
+			query: ListQuery{IDs: []string{"gc-nohist", "gc-wisp", "gc-closed"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 3},
+			want:  []string{"gc-closed", "gc-wisp", "gc-nohist"},
+		},
+		{
+			name: "a status filter still applies to the requested ids",
+			rows: func() []*beadslib.Issue {
+				rows := idListRowsForTest("gc-a", "gc-b", "gc-c")
+				closedAt := rows[1].CreatedAt
+				rows[1].Status, rows[1].ClosedAt = beadslib.StatusClosed, &closedAt
+				return rows
+			}(),
+			query: ListQuery{IDs: []string{"gc-b", "gc-c"}, Status: "closed", IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 1},
+			want:  []string{"gc-b"},
+		},
+		{
+			name: "an assignee fan-out still applies to the requested ids",
+			rows: func() []*beadslib.Issue {
+				rows := idListRowsForTest("gc-a", "gc-b", "gc-c", "gc-d")
+				rows[0].Assignee, rows[1].Assignee, rows[2].Assignee, rows[3].Assignee = "worker", "gc-9", "other", "worker"
+				return rows
+			}(),
+			query: ListQuery{IDs: []string{"gc-b", "gc-c", "gc-d"}, Assignees: []string{"worker", "gc-9"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 5},
+			want:  []string{"gc-b", "gc-d"},
+		},
+		{
+			name: "created_at ties break by id in the canonical direction",
+			rows: func() []*beadslib.Issue {
+				rows := idListRowsForTest("gc-a", "gc-b", "gc-c", "gc-d")
+				for _, row := range rows {
+					row.CreatedAt = rows[0].CreatedAt
+				}
+				return rows
+			}(),
+			query: ListQuery{IDs: []string{"gc-b", "gc-c", "gc-d"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, Limit: 2},
+			want:  []string{"gc-d", "gc-c"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := filteringReader{rows: tc.rows}
+			store := newNativeDoltStoreForTest(&nativeDoltReaderSpy{list: reader.list})
+			got, err := store.List(tc.query)
+			if err != nil {
+				t.Fatalf("List(%+v): %v", tc.query, err)
+			}
+			if ids := beadIDsInOrder(got); !slices.Equal(ids, tc.want) {
+				t.Fatalf("List(%+v) = %v, want %v", tc.query, ids, tc.want)
+			}
+		})
+	}
+}
+
+// An ID-filtered listing never carries a backing limit, in either created
+// order that would otherwise push one: every request states an explicit 0, so
+// the whole candidate set reaches the ID filter before the caller's limit.
+func TestNativeListPlanNeverPushesALimitForIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query ListQuery
+		want  int
+	}{
+		{
+			name:  "created asc with ids",
+			query: ListQuery{IDs: []string{"gc-1"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 7},
+		},
+		{
+			name:  "created desc with the opt-in and ids",
+			query: ListQuery{IDs: []string{"gc-1"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, AllowBackingCreatedLimit: true, Limit: 7},
+		},
+		{
+			name:  "an assignee fan-out with ids",
+			query: ListQuery{IDs: []string{"gc-1", "gc-2"}, Assignees: []string{"worker", "gc-9"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 7},
+		},
+		{
+			name:  "control: created asc without ids keeps the pushed limit",
+			query: ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 7},
+			want:  7,
+		},
+		{
+			name:  "control: created desc with the opt-in and no ids keeps the pushed limit",
+			query: ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, AllowBackingCreatedLimit: true, Limit: 7},
+			want:  7,
+		},
+		{
+			name:  "control: an empty id set is no id filter and keeps the pushed limit",
+			query: ListQuery{IDs: []string{}, AllowScan: true, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc, Limit: 7},
+			want:  7,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertNativeListRequestLimitsForTest(t, tc.query, tc.want)
+		})
+	}
+}
+
+// assertNativeListRequestLimitsForTest checks the limit on every request both
+// NativeListPlan and List build for query: non-nil, and equal to want.
+func assertNativeListRequestLimitsForTest(t *testing.T, query ListQuery, want int) {
+	t.Helper()
+	plan := NativeListPlan(query)
+	if len(plan) == 0 {
+		t.Fatalf("NativeListPlan(%+v) planned no request", query)
+	}
+	for _, req := range plan {
+		if req.Limit == nil || *req.Limit != want {
+			t.Fatalf("NativeListPlan(%+v) request limit = %v, want an explicit %d", query, nativeLimitForTest(req.Limit), want)
+		}
+	}
+	var asked []issueops.ListRequest
+	store := newNativeDoltStoreForTest(&nativeDoltReaderSpy{
+		list: func(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+			asked = append(asked, req)
+			return issueops.IssuePage{}, nil
+		},
+	})
+	if _, err := store.List(query); err != nil {
+		t.Fatalf("List(%+v): %v", query, err)
+	}
+	if len(asked) != len(plan) {
+		t.Fatalf("List(%+v) sent %d requests, want the plan's %d", query, len(asked), len(plan))
+	}
+	for _, req := range asked {
+		if req.Limit == nil || *req.Limit != want {
+			t.Fatalf("List(%+v) request limit = %v, want an explicit %d", query, nativeLimitForTest(req.Limit), want)
+		}
+	}
+}
+
+func nativeLimitForTest(limit *int) string {
+	if limit == nil {
+		return "nil"
+	}
+	return fmt.Sprint(*limit)
 }
