@@ -303,17 +303,23 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 //
 // The closed set mirrors the enabler's reason codes (ga-71l): "escape-hatch"
 // (GC_NO_API truthy), "non-loopback-bind" (a standalone controller's API bound
-// to non-localhost with mutations disallowed), "grant-required" (a
-// supervisor-hosted city whose supervisor requires city grants),
-// "controller-down" (everything else — no controller, config missing, API
-// port unset, no supervisor-managed client).
+// to non-localhost with mutations disallowed), "api-port-unbound" (a live
+// controller that is not supervisor-hosted, whose usable [api] port has
+// nothing accepting connections), "grant-required" (a supervisor-hosted city
+// whose supervisor requires city grants), "controller-down" (everything else —
+// no controller, config missing, API port unset, no supervisor-managed
+// client).
 func apiClientFallbackReason(cityPath string) string {
 	return routeFallbackReason(cityPath, apiRouteGeneral)
 }
 
 // routeFallbackReason returns the apiClientFallbackReason code for a nil from
 // routeAPIClient with the same route. A supervisor-hosted city's [api] bind is
-// never the reason: the supervisor ignores that port.
+// never the reason: the supervisor ignores that port. A live controller that is
+// not supervisor-hosted and whose usable [api] port gave a nil client can only
+// have failed routeAPIClient's listener probe, so the reason is
+// "api-port-unbound" without dialing the port again: a second dial would double
+// the cost and could disagree with the routing decision it explains.
 func routeFallbackReason(cityPath string, route apiRoute) string {
 	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
 		return "escape-hatch"
@@ -329,10 +335,10 @@ func routeFallbackReason(cityPath string, route apiRoute) string {
 	default:
 		tomlPath := filepath.Join(cityPath, "city.toml")
 		if cfg, err := config.Load(fsys.OSFS{}, tomlPath); err == nil && cfg.API.Port > 0 {
-			bind := cfg.API.BindOrDefault()
-			if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
+			if _, ok := standaloneControllerAddr(cfg); !ok {
 				return "non-loopback-bind"
 			}
+			return "api-port-unbound"
 		}
 	}
 	return "controller-down"

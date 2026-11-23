@@ -438,26 +438,38 @@ func TestAPIClientFallbackReason(t *testing.T) {
 		apiRouteControllerIdentityHook = origIdentity
 		apiRouteSupervisorGrantsHook = origGrants
 	})
-	const readOnlyBind = "name = \"t\"\n[api]\nport = 9443\nbind = \"0.0.0.0\"\n"
+	const (
+		readOnlyBind = "name = \"t\"\n[api]\nport = 9443\nbind = \"0.0.0.0\"\n"
+		noAPIPort    = "name = \"t\"\n"
+	)
 	cases := []struct {
-		name   string
+		name string
+		// down reports no live controller socket.
+		down   bool
 		mode   controllerHostingMode
 		grants bool
+		toml   string
 		want   string
 	}{
-		{name: "standalone-read-only-bind", mode: controllerHostingStandalone, want: "non-loopback-bind"},
-		{name: "unknown-read-only-bind", mode: controllerHostingUnknown, want: "non-loopback-bind"},
-		{name: "supervisor-hosted-ignores-api-bind", mode: controllerHostingSupervisor, want: "controller-down"},
-		{name: "supervisor-hosted-requiring-grants", mode: controllerHostingSupervisor, grants: true, want: "grant-required"},
+		{name: "standalone-read-only-bind", mode: controllerHostingStandalone, toml: readOnlyBind, want: "non-loopback-bind"},
+		{name: "unknown-read-only-bind", mode: controllerHostingUnknown, toml: readOnlyBind, want: "non-loopback-bind"},
+		{name: "supervisor-hosted-ignores-api-bind", mode: controllerHostingSupervisor, toml: readOnlyBind, want: "controller-down"},
+		{name: "supervisor-hosted-requiring-grants", mode: controllerHostingSupervisor, grants: true, toml: readOnlyBind, want: "grant-required"},
+		{name: "standalone-no-api-port", mode: controllerHostingStandalone, toml: noAPIPort, want: "controller-down"},
+		{name: "unknown-no-api-port", mode: controllerHostingUnknown, toml: noAPIPort, want: "controller-down"},
+		{name: "no-controller", down: true, toml: apiPortCityTOML(9443), want: "controller-down"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("GC_NO_API", "")
 			apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+				if tc.down {
+					return controllerIdentityReply{}
+				}
 				return controllerIdentityReply{PID: 4242, HostingMode: tc.mode}
 			}
 			apiRouteSupervisorGrantsHook = func() bool { return tc.grants }
-			dir := writeCityTOMLForRoute(t, t.TempDir(), readOnlyBind)
+			dir := writeCityTOMLForRoute(t, t.TempDir(), tc.toml)
 			if got := apiClientFallbackReason(dir); got != tc.want {
 				t.Fatalf("apiClientFallbackReason = %q, want %q", got, tc.want)
 			}
@@ -797,6 +809,35 @@ func TestAPIClientUnboundAPIPortTakesLocalFallback(t *testing.T) {
 			dir := writeCityTOMLForRoute(t, t.TempDir(), apiPortCityTOML(unboundLoopbackPort(t)))
 			if c := apiClient(dir); c != nil {
 				t.Fatalf("apiClient = %p, want nil: nothing listens on the [api] port", c)
+			}
+		})
+	}
+}
+
+// TestAPIClientFallbackReasonUnboundAPIPort pins the reason a nil client
+// reports when a live non-supervisor-hosted controller's city.toml names a
+// usable [api] port nothing listens on: "api-port-unbound", for apiClient and
+// for every route a controller that identifies as standalone resolves nil on.
+func TestAPIClientFallbackReasonUnboundAPIPort(t *testing.T) {
+	origIdentity := apiRouteControllerIdentityHook
+	t.Cleanup(func() { apiRouteControllerIdentityHook = origIdentity })
+	for _, mode := range []controllerHostingMode{controllerHostingStandalone, controllerHostingUnknown} {
+		t.Run(hostingModeName(mode), func(t *testing.T) {
+			t.Setenv("GC_NO_API", "")
+			apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+				return controllerIdentityReply{PID: 4242, HostingMode: mode}
+			}
+			dir := writeCityTOMLForRoute(t, t.TempDir(), apiPortCityTOML(unboundLoopbackPort(t)))
+			if got := apiClientFallbackReason(dir); got != "api-port-unbound" {
+				t.Fatalf("apiClientFallbackReason = %q, want \"api-port-unbound\"", got)
+			}
+			if mode != controllerHostingStandalone {
+				return
+			}
+			for _, route := range []apiRoute{apiRoutePreferSupervisor, apiRoutePreferSupervisorMutation, apiRouteStandaloneOnly} {
+				if got := routeFallbackReason(dir, route); got != "api-port-unbound" {
+					t.Fatalf("routeFallbackReason(route %d) = %q, want \"api-port-unbound\"", route, got)
+				}
 			}
 		})
 	}
