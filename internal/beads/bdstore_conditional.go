@@ -486,11 +486,15 @@ func (s *BdStore) runConditionalWrite(id string, expectedRevision int64, args ..
 	for attempt := 1; ; attempt++ {
 		out, err := s.runner(s.dir, "bd", prefixed...)
 		if err == nil {
+			recordWriteBudget(verb+"_if_match", id, attempt, conditionalWriteMaxAttempts, nil, false)
 			return nil
 		}
 		lastOut, lastErr = out, err
 		if isBdAmbiguousWriteError(err) {
 			break
+		}
+		if isBdTransientWriteError(err) && attempt >= conditionalWriteMaxAttempts {
+			recordWriteBudget(verb+"_if_match", id, attempt, conditionalWriteMaxAttempts, err, true)
 		}
 		if isBdTransientWriteError(err) && attempt < conditionalWriteMaxAttempts {
 			if cur, getErr := s.Get(id); getErr == nil && cur.Revision != expectedRevision {
@@ -580,6 +584,7 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 		err = s.runConditionalWrite(id, b.Revision, args...)
 		switch {
 		case err == nil:
+			recordWriteBudget("set_metadata_cas", id, attempt, casEmulationMaxAttempts, nil, false)
 			return true, nil
 		case IsPreconditionFailed(err):
 			// The revision moved under us; re-read and re-check the value next
@@ -592,9 +597,11 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 				if final, readErr := s.Get(id); readErr == nil && final.Metadata[key] != expected {
 					return false, nil
 				}
-				return false, &CASRetriesExhaustedError{
+				exhausted := &CASRetriesExhaustedError{
 					ID: id, Key: key, Attempts: attempt, LastRevision: b.Revision,
 				}
+				recordWriteBudget("set_metadata_cas", id, attempt, casEmulationMaxAttempts, exhausted, true)
+				return false, exhausted
 			}
 			conditionalWriteSleep(conditionalWriteBackoff(attempt))
 		default:
