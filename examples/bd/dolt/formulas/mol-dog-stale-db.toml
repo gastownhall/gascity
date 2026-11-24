@@ -30,11 +30,19 @@ under `timeout --kill-after=5 $DOG_BD_TIMEOUT` (default 60 seconds; a
 value that is not a positive whole number of seconds means 60), so a
 hung store fails the call instead of blocking the step. A report the
 store did not take is named in the close reason
-(`reports_omitted=<stage>`) and a `mol-dog-stale-db.escalate` event; a
-hung outcome write or close leaves the work bead open with no outcome.
-The step drain-acks either way. Event emits and `gc dolt-cleanup` are
-not wrapped. Without `timeout` or `gtimeout` on PATH the step warns
-once and runs the calls unbounded.
+(`reports_omitted=<stage>`) and a `mol-dog-stale-db.escalate` event. A
+hung outcome write leaves the work bead open with no outcome; a hung
+close withdraws the outcome too, and the close itself may still have
+landed. The step drain-acks either way. Event emits and
+`gc dolt-cleanup` are not wrapped. Without `timeout` or `gtimeout` on
+PATH the step warns once and runs the calls unbounded.
+
+The core escalate.sh bounds its own send with
+`GC_ESCALATE_SEND_TIMEOUT_SECS` (default 30) in a process group of its
+own, out of this bound's reach, so keep `DOG_BD_TIMEOUT` above it.
+Below it, the bound kills the hook while its send is still running:
+the alert can still go out, but the hook can no longer record it, so
+the next run sends the alert again.
 
 ## Dog Contract
 
@@ -211,6 +219,7 @@ escalate_refused_incident_flags() {
   local city_path="${GC_CITY_PATH:-${GC_CITY:-.}}"
   local system_packs="${GC_SYSTEM_PACKS_DIR:-$city_path/.gc/system/packs}"
   [ "$1" -ne 0 ] || return 1
+  case "$1" in 124|137) return 1 ;; esac
   if [ "$ESCALATE_SCRIPT" -ef "$system_packs/core/assets/scripts/escalate.sh" ]; then
     return 1
   fi
@@ -470,7 +479,9 @@ fi
 # gc closes a session's own claim under the identity that claimed it. A failed
 # or overrun outcome write never reaches the close, and it or a failed close
 # withdraws the outcome (an overrun write may still have landed), so the wisp
-# left open carries none, as on every other fail-open path.
+# left open carries none, as on every other fail-open path. An overrun close
+# may have landed too (a passthrough close still reads the closed row back
+# after bd commits it), so its message does not claim the wisp was left open.
 withdraw_and_fail_open() {
   run_or_warn "withdraw pass outcome" store_bounded gc bd update "$WORK_BEAD" --unset-metadata gc.outcome
   run_or_warn "emit close escalation" gc event emit mol-dog-stale-db.escalate --message "$1"
@@ -482,7 +493,7 @@ if ! store_bounded gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass; the
   withdraw_and_fail_open "outcome write failed or overran ${STORE_TIMEOUT}s; leaving work bead open"
 fi
 if ! store_bounded gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED}${OMITTED_SUFFIX})"; then
-  withdraw_and_fail_open "gc bd close failed or overran ${STORE_TIMEOUT}s; leaving work bead open"
+  withdraw_and_fail_open "gc bd close failed or overran ${STORE_TIMEOUT}s; the close may have landed"
 fi
 drain_ack_once # drain-ack before normal exit
 exit

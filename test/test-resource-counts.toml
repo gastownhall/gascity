@@ -1674,7 +1674,7 @@ tagged = true
 [[count]]
 path = "examples/bd/dolt/stale_db_formula_test.go"
 resource = "subprocess"
-calls = 11
+calls = 12
 
 [[count]]
 path = "examples/bd/dolt/status_test.go"

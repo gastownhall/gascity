@@ -1803,8 +1803,10 @@ func TestStaleDBFormulaHungOutcomeOrCloseFailsOpen(t *testing.T) {
 		hang      string
 		wantEvent string
 	}{
-		{"outcome write", staleDBOutcomeWrite("bead-1"), "gc event emit mol-dog-stale-db.escalate --message outcome write failed or overran 2s"},
-		{"close", staleDBCloseWrite("bead-1"), "gc event emit mol-dog-stale-db.escalate --message gc bd close failed or overran 2s"},
+		{"outcome write", staleDBOutcomeWrite("bead-1"), "gc event emit mol-dog-stale-db.escalate --message outcome write failed or overran 2s; leaving work bead open\n"},
+		// A close that overran may have landed, so its event does not say the
+		// work bead was left open.
+		{"close", staleDBCloseWrite("bead-1"), "gc event emit mol-dog-stale-db.escalate --message gc bd close failed or overran 2s; the close may have landed\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := runStaleDBFormulaHungStoreCase(t, staleDBHungStoreCase{
@@ -1831,17 +1833,37 @@ func TestStaleDBFormulaHungOutcomeOrCloseFailsOpen(t *testing.T) {
 	}
 }
 
-// staleDBHangingEscalateHook is an escalate.sh hook that logs its call and
-// never answers.
+// staleDBHangingEscalateHook is an escalate.sh hook that logs its call, echoes
+// its arguments, incident flags included, to stderr, and never answers.
 const staleDBHangingEscalateHook = `#!/usr/bin/env bash
 echo "hook $*" >> "$GC_TEST_LOG"
+echo "hook: args: $*" >&2
 sleep 120
+`
+
+// staleDBEchoingEscalateHook is an escalate.sh hook that logs its call, echoes
+// its arguments, incident flags included, to stderr, and returns.
+const staleDBEchoingEscalateHook = `#!/usr/bin/env bash
+echo "hook $*" >> "$GC_TEST_LOG"
+echo "hook: args: $*" >&2
+`
+
+// staleDBKillingGtimeout is a gtimeout that reports every escalate.sh hook it
+// runs as killed by the bound, exit 137 as timeout exits once --kill-after
+// fires, and runs every other command unbounded.
+const staleDBKillingGtimeout = `#!/usr/bin/env bash
+shift 2
+case "$1" in
+  */escalate.sh) "$@"; exit 137 ;;
+esac
+exec "$@"
 `
 
 // TestStaleDBFormulaHungNotificationsAreBounded: an escalation or maintenance
 // notice that hangs is bounded, and the step still closes its work bead and
-// drain-acks. A hook the bound killed is not read as refusing the incident
-// flags, so the escalation is not sent to it again.
+// drain-acks. A hook the bound killed (exit 124, or 137 once killed) is not
+// read as refusing the incident flags, even when its stderr names them, so the
+// escalation is not sent to it again.
 func TestStaleDBFormulaHungNotificationsAreBounded(t *testing.T) {
 	staleDBRequireHungStoreTools(t)
 
@@ -1849,21 +1871,23 @@ func TestStaleDBFormulaHungNotificationsAreBounded(t *testing.T) {
 		name     string
 		scanJSON string
 		hang     string
-		hook     bool
+		hook     string
+		bins     map[string]string
 		env      []string
 	}{
 		{name: "escalation mail", scanJSON: staleDBOverThresholdScan, hang: "gc mail send ", env: []string{"GC_SYSTEM_PACKS_DIR=" + t.TempDir()}},
-		{name: "escalate hook", scanJSON: staleDBOverThresholdScan, hook: true},
+		{name: "escalate hook", scanJSON: staleDBOverThresholdScan, hook: staleDBHangingEscalateHook},
+		{name: "escalate hook killed", scanJSON: staleDBOverThresholdScan, hook: staleDBEchoingEscalateHook, bins: map[string]string{"gtimeout": staleDBKillingGtimeout}},
 		{name: "maintenance nudge", scanJSON: staleDBCleanScan, hang: "gc session nudge ", env: []string{"GC_MAINTENANCE_DONE_TARGET=ops"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := append([]string{"DOG_BD_TIMEOUT=2"}, tc.env...)
-			if tc.hook {
+			if tc.hook != "" {
 				hook := filepath.Join(t.TempDir(), "escalate.sh")
-				writeTestFile(t, hook, staleDBHangingEscalateHook, 0o755)
+				writeTestFile(t, hook, tc.hook, 0o755)
 				env = append(env, "GC_ESCALATE_SCRIPT="+hook)
 			}
-			run := runStaleDBFormulaHungStoreCase(t, staleDBHungStoreCase{scanJSON: tc.scanJSON, hang: tc.hang, env: env})
+			run := runStaleDBFormulaHungStoreCase(t, staleDBHungStoreCase{scanJSON: tc.scanJSON, hang: tc.hang, bins: tc.bins, env: env})
 			if run.timedOut {
 				t.Fatalf("step still blocked on the hung %s after %s\n%s", tc.name, staleDBHungStoreDeadline, run)
 			}
@@ -1871,7 +1895,7 @@ func TestStaleDBFormulaHungNotificationsAreBounded(t *testing.T) {
 				t.Fatalf("step failed; a hung %s must not fail the scan\n%s", tc.name, run)
 			}
 			requireStaleDBLogInOrder(t, run, staleDBCloseWrite("bead-1"), "gc runtime drain-ack\n")
-			if tc.hook {
+			if tc.hook != "" {
 				if got := strings.Count(run.log, "hook --subject "); got != 1 {
 					t.Fatalf("escalate hook called %d times, want 1: a bound kill is not a refusal of the incident flags\n%s", got, run)
 				}
@@ -2186,84 +2210,5 @@ func TestStaleDBOrderUsesParsedFieldsOnly(t *testing.T) {
 	}
 	if order.Schedule != "0 */4 * * *" {
 		t.Fatalf("Schedule = %q, want 0 */4 * * *", order.Schedule)
-	}
-}
-
-// TestStaleDBFormulaHungReportWriteStillClosesAndDrainAcks pins that a slow
-// or unresponsive store degrades the dog's report, not its bookkeeping: when
-// the scan-report `gc bd update` blocks, the step bounds it, still closes the
-// work bead and drain-acks instead of hanging until its own deadline.
-func TestStaleDBFormulaHungReportWriteStillClosesAndDrainAcks(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash not found: %v", err)
-	}
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skipf("jq not found: %v", err)
-	}
-	script := renderStaleDBFormulaShell(t)
-	dir := t.TempDir()
-	binDir := filepath.Join(dir, "bin")
-	if err := os.Mkdir(binDir, 0o755); err != nil {
-		t.Fatalf("Mkdir: %v", err)
-	}
-	logPath := filepath.Join(dir, "commands.log")
-	scanPath := filepath.Join(dir, "scan.json")
-	writeTestFile(t, scanPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[],"skipped":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`)
-	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
-set -euo pipefail
-rendered="gc $*"
-echo "$rendered" >> "$GC_TEST_LOG"
-case "${1:-} ${2:-}" in
-  "dolt-cleanup "*) cat "$GC_TEST_SCAN_JSON" ;;
-  "bd update")
-    if [[ "$rendered" == *"--set-metadata gc.dolt_cleanup."* ]]; then
-      sleep 120
-    fi
-    ;;
-  *) ;;
-esac
-`, 0o755)
-
-	cmd := exec.Command("bash", "-s")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(staleDBFilteredEnv("PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "DOG_BD_TIMEOUT"),
-		"GC_BEAD_ID=bead-1",
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"TMPDIR="+dir,
-		"GC_TEST_LOG="+logPath,
-		"GC_TEST_SCAN_JSON="+scanPath,
-		"DOG_BD_TIMEOUT=2",
-	)
-	var out strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	const deadline = 30 * time.Second
-	timedOut := false
-	select {
-	case <-done:
-	case <-time.After(deadline):
-		timedOut = true
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-done
-	}
-	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("ReadFile(%s): %v\noutput:\n%s", logPath, err, out.String())
-	}
-	log := string(logData)
-	if timedOut {
-		t.Errorf("step still blocked on the hung report write after %s; a stalled store call must be bounded", deadline)
-	}
-	if !strings.Contains(log, staleDBCloseWrite("bead-1")) {
-		t.Errorf("work bead was never closed after the report write hung\nlog:\n%s\noutput:\n%s", log, out.String())
-	}
-	if !strings.Contains(log, "gc runtime drain-ack") {
-		t.Errorf("step never drain-acked after the report write hung\nlog:\n%s\noutput:\n%s", log, out.String())
 	}
 }
