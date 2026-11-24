@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
@@ -672,6 +673,81 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 	secondMember := mustGetBead(t, store, members[1].ID)
 	if got := secondMember.Metadata["gc.exclusive_drain_reservation"]; got != otherDrain.ID {
 		t.Fatalf("second member reservation = %q, want the open drain %s", got, otherDrain.ID)
+	}
+}
+
+// TestProcessDrainExclusiveReservationTakesOverClosedOwner covers a drain
+// re-slung over members whose reservation names a drain control that was
+// closed from outside (gc convoy delete --force, run cancel): the closed
+// control never ran its own release, so the next drain must take the
+// reservation over instead of failing on a dead owner.
+func TestProcessDrainExclusiveReservationTakesOverClosedOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		metadata   map[string]string
+		wantAction string
+		reserved   int
+	}{
+		{name: "separate", metadata: map[string]string{"gc.drain_member_access": "exclusive"}, wantAction: "drain-expanded", reserved: 2},
+		{name: "shared", metadata: map[string]string{
+			"gc.drain_context":          "shared",
+			"gc.drain_member_access":    "exclusive",
+			"gc.drain_item_single_lane": "true",
+		}, wantAction: "drain-shared-advanced", reserved: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			store, drain := seedDrainWorkflow(t)
+			if err := store.SetMetadataBatch(drain.ID, tc.metadata); err != nil {
+				t.Fatalf("SetMetadataBatch(exclusive drain): %v", err)
+			}
+			root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+			members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], false)
+			if err != nil {
+				t.Fatalf("Members: %v", err)
+			}
+			oldDrain := createExclusiveDrainControl(t, store, "old drain")
+			for _, member := range members {
+				if err := store.SetMetadata(member.ID, "gc.exclusive_drain_reservation", oldDrain.ID); err != nil {
+					t.Fatalf("SetMetadata(reservation): %v", err)
+				}
+			}
+			if err := updateMetadataAndClose(beadstest.Graph(store), oldDrain.ID, map[string]string{
+				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+				"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+			}); err != nil {
+				t.Fatalf("close old drain: %v", err)
+			}
+
+			result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+			if err != nil {
+				t.Fatalf("ProcessControl(drain over members reserved by a closed drain): %v", err)
+			}
+			drain = mustGetBead(t, store, drain.ID)
+			if result.Action != tc.wantAction {
+				t.Fatalf("Action = %q (gc.failure_reason=%q), want %s", result.Action, drain.Metadata["gc.failure_reason"], tc.wantAction)
+			}
+			if drain.Status == "closed" || drain.Metadata["gc.failure_reason"] != "" {
+				t.Fatalf("drain = %+v, want open with no failure reason", drain)
+			}
+			manifest := mustDrainManifest(t, drain)
+			reserved := 0
+			for _, row := range manifest.Rows {
+				if row.ItemRootID == "" {
+					continue
+				}
+				reserved++
+				member := mustGetBead(t, store, row.MemberID)
+				if got := strings.TrimSpace(member.Metadata["gc.exclusive_drain_reservation"]); got != drain.ID {
+					t.Fatalf("member %s reservation = %q, want taken over by %s", row.MemberID, got, drain.ID)
+				}
+			}
+			if reserved != tc.reserved {
+				t.Fatalf("launched %d item roots, want %d", reserved, tc.reserved)
+			}
+		})
 	}
 }
 

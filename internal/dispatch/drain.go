@@ -1941,6 +1941,12 @@ func (e drainReservationError) Error() string {
 // reservation read and write route to the member's owning store
 // (drainMemberOwningStore). On origin/main the owning store is the single store,
 // matching the pre-seam store.Get/store.SetMetadata behavior exactly.
+//
+// A reservation naming another drain control conflicts only while that
+// control is open. Its own terminal paths release the reservation, but a
+// control closed from outside (a force-deleted convoy, a canceled run) or
+// purged never does, so a closed or missing owner is taken over with a write
+// fenced on the stale value.
 func reserveDrainMember(store beads.GraphStore, control, member beads.Bead, opts ProcessOptions) error {
 	if drainMemberAccess(control) != beadmeta.DrainMemberAccessExclusive {
 		return nil
@@ -1956,23 +1962,56 @@ func reserveDrainMember(store beads.GraphStore, control, member beads.Bead, opts
 		}
 		return fmt.Errorf("%s: loading exclusive drain member %s: %w", control.ID, member.ID, err)
 	}
-	owner := strings.TrimSpace(current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey])
-	if owner != "" && owner != control.ID {
-		return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
-	}
+	stored := current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]
+	owner := strings.TrimSpace(stored)
 	if owner == control.ID {
 		return nil
 	}
-	return claimDrainReservation(memberStore, control, member)
+	if owner == "" {
+		return claimDrainReservation(memberStore, control, member, stored)
+	}
+	released, ownerState, err := drainReservationOwnerReleased(store, owner, opts)
+	if err != nil {
+		return fmt.Errorf("%s: checking reservation owner %s of drain member %s: %w", control.ID, owner, member.ID, err)
+	}
+	if !released {
+		return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
+	}
+	if err := claimDrainReservation(memberStore, control, member, stored); err != nil {
+		return err
+	}
+	opts.tracef("process-control bead=%s kind=drain reservation-takeover member=%s stale_owner=%s owner_state=%s", control.ID, member.ID, owner, ownerState)
+	return nil
 }
 
-// claimDrainReservation claims the empty reservation slot. When the member's
-// owning store resolves a conditional writer (beads.conditional_writes auto or
-// require on a capable store), the claim is a value-CAS so two racing drains
-// cannot both observe an empty owner and both stamp; otherwise it is the
-// byte-identical legacy write. A require-mode refusal surfaces as-is — the
+// drainReservationOwnerReleased reports whether a reservation naming owner
+// (another drain control) is dead: the drain's residency frame holds owner as
+// a closed bead, or holds no bead with that id at all. Any other status is a
+// live owner. A lookup that could not be completed is an error, never a
+// release. state names what was observed ("closed", "missing", or the live
+// owner's status) for tracing.
+func drainReservationOwnerReleased(store beads.GraphStore, owner string, opts ProcessOptions) (released bool, state string, err error) {
+	row, found, err := resolveDrainMember(store, owner, opts)
+	if err != nil {
+		return false, "", err
+	}
+	if !found {
+		return true, "missing", nil
+	}
+	if row.Bead.Status == "closed" {
+		return true, "closed", nil
+	}
+	return false, row.Bead.Status, nil
+}
+
+// claimDrainReservation replaces the reservation value expected (empty, or a
+// released owner's id) with control.ID. When the member's owning store
+// resolves a conditional writer (beads.conditional_writes auto or require on
+// a capable store), the claim is a value-CAS fenced on expected so two racing
+// drains cannot both observe the same slot and both stamp; otherwise it is
+// the legacy unconditional write. A require-mode refusal surfaces as-is — the
 // drain fails closed rather than issuing an unconditional claim.
-func claimDrainReservation(memberStore beads.Store, control, member beads.Bead) error {
+func claimDrainReservation(memberStore beads.Store, control, member beads.Bead, expected string) error {
 	writer, _, err := beads.ResolveConditionalWriter(memberStore)
 	if err != nil {
 		return fmt.Errorf("%s: reserving drain member %s: %w", control.ID, member.ID, err)
@@ -1980,7 +2019,7 @@ func claimDrainReservation(memberStore beads.Store, control, member beads.Bead) 
 	if writer == nil {
 		return memberStore.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, control.ID)
 	}
-	return claimDrainReservationCAS(memberStore, writer, control, member)
+	return claimDrainReservationCAS(memberStore, writer, control, member, expected)
 }
 
 // claimDrainReservationCAS fences the claim. A failed CAS is an observation,
@@ -1991,11 +2030,11 @@ func claimDrainReservation(memberStore beads.Store, control, member beads.Bead) 
 // spurious conflict (a raced release, or cross-key revision interference on
 // stores that emulate value-CAS over a whole-bead fence), re-issued once
 // before surfacing; anything else is a genuine competing reservation.
-func claimDrainReservationCAS(memberStore beads.Store, writer beads.ConditionalWriter, control, member beads.Bead) error {
+func claimDrainReservationCAS(memberStore beads.Store, writer beads.ConditionalWriter, control, member beads.Bead, expected string) error {
 	const claimAttempts = 2
 	var lastErr error
 	for attempt := 1; attempt <= claimAttempts; attempt++ {
-		ok, casErr := writer.CompareAndSetMetadataKey(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, "", control.ID)
+		ok, casErr := writer.CompareAndSetMetadataKey(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, expected, control.ID)
 		if ok {
 			return nil
 		}

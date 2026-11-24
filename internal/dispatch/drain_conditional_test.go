@@ -180,7 +180,7 @@ func TestClaimDrainReservationCASAmbiguousCommitSelfWins(t *testing.T) {
 	}
 	writer := &scriptedDrainWriter{inner: inner, commitThenErr: errors.New("i/o timeout")}
 
-	if err := claimDrainReservationCAS(store, writer, control, member); err != nil {
+	if err := claimDrainReservationCAS(store, writer, control, member, ""); err != nil {
 		t.Fatalf("ambiguous committed claim = %v, want self-win nil (§9.3: our own committed write)", err)
 	}
 	if owner := reservationOwner(t, store, member.ID); owner != "drain-a" {
@@ -194,7 +194,7 @@ func TestClaimDrainReservationCASSpuriousConflictRetriesOnce(t *testing.T) {
 	inner, _ := beads.ConditionalWriterFor(store)
 	writer := &scriptedDrainWriter{inner: inner, failPreconditionOnce: true}
 
-	if err := claimDrainReservationCAS(store, writer, control, member); err != nil {
+	if err := claimDrainReservationCAS(store, writer, control, member, ""); err != nil {
 		t.Fatalf("spurious conflict = %v, want one bounded re-issue to succeed", err)
 	}
 	if writer.casCalls != 2 {
@@ -210,7 +210,7 @@ func TestClaimDrainReservationCASPersistentSpuriousConflictSurfaces(t *testing.T
 	control, member := newDrainReservationFixtures(t, store)
 	writer := &alwaysPreconditionWriter{}
 
-	err := claimDrainReservationCAS(store, writer, control, member)
+	err := claimDrainReservationCAS(store, writer, control, member, "")
 	if err == nil {
 		t.Fatal("persistent spurious conflict must surface an error for the next level-triggered pass")
 	}
