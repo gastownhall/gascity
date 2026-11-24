@@ -32,7 +32,8 @@ type Provider struct {
 	// fixed wall-clock deadline with "no output for setupTimeout" (idle)
 	// plus this absolute ceiling.
 	setupMaxTimeout time.Duration
-	mu              sync.Mutex // serializes workspace/tab find-or-create across concurrent Starts
+	listDeadline    time.Duration // test override for herdrListDeadline; zero selects the default
+	mu              sync.Mutex    // serializes workspace/tab find-or-create across concurrent Starts
 	// act is the tracker-backed activity source behind GetLastActivity /
 	// CanReportActivity (#4217); started lazily on first GetLastActivity.
 	act activityTracker
@@ -949,22 +950,36 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // registered names. A registry entry with no registered name is a pane herdr
 // detected an agent in, not a session, and is never listed.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	ctx := context.Background()
+	// One deadline covers the whole walk: each session costs up to three herdr
+	// calls, so without it a stalled herdr multiplies the per-call bound by the
+	// number of bound sessions.
+	ctx, cancel := context.WithTimeout(context.Background(), p.listBound())
+	defer cancel()
 	agents, err := p.c.listAgents(ctx)
 	if err != nil {
 		return nil, listRunningFailure(err)
 	}
 	seen := make(map[string]bool)   // gc names already listed
 	mapped := make(map[string]bool) // herdr-side names owned by bound gc sessions
-	var out []string
-	for _, name := range p.boundSessionNames() {
+	bound := p.boundSessionNames()
+	for _, name := range bound {
 		mapped[herdrAgentName(name)] = true
+	}
+	var out []string
+	var stalled error
+	for _, name := range bound {
 		if !strings.HasPrefix(name, prefix) || seen[name] {
 			continue
 		}
 		if _, running, err := resolveBinding(p.lookupOps(ctx, name)); err == nil && running {
 			seen[name] = true
 			out = append(out, name)
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			// The walk ran out of time, so the sessions not yet verified are
+			// unknown, not absent: stop and say so.
+			stalled = cerr
+			break
 		}
 	}
 	for _, a := range agents {
@@ -976,7 +991,23 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 			out = append(out, a.Name)
 		}
 	}
+	if stalled != nil {
+		// Unwrapped: IsRuntimeServerAbsent is a direct type assertion. A stall
+		// is not an absent server, so ServerAbsent stays false.
+		return out, &runtime.PartialListError{Err: fmt.Errorf("herdr: list running: %w", stalled)}
+	}
 	return out, nil
+}
+
+// herdrListDeadline bounds one ListRunning walk.
+const herdrListDeadline = 25 * time.Second
+
+// listBound is the ListRunning deadline, honoring the test override.
+func (p *Provider) listBound() time.Duration {
+	if p.listDeadline > 0 {
+		return p.listDeadline
+	}
+	return herdrListDeadline
 }
 
 // SendKeys translates tmux-style key names and sends them to the agent's pane.
