@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -202,5 +203,94 @@ func TestCheckTriggerEventStampsAtOrBelowHeadMatchExistingBehavior(t *testing.T)
 				t.Errorf("ReadFailed = true, want a clean read")
 			}
 		})
+	}
+}
+
+// orderedEventLog records the order of an event check's reads and can fail
+// its head or its list.
+type orderedEventLog struct {
+	*events.Fake
+	reads    *[]string
+	failHead bool
+	failList bool
+}
+
+func (l *orderedEventLog) LatestSeq() (uint64, error) {
+	*l.reads = append(*l.reads, "head")
+	if l.failHead {
+		return 0, errors.New("simulated head failure")
+	}
+	return l.Fake.LatestSeq()
+}
+
+func (l *orderedEventLog) List(filter events.Filter) ([]events.Event, error) {
+	*l.reads = append(*l.reads, "list")
+	if l.failList {
+		return nil, errors.New("simulated list failure")
+	}
+	return l.Fake.List(filter)
+}
+
+// TestCheckTriggerEventReadsStampsThenHeadThenEvents (AC-4): the stamps are
+// read before the head, so a stamp a concurrent run writes while the check
+// reads is never above the head it is bounded by.
+func TestCheckTriggerEventReadsStampsThenHeadThenEvents(t *testing.T) {
+	var reads []string
+	log := &orderedEventLog{Fake: restartedLog(2), reads: &reads}
+	// The stamps callback stands in for a run recorded just before the check:
+	// it records an event and returns that event's seq as the run's stamp.
+	cursorFn := func(string) []uint64 {
+		reads = append(reads, "stamps")
+		log.Record(events.Event{Type: "bead.created"})
+		seq, _ := log.Fake.LatestSeq()
+		return []uint64{seq}
+	}
+	result := CheckTrigger(updatedOrder(), time.Time{}, neverRan, log, cursorFn)
+	if want := []string{"stamps", "head", "list"}; !slices.Equal(reads, want) {
+		t.Fatalf("reads = %v, want %v", reads, want)
+	}
+	if result.Due || result.CursorReset != nil {
+		t.Fatalf("result = %+v, want not due and no reset of the fresh stamp", result)
+	}
+}
+
+// TestCheckTriggerEventHeadFailureFailsClosed (AC-4): a head that cannot be
+// read leaves the order not due with a contextual error and lists nothing,
+// with stamps or without.
+func TestCheckTriggerEventHeadFailureFailsClosed(t *testing.T) {
+	for _, cursorFn := range []CursorFunc{nil, stampsFn(), stampsFn(500)} {
+		var reads []string
+		log := &orderedEventLog{Fake: restartedLog(2), reads: &reads, failHead: true}
+		result := CheckTrigger(updatedOrder(), time.Time{}, neverRan, log, cursorFn)
+		if result.Due || !result.ReadFailed || result.Err == nil {
+			t.Fatalf("result = %+v, want not due with ReadFailed and Err", result)
+		}
+		if !strings.Contains(result.Err.Error(), "reading event head for order digest: simulated head failure") {
+			t.Fatalf("Err = %v, want the order named and the cause wrapped", result.Err)
+		}
+		if !strings.Contains(result.Reason, "simulated head failure") {
+			t.Fatalf("Reason = %q, want the head error", result.Reason)
+		}
+		if slices.Contains(reads, "list") {
+			t.Fatalf("reads = %v, want no list after a head failure", reads)
+		}
+	}
+}
+
+// TestCheckTriggerEventListFailureKeepsTheReset (AC-4): a list that fails
+// after a reset was detected is not due, wraps the error, and still reports
+// the reset.
+func TestCheckTriggerEventListFailureKeepsTheReset(t *testing.T) {
+	var reads []string
+	log := &orderedEventLog{Fake: restartedLog(2), reads: &reads, failList: true}
+	result := CheckTrigger(updatedOrder(), time.Time{}, neverRan, log, stampsFn(500))
+	if result.Due || !result.ReadFailed || result.Err == nil || !strings.Contains(result.Err.Error(), "simulated list failure") {
+		t.Fatalf("result = %+v, want not due with ReadFailed and the list error", result)
+	}
+	if want := (CursorReset{Stamp: 500, Head: 2, Cursor: 0}); result.CursorReset == nil || *result.CursorReset != want {
+		t.Fatalf("CursorReset = %+v, want %+v", result.CursorReset, want)
+	}
+	if !strings.HasPrefix(result.Reason, "event: read error: simulated list failure (cursor reset:") {
+		t.Fatalf("Reason = %q, want the read error with the reset facts", result.Reason)
 	}
 }
