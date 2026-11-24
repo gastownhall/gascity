@@ -131,3 +131,68 @@ func TestReleaseOrphanedPoolAssignments_KeepsWorkHandedToHumanAssignee(t *testin
 		t.Fatalf("released = %v, want exactly [%s] (the dead pool holder control)", released, control.ID)
 	}
 }
+
+// Issue #6945, full shape: only the exact operator identity is a person's
+// claim. Every other bare non-session name — an off-roster coordinator, a
+// case variant, a prefixed or suffixed lookalike — stays an ordinary dead
+// claim the sweep reclaims. One sweep holds both shapes, so a sweep that was
+// disabled (keeps everything) or left unchanged (releases every bare name)
+// cannot pass. No session exists anywhere, and none answers to a person.
+func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedClaims(t *testing.T) {
+	sessionStore := beads.NewMemStore()
+	workStore := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+
+	handoff := seedHumanLabelSweepWork(t, workStore, "pool work handed to the operator", "human", "in_progress")
+	openHandoff := seedHumanLabelSweepWork(t, workStore, "pool work handed to the operator, not started", "human", "open")
+	paddedHandoff := seedHumanLabelSweepWork(t, workStore, "pool work handed to the operator with a padded assignee", " human ", "in_progress")
+	coordinator := seedHumanLabelSweepWork(t, workStore, "pool work held by an off-roster coordinator", "alice", "in_progress")
+
+	kept := []beads.Bead{handoff, openHandoff, paddedHandoff}
+	work := append([]beads.Bead{coordinator}, kept...)
+	stores := make([]beads.Store, len(work))
+	for i := range stores {
+		stores[i] = workStore
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		workStore,
+		beads.SessionStore{Store: sessionStore},
+		cfg,
+		"",
+		nil,
+		work,
+		stores,
+		nil, nil, nil, nil, nil,
+	)
+
+	releasedByID := make(map[string]bool, len(released))
+	for _, r := range released {
+		releasedByID[r.ID] = true
+	}
+	if len(released) != 1 {
+		t.Fatalf("released = %v, want exactly [coordinator] (the dead bare-name control)", released)
+	}
+	for _, k := range kept {
+		got, err := workStore.Get(k.ID)
+		if err != nil {
+			t.Fatalf("get %s: %v", k.ID, err)
+		}
+		if got.Status != k.Status || got.Assignee != k.Assignee {
+			t.Errorf("hand-off %s (%q) = status %q assignee %q, want %q/%q untouched", k.ID, k.Title, got.Status, got.Assignee, k.Status, k.Assignee)
+		}
+		if releasedByID[k.ID] {
+			t.Errorf("hand-off %s (%q) must be absent from the released list", k.ID, k.Title)
+		}
+	}
+	got, err := workStore.Get(coordinator.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Errorf("control %s = status %q assignee %q, want open/unassigned", coordinator.ID, got.Status, got.Assignee)
+	}
+	if !releasedByID[coordinator.ID] {
+		t.Errorf("control %s (%q) must be present in the released list", coordinator.ID, coordinator.Title)
+	}
+}
