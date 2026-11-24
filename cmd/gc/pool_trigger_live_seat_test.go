@@ -1360,3 +1360,35 @@ func TestLegacyResumeReRepointKeepsCanonicalTriggerStoreRef(t *testing.T) {
 		t.Fatalf("%s = %q, want rig:r1, the store the new trigger was read from", beadmeta.TriggerBeadStoreRefMetadataKey, got)
 	}
 }
+
+// A seat the resume tier re-points at work that never published
+// managed-worktree evidence binds the pool's own directory, as before
+// gastownhall/gascity#5753's fix, and verifies nothing.
+func TestLegacyResumeUnmanagedAssignedWorkBindsPoolDirectory(t *testing.T) {
+	for _, shape := range unmanagedWorkDirShapes(filepath.Join(t.TempDir(), "gc-b")) {
+		t.Run(shape.name, func(t *testing.T) {
+			_, pathA := liveSeatManagedSpec(t, "gc-a")
+			unmanaged := func(id string) beads.Bead {
+				return withMetadata(workBead("gc-b", "worker", id, "in_progress", 1), shape.meta)
+			}
+			res := liveSeatReuse{
+				seatDir: pathA, extra: map[string]string{"state": "asleep"},
+				request: func(id string) SessionRequest {
+					cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(3)}}}
+					return assignedWorkRequest(t, cfg, unmanaged(id), nil, []string{"r1"}, []beads.Bead{sessionBead(id, "open")})
+				},
+				assigned: func(id string) []beads.Bead { return []beads.Bead{unmanaged(id)} },
+			}.reused(t)
+			row := res.row(t)
+			if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gc-b" {
+				t.Fatalf("trigger = %q, want gc-b; stderr=%s", got, res.stderr)
+			}
+			if got, want := row.Metadata[beadmeta.WorkDirMetadataKey], res.cfg.Agents[0].WorkDir; got != want {
+				t.Fatalf("gc.work_dir = %q, want the pool directory %q; stderr=%s", got, want, res.stderr)
+			}
+			if got := res.probe.worktreeVerifies.Load(); got != 0 {
+				t.Fatalf("worktree verifies = %d, want 0", got)
+			}
+		})
+	}
+}
