@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -448,5 +449,30 @@ func TestRunWorkflowServeFollowTracesPendingOnsetOnce(t *testing.T) {
 	}
 	if onsets != 1 || repeats != 2 {
 		t.Fatalf("trace has %d `serve pending` and %d `serve pending-repeat` lines for gc-blocked, want 1 and 2:\n%s", onsets, repeats, data)
+	}
+}
+
+// TestRunWorkflowServeFollowPendingBaselineSurvivesTransientFailure pins that a
+// drain failing with a transient controller error keeps the previous pending
+// baseline: it observed no complete pending set, and clearing the baseline
+// would put a dispatcher behind a saturated store back on its 1s floor after
+// every failed sweep.
+func TestRunWorkflowServeFollowPendingBaselineSurvivesTransientFailure(t *testing.T) {
+	clearGCEnv(t)
+
+	blocked := pendingFollowRow{id: "gc-blocked", err: dispatch.ErrControlPending}
+	timeout := fmt.Errorf("querying control work: running work query %q: timed out after 30s: %w", "bd ready", context.DeadlineExceeded)
+	waits, dispatches := runPendingFollowScript(t, []pendingFollowSweep{
+		{rows: []pendingFollowRow{blocked}},
+		{listErr: timeout},
+		{rows: []pendingFollowRow{blocked}},
+	})
+
+	want := []pendingFollowWait{{0, 1 * time.Second}, {0, 1 * time.Second}, {1, 2 * time.Second}}
+	if !slices.Equal(waits, want) {
+		t.Fatalf("waits = %+v, want %+v", waits, want)
+	}
+	if got := dispatches["gc-blocked"]; got != 2 {
+		t.Fatalf("gc-blocked dispatched %d times, want 2 (once per sweep whose query succeeded)", got)
 	}
 }
