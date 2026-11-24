@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -526,5 +527,40 @@ func TestRunWorkflowServeFollowTracesPendingOnsetOnce(t *testing.T) {
 	}
 	if repeats != 2 {
 		t.Fatalf("trace shows %d \"serve pending-repeat\" lines after the onset, want 2 (one per repeat sweep):\n%s", repeats, trace)
+	}
+}
+
+// TestRunWorkflowServeFollowPendingBaselineSurvivesTransientFailure pins that a
+// transient drain failure between two sweeps does not clear the repeat
+// baseline: the drain observed no complete pending set, so clearing it would
+// put a dispatcher behind a saturated store back on the 1s floor after every
+// failed sweep.
+func TestRunWorkflowServeFollowPendingBaselineSurvivesTransientFailure(t *testing.T) {
+	clearGCEnv(t)
+
+	// The work-query timeout drainWorkflowServeWork wraps verbatim when the
+	// store is briefly saturated (TestRunWorkflowServeFollowSurvivesTransient
+	// WorkQueryTimeout's shape).
+	transientErr := fmt.Errorf("querying control work: running work query %q: timed out after 30s: %w", "bd ready", context.DeadlineExceeded)
+	blockedRow := hookBead{ID: "gc-blocked", Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}}
+	waits, stopErr := stubServeFollowLoop(t,
+		func(c int) ([]hookBead, error) {
+			if c == 2 {
+				return nil, transientErr
+			}
+			return []hookBead{blockedRow}, nil
+		},
+		func(int, string) error { return dispatch.ErrControlPending },
+		3)
+	if err := runWorkflowServeFollow(config.Agent{Name: "control-dispatcher"}, t.TempDir(), t.TempDir(), "bd ready", nil, io.Discard); !errors.Is(err, stopErr) {
+		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
+	}
+	want := []serveFollowWaitCall{
+		{idleSweeps: 0, sleepDur: 1 * time.Second},
+		{idleSweeps: 0, sleepDur: 1 * time.Second},
+		{idleSweeps: 1, sleepDur: 2 * time.Second},
+	}
+	if !slices.Equal(*waits, want) {
+		t.Fatalf("waits = %+v, want %+v (the failed sweep must not clear the repeat baseline)", *waits, want)
 	}
 }
