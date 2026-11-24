@@ -446,14 +446,21 @@ fi
 # and a city whose coordination classes live in their own store serves it in
 # process, where bare `bd` cannot see the wisp. Neither write needs --actor:
 # gc closes a session's own claim under the identity that claimed it. A failed
-# close withdraws the outcome, so the wisp it leaves open carries none, as on
-# every other fail-open path.
+# or overrun outcome write never reaches the close, and it or a failed close
+# withdraws the outcome (an overrun write may still have landed), so the wisp
+# left open carries none, as on every other fail-open path.
+withdraw_and_fail_open() {
+  run_or_warn "withdraw pass outcome" store_bounded gc bd update "$WORK_BEAD" --unset-metadata gc.outcome
+  run_or_warn "emit close escalation" gc event emit mol-dog-stale-db.escalate --message "$1"
+  fail_open_after_drain "$1"
+}
 OMITTED_SUFFIX=""
 [ -z "$REPORTS_OMITTED" ] || OMITTED_SUFFIX=", reports_omitted=${REPORTS_OMITTED}"
-gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass
-if ! gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED}${OMITTED_SUFFIX})"; then
-  run_or_warn "withdraw pass outcome" gc bd update "$WORK_BEAD" --unset-metadata gc.outcome
-  fail_open_after_drain "gc bd close failed; leaving work bead open"
+if ! store_bounded gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass; then
+  withdraw_and_fail_open "outcome write failed or overran ${STORE_TIMEOUT}s; leaving work bead open"
+fi
+if ! store_bounded gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED}${OMITTED_SUFFIX})"; then
+  withdraw_and_fail_open "gc bd close failed or overran ${STORE_TIMEOUT}s; leaving work bead open"
 fi
 drain_ack_once # drain-ack before normal exit
 exit

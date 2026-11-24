@@ -1791,6 +1791,46 @@ func TestStaleDBFormulaFailedReportsAreRecordedAsOmitted(t *testing.T) {
 	}
 }
 
+// TestStaleDBFormulaHungOutcomeOrCloseFailsOpen: when the outcome write or the
+// close hangs, the step bounds it, withdraws the outcome that may have landed,
+// escalates naming the call, drain-acks and fails open. A hung outcome write
+// is never followed by the close.
+func TestStaleDBFormulaHungOutcomeOrCloseFailsOpen(t *testing.T) {
+	staleDBRequireHungStoreTools(t)
+
+	for _, tc := range []struct {
+		name      string
+		hang      string
+		wantEvent string
+	}{
+		{"outcome write", staleDBOutcomeWrite("bead-1"), "gc event emit mol-dog-stale-db.escalate --message outcome write failed or overran 2s"},
+		{"close", staleDBCloseWrite("bead-1"), "gc event emit mol-dog-stale-db.escalate --message gc bd close failed or overran 2s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runStaleDBFormulaHungStoreCase(t, staleDBHungStoreCase{
+				scanJSON: staleDBCleanScan,
+				hang:     tc.hang,
+				env:      []string{"DOG_BD_TIMEOUT=2"},
+			})
+			if run.timedOut {
+				t.Fatalf("step still blocked on the hung %s after %s\n%s", tc.name, staleDBHungStoreDeadline, run)
+			}
+			if run.err == nil {
+				t.Fatalf("step exited 0; a hung %s must leave the work bead open\n%s", tc.name, run)
+			}
+			requireStaleDBLogInOrder(t, run,
+				tc.hang,
+				staleDBOutcomeWithdrawal("bead-1")+"\n",
+				tc.wantEvent,
+				"gc runtime drain-ack\n",
+			)
+			if tc.hang != staleDBCloseWrite("bead-1") && strings.Contains(run.log, staleDBCloseWrite("bead-1")) {
+				t.Fatalf("the close ran after the hung %s\n%s", tc.name, run)
+			}
+		})
+	}
+}
+
 func runStaleDBFormulaFailureCase(t *testing.T, tc staleDBFailureCase) (string, []byte, error) {
 	t.Helper()
 	script := renderStaleDBFormulaShell(t)
