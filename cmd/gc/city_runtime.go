@@ -2495,7 +2495,9 @@ func warnIfClosedOrderTrackingBacklogLarge(stores []beads.Store, stderr io.Write
 // every nudgeMailSweepWatchdogInterval. Its store watchdog lane runs it with
 // the pass's config snapshot, so it reads TTLs from cfg rather than through
 // the cr.cfg accessors. ctx is the lane's: a canceled pass starts nothing,
-// queue maintenance sees the cancellation, and no sweep follows it.
+// and no sweep follows queue maintenance once ctx is canceled. Maintenance is
+// handed ctx, but the file queue's does not consult it: its own time budget
+// bounds the call, and a lane canceled mid-maintenance waits for it to return.
 func (cr *CityRuntime) runNudgeMailSweepWatchdog(ctx context.Context, cfg *config.City, now time.Time) {
 	if ctx.Err() != nil || !cr.nudgeMailSweepWatchdogDue(now) {
 		return
@@ -2521,7 +2523,10 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(ctx context.Context, cfg *confi
 			return err
 		}
 	}
-	if err := maintain(ctx, nudgeStore, now); err != nil && ctx.Err() == nil && cr.stderr != nil {
+	// An error that is the lane's own cancellation is shutdown, not a failure:
+	// ctx.Err() is nil while the lane runs, so nothing matches it until then.
+	// Every other error is logged, one that returns during shutdown included.
+	if err := maintain(ctx, nudgeStore, now); err != nil && !errors.Is(err, ctx.Err()) && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: nudge queue maintenance: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
 	if ctx.Err() != nil {

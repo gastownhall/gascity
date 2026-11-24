@@ -235,18 +235,20 @@ lane type per watchdog.
 - **Shutdown.** `run()` cancels every lane, then joins them, before the
   stores close, so a lane blocked in a store call does not hold up the
   others. The tracking and retention calls are not interruptible and finish
-  first. The nudge/mail watchdog passes the lane's context to the nudge
-  queue's maintenance and runs no mail sweep once it is canceled.
+  first, and so does the nudge queue's maintenance: the nudge/mail watchdog
+  hands it the lane's context, but the file queue does not consult it, and
+  the maintenance's own time budget bounds the call. Once its lane is
+  canceled the nudge/mail watchdog runs no sweep after the maintenance.
 - **Visibility.** Each due pass of a live city is its own trace cycle with
   trigger `store_watchdog` and the watchdog key as its detail; the work's
   operation record carries its duration and status, and a canceled or
   panicked pass ends the cycle aborted. Each tick records a
   `store_watchdog_lanes` operation with, per lane under its key, the age of
   its last completed pass (`<key>_backstop_ran`,
-  `<key>_backstop_age_seconds`) and its last attempt's status
+  `<key>_backstop_age_seconds`) and its last attempt's status and age
   (`<key>_last_status`: `not_due`, `suspended`, `pressure_skipped`,
-  `canceled`, `aborted` or `completed`). Only work that finished uncanceled
-  refreshes the age.
+  `canceled`, `aborted` or `completed`; `<key>_last_status_age_seconds`).
+  Only work that finished uncanceled refreshes the backstop age.
 
 **Trigger evaluation and dispatch (on each lane pass):**
 

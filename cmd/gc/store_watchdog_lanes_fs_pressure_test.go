@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,6 +90,56 @@ func TestStoreWatchdogLanesRunBelowFSPressureThreshold(t *testing.T) {
 		if storeWatchdogLastRun(cr, lane.spec.key).IsZero() {
 			t.Fatalf("%s did not run below the FS pressure threshold", lane.spec.work)
 		}
+	}
+}
+
+// Only a due pass samples FS pressure. Under sustained pressure, attempts
+// while the watchdog is not due read no pressure, log no skip or forced pass
+// and leave the lane's episode empty, however many there are, so the first
+// due pass after them is shed as the episode's first skip.
+func TestStoreWatchdogLaneNotDueAttemptsTakeNoPressureSample(t *testing.T) {
+	now := time.Now()
+	store := &watchdogOpCountingStore{Store: beads.NewMemStoreFrom(100, storeWatchdogSeed(now), nil)}
+	cr := storeWatchdogTestRuntime(t, store, &recordingOrderDispatcher{})
+	var stderr bytes.Buffer
+	cr.stderr = &stderr
+	var samples atomic.Int64
+	withFakePressureReader(t, func(string) ([]byte, error) {
+		samples.Add(1)
+		return []byte(samplePressureHigh), nil
+	})
+	t.Setenv(fsPressureThresholdEnv, "")
+	lane := cr.storeWatchdogLaneOf(storeWatchdogOrderTrackingRetention)
+	cr.orderTrackingRetentionWatchdogLast = now
+
+	for attempt := 1; attempt <= maxConsecutiveFSPressureSkips+1; attempt++ {
+		cr.runStoreWatchdogLanePass(context.Background(), lane)
+		if st := lane.status().last; st != storeWatchdogPassNotDue {
+			t.Fatalf("attempt %d status = %q, want %q", attempt, st, storeWatchdogPassNotDue)
+		}
+	}
+	if got := samples.Load(); got != 0 {
+		t.Fatalf("not-due attempts sampled FS pressure %d times, want 0", got)
+	}
+	if lane.fsPressure != (fsPressureEpisode{}) {
+		t.Fatalf("not-due attempts moved the lane's pressure episode to %+v, want it empty", lane.fsPressure)
+	}
+	out := stderr.String()
+	if strings.Contains(out, "skipping "+lane.spec.work) || strings.Contains(out, "forcing "+lane.spec.work) {
+		t.Fatalf("not-due attempts logged a pressure decision:\n%s", out)
+	}
+
+	cr.orderTrackingRetentionWatchdogLast = time.Time{}
+	before := store.ops.Load()
+	cr.runStoreWatchdogLanePass(context.Background(), lane)
+	if st := lane.status().last; st != storeWatchdogPassPressureSkipped || lane.fsPressure.skips != 1 {
+		t.Fatalf("first due attempt: status %q, episode %+v; want %q as the episode's first skip", st, lane.fsPressure, storeWatchdogPassPressureSkipped)
+	}
+	if got := samples.Load(); got != 1 {
+		t.Fatalf("FS pressure samples after the first due attempt = %d, want 1", got)
+	}
+	if got := store.ops.Load() - before; got != 0 {
+		t.Fatalf("the shed due attempt made %d store calls, want 0", got)
 	}
 }
 

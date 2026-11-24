@@ -143,15 +143,29 @@ func storeWatchdogTestRuntime(t *testing.T, store beads.Store, od orderDispatche
 	return cr
 }
 
+// routeStoreWatchdogHistoryTo gives cr a split city's routes, every
+// infrastructure class relocated to binding, for a test that seeds the
+// order-tracking, nudge and mail history its watchdogs work on into binding.
+// A split city's controller writes that history there, and the watchdogs
+// sweep it there through the orders binding and the class stores, with or
+// without the split-strict gate. Seeded into a city store that relocates
+// nothing, the history's tracking beads are hidden from both order-tracking
+// watchdogs by the gate's work view, as for the TestOrderTracking*Watchdog*
+// tests in testdata/split_strict_known_failures.list.
+func routeStoreWatchdogHistoryTo(cr *CityRuntime, binding beads.Store) {
+	cr.storageRoutes = messagingSplitRoutes(binding)
+}
+
 // A retention prune blocked in its closed-history read holds nothing else:
 // the startup dispatch, an orders-lane pass and the tracking and nudge/mail
 // lanes each finish their work while it stays parked.
 func TestStoreWatchdogLanesRunWhileRetentionIsBlocked(t *testing.T) {
 	now := time.Now()
 	seed := append(storeWatchdogSeed(now), mailSeed("mail-stale", now.Add(-nudgeMailSweepDefaultMailTTL-time.Minute)))
-	store := newClosedHistoryBlockingStore(beads.NewMemStoreFrom(100, seed, nil))
+	binding := newClosedHistoryBlockingStore(beads.NewMemStoreFrom(100, seed, nil))
 	od := &recordingOrderDispatcher{}
-	cr := storeWatchdogTestRuntime(t, store, od)
+	cr := storeWatchdogTestRuntime(t, beads.NewMemStore(), od)
+	routeStoreWatchdogHistoryTo(cr, binding)
 	ctx := context.Background()
 
 	retentionDone := make(chan struct{})
@@ -160,10 +174,10 @@ func TestStoreWatchdogLanesRunWhileRetentionIsBlocked(t *testing.T) {
 		cr.runStoreWatchdogLanePass(ctx, cr.storeWatchdogLaneOf(storeWatchdogOrderTrackingRetention))
 	}()
 	t.Cleanup(func() {
-		close(store.release)
+		close(binding.release)
 		awaitClose(t, retentionDone, "the retention pass finishing after release")
 	})
-	awaitClose(t, store.entered, "the retention watchdog reaching its closed-history read")
+	awaitClose(t, binding.entered, "the retention watchdog reaching its closed-history read")
 
 	othersDone := make(chan struct{})
 	go func() {
@@ -184,7 +198,7 @@ func TestStoreWatchdogLanesRunWhileRetentionIsBlocked(t *testing.T) {
 		t.Fatalf("dispatcher calls = %d, want 2 (startup dispatch and one lane pass)", got)
 	}
 	for id, want := range map[string]string{"stale-open": "closed", "mail-stale": "closed"} {
-		got, err := store.Get(id)
+		got, err := binding.Get(id)
 		if err != nil {
 			t.Fatalf("get %s: %v", id, err)
 		}
@@ -251,9 +265,10 @@ func TestStoreWatchdogLanesRunDuringColdStartReconcile(t *testing.T) {
 	cr.od = &recordingOrderDispatcher{}
 	now := time.Now()
 	seed := append(storeWatchdogSeed(now), mailSeed("mail-stale", now.Add(-nudgeMailSweepDefaultMailTTL-time.Minute)))
-	store := beads.NewMemStoreFrom(100, seed, nil)
+	binding := beads.NewMemStoreFrom(100, seed, nil)
+	routeStoreWatchdogHistoryTo(cr, binding)
 	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
-	cs.cityBeadStore = store
+	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -277,8 +292,8 @@ func TestStoreWatchdogLanesRunDuringColdStartReconcile(t *testing.T) {
 
 	deadline := time.Now().Add(hangBudget)
 	for {
-		mail, mailErr := store.Get("mail-stale")
-		closed, listErr := store.List(beads.ListQuery{Status: "closed", Label: "order-run:prune", TierMode: beads.TierBoth})
+		mail, mailErr := binding.Get("mail-stale")
+		closed, listErr := binding.List(beads.ListQuery{Status: "closed", Label: "order-run:prune", TierMode: beads.TierBoth})
 		if mailErr != nil || listErr != nil {
 			t.Fatalf("reading the store: %v", errors.Join(mailErr, listErr))
 		}
@@ -498,6 +513,26 @@ func TestNudgeMailSweepLaneSweepsNothingAfterCanceledMaintenance(t *testing.T) {
 	}
 	if out := stderr.String(); strings.Contains(out, "context canceled") {
 		t.Fatalf("stderr logs the cancellation as a failure:\n%s", out)
+	}
+}
+
+// Only the lane's own cancellation goes unlogged: a queue maintenance failure
+// that returns after the lane was canceled, as a file queue's can (it does not
+// consult the lane's context), is still logged as a failure.
+func TestNudgeMailSweepLaneLogsAMaintenanceFailureReturnedAfterCancellation(t *testing.T) {
+	cr := storeWatchdogTestRuntime(t, beads.NewMemStore(), &recordingOrderDispatcher{})
+	var stderr bytes.Buffer
+	cr.stderr = &stderr
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cr.maintainNudgeQueue = func(context.Context, beads.NudgesStore, time.Time) error {
+		cancel()
+		return errors.New("writing the nudge queue state: disk full")
+	}
+
+	cr.runStoreWatchdogLanePass(ctx, cr.storeWatchdogLaneOf(storeWatchdogNudgeMailSweep))
+	if out := stderr.String(); !strings.Contains(out, "nudge queue maintenance: writing the nudge queue state: disk full") {
+		t.Fatalf("stderr does not log the maintenance failure that returned after the lane was canceled:\n%s", out)
 	}
 }
 
