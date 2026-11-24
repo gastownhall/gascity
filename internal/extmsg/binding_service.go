@@ -624,7 +624,7 @@ func bindingMatchesSelector(record SessionBindingRecord, candidates map[string]s
 	return false
 }
 
-func loadGroupRecord(store beads.Store, groupID string) (ConversationGroupRecord, error) {
+func loadGroupRecord(store beads.MailStore, groupID string) (ConversationGroupRecord, error) {
 	item, err := store.Get(groupID)
 	if err != nil {
 		return ConversationGroupRecord{}, fmt.Errorf("get group %s: %w", groupID, err)
