@@ -105,9 +105,11 @@ bash scripts/test-local-concurrency.sh ; exit0
 
 ## Required CI and image acceptance
 
-ci_required_closure: python3 ci_required_triggers.py MERGE_SCRATCH 42f005d69334630c326bb3eac685543a57f47ccf e786e86217bfd5cef7712aabeed4da6db2efcf0d fork
+ci_required_closure: python3 /home/jaword/projects/gc-management/packs/actual/deployer/scripts/ci_required_triggers.py /var/tmp/gc-gate.ga-9ywc47up-20261124.McyOQBAD/merge 42f005d69334630c326bb3eac685543a57f47ccf e786e86217bfd5cef7712aabeed4da6db2efcf0d fork
 ci_required_workflow_blob: fa2c1f1b1466278b2eed8f4288d5a4f8eb3cc612
 ci_required_leaf_count: 6
+ci_required_summary: 6 LEAF jobs need a status; the rest are rolled up through their needs.
+ci_required_tool_exit: 0
 ci_required_accounting:
 ~~~text
 runner-policy | CI-PASS https://github.com/gastownhall/gascity/actions/runs/45461281279 | https://github.com/gastownhall/gascity/actions/runs/45461281279/job/138684200237
@@ -131,6 +133,8 @@ All four image policy checks report PASS. The image tag is CI's synthetic merge 
 Separate scanner advisory: Go module vulnerabilities run45461280598 fails on existing OpenTelemetry GO-2026-6974. Repo-wide fix tracking ga-7bn2fn5g remains open; companion own PR9464 was confirmed open/unlanded. This is outside the six-leaf required-CI closure and is handled under the existing scanner-advisory policy, not a criterion3 waiver. Sighting f0e5f59a-e9b6-5a58-8925-6d934b92c426 and mayor notification gcg-16218113 were verified.
 
 ## Retained execution record
+
+Post-record generated-file sync and tracked drift check also exit0; active pre-commit docsync passes. Scratch output-base release and worktree cleanup complete (release rc0,9s); all raw logs remain.
 
 Full evidence retained at /var/tmp/gc-gate.ga-9ywc47up-20261124.McyOQBAD, with a durable copy at /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-9ywc47up/gate-20261124-McyOQBAD. Scratch cleanup runs separately; raw per-job logs remain retained.
 Pack at C3 start: cc4b57a701a30c4b0453c27aa9386965edbce5c4 (recovered after launch from the local reflog at the recorded start time; equal to the later live HEAD).
