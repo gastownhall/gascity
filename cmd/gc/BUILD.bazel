@@ -1427,6 +1427,7 @@ go_test(
         "cmd_hook_discovery_drain_test.go",
         "cmd_hook_stdin_drain_test.go",
         "cmd_hook_test.go",
+        "hook_custom_federation_test.go",
         "cmd_hook_timeout_test.go",
         "cmd_hook_unavailable_test.go",
         "cmd_hook_visibility_test.go",
