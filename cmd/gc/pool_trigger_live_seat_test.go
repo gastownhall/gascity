@@ -1280,3 +1280,27 @@ func TestLegacyResumeRequestFromAssignedWorkBindsVerifiedWorktree(t *testing.T) 
 		t.Fatalf("worktree verifies = %d, want 1", got)
 	}
 }
+
+// A seat bound to its trigger while the trigger carried no worktree evidence
+// recorded the pool's own directory. Once the resume tier computes the
+// trigger's request from the work's published evidence, the stopped seat
+// moves to that verified worktree before it starts, instead of starting in
+// the pool directory and leaving its own trigger behind
+// (gastownhall/gascity#5753).
+func TestLegacySameTriggerStaleResumeSeatMovesToItsWorktree(t *testing.T) {
+	specB, pathB := liveSeatManagedSpec(t, "gc-b")
+	res := liveSeatReuse{
+		poolDir: true, extra: map[string]string{beadmeta.TriggerBeadIDMetadataKey: "gc-b"},
+		request: assignedWorkResume(t, specB),
+		assigned: func(id string) []beads.Bead {
+			return []beads.Bead{managedAssignedWork(specB, id)}
+		},
+	}.reused(t)
+	row := res.row(t)
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if got := row.Metadata[key]; got != pathB {
+			t.Fatalf("%s = %q; want the trigger's verified worktree %q, not the pool directory %q; stderr=%s",
+				key, got, pathB, res.cfg.Agents[0].WorkDir, res.stderr)
+		}
+	}
+}
