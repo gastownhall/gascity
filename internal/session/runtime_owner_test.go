@@ -403,3 +403,42 @@ func TestRuntimeOwnerRecordedUnderOneUIDFencesAnother(t *testing.T) {
 		t.Fatalf("runtime_owner = %+v (present %v), want it rewritten under uid %d with the test process as its one root", got, ok, os.Geteuid())
 	}
 }
+
+// AC-5: a record under the Manager's own euid, even with a live root, leaves
+// the start to the orphan passes: an untracked orphan is terminated before
+// the start, and one that will not die still refuses it (SESSION-START-024).
+func TestStartUnderSameUIDLeavesOwnerFenceOut(t *testing.T) {
+	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) { return false, nil })
+	for _, start := range runtimeOwnerStarts {
+		t.Run(start.name+"/orphan terminated", func(t *testing.T) {
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+			seedRuntimeOwner(t, mgr, info.ID, os.Geteuid(), runtimeLeaseBootID(), liveRoot(t))
+			sp.results = []runtime.LiveRuntime{{PID: goneRootPID, StartIdentity: "7"}}
+
+			if err := start.start(t, mgr, info); err != nil {
+				t.Fatalf("%s: %v", start.name, err)
+			}
+			want := append(orphanGateEvents(info.ID), "start:"+info.ID)
+			if got := sp.events[:min(len(want), len(sp.events))]; !slices.Equal(got, want) {
+				t.Fatalf("events = %v, want them to begin %v", sp.events, want)
+			}
+		})
+		t.Run(start.name+"/orphan survives", func(t *testing.T) {
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+			seedRuntimeOwner(t, mgr, info.ID, os.Geteuid(), runtimeLeaseBootID(), liveRoot(t))
+			sp.results = []runtime.LiveRuntime{{PID: goneRootPID, StartIdentity: "7"}}
+			sp.terminateErr = errors.New("terminate failed")
+
+			err := start.start(t, mgr, info)
+			if err == nil || !strings.Contains(err.Error(), "orphan cleanup") {
+				t.Fatalf("%s error = %v, want the pre-start orphan cleanup refusal", start.name, err)
+			}
+			if strings.Contains(err.Error(), "--unset-metadata") {
+				t.Fatalf("%s error = %v, want the orphan refusal, not the runtime-owner one", start.name, err)
+			}
+			if !hasEventPrefix(sp.events, "terminate:") || hasEventPrefix(sp.events, "start:") {
+				t.Fatalf("events = %v, want a terminate and no start", sp.events)
+			}
+		})
+	}
+}
