@@ -250,3 +250,57 @@ func TestSessionSyncAlwaysEnqueuesWake(t *testing.T) {
 		t.Fatal("session-sync enqueued no wake")
 	}
 }
+
+// primedPinnedCache returns a primed cache over a backing that keeps seeded
+// ids, holding a clean copy of session row id, and the backing.
+func primedPinnedCache(t *testing.T, id string, onChange func(eventType, beadID string, payload json.RawMessage)) (*beads.CachingStore, *beads.MemStore) {
+	t.Helper()
+	backing := pinnedIDMemStore()
+	if _, err := backing.Create(beads.Bead{
+		ID: id, Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"state": "active", "session_name": "s-routed", "generation": "2"},
+	}); err != nil {
+		t.Fatalf("seeding %s: %v", id, err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, onChange)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	return cache, backing
+}
+
+// TestSessionSyncRefreshesRoutedSessionClassCache: on a city whose routes
+// relocate sessions to a class binding, session-sync refreshes the binding's
+// cache and leaves the city work cache alone, even where the work backing
+// holds a row under the same id that changed too.
+func TestSessionSyncRefreshesRoutedSessionClassCache(t *testing.T) {
+	const id = "pl-wisp-routed"
+	var workChanges int
+	work, workBacking := primedPinnedCache(t, id, func(string, string, json.RawMessage) { workChanges++ })
+	binding, bindingBacking := primedPinnedCache(t, id, nil)
+	cityPath := t.TempDir()
+	routes := splitRoutesOver(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	reset := map[string]string{"restart_requested": "true", "continuation_reset_pending": "true"}
+	for _, backing := range []*beads.MemStore{bindingBacking, workBacking} {
+		if err := backing.SetMetadataBatch(id, reset); err != nil {
+			t.Fatalf("cli reset write: %v", err)
+		}
+	}
+
+	reply := runSessionSyncCommand(t, cityPath, id, newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)))
+	if reply.Outcome != sessionSyncOK || reply.Generation != "2" {
+		t.Fatalf("reply = %+v, want ok generation 2", reply)
+	}
+	if got, err := binding.Get(id); err != nil || got.Metadata["restart_requested"] != "true" {
+		t.Fatalf("binding cache row = %v, %v; want the reset installed", got.Metadata, err)
+	}
+	if got, err := work.Get(id); err != nil || got.Metadata["restart_requested"] != "" {
+		t.Fatalf("work cache row = %v, %v; want it untouched", got.Metadata, err)
+	}
+	if workChanges != 0 {
+		t.Fatalf("work cache announced %d changes, want none", workChanges)
+	}
+}
