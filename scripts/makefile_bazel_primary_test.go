@@ -122,3 +122,102 @@ func TestWorkflowsNameTheirTestEngine(t *testing.T) {
 		}
 	}
 }
+
+func nativeDepContractMakeRecipe(t *testing.T) []string {
+	t.Helper()
+	_, rest, ok := strings.Cut(nativeDepContractRead(t, "Makefile"), "\ncheck-native-dependency-surface:")
+	if !ok {
+		t.Fatal("missing native dependency Make target")
+	}
+	lines := strings.Split(rest, "\n")
+	var recipe []string
+	for _, line := range lines[1:] {
+		if !strings.HasPrefix(line, "\t") {
+			break
+		}
+		recipe = append(recipe, strings.TrimPrefix(line, "\t"))
+	}
+	if len(recipe) == 0 {
+		t.Fatal("native dependency Make target has no recipe")
+	}
+	return recipe
+}
+
+func TestNativeDepContractMakeDelegatesToCILabel(t *testing.T) {
+	label := nativeDepContractCILabel(t)
+	for _, flags := range []string{"", "--config=fork-cache"} {
+		t.Run("flags_"+flags, func(t *testing.T) {
+			out := makeDryRun(t, "check-native-dependency-surface", "BAZEL_FLAGS="+flags)
+			want := "mkdir -p /tmp/bt\n" + fakeMakeBazel + " test " + flags + " --keep_going --test_output=all " + label + "\n"
+			if out != want {
+				t.Errorf("local guard must run the CI target with identical policy\ngot:\n%swant:\n%s", out, want)
+			}
+			for _, forbidden := range []string{"go build", "CGO_ENABLED", "check-native-dependency-surface.sh", "GC_NATIVE_DEP", "--test_env", "--action_env"} {
+				if strings.Contains(out, forbidden) {
+					t.Errorf("local guard introduces independent build/policy %q:\n%s", forbidden, out)
+				}
+			}
+		})
+	}
+}
+
+func TestNativeDepContractMakeRecipeDoesNotRunScript(t *testing.T) {
+	for _, line := range nativeDepContractMakeRecipe(t) {
+		if strings.Contains(line, "check-native-dependency-surface.sh") {
+			t.Errorf("Make guard runs the script instead of the CI target: %s", line)
+		}
+	}
+}
+
+func TestNativeDepContractMakeRecipeDoesNotMaskFailure(t *testing.T) {
+	for _, line := range nativeDepContractMakeRecipe(t) {
+		trimmed := strings.TrimLeft(line, "@ ")
+		if strings.HasPrefix(trimmed, "-") || regexp.MustCompile(`\|\|\s*(true|:)(\s|$)`).MatchString(line) {
+			t.Errorf("guard failure is masked by recipe %q", line)
+		}
+	}
+}
+
+func TestNativeDepContractMakeStaysOutOfCheck(t *testing.T) {
+	out := makeDryRun(t, "check")
+	for _, forbidden := range []string{nativeDepContractCILabel(t), "check-native-dependency-surface.sh"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("check duplicates the native guard through %q:\n%s", forbidden, out)
+		}
+	}
+	if strings.Count(out, fakeMakeBazel+" test ") != 1 || !strings.Contains(out, fakeMakeBazel+" test  --keep_going //...") {
+		t.Errorf("check must retain its one existing Bazel invocation:\n%s", out)
+	}
+}
+
+func TestNativeDepContractMakeHasNoGoTwin(t *testing.T) {
+	makefile := nativeDepContractRead(t, "Makefile")
+	if regexp.MustCompile(`(?m)^check-native-dependency-surface-go\s*:`).MatchString(makefile) {
+		t.Error("host Go twin would measure a different artifact")
+	}
+	source := nativeDepContractRead(t, "scripts/makefile_bazel_primary_test.go")
+	_, primary, ok := strings.Cut(source, "func TestMakePrimaryTargetsRunBazel(")
+	if !ok {
+		t.Fatal("missing primary-target map test")
+	}
+	primary, _, _ = strings.Cut(primary, "\nfunc ")
+	if strings.Contains(primary, "check-native-dependency-surface") {
+		t.Error("native guard has no Go twin and cannot join the primary-target map")
+	}
+}
+
+func TestNativeDepContractMakePropagatesBazelFailure(t *testing.T) {
+	bin := t.TempDir()
+	stub := filepath.Join(bin, "bazel")
+	writeExecutable(t, stub, "#!/bin/sh\necho 'fixture Bazel build failed' >&2\nexit 23\n")
+	// The legacy recipe must fail without ever building the real gc.
+	writeExecutable(t, filepath.Join(bin, "go"), "#!/bin/sh\necho 'unexpected host go invocation' >&2\nexit 1\n")
+	cmd := makeCommand("--no-print-directory", "-f", filepath.Join(repoRoot(t), "Makefile"),
+		"BAZEL="+stub, "BAZEL_FLAGS=", "SYS_USR_CGO_FALLBACK=0", "check-native-dependency-surface")
+	cmd.Dir = repoRoot(t)
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir(), "SHELL=/bin/sh"}
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "fixture Bazel build failed") {
+		t.Fatalf("make must propagate its Bazel build failure: %v\n%s", err, out)
+	}
+}
