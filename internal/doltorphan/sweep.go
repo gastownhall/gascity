@@ -1,12 +1,12 @@
 // Package doltorphan implements a symptom-based fallback sweep for
 // orphaned dolt store directories: a directory is a removal candidate when
-// it is old, contains a .dolt marker, and is not held open by any live
-// process. It composes with, but does not replace, process-level
-// classification (e.g. cmd/gc's classifyDoltProcess) — this package never
-// inspects or kills processes, it only judges directories that are already
-// symptomatic of abandonment, which is what lets it catch leaks regardless
-// of what created them (a killed test binary, an untracked ad-hoc dolt
-// invocation, etc.). Ported from the production-proven heuristic in
+// it is old, contains a Dolt store (a .dolt/noms directory), and is not held
+// open by any live process. It composes with, but does not replace,
+// process-level classification (e.g. cmd/gc's classifyDoltProcess) — this
+// package never inspects or kills processes, it only judges directories that
+// are already symptomatic of abandonment, which is what lets it catch leaks
+// regardless of what created them (a killed test binary, an untracked ad-hoc
+// dolt invocation, etc.). Ported from the production-proven heuristic in
 // gc-test-dolt-reaper.sh sections 4-5.
 package doltorphan
 
@@ -28,9 +28,10 @@ import (
 // ga-ntbpyb.2.
 const DefaultMinAge = 60 * time.Minute
 
-// maxMarkerDepth bounds how deep the .dolt marker search descends below a
-// candidate directory, mirroring `find "$d" -maxdepth 3 -type d -name
-// '.dolt'` from gc-test-dolt-reaper.sh section 4.
+// maxMarkerDepth bounds how deep the Dolt store search descends below a
+// candidate directory: a store root may sit at most two levels below the
+// top-level child (top/a/b), so its .dolt is the third level down and its
+// .dolt/noms the fourth.
 const maxMarkerDepth = 3
 
 // sentinelFileName, when present directly inside a top-level candidate
@@ -96,25 +97,26 @@ type candidate struct {
 }
 
 // Sweep considers direct children of cfg.Root that look like abandoned dolt
-// containers: mtime older than MinAge, a .dolt marker directory within
-// maxMarkerDepth levels, and not currently held open by any live process
-// per lsof (checked against the top-level child, since that's as deep as
-// lsofHeldChildren can see). Candidate selection intentionally does not
-// filter on directory name — the signals above are what establish
-// abandonment, not any particular naming convention, so this catches leaks
-// "regardless of creation source" (ga-ntbpyb.2 acceptance criterion 2)
-// including directories named by Go's t.TempDir() rather than the
-// bare-mktemp "tmp.*" pattern the heuristic was first observed against.
+// containers: mtime older than MinAge, a Dolt store within maxMarkerDepth
+// levels, and not currently held open by any live process per lsof (checked
+// against the top-level child, since that's as deep as lsofHeldChildren can
+// see). Candidate selection intentionally does not filter on directory name —
+// the signals above are what establish abandonment, not any particular naming
+// convention, so this catches leaks "regardless of creation source"
+// (ga-ntbpyb.2 acceptance criterion 2) including directories named by Go's
+// t.TempDir() rather than the bare-mktemp "tmp.*" pattern the heuristic was
+// first observed against.
 //
 // A top-level child containing sentinelFileName or noReapMarkerName (any file
 // type, like the reaper's own -e test) is exempted entirely, regardless of
 // age or marker.
 //
-// Removal targets only the directory that actually owns the .dolt marker,
-// which may be nested below the top-level child. The top-level child itself
-// is removed only when it directly contains the .dolt marker, i.e. when it
-// is the store — so that unrelated payload a container legitimately holds
-// alongside an abandoned Dolt copy nested within it survives the sweep.
+// Removal targets only the Dolt store directory, which may be nested below
+// the top-level child. The top-level child itself is removed only when it is
+// itself a Dolt store — so that unrelated payload a container legitimately
+// holds alongside an abandoned Dolt copy nested within it survives the sweep.
+// A .dolt without a noms directory (a sql-server's bookkeeping, Dolt's global
+// config) is not a store, so a directory holding only that is never removed.
 //
 // If the lsof scan itself fails, Sweep fails closed: nothing is removed
 // this pass (an unverifiable "is this held open" check is treated the
@@ -200,29 +202,28 @@ func hasSentinel(dir string) bool {
 	return false
 }
 
-// findDoltStoreDir searches for a directory literally named ".dolt" within
-// depth levels of dir (dir's direct children are depth 1) and, if found,
-// returns the path of the directory that directly contains it — the actual
-// Dolt store root. This is the removal target: deleting only this path,
-// rather than the top-level candidate dir, is what keeps a container's
-// unrelated siblings intact when it legitimately holds other payload
-// alongside an abandoned Dolt copy nested deeper within it.
+// findDoltStoreDir searches within depth levels of dir (dir's direct children
+// are depth 1) for a Dolt store and, if found, returns its root: the directory
+// whose .dolt/noms is a directory. That is the test Dolt itself applies to
+// decide a directory holds a database. A .dolt without noms (the bookkeeping a
+// dolt sql-server --data-dir leaves, Dolt's global config, an empty or
+// incomplete .dolt) is not a store marker, so its directory is never a removal
+// target on that account. A probe error also counts as "not a store", because
+// the sweep errs toward keeping what it cannot verify. .dolt is a probe
+// target and is never descended into.
 //
-// A subtree can contain more than one .dolt marker at different depths: a
-// `dolt sql-server --data-dir <dir>` writes its own server-bookkeeping
-// marker directly at <dir>/.dolt (holding tmp/ and sql-server.info),
-// distinct from a database's own store marker nested inside it (e.g.
-// <dir>/<db>/.dolt, created by `dolt init`). Since os.ReadDir returns
-// entries in lexical order and ".dolt" sorts before most other names, a
-// naive first-match search hits the shallow bookkeeping marker before ever
-// looking inside the sibling that holds the real, deeper store — which
-// makes Sweep delete the whole top-level container instead of just the
-// abandoned store nested within it. To avoid that, a marker in a nested
-// subdirectory is always preferred over one directly in dir: every
-// subdirectory is explored before falling back to treating dir itself as the
-// store, so an ancestor never becomes the target while a descendant store
-// exists. When stores sit in separate sibling subtrees, the first one found
-// in lexical order is returned; the rest are removed on later passes.
+// The returned root is the removal target: deleting only it, rather than the
+// top-level candidate dir, keeps a container's unrelated siblings intact when
+// it holds other payload alongside an abandoned Dolt copy nested deeper within
+// it. A store that is removed goes whole, including any files beside its .dolt.
+//
+// A subtree can hold stores at different depths, so a store in a nested
+// subdirectory is always preferred over dir itself: every subdirectory is
+// explored before falling back to dir, so an ancestor never becomes the target
+// while a descendant store exists. When stores sit in separate sibling
+// subtrees, the first one found in lexical order is returned and the rest go
+// on later passes, one per pass: removing a store refreshes its container's
+// mtime, so the next sibling goes only after another MinAge.
 func findDoltStoreDir(dir string, depth int) (string, bool) {
 	if depth <= 0 {
 		return "", false
@@ -237,7 +238,9 @@ func findDoltStoreDir(dir string, depth int) (string, bool) {
 			continue
 		}
 		if e.Name() == ".dolt" {
-			selfIsStore = true
+			if info, err := os.Lstat(filepath.Join(dir, ".dolt", "noms")); err == nil && info.IsDir() {
+				selfIsStore = true
+			}
 			continue
 		}
 		if store, ok := findDoltStoreDir(filepath.Join(dir, e.Name()), depth-1); ok {

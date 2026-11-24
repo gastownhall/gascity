@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -54,7 +55,7 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 	registry := extmsg.NewAdapterRegistry()
 	adapter := &testExtMsgAdapter{}
@@ -88,7 +89,7 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	}); err != nil {
 		t.Fatalf("EnsureMembership(peer): %v", err)
 	}
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("named peer should not be materialized before outbound publish")
 	}
 
@@ -121,7 +122,7 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	}
 	srv.waitForBackground()
 
-	peerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
+	peerID, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}
@@ -159,7 +160,7 @@ func TestExtmsgNotifyMembersDoesNotMaterializeExcludedNamedSender(t *testing.T) 
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{
@@ -180,13 +181,13 @@ func TestExtmsgNotifyMembersDoesNotMaterializeExcludedNamedSender(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("EnsureMembership(sender): %v", err)
 	}
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("named sender should not be materialized before notify")
 	}
 
 	srv.extmsgNotifyMembers(context.Background(), ref, "worker", "agent", "self update", "myrig/worker", "")
 
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("excluded named sender was materialized")
 	}
 	for _, call := range fs.sp.Calls {
@@ -200,7 +201,7 @@ func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testi
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{
@@ -276,7 +277,7 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 	requestRef := extmsg.ConversationRef{
 		ScopeID:        "guild-1",
@@ -336,7 +337,7 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	}
 	srv.waitForBackground()
 
-	peerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
+	peerID, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}
@@ -409,7 +410,7 @@ func TestHandleExtMsgInboundNormalizedTransientStorageFaultReturns500(t *testing
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	services.Bindings = faultBindingService{err: errors.New("database is locked")}
 	fs.extmsgSvc = &services
 	fs.adapterReg = extmsg.NewAdapterRegistry()
@@ -433,7 +434,7 @@ func TestHandleExtMsgInboundNormalizedInvalidConversationReturns400(t *testing.T
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	services.Bindings = faultBindingService{err: fmt.Errorf("%w: scope_id required", extmsg.ErrInvalidConversation)}
 	fs.extmsgSvc = &services
 	fs.adapterReg = extmsg.NewAdapterRegistry()
@@ -460,7 +461,7 @@ func TestHandleExtMsgInboundNormalizedInvariantViolationReturns400(t *testing.T)
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	services.Bindings = faultBindingService{err: fmt.Errorf("%w: multiple active bindings for telegram/acct-1/chat-1", extmsg.ErrInvariantViolation)}
 	fs.extmsgSvc = &services
 	fs.adapterReg = extmsg.NewAdapterRegistry()

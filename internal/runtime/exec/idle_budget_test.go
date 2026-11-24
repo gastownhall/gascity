@@ -286,3 +286,67 @@ func TestIdleProbeBudgetFollowsDeclaration(t *testing.T) {
 		t.Errorf("execIdleProbeBudget = %v, want 5s", execIdleProbeBudget)
 	}
 }
+
+// scriptedCarrier answers each capture with the next scripted reading (the
+// last one repeats) at once.
+type scriptedCarrier struct {
+	runtime.Carrier
+	panes []string
+	errs  []error
+
+	mu   sync.Mutex
+	next int
+}
+
+func (c *scriptedCarrier) Peek(context.Context, string, int) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	i := c.next
+	c.next++
+	pane, err := "", error(nil)
+	if len(c.panes) > 0 {
+		pane = c.panes[min(i, len(c.panes)-1)]
+	}
+	if len(c.errs) > 0 {
+		err = c.errs[min(i, len(c.errs)-1)]
+	}
+	return pane, err
+}
+
+// A wait whose captures failed or were indeterminate read nothing: it wraps
+// ErrWaitUnobserved beside its timeout (RUNTIME-CONTRACT-016), as the tmux
+// twin does.
+func TestWaitForPaneIdleUnreadIsUnobserved(t *testing.T) {
+	fastIdlePoll(t)
+	for name, c := range map[string]*scriptedCarrier{
+		"captures fail":         {errs: []error{errors.New("peek: transient")}},
+		"pane is indeterminate": {panes: []string{"some output\nbuilding..."}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				err := waitForPaneIdle(context.Background(), c, time.Now, "s", "❯ ", time.Second)
+				if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, runtime.ErrWaitUnobserved) {
+					t.Fatalf("waitForPaneIdle = %v, want DeadlineExceeded wrapping ErrWaitUnobserved", err)
+				}
+			})
+		})
+	}
+}
+
+// One busy capture makes the timeout an observed one.
+func TestWaitForPaneIdleBusyIsObserved(t *testing.T) {
+	fastIdlePoll(t)
+	synctest.Test(t, func(t *testing.T) {
+		c := &scriptedCarrier{
+			panes: []string{"✻ Thinking… (12s · esc to interrupt)", ""},
+			errs:  []error{nil, errors.New("peek: transient")},
+		}
+		err := waitForPaneIdle(context.Background(), c, time.Now, "s", "❯ ", time.Second)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("waitForPaneIdle = %v, want DeadlineExceeded", err)
+		}
+		if errors.Is(err, runtime.ErrWaitUnobserved) {
+			t.Fatalf("waitForPaneIdle = %v, want no ErrWaitUnobserved: a capture showed the session busy", err)
+		}
+	})
+}

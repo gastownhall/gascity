@@ -18,11 +18,14 @@ const recentChangesCap = 12
 const maxHistoricalLanes = 50
 
 // engineeringTypes is the run-bead-filter allowlist. Port of TS
-// ENGINEERING_TYPES. (Used by RunBeadFilter; the summary builder itself does not
+// ENGINEERING_TYPES, plus "step": molecule instantiation types each untyped or
+// "task"-typed non-root formula-v1 step "step" (so Ready skips formula
+// scaffolding, #1039), and without it a v1 run projects as a bare root with no
+// steps. (Used by RunBeadFilter; the summary builder itself does not
 // pre-filter — it groups whatever it is given, exactly like buildRunSummary.)
 var engineeringTypes = map[string]bool{
 	"feature": true, "bug": true, "task": true, "epic": true,
-	"chore": true, "decision": true, "molecule": true,
+	"chore": true, "decision": true, "molecule": true, "step": true,
 }
 
 // BuildRunSummary projects a set of bead snapshots into the dashboard run-view

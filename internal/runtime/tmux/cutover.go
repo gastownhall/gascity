@@ -50,6 +50,9 @@ var (
 	_ runtime.ServerDeathConfirmer  = (*seamBackedProvider)(nil)
 	_ runtime.FreshLivenessObserver = (*seamBackedProvider)(nil)
 	_ runtime.SessionObjectKiller   = (*seamBackedProvider)(nil)
+	// Stopping a stopped Codex turn's background terminals rides the
+	// embedded raw provider.
+	_ runtime.BackgroundWorkStopper = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.

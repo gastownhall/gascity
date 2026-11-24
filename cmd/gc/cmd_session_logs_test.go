@@ -1192,3 +1192,45 @@ func TestResolveSessionLogPath_DoesNotFallbackAcrossSessionsWhenSessionKeyMissin
 		t.Fatalf("resolveSessionLogPath() = %q, want empty when keyed lookup misses", got)
 	}
 }
+
+// TestResolveStoredSessionLogSource_SharedWorkDirClaudeRowsResolveByKey pins
+// the read half of gastownhall/gascity#5439: with one transcript per key under
+// the shared work_dir, each supervisor-created claude row resolves to its own
+// transcript, never the ambiguous workdir diagnostic.
+func TestResolveStoredSessionLogSource_SharedWorkDirClaudeRowsResolveByKey(t *testing.T) {
+	store, _, workDir := syncSharedWorkDirClaudeSessions(t)
+	searchBase := t.TempDir()
+	rows := allSessionBeads(t, store)
+	want := map[string]string{}
+	for _, b := range rows {
+		key := b.Metadata["session_key"]
+		want[b.ID] = writeNamedTestSession(t, searchBase, workDir, key+".jsonl",
+			`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"`+key+`"},"timestamp":"2026-10-26T00:00:00Z"}`)
+	}
+	// The transcript probe consults the ambient session env; keep it inert so
+	// the keyed path, not an ambient provider, answers.
+	for _, k := range []string{"GC_SESSION", "GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG", "GC_RIG_ROOT"} {
+		t.Setenv(k, "")
+	}
+	seen := map[string]bool{}
+	for _, b := range rows {
+		name := b.Metadata["session_name"] // the name `gc session logs` is given
+		if name == "" {
+			t.Fatalf("session %s has no session_name to resolve", b.ID)
+		}
+		got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), name, []string{searchBase})
+		switch {
+		case !ok:
+			t.Fatalf("resolveStoredSessionLogSource(%q) = not found", name)
+		case diagnostic != "":
+			t.Fatalf("resolveStoredSessionLogSource(%q) diagnostic = %q, want none", name, diagnostic)
+		case provider != "claude":
+			t.Fatalf("resolveStoredSessionLogSource(%q) provider = %q, want claude", name, provider)
+		case got != want[b.ID]:
+			t.Fatalf("resolveStoredSessionLogSource(%q) = %q, want its own transcript %q", name, got, want[b.ID])
+		case seen[got]:
+			t.Fatalf("transcript %q resolved for two sessions", got)
+		}
+		seen[got] = true
+	}
+}

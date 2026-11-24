@@ -14,9 +14,9 @@ replayed from the cache would fail every later run on the same inputs. A run
 that outlives timeout fails it too, its Go test timeout's panic (which names
 the running test) printed. A passing run is cached as an action:
 --cache_test_results=no and --runs_per_test do not rerun it (--config=fresh
-does: GoTestRun=+no-cache, .bazelrc). Seeds fix a simulator run's inputs,
-not its goroutines' interleavings, so a rerun may take another path
-(mc-gfdi5).
+does: GoTestRun=+no-cache, .bazelrc). A simulator range is a function of
+its seeds (TestSimDeterministic, mc-gfdi5), so a cached pass is the pass a
+rerun would make.
 
     test     the go_test to run;
     args     the test binary's flags, e.g. "-test.run=^TestSimCorpus$";

@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setActiveCity } from '../api/cityBase';
 import { invalidate } from '../api/cache';
@@ -279,10 +279,7 @@ function renderPage(path: string, attention: { eventId?: string; deploys?: boole
       : {}),
   };
   return render(
-    <MemoryRouter
-      initialEntries={[path]}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={[path]}>
       <AttentionProvider
         contributors={createAttentionContributors(
           Object.keys(facts).length === 0 ? {} : { activity: facts },

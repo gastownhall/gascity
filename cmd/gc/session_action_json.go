@@ -18,6 +18,13 @@ type sessionActionResult struct {
 	WaitNudgesWithdrawn int    `json:"wait_nudges_withdrawn,omitempty"`
 	Pinned              *bool  `json:"pinned,omitempty"`
 	MaterializedNamed   bool   `json:"materialized_named,omitempty"`
+	// OpID, Key and Replayed name the operation-journal op that backs the
+	// run, when one does (DES-O0API §8.3): its id, its client key (supplied
+	// with --key or minted), and whether the run replayed a closed op's
+	// outcome instead of acting.
+	OpID     string `json:"op_id,omitempty"`
+	Key      string `json:"key,omitempty"`
+	Replayed bool   `json:"replayed,omitempty"`
 }
 
 func sessionJSONRequested(values []bool) bool {

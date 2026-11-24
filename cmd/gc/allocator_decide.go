@@ -58,8 +58,13 @@ type allocInputs struct {
 	// ScaleCheck is the external-reads lane's scale_check result at Now
 	// (externalReadsRecording.scaleCheck), nil when missing or stale (I5).
 	ScaleCheck *scaleCheckResult
-	Obs        *ObservationSnapshot
-	ObsMaxAge  time.Duration
+	// ScaleCheckStartedAt is when ScaleCheck's run started, and ClaimsSeen
+	// when the planner first saw each open work assignment (the pairing
+	// guard, claimHeldTemplates). A nil ClaimsSeen holds nothing.
+	ScaleCheckStartedAt time.Time
+	ClaimsSeen          map[workClaim]time.Time
+	Obs                 *ObservationSnapshot
+	ObsMaxAge           time.Duration
 	// Endpoints is each config-only endpoint key's breaker reading.
 	Endpoints map[endpointKey]endpointView
 	// ProviderHealth is I7 at Now; nil reads as no registry (fail open).
@@ -113,6 +118,13 @@ type demandView struct {
 	// environment generation.
 	RelocatedClaimRefs []string
 	WakeClaimRefs      []string
+	// ProbeStores are the stores of the demand targets' default scale-check
+	// probes (demandProbeStores): K1's lane reads them, and gather's
+	// lane-fed check reuses them rather than build the targets again.
+	ProbeStores []beads.Store
+	// ClaimedDemand is the default-probe demand gather dropped as work this
+	// pass already reads as claimed (withoutClaimedDemand), by template.
+	ClaimedDemand map[string]claimedDemandCut
 }
 
 // endpointView is one endpoint's breaker as the pass reads it.
@@ -175,6 +187,8 @@ type decidePass struct {
 	poolStates  []PoolDesiredState
 	poolDesired map[string]int
 	poolWork    []beads.Bead
+	// parked is the pass's park verdicts (parkSeats), by session bead ID.
+	parked parkedSeats
 	// inFlight are the planning reservations of the in-flight creates the
 	// census does not show yet (inFlightCreates), and standIns the templates
 	// of the pending-create rows the pool ones stand in for, by stand-in ID.
@@ -531,10 +545,7 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 	infos := p.decidable
 	work, workRefs, _ := filterAssignedWorkBeadsForSessionWakeOn(p.cfg, p.in.CityPath, p.in.Demand.WakeClaimRefs,
 		infos, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs, nil)
-	agentSuspended := func(a *config.Agent) bool {
-		return a.Suspended || agentInSuspendedRig(p.in.CityPath, a, p.cfg.Rigs, p.in.SuspendedRigPaths)
-	}
-	input := newAwakeInputFromSnapshot(p.cfg, agentSuspended, infos, p.poolDesired, p.named.workReady,
+	input := newAwakeInputFromSnapshot(p.cfg, p.suspends, infos, p.poolDesired, p.named.workReady,
 		p.named.routedDemand, nil, p.in.ReadyWaits, work, readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, work, workRefs), p.in.Now)
 	if p.index != nil {
 		input.workIndex = newAwakeWorkIndex(input.WorkBeads)
@@ -630,6 +641,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			e.Config = &ref
 			e.Normalize = sel.normalize
 		}
+		e.Park = p.parked[info.ID]
 		d := decisions[info.ID]
 		if d.HasAssignedWork || d.AssignedWorkBeadID != "" {
 			e.AssignedWork = &assignedWorkView{BeadID: d.AssignedWorkBeadID, Claimed: d.AssignedWorkClaimed, RequiresFreshCycle: d.RequiresFreshCycle}
@@ -747,8 +759,6 @@ func (p *decidePass) retains(template string, info session.Info) bool {
 	return slices.Contains(tp.Causes, "named-scale-check-partial") && isNamedSessionInfo(info)
 }
 
-// agentSuspended reports a configured template whose agent or rig is
-// suspended: its undesired rows drain as suspended, not orphaned.
 // honorWakes is D7 rule 4 (CONTRACT v5.10n): a row with a pending explicit
 // wake AL1 honors (WakeHonored) is wanted, in or out of its template's
 // desired set, so it is never Sleep or Drain and no drain or close takes it.
@@ -806,17 +816,33 @@ func (p *decidePass) underMaxActive(k rowKey, template string) bool {
 }
 
 // honorsExplicitWake is the awake set's explicit-wake desire
-// (compute_awake_set.go, ExplicitWake) for a request still pending
+// (compute_awake_set.go, ExplicitWakeStartable) for a request still pending
 // (explicitWakePendingInfo: not served by a sleep since), on a row that is
-// not dependency-only, of a configured agent that is not suspended.
+// not dependency-only, of a configured agent that is not suspended. It
+// judges the agent as the awake set does (sessionAgentCanStart on
+// findSessionAgentByTemplate's agent), so a rig's session of a scope="rig"
+// agent with no dir has its wake honored on a live rig and held on a
+// suspended one.
 func (p *decidePass) honorsExplicitWake(info session.Info, template string) bool {
 	return explicitWakePendingInfo(info) && !info.DependencyOnly &&
-		p.agentByTemplate(template) != nil && !p.agentSuspended(template)
+		sessionAgentCanStart(p.sessionAgentByTemplate(template), p.suspends)
 }
 
+// agentSuspended reports a configured template whose agent or rig is
+// suspended (suspends), its agent resolved the way the session was built
+// (sessionAgentByTemplate): its undesired rows drain as suspended, not
+// orphaned.
 func (p *decidePass) agentSuspended(template string) bool {
-	agent := p.agentByTemplate(template)
-	return agent != nil && (agent.Suspended || agentInSuspendedRig(p.in.CityPath, agent, p.cfg.Rigs, p.in.SuspendedRigPaths))
+	agent := p.sessionAgentByTemplate(template)
+	return agent != nil && p.suspends(agent)
+}
+
+// suspends reports agent's effective suspension in the pass, its own or its
+// rig's (SuspendedRigPaths): the awake set, the honored wake and the drain
+// reason all read it. A suspended city's pass decides no wake at all
+// (decidePass.suspended).
+func (p *decidePass) suspends(agent *config.Agent) bool {
+	return agent.Suspended || agentInSuspendedRig(p.in.CityPath, agent, p.cfg.Rigs, p.in.SuspendedRigPaths)
 }
 
 // sortRowKeys orders keys by leg, then bead ID.

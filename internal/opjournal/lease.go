@@ -103,6 +103,14 @@ func ParseLease(s string) (Lease, error) {
 // formatTime renders t as RFC3339Nano in UTC.
 func formatTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
+// storableTime reports whether t survives formatTime and parseTime: RFC3339
+// writes four-digit years, so a time outside years 0 through 9999 would leave
+// a row that no longer decodes.
+func storableTime(t time.Time) bool {
+	y := t.UTC().Year()
+	return y >= 0 && y <= 9999
+}
+
 // parseTime parses an RFC3339Nano time into UTC.
 func parseTime(s string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339Nano, s)

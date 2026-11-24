@@ -44,7 +44,8 @@ func (cr *CityRuntime) startHistoricalTranscriptMetaReconcile(ctx context.Contex
 		if sessionStore.Store == nil {
 			return
 		}
-		factory, err := workerFactoryWithConfig(cr.cityPath, sessionStore.Store, cr.sp, cr.cfg)
+		factory, err := workerFactoryWithAttribution(cr.cityPath, sessionStore.Store, cr.sp, cr.cfg, nil,
+			cr.formulaBeadResolver(cr.cfg, nil), cr.formulaMemo())
 		if err != nil {
 			fmt.Fprintf(cr.stderr, "%s: transcript metadata: building worker factory: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort patrol diagnostic
 			return

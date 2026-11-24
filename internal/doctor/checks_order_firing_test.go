@@ -773,3 +773,28 @@ func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
 		t.Fatalf("TimedOut = false, want true so callers (JSON output, doctor summary) can distinguish this from a confirmed failure")
 	}
 }
+
+// An order its scope's backend rules out never fires, by design. The check
+// reports it as inapplicable and does not count it as stale or never-fired.
+func TestOrderFiringCurrent_InapplicableOrderIsReportedNotStale(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "dolt-health", "cooldown", "30s")
+	writeOrderFiringTestEvents(t, cityPath, events.Event{
+		Type: events.ControllerStarted,
+		Ts:   now.Add(-8 * time.Hour),
+	})
+
+	check := NewOrderFiringCurrentCheck(cfg, cityPath,
+		WithOrderFiringCurrentInapplicableFunc(func(o orders.Order) (string, bool) {
+			return "http", o.Name == "dolt-health"
+		}))
+	check.clock = func() time.Time { return now }
+	result := check.Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if got := strings.Join(result.Details, "\n"); !strings.Contains(got, "dolt-health: inapplicable (backend http)") {
+		t.Fatalf("details = %v, want the order reported inapplicable", result.Details)
+	}
+}
