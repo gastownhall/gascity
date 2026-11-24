@@ -40,6 +40,15 @@ const (
 	// on this value, so the factory owns it and they read it.
 	BeadsGateProxiedProvider = "proxied_provider"
 
+	// BeadsGateForceFallback is the gate of the BdStore fallback
+	// GC_BEADS_FORCE_FALLBACK=1 forces. It and BeadsGateBdHooks are exported
+	// for a caller that must not take that lane (the storage migration) and
+	// names the gate in its refusal.
+	BeadsGateForceFallback = nativeForceFallbackGate
+	// BeadsGateBdHooks is the gate of the BdStore fallback executable bd hooks
+	// force: only the bd CLI runs them.
+	BeadsGateBdHooks = nativeHooksGate
+
 	storeNameBdStore         = BeadsStoreNameBdStore
 	storeNameFileStore       = BeadsStoreNameFileStore
 	storeNameExecStore       = BeadsStoreNameExecStore
@@ -286,7 +295,8 @@ type StoreOpenOptions struct {
 	// OpenProxiedStore opens the split store for a proxied-server scope:
 	// reads on a native handle over bd's proxy data port, mutations on the bd
 	// leaf. It is consulted ONLY when the persisted topology is
-	// proxied-server, GC_BEADS_PROXIED_NATIVE is on, and it is non-nil — so a
+	// proxied-server, GC_BEADS_PROXIED_NATIVE is on (or ForceProxiedNative),
+	// and it is non-nil — so a
 	// composition root that has not been taught about the lane, and every
 	// binary with the flag off, take exactly the path they take today.
 	//
@@ -299,6 +309,12 @@ type StoreOpenOptions struct {
 	// that names the generation it was looking at is a diagnostic and one that
 	// names only a verdict is a mystery.
 	OpenProxiedStore func(ctx context.Context, longLived bool) (Store, ProxiedOpenReport, error)
+
+	// ForceProxiedNative turns the proxied-native lane on for this open alone,
+	// as GC_BEADS_PROXIED_NATIVE does for the whole process. The storage
+	// migration's maintenance window sets it: it needs the lane that reads
+	// edge payloads, and nothing else in the process should change lanes.
+	ForceProxiedNative bool
 
 	// LongLived says whether the store this open produces will be held for the
 	// process lifetime (a controller or rig store) rather than used once and
@@ -630,7 +646,7 @@ func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, prov
 // topology (the caller's condition). Nothing else in this function can turn
 // the lane on.
 func (opts StoreOpenOptions) openProxiedNative(ctx context.Context, diag *BeadsDiagnostic) (bool, StoreOpenResult, error) {
-	if !proxiedNativeEnabled() || opts.OpenProxiedStore == nil {
+	if (!proxiedNativeEnabled() && !opts.ForceProxiedNative) || opts.OpenProxiedStore == nil {
 		return false, StoreOpenResult{}, nil
 	}
 	store, report, err := opts.OpenProxiedStore(ctx, opts.LongLived)

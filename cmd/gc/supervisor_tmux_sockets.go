@@ -285,7 +285,7 @@ func installSupervisorService(goos string, data *supervisorServiceData, stdout, 
 		}
 		return installSupervisorSystemd(data, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "gc supervisor install: not supported on %s\n", goos) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", &supervisorServiceManagerUnsupportedError{GOOS: goos, Op: "gc supervisor install"}) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }

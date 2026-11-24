@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 type SessionReconcilerTraceArmStore struct {
@@ -73,10 +73,11 @@ func (s *SessionReconcilerTraceArmStore) withLock(fn func() error) error {
 		return err
 	}
 	defer f.Close() //nolint:errcheck
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, Label: s.lockPath})
+	if err != nil {
 		return err
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release() //nolint:errcheck
 	return fn()
 }
 

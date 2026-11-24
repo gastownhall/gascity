@@ -102,7 +102,7 @@ func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error
 	if transport == "" && target == "" && o.enabled() {
 		transport, target = "direct", "external"
 	}
-	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(*cfg), contract.InitIntent{Transport: "proxied", Target: "local"})
+	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(*cfg), contract.InitIntent{Transport: freshScopeTransportDefault, Target: "local"})
 	if err != nil {
 		return err
 	}
@@ -263,7 +263,7 @@ func (o hostedDoltInitOptions) providerOwnershipIntent(city config.City) (provid
 	if transport == "" && target == "" && o.enabled() {
 		transport, target = "direct", "external"
 	}
-	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(city), contract.InitIntent{Transport: "proxied", Target: "local"})
+	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(city), contract.InitIntent{Transport: freshScopeTransportDefault, Target: "local"})
 	if err != nil {
 		return providerScopeIntent{}, err
 	}
@@ -631,7 +631,7 @@ func applyInitHostedDoltCanonicalConfig(fs fsys.FS, cityPath, issuePrefix string
 	}
 	// Reached only when opts.enabled(), i.e. an explicit --dolt-host endpoint.
 	// That binding names an upstream someone else runs, so the scope is direct
-	// by construction and never takes the fresh proxied default.
+	// by construction and never takes the fresh-scope default.
 	if err := enforceCanonicalScopeMetadataForInit(fs, cityPath, strings.TrimSpace(opts.Database), "server"); err != nil {
 		return fmt.Errorf("writing canonical metadata: %w", err)
 	}

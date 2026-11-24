@@ -16,10 +16,11 @@ none requires per-city configuration.
 | `gate-sweep` | cooldown 30s | Evaluate and close pending gates (timer, GitHub) in the city store and every non-suspended rig store |
 | `orphan-sweep` | cooldown 5m | Reset beads assigned to dead agents back to the work pool |
 | `cross-rig-deps` | cooldown 5m | Convert satisfied cross-rig `blocks` deps to `related` |
-| `convoy-autoclose-backstop` | cooldown 1h | Close open, un-owned convoys whose members are all terminal (reconciles a missed autoclose) |
+| `convoy-autoclose-backstop` | cooldown 1h | Close open, un-owned convoys whose members are all terminal (reconciles a missed autoclose), and the unit convoys of closed drains |
 | `order-tracking-sweep` | cooldown | Close stale order-tracking beads and prune expired tracking history |
 | `spawn-storm-detect` | cooldown | Detect beads repeatedly bouncing back to pool |
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
+| `binding-snapshot` | cooldown 6h | Snapshot a split city's infrastructure binding (`gc storage snapshot --binding --keep 4` into the pack state dir); does nothing on a city with no binding |
 | **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
 | **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees or routed targets when a blocker bead closes** |
 | **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |

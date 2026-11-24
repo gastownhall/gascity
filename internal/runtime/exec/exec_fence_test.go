@@ -22,8 +22,14 @@ func boxScript(t *testing.T, read, guarded string, separable bool) (script, call
 	dir := t.TempDir()
 	calls = filepath.Join(dir, "calls")
 	caps := `"proc.exec","input-fence"`
+	meta := ""
 	if separable {
 		caps += `,"proc.provision"`
+		// A pack that un-welds start keeps the launch identity gc writes
+		// after the launch (RPP-PROVISION-005).
+		meta = `  set-meta) cat > "` + dir + `/meta.$3" ;;
+  get-meta) cat "` + dir + `/meta.$3" 2>/dev/null; true ;;
+`
 	}
 	script = writeScript(t, dir, `
 op="$1"
@@ -39,7 +45,7 @@ case "$op" in
     esac
     ;;
   start|provision|stop) cat > /dev/null ;;
-  *) exit 2 ;;
+`+meta+`  *) exit 2 ;;
 esac
 `)
 	return script, calls
@@ -464,6 +470,80 @@ func TestExecCollidingStartRestoresTheLiveFence(t *testing.T) {
 	}
 }
 
+// launchFenceScript is a pack that un-welds start through the launch op and
+// can fence (proc.exec with input-fence), whose agent is already up: the
+// fence read answers read, the launch op fails with launchErr (exit 1) when
+// it is set, and a fence publish (set-option -p -F) exits 1 when
+// failPublish. Every in-box command is logged to calls.
+func launchFenceScript(t *testing.T, read, launchErr string, failPublish bool) (script, calls string) {
+	t.Helper()
+	dir := t.TempDir()
+	calls = filepath.Join(dir, "calls")
+	launch := "cat > /dev/null"
+	if launchErr != "" {
+		launch += "; echo '" + launchErr + "' >&2; exit 1"
+	}
+	publish := ""
+	if failPublish {
+		publish = `"'tmux' 'set-option' '-p' '-F'"*) exit 1 ;;`
+	}
+	script = writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec","input-fence","proc.provision","proc.launch"]}' ;;
+  exec)
+    cmd=$(cat)
+    echo "$cmd" >> `+calls+`
+    case "$cmd" in
+      `+publish+`
+      *display-message*) echo '`+read+`' ;;
+    esac
+    ;;
+  launch) `+launch+` ;;
+  *) exit 2 ;;
+esac
+`)
+	return script, calls
+}
+
+// Kills a launch op that strips the running agent's fence on its way to
+// failing: a launch that clears the pane's fence, then is refused before it
+// replaces the agent, left a healthy session unproven to every fenced op
+// (the queue's startup turns, the conversation lane's fenced messages) until
+// it restarted, and so did a launch whose new fence could not be published.
+// The fence it cleared goes back on the same pane and root process, as after
+// a welded start that a live box refused (restoreInputFence).
+func TestExecFailedLaunchRestoresTheLiveFence(t *testing.T) {
+	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
+	old := runtime.InputFence{Generation: 1, Epoch: 1, Token: "old"}
+	live := old.Digest() + ".%1|%1|4242"
+	restore := shellQuote([]string{
+		"tmux", "if-shell", "-F", "-t", "main",
+		"#{&&:#{==:#{pane_id},%1},#{&&:#{==:#{pane_pid},4242},#{==:#{@gc_fence},}}}",
+		"'set-option' '-p' '-F' '-t' 'main' '@gc_fence' '" + old.Digest() + ".#{pane_id}'",
+	})
+
+	t.Run("launch refused", func(t *testing.T) {
+		script, calls := launchFenceScript(t, live, "box busy", false)
+		if err := NewProvider(script).Relaunch(context.Background(), "s", runtime.Config{Env: env}); err == nil {
+			t.Fatal("Relaunch with the launch op refused = nil, want its error")
+		}
+		got := readCalls(t, calls)
+		if len(got) != 2 || !strings.Contains(got[0], "'set-option' '-p' '-u'") || got[1] != restore {
+			t.Fatalf("refused Relaunch ran %q, want the fence cleared and then restored on pane %%1 under pid 4242", got)
+		}
+	})
+	t.Run("fence publish failed", func(t *testing.T) {
+		script, calls := launchFenceScript(t, live, "", true)
+		if err := NewProvider(script).Relaunch(context.Background(), "s", runtime.Config{Env: env}); err == nil {
+			t.Fatal("Relaunch with the fence publish failing = nil, want an error")
+		}
+		got := readCalls(t, calls)
+		if len(got) != 3 || !strings.Contains(got[0], "'set-option' '-p' '-u'") || !strings.HasPrefix(got[1], "'tmux' 'set-option' '-p' '-F'") || got[2] != restore {
+			t.Fatalf("Relaunch ran %q, want the fence cleared, the failed publish, then the old fence restored on pane %%1 under pid 4242", got)
+		}
+	})
+}
+
 // Kills a start or launch that drives the box tmux of a pack that cannot
 // fence (no input-fence, with or without the exec connection), whose box
 // tmux need not hold a fence: Start neither clears nor publishes a fence and
@@ -496,6 +576,8 @@ esac
 case "$1" in
   protocol) echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
   exec) cat >> `+calls+`; echo >> `+calls+` ;;
+  set-meta) cat > "`+dir+`/meta.$3" ;;
+  get-meta) cat "`+dir+`/meta.$3" 2>/dev/null; true ;;
   *) exit 2 ;;
 esac
 `)
