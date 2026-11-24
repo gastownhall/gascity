@@ -1,6 +1,8 @@
 package dispatch
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -114,5 +116,115 @@ func TestNestedCheckScopeChecksResolveExactlyOneBody(t *testing.T) {
 				t.Fatal("compile minted no scope-checks")
 			}
 		})
+	}
+}
+
+// TestNestedCheckCompileIterationMatchesRuntimeRespawn pins #9412's parity
+// contract: outer iteration 1 (the compile) and outer iteration 2
+// (buildAttemptRecipe with its seeded inner loop) give the inner control, the
+// inner iteration scope, the inner member and its scope-check the same
+// membership identity, and each gc.scope_ref names the bead's innermost
+// enclosing iteration root.
+func TestNestedCheckCompileIterationMatchesRuntimeRespawn(t *testing.T) {
+	t.Parallel()
+
+	compiled := compileNestedCheckSteps(t, []*formula.Step{nestedCheckStep("outer",
+		nestedCheckStep("inner", nestedPlainStep("i1")),
+		nestedPlainStep("o1", "inner"),
+	)})
+	compileMeta := make(map[string]map[string]string, len(compiled))
+	var spec *formula.Step
+	for _, step := range compiled {
+		compileMeta[step.ID] = step.Metadata
+		if step.ID == "outer.spec" {
+			spec = &formula.Step{}
+			if err := json.Unmarshal([]byte(step.Description), spec); err != nil {
+				t.Fatalf("decoding outer spec: %v", err)
+			}
+		}
+	}
+	if spec == nil {
+		t.Fatal("compile produced no outer.spec")
+	}
+	control := beads.Bead{ID: "outer", Metadata: map[string]string{
+		beadmeta.StepIDMetadataKey:  "outer",
+		beadmeta.StepRefMetadataKey: "outer",
+	}}
+	recipe := buildAttemptRecipe(spec, control, 2)
+	runtimeMeta := make(map[string]map[string]string, len(recipe.Steps))
+	for _, step := range recipe.Steps {
+		runtimeMeta[step.ID] = step.Metadata
+	}
+
+	kindOf := func(meta map[string]string) string {
+		if kind := meta[beadmeta.KindMetadataKey]; kind != "" {
+			return kind
+		}
+		return beadmeta.KindTask
+	}
+	for _, tc := range []struct {
+		suffix    string // ID below the outer iteration root
+		enclosing string // innermost enclosing iteration root below it; "" = none
+	}{
+		{suffix: ".inner", enclosing: ""},
+		{suffix: ".inner.iteration.1", enclosing: "-"},
+		{suffix: ".inner.iteration.1.i1", enclosing: ".inner.iteration.1"},
+		{suffix: ".inner.iteration.1.i1-scope-check", enclosing: ".inner.iteration.1"},
+	} {
+		for _, side := range []struct {
+			name string
+			root string
+			meta map[string]map[string]string
+		}{
+			{"compile", "outer.iteration.1", compileMeta},
+			{"runtime", "outer.iteration.2", runtimeMeta},
+		} {
+			meta := side.meta[side.root+tc.suffix]
+			if meta == nil {
+				t.Errorf("%s: missing %s%s", side.name, side.root, tc.suffix)
+				continue
+			}
+			scopeRef, hasScopeRef := meta[beadmeta.ScopeRefMetadataKey]
+			switch tc.enclosing {
+			case "-":
+				if hasScopeRef {
+					t.Errorf("%s %s%s gc.scope_ref = %q, want absent", side.name, side.root, tc.suffix, scopeRef)
+				}
+			default:
+				rootMeta := side.meta[side.root+tc.enclosing]
+				if rootMeta == nil {
+					t.Errorf("%s: missing enclosing root %s%s", side.name, side.root, tc.enclosing)
+					continue
+				}
+				if want := rootMeta[beadmeta.StepRefMetadataKey]; scopeRef == "" || scopeRef != want {
+					t.Errorf("%s %s%s gc.scope_ref = %q, want the enclosing root's gc.step_ref %q", side.name, side.root, tc.suffix, scopeRef, want)
+				}
+			}
+		}
+		compile, runtime := compileMeta["outer.iteration.1"+tc.suffix], runtimeMeta["outer.iteration.2"+tc.suffix]
+		if compile == nil || runtime == nil {
+			continue
+		}
+		if kc, kr := kindOf(compile), kindOf(runtime); kc != kr {
+			t.Errorf("%s gc.kind: compile %q, runtime %q", tc.suffix, kc, kr)
+		}
+		for _, key := range []string{
+			beadmeta.ScopeRoleMetadataKey,
+			beadmeta.StepIDMetadataKey,
+			beadmeta.RalphStepIDMetadataKey,
+			beadmeta.OnFailMetadataKey,
+		} {
+			if compile[key] != runtime[key] {
+				t.Errorf("%s %s: compile %q, runtime %q", tc.suffix, key, compile[key], runtime[key])
+			}
+		}
+		_, compileScoped := compile[beadmeta.ScopeRefMetadataKey]
+		_, runtimeScoped := runtime[beadmeta.ScopeRefMetadataKey]
+		if compileScoped != runtimeScoped {
+			t.Errorf("%s gc.scope_ref present: compile %v, runtime %v", tc.suffix, compileScoped, runtimeScoped)
+		}
+	}
+	if !strings.HasPrefix(runtimeMeta["outer.iteration.2.inner.iteration.1"][beadmeta.ControlForMetadataKey], "outer.iteration.2.inner") {
+		t.Errorf("runtime inner scope gc.control_for = %q, want the iteration-2 inner control", runtimeMeta["outer.iteration.2.inner.iteration.1"][beadmeta.ControlForMetadataKey])
 	}
 }
