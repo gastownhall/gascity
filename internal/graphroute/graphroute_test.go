@@ -1729,3 +1729,31 @@ func TestGraphWorkflowRouteVarsResolvesDefaultReferencingProvidedVar(t *testing.
 		t.Fatalf("GraphWorkflowRouteVars(nil) = %v, want copy of provided", got)
 	}
 }
+
+// TestApplyGraphRouteBinding_IndependentStepsErrorPointsAtBothWaysOut pins the
+// operator-facing half of the one-shot refusal (ga-sj2h8f.1, architect ruling,
+// exit contract (b)): besides the step, the group and the lifecycle, which
+// TestApplyGraphRouteBinding_IndependentSteps pins, the message points at both
+// ways out -- a long-lived agent, and for a shared drain the separate context,
+// spelled the way a formula writes it (context="separate"). Added by the reviewer
+// of ga-8tc9px8a; the production text is unchanged.
+func TestApplyGraphRouteBinding_IndependentStepsErrorPointsAtBothWaysOut(t *testing.T) {
+	step := &formula.RecipeStep{ID: "wf.pooled-step", Metadata: map[string]string{}}
+	err := ApplyGraphRouteBinding(step, GraphRouteBinding{
+		QualifiedName:     "gascity/polecat",
+		MetadataOnly:      true,
+		ContinuationGroup: "drain:ga-control1",
+		IndependentSteps:  true,
+	})
+	if err == nil {
+		t.Fatalf("ApplyGraphRouteBinding: want error, got nil")
+	}
+	for _, want := range []string{
+		"long-lived agent",
+		`context="` + beadmeta.DrainContextSeparate + `"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not point at the way out %q", err.Error(), want)
+		}
+	}
+}
