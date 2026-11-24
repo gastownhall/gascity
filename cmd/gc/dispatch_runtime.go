@@ -619,9 +619,14 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 				return err
 			}
 			workflowTracef("serve drain-transient-retry agent=%s err=%v", agentCfg.QualifiedName(), err)
+			// A failed drain observed no complete pending set, so the
+			// previous sweep's baseline stays: clearing it would put a
+			// dispatcher behind a saturated store back on its 1s floor
+			// after every failed sweep.
 			drainResult = workflowServeDrainResult{}
+		} else {
+			previousPending = drainResult.pending
 		}
-		previousPending = drainResult.pending
 		if pendingWakeErr != nil {
 			// The previous wait observed a relevant event and then a fatal
 			// watcher error in the same coalescing window. The drain above is
