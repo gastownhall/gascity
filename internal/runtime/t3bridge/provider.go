@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -2776,6 +2777,15 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // ends: the worktree this call created is removed and the error wraps ctx's
 // error. A reused thread is not interrupted once its reuse begins.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	// Clone Env: callers may reuse the same runtime.Config (and thus the
+	// same underlying map) across multiple Start calls for the same
+	// session, and Start writes GC_STARTUP_ENVELOPE back into it below.
+	// A previous call's ensureEventWatcher goroutine may still be reading
+	// its own cfg.Env concurrently, so mutating the caller's map in place
+	// races with it. Operating on a private copy avoids that without
+	// changing any observable behavior.
+	cfg.Env = maps.Clone(cfg.Env)
+
 	var envelope StartupEnvelope
 	hasWorktree := false
 	var cwd, branch, newBranch, desiredPath string
