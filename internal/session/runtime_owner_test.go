@@ -442,3 +442,33 @@ func TestStartUnderSameUIDLeavesOwnerFenceOut(t *testing.T) {
 		})
 	}
 }
+
+// AC-6: a provider that cannot scan the process table neither writes a
+// runtime_owner record nor is refused by one another uid left.
+func TestNonScannerProviderRecordsNoRuntimeOwner(t *testing.T) {
+	setCurrentEUID(t, 4242)
+	fake := runtime.NewFake()
+	mgr := newTestManager(t, beads.NewMemStore(), &providerWithoutProcessScanner{Provider: fake})
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if got, ok := readRuntimeOwner(t, mgr, info.ID); ok {
+		t.Fatalf("runtime_owner = %+v after a non-scanner start, want none", got)
+	}
+
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	seedRuntimeOwner(t, mgr, info.ID, 4243, runtimeLeaseBootID(), liveRoot(t))
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start over another uid's live record: %v, want no check for a non-scanner provider", err)
+	}
+	if !fake.IsRunning(info.SessionName) {
+		t.Fatalf("runtime session %q was not started", info.SessionName)
+	}
+	if got, _ := readRuntimeOwner(t, mgr, info.ID); got.UID != 4243 {
+		t.Fatalf("runtime_owner = %+v, want the seeded record left as it was", got)
+	}
+}
