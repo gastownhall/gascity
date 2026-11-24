@@ -12387,7 +12387,18 @@ func TestCmdWorkflowDeleteSourceRefusesSharedAutomaticInputConvoy(t *testing.T) 
 		}
 	}
 
+	// reopen-source is a probe: the shared run blocks it like any live run
+	// (exit 3), and the sweep's remedy is delete-source's to print.
 	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 3 {
+		t.Fatalf("cmdWorkflowReopenSource = %d, want 3; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "result=conflict source_bead_id="+source.ID+" blocking_workflow_ids="+root.ID+"\n") || strings.Contains(stderr.String(), "delete-source") {
+		t.Fatalf("reopen-source stderr = %q, want the shared run %s blocking and no sweep remedy", stderr.String(), root.ID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
 	if code := cmdWorkflowDeleteSource(convoyID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("remedy cmdWorkflowDeleteSource(%s) = %d; stdout=%s stderr=%s", convoyID, code, stdout.String(), stderr.String())
 	}
@@ -12506,5 +12517,400 @@ func TestCollectSourceWorkflowMatchesInputConvoyReadFailure(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// splitDeleteSourceTestCity prepares a split city for delete-source: its
+// infrastructure classes, the workflow graph among them, are served from a
+// relocated class binding while work beads stay in the work stores.
+func splitDeleteSourceTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath, _ := foreignProviderCity(t)
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+	return cityPath
+}
+
+// splitCityStoreRef is the store ref of cityPath's own scope, the one a run
+// launched on a city work bead records in gc.root_store_ref.
+func splitCityStoreRef(t *testing.T, cityPath string) string {
+	t.Helper()
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the city config: %v", err)
+	}
+	ref := workflowStoreRefForDir(cityPath, cityPath, loadedCityName(cfg, cityPath), cfg)
+	if ref == "" {
+		t.Fatal("the city scope resolved no store ref")
+	}
+	return ref
+}
+
+// TestWorkflowDeleteSourceSweepsConvoyFirstRunsInTheBinding pins #7197 on the
+// shape a split city runs: the source and its launch convoy sit in a work store
+// while the run (root, steps and a nested drain item workflow) lives only in the
+// class binding, under the S4 placement rule. The view holding the convoy holds
+// none of the run, so only listSourceRoots' binding leg reaches it.
+func TestWorkflowDeleteSourceSweepsConvoyFirstRunsInTheBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// rig puts the source in a rig store rather than the city's work store.
+		rig bool
+		// unscoped launches the run without gc.root_store_ref. No other work
+		// store holds a convoy under its id, so it is still the source's.
+		unscoped bool
+	}{
+		{name: "city work store"},
+		{name: "rig store", rig: true},
+		{name: "unscoped root on a unique convoy id", unscoped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := splitDeleteSourceTestCity(t)
+			var holder beads.Store
+			var source beads.Bead
+			scopeRef := splitCityStoreRef(t, cityPath)
+			if tc.rig {
+				const sourceID = "fe-7197"
+				holder, scopeRef = rigHoldingID(t, cityPath, sourceID, "Source", "task"), "rig:frontend"
+				var err error
+				if source, err = holder.Get(sourceID); err != nil {
+					t.Fatalf("reading the rig's source back: %v", err)
+				}
+			} else {
+				holder = workStoreFor(t, cityPath)
+				source = createDeleteSourceTestBead(t, holder, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+			}
+			convoyID, err := graphv2.NormalizeInputConvoy(beads.WorkStore{Store: holder}, source.ID)
+			if err != nil {
+				t.Fatalf("NormalizeInputConvoy(%s): %v", source.ID, err)
+			}
+			scoped := func(meta map[string]string) map[string]string {
+				if !tc.unscoped {
+					meta[beadmeta.RootStoreRefMetadataKey] = scopeRef
+				}
+				return meta
+			}
+			binding := soleClassBindingStore(t, cityPath)
+			root, steps := createGraphWorkflowRun(t, binding, "in_progress", scoped(map[string]string{beadmeta.InputConvoyIDMetadataKey: convoyID}), 2)
+			drain := createDrainControl(t, binding, root.ID, "in_progress")
+			// A drain mints its unit convoy in the work store (drainUnitConvoyStore)
+			// and the item run in the binding.
+			unit := createDeleteSourceTestBead(t, holder, beads.Bead{
+				Title:  "drain unit",
+				Type:   "convoy",
+				Status: "open",
+				Metadata: map[string]string{
+					beadmeta.SyntheticMetadataKey:      "true",
+					beadmeta.SyntheticKindMetadataKey:  beadmeta.SyntheticKindDrainUnitConvoy,
+					beadmeta.DrainControlIDMetadataKey: drain.ID,
+				},
+			})
+			item, itemSteps := createGraphWorkflowRun(t, binding, "in_progress", scoped(map[string]string{
+				beadmeta.InputConvoyIDMetadataKey:  unit.ID,
+				beadmeta.DrainControlIDMetadataKey: drain.ID,
+			}), 1)
+			run := append([]beads.Bead{root, drain, item}, steps...)
+			run = append(run, itemSteps...)
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, false, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("preview exited %d: %s%s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), fmt.Sprintf("result=preview source_bead_id=%s matched_roots=1 matched_beads=%d ", source.ID, len(run))) ||
+				!strings.Contains(stdout.String(), "store="+convoyBindingViewPath+" roots="+root.ID+" ") {
+				t.Fatalf("preview stdout = %q, want the binding's run on convoy %s matched with all %d of its beads", stdout.String(), convoyID, len(run))
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 3 {
+				t.Fatalf("reopen-source exited %d, want 3: %s%s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "blocking_workflow_ids="+root.ID+"\n") {
+				t.Fatalf("reopen-source stderr = %q, want the binding's live run %s blocking", stderr.String(), root.ID)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("--apply exited %d: %s%s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), fmt.Sprintf("result=cleaned source_bead_id=%s matched_roots=1 matched_beads=%d closed=%d ", source.ID, len(run), len(run))) {
+				t.Fatalf("--apply stdout = %q, want the whole run closed", stdout.String())
+			}
+			for _, b := range run {
+				assertWorkflowBeadClosedWith(t, binding, b.ID, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+			}
+		})
+	}
+}
+
+// sameIDLaunchConvoyCity builds a split city whose work store and rig
+// "frontend" both hold a source and its automatic input convoy under the same
+// ids, as two stores minting under one prefix do. It returns the shared ids and
+// the class binding, where the runs launched on either convoy live.
+func sameIDLaunchConvoyCity(t *testing.T) (cityPath, sourceID, convoyID string, binding beads.Store) {
+	t.Helper()
+	cityPath = splitDeleteSourceTestCity(t)
+	work := workStoreFor(t, cityPath)
+	source := createDeleteSourceTestBead(t, work, beads.Bead{Title: "city source", Type: "task", Status: "in_progress"})
+	convoyID, err := graphv2.NormalizeInputConvoy(beads.WorkStore{Store: work}, source.ID)
+	if err != nil {
+		t.Fatalf("NormalizeInputConvoy(%s): %v", source.ID, err)
+	}
+	rig := rigHoldingID(t, cityPath, source.ID, "rig source", "task")
+	if _, err := rig.Create(beads.Bead{
+		ID:       convoyID,
+		Title:    "input convoy for " + source.ID,
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	}); err != nil {
+		t.Fatalf("planting the rig's input convoy %s: %v", convoyID, err)
+	}
+	if err := rig.DepAdd(convoyID, source.ID, convoycore.TrackingDepType); err != nil {
+		t.Fatalf("tracking the rig's source from its convoy: %v", err)
+	}
+	return cityPath, source.ID, convoyID, soleClassBindingStore(t, cityPath)
+}
+
+// TestWorkflowDeleteSourceScopesSameIDLaunchConvoysInTheBinding pins the
+// binding leg's scope rule. The binding holds one run per same-ID convoy, each
+// naming its scope in gc.root_store_ref, and each store's sweep, selected by
+// --store-ref, must reach only its own: preview, --apply, reopen-source and
+// --delete all leave the other store's run alone.
+func TestWorkflowDeleteSourceScopesSameIDLaunchConvoysInTheBinding(t *testing.T) {
+	cityPath, sourceID, convoyID, binding := sameIDLaunchConvoyCity(t)
+	cityRoot, citySteps := createGraphWorkflowRun(t, binding, "in_progress", map[string]string{
+		beadmeta.InputConvoyIDMetadataKey: convoyID,
+		beadmeta.RootStoreRefMetadataKey:  splitCityStoreRef(t, cityPath),
+	}, 1)
+	rigRoot, rigSteps := createGraphWorkflowRun(t, binding, "in_progress", map[string]string{
+		beadmeta.InputConvoyIDMetadataKey: convoyID,
+		beadmeta.RootStoreRefMetadataKey:  "rig:frontend",
+	}, 1)
+	cityRun := append([]beads.Bead{cityRoot}, citySteps...)
+	rigRun := append([]beads.Bead{rigRoot}, rigSteps...)
+	city := sourceWorkflowStoreSelector{storeRef: "city"}
+	rig := sourceWorkflowStoreSelector{storeRef: "rig:frontend"}
+
+	for _, tc := range []struct {
+		selector sourceWorkflowStoreSelector
+		root     beads.Bead
+	}{{city, cityRoot}, {rig, rigRoot}} {
+		var stdout, stderr bytes.Buffer
+		if code := cmdWorkflowDeleteSource(sourceID, tc.selector, false, false, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s preview exited %d: %s%s", tc.selector.storeRef, code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), " matched_roots=1 matched_beads=2 ") || !strings.Contains(stdout.String(), " roots="+tc.root.ID+" beads=2") {
+			t.Fatalf("%s preview stdout = %q, want only its own run %s", tc.selector.storeRef, stdout.String(), tc.root.ID)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(sourceID, rig, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("rig --apply exited %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned source_bead_id="+sourceID+" matched_roots=1 matched_beads=2 closed=2 ") {
+		t.Fatalf("rig --apply stdout = %q, want only the rig's run closed", stdout.String())
+	}
+	for _, b := range rigRun {
+		assertWorkflowBeadClosedWith(t, binding, b.ID, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+	}
+	for _, b := range cityRun {
+		if got, err := binding.Get(b.ID); err != nil || got.Status == "closed" {
+			t.Fatalf("the city's %s after the rig's sweep = status %q, %v; want it untouched", b.ID, got.Status, err)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdWorkflowReopenSource(sourceID, rig, &stdout, &stderr); code != 0 {
+		t.Fatalf("rig reopen-source exited %d, want 0 (the city's live run is not the rig source's): %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=reopened source_bead_id="+sourceID) {
+		t.Fatalf("rig reopen-source stdout = %q, want the source reopened", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdWorkflowReopenSource(sourceID, city, &stdout, &stderr); code != 3 {
+		t.Fatalf("city reopen-source exited %d, want 3: %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "blocking_workflow_ids="+cityRoot.ID+"\n") {
+		t.Fatalf("city reopen-source stderr = %q, want only the city's run %s blocking", stderr.String(), cityRoot.ID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdWorkflowDeleteSource(sourceID, city, true, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("city --delete exited %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned source_bead_id="+sourceID+" matched_roots=1 matched_beads=2 ") || !strings.Contains(stdout.String(), " deleted=2 ") {
+		t.Fatalf("city --delete stdout = %q, want only the city's run deleted", stdout.String())
+	}
+	for _, b := range cityRun {
+		if _, err := binding.Get(b.ID); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("Get(%s) after the city's --delete = %v, want not found", b.ID, err)
+		}
+	}
+	for _, b := range rigRun {
+		if _, err := binding.Get(b.ID); err != nil {
+			t.Errorf("Get(%s) after the city's --delete = %v, want the rig's run kept", b.ID, err)
+		}
+	}
+}
+
+// TestWorkflowDeleteSourceRefusesAnUnscopedBindingRootOnASameIDConvoy pins the
+// refusal half of the binding scope rule. Once two work stores hold a convoy
+// under the id a root with no gc.root_store_ref names, nothing tells whose run
+// it is: delete-source refuses from either side before closing anything and
+// names the remedy, and reopen-source reports the run as blocking (exit 3)
+// without printing the sweep's remedy. Stamping the scope lets the sweep through.
+func TestWorkflowDeleteSourceRefusesAnUnscopedBindingRootOnASameIDConvoy(t *testing.T) {
+	_, sourceID, convoyID, binding := sameIDLaunchConvoyCity(t)
+	root, steps := createGraphWorkflowRun(t, binding, "in_progress", map[string]string{beadmeta.InputConvoyIDMetadataKey: convoyID}, 1)
+	run := append([]beads.Bead{root}, steps...)
+	rig := sourceWorkflowStoreSelector{storeRef: "rig:frontend"}
+
+	for _, selector := range []sourceWorkflowStoreSelector{rig, {storeRef: "city"}} {
+		var stdout, stderr bytes.Buffer
+		if code := cmdWorkflowDeleteSource(sourceID, selector, true, false, &stdout, &stderr); code != 1 {
+			t.Fatalf("%s --apply exited %d, want 1: %s%s", selector.storeRef, code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "carries no "+beadmeta.RootStoreRefMetadataKey) || !strings.Contains(stderr.String(), "also holds a convoy "+convoyID) ||
+			!strings.Contains(stderr.String(), "gc bd update "+root.ID+" --set-metadata "+beadmeta.RootStoreRefMetadataKey+"=") {
+			t.Fatalf("%s --apply stderr = %q, want the ambiguous run %s, the colliding convoy and the remedy named", selector.storeRef, stderr.String(), root.ID)
+		}
+		for _, b := range run {
+			if got, err := binding.Get(b.ID); err != nil || got.Status == "closed" {
+				t.Fatalf("%s: %s after a refused sweep = status %q, %v; want it untouched", selector.storeRef, b.ID, got.Status, err)
+			}
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(sourceID, rig, &stdout, &stderr); code != 3 {
+		t.Fatalf("reopen-source exited %d, want 3: %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "result=conflict source_bead_id="+sourceID+" blocking_workflow_ids="+root.ID+"\n") || strings.Contains(stderr.String(), "gc bd update") {
+		t.Fatalf("reopen-source stderr = %q, want the ambiguous run %s blocking and no sweep remedy", stderr.String(), root.ID)
+	}
+
+	if err := binding.SetMetadata(root.ID, beadmeta.RootStoreRefMetadataKey, "rig:frontend"); err != nil {
+		t.Fatalf("stamping the run's scope: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdWorkflowDeleteSource(sourceID, rig, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("--apply after the remedy exited %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned source_bead_id="+sourceID+" matched_roots=1 ") {
+		t.Fatalf("--apply after the remedy stdout = %q, want the now-scoped run cleaned", stdout.String())
+	}
+	for _, b := range run {
+		assertWorkflowBeadClosedWith(t, binding, b.ID, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+	}
+}
+
+// convoyProbeFailStore fails every Get: the read the binding scope rule probes
+// another work store with.
+type convoyProbeFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s convoyProbeFailStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, s.err
+}
+
+// TestCollectSourceWorkflowMatchesScopesUnscopedBindingRoots pins when the
+// binding attributes a root with no gc.root_store_ref to the source: once
+// every work store of another scope has answered that it holds no convoy under
+// the root's convoy id. A same-ID bead that is not a convoy was never launched
+// on, and a store that cannot be read rules nothing out. A root scoped to
+// another scope is never the source's, whatever the other stores hold.
+func TestCollectSourceWorkflowMatchesScopesUnscopedBindingRoots(t *testing.T) {
+	const cityPath = "/city"
+	rigPath := filepath.Join(cityPath, "rigs", "frontend")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "rigs/frontend"}},
+	}
+	// seedRig mints two beads in the rig store, which mints the same ids as the
+	// city's, so its second bead takes the id of the source's launch convoy.
+	seedRig := func(secondType string) func(*testing.T, beads.Store, string) {
+		return func(t *testing.T, rig beads.Store, convoyID string) {
+			createDeleteSourceTestBead(t, rig, beads.Bead{Title: "rig bead", Type: "task", Status: "open"})
+			second := createDeleteSourceTestBead(t, rig, beads.Bead{Title: "rig bead", Type: secondType, Status: "open"})
+			if second.ID != convoyID {
+				t.Fatalf("the rig minted %s, want the same id as the city's convoy %s", second.ID, convoyID)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		seed    func(*testing.T, beads.Store, string)
+		readErr error
+		// refused is the account the refusal must carry; "" means the root is
+		// the source's.
+		refused string
+	}{
+		{name: "no same-ID bead elsewhere"},
+		{name: "same-ID task elsewhere", seed: seedRig("task")},
+		{name: "same-ID convoy elsewhere", seed: seedRig("convoy"), refused: "also holds a convoy"},
+		{name: "unreadable store elsewhere", readErr: errors.New("connection reset mid-probe"), refused: rigPath + " could not be read to rule out a convoy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := beads.NewMemStore()
+			source := createDeleteSourceTestBead(t, city, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+			convoyID, err := graphv2.NormalizeInputConvoy(beads.WorkStore{Store: city}, source.ID)
+			if err != nil {
+				t.Fatalf("NormalizeInputConvoy: %v", err)
+			}
+			var rig beads.Store = beads.NewMemStore()
+			if tc.seed != nil {
+				tc.seed(t, rig, convoyID)
+			}
+			if tc.readErr != nil {
+				rig = convoyProbeFailStore{Store: rig, err: tc.readErr}
+			}
+			binding := beads.NewMemStore()
+			binding.IDPrefix = "gcg"
+			root, _ := createGraphWorkflowRun(t, binding, "in_progress", map[string]string{beadmeta.InputConvoyIDMetadataKey: convoyID}, 1)
+			createGraphWorkflowRun(t, binding, "in_progress", map[string]string{
+				beadmeta.InputConvoyIDMetadataKey: convoyID,
+				beadmeta.RootStoreRefMetadataKey:  "rig:frontend",
+			}, 1)
+			views := []convoyStoreView{
+				{path: cityPath, store: city},
+				{path: rigPath, store: rig},
+				{path: convoyBindingViewPath, store: binding, role: convoyViewClassBinding},
+			}
+
+			matches, skips, _, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, source.ID, "city:test", views, nil)
+			if tc.refused == "" {
+				if err != nil {
+					t.Fatalf("collect: %v", err)
+				}
+				var got []string
+				for _, match := range matches {
+					got = append(got, rootIDs(match.roots)...)
+				}
+				if !slices.Equal(got, []string{root.ID}) {
+					t.Fatalf("matched roots = %v, want only the unscoped root %s", got, root.ID)
+				}
+				return
+			}
+			var refusal *unattributedLaunchRun
+			if !errors.As(err, &refusal) {
+				t.Fatalf("collect returned %d matches and err %v, want the unscoped root refused", len(matches), err)
+			}
+			if refusal.rootID != root.ID || !strings.Contains(err.Error(), tc.refused) {
+				t.Fatalf("refusal = %q for %s, want root %s and %q", err, refusal.rootID, root.ID, tc.refused)
+			}
+			if tc.readErr != nil && (len(skips) != 1 || skips[0].path != rigPath) {
+				t.Fatalf("skips = %v, want the unreadable rig recorded", skips)
+			}
+		})
 	}
 }

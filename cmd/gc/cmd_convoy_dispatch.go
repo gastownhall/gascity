@@ -2178,8 +2178,12 @@ func closeWorkflowMatches(matches []workflowStoreMatch) (int, error) {
 func closeOpenWorkflowBeads(store beads.Store, matched []beads.Bead) (int, error) {
 	stepIDs, rootIDs := splitOpenWorkflowBeadIDs(matched)
 	// A match can span nested drain item workflows, whose steps block one
-	// another across the batch: close blockers first, keeping the deepest-first
-	// match order among beads with no "blocks" edge between them.
+	// another. Each of the two batches closes blockers first, keeping the
+	// deepest-first match order among beads with no "blocks" edge between them.
+	// The order covers only edges inside one batch: a dependent item workflow's
+	// steps are also blocked by a sibling item's root, which closes in the root
+	// batch after them. A store that enforced "blocks" on close would refuse
+	// those steps; bd and the native store both close with force.
 	stepIDs, err := closeorder.Order(store, stepIDs)
 	if err != nil {
 		return 0, err
@@ -2681,7 +2685,8 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 			return fmt.Errorf("getting bead %q: %w", sourceBeadID, beads.ErrNotFound)
 		}
 		matches, skips, _, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, target.storeRef)
-		if err != nil {
+		var unattributed *unattributedLaunchRun
+		if err != nil && !errors.As(err, &unattributed) {
 			return err
 		}
 		if len(skips) > 0 {
@@ -2690,17 +2695,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 			// stores so operators know coverage was degraded.
 			fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips(skips)) //nolint:errcheck
 		}
-		// A closed root matches only for the open item workflows left under it:
-		// cleanup debris, not a live run, so it does not block the reopen.
-		var ids []string
-		for _, match := range matches {
-			for _, root := range match.roots {
-				if root.Status != "closed" {
-					ids = append(ids, root.ID)
-				}
-			}
-		}
-		if len(ids) > 0 {
+		if ids := reopenBlockingRootIDs(matches, unattributed); len(ids) > 0 {
 			_, _ = fmt.Fprintf(
 				stderr,
 				"result=conflict source_bead_id=%s blocking_workflow_ids=%s\n",
@@ -2796,6 +2791,28 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		return 1
 	}
 	return resultCode
+}
+
+// reopenBlockingRootIDs returns the runs that keep reopen-source from
+// re-opening the source: every matched root that is not closed, and the run
+// the collector stopped at because it cannot attribute it to the source alone.
+// A closed root matches only for the open item workflows left under it:
+// cleanup debris, not a live run. An unattributed run blocks whatever its
+// root's status, since the walk ended there and the source may be part of it;
+// the sweep it needs is delete-source's to name.
+func reopenBlockingRootIDs(matches []sourceWorkflowStoreMatch, unattributed *unattributedLaunchRun) []string {
+	var ids []string
+	if unattributed != nil {
+		ids = append(ids, unattributed.rootID)
+	}
+	for _, match := range matches {
+		for _, root := range match.roots {
+			if root.Status != "closed" {
+				ids = append(ids, root.ID)
+			}
+		}
+	}
+	return ids
 }
 
 // reopenSourceRoute is the pool route reopen-source pre-routes b to: its
@@ -3279,11 +3296,14 @@ func (c *sourceWorkflowMatchCollector) collect(currentSourceID, currentSourceSto
 // sourceLaunchConvoy is an input convoy a run launched on the current source
 // would name in gc.input_convoy_id: the source itself when it is a convoy, or an
 // automatic input convoy tracking it. owned is false for an automatic convoy
-// that tracks other beads too, whose runs are not the source's alone.
+// that tracks other beads too, whose runs are not the source's alone. scopeRef
+// is the store ref of the scope holding the convoy, which a run launched on it
+// records in gc.root_store_ref: a launch is minted in its target's scope.
 type sourceLaunchConvoy struct {
-	id     string
-	holder int
-	owned  bool
+	id       string
+	holder   int
+	scopeRef string
+	owned    bool
 }
 
 // launchConvoys resolves the current source's launch convoys in every view that
@@ -3312,8 +3332,9 @@ func (c *sourceWorkflowMatchCollector) launchConvoys(currentSourceID, currentSou
 			}
 			continue
 		}
+		scopeRef := workflowStoreRefForDir(info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg)
 		if source.Type == "convoy" {
-			launches = append(launches, sourceLaunchConvoy{id: source.ID, holder: i, owned: true})
+			launches = append(launches, sourceLaunchConvoy{id: source.ID, holder: i, scopeRef: scopeRef, owned: true})
 		}
 		automatic, err := convoycore.AutomaticInputConvoysFor(info.store, currentSourceID)
 		if err != nil {
@@ -3324,7 +3345,7 @@ func (c *sourceWorkflowMatchCollector) launchConvoys(currentSourceID, currentSou
 			continue
 		}
 		for _, input := range automatic {
-			launches = append(launches, sourceLaunchConvoy{id: input.Convoy.ID, holder: i, owned: input.Owned})
+			launches = append(launches, sourceLaunchConvoy{id: input.Convoy.ID, holder: i, scopeRef: scopeRef, owned: input.Owned})
 		}
 	}
 	return launches, nil
@@ -3376,16 +3397,13 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 		if err != nil {
 			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflows", err)
 		}
-		for _, shared := range listed.shared {
-			open, err := openRootOf(graph, shared.roots)
+		for _, unattributed := range listed.unattributed {
+			open, err := openRootOf(graph, unattributed.roots)
 			if err != nil {
 				return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
 			}
 			if open != "" {
-				return nil, fmt.Errorf(
-					"source %s shares automatic input convoy %s with other beads, so its open workflow %s is not the source's alone; rerun gc convoy delete-source %s",
-					currentSourceID, shared.convoyID, open, shared.convoyID,
-				)
+				return nil, unattributed.refusal(currentSourceID, open)
 			}
 		}
 		if err := c.mergeRootMatches(info, graph, listed.roots); err != nil {
@@ -3401,23 +3419,61 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 }
 
 // sourceRootListing is what one view holds for the current source: the roots
-// attributed to it, and the roots of each shared automatic launch convoy.
+// attributed to it, and the launch convoy roots it cannot claim.
 type sourceRootListing struct {
-	roots  []beads.Bead
-	shared []sharedLaunchConvoyRoots
+	roots        []beads.Bead
+	unattributed []unattributedLaunchRoots
 }
 
-// sharedLaunchConvoyRoots are the roots launched on an automatic input convoy
-// that tracks the source among other beads.
-type sharedLaunchConvoyRoots struct {
-	convoyID string
-	roots    []beads.Bead
+// unattributedLaunchRoots are roots launched on one of the source's launch
+// convoys that the sweep cannot attribute to the source alone. With no
+// collision the convoy is shared: it tracks other beads too. With one, the
+// roots name no scope, and collision accounts for the work store of another
+// scope that holds, or could not rule out, a convoy under the same id.
+type unattributedLaunchRoots struct {
+	convoyID  string
+	collision string
+	roots     []beads.Bead
+}
+
+// refusal is the collector's verdict on rootID, the open run among these roots.
+func (u unattributedLaunchRoots) refusal(sourceID, rootID string) *unattributedLaunchRun {
+	if u.collision == "" {
+		return &unattributedLaunchRun{
+			rootID: rootID,
+			reason: fmt.Sprintf("source %s shares automatic input convoy %s with other beads, so its open workflow %s is not the source's alone", sourceID, u.convoyID, rootID),
+			remedy: "rerun gc convoy delete-source " + u.convoyID,
+		}
+	}
+	return &unattributedLaunchRun{
+		rootID: rootID,
+		reason: fmt.Sprintf("open workflow %s names input convoy %s but carries no %s, and %s, so it cannot be attributed to source %s", rootID, u.convoyID, beadmeta.RootStoreRefMetadataKey, u.collision, sourceID),
+		remedy: fmt.Sprintf("stamp the scope it runs in with gc bd update %s --set-metadata %s=<city:name|rig:name> and rerun", rootID, beadmeta.RootStoreRefMetadataKey),
+	}
+}
+
+// unattributedLaunchRun is an open run launched on one of the source's launch
+// convoys that the collector cannot attribute to the source alone, so the walk
+// stops at it. delete-source refuses to sweep it and names the remedy;
+// reopen-source reports it as the run blocking the reopen, since the source may
+// still be part of it.
+type unattributedLaunchRun struct {
+	rootID string
+	reason string
+	remedy string
+}
+
+// Error is delete-source's refusal: why the run is not provably the source's,
+// then the operator's next step.
+func (r *unattributedLaunchRun) Error() string {
+	return r.reason + "; " + r.remedy
 }
 
 // listSourceRoots lists the roots in one view attributed to the current
 // source: those keyed by gc.source_bead_id, closed ones included, and those
 // launched on one of its owned launch convoys. A launch convoy's roots are read
-// only from the view holding the convoy or from the class binding, so a
+// only from the view holding the convoy or from the class binding, and the
+// binding keeps only those of the convoy's own scope (bindingScopedRoots), so a
 // same-ID convoy in another store never attributes its runs to this source.
 func (c *sourceWorkflowMatchCollector) listSourceRoots(graph beads.MoleculeTarget, index int, info convoyStoreView, currentSourceID, currentSourceStoreRef, rootStoreRef string, launches []sourceLaunchConvoy) (sourceRootListing, error) {
 	roots, err := sourceworkflow.ListSourceRootsInCity(graph, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
@@ -3429,18 +3485,108 @@ func (c *sourceWorkflowMatchCollector) listSourceRoots(graph beads.MoleculeTarge
 		if launch.holder != index && !info.isClassBinding() {
 			continue
 		}
-		convoyRoots, err := sourceworkflow.ListInputConvoyRoots(graph, launch.id)
+		attributed, unattributed, err := c.launchRootsIn(graph, info, launch, currentSourceStoreRef)
 		if err != nil {
 			return sourceRootListing{}, err
 		}
-		if !launch.owned {
-			listing.shared = append(listing.shared, sharedLaunchConvoyRoots{convoyID: launch.id, roots: convoyRoots})
-			continue
-		}
-		listing.roots = append(listing.roots, convoyRoots...)
+		listing.roots = append(listing.roots, attributed...)
+		listing.unattributed = append(listing.unattributed, unattributed...)
 	}
 	listing.roots = uniqueBeads(listing.roots)
 	return listing, nil
+}
+
+// launchRootsIn reads the roots launched on launch's convoy in one view and
+// splits them into those attributed to the source and those it cannot claim.
+// Every root of a shared convoy is unclaimed.
+func (c *sourceWorkflowMatchCollector) launchRootsIn(graph beads.MoleculeTarget, info convoyStoreView, launch sourceLaunchConvoy, currentSourceStoreRef string) ([]beads.Bead, []unattributedLaunchRoots, error) {
+	roots, err := sourceworkflow.ListInputConvoyRoots(graph, launch.id)
+	if err != nil {
+		return nil, nil, err
+	}
+	var unattributed []unattributedLaunchRoots
+	if info.isClassBinding() {
+		var ambiguous unattributedLaunchRoots
+		roots, ambiguous, err = c.bindingScopedRoots(launch, roots, currentSourceStoreRef)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(ambiguous.roots) > 0 {
+			unattributed = append(unattributed, ambiguous)
+		}
+	}
+	if !launch.owned {
+		return nil, append(unattributed, unattributedLaunchRoots{convoyID: launch.id, roots: roots}), nil
+	}
+	return roots, unattributed, nil
+}
+
+// bindingScopedRoots keeps the roots the class binding holds on launch's convoy
+// that run in the convoy's own scope. The binding holds every scope's graph
+// rows (the S4 placement rule) while a convoy id is unique only inside its own
+// work store, so a root there is the source's when its gc.root_store_ref names
+// the scope holding the convoy; a root of another scope was launched on that
+// scope's same-ID convoy. A root that names no scope is kept only while no work
+// store of another scope holds, or could hold, a convoy under the same id;
+// otherwise it comes back unattributed, with that store's account.
+func (c *sourceWorkflowMatchCollector) bindingScopedRoots(launch sourceLaunchConvoy, roots []beads.Bead, currentSourceStoreRef string) ([]beads.Bead, unattributedLaunchRoots, error) {
+	scopeOf := func(root beads.Bead) string {
+		return strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey])
+	}
+	collision := ""
+	if slices.ContainsFunc(roots, func(root beads.Bead) bool { return scopeOf(root) == "" }) {
+		var err error
+		if collision, err = c.sameIDConvoyElsewhere(launch, currentSourceStoreRef); err != nil {
+			return nil, unattributedLaunchRoots{}, err
+		}
+	}
+	ambiguous := unattributedLaunchRoots{convoyID: launch.id, collision: collision}
+	var scoped []beads.Bead
+	for _, root := range roots {
+		switch scope := scopeOf(root); {
+		case scope == "" && collision != "":
+			ambiguous.roots = append(ambiguous.roots, root)
+		case scope == "" || sourceworkflow.SameSourceStoreRef(scope, launch.scopeRef, c.cityName):
+			scoped = append(scoped, root)
+		}
+	}
+	return scoped, ambiguous, nil
+}
+
+// sameIDConvoyElsewhere accounts for a work store outside launch's scope that
+// holds a convoy under launch's id, or that could not be read to rule one out,
+// and returns "" once every other work store has answered that it holds none.
+// A probe failure is classified by recordScanFailure: tolerated, the store
+// counts as unread; in the selected store or the binding, the walk aborts.
+func (c *sourceWorkflowMatchCollector) sameIDConvoyElsewhere(launch sourceLaunchConvoy, currentSourceStoreRef string) (string, error) {
+	inScope := func(dir string) bool {
+		return sourceStoreRefSelectsDir(launch.scopeRef, dir, c.cityPath, c.cityName, c.cfg)
+	}
+	for i, info := range c.stores {
+		if i == launch.holder || info.store == nil || info.isClassBinding() || inScope(info.scopePath(c.cityPath)) {
+			continue
+		}
+		if _, failed := c.failedStores[i]; failed {
+			continue // its skip is accounted for below
+		}
+		other, err := info.store.Get(launch.id)
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+		case err != nil:
+			c.attemptedStores[i] = struct{}{}
+			if err := c.recordScanFailure(i, info, currentSourceStoreRef, "probing input convoy "+launch.id, err); err != nil {
+				return "", err
+			}
+		case other.Type == "convoy":
+			return fmt.Sprintf("%s also holds a convoy %s", workflowDeleteStoreLabelForView(c.cfg, c.cityPath, info), launch.id), nil
+		}
+	}
+	for _, skip := range c.skips {
+		if !inScope(skip.path) {
+			return fmt.Sprintf("%s could not be read to rule out a convoy %s", skip.path, launch.id), nil
+		}
+	}
+	return "", nil
 }
 
 // openRootOf returns the first of roots with anything of its workflow tree
