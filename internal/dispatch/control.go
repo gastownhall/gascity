@@ -984,13 +984,18 @@ func spawnNextAttempt(ctx context.Context, store beads.GraphStore, control beads
 // between the closing step and the lane's next claim any other pool session can
 // take it. A held root (in_progress + assignee; the reconciler clears it when the
 // holder dies) names the live lane. Best effort: any read miss leaves the attempt
-// unassigned, i.e. the previous behaviour.
-func inheritRootHolderAssignee(store beads.Store, control beads.Bead, recipe *formula.Recipe) {
+// unassigned, i.e. the previous behavior.
+func inheritRootHolderAssignee(store beads.GraphStore, control beads.Bead, recipe *formula.Recipe) {
+	lane := strings.TrimSpace(control.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
 	var pinned []*formula.RecipeStep
 	for i := range recipe.Steps {
 		step := &recipe.Steps[i]
 		kind := step.Metadata[beadmeta.KindMetadataKey]
 		if kind == beadmeta.KindSpec || isAttemptControlKind(kind) || strings.TrimSpace(step.Assignee) != "" {
+			continue
+		}
+		// An attempt routed to a different lane than the one holding the root is never pinned to that holder.
+		if routed := strings.TrimSpace(step.Metadata[beadmeta.RoutedToMetadataKey]); lane != "" && routed != "" && routed != lane {
 			continue
 		}
 		if step.Metadata[beadmeta.SessionAffinityMetadataKey] == "require" &&

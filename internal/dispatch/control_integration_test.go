@@ -2640,9 +2640,15 @@ func TestSpawnNextAttemptPinsAffineAttemptToRootHolder(t *testing.T) {
 		name       string
 		rootHolder string
 		want       string
+		rootStatus string // defaults to in_progress
+		dropRootID bool   // blank the control's gc.root_bead_id
+		lane       string // control gc.execution_routed_to
 	}{
-		{"held root", "gc-wisp-holder", "gc-wisp-holder"},
-		{"unheld root", "", ""},
+		{name: "held root", rootHolder: "gc-wisp-holder", want: "gc-wisp-holder"},
+		{name: "unheld root", rootHolder: "", want: ""},
+		{name: "root not in_progress", rootHolder: "gc-wisp-holder", want: "", rootStatus: "open"},
+		{name: "missing root id", rootHolder: "gc-wisp-holder", want: "", dropRootID: true},
+		{name: "other lane", rootHolder: "gc-wisp-holder", want: "", lane: "other-agent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -2657,6 +2663,9 @@ formula_v2 = true
 [[agent]]
 name = "lane"
 max_active_sessions = 4
+
+[[agent]]
+name = "other-agent"
 
 [[agent]]
 name = "control-dispatcher"
@@ -2685,21 +2694,28 @@ max_active_sessions = 1
 				Metadata: map[string]string{"gc.kind": "workflow"},
 			})
 			status, assignee := "in_progress", tc.rootHolder
+			if tc.rootStatus != "" {
+				status = tc.rootStatus
+			}
 			if err := store.Update(root.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
 				t.Fatalf("hold root: %v", err)
 			}
-			control := mustCreate(t, store, beads.Bead{
-				Title: "review retry",
-				Metadata: map[string]string{
-					"gc.kind":             "retry",
-					"gc.root_bead_id":     root.ID,
-					"gc.step_ref":         "mol-test.review",
-					"gc.step_id":          "review",
-					"gc.max_attempts":     "3",
-					"gc.source_step_spec": string(specJSON),
-					"gc.control_epoch":    "1",
-				},
-			})
+			controlMeta := map[string]string{
+				"gc.kind":             "retry",
+				"gc.root_bead_id":     root.ID,
+				"gc.step_ref":         "mol-test.review",
+				"gc.step_id":          "review",
+				"gc.max_attempts":     "3",
+				"gc.source_step_spec": string(specJSON),
+				"gc.control_epoch":    "1",
+			}
+			if tc.dropRootID {
+				delete(controlMeta, "gc.root_bead_id")
+			}
+			if tc.lane != "" {
+				controlMeta["gc.execution_routed_to"] = tc.lane
+			}
+			control := mustCreate(t, store, beads.Bead{Title: "review retry", Metadata: controlMeta})
 			attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.review.attempt.1", 1, map[string]string{
 				"gc.outcome":        "fail",
 				"gc.failure_class":  "transient",
@@ -2707,7 +2723,7 @@ max_active_sessions = 1
 			})
 			mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-			if _, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath}); err != nil {
+			if _, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}); err != nil {
 				t.Fatalf("processRetryControl: %v", err)
 			}
 			attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.review.attempt.2")
