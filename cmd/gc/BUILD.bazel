@@ -2188,6 +2188,7 @@ go_test(
         "reconcile_sim_pending_test.go",
         "reconcile_sim_respawn_test.go",
         "reconcile_sim_scenarios_test.go",
+        "reconcile_sim_session_reset_test.go",
         "reconcile_sim_test.go",
         "reconcile_sim_v59x_test.go",
         "reconcile_steps_pool_test.go",
