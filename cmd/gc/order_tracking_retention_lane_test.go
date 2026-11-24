@@ -2,12 +2,19 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // retentionListingStore parks the closed order-tracking listing the retention
@@ -69,6 +76,39 @@ func (s *retentionListingStore) DepList(id, direction string) ([]beads.Dep, erro
 	return s.Store.DepList(id, direction)
 }
 
+// retentionEligibleSeed is n closed order-tracking runs of one order, all
+// 8 days old (past the 7d default TTL), oldest first: with n above
+// minClosedOrderTrackingRetained, the n-10 oldest are prunable.
+func retentionEligibleSeed(prefix string, n int, now time.Time) []beads.Bead {
+	seed := make([]beads.Bead, 0, n)
+	for i := range n {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("%s-%02d", prefix, i),
+			Title:     "order:" + prefix,
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:" + prefix, labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	return seed
+}
+
+// writeFreshRetentionBackup stamps a backup taken an hour ago under cityPath,
+// so the retention watchdog's backup-age guard lets the sweep delete.
+func writeFreshRetentionBackup(t *testing.T, cityPath string, now time.Time) {
+	t.Helper()
+	backupDir := filepath.Join(cityPath, ".beads", "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", backupDir, err)
+	}
+	stateJSON := fmt.Sprintf(`{"timestamp":%q}`, now.Add(-time.Hour).Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(backupDir, "backup_state.json"), []byte(stateJSON), 0o644); err != nil {
+		t.Fatalf("write backup_state.json: %v", err)
+	}
+}
+
 // The startup order pass runs before the cold-start reconcile and readiness,
 // so it must not run the retention sweep: with prunable beads, a fresh backup
 // and a zero stamp, it neither lists nor deletes closed tracking runs and
@@ -96,5 +136,99 @@ func TestStartupOrderPassDoesNotRunRetentionSweep(t *testing.T) {
 	}
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want zero after the order pass", cr.orderTrackingRetentionWatchdogLast)
+	}
+}
+
+// retentionRunHarness is a city runtime that starts cleanly through run(),
+// whose city store parks the retention listing until release closes.
+type retentionRunHarness struct {
+	cr      *CityRuntime
+	store   *retentionListingStore
+	od      *drainSignalOrderDispatcher
+	started chan struct{}
+	release func()
+}
+
+// drainSignalOrderDispatcher closes drained on its first drain: shutdown()
+// drains the order dispatchers before it stops sessions and closes the
+// storage binding, so drained marks shutdown under way.
+type drainSignalOrderDispatcher struct {
+	drained   chan struct{}
+	drainOnce sync.Once
+}
+
+func (d *drainSignalOrderDispatcher) dispatch(context.Context, string, time.Time) {}
+
+func (d *drainSignalOrderDispatcher) drain(context.Context) bool {
+	d.drainOnce.Do(func() { close(d.drained) })
+	return true
+}
+
+func newRetentionRunHarness(t *testing.T) *retentionRunHarness {
+	t.Helper()
+	t.Setenv(fsPressureThresholdEnv, "100")
+	now := time.Now()
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	writeFreshRetentionBackup(t, cityPath, now)
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	cr, runtimeErr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:      newDrainOps(sp),
+		Rec:       events.Discard,
+		Stdout:    io.Discard,
+		Stderr:    io.Discard,
+		OnStarted: func() { startedOnce.Do(func() { close(started) }) },
+	})
+	if runtimeErr != nil {
+		t.Fatalf("building the city runtime: %v", runtimeErr)
+	}
+	od := &drainSignalOrderDispatcher{drained: make(chan struct{})}
+	cr.od = od
+	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	store := newRetentionListingStore(beads.NewMemStoreFrom(100, retentionEligibleSeed("run", minClosedOrderTrackingRetained+2, now), nil), gate)
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = store
+	cr.setControllerState(cs)
+	return &retentionRunHarness{cr: cr, store: store, od: od, started: started, release: release}
+}
+
+// A restart must not wait for the retention sweep: with the closed
+// order-tracking listing parked, run() still fires onStarted and publishes
+// readiness (#6429: a 73k-bead backlog kept a city not-ready for minutes).
+func TestCityRuntimeRunReachesReadyWhileRetentionListingBlocks(t *testing.T) {
+	h := newRetentionRunHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		h.cr.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		h.release()
+		awaitClose(t, runDone, "run() returning after cancellation")
+	})
+
+	awaitClose(t, h.started, "onStarted while the retention listing is parked")
+	if n := h.store.listed.Load(); n != 0 {
+		t.Fatalf("retention listings returned = %d, want 0: readiness waited for the listing", n)
 	}
 }
