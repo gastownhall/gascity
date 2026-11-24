@@ -72,6 +72,8 @@ const (
 	BondVarsMetadataKey       = "gc.bond_vars"
 	BoundStepIDMetadataKey    = "gc.bound_step_id"
 	BrainParentSIDMetadataKey = "gc.brain_parent_sid"
+	BlockedOnMetadataKey      = "gc.blocked_on"
+	BlockerV2MetadataKey      = "gc.blocker.v2"
 	// BudgetDeferredUntilMetadataKey holds an RFC3339 timestamp stamped by the
 	// sling boundary (host/bin/gc in the outer city repo) when a claim attempt
 	// is refused for build-budget reasons; deacon-dispatch.sh clears it on
@@ -623,6 +625,8 @@ var KnownMetadataKeys = []string{
 	AwaitingHumanMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
+	BlockedOnMetadataKey,
+	BlockerV2MetadataKey,
 	BoundStepIDMetadataKey,
 	BrainParentSIDMetadataKey,
 	BudgetDeferredUntilMetadataKey,

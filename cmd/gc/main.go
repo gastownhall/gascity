@@ -357,6 +357,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	configureJSONSchemaFlag(root)
 	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
+		newPoolAdmissionProbeCmd(stdout, stderr),
 		newStartCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),
 		newReloadCmd(stdout, stderr),

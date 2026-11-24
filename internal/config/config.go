@@ -1450,6 +1450,10 @@ func (w *Workspace) EffectiveSuspendedOnStart() bool {
 
 // BeadsConfig holds bead store settings.
 type BeadsConfig struct {
+	// BlockerWriteValidator is an opt-in city-relative Python admission
+	// validator for gc.blocked_on and gc.blocker.v2 metadata writes. It runs
+	// before either bd passthrough or class-store mutation.
+	BlockerWriteValidator string `toml:"blocker_write_validator,omitempty"`
 	// Provider selects the bead store backend: "bd" (default, Dolt-backed),
 	// "file", or "exec:<script>" for a user-supplied script. The "sqlite",
 	// "sqlite-cgo", and "coordstore" coordination-store providers were removed

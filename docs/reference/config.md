@@ -298,6 +298,7 @@ BeadsConfig holds bead store settings.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `blocker_write_validator` | string |  |  | BlockerWriteValidator is an opt-in city-relative Python admission validator for gc.blocked_on and gc.blocker.v2 metadata writes. It runs before either bd passthrough or class-store mutation. |
 | `provider` | string |  | `bd` | Provider selects the bead store backend: "bd" (default, Dolt-backed), "file", or "exec:&lt;script&gt;" for a user-supplied script. The "sqlite", "sqlite-cgo", and "coordstore" coordination-store providers were removed and now hard-error; migrate to "doltlite" or remove the setting. |
 | `backend` | string |  |  | Backend selects the bd storage engine when Provider is "bd". Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores. |
 | `event_hooks` | boolean |  | `true` | EventHooks controls installation of the bead event-forwarding hooks (.beads/hooks/on_create,on_update,on_close) that shell out to `gc event emit` on every bead write. Defaults to true. Set to false once the controller's native cache-events already observe bead changes (the bd_hooks doctor gate): the lifecycle then removes the event hooks (leaving git hooks untouched) and stops reinstalling them, clearing the per-write churn and the native-store gate. |

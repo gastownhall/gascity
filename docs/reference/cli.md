@@ -63,6 +63,7 @@ gc [flags]
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
+| [gc pool-admission-probe](#gc-pool-admission-probe) | Read-only probe of the pool start live census |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
 | [gc ready](#gc-ready) | List ready (claimable) work across every store in the city |
@@ -3691,6 +3692,14 @@ gc pack release verify <source> [flags]
 | `--hash` | string |  | expected sha256:&lt;64hex&gt; content hash |
 | `--path` | string |  | pack path inside the source repository |
 
+## gc pool-admission-probe
+
+Read-only probe of the pool start live census
+
+```
+gc pool-admission-probe
+```
+
 ## gc prime
 
 Outputs the behavioral prompt for an agent.
@@ -4674,6 +4683,7 @@ gc session
 | Subcommand | Description |
 |------------|-------------|
 | [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
+| [gc session capacity-contract](#gc-session-capacity-contract) | Report the native exact-session capacity admission contract |
 | [gc session close](#gc-session-close) | Close a session permanently |
 | [gc session kill](#gc-session-kill) | Force-kill session runtime |
 | [gc session list](#gc-session-list) | List chat sessions |
@@ -4727,6 +4737,18 @@ gc session attach <session-id-or-alias> [flags]
 |------|------|---------|-------------|
 | `--no-start` | bool |  | attach only if the session is running; never create, start or wake it |
 | `--wait-timeout` | duration | `2m0s` | max time to wait for the controller to start a stopped session before attaching |
+
+## gc session capacity-contract
+
+Report the native exact-session capacity admission contract
+
+```
+gc session capacity-contract [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | JSON output (the only supported format) |
 
 ## gc session close
 
