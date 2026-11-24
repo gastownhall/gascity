@@ -799,6 +799,11 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // elevation fence is about the city, and nothing here tells where a provider
 // runs its processes, so no provider is exempt from it.
 //
+// Off Windows, before any scan, a provider that can scan the process table
+// also refuses, terminating nothing, while a runtime another uid recorded for
+// the session in this boot is still alive (checkRuntimeOwner): the scan skips
+// other uids' processes, so it cannot see that runtime (SESSION-START-029).
+//
 // Where terminating a root can leave a descendant the termination could not
 // reach (proctable.RescanAfterTermination), that descendant still carries the
 // session's identity and is reported as a root by any scan made after it lost
@@ -812,6 +817,9 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return recordElevatedSessionStart(m.cityPath)
+	}
+	if err := m.checkRuntimeOwner(sessionID); err != nil {
+		return err
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	for pass := 1; ; pass++ {

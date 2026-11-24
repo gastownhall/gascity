@@ -219,6 +219,24 @@ func TestScanWithRootEmptyReturnsNonNilSlice(t *testing.T) {
 	}
 }
 
+// TestScanBySessionIDSkipsRootsOwnedByAnotherUID pins the silent skip the
+// runtime-owner fence in internal/session (#5870) exists for: a process
+// another uid owns yields no root and no EntryError, so a restart under
+// another uid cannot see the preserved population at all.
+func TestScanBySessionIDSkipsRootsOwnedByAnotherUID(t *testing.T) {
+	root := t.TempDir()
+	buildFakeProc(t, root, 100, map[string]string{"GC_SESSION_ID": "ga-abc"})
+	writeFakeProcessUID(t, filepath.Join(root, "100"), os.Geteuid()+1)
+
+	got, err := scanWithRoot(root, "ga-abc")
+	if err != nil {
+		t.Fatalf("scanWithRoot error = %v, want none: a root another uid owns is skipped silently", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("scanWithRoot = %v, want no root for a process another uid owns", got)
+	}
+}
+
 func TestScanWithRootFiltersBySessionID(t *testing.T) {
 	root := t.TempDir()
 	// pid 100: parent 1 (init), session ga-abc

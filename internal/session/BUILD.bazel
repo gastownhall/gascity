@@ -70,6 +70,8 @@ go_library(
         "runtime_lease_boot_other.go",
         "runtime_lease_unix.go",
         "runtime_lease_windows.go",
+        "runtime_owner.go",
+        "runtime_owner_windows.go",
         "sleep_reason.go",
         "startup_health.go",
         "startup_nudge_handback.go",
@@ -225,6 +227,7 @@ go_test(
         "runtime_lease_identity_windows_test.go",
         "runtime_lease_test.go",
         "runtime_lease_unix_test.go",
+        "runtime_owner_test.go",
         "session_mutation_lock_test.go",
         "sleep_reason_test.go",
         "startup_health_backoff_test.go",
@@ -354,6 +357,9 @@ go_test(
         "@rules_go//go/platform:ios": [
             "//internal/pidutil",
         ],
+        "@rules_go//go/platform:js": [
+            "//internal/pidutil",
+        ],
         "@rules_go//go/platform:linux": [
             "//internal/pidutil",
             "//internal/runtime/runtimecontract/reference",
@@ -362,6 +368,15 @@ go_test(
             "//internal/pidutil",
         ],
         "@rules_go//go/platform:openbsd": [
+            "//internal/pidutil",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/pidutil",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/pidutil",
+        ],
+        "@rules_go//go/platform:qnx": [
             "//internal/pidutil",
         ],
         "@rules_go//go/platform:solaris": [
