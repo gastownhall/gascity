@@ -42,6 +42,187 @@ func compileNestedSteps(t *testing.T, steps []*Step) []*Step {
 	return collectGraphSteps(f.Steps)
 }
 
+func mustNestedStep(t *testing.T, steps []*Step, id string) *Step {
+	t.Helper()
+	step := findGraphStepByID(steps, id)
+	if step == nil {
+		ids := make([]string, 0, len(steps))
+		for _, s := range steps {
+			ids = append(ids, s.ID)
+		}
+		t.Fatalf("missing compiled step %q; have %v", id, ids)
+	}
+	return step
+}
+
+// assertNestedMeta checks each key of want on step; an empty want value means
+// the key must be absent.
+func assertNestedMeta(t *testing.T, step *Step, want map[string]string) {
+	t.Helper()
+	for key, value := range want {
+		got, present := step.Metadata[key]
+		if value == "" {
+			if present {
+				t.Errorf("%s %s = %q, want absent", step.ID, key, got)
+			}
+			continue
+		}
+		if got != value {
+			t.Errorf("%s %s = %q, want %q", step.ID, key, got, value)
+		}
+	}
+}
+
+// TestApplyRalph_NestedCheckWithChildrenKeepsInnerLoopIdentity pins issue
+// #9412: a check-with-children nested in another check's body keeps its own
+// iteration scope and members. Only the inner control joins the enclosing
+// iteration, as dispatch.buildAttemptRecipe builds it for outer iterations 2+.
+func TestApplyRalph_NestedCheckWithChildrenKeepsInnerLoopIdentity(t *testing.T) {
+	t.Parallel()
+
+	const (
+		outerIter = "outer.iteration.1"
+		innerCtl  = outerIter + ".inner"
+		innerIter = innerCtl + ".iteration.1"
+	)
+	innerMember := func(scopeRef, ralphStepID string) map[string]string {
+		return map[string]string{
+			beadmeta.ScopeRefMetadataKey:           scopeRef,
+			beadmeta.RalphStepIDMetadataKey:        ralphStepID,
+			beadmeta.ScopeRoleMetadataKey:          beadmeta.ScopeRoleMember,
+			beadmeta.OnFailMetadataKey:             "abort_scope",
+			beadmeta.AttemptMetadataKey:            "1",
+			beadmeta.IterationMetadataKey:          "1",
+			beadmeta.StepIDMetadataKey:             "i1",
+			beadmeta.StepRefMetadataKey:            scopeRef + ".i1",
+			beadmeta.KindMetadataKey:               "",
+			beadmeta.ControlForMetadataKey:         "",
+			beadmeta.ScopeNameMetadataKey:          "",
+			beadmeta.OutputJSONRequiredMetadataKey: "",
+		}
+	}
+	innerScope := func(stepID, controlFor string) map[string]string {
+		return map[string]string{
+			beadmeta.KindMetadataKey:        beadmeta.KindScope,
+			beadmeta.ScopeRoleMetadataKey:   beadmeta.ScopeRoleBody,
+			beadmeta.ScopeNameMetadataKey:   stepID,
+			beadmeta.StepIDMetadataKey:      stepID,
+			beadmeta.RalphStepIDMetadataKey: stepID,
+			beadmeta.ControlForMetadataKey:  controlFor,
+			beadmeta.AttemptMetadataKey:     "1",
+			beadmeta.IterationMetadataKey:   "1",
+			beadmeta.ScopeRefMetadataKey:    "",
+			beadmeta.OnFailMetadataKey:      "",
+		}
+	}
+	innerControl := func(stepID, scopeRef, ralphStepID string) map[string]string {
+		return map[string]string{
+			beadmeta.KindMetadataKey:        beadmeta.KindRalph,
+			beadmeta.StepIDMetadataKey:      stepID,
+			beadmeta.ScopeRefMetadataKey:    scopeRef,
+			beadmeta.ScopeRoleMetadataKey:   beadmeta.ScopeRoleMember,
+			beadmeta.OnFailMetadataKey:      "abort_scope",
+			beadmeta.RalphStepIDMetadataKey: ralphStepID,
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		steps []*Step
+		check func(t *testing.T, steps []*Step)
+	}{
+		{
+			name: "two_level",
+			steps: []*Step{nestedCheck("outer",
+				nestedCheck("inner", nestedPlain("i1")),
+				nestedPlain("o1", "inner"),
+			)},
+			check: func(t *testing.T, steps []*Step) {
+				assertNestedMeta(t, mustNestedStep(t, steps, innerIter+".i1"), innerMember(innerIter, "inner"))
+				assertNestedMeta(t, mustNestedStep(t, steps, innerIter+".i1-scope-check"), map[string]string{
+					beadmeta.KindMetadataKey:        beadmeta.KindScopeCheck,
+					beadmeta.ScopeRefMetadataKey:    innerIter,
+					beadmeta.RalphStepIDMetadataKey: "inner",
+				})
+				scope := mustNestedStep(t, steps, innerIter)
+				assertNestedMeta(t, scope, innerScope("inner", innerCtl))
+				if !containsString(scope.Needs, innerIter+".i1") || containsString(scope.Needs, innerIter+".i1-scope-check") {
+					t.Errorf("inner iteration scope needs = %v, want the raw member %s.i1, not its scope-check", scope.Needs, innerIter)
+				}
+				assertNestedMeta(t, mustNestedStep(t, steps, innerCtl), innerControl("inner", outerIter, "outer"))
+				o1 := mustNestedStep(t, steps, outerIter+".o1")
+				if !containsString(o1.Needs, innerCtl+"-scope-check") {
+					t.Errorf("o1 needs = %v, want the inner control's scope-check %s-scope-check", o1.Needs, innerCtl)
+				}
+			},
+		},
+		{
+			name: "o1_parallel",
+			steps: []*Step{nestedCheck("outer",
+				nestedCheck("inner", nestedPlain("i1")),
+				nestedPlain("o1"),
+			)},
+			check: func(t *testing.T, steps []*Step) {
+				assertNestedMeta(t, mustNestedStep(t, steps, innerIter+".i1"), innerMember(innerIter, "inner"))
+				assertNestedMeta(t, mustNestedStep(t, steps, innerIter), innerScope("inner", innerCtl))
+				assertNestedMeta(t, mustNestedStep(t, steps, innerCtl), innerControl("inner", outerIter, "outer"))
+			},
+		},
+		{
+			name: "three_level",
+			steps: []*Step{nestedCheck("outer",
+				nestedCheck("mid", nestedCheck("inner", nestedPlain("i1"))),
+			)},
+			check: func(t *testing.T, steps []*Step) {
+				const (
+					midCtl     = outerIter + ".mid"
+					midIter    = midCtl + ".iteration.1"
+					deepCtl    = midIter + ".inner"
+					deepIter   = deepCtl + ".iteration.1"
+					deepMember = deepIter + ".i1"
+				)
+				assertNestedMeta(t, mustNestedStep(t, steps, deepMember), innerMember(deepIter, "inner"))
+				assertNestedMeta(t, mustNestedStep(t, steps, deepMember+"-scope-check"), map[string]string{
+					beadmeta.ScopeRefMetadataKey:    deepIter,
+					beadmeta.RalphStepIDMetadataKey: "inner",
+				})
+				assertNestedMeta(t, mustNestedStep(t, steps, deepIter), innerScope("inner", deepCtl))
+				assertNestedMeta(t, mustNestedStep(t, steps, deepCtl), innerControl("inner", midIter, "mid"))
+				assertNestedMeta(t, mustNestedStep(t, steps, midIter), innerScope("mid", midCtl))
+				assertNestedMeta(t, mustNestedStep(t, steps, midCtl), innerControl("mid", outerIter, "outer"))
+			},
+		},
+		{
+			name: "retry_in_inner_body",
+			steps: []*Step{nestedCheck("outer",
+				nestedCheck("inner", &Step{ID: "r", Title: "r", Type: "task", Retry: &RetrySpec{MaxAttempts: 2}}),
+				nestedPlain("o1", "inner"),
+			)},
+			check: func(t *testing.T, steps []*Step) {
+				assertNestedMeta(t, mustNestedStep(t, steps, innerIter+".r"), map[string]string{
+					beadmeta.KindMetadataKey:        beadmeta.KindRetry,
+					beadmeta.ScopeRefMetadataKey:    innerIter,
+					beadmeta.RalphStepIDMetadataKey: "inner",
+					beadmeta.StepIDMetadataKey:      "r",
+				})
+				assertNestedMeta(t, mustNestedStep(t, steps, innerIter+".r.attempt.1"), map[string]string{
+					beadmeta.ScopeRefMetadataKey:     innerIter,
+					beadmeta.RalphStepIDMetadataKey:  "inner",
+					beadmeta.ControlForMetadataKey:   innerIter + ".r",
+					beadmeta.RetryAttemptMetadataKey: "1",
+				})
+				assertNestedMeta(t, mustNestedStep(t, steps, innerIter), innerScope("inner", innerCtl))
+				assertNestedMeta(t, mustNestedStep(t, steps, innerCtl), innerControl("inner", outerIter, "outer"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.check(t, compileNestedSteps(t, tc.steps))
+		})
+	}
+}
+
 // renderCompiledSteps is a stable dump of every compiled step's identity,
 // edges and metadata, one line per step in compile order.
 func renderCompiledSteps(steps []*Step) string {
