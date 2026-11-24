@@ -71,6 +71,7 @@ go_library(
         "runtime_lease_unix.go",
         "runtime_lease_windows.go",
         "runtime_owner.go",
+        "runtime_owner_key.go",
         "runtime_owner_windows.go",
         "sleep_reason.go",
         "startup_health.go",

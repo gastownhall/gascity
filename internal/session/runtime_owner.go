@@ -18,11 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
-// runtimeOwnerKey is the session metadata key holding the runtime-owner
-// record: the uid that launched the session's runtime, the boot it ran in,
-// and the identity of each of its process-table roots.
-const runtimeOwnerKey = "runtime_owner"
-
 // runtimeOwner is the runtime-owner record. A Manager writes it after each
 // start it makes through a process-table-scanner provider, so a later start
 // under another uid, whose scan cannot see this uid's processes, can still
