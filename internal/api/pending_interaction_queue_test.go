@@ -50,7 +50,7 @@ func TestExtmsgNotifyQueuesBehindPending(t *testing.T) {
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Blocked")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval", Prompt: "Allow Bash?"})
 
-	if err := srv.sendBackgroundMessageToSession(context.Background(), fs.cityBeadStore, info.ID, "new message in #ops"); err != nil {
+	if err := srv.sendBackgroundMessageToSession(context.Background(), beadstest.Sessions(fs.cityBeadStore), info.ID, "new message in #ops"); err != nil {
 		t.Fatalf("sendBackgroundMessageToSession = %v, want the notice queued", err)
 	}
 	if got := fs.sp.CountCalls("Nudge", info.SessionName) + fs.sp.CountCalls("NudgeNow", info.SessionName); got != 0 {

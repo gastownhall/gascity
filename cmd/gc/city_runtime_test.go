@@ -4721,7 +4721,7 @@ func (f fixedWispGC) shouldRun(time.Time) bool {
 	return true
 }
 
-func (f fixedWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+func (f fixedWispGC) runGC(wispGCRoots, wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	return f.purged, f.err
 }
 
@@ -5001,7 +5001,9 @@ func TestCityRuntimeTickRunsOnDeathWithCanonicalRigEnv(t *testing.T) {
 	}
 	prevPoolRunning := map[string]bool{}
 	for sessionName, info := range handlers {
-		info.Command = "printf '%s|%s|%s' \"${GC_DOLT_PORT:-}\" \"${GC_DOLT_USER:-}\" \"${GC_DOLT_PASSWORD:-}\" > " + outFile
+		info.Command = platformCommand(
+			"printf '%s|%s|%s' \"${GC_DOLT_PORT:-}\" \"${GC_DOLT_USER:-}\" \"${GC_DOLT_PASSWORD:-}\" > "+outFile,
+			"Set-Content -LiteralPath "+psLiteral(outFile)+" -NoNewline -Value ('{0}|{1}|{2}' -f $env:GC_DOLT_PORT, $env:GC_DOLT_USER, $env:GC_DOLT_PASSWORD)")
 		handlers[sessionName] = info
 		prevPoolRunning[sessionName] = true
 		break

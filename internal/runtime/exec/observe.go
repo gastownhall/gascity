@@ -30,10 +30,6 @@ const probeOpTimeout = 4 * time.Second
 // observeOutputCap is the most stdout one `observe` answer may print.
 const observeOutputCap = 1 << 20
 
-// exitCodeFreshCollision is a fresh_only `start` or `provision` refusing a
-// name a box holds (EX_CANTCREAT).
-const exitCodeFreshCollision = 73
-
 // absentPollInterval paces Relaunch's wait for its stopped box to go.
 var absentPollInterval = 200 * time.Millisecond
 
@@ -217,6 +213,28 @@ func (p *Provider) ObserveIdentity(name string) (map[string]string, error) {
 	return o.identity, nil
 }
 
+// peekBox is a v2-ready script's Peek of whatever box holds name. A fresh
+// `observe` picks the read: a running box's screen as Peek reads it (over
+// the carrier, or the `peek` op); a dead box's from the `peek` op itself,
+// whose exit 66 ([runtime.ExitCodeNoScreen]) answers "no screen", an empty
+// screen with no error, as peekOp answers it for every caller (v2's
+// dead-box classification reads an empty screen as nothing to classify); no
+// box, nothing, as the seams answer a name no box runs. Any other failure,
+// the observe's included, is an error: never an empty screen.
+func (p *Provider) peekBox(name string, lines int) (string, error) {
+	o, err := p.observe(context.Background(), name, nil)
+	if err != nil {
+		return "", err
+	}
+	switch o.state {
+	case stateRunning:
+		return p.Peek(name, lines)
+	case stateAbsent:
+		return "", nil
+	}
+	return p.peekOp(context.Background(), name, lines)
+}
+
 // killObjectRequest is `kill-object`'s stdin.
 type killObjectRequest struct {
 	Object   observeObject `json:"object"`
@@ -302,23 +320,37 @@ func (p *Provider) startFresh(ctx context.Context, name string, cfg runtime.Conf
 }
 
 // createFresh creates the box and launches the agent: `provision` then a
-// fresh launchAgent for a separable pack, otherwise the welded `start` op
-// followed by finishStart, as Start runs it.
+// fresh launchAgent and its first turn's handback for a separable pack, otherwise the
+// welded `start` op followed by finishStart, as Start runs it. For a pack
+// sharing the host filesystem the host work comes first and session_setup
+// last, as in Start.
 func (p *Provider) createFresh(ctx context.Context, name string, cfg runtime.Config) error {
-	data, err := marshalStartConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("exec provider: marshaling start config: %w", err)
-	}
+	hostWork := p.sharesHostFS()
 	if p.supportsSeparableLaunch() {
+		data, err := p.startConfigFor(ctx, name, withoutNudge(cfg), hostWork)
+		if err != nil {
+			return err
+		}
 		if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
 			return err
 		}
-		return p.launchAgent(ctx, name, cfg)
+		if err := p.launchAgent(ctx, name, cfg); err != nil {
+			return err
+		}
+		p.finishSeparableLaunch(ctx, name, cfg, hostWork)
+		return nil
+	}
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
+	if err != nil {
+		return err
 	}
 	if _, err := p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
 		return err
 	}
 	_, err = p.finishStart(ctx, name, cfg)
+	if err == nil && hostWork {
+		p.runHostSessionSetup(ctx, name, cfg)
+	}
 	return err
 }
 
@@ -359,7 +391,7 @@ func freshCollision(err error) bool {
 	if !errors.As(err, &e) || e.op != "start" && e.op != "provision" {
 		return false
 	}
-	return e.code == exitCodeFreshCollision || isStartCollision(e.msg)
+	return e.code == runtime.ExitCodeFreshCollision || isStartCollision(e.msg)
 }
 
 // cleanupAfterFreshStartFailure returns the error a failed fresh start
@@ -421,4 +453,24 @@ func (p *Provider) awaitAbsent(ctx context.Context, name string) error {
 		case <-time.After(absentPollInterval):
 		}
 	}
+}
+
+// Observation is one well-formed `observe` answer as gc reads it: State is
+// running, dead or absent; ObjectID and ObjectCreated are set when present;
+// Identity is nil while it is not readable. It is exported for the
+// conformance kit (internal/runtime/runtimecontract), so the kit holds a
+// script to exactly the answers gc accepts.
+type Observation struct {
+	State, ObjectID, ObjectCreated, Agent, AgentPID string
+	Identity                                        map[string]string
+}
+
+// ParseObserve reads one `observe` answer as the provider does: anything
+// it would read as unknown (state unknown included) is an error.
+func ParseObserve(out []byte) (Observation, error) {
+	o, err := parseObserve(out)
+	if err != nil {
+		return Observation{}, err
+	}
+	return Observation{State: o.state, ObjectID: o.object.ID, ObjectCreated: o.object.Created, Agent: o.agent, AgentPID: o.agentPID, Identity: o.identity}, nil
 }

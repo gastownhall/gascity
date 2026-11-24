@@ -131,7 +131,7 @@ func (s *Server) streamSessionLog(
 		}
 
 		// Use tail=1 (last compaction segment) to limit parsing scope.
-		factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+		factory, err := s.workerFactory(s.state.Stores().Sessions())
 		if err != nil {
 			return false
 		}
@@ -328,7 +328,7 @@ func (s *Server) streamSessionLogHuma(
 			return false
 		}
 
-		factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+		factory, err := s.workerFactory(s.state.Stores().Sessions())
 		if err != nil {
 			return false
 		}

@@ -48,6 +48,10 @@ var goModDownloadExemptWorkflows = map[string]string{
 	"review-formulas.yml": "Bazel fetches modules via go_deps",
 	// Installs gocyclo with `go install pkg@version`; never builds this module.
 	"complexity.yml": "go install of a pinned tool only",
+	// Its govulncheck job scans the nested Go modules (tools/nogo), whose
+	// go.sum the action's cache key does not cover; the job runs the same
+	// retried download script in the module directory instead.
+	"security-scan.yml": "scans nested modules; runs go-mod-download-retry.sh in each",
 	// Publishing jobs are not migrated: they keep actions/setup-go's own
 	// cache (its default), which restores GOMODCACHE from setup-go-* entries,
 	// so they never read the go-mod-download cache this action writes.

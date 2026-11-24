@@ -130,6 +130,159 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 }
 
+// TestDoRigAdd_WaitsForControllerReload pins that `gc rig add` returns only
+// after the running controller has applied the new rig. A reload that is merely
+// queued leaves the controller serving `gc ready` from the pre-rig config until
+// its reconcile tick starts the reload, so work created in the rig right after
+// the add is missing from a controller-served answer.
+func TestDoRigAdd_WaitsForControllerReload(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	var requests []reloadControlRequest
+	sendReloadControlRequestHook = func(_ string, req reloadControlRequest) (reloadControlReply, error) {
+		requests = append(requests, req)
+		return reloadControlReply{Outcome: reloadOutcomeApplied}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+	if len(requests) != 1 {
+		t.Fatalf("controller reload requests = %d (%+v), want exactly 1", len(requests), requests)
+	}
+	if !requests[0].Wait || requests[0].Timeout == "" {
+		t.Errorf("reload request = %+v, want Wait with a Timeout so the rig is served before rig add returns", requests[0])
+	}
+}
+
+// TestDoRigAdd_AddsRigWhenControllerUnavailable pins that waiting for the
+// reload never turns a stopped controller into a failed add: the rig is in
+// city.toml and a later controller start reads it.
+func TestDoRigAdd_AddsRigWhenControllerUnavailable(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{}, errControllerUnavailable
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd returned %d with no controller, stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "my-frontend") {
+		t.Errorf("city.toml should contain the rig:\n%s", data)
+	}
+	if strings.Contains(stderr.String(), "controller reload did not complete") {
+		t.Errorf("stderr should not warn about an incomplete reload when no controller answers:\n%s", stderr.String())
+	}
+}
+
+// TestDoRigAdd_WarnsWhenControllerReloadIncomplete pins that a controller
+// answering the reload without applying it still leaves the rig added, but
+// tells the user to run `gc reload` so the rig is served.
+func TestDoRigAdd_WarnsWhenControllerReloadIncomplete(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{Outcome: "failed", Error: "boom"}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "my-frontend") {
+		t.Errorf("city.toml should contain the rig:\n%s", data)
+	}
+	for _, want := range []string{"controller reload did not complete", "gc reload"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+// TestDoRigAdd_WarnsWhenControllerExchangeFails pins that a running
+// controller whose reload exchange fails (unparsable reply, unresponsive)
+// still leaves the rig added, but tells the user to run `gc reload` instead
+// of silently falling back to a supervisor poke.
+func TestDoRigAdd_WarnsWhenControllerExchangeFails(t *testing.T) {
+	cases := map[string]error{
+		"unparsable reply": fmt.Errorf("parsing response: %w", errors.New("bad json")),
+		"unresponsive":     errControllerUnresponsive,
+	}
+	for name, sendErr := range cases {
+		t.Run(name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+			rigPath := filepath.Join(t.TempDir(), "my-frontend")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_DOLT", "skip")
+			t.Setenv("GC_BEADS", "bd")
+
+			oldSend := sendReloadControlRequestHook
+			t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+			sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+				return reloadControlReply{}, sendErr
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+			}
+			data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "my-frontend") {
+				t.Errorf("city.toml should contain the rig:\n%s", data)
+			}
+			for _, want := range []string{"controller reload did not complete", "gc reload"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+			}
+		})
+	}
+}
+
 func TestDoRigAdd_PreservesComments(t *testing.T) {
 	cityPath := t.TempDir()
 	cityToml := `# This is a city-level rationale comment.
@@ -3179,6 +3332,9 @@ func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
 	if err := os.MkdirAll(beads, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The store names the port gc recorded for this city's own managed Dolt,
+	// so gc claims it and runs its init op over it.
+	writeDoltRuntimePublicationFixtureOnPort(t, cityPath, managedDoltStatePath(cityPath), 21658)
 	// bd creates both files 0600.
 	before := map[string]string{
 		"metadata.json": `{"backend":"dolt","database":"dolt","dolt_database":"ar","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":21658}`,
@@ -3721,14 +3877,14 @@ default_branch = "trunk"
 	}
 }
 
-func TestRouteRigList_StaleBannerOver30s(t *testing.T) {
-	// Human output must append a staleness banner when the server reports
-	// a cache age > 30 s.
+func TestRouteRigList_NoCacheAgeFooter(t *testing.T) {
+	// The rig list is not read from the bead cache, so it prints no cache-age
+	// footer on either stream, whatever age a server reports.
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeRigListTestCity(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
 	}))
@@ -3739,9 +3895,7 @@ func TestRouteRigList_StaleBannerOver30s(t *testing.T) {
 	if code := routeRigList(cityPath, c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertNoCacheAgeFooter(t, stdout.String(), stderr.String())
 }
 
 // writeRigListLagCity writes a city whose city.toml registers frontend and
@@ -4120,6 +4274,64 @@ func TestDoRigAdd_AdoptBdInitStoreWithoutConfigYamlPrefix(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `prefix = "hv"`) {
 		t.Errorf("city.toml does not pin the store's prefix:\n%s", data)
+	}
+}
+
+// A store bd initialized with --server --external against a dolt sql-server
+// the operator runs on this machine is not gc's to initialize. Adopt registers
+// it and leaves bd's files as found.
+func TestAdoptLoopbackBdServerStoreLeavesItsFilesAlone(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	calls := filepath.Join(cityPath, "provider-calls")
+	provider := filepath.Join(cityPath, "gc-beads-bd")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + calls + "\nif [ \"$1\" = init ]; then echo 'init must not run' >&2; exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(provider, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+provider)
+	t.Setenv("GC_DOLT", "")
+
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origWait := initDirIfReadyWaitForManagedDolt
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyWaitForManagedDolt = origWait
+	})
+	initDirIfReadyEnsureBeadsProvider = func(string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(string, time.Duration) error { return nil }
+
+	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+	beads := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]string{
+		"metadata.json":    `{"backend":"dolt","database":"dolt","dolt_database":"ar","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":21658}`,
+		"config.yaml":      "# bd template\nissue-prefix: \"ar\"\n",
+		"dolt-server.port": "21658\n",
+	}
+	for name, data := range before {
+		if err := os.WriteFile(filepath.Join(beads, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", "", false, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd = %d, want 0 (stdout=%q stderr=%q)", code, stdout.String(), stderr.String())
+	}
+	if data, _ := os.ReadFile(calls); strings.Contains(string(data), "init") {
+		t.Fatalf("provider init op ran for a store gc does not serve; calls:\n%s", data)
+	}
+	for name, want := range before {
+		got, err := os.ReadFile(filepath.Join(beads, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s after adopt:\n%s\nwant:\n%s", name, got, want)
+		}
 	}
 }
 

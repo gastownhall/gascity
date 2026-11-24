@@ -740,7 +740,7 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 // handler returns 400 when empty); limit=0 selects the server default;
 // before is an optional RFC3339 upper bound. The CachedRead.AgeSeconds
 // field carries the supervisor CachingStore age so callers can surface
-// _cache_age_s on --json output and a staleness banner on human output.
+// _cache_age_s on --json output and a cache-age footer on human output.
 func (c *Client) GetOrderHistory(scopedName string, limit int, before string) (CachedRead[[]OrderHistoryView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]OrderHistoryView]{}, err
@@ -765,18 +765,15 @@ func (c *Client) GetOrderHistory(scopedName string, limit int, before string) (C
 	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[[]OrderHistoryView]{}, err
 	}
-	return CachedRead[[]OrderHistoryView]{
-		Body:       orderHistoryFromGenList(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(orderHistoryFromGenList(resp.JSON200), resp.HTTPResponse), nil
 }
 
 // GetMaintenanceStatus fetches the Dolt store maintenance loop state via
 // GET /v0/city/{cityName}/maintenance/status. The CachedRead.AgeSeconds
 // field carries the supervisor CachingStore age from the X-GC-Cache-Age-S
-// response header so callers can surface _cache_age_s on --json output
-// and a staleness banner on human output. Returns
-// *MaintenanceDisabledError when the loop is disabled in city.toml.
+// response header, which the server always reports as 0 (the maintenance
+// status is not read from the bead cache), for _cache_age_s on --json output.
+// Returns *MaintenanceDisabledError when the loop is disabled in city.toml.
 func (c *Client) GetMaintenanceStatus() (CachedRead[MaintenanceStatusView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[MaintenanceStatusView]{}, err
@@ -791,10 +788,7 @@ func (c *Client) GetMaintenanceStatus() (CachedRead[MaintenanceStatusView], erro
 	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[MaintenanceStatusView]{}, err
 	}
-	return CachedRead[MaintenanceStatusView]{
-		Body:       maintenanceStatusViewFromGen(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(maintenanceStatusViewFromGen(resp.JSON200), resp.HTTPResponse), nil
 }
 
 // TriggerMaintenanceDoltGC posts POST /v0/city/{cityName}/maintenance/dolt-gc.
@@ -837,7 +831,7 @@ type ListSessionsOpts struct {
 // GET /v0/city/{cityName}/sessions, walking every keyset page. The
 // CachedRead.AgeSeconds field carries the supervisor CachingStore age from
 // the X-GC-Cache-Age-S response header so callers can surface _cache_age_s
-// on --json output and a staleness banner on human output. Rows decode into
+// on --json output and a cache-age footer on human output. Rows decode into
 // SessionListView; a malformed timestamp is a plain (non-fallback) error.
 // The body also carries the server's report of a partial read
 // (SessionList.Partial) and whether the server predates agent_name
@@ -856,6 +850,7 @@ func (c *Client) ListSessions(opts ListSessionsOpts) (CachedRead[SessionList], e
 	var (
 		all        []SessionListView
 		ageSeconds float64
+		refresh    CacheRefresh
 		cursor     string
 		report     sessionListDegradation
 		noAgent    bool
@@ -896,6 +891,7 @@ func (c *Client) ListSessions(opts ListSessionsOpts) (CachedRead[SessionList], e
 		noAgent = noAgent || sessionListPageLacksAgentName(resp.JSON200)
 		if page == 0 {
 			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
+			refresh = cacheRefreshFromResponse(resp.HTTPResponse)
 		}
 		next := ""
 		if resp.JSON200 != nil && resp.JSON200.NextCursor != nil {
@@ -920,6 +916,7 @@ func (c *Client) ListSessions(opts ListSessionsOpts) (CachedRead[SessionList], e
 			AgentNameMissing: noAgent,
 		},
 		AgeSeconds: ageSeconds,
+		Refresh:    refresh,
 	}, nil
 }
 
@@ -952,17 +949,14 @@ func (c *Client) GetSession(id string, peek bool, peekLines int) (CachedRead[Ses
 	if resp.JSON200 == nil {
 		return CachedRead[SessionView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
 	}
-	return CachedRead[SessionView]{
-		Body:       sessionViewFromGen(*resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(sessionViewFromGen(*resp.JSON200), resp.HTTPResponse), nil
 }
 
 // ListRigs fetches the current set of configured rigs via
 // GET /v0/city/{cityName}/rigs. The CachedRead.AgeSeconds field carries the
-// supervisor CachingStore age from the X-GC-Cache-Age-S response header so
-// callers can surface _cache_age_s on --json output and a staleness banner
-// on human output.
+// supervisor CachingStore age from the X-GC-Cache-Age-S response header,
+// which the server reports as 0: the rig list is not read from the bead
+// cache, so the CLI prints no cache-age footer for it.
 func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]RigView]{}, err
@@ -977,10 +971,7 @@ func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
 	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[[]RigView]{}, err
 	}
-	return CachedRead[[]RigView]{
-		Body:       rigsFromGenList(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(rigsFromGenList(resp.JSON200), resp.HTTPResponse), nil
 }
 
 // ListConvoys fetches every open convoy across all rigs via
@@ -989,7 +980,7 @@ func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
 // server's default page (100) with nothing marking the rest as missing. The
 // CachedRead.AgeSeconds field carries the supervisor CachingStore age from the
 // first page's X-GC-Cache-Age-S response header so callers can surface
-// _cache_age_s on --json output and a staleness banner on human output. A page
+// _cache_age_s on --json output and a cache-age footer on human output. A page
 // the server marks partial stops the drain with an error (convoysPage). Two
 // convoys that share an ID are both returned unless their rows are identical
 // (identicalBeadRow).
@@ -1001,7 +992,7 @@ func (c *Client) ListConvoys() (CachedRead[[]beads.Bead], error) {
 	if err != nil {
 		return CachedRead[[]beads.Bead]{}, err
 	}
-	return CachedRead[[]beads.Bead]{Body: cr.Body.Beads, AgeSeconds: cr.AgeSeconds}, nil
+	return CachedRead[[]beads.Bead]{Body: cr.Body.Beads, AgeSeconds: cr.AgeSeconds, Refresh: cr.Refresh}, nil
 }
 
 // convoysPage is the GET /v0/city/{cityName}/convoys page fetcher for
@@ -1030,6 +1021,7 @@ func (c *Client) convoysPage(cursor string, limit int64) (beadListPage, error) {
 		items:      convoysFromGenList(resp.JSON200),
 		next:       listNextCursor(resp.JSON200),
 		ageSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+		refresh:    cacheRefreshFromResponse(resp.HTTPResponse),
 	}, nil
 }
 
@@ -1055,10 +1047,7 @@ func (c *Client) GetConvoy(id string) (CachedRead[ConvoyStatusView], error) {
 	if resp.JSON200 == nil {
 		return CachedRead[ConvoyStatusView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
 	}
-	return CachedRead[ConvoyStatusView]{
-		Body:       convoyStatusFromGen(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(convoyStatusFromGen(resp.JSON200), resp.HTTPResponse), nil
 }
 
 // CheckConvoy fetches one convoy's completion status via
@@ -1081,10 +1070,7 @@ func (c *Client) CheckConvoy(id string) (CachedRead[ConvoyCheckView], error) {
 	if resp.JSON200 == nil {
 		return CachedRead[ConvoyCheckView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
 	}
-	return CachedRead[ConvoyCheckView]{
-		Body:       convoyCheckFromGen(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(convoyCheckFromGen(resp.JSON200), resp.HTTPResponse), nil
 }
 
 // ListBeadsOpts is the optional filter set for ListBeads. All fields are
@@ -1147,8 +1133,8 @@ func listBeadsParams(opts ListBeadsOpts) *genclient.GetV0CityByCityNameBeadsPara
 // GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
 // query parameters. The CachedRead.AgeSeconds field carries the supervisor
 // CachingStore age from the X-GC-Cache-Age-S response header so callers can
-// surface _cache_age_s on a remote target's --json output and a staleness
-// banner on human output. The body also carries the server's report of any
+// surface _cache_age_s on a remote target's --json output and a cache-age
+// footer on human output. The body also carries the server's report of any
 // backend that failed while building the list (BeadListView.Partial); the
 // client reports it and leaves the judgment to the caller.
 func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[BeadListView], error) {
@@ -1160,12 +1146,13 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[BeadListView], error)
 
 // beadListPage is one page of a keyset-paginated bead list (/beads,
 // /convoys): its items, its next_cursor ("" on the last page), its
-// X-GC-Cache-Age-S cache age, and the server's report of any backend that
-// failed while building it.
+// X-GC-Cache-Age-S cache age and the cache's refresh headers, and the server's
+// report of any backend that failed while building it.
 type beadListPage struct {
 	items         []beads.Bead
 	next          string
 	ageSeconds    float64
+	refresh       CacheRefresh
 	partial       bool
 	partialErrors []string
 }
@@ -1197,6 +1184,7 @@ func (c *Client) beadsPage(params *genclient.GetV0CityByCityNameBeadsParams) bea
 			items:         beadsFromGenList(resp.JSON200),
 			next:          listNextCursor(resp.JSON200),
 			ageSeconds:    cacheAgeFromResponse(resp.HTTPResponse),
+			refresh:       cacheRefreshFromResponse(resp.HTTPResponse),
 			partial:       partial,
 			partialErrors: partialErrs,
 		}, nil
@@ -1280,8 +1268,9 @@ func drainBeadPages(fetch beadPageFetcher, limit, maxPages int, match beadRowsMa
 	// which breaks `--json` consumers (`jq '.beads[]'`) and diverges from the
 	// direct-bd lane, which always emits an empty array.
 	kept := keptBeadRows{match: match, rows: []beads.Bead{}, byID: make(map[string][]beads.Bead)}
-	// AgeSeconds comes from the first page.
+	// AgeSeconds and Refresh come from the first page.
 	var ageSeconds float64
+	var refresh CacheRefresh
 	// seenCursors records every next_cursor already requested. Cursors must
 	// strictly advance, so any repeat — an immediate A,A or a longer A,B,A,B
 	// cycle — is a buggy or hostile server; abort instead of looping. This
@@ -1313,6 +1302,7 @@ func drainBeadPages(fetch beadPageFetcher, limit, maxPages int, match beadRowsMa
 		}
 		if page == 0 {
 			ageSeconds = got.ageSeconds
+			refresh = got.refresh
 		}
 		partial = partial || got.partial
 		for _, msg := range got.partialErrors {
@@ -1336,12 +1326,13 @@ func drainBeadPages(fetch beadPageFetcher, limit, maxPages int, match beadRowsMa
 	return CachedRead[BeadListView]{
 		Body:       BeadListView{Beads: kept.rows, Partial: partial, PartialErrors: partialErrs},
 		AgeSeconds: ageSeconds,
+		Refresh:    refresh,
 	}, nil
 }
 
 // GetBead fetches one bead by ID via
 // GET /v0/city/{cityName}/bead/{id}. Returns the bead detail with cache age
-// so callers can attach _cache_age_s (JSON) or a staleness banner (human).
+// so callers can attach _cache_age_s (JSON) or a cache-age footer (human).
 func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[beads.Bead]{}, err
@@ -1359,22 +1350,29 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 	if resp.JSON200 == nil {
 		return CachedRead[beads.Bead]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
 	}
-	return CachedRead[beads.Bead]{
-		Body:       beadFromGenPtr(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(beadFromGenPtr(resp.JSON200), resp.HTTPResponse), nil
 }
 
 // GetStatus fetches the city-wide status snapshot via
 // GET /v0/city/{cityName}/status. The CachedRead.AgeSeconds field carries
 // the supervisor CachingStore age from the X-GC-Cache-Age-S response header
-// so callers can surface _cache_age_s on --json output and a staleness
-// banner on human output.
+// so callers can surface _cache_age_s on --json output and a cache-age
+// footer on human output.
+//
+// The CLI's reads are one-shot, so GetStatus asks the server to build the
+// body for the read (?fresh=true) rather than answer with the one a previous
+// read left saved (ga-v1vyh8.17). The server waits about 10s for that build
+// and then answers with its saved body, if it has one; a server older than
+// the parameter ignores it and serves its saved body at once. Either way the
+// saved body comes with its age (and rebuilding where the server sends the
+// refresh header). CachedRead.AgeSeconds and Refresh stay exactly what the
+// server reports; the CLI never claims freshness itself.
 func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[StatusView]{}, err
 	}
-	resp, err := c.cw.GetV0CityByCityNameStatusWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameStatusParams{})
+	fresh := true
+	resp, err := c.cw.GetV0CityByCityNameStatusWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameStatusParams{Fresh: &fresh})
 	if err != nil {
 		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}
@@ -1384,10 +1382,7 @@ func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[StatusView]{}, err
 	}
-	return CachedRead[StatusView]{
-		Body:       statusViewFromGen(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(statusViewFromGen(resp.JSON200), resp.HTTPResponse), nil
 }
 
 // ListMailInbox fetches unread messages for the given agent recipient via
@@ -1397,7 +1392,7 @@ func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 // MailListView preserves partial aggregate-read metadata so callers do not
 // silently treat a degraded all-rig read as authoritative. The
 // CachedRead.AgeSeconds field carries the supervisor CachingStore age so
-// callers can surface _cache_age_s on --json output and a staleness banner
+// callers can surface _cache_age_s on --json output and a cache-age footer
 // on human output.
 func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], error) {
 	if err := c.requireCityScope(); err != nil {
@@ -1420,10 +1415,7 @@ func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], err
 	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[MailListView]{}, err
 	}
-	return CachedRead[MailListView]{
-		Body:       mailListFromGen(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(mailListFromGen(resp.JSON200), resp.HTTPResponse), nil
 }
 
 // GetMail fetches a single message by ID via GET /v0/city/{cityName}/mail/{id}.
@@ -1450,10 +1442,7 @@ func (c *Client) GetMail(id, rig string) (CachedRead[mail.Message], error) {
 	if resp.JSON200 == nil {
 		return CachedRead[mail.Message]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
 	}
-	return CachedRead[mail.Message]{
-		Body:       mailMessageFromGen(*resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(mailMessageFromGen(*resp.JSON200), resp.HTTPResponse), nil
 }
 
 // CountMail fetches total/unread message counts via
@@ -1480,10 +1469,7 @@ func (c *Client) CountMail(agent, rig string) (CachedRead[MailCountView], error)
 	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return CachedRead[MailCountView]{}, err
 	}
-	return CachedRead[MailCountView]{
-		Body:       mailCountFromGen(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(mailCountFromGen(resp.JSON200), resp.HTTPResponse), nil
 }
 
 // GetService fetches one current workspace service status.
