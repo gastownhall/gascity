@@ -159,6 +159,7 @@ func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedClaims(t *testing.T
 		stores[i] = workStore
 	}
 
+	logBuf := captureSweepLog(t)
 	released := releaseOrphanedPoolAssignments(
 		workStore,
 		beads.SessionStore{Store: sessionStore},
@@ -200,5 +201,11 @@ func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedClaims(t *testing.T
 		if !releasedByID[c.ID] {
 			t.Errorf("control %s (%q) must be present in the released list", c.ID, c.Title)
 		}
+	}
+	// The operator identity is decided before the foreign-claim gate, so an
+	// operator claim never reaches it and the sweep pass reports no protected
+	// foreign/unknown identities for the beads this test holds (#6945).
+	if logged := logBuf.String(); strings.Contains(logged, "protected") {
+		t.Fatalf("an operator-assigned claim must not reach the foreign-claim gate; log:\n%s", logged)
 	}
 }
