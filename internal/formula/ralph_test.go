@@ -854,3 +854,366 @@ func TestBindCheckMaxAttemptsVars_KeepsFirstBinding(t *testing.T) {
 		t.Fatalf("resolved check = %+v, want MaxAttempts 2 from the first binding", got)
 	}
 }
+
+// TestApplyRalph_NestedRalphWithChildrenKeepsInnerScope pins issue #9412: a
+// check loop with children nested in another check loop's body must leave the
+// inner iteration scope and its members scoped to the inner loop, so the inner
+// member's scope-check evaluates the inner iteration, not the outer one.
+func TestApplyRalph_NestedRalphWithChildrenKeepsInnerScope(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "outer",
+			Title: "Outer loop",
+			Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+			Children: []*Step{
+				{
+					ID:       "inner",
+					Title:    "Inner loop",
+					Ralph:    &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+					Children: []*Step{{ID: "i1", Title: "Inner work"}},
+				},
+				{ID: "o1", Title: "Outer work", Needs: []string{"inner"}},
+			},
+		},
+	}
+
+	got, err := ApplyRalph(steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	byID := make(map[string]*Step, len(got))
+	for _, s := range got {
+		byID[s.ID] = s
+	}
+
+	const innerIteration = "outer.iteration.1.inner.iteration.1"
+	member := byID[innerIteration+".i1"]
+	if member == nil {
+		t.Fatalf("missing inner member %s.i1", innerIteration)
+	}
+	if ref := member.Metadata[beadmeta.ScopeRefMetadataKey]; ref != innerIteration {
+		t.Errorf("inner member gc.scope_ref = %q, want %q", ref, innerIteration)
+	}
+	if owner := member.Metadata[beadmeta.RalphStepIDMetadataKey]; owner != "inner" {
+		t.Errorf("inner member gc.ralph_step_id = %q, want %q", owner, "inner")
+	}
+
+	scope := byID[innerIteration]
+	if scope == nil {
+		t.Fatalf("missing inner iteration scope %s", innerIteration)
+	}
+	if ref := scope.Metadata[beadmeta.ScopeRefMetadataKey]; ref == "outer.iteration.1" {
+		t.Errorf("inner iteration scope gc.scope_ref = %q: inner scope joined the outer iteration as a member", ref)
+	}
+}
+
+// nestedCheckSteps builds the nested-check shape of issue #9412 at one nesting
+// depth: an outer check loop whose body holds an inner check loop (children
+// i1) and o1. With o1NeedsInner, o1 waits on the inner control; otherwise o1
+// runs parallel to the inner loop.
+func nestedCheckSteps(o1NeedsInner bool) []*Step {
+	o1 := &Step{ID: "o1", Title: "Outer work after the inner loop"}
+	if o1NeedsInner {
+		o1.Needs = []string{"inner"}
+	}
+	return []*Step{
+		{
+			ID:    "outer",
+			Title: "Outer loop",
+			Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+			Children: []*Step{
+				{
+					ID:       "inner",
+					Title:    "Inner loop",
+					Ralph:    &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+					Children: []*Step{{ID: "i1", Title: "Inner work"}},
+				},
+				o1,
+			},
+		},
+	}
+}
+
+// threeLevelNestedCheckSteps nests a check three levels deep: outer > mid >
+// inner, with one work member at the innermost level.
+func threeLevelNestedCheckSteps() []*Step {
+	innermost := &Step{
+		ID:       "inner",
+		Title:    "Innermost loop",
+		Ralph:    &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+		Children: []*Step{{ID: "i1", Title: "Innermost work"}},
+	}
+	mid := &Step{
+		ID:       "mid",
+		Title:    "Mid loop",
+		Ralph:    &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+		Children: []*Step{innermost},
+	}
+	return []*Step{
+		{
+			ID:       "outer",
+			Title:    "Outer loop",
+			Ralph:    &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+			Children: []*Step{mid},
+		},
+	}
+}
+
+// nestedCheckWithRetrySteps adds a retry-managed step to the inner loop's
+// body, alongside the plain member i1.
+func nestedCheckWithRetrySteps() []*Step {
+	return []*Step{
+		{
+			ID:    "outer",
+			Title: "Outer loop",
+			Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+			Children: []*Step{
+				{
+					ID:    "inner",
+					Title: "Inner loop",
+					Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+					Children: []*Step{
+						{ID: "i1", Title: "Inner work"},
+						{ID: "r1", Title: "Retry work", Retry: &RetrySpec{MaxAttempts: 2}},
+					},
+				},
+			},
+		},
+	}
+}
+
+// compileNestedCheck expands steps the way the v2 compiler does (retries, then
+// ralph) and applies graph controls, returning every step keyed by ID.
+func compileNestedCheck(t *testing.T, steps []*Step) map[string]*Step {
+	t.Helper()
+	expanded, err := ApplyRetries(steps)
+	if err != nil {
+		t.Fatalf("ApplyRetries failed: %v", err)
+	}
+	expanded, err = ApplyRalph(expanded)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	f := &Formula{Steps: expanded}
+	ApplyGraphControls(f)
+	byID := make(map[string]*Step)
+	for _, s := range collectGraphSteps(f.Steps) {
+		byID[s.ID] = s
+	}
+	return byID
+}
+
+// assertInnerLoopIdentity checks the inner loop's compile contract for the
+// nested-check shape at one level (issue #9412, AC-1): the inner member and its
+// scope-check stay scoped to the inner iteration, the inner iteration scope
+// keeps its own loop identity and edges, and only the inner control joins the
+// outer iteration.
+func assertInnerLoopIdentity(t *testing.T, byID map[string]*Step) {
+	t.Helper()
+	const innerIteration = "outer.iteration.1.inner.iteration.1"
+
+	member := byID[innerIteration+".i1"]
+	if member == nil {
+		t.Fatalf("missing inner member %s.i1", innerIteration)
+	}
+	wantMember := map[string]string{
+		beadmeta.ScopeRefMetadataKey:    innerIteration,
+		beadmeta.RalphStepIDMetadataKey: "inner",
+		beadmeta.ScopeRoleMetadataKey:   beadmeta.ScopeRoleMember,
+		beadmeta.OnFailMetadataKey:      "abort_scope",
+		beadmeta.AttemptMetadataKey:     "1",
+		beadmeta.IterationMetadataKey:   "1",
+	}
+	for key, want := range wantMember {
+		if got := member.Metadata[key]; got != want {
+			t.Errorf("inner member %s = %q, want %q", key, got, want)
+		}
+	}
+
+	scopeCheck := byID[innerIteration+".i1-scope-check"]
+	if scopeCheck == nil {
+		t.Fatalf("missing minted %s.i1-scope-check", innerIteration)
+	}
+	if got := scopeCheck.Metadata[beadmeta.KindMetadataKey]; got != beadmeta.KindScopeCheck {
+		t.Errorf("inner member scope-check gc.kind = %q, want %q", got, beadmeta.KindScopeCheck)
+	}
+	for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.RalphStepIDMetadataKey} {
+		if got := scopeCheck.Metadata[key]; got != member.Metadata[key] {
+			t.Errorf("inner member scope-check %s = %q, want %q (same as the member)", key, got, member.Metadata[key])
+		}
+	}
+
+	scope := byID[innerIteration]
+	if scope == nil {
+		t.Fatalf("missing inner iteration scope %s", innerIteration)
+	}
+	wantScope := map[string]string{
+		beadmeta.KindMetadataKey:        beadmeta.KindScope,
+		beadmeta.ScopeRoleMetadataKey:   beadmeta.ScopeRoleBody,
+		beadmeta.ScopeNameMetadataKey:   "inner",
+		beadmeta.StepIDMetadataKey:      "inner",
+		beadmeta.RalphStepIDMetadataKey: "inner",
+		beadmeta.ControlForMetadataKey:  "outer.iteration.1.inner",
+	}
+	for key, want := range wantScope {
+		if got := scope.Metadata[key]; got != want {
+			t.Errorf("inner iteration scope %s = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.OnFailMetadataKey} {
+		if got, ok := scope.Metadata[key]; ok && got != "" {
+			t.Errorf("inner iteration scope must not carry %s, got %q", key, got)
+		}
+	}
+	if !containsString(scope.Needs, innerIteration+".i1") {
+		t.Errorf("inner iteration scope needs = %v, want %q directly (the ga-a6zy9 guard keeps the edge raw)", scope.Needs, innerIteration+".i1")
+	}
+	if containsString(scope.Needs, innerIteration+".i1-scope-check") {
+		t.Errorf("inner iteration scope needs = %v, must not block on its own closer %q", scope.Needs, innerIteration+".i1-scope-check")
+	}
+
+	control := byID["outer.iteration.1.inner"]
+	if control == nil {
+		t.Fatal("missing inner control outer.iteration.1.inner")
+	}
+	wantControl := map[string]string{
+		beadmeta.KindMetadataKey:        beadmeta.KindRalph,
+		beadmeta.StepIDMetadataKey:      "inner",
+		beadmeta.ScopeRefMetadataKey:    "outer.iteration.1",
+		beadmeta.ScopeRoleMetadataKey:   beadmeta.ScopeRoleMember,
+		beadmeta.OnFailMetadataKey:      "abort_scope",
+		beadmeta.RalphStepIDMetadataKey: "outer",
+	}
+	for key, want := range wantControl {
+		if got := control.Metadata[key]; got != want {
+			t.Errorf("inner control %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestApplyRalph_NestedCheckWithChildrenKeepsInnerLoopIdentity pins the
+// compile contract of issue #9412 across shapes: a check-with-children nested
+// in a check body keeps the inner loop's identity while only the inner
+// control joins the outer iteration.
+func TestApplyRalph_NestedCheckWithChildrenKeepsInnerLoopIdentity(t *testing.T) {
+	t.Run("two_level", func(t *testing.T) {
+		byID := compileNestedCheck(t, nestedCheckSteps(true))
+		assertInnerLoopIdentity(t, byID)
+
+		// o1's need on the inner control gates on the control's minted
+		// scope-check, exactly as for any nested control today.
+		o1 := byID["outer.iteration.1.o1"]
+		if o1 == nil {
+			t.Fatal("missing outer member outer.iteration.1.o1")
+		}
+		if len(o1.Needs) != 1 || o1.Needs[0] != "outer.iteration.1.inner-scope-check" {
+			t.Errorf("o1 needs = %v, want [outer.iteration.1.inner-scope-check]", o1.Needs)
+		}
+	})
+
+	t.Run("o1_parallel", func(t *testing.T) {
+		byID := compileNestedCheck(t, nestedCheckSteps(false))
+		assertInnerLoopIdentity(t, byID)
+		o1 := byID["outer.iteration.1.o1"]
+		if o1 == nil {
+			t.Fatal("missing outer member outer.iteration.1.o1")
+		}
+		if len(o1.Needs) != 0 {
+			t.Errorf("parallel o1 needs = %v, want none", o1.Needs)
+		}
+	})
+
+	t.Run("three_level", func(t *testing.T) {
+		byID := compileNestedCheck(t, threeLevelNestedCheckSteps())
+
+		const midIteration = "outer.iteration.1.mid.iteration.1"
+		const innerIteration = midIteration + ".inner.iteration.1"
+
+		i1 := byID[innerIteration+".i1"]
+		if i1 == nil {
+			t.Fatalf("missing innermost member %s.i1", innerIteration)
+		}
+		if got := i1.Metadata[beadmeta.ScopeRefMetadataKey]; got != innerIteration {
+			t.Errorf("innermost i1 gc.scope_ref = %q, want %q", got, innerIteration)
+		}
+		if got := i1.Metadata[beadmeta.RalphStepIDMetadataKey]; got != "inner" {
+			t.Errorf("innermost i1 gc.ralph_step_id = %q, want inner", got)
+		}
+
+		midScope := byID[midIteration]
+		if midScope == nil {
+			t.Fatalf("missing mid iteration scope %s", midIteration)
+		}
+		if got, ok := midScope.Metadata[beadmeta.ScopeRefMetadataKey]; ok && got != "" {
+			t.Errorf("mid iteration scope gc.scope_ref = %q, want none", got)
+		}
+		if got := midScope.Metadata[beadmeta.RalphStepIDMetadataKey]; got != "mid" {
+			t.Errorf("mid iteration scope gc.ralph_step_id = %q, want mid", got)
+		}
+
+		innerControl := byID[midIteration+".inner"]
+		if innerControl == nil {
+			t.Fatalf("missing innermost control %s.inner", midIteration)
+		}
+		if got := innerControl.Metadata[beadmeta.ScopeRefMetadataKey]; got != midIteration {
+			t.Errorf("innermost control gc.scope_ref = %q, want %q", got, midIteration)
+		}
+		if got := innerControl.Metadata[beadmeta.RalphStepIDMetadataKey]; got != "mid" {
+			t.Errorf("innermost control gc.ralph_step_id = %q, want mid", got)
+		}
+
+		innerScope := byID[innerIteration]
+		if innerScope == nil {
+			t.Fatalf("missing innermost iteration scope %s", innerIteration)
+		}
+		if got, ok := innerScope.Metadata[beadmeta.ScopeRefMetadataKey]; ok && got != "" {
+			t.Errorf("innermost iteration scope gc.scope_ref = %q, want none", got)
+		}
+		if got := innerScope.Metadata[beadmeta.RalphStepIDMetadataKey]; got != "inner" {
+			t.Errorf("innermost iteration scope gc.ralph_step_id = %q, want inner", got)
+		}
+		if got := innerScope.Metadata[beadmeta.ControlForMetadataKey]; got != midIteration+".inner" {
+			t.Errorf("innermost iteration scope gc.control_for = %q, want %q", got, midIteration+".inner")
+		}
+	})
+
+	t.Run("retry_in_inner_body", func(t *testing.T) {
+		byID := compileNestedCheck(t, nestedCheckWithRetrySteps())
+		assertInnerLoopIdentity(t, byID)
+
+		const innerIteration = "outer.iteration.1.inner.iteration.1"
+		retryControl := byID[innerIteration+".r1"]
+		if retryControl == nil {
+			t.Fatalf("missing retry control %s.r1", innerIteration)
+		}
+		if got := retryControl.Metadata[beadmeta.KindMetadataKey]; got != beadmeta.KindRetry {
+			t.Errorf("retry control gc.kind = %q, want %q", got, beadmeta.KindRetry)
+		}
+		if got := retryControl.Metadata[beadmeta.ScopeRefMetadataKey]; got != innerIteration {
+			t.Errorf("retry control gc.scope_ref = %q, want %q", got, innerIteration)
+		}
+		if got := retryControl.Metadata[beadmeta.RalphStepIDMetadataKey]; got != "inner" {
+			t.Errorf("retry control gc.ralph_step_id = %q, want inner", got)
+		}
+		if got := retryControl.Metadata[beadmeta.AttemptMetadataKey]; got != "1" {
+			t.Errorf("retry control gc.attempt = %q, want 1 (the inner iteration)", got)
+		}
+
+		retryAttempt := byID[innerIteration+".r1.attempt.1"]
+		if retryAttempt == nil {
+			t.Fatalf("missing retry attempt %s.r1.attempt.1", innerIteration)
+		}
+		wantAttempt := map[string]string{
+			beadmeta.ScopeRefMetadataKey:     innerIteration,
+			beadmeta.RalphStepIDMetadataKey:  "inner",
+			beadmeta.RetryAttemptMetadataKey: "1",
+			beadmeta.AttemptMetadataKey:      "1",
+			beadmeta.ControlForMetadataKey:   innerIteration + ".r1",
+		}
+		for key, want := range wantAttempt {
+			if got := retryAttempt.Metadata[key]; got != want {
+				t.Errorf("retry attempt %s = %q, want %q", key, got, want)
+			}
+		}
+	})
+}

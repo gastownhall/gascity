@@ -219,6 +219,37 @@ func trailingAttemptOrdinal(id string) string {
 	return n
 }
 
+// attemptScopeControl returns the logical control (retry or ralph) that step
+// is a physical attempt of, or nil when step is not an attempt-scope root. An
+// attempt-scope root is a gc.kind=scope step carrying a gc.attempt whose
+// gc.control_for names a retry/ralph control holding the same gc.step_id — the
+// iteration scope a check or retry loop mints per attempt. It is the shared
+// classifier for namespaced bodies (namespaceRalphBodySteps) and workflow
+// sinks (graphSinkStepIDs): a nested attempt scope keeps its own loop's
+// identity and rolls up through its enclosing scope instead of taking the
+// enclosing iteration's membership stamps or contributing its control as a
+// finalizer sink.
+func attemptScopeControl(step *Step, stepByID map[string]*Step) *Step {
+	if step == nil ||
+		step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope ||
+		strings.TrimSpace(step.Metadata[beadmeta.AttemptMetadataKey]) == "" {
+		return nil
+	}
+	control := stepByID[step.Metadata[beadmeta.ControlForMetadataKey]]
+	if control == nil {
+		return nil
+	}
+	stepID := step.Metadata[beadmeta.StepIDMetadataKey]
+	if stepID == "" || stepID != control.Metadata[beadmeta.StepIDMetadataKey] {
+		return nil
+	}
+	kind := control.Metadata[beadmeta.KindMetadataKey]
+	if kind != beadmeta.KindRetry && kind != beadmeta.KindRalph {
+		return nil
+	}
+	return control
+}
+
 func collectRalphBodyStepIDs(steps []*Step) map[string]bool {
 	ids := make(map[string]bool)
 	var collect func([]*Step)
@@ -237,6 +268,21 @@ func collectRalphBodyStepIDs(steps []*Step) map[string]bool {
 func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, attempt int, bodyIDs map[string]bool) ([]*Step, []string) {
 	var out []*Step
 	var topLevel []string
+	// A nested retry/ralph expansion flattened into this body owns its own
+	// attempt scope: its scope root and members must keep the inner loop's
+	// identity instead of this iteration's membership stamps (issue #9412).
+	// nestedRoots holds the pre-namespacing IDs of those inner attempt-scope
+	// roots, classified over the un-namespaced body.
+	bodyByID := make(map[string]*Step, len(bodyIDs))
+	for _, s := range collectGraphSteps(steps) {
+		bodyByID[s.ID] = s
+	}
+	nestedRoots := make(map[string]bool, len(bodyByID))
+	for id, s := range bodyByID {
+		if attemptScopeControl(s, bodyByID) != nil {
+			nestedRoots[id] = true
+		}
+	}
 	var walk func([]*Step, bool)
 	walk = func(nodes []*Step, top bool) {
 		for _, node := range nodes {
@@ -259,14 +305,29 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 				childStepID = node.ID
 			}
 			childMeta := map[string]string{
-				beadmeta.ScopeRefMetadataKey:    iterationID,
-				beadmeta.OnFailMetadataKey:      metadataDefault(node.Metadata, beadmeta.OnFailMetadataKey, "abort_scope"),
-				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember),
-				beadmeta.StepIDMetadataKey:      childStepID,
-				beadmeta.RalphStepIDMetadataKey: owner.ID,
-				beadmeta.AttemptMetadataKey:     RalphBodyChildAttempt(node, attempt),
-				beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
-				beadmeta.StepRefMetadataKey:     clone.ID,
+				beadmeta.StepRefMetadataKey: clone.ID,
+			}
+			switch {
+			case nestedRoots[node.ID]:
+				// An inner attempt-scope root keeps its own kind, scope_name,
+				// step_id, ralph_step_id, attempt, and iteration — the inner
+				// loop's identity. It is not a member of this iteration, so it
+				// carries no gc.scope_ref and no gc.on_fail.
+				delete(clone.Metadata, beadmeta.ScopeRefMetadataKey)
+				delete(clone.Metadata, beadmeta.OnFailMetadataKey)
+			case nestedRoots[node.Metadata[beadmeta.ScopeRefMetadataKey]]:
+				// A member of a nested attempt scope keeps its inner-loop
+				// membership metadata and only re-targets its gc.scope_ref at
+				// the namespaced inner scope.
+				childMeta[beadmeta.ScopeRefMetadataKey] = iterationID + "." + node.Metadata[beadmeta.ScopeRefMetadataKey]
+			default:
+				childMeta[beadmeta.ScopeRefMetadataKey] = iterationID
+				childMeta[beadmeta.OnFailMetadataKey] = metadataDefault(node.Metadata, beadmeta.OnFailMetadataKey, "abort_scope")
+				childMeta[beadmeta.ScopeRoleMetadataKey] = metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember)
+				childMeta[beadmeta.StepIDMetadataKey] = childStepID
+				childMeta[beadmeta.RalphStepIDMetadataKey] = owner.ID
+				childMeta[beadmeta.AttemptMetadataKey] = RalphBodyChildAttempt(node, attempt)
+				childMeta[beadmeta.IterationMetadataKey] = strconv.Itoa(attempt)
 			}
 			// A nested control's attempt/iteration root carries gc.control_for as
 			// the bare inner-control step id (stamped by expandRetry/expandRalph

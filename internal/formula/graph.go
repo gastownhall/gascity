@@ -247,18 +247,20 @@ func graphSinkStepIDs(steps []*Step) []string {
 			// mandatory sink so a failed loop cannot be hidden by passing
 			// downstream work, and so iteration 1 cannot remain as a stale failed
 			// blocker after a later attempt passes.
-			control := stepByID[step.Metadata[beadmeta.ControlForMetadataKey]]
-			attemptStepID := step.Metadata[beadmeta.StepIDMetadataKey]
-			if step.Metadata[beadmeta.AttemptMetadataKey] != "" && control != nil &&
-				attemptStepID != "" && attemptStepID == control.Metadata[beadmeta.StepIDMetadataKey] &&
-				(control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetry ||
-					control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRalph) {
+			if control := attemptScopeControl(step, stepByID); control != nil {
 				// Nested attempt scopes roll up through their enclosing scope. Only
 				// an outermost attempt contributes its logical control directly;
 				// otherwise an inner control from an old outer attempt would become
 				// another stale workflow blocker.
 				scopeRef := step.Metadata[beadmeta.ScopeRefMetadataKey]
 				if scopeRef == "" {
+					// An inner control nested inside another attempt scope rolls
+					// up through that scope's own sink contribution; contributing
+					// it here would pin a stale inner control as a workflow
+					// blocker after the outer loop moved on.
+					if attemptScopeControl(stepByID[control.Metadata[beadmeta.ScopeRefMetadataKey]], stepByID) != nil {
+						continue
+					}
 					appendSink(control.ID)
 					continue
 				}
