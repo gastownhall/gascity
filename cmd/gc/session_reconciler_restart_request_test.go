@@ -1229,3 +1229,65 @@ func TestPreWakePatchConsumesTheRestartRequestItAnswers(t *testing.T) {
 		})
 	}
 }
+
+// TestRestartRequestAfterReplacementStopsOnce (ga-45119r AC-4, #5843): the
+// PreWake consumes only the request its own start answers. A pair written
+// after a replacement's CAS has landed is a request against that new
+// incarnation: the reconciler stops it and restarts it fresh exactly once,
+// and the second replacement is left running.
+func TestRestartRequestAfterReplacementStopsOnce(t *testing.T) {
+	env, _ := newRestartRequestSplitStoreEnv(t)
+	session, sessionName := newRestartRequestWakeFixture(t, env)
+	env.primeCache(t)
+
+	// The reconciler's snapshot comes from the rows it is handed, so every
+	// pass after the first must be given the row's current state.
+	currentRow := func() beads.Bead {
+		t.Helper()
+		b, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("store get between passes: %v", err)
+		}
+		return b
+	}
+
+	env.reconcile([]beads.Bead{session}) // the first fresh wake, its CAS landed
+	rebaseFixtureConfigBaseline(t, env, session.ID, sessionName)
+	if starts := env.sp.CountCalls("Start", sessionName); starts != 1 {
+		t.Fatalf("starts of %s = %d, want the one fresh wake", sessionName, starts)
+	}
+
+	// A new request pair, written after the replacement's PreWake CAS: the
+	// next pass stops this incarnation and hands the row to a fresh wake.
+	if err := env.store.SetMetadataBatch(session.ID, map[string]string{
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+	}); err != nil {
+		t.Fatalf("writing the new request pair: %v", err)
+	}
+	env.reconcile([]beads.Bead{currentRow()}) // the stop and its handoff
+	if stops := env.sp.CountCalls("Stop", sessionName); stops != 1 {
+		t.Fatalf("stops of %s = %d after the request pair, want exactly the one restart stop", sessionName, stops)
+	}
+	env.reconcile([]beads.Bead{currentRow()}) // the fresh wake
+	rebaseFixtureConfigBaseline(t, env, session.ID, sessionName)
+	if starts := env.sp.CountCalls("Start", sessionName); starts != 2 {
+		t.Fatalf("starts of %s = %d, want the replacement and its fresh restart", sessionName, starts)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store get after the restart: %v", err)
+	}
+	if got.Metadata["restart_requested"] != "" || got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("row after the restart: restart_requested=%q continuation_reset_pending=%q, want both consumed", got.Metadata["restart_requested"], got.Metadata["continuation_reset_pending"])
+	}
+
+	// The second replacement is left running: no later pass stops it again.
+	env.reconcile([]beads.Bead{currentRow()})
+	if stops := env.sp.CountCalls("Stop", sessionName); stops != 1 {
+		t.Fatalf("stops of %s = %d after the restart, want still the one", sessionName, stops)
+	}
+	if starts := env.sp.CountCalls("Start", sessionName); starts != 2 {
+		t.Fatalf("starts of %s = %d after the restart, want still two", sessionName, starts)
+	}
+}
