@@ -254,6 +254,13 @@ if ! jq -e '.schema == "gc.dolt.cleanup.v1"' "$SCAN_FILE" >/dev/null; then
   fail_open_after_drain "gc dolt-cleanup dry-run returned invalid JSON; leaving work bead open"
 fi
 
+# Validate before shell arithmetic: an invalid count can exit successfully
+# through an EXIT trap on older Bash versions.
+if ! jq -e '(if .dropped.count == null then 0 else .dropped.count end) | if type == "number" then . >= 0 and . == floor else false end' "$SCAN_FILE" >/dev/null; then
+  record_report "scan (invalid count)" "$SCAN_FILE"
+  fail_open_after_drain "gc dolt-cleanup dry-run returned an invalid dropped count; leaving work bead open"
+fi
+
 ORPHAN_DBS=$(jq -r '.dropped.count // 0' "$SCAN_FILE")
 ORPHAN_PROCS=$(jq -r '.reaped.targets | length' "$SCAN_FILE")
 ORPHAN_TOTAL=$((ORPHAN_DBS + ORPHAN_PROCS))
