@@ -218,6 +218,89 @@ func TestParsePruneDuration(t *testing.T) {
 	}
 }
 
+func TestSessionCapacityEntryRefusesBeforeExecutingModel(t *testing.T) {
+	city := t.TempDir()
+	marker := filepath.Join(city, "model-must-not-run")
+	cmd := newSessionCapacityEnterCmd()
+	cmd.SetArgs([]string{city, "owned-sid", "attempt", "gc-managed-owned.scope", "--", "/bin/sh", "-c", "touch " + marker})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("missing admission authority executed the model")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("model ran before entry acknowledgement: %v", err)
+	}
+}
+
+func TestSessionCapacityContractReportsExactDedicatedReservation(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	city := t.TempDir()
+	writeNamedSessionCityTOML(t, city)
+	t.Setenv("GC_CITY", city)
+	t.Setenv("GC_CITY_PATH", city)
+	var stdout bytes.Buffer
+	cmd := newSessionCapacityContractCmd(&stdout)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["schema"] != "gc.session-capacity-contract/v1" ||
+		got["dedicated_alias_reservation"] != session.DedicatedClerkReservationContract ||
+		got["native_actual_start"] != true {
+		t.Fatalf("unexpected contract: %v", got)
+	}
+}
+
+func TestSessionCapacityContractNativeModeDoesNotAdvertiseLegacyReservation(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	city := t.TempDir()
+	writeNamedSessionCityTOML(t, city)
+	t.Setenv("GC_CITY", city)
+	t.Setenv("GC_CITY_PATH", city)
+	if err := os.MkdirAll(filepath.Join(city, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `[admission]
+mode="native-managed-v1"
+[queue]
+managed_exact_routes=["worker"]
+[limits]
+max_managed_workers=3
+[thresholds]
+mem_green_gib=6
+memory_psi_green=1
+io_psi_green=10
+`
+	path := filepath.Join(city, "config/capacity-scheduler-v2.toml")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	cmd := newSessionCapacityContractCmd(&stdout)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["admission_mode"] != "native-managed-v1" || got["dedicated_alias_reservation"] != "" || got["native_actual_start"] != true {
+		t.Fatalf("false legacy capability: %v", got)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(config, "native-managed-v1", "unknown-mode", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if err := newSessionCapacityContractCmd(&stdout).Execute(); err == nil || stdout.Len() != 0 {
+		t.Fatal("unknown mode advertised compatibility")
+	}
+}
+
 func TestSessionNewJSONRequiresNoAttach(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := cmdSessionNew([]string{"worker"}, "", "", "", false, true, 0, &stdout, &stderr)
