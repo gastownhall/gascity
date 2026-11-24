@@ -2297,6 +2297,16 @@ managed Dolt server is not running is named on stderr but does not hold the
 answer up. A failed query is also recorded as a session.work_query_failed event,
 one per store that failed, naming it.
 
+With --timeout &lt;duration&gt;, or a GC_HOOK_DEADLINE inherited from gc hook run,
+the hook answers before that deadline (the earlier of the two). The stores are
+read concurrently, and a read still running when only the answer margin is
+left (a third of the budget, at most 3s) is stopped, its process group killed:
+it is a failed read like any other, so with no other store serving work the
+hook exits 2 with GC_HOOK_STORE_UNAVAILABLE and the hook deadline named on
+stderr. An inherited GC_HOOK_DEADLINE that does not parse or has already
+passed is ignored with a note on stderr. With neither, each store read is
+bounded only by its own 150s timeout.
+
 Before the work query, a session keyed by $GC_SESSION_ID is checked for a
 pending drain (the drain fence), with and without --claim. A draining session
 gets the drain result instead of work. If the session row cannot be read, the
@@ -2334,6 +2344,7 @@ gc hook [agent] [flags]
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
+| `--timeout` | duration | `0s` | answer before this budget runs out: store reads stop early enough to report it (0: no budget; an inherited GC_HOOK_DEADLINE also bounds it) |
 | `--worktree` | bool |  | with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged) |
 
 | Subcommand | Description |

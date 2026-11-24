@@ -157,3 +157,66 @@ func hookDeadlineAllowsNudgeAck(what string, stderr io.Writer) bool {
 	}
 	return true
 }
+
+// hookInvocationDeadline is the deadline this gc hook invocation answers by:
+// hookProcessStart plus timeout (gc hook --timeout; zero for none), or the
+// deadline gc hook run handed it in hookDeadlineEnv, whichever is earlier. ok
+// is false when there is neither. An inherited value that does not parse, or
+// that has already passed, is ignored with a note on stderr, as
+// childHookDeadline ignores it: gc hook run, its only writer, always writes a
+// valid future instant, so such a value is leaked environment.
+func hookInvocationDeadline(timeout time.Duration, stderr io.Writer) (time.Time, bool) {
+	var deadline time.Time
+	ok := false
+	if timeout > 0 {
+		deadline, ok = hookProcessStart.Add(timeout), true
+	}
+	inherited, has, err := inheritedHookDeadline()
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "gc hook: ignoring %s: %v\n", hookDeadlineEnv, err) //nolint:errcheck // best-effort stderr
+	case has && !inherited.After(time.Now()):
+		fmt.Fprintf(stderr, "gc hook: ignoring %s=%s: already past\n", hookDeadlineEnv, hookDeadlineEnvValue(inherited)) //nolint:errcheck // best-effort stderr
+	case has && (!ok || inherited.Before(deadline)):
+		deadline, ok = inherited, true
+	}
+	return deadline, ok
+}
+
+// errHookDeadlineReached is the cause a hook's store reads stop with when the
+// invocation deadline ends them. It unwraps to context.DeadlineExceeded, so a
+// read it stops is classified as a timed-out read.
+type errHookDeadlineReached struct {
+	deadline time.Time
+}
+
+func (e *errHookDeadlineReached) Error() string {
+	return "stopped at the hook deadline " + e.deadline.UTC().Format(time.RFC3339)
+}
+
+func (e *errHookDeadlineReached) Unwrap() error { return context.DeadlineExceeded }
+
+// hookAnswerMarginKey carries, on a hook's read context, the time it keeps
+// after its reads end to answer and exit (hookReadContext).
+type hookAnswerMarginKey struct{}
+
+// hookReadContext is the context a hook invocation's store reads run under.
+// With a deadline it ends at the deadline less the answer margin
+// (hookArchiveMargin from hookProcessStart), so the hook still has the margin
+// to report the reads it stopped and exit before the deadline; the margin
+// rides along for hookAnswerMargin. Without one it is parent, unbounded.
+func hookReadContext(parent context.Context, deadline time.Time, ok bool) (context.Context, context.CancelFunc) {
+	if !ok {
+		return context.WithCancel(parent)
+	}
+	margin := hookArchiveMargin(deadline, hookProcessStart)
+	ctx := context.WithValue(parent, hookAnswerMarginKey{}, margin)
+	return context.WithDeadlineCause(ctx, deadline.Add(-margin), &errHookDeadlineReached{deadline: deadline})
+}
+
+// hookAnswerMargin is the answer margin hookReadContext put on ctx, and false
+// when ctx carries no hook deadline.
+func hookAnswerMargin(ctx context.Context) (time.Duration, bool) {
+	margin, ok := ctx.Value(hookAnswerMarginKey{}).(time.Duration)
+	return margin, ok
+}

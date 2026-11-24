@@ -34,6 +34,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var drainAck bool
 	var jsonOut bool
 	var worktree bool
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
 		Short: "Find routed work for an agent",
@@ -78,6 +79,16 @@ managed Dolt server is not running is named on stderr but does not hold the
 answer up. A failed query is also recorded as a session.work_query_failed event,
 one per store that failed, naming it.
 
+With --timeout <duration>, or a GC_HOOK_DEADLINE inherited from gc hook run,
+the hook answers before that deadline (the earlier of the two). The stores are
+read concurrently, and a read still running when only the answer margin is
+left (a third of the budget, at most 3s) is stopped, its process group killed:
+it is a failed read like any other, so with no other store serving work the
+hook exits 2 with GC_HOOK_STORE_UNAVAILABLE and the hook deadline named on
+stderr. An inherited GC_HOOK_DEADLINE that does not parse or has already
+passed is ignored with a note on stderr. With neither, each store read is
+bounded only by its own 150s timeout.
+
 Before the work query, a session keyed by $GC_SESSION_ID is checked for a
 pending drain (the drain fence), with and without --claim. A draining session
 gets the drain result instead of work. If the session row cannot be read, the
@@ -113,6 +124,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 				Worktree:   worktree,
+				Timeout:    timeout,
 			}
 			// exitForCode, not `!= 0 → errExit`: the store-unavailable
 			// contract is exit 2 (reportWorkQueryFailure), and folding it
@@ -126,6 +138,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "answer before this budget runs out: store reads stop early enough to report it (0: no budget; an inherited GC_HOOK_DEADLINE also bounds it)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged)")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
@@ -310,6 +323,9 @@ type hookCommandOptions struct {
 	JSON       bool
 	Worktree   bool
 	DrainAckFn hookDrainAckFunc
+	// Timeout is the caller's budget for this invocation (--timeout); zero
+	// means none. hookInvocationDeadline turns it into the hook deadline.
+	Timeout time.Duration
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -343,6 +359,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		fmt.Fprintln(stderr, "gc hook: --worktree requires --claim") //nolint:errcheck
 		return 1
 	}
+	if opts.Timeout < 0 {
+		fmt.Fprintf(stderr, "gc hook: --timeout must not be negative, got %s\n", opts.Timeout) //nolint:errcheck
+		return 1
+	}
+	deadline, hasDeadline := hookInvocationDeadline(opts.Timeout, stderr)
 
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
@@ -642,7 +663,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	visibility := hookDiscoveryVisibility(city, cityName, &a, identityCandidates, routeTargets, stderr)
-	runner := hookDiscoveryRunner(context.Background(), stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnvContext), visibility, emitQueryFailure, stderr)
+	readCtx, cancelReads := hookReadContext(context.Background(), deadline, hasDeadline)
+	defer cancelReads()
+	runner := hookDiscoveryRunner(readCtx, stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnvContext), visibility, emitQueryFailure, stderr)
 	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, strictDrainAck), city.claimOps(), runner, stdout, stderr, visibility)
 }
 
@@ -1378,6 +1401,10 @@ func shellWorkQueryWithEnvContext(parent context.Context, command, dir string, e
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
 	cmd.WaitDelay = 2 * time.Second
+	if margin, ok := hookAnswerMargin(parent); ok {
+		// The pipes must not hold the hook past its deadline.
+		cmd.WaitDelay = min(cmd.WaitDelay, margin)
+	}
 	prepareProviderOpCommand(cmd)
 	if dir != "" {
 		cmd.Dir = dir
@@ -1392,9 +1419,15 @@ func shellWorkQueryWithEnvContext(parent context.Context, command, dir string, e
 
 // workQueryResult turns a finished work query's output and error into
 // shellWorkQueryWithEnv's result. ctx is the query's own, bounded by
-// hookWorkQueryTimeout.
+// hookWorkQueryTimeout and by the hook deadline its parent may carry
+// (hookReadContext); a timeout names whichever bound stopped the query.
 func workQueryResult(ctx context.Context, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
 	if ctx.Err() == context.DeadlineExceeded {
+		bound := fmt.Sprintf("timed out after %s", hookWorkQueryTimeout)
+		var reached *errHookDeadlineReached
+		if errors.As(context.Cause(ctx), &reached) {
+			bound = reached.Error()
+		}
 		// Wrap context.DeadlineExceeded so callers can classify the timeout as
 		// transient (dispatch.IsTransientControllerError / errors.Is). Without
 		// this, a work-query timeout reads as an opaque fatal error and kills
@@ -1403,9 +1436,9 @@ func workQueryResult(ctx context.Context, command string, out []byte, stderr *by
 		// "timed out after" text is preserved.
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {
-			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q: %w", command, hookWorkQueryTimeout, msg, context.DeadlineExceeded)
+			return string(out), fmt.Errorf("running work query %q: %s with partial stdout %q: %w", command, bound, msg, context.DeadlineExceeded)
 		}
-		return "", fmt.Errorf("running work query %q: timed out after %s: %w", command, hookWorkQueryTimeout, context.DeadlineExceeded)
+		return "", fmt.Errorf("running work query %q: %s: %w", command, bound, context.DeadlineExceeded)
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
