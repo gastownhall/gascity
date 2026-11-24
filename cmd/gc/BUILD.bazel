@@ -2432,6 +2432,7 @@ go_test(
         "session_state_helpers_test.go",
         "session_suspend_continuity_test.go",
         "session_suspend_sticks_test.go",
+        "session_sync_client_test.go",
         "session_target_test.go",
         "session_template_overrides_test.go",
         "session_template_start_test.go",

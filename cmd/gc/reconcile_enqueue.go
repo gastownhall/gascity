@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -181,4 +183,86 @@ func pokeControllerForRestart(cityPath string, key reconcilekey.Key) error {
 		return fmt.Errorf("signaling controller: %w (restart request remains durably set for the next reconcile tick)", err)
 	}
 	return nil
+}
+
+// sessionSyncAttempts bounds how often the client sends session-sync while
+// the controller replies busy.
+const sessionSyncAttempts = 3
+
+// sessionSyncReadTimeout bounds the wait for one session-sync reply. It
+// covers the controller's own refresh budget (sessionSyncRefreshBudget).
+var sessionSyncReadTimeout = 5 * time.Second
+
+// errSessionSyncUnsupported reports a controller that predates session-sync:
+// it closed the connection without replying. The keyed poke was sent
+// instead, so the controller is woken but has not confirmed it sees the row.
+var errSessionSyncUnsupported = errors.New("the controller predates session-sync; a keyed poke was sent instead")
+
+// errSessionSyncMissing reports that the controller's session store has no
+// row for the session.
+var errSessionSyncMissing = errors.New("the controller's session store has no row for the session")
+
+// sessionSyncCommand renders the session-sync socket command for sessionID.
+func sessionSyncCommand(sessionID string) string {
+	payload, err := json.Marshal(sessionSyncRequest{SessionID: sessionID})
+	if err != nil {
+		// A struct of one string field always marshals.
+		return sessionSyncCommandPrefix + `{"session_id":""}`
+	}
+	return sessionSyncCommandPrefix + string(payload)
+}
+
+// syncSessionOnController asks the controller for cityPath to install the
+// session row sessionID as its backing holds it now and to reconcile it,
+// and waits for the acknowledgment. It returns nil only when the controller
+// replied ok. On a worker site it returns errWorkerSiteNoController without
+// dialing: no controller in this box can confirm the row, and there is no
+// supervisor fallback.
+func syncSessionOnController(cityPath, sessionID string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
+	send := func(command string) ([]byte, error) {
+		return sendControllerCommandWithTimeouts(cityPath, command, 2*time.Second, 2*time.Second, sessionSyncReadTimeout)
+	}
+	return syncSessionWith(sessionID, send)
+}
+
+// syncSessionWith runs the session-sync exchange over send. A busy reply is
+// resent up to sessionSyncAttempts times in all. An older controller's
+// close without a reply falls back to the keyed poke, so its wake is not
+// lost, and returns errSessionSyncUnsupported (joined with the poke's error
+// when that failed too).
+func syncSessionWith(sessionID string, send func(command string) ([]byte, error)) error {
+	command := sessionSyncCommand(sessionID)
+	var reply sessionSyncReply
+	for range sessionSyncAttempts {
+		resp, err := send(command)
+		if err != nil {
+			if keyedPokeUnsupported(err) {
+				if pokeErr := sendKeyedPoke(reconcilekey.Session(sessionID), send); pokeErr != nil {
+					return errors.Join(errSessionSyncUnsupported, fmt.Errorf("keyed poke: %w", pokeErr))
+				}
+				return errSessionSyncUnsupported
+			}
+			return fmt.Errorf("session-sync: %w", err)
+		}
+		reply = sessionSyncReply{}
+		if err := json.Unmarshal(bytes.TrimSpace(resp), &reply); err != nil {
+			return fmt.Errorf("session-sync: decoding reply %q: %w", strings.TrimSpace(string(resp)), err)
+		}
+		switch reply.Outcome {
+		case sessionSyncOK:
+			return nil
+		case sessionSyncMissing:
+			return errSessionSyncMissing
+		case sessionSyncBusy:
+			continue
+		case sessionSyncFailed:
+			return fmt.Errorf("session-sync failed: %s", reply.Error)
+		default:
+			return fmt.Errorf("session-sync: unknown outcome %q", reply.Outcome)
+		}
+	}
+	return fmt.Errorf("session-sync busy: %s (after %d attempts)", reply.Error, sessionSyncAttempts)
 }
