@@ -17,6 +17,11 @@ package main
 //     to decide what to claim, and nothing here feeds back into that path. The
 //     id comes off the seat's own session row (gc.trigger_bead_id), never its
 //     shell: no session env carries a trigger id (gastownhall/gascity#5738).
+//   - It reads the trigger in the store the controller counted it in, which the
+//     same session row stamps (gc.trigger_bead_store_ref), never in the seat's
+//     own store. A same-id copy in the seat's store says nothing about the row
+//     the controller counted, and reading it instead would classify every
+//     cross-store disagreement benign (gastownhall/gascity#5858).
 //   - It is scoped to seats the controller spawned on demand evidence
 //     (GC_SPAWN_ORIGIN=demand, presence only). A named session or a manual hook
 //     draining empty is not evidence about anything.
@@ -28,11 +33,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -102,7 +109,7 @@ func recordDemandClaimDivergence(reason string, opts hookClaimOptions, ops hookC
 		// The one classification worth a line on the worker's own stderr: the
 		// row the controller counted is still sitting there, claimable, and this
 		// seat could not see it.
-		fmt.Fprintf(stderr, "gc hook --claim: demand/claim divergence: %s is still claimable but this seat's query did not serve it\n", triggerID) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc hook --claim: demand/claim divergence: %s is still claimable in %s, the store its demand was counted in, but this seat's query did not serve it\n", triggerID, trigger.StoreRef) //nolint:errcheck
 	}
 }
 
@@ -192,6 +199,40 @@ func classifyDemandTrigger(trigger demandTrigger, opts hookClaimOptions, ops hoo
 		// here for the same reason.
 		return status, events.DemandClaimBenign
 	}
+}
+
+// demandTriggerStoreAt resolves a trigger's gc.trigger_bead_store_ref stamp to
+// the leg that reads the store the controller counted the row in, built by the
+// same leg builders the hook fan-out uses. The stamp is folded the way the
+// census that wrote it compares it (normalizeDemandStoreRef): the city
+// spellings and class refs read the city store, "rig:<name>" and the bare rig
+// name read that rig's store. An empty stamp, a scheme the census never
+// writes, or a store no leg can be built for is an error: the seat cannot
+// place the counting store.
+//
+// The leg is built from a zero agent view with no identity overrides: the read
+// is by id, so there is no query identity to preserve, and the store
+// coordinates come from the view's rig alone.
+func demandTriggerStoreAt(cityPath string, cfg *config.City, storeRef string) (hookStore, error) {
+	storeRef = strings.TrimSpace(storeRef)
+	if storeRef == "" {
+		return hookStore{}, errors.New("the session row records no store its trigger was counted in")
+	}
+	var legs []hookStore
+	switch normalized := normalizeDemandStoreRef(storeRef); {
+	case normalized == "city":
+		legs = appendCityHookStore(nil, cityPath, cfg, &config.Agent{}, nil)
+	case strings.HasPrefix(normalized, "rig:"):
+		legs = appendOneRigHookStore(nil, cityPath, cfg, &config.Agent{}, strings.TrimPrefix(normalized, "rig:"), nil)
+	case !strings.Contains(normalized, ":"):
+		legs = appendOneRigHookStore(nil, cityPath, cfg, &config.Agent{}, normalized, nil)
+	default:
+		return hookStore{}, fmt.Errorf("trigger store ref %q names no store this seat can read", storeRef)
+	}
+	if len(legs) == 0 {
+		return hookStore{}, fmt.Errorf("building the leg for trigger store ref %q: no store this seat can read", storeRef)
+	}
+	return legs[0], nil
 }
 
 // classifyDemandTriggerBlockedness settles a trigger row whose blockedness the
