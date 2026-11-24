@@ -12081,3 +12081,64 @@ func TestCmdWorkflowReopenSourceConflictsWithLiveConvoyFirstRoot(t *testing.T) {
 		t.Fatalf("stderr = %q, want the live convoy-first root blocking", stderr.String())
 	}
 }
+
+func TestCmdWorkflowDeleteSourceApplyClosesConvoyFirstRoot(t *testing.T) {
+	cityDir, store := newDeleteSourceTestCity(t)
+	source := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+	_, root, steps := createConvoyFirstRun(t, store, source.ID)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowDeleteSource = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned source_bead_id="+source.ID+" matched_roots=1 matched_beads=3 closed=3 ") {
+		t.Fatalf("stdout = %q, want the convoy-first run cleaned", stdout.String())
+	}
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	for _, id := range append([]string{root.ID}, workflowBeadIDs(steps)...) {
+		assertWorkflowBeadClosedWith(t, reloaded, id, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("rerun cmdWorkflowDeleteSource = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=already_clean source_bead_id="+source.ID+" matched_roots=0 ") {
+		t.Fatalf("rerun stdout = %q, want already_clean once the run is closed", stdout.String())
+	}
+}
+
+// TestCmdWorkflowDeleteSourceDeleteRemovesExactlyTheSweptConvoyFirstRun pins
+// --delete on the new leg: the run's beads go, the source and its launch
+// convoy stay.
+func TestCmdWorkflowDeleteSourceDeleteRemovesExactlyTheSweptConvoyFirstRun(t *testing.T) {
+	cityDir, store := newDeleteSourceTestCity(t)
+	source := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+	convoyID, root, steps := createConvoyFirstRun(t, store, source.ID)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowDeleteSource = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned") || !strings.Contains(stdout.String(), " deleted=3 ") {
+		t.Fatalf("stdout = %q, want the three run beads deleted", stdout.String())
+	}
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	for _, id := range append([]string{root.ID}, workflowBeadIDs(steps)...) {
+		if _, err := reloaded.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("Get(%s) after --delete = %v, want not found", id, err)
+		}
+	}
+	for _, id := range []string{source.ID, convoyID} {
+		if _, err := reloaded.Get(id); err != nil {
+			t.Errorf("Get(%s) after --delete = %v, want it kept", id, err)
+		}
+	}
+}
