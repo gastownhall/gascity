@@ -250,3 +250,57 @@ func TestStartRecordsRuntimeOwnerAfterStart(t *testing.T) {
 		})
 	}
 }
+
+// goneRootPID is above Linux's largest pid_max, so no process ever has it.
+const goneRootPID = 1 << 30
+
+// AC-3: a start whose runtime-owner record cannot be completed (the scan
+// fails, finds no root, cannot read a root's start time, or the write fails)
+// still succeeds, and a log line names the session and the failure.
+func TestRuntimeOwnerRecordFailureDoesNotFailStart(t *testing.T) {
+	classifyInfrastructure(t)
+	tracked := func(pid int) []runtime.LiveRuntime { return []runtime.LiveRuntime{{PID: pid, IsTracked: true}} }
+	for _, tc := range []struct {
+		name    string
+		results []runtime.LiveRuntime
+		findErr error
+		store   func(*beads.MemStore) beads.Store
+		want    string
+	}{
+		{name: "scan error", findErr: errors.New("proc entry unreadable"), want: "scanning for its runtime roots: proc entry unreadable"},
+		{name: "no root", want: "no runtime root found"},
+		{name: "unreadable start time", results: tracked(goneRootPID), want: fmt.Sprintf("leaving root pid=%d out: reading its start time", goneRootPID)},
+		{
+			name: "failed write", results: tracked(os.Getpid()),
+			store: func(s *beads.MemStore) beads.Store { return failMetadataKeyStore{MemStore: s, key: "runtime_owner"} },
+			want:  "writing runtime_owner: set metadata failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureLog(t)
+			var store beads.Store = beads.NewMemStore()
+			if tc.store != nil {
+				store = tc.store(store.(*beads.MemStore))
+			}
+			sp := &orphanScanProvider{Fake: runtime.NewFake(), city: t.TempDir(), results: tc.results, findErr: tc.findErr}
+			mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+			if err != nil {
+				t.Fatalf("CreateSession: %v, want the start to succeed", err)
+			}
+			if !hasEventPrefix(sp.events, "start:") {
+				t.Fatalf("events = %v, want a start", sp.events)
+			}
+			var line string
+			for _, l := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(l, "recording runtime owner of "+info.ID) && strings.Contains(l, tc.want) {
+					line = l
+				}
+			}
+			if line == "" {
+				t.Fatalf("log = %q, want a line naming %s and %q", logs.String(), info.ID, tc.want)
+			}
+		})
+	}
+}
