@@ -84,7 +84,7 @@ func (p *Provider) InterruptFenced(_ context.Context, name string, fence runtime
 		// Reaped: its process group id may already name another process.
 		return &runtime.FenceMismatchError{Session: name, Found: runtime.FenceFoundDead}
 	}
-	err = runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
+	err = signalInterrupt(sc)
 	switch {
 	case err == nil:
 		return nil

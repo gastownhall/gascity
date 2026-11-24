@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -20,7 +21,7 @@ func TestConvoyCreateOps(t *testing.T) {
 	store := beads.NewMemStore()
 	deps := testConvoyDeps()
 
-	result, err := ConvoyCreate(deps, MemberClasses{Convoy: store}, ConvoyCreateInput{
+	result, err := ConvoyCreate(deps, MemberClasses{Convoy: beadstest.Work(store)}, ConvoyCreateInput{
 		Title: "my convoy",
 		Fields: ConvoyFields{
 			Owner:  "mayor",
@@ -61,7 +62,7 @@ func TestConvoyCreateWithItemsOps(t *testing.T) {
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: epic.ID})
 	b2, _ := store.Create(beads.Bead{Title: "task 2"})
 
-	result, err := ConvoyCreate(deps, MemberClasses{Convoy: store}, ConvoyCreateInput{
+	result, err := ConvoyCreate(deps, MemberClasses{Convoy: beadstest.Work(store)}, ConvoyCreateInput{
 		Title: "linked convoy",
 		Items: []string{b1.ID, b2.ID},
 	})
@@ -94,7 +95,7 @@ func TestConvoyProgressOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: store}, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +120,7 @@ func TestConvoyProgressCompleteOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: store}, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +146,7 @@ func TestConvoyProgressTracksDepsOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: store}, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +175,7 @@ func TestConvoyProgressTreatsTombstoneAsCompleteOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: store}, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func TestConvoyMembersKeepsDanglingTracksUnknownOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	members, err := Members(store, convoy.ID, true)
+	members, err := MembersIn(MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +222,7 @@ func TestConvoyMembersKeepsMalformedTrackedItemUnknownOps(t *testing.T) {
 	}
 	store := metadataParseErrorStore{Store: backing, corruptID: item.ID}
 
-	members, err := Members(store, convoy.ID, true)
+	members, err := MembersIn(MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +245,7 @@ func TestConvoyAddItemsOps(t *testing.T) {
 	epic, _ := store.Create(beads.Bead{Title: "epic", Type: "epic"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: epic.ID})
 
-	err := ConvoyAddItems(deps, MemberClasses{Convoy: store}, convoy.ID, []string{b1.ID})
+	err := ConvoyAddItems(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, []string{b1.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +268,7 @@ func TestUntrackItemFailsOnAmbiguousMixedDependencyTypes(t *testing.T) {
 		t.Fatalf("DepAdd(tracks): %v", err)
 	}
 
-	if err := UntrackItem(store, convoy.ID, item.ID); err == nil {
+	if err := UntrackItem(beadstest.Work(store), convoy.ID, item.ID); err == nil {
 		t.Fatal("UntrackItem succeeded for mixed dependency types, want error")
 	}
 	requireTracksDep(t, store, convoy.ID, item.ID)
@@ -279,7 +280,7 @@ func TestConvoyCloseOps(t *testing.T) {
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 
-	err := ConvoyClose(deps, store, convoy.ID)
+	err := ConvoyClose(deps, beadstest.Work(store), convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +307,7 @@ func TestConvoyCloseNotFoundOps(t *testing.T) {
 	store := beads.NewMemStore()
 	deps := testConvoyDeps()
 
-	err := ConvoyClose(deps, store, "nonexistent")
+	err := ConvoyClose(deps, beadstest.Work(store), "nonexistent")
 	if err == nil {
 		t.Error("expected error for nonexistent convoy")
 	}

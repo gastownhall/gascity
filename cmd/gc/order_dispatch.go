@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -35,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -89,7 +89,7 @@ const (
 	// the index and pays one LIMIT-1 LastRun fallback (itself limit-pushed
 	// now), after which cachedLastRun remembers it across ticks and rebuilds.
 	orderTrackingHistoryIndexLimit   = 256
-	defaultMaxOrderDispatchesPerTick = 4
+	defaultMaxOrderDispatchesPerTick = config.DefaultMaxOrderDispatchesPerTick
 	orderTrackingSweepCloseBudget    = 4
 
 	// orderTrackingSweepWatchdogNotClosedInterval is how often the stale
@@ -120,9 +120,10 @@ const (
 	// runs finish instead of timing out. Refusals (live descendants) do
 	// not consume it.
 	orderTrackingSweepRetentionDeleteBudget = 128
-	// orderTrackingRetentionDeleteChunk is how many guarded ids one batched
-	// delete commits. Chunks keep a kill at the exec deadline from throwing
-	// away a whole run of successful guards.
+	// orderTrackingRetentionDeleteChunk is how many guarded ids one
+	// deleteWorkflowBeadsBatch call rechecks and deletes. Chunks keep the
+	// set-level recheck close to its delete, and a kill at the exec deadline
+	// keeps the chunks already committed.
 	orderTrackingRetentionDeleteChunk = 32
 )
 
@@ -181,13 +182,21 @@ func tailForOrderFailureEvent(output string) string {
 	return "[output truncated] " + tail
 }
 
-// shellExecRunner is the production ExecRunner using os/exec.
+// shellExecRunner is the production ExecRunner using os/exec. command runs
+// through the platform's interpreter (runtime.ShellCommandContext), and one
+// the platform refuses (runtime.ShellCommandUnavailable) starts nothing.
 func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return nil, fmt.Errorf("order command refused: %s", reason)
+	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return nil, err
+	}
 	cmd.Dir = dir
 	cmd.Env = mergeOrderExecEnv(cmd.Environ(), env)
 	processgroup.StartCommandInNewGroup(cmd)
@@ -238,17 +247,16 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	}
 	cmd.WaitDelay = shellExecPostCancelWaitDelay
 
-	if err := cmd.Start(); err != nil {
+	pgid, err := startOrderCommand(cmd)
+	if err != nil {
 		return output.Bytes(), err
 	}
+	defer releaseOrderCommand(cmd)
 	cleanupMu.Lock()
-	startedPGID = cmd.Process.Pid
-	if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
-		startedPGID = pgid
-	}
+	startedPGID = pgid
 	cleanupMu.Unlock()
 
-	err := cmd.Wait()
+	err = cmd.Wait()
 	cleanupMu.Lock()
 	wasCanceled := canceled
 	cleanupMu.Unlock()
@@ -526,11 +534,20 @@ func buildOrderDispatcherFromOrderSet(routes *storageRoutes, cityPath string, cf
 
 	// Filter out manual- and webhook-trigger orders — they are never
 	// auto-dispatched (webhook orders fire only via the supervisor receiver).
+	// An exec order this platform refuses to run is left out too, named once
+	// per build, rather than failing on every tick.
 	var auto []orders.Order
 	for _, a := range allAA {
-		if a.Trigger != "manual" && a.Trigger != "webhook" {
-			auto = append(auto, a)
+		if a.Trigger == "manual" || a.Trigger == "webhook" {
+			continue
 		}
+		if a.IsExec() {
+			if reason := runtime.ShellCommandUnavailable(a.Exec); reason != "" {
+				logDispatchError(stderr, "order %s is not scheduled: %s", a.ScopedName(), reason)
+				continue
+			}
+		}
+		auto = append(auto, a)
 	}
 	if len(auto) == 0 {
 		return nil
@@ -557,10 +574,7 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 		ep = p
 	}
 
-	maxDispatchesPerTick := defaultMaxOrderDispatchesPerTick
-	if cfg.Orders.MaxDispatchesPerTick != nil && *cfg.Orders.MaxDispatchesPerTick > 0 {
-		maxDispatchesPerTick = *cfg.Orders.MaxDispatchesPerTick
-	}
+	maxDispatchesPerTick := cfg.Orders.EffectiveMaxDispatchesPerTick()
 
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	m := &memoryOrderDispatcher{
@@ -2386,7 +2400,7 @@ func orderSourceBinding(cfg *config.City, a orders.Order) (string, bool) {
 // the resolved invocation vars alongside it. The caller must thread those vars
 // into molecule.Instantiate; without them every {{var}} referencing a
 // caller-supplied value renders empty on the instantiated beads (#4668).
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
+func prepareOrderWispRecipe(ctx context.Context, store beads.WorkStore, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
 	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
 		return nil, nil, err
@@ -2483,6 +2497,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 			return fmt.Errorf("formulas v2 order step %q has no routing target; set order pool or gc.run_target", step.ID)
 		}
 	}
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(b)).
 	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(
 		recipe,
 		routeVars,
@@ -2491,7 +2506,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 		scopeRef,
 		storeRef,
 		graphroute.GraphRouteBinding{},
-		store,
+		beads.SessionStore{Store: store},
 		cityName,
 		cfg,
 		cliGraphrouteDeps(cityPath),
@@ -2782,7 +2797,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 
 	vars = orderFormulaVars(m.cfg, a, vars)
 	searchPaths := orderFormulaSearchPaths(m.cfg, a)
-	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, beads.WorkStore{Store: store}, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2864,7 +2879,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 
 	moleculeStore := moleculeClassStore(recipe, store, graphStore)
 	m.rememberOrderPoursWork(scoped, recipeCoordClass(recipe) == coordclass.ClassWork)
-	cookResult, err := molecule.Instantiate(ctx, moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
+	cookResult, err := molecule.Instantiate(ctx, moleculeClassTarget(recipe, moleculeStore, moleculeStore), recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -3761,12 +3776,10 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 // It stops once the total deletion count across all stores reaches limit,
 // returning the partial deleted count with a nil error on budget exhaustion.
 // Store errors are returned as normal; deletion errors within budget are
-// propagated. It also stops between delete chunks once ctx is done, returning
-// the partial count and ctx's error.
-func sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx context.Context, stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// propagated. A store whose delete batch fails counts none of its cleared runs,
+// so those deletes are not charged against limit and later stores may still
+// spend their own allowance: the worst case is len(stores)*limit per pass.
+func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
@@ -3782,7 +3795,7 @@ func sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx context.Context, s
 		}
 		// Enforce the global budget by passing the remaining allowance to the
 		// per-store bounded sweep, which stops deleting once it is spent.
-		n, err := sweepClosedOrderTrackingRetentionBounded(ctx, store, now, policy, onlyOrders, remaining)
+		n, err := sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, remaining)
 		deleted += n
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
@@ -3809,14 +3822,14 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
-	deleted := 0
+	var cleared []string
 	var retained []string
 	var deleteErr error
 	for _, run := range runs {
-		// Per-bead delete keeps a single refusal or a failing Delete exact
-		// for callers that prune a handful of rows. The maintenance order
-		// uses the bounded batch path below.
-		if err := deleteWorkflowBead(store, run.ID); err != nil {
+		if run.ID == "" {
+			continue
+		}
+		if err := assertWorkflowDeleteLeavesNothingStranded(store, run.ID, nil); err != nil {
 			if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 				retained = append(retained, run.ID)
 				continue
@@ -3824,10 +3837,32 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 			continue
 		}
-		deleted++
+		cleared = append(cleared, run.ID)
 	}
 	logRetainedForLiveDescendants(retained)
-	return deleted, deleteErr
+	if err := deleteClearedOrderTrackingRuns(cleared, func(ids []string) error {
+		return deleteWorkflowBeadsBatch(store, ids)
+	}); err != nil {
+		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	}
+	return len(cleared), deleteErr
+}
+
+// deleteClearedOrderTrackingRuns deletes the retention set that already passed
+// the per-run strand guard, handing deleteBatch at most
+// orderTrackingRetentionDeleteChunk ids per call. The callers pass
+// deleteWorkflowBeadsBatch, which rechecks its ids at the set level right
+// before its delete, so the check-to-delete window spans one chunk, not the
+// whole set. It stops at the first failing chunk; earlier chunks stay
+// deleted, but the caller counts none of the store's cleared runs.
+func deleteClearedOrderTrackingRuns(cleared []string, deleteBatch func([]string) error) error {
+	for start := 0; start < len(cleared); start += orderTrackingRetentionDeleteChunk {
+		end := min(start+orderTrackingRetentionDeleteChunk, len(cleared))
+		if err := deleteBatch(cleared[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // logRetainedForLiveDescendants reports the candidates the retention prune
@@ -3845,13 +3880,9 @@ func logRetainedForLiveDescendants(ids []string) {
 // sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
 // sweepClosedOrderTrackingRetention. It stops deleting once limit deletions have
 // occurred within this store call. On budget exhaustion it returns the partial
-// count with a nil error; delete errors are still propagated. It also stops
-// before the next delete once ctx is done, returning the partial count joined
-// with ctx's error.
-func sweepClosedOrderTrackingRetentionBounded(ctx context.Context, store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// count with a nil error; delete errors are still propagated. Live-descendant
+// refusals do not consume limit.
+func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
 	}
@@ -3870,14 +3901,33 @@ func sweepClosedOrderTrackingRetentionBounded(ctx context.Context, store beads.S
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
-	ids := make([]string, 0, len(runs))
+	var cleared []string
+	var retained []string
+	var deleteErr error
 	for _, run := range runs {
+		if len(cleared) >= limit {
+			break
+		}
 		if run.ID == "" {
 			continue
 		}
-		ids = append(ids, run.ID)
+		if err := assertWorkflowDeleteLeavesNothingStranded(store, run.ID, nil); err != nil {
+			if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+				retained = append(retained, run.ID)
+				continue
+			}
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
+			continue
+		}
+		cleared = append(cleared, run.ID)
 	}
-	return deleteClosedOrderTrackingRetentionBounded(ctx, ordersStore, ids, limit)
+	logRetainedForLiveDescendants(retained)
+	if err := deleteClearedOrderTrackingRuns(cleared, func(ids []string) error {
+		return deleteWorkflowBeadsBatch(store, ids)
+	}); err != nil {
+		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	}
+	return len(cleared), deleteErr
 }
 
 // countClosedOrderTrackingRetentionEligible returns the number of closed
@@ -4006,148 +4056,6 @@ func sortOrderTrackingRunsNewestFirst(runs []orders.OrderRun) {
 		}
 		return left.After(right)
 	})
-}
-
-// orderTrackingRetentionDeleteGuard proves id is safe to delete without the
-// tree walk when the bead is a leaf. An open non-transient member refuses
-// immediately. Any other member, parent-child, or dependent falls through
-// to the full stranding guard so a partial stamp is still seen.
-func orderTrackingRetentionDeleteGuard(store beads.OrdersStore, id string) error {
-	reader := beads.LiveFor(store)
-	members, err := reader.List(beads.ListQuery{
-		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: id},
-		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
-	})
-	if err != nil {
-		return fmt.Errorf("checking live descendants of %s: %w", id, err)
-	}
-	other := false
-	var open []string
-	for _, b := range members {
-		if b.ID == id {
-			continue
-		}
-		other = true
-		if b.Status != "closed" && !isTransientNotificationBead(b) {
-			open = append(open, b.ID)
-		}
-	}
-	if len(open) > 0 {
-		return workflowDeleteRefusal(id, open)
-	}
-	if other {
-		return assertWorkflowDeleteLeavesNothingStranded(store, id, nil)
-	}
-	children, err := orderWispParentChildren(reader, id)
-	if err != nil {
-		return fmt.Errorf("checking live descendants of %s: %w", id, err)
-	}
-	if len(children) > 0 {
-		return assertWorkflowDeleteLeavesNothingStranded(store, id, nil)
-	}
-	up, err := store.DepList(id, "up")
-	if err != nil {
-		return fmt.Errorf("checking live descendants of %s: %w", id, err)
-	}
-	if len(up) > 0 {
-		return assertWorkflowDeleteLeavesNothingStranded(store, id, nil)
-	}
-	return nil
-}
-
-// deleteOrderTrackingRetentionIDs deletes ids that have already passed the
-// stranding guard. A BatchDeleter commits the chunk in one call. A wrapper
-// that only forwards the capability returns ErrBatchDeleteUnsupported and
-// falls through to the per-bead graph delete.
-func deleteOrderTrackingRetentionIDs(store beads.OrdersStore, ids []string) (int, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	if deleter, ok := beads.As[beads.BatchDeleter](store); ok {
-		err := deleter.DeleteBatch(ids)
-		if err == nil {
-			return len(ids), nil
-		}
-		if !errors.Is(err, beads.ErrBatchDeleteUnsupported) {
-			var batchErr *beads.BatchDeleteError
-			if errors.As(err, &batchErr) {
-				return len(batchErr.Committed), err
-			}
-			return 0, err
-		}
-	}
-	deleted := 0
-	var errs []error
-	for _, id := range ids {
-		if err := deleteWorkflowBeadUnguarded(store, id); err != nil {
-			errs = append(errs, fmt.Errorf("deleting closed order-tracking bead %q: %w", id, err))
-			continue
-		}
-		deleted++
-	}
-	return deleted, errors.Join(errs...)
-}
-
-// deleteClosedOrderTrackingRetentionBounded guards ids until limit safe
-// deletes are gathered, committing each full chunk so a kill at the exec
-// deadline keeps completed work. Live-descendant refusals are skipped and
-// do not consume limit.
-func deleteClosedOrderTrackingRetentionBounded(ctx context.Context, store beads.OrdersStore, ids []string, limit int) (int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if limit <= 0 || len(ids) == 0 {
-		return 0, nil
-	}
-	deleted := 0
-	var retained []string
-	var sweepErr error
-	safe := make([]string, 0, orderTrackingRetentionDeleteChunk)
-	flush := func() error {
-		if len(safe) == 0 {
-			return nil
-		}
-		chunk := append([]string(nil), safe...)
-		safe = safe[:0]
-		n, err := deleteOrderTrackingRetentionIDs(store, chunk)
-		deleted += n
-		return err
-	}
-	for _, id := range ids {
-		if deleted+len(safe) >= limit {
-			break
-		}
-		if err := ctx.Err(); err != nil {
-			if ferr := flush(); ferr != nil {
-				logRetainedForLiveDescendants(retained)
-				return deleted, errors.Join(sweepErr, ferr, err)
-			}
-			logRetainedForLiveDescendants(retained)
-			return deleted, errors.Join(sweepErr, err)
-		}
-		if err := orderTrackingRetentionDeleteGuard(store, id); err != nil {
-			if errors.Is(err, errWorkflowDeleteLiveDescendants) {
-				retained = append(retained, id)
-				continue
-			}
-			sweepErr = errors.Join(sweepErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", id, err))
-			continue
-		}
-		safe = append(safe, id)
-		if len(safe) >= orderTrackingRetentionDeleteChunk || deleted+len(safe) >= limit {
-			if err := flush(); err != nil {
-				logRetainedForLiveDescendants(retained)
-				return deleted, errors.Join(sweepErr, err)
-			}
-		}
-	}
-	if err := flush(); err != nil {
-		logRetainedForLiveDescendants(retained)
-		return deleted, errors.Join(sweepErr, err)
-	}
-	logRetainedForLiveDescendants(retained)
-	return deleted, sweepErr
 }
 
 func orderTrackingRetentionBucket(run orders.OrderRun, onlyOrders map[string]struct{}) (string, bool) {

@@ -655,7 +655,7 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	}
 	dryRun := in.args.Bool("--dry-run")
 	if split.skipped > 0 && !skipInfra && !dryRun {
-		return in.refuse("gc bd import: refused on this split city: %s holds %d row(s) of a class this store does not hold (%s). bd import would strand every one in the work store, and every later gc command would refuse until they were repaired. They are not routed to the class store either: it already holds the live copies, and replaying an archive over them would roll sessions and running graphs back. Re-run with %s to import only the %d row(s) this store holds; the rest are left out and counted. Nothing was written.",
+		return in.refuse("gc bd import: refused on this split city: %s holds %d row(s) of a class this store does not hold (%s). bd import would strand every one in the work store, where no class reader sees them and the city serves degraded until they are repaired. They are not routed to the class store either: it already holds the live copies, and replaying an archive over them would roll sessions and running graphs back. Re-run with %s to import only the %d row(s) this store holds; the rest are left out and counted. Nothing was written.",
 			source, split.skipped, formatClassCounts(split.byClass), bdImportSkipInfraFlag, len(split.keep))
 	}
 	if !dryRun {

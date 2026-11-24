@@ -2,15 +2,50 @@ package gitcred
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
 
+// exitCodeEnv makes this test binary re-execute as a process that does nothing
+// but exit with the requested code.
+//
+// The helpers below need a genuine *exec.ExitError, which cannot be fabricated
+// -- only a real finished process produces one. Shelling out to `sh -c "exit N"`
+// is the usual trick, but it makes an entire file of portable assertions about
+// git's stderr depend on a POSIX shell. Re-executing this binary needs no shell
+// on any platform.
+const exitCodeEnv = "GC_TEST_GITCRED_EXIT_CODE"
+
+func TestMain(m *testing.M) {
+	if raw := os.Getenv(exitCodeEnv); raw != "" {
+		code, err := strconv.Atoi(raw)
+		if err != nil {
+			os.Exit(125)
+		}
+		os.Exit(code)
+	}
+	os.Exit(m.Run())
+}
+
+// exitError runs a child that exits with code and returns the resulting error.
+func exitError(t *testing.T, code int) error {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("setup: locating test binary: %v", err)
+	}
+	cmd := exec.Command(exe)
+	cmd.Env = append(os.Environ(), exitCodeEnv+"="+strconv.Itoa(code))
+	return cmd.Run()
+}
+
 // exit128 returns a real *exec.ExitError with code 128.
 func exit128(t *testing.T) error {
 	t.Helper()
-	err := exec.Command("sh", "-c", "exit 128").Run()
+	err := exitError(t, 128)
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 128 {
 		t.Fatalf("setup: could not produce exit-128 error, got %v", err)
@@ -20,7 +55,7 @@ func exit128(t *testing.T) error {
 
 func exit1(t *testing.T) error {
 	t.Helper()
-	err := exec.Command("sh", "-c", "exit 1").Run()
+	err := exitError(t, 1)
 	if err == nil {
 		t.Fatalf("setup: expected exit-1 error")
 	}

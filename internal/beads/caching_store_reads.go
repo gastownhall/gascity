@@ -520,6 +520,7 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 		return nil
 	}
 
+	now := c.clockNow()
 	var stale []string
 	for id, bead := range c.beads {
 		if _, ok := freshIDs[id]; ok {
@@ -537,6 +538,14 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 		// cache holds it as "open" until that change's event or the next
 		// reconcile installs it; this sweep does not.
 		if query.Status != "" && bead.SourceStatus != "" && bead.SourceStatus != query.Status {
+			continue
+		}
+		// A row deferred into the future is absent from a Live "open" by
+		// design too: a SQLite store records a deferral as its defer_until
+		// alone and leaves the row out of its raw open
+		// (sqliteListLeavesOutDeferred). Another process's close or claim of
+		// such a row waits for its event or the next reconcile, as above.
+		if query.Status == "open" && LiveOpenLeavesOut(bead, now) {
 			continue
 		}
 		stale = append(stale, id)
@@ -1088,6 +1097,29 @@ func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([
 		return nil, err
 	}
 	return rows, nil
+}
+
+// ReadyJudgmentContext is ReadyContext for a reader that trusts the cache
+// row by row: it judges every candidate the cache can vouch for, leaves a
+// dirty or unanswerable one unjudged rather than declining the whole read, and
+// returns the snapshot its verdicts were reached on (ReadyJudgment): each
+// judged candidate's edges, and which rows the cache held and trusted. A
+// reader that must know a verdict judged every target, rather than skipping
+// one the cache does not hold, reads this. Like ReadyContext it never reads
+// the backing: a cache that cannot vouch for any of it (not live, coverage
+// incomplete, projection degraded, busy) returns ErrCacheUnavailable.
+func (c *CachingStore) ReadyJudgmentContext(ctx context.Context, query ReadyQuery) (ReadyJudgment, error) {
+	if err := ctx.Err(); err != nil {
+		return ReadyJudgment{}, err
+	}
+	j, err := c.cachedReadyJudgment(ctx, c.readyTier(query), true)
+	if err != nil {
+		return ReadyJudgment{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ReadyJudgment{}, err
+	}
+	return j, nil
 }
 
 // CachedReady returns ready beads from the in-memory active read model.

@@ -51,8 +51,7 @@ type Override struct {
 // errors, not silent no-ops). A bad override never stops the others: every
 // override that matches is applied, and the error joins one entry per bad
 // override, in config order. An override can name an absent order because
-// the order was retired or renamed, its own file disables it, or the city's
-// orders skip list removed it.
+// the order was retired or renamed, or the city's orders skip list removed it.
 func ApplyOverrides(aa []Order, overrides []Override) error {
 	var errs []error
 	for i, ov := range overrides {
