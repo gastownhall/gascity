@@ -686,3 +686,69 @@ func TestVerbCtxCarriesTheBound(t *testing.T) {
 		}
 	})
 }
+
+// passAll holds nothing: every call reaches the fake at once.
+func passAll() func(string, int, []string) time.Duration {
+	return func(string, int, []string) time.Duration { return 0 }
+}
+
+// TestAttachBoundsOnlyItsLookup is AC-2 of #6055: a blocking lookup returns the
+// "no running pod" error within the bound, and the ctx handed to kubectl has no
+// deadline and outlives the request bound.
+func TestAttachBoundsOnlyItsLookup(t *testing.T) {
+	t.Run("lookup blocks", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ops := newHoldOps(holdAll())
+			p := deadlineProvider(ops)
+			p.run = func(context.Context, []string) error {
+				t.Error("kubectl must not run when the lookup timed out")
+				return nil
+			}
+
+			start := time.Now()
+			err := p.Attach(deadlineSession)
+			elapsed := time.Since(start)
+
+			if err == nil || !strings.Contains(err.Error(), "attach: no running pod") {
+				t.Fatalf("Attach = %v, want the attach: no running pod error", err)
+			}
+			if elapsed > testRequestBound {
+				t.Fatalf("Attach lookup took %v, want within %v", elapsed, testRequestBound)
+			}
+			if ops.cutCount() == 0 {
+				t.Fatal("the lookup was never cut: the test is vacuous")
+			}
+		})
+	})
+	t.Run("kubectl ctx is uncut", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ops := newHoldOps(passAll())
+			addRunningPods(ops.fakeK8sOps, 1)
+			p := deadlineProvider(ops)
+
+			var ran bool
+			p.run = func(ctx context.Context, args []string) error {
+				ran = true
+				if _, ok := ctx.Deadline(); ok {
+					t.Error("the ctx given to kubectl has a deadline: the interactive stream would be cut")
+				}
+				if !strings.Contains(strings.Join(args, " "), SanitizeName(deadlineSession)) {
+					t.Errorf("kubectl args %v do not name the pod", args)
+				}
+				// Outlive the request bound; the stream is a user's terminal.
+				<-time.After(3 * testRequestBound)
+				if err := ctx.Err(); err != nil {
+					t.Errorf("kubectl ctx ended after the request bound: %v", err)
+				}
+				return nil
+			}
+
+			if err := p.Attach(deadlineSession); err != nil {
+				t.Fatalf("Attach = %v, want nil", err)
+			}
+			if !ran {
+				t.Fatal("kubectl hook never ran")
+			}
+		})
+	})
+}
