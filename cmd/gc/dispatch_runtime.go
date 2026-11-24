@@ -516,7 +516,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 						continue
 					}
 					if previous.repeats(beadID, reason) {
-						workflowTracef("serve pending bead=%s kind=%s", beadID, kind)
+						workflowTracef("serve pending-repeat bead=%s kind=%s", beadID, kind)
 						continue
 					}
 					result.pendingAny = true

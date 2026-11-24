@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -417,5 +420,33 @@ func TestRunWorkflowServeFollowNewPendingResetsBackoff(t *testing.T) {
 				t.Fatalf("waits = %+v, want %+v", waits, tt.want)
 			}
 		})
+	}
+}
+
+// TestRunWorkflowServeFollowTracesPendingOnsetOnce pins the trace a pending
+// bead leaves across consecutive --follow sweeps: `serve pending` marks the
+// onset once, and every verbatim repeat after it writes `serve pending-repeat`.
+func TestRunWorkflowServeFollowTracesPendingOnsetOnce(t *testing.T) {
+	clearGCEnv(t)
+	tracePath := filepath.Join(t.TempDir(), "workflow-trace.log")
+	t.Setenv("GC_WORKFLOW_TRACE", tracePath)
+
+	runPendingFollowScript(t, repeatSweeps(3, pendingFollowRow{id: "gc-blocked", err: dispatch.ErrControlPending}))
+
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("reading trace: %v", err)
+	}
+	var onsets, repeats int
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.HasSuffix(line, " serve pending bead=gc-blocked kind=workflow-finalize"):
+			onsets++
+		case strings.HasSuffix(line, " serve pending-repeat bead=gc-blocked kind=workflow-finalize"):
+			repeats++
+		}
+	}
+	if onsets != 1 || repeats != 2 {
+		t.Fatalf("trace has %d `serve pending` and %d `serve pending-repeat` lines for gc-blocked, want 1 and 2:\n%s", onsets, repeats, data)
 	}
 }
