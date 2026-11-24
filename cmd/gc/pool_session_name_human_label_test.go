@@ -190,3 +190,18 @@ func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedOpenWork(t *testing
 	assertSweepKept(t, workStore, released, handoff)
 	assertSweepReleased(t, workStore, released, control)
 }
+
+// The operator exemption is an exact, case-sensitive match, as in the shell
+// sweep's `[ "$name" = "human" ]`: other bare names with no answering session,
+// including near-misses of the operator name, are still released.
+func TestReleaseOrphanedPoolAssignments_ReleasesNonOperatorBareNames(t *testing.T) {
+	workStore := beads.NewMemStore()
+	var dead []beads.Bead
+	for _, name := range []string{"alice", "Human", "humanoid", "human-1"} {
+		dead = append(dead, seedHumanLabelSweepWork(t, workStore, "pool work held by "+name, name, "in_progress"))
+	}
+
+	released := runOperatorSweep(t, workStore, dead...)
+
+	assertSweepReleased(t, workStore, released, dead...)
+}
