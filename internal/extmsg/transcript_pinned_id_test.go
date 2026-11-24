@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // These tests pin how Append uses a pinned entry ID per (conversation,
@@ -49,7 +50,7 @@ func TestTranscriptEntryIDIsPinnedUnderTheStateBead(t *testing.T) {
 	ctx := context.Background()
 	store := newPinnedIDMemStore()
 	store.IDPrefix = "gm"
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	first, err := appendInboundForSequenceTest(ctx, svc, ref, "msg-1", testNow())
@@ -97,7 +98,7 @@ func TestTranscriptAppendReadsThePinnedIDBeforeCreating(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
 	inner := &upsertingCreateStore{MemStore: newPinnedIDMemStore()}
-	svc := NewServices(&failingSequenceBumpStore{Store: inner}).Transcript
+	svc := servicesOverStore(&failingSequenceBumpStore{Store: inner}).Transcript
 	ref := testConversationRef()
 
 	if _, err := appendInboundForSequenceTest(ctx, svc, ref, "msg-1", testNow()); err == nil {
@@ -118,7 +119,7 @@ func TestTranscriptAppendReplayMakesAStoredEntryVisible(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
 	inner := newPinnedIDMemStore()
-	svc := NewServices(&failingSequenceBumpStore{Store: inner}).Transcript
+	svc := servicesOverStore(&failingSequenceBumpStore{Store: inner}).Transcript
 	ref := testConversationRef()
 
 	if _, err := appendInboundForSequenceTest(ctx, svc, ref, "msg-1", testNow()); err == nil {
@@ -148,7 +149,7 @@ func TestTranscriptAppendAmbiguousCreateReportsTheErrorAndCoversTheEntry(t *test
 	freezeTestClock(t)
 	ctx := context.Background()
 	inner := newPinnedIDMemStore()
-	svc := NewServices(&ambiguousCreateStore{Store: inner}).Transcript
+	svc := servicesOverStore(&ambiguousCreateStore{Store: inner}).Transcript
 	ref := testConversationRef()
 
 	if _, err := appendInboundForSequenceTest(ctx, svc, ref, "msg-1", testNow()); err == nil {
@@ -164,7 +165,7 @@ func TestTranscriptAppendWithoutProviderMessageIDNeverStoresTwice(t *testing.T) 
 	freezeTestClock(t)
 	ctx := context.Background()
 	inner := newPinnedIDMemStore()
-	svc := NewServices(&ambiguousCreateStore{Store: inner}).Transcript
+	svc := servicesOverStore(&ambiguousCreateStore{Store: inner}).Transcript
 	ref := testConversationRef()
 
 	if _, err := appendInboundForSequenceTest(ctx, svc, ref, "", testNow()); err == nil {
@@ -196,7 +197,7 @@ func TestTranscriptAppendKeepsEntriesOnAStoreThatMintsOverPinnedIDs(t *testing.T
 	freezeTestClock(t)
 	ctx := context.Background()
 	store := beads.NewMemStore()
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	for i, id := range []string{"msg-1", "msg-2"} {
@@ -217,7 +218,7 @@ func TestTranscriptAppendRefusesAPinnedIDHeldByAnotherBead(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
 	store := newPinnedIDMemStore()
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	if _, err := appendInboundForSequenceTest(ctx, svc, ref, "msg-1", testNow()); err != nil {
@@ -264,7 +265,7 @@ func TestTranscriptAppendAdvancesNextSequenceByCompareAndSet(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
 	store := &casCountingStore{MemStore: newPinnedIDMemStore()}
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	for i, id := range []string{"msg-1", "msg-2", "msg-3"} {
@@ -283,7 +284,7 @@ func TestTranscriptAppendFallsBackWhenCompareAndSetIsUnsupported(t *testing.T) {
 	inner := newPinnedIDMemStore()
 	inner.DisableConditionalWrites = true
 	store := &casCountingStore{MemStore: inner}
-	svc := NewServices(store).Transcript
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 	ref := testConversationRef()
 
 	for i, id := range []string{"msg-1", "msg-2"} {
@@ -303,7 +304,7 @@ func TestTranscriptAdvanceNextSequenceNeverLowersIt(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
 	store := newPinnedIDMemStore()
-	svc := newTranscriptService(store, newBindingLockPool())
+	svc := newTranscriptService(beadstest.Mail(store), newBindingLockPool())
 	ref := testConversationRef()
 
 	for i, id := range []string{"msg-1", "msg-2", "msg-3"} {
@@ -318,4 +319,10 @@ func TestTranscriptAdvanceNextSequenceNeverLowersIt(t *testing.T) {
 	if got := transcriptStateFor(t, store, ref).NextSequence; got != 4 {
 		t.Fatalf("next_sequence after a stale advance = %d, want 4", got)
 	}
+}
+
+// servicesOverStore builds Services whose mail and session handles share one
+// store value, so a fault-injecting wrapper keeps a single state.
+func servicesOverStore(s beads.Store) Services {
+	return NewServices(beadstest.Mail(s), beadstest.Sessions(s))
 }

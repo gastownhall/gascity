@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // These tests pin the transcript sequence invariant: within one conversation
@@ -218,9 +219,9 @@ func TestTranscriptAppendSequenceUniqueAcrossLockPools(t *testing.T) {
 	shared := newPinnedIDMemStore()
 	ref := testConversationRef()
 
-	writerA := newTranscriptService(shared, newBindingLockPool())
+	writerA := newTranscriptService(beadstest.Mail(shared), newBindingLockPool())
 	gate := newGatedCreateStore(shared)
-	writerB := newTranscriptService(gate, newBindingLockPool())
+	writerB := newTranscriptService(beadstest.Mail(gate), newBindingLockPool())
 
 	if _, err := appendInboundForSequenceTest(ctx, writerA, ref, "msg-0", testNow()); err != nil {
 		t.Fatalf("Append(msg-0): %v", err)
@@ -245,9 +246,9 @@ func TestTranscriptBackfillCursorDoesNotSkipLateEntry(t *testing.T) {
 	shared := newPinnedIDMemStore()
 	ref := testConversationRef()
 
-	writerA := newTranscriptService(shared, newBindingLockPool())
+	writerA := newTranscriptService(beadstest.Mail(shared), newBindingLockPool())
 	gate := newGatedCreateStore(shared)
-	writerB := newTranscriptService(gate, newBindingLockPool())
+	writerB := newTranscriptService(beadstest.Mail(gate), newBindingLockPool())
 
 	if _, err := appendInboundForSequenceTest(ctx, writerA, ref, "msg-0", testNow()); err != nil {
 		t.Fatalf("Append(msg-0): %v", err)
@@ -322,7 +323,7 @@ func TestTranscriptAppendSequenceUniqueAfterAmbiguousCreate(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
 	inner := newPinnedIDMemStore()
-	svc := NewServices(&ambiguousCreateStore{Store: inner}).Transcript
+	svc := servicesOverStore(&ambiguousCreateStore{Store: inner}).Transcript
 	ref := testConversationRef()
 
 	if _, err := appendInboundForSequenceTest(ctx, svc, ref, "msg-1", testNow()); err == nil {
@@ -346,7 +347,7 @@ func TestTranscriptAppendSequenceUniqueAfterStateBumpFailure(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
 	inner := newPinnedIDMemStore()
-	svc := NewServices(&failingSequenceBumpStore{Store: inner}).Transcript
+	svc := servicesOverStore(&failingSequenceBumpStore{Store: inner}).Transcript
 	ref := testConversationRef()
 
 	if _, err := appendInboundForSequenceTest(ctx, svc, ref, "msg-1", testNow()); err == nil {
@@ -372,7 +373,7 @@ func TestHandleInboundNormalizedAmbiguousCreateKeepsSequencesDistinct(t *testing
 	freezeTestClock(t)
 	ctx := context.Background()
 	inner := newPinnedIDMemStore()
-	fabric := NewServices(&ambiguousCreateStore{Store: inner})
+	fabric := servicesOverStore(&ambiguousCreateStore{Store: inner})
 	ref := testConversationRef()
 	deps := InboundDeps{
 		Services:                    fabric,
