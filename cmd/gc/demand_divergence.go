@@ -186,6 +186,14 @@ func classifyDemandTrigger(trigger demandTrigger, opts hookClaimOptions, ops hoo
 		// would read zero forever and stop being the agreement signal it exists to
 		// be. Settle it instead, against the same live deps the drain-ack open arm
 		// settles on.
+		//
+		// A row the class route served from the relocated binding cannot be
+		// settled that way: the dependency walk is not class-routed, and against
+		// a work ledger that does not hold the row it reads "not blocked", which
+		// would invent a divergence. Its blockedness is unknown.
+		if ops.ClassRoute.knownResident(triggerID) {
+			return status, events.DemandClaimUnknown
+		}
 		return status, classifyDemandTriggerBlockedness(triggerID, leg, opts, ops)
 	case demandRowStatusBlocked:
 		// bd's own blocked status is a fresh bead-local field and the ready query

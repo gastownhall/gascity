@@ -802,3 +802,74 @@ func TestDivergenceUnplaceableStampIsUnknownWithoutAnyRead(t *testing.T) {
 		})
 	}
 }
+
+// gastownhall/gascity#5858, the failure modes once the counting store
+// resolves: a failed trigger read, a failed dependency settlement, and a row
+// the class route served from the relocated binding whose blockedness the row
+// alone cannot answer are each unknown, never divergence. A binding-served row
+// gets no dependency walk at all: the walk is not class-routed, and run against
+// a work ledger that does not hold the row it would read "not blocked" and
+// invent a divergence. The control shows the route alone changes nothing for a
+// row it did not serve.
+func TestDivergenceCountingStoreFailuresAreUnknown(t *testing.T) {
+	openRow := beads.Bead{
+		ID: "canary-8a1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+	servedFromBinding := &hookClaimClassRoute{resident: map[string]bool{openRow.ID: true}}
+	servedFromLedger := &hookClaimClassRoute{resident: map[string]bool{"gcg-other": true}}
+	for _, tt := range []struct {
+		name       string
+		readErr    error
+		confirmErr error
+		route      *hookClaimClassRoute
+		wantStat   string
+		wantClass  string
+		wantDeps   int
+	}{
+		{
+			name: "the counting-store read fails", readErr: errors.New("city store read failed"),
+			wantStat: "unreadable", wantClass: events.DemandClaimUnknown, wantDeps: 0,
+		},
+		{
+			name: "the dependency settlement fails", confirmErr: errors.New("dependency read failed"),
+			wantStat: "open", wantClass: events.DemandClaimUnknown, wantDeps: 1,
+		},
+		{
+			name: "the class route served the row from the binding", route: servedFromBinding,
+			wantStat: "open", wantClass: events.DemandClaimUnknown, wantDeps: 0,
+		},
+		{
+			name: "control: the class route did not serve this row", route: servedFromLedger,
+			wantStat: "open", wantClass: events.DemandClaimDivergence, wantDeps: 1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const cityDir = "/city"
+			ops := demandDivergenceOpsForBlockedBead(openRow, nil, false, nil)
+			ops.ClassRoute = tt.route
+			ops.DemandTriggerStore = demandCountingLegs(map[string]hookStore{"city": {dir: cityDir}})
+			var reads, deps []string
+			ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, _, _ string) (beads.Bead, error) {
+				reads = append(reads, dir)
+				return openRow, tt.readErr
+			}
+			ops.ConfirmBlocked = func(_ context.Context, dir string, _ []string, _, _ string) (bool, error) {
+				deps = append(deps, dir)
+				return false, tt.confirmErr
+			}
+
+			status, class := classifyDemandTrigger(demandTrigger{ID: openRow.ID, StoreRef: "city"}, divergenceOptions(), ops)
+
+			if status != tt.wantStat || class != tt.wantClass {
+				t.Fatalf("classification = %q (status %q), want %q (status %q)", class, status, tt.wantClass, tt.wantStat)
+			}
+			if len(reads) != 1 || reads[0] != cityDir {
+				t.Fatalf("trigger reads = %v, want one, in the counting leg %s", reads, cityDir)
+			}
+			if len(deps) != tt.wantDeps || (len(deps) == 1 && deps[0] != cityDir) {
+				t.Fatalf("dependency reads = %v, want %d in the counting leg %s", deps, tt.wantDeps, cityDir)
+			}
+		})
+	}
+}
