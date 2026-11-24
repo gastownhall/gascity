@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -78,7 +80,7 @@ func newTurnTestClaudeSession(t *testing.T, p runtime.Profile, backend func(*run
 	srv := New(fs)
 	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sessionProvider, session.WithCityPath(fs.cityPath),
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sessionProvider, session.WithCityPath(fs.cityPath),
 		session.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker", Title: "Turns", Command: "claude", WorkDir: t.TempDir(), Provider: "claude",
@@ -307,7 +309,7 @@ func TestSessionTurnProtocolSourceWithNoRuntimeBoundRunsNoTurn(t *testing.T) {
 // reports a session it does not run in the same terms.
 func TestSessionTurnClosedSessionIsNotFound(t *testing.T) {
 	fs, srv, info := newTurnTestProtocolSession(t)
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

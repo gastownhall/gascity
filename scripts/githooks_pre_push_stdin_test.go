@@ -360,3 +360,88 @@ exit 9
 		t.Fatalf("push-time suite ran after a beads rejection: %q", got)
 	}
 }
+
+// TestPrePushGuardFallsBackToCheckedOutBranchOnlyWhenStdinNamesNoBranch pins
+// ga-bugldjz0's two clauses where the hook decides them, with the real
+// ownership guard (the fixture's stub allows anything): a push resolves the
+// bead of each refs/heads/* ref it names, and only a push whose stdin names none
+// falls back to the checked-out branch. git hands the hook the literal ref HEAD
+// for `git push origin HEAD`, the spelling agents use most, and refs/tags/* for
+// a tag push; neither names a branch. The fake bd records which bead the guard
+// asks about and reports it closed, so the push blocks on exactly the bead that
+// was resolved.
+func TestPrePushGuardFallsBackToCheckedOutBranchOnlyWhenStdinNamesNoBranch(t *testing.T) {
+	zero := strings.Repeat("0", 40)
+	cases := []struct {
+		name   string
+		local  string // the <local ref> git hands the hook
+		remote string // the <remote ref> git hands the hook
+		asked  string // the one bead the guard must ask bd about
+	}{
+		{
+			name:   "HEAD spelling names no branch",
+			local:  "HEAD",
+			remote: "refs/heads/builder/ga-stale001",
+			asked:  "ga-stale001",
+		},
+		{
+			name:   "tag push names no branch",
+			local:  "refs/tags/v1",
+			remote: "refs/tags/v1",
+			asked:  "ga-stale001",
+		},
+		{
+			name:   "a pushed branch wins over the checked-out one",
+			local:  "refs/heads/builder/ga-other02",
+			remote: "refs/heads/builder/ga-other02",
+			asked:  "ga-other02",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			guard, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "push-ownership-guard.sh"))
+			if err != nil {
+				t.Fatalf("read the real guard: %v", err)
+			}
+			writeExecutable(t, filepath.Join(f.repo, "scripts", "push-ownership-guard.sh"), string(guard))
+
+			askedLog := filepath.Join(t.TempDir(), "bd-show-asked")
+			// bd reports every bead closed and records which one it was asked about;
+			// anything else it is called with is the beads chain's ref-list hand-off.
+			writeExecutable(t, filepath.Join(f.binDir, "bd"), `#!/usr/bin/env sh
+case "$1" in
+show)
+	printf '%s\n' "$2" >> "$BD_SHOW_ASKED"
+	printf '[{"id":"%s","status":"closed","assignee":"agent-x","metadata":{},"labels":[]}]' "$2"
+	;;
+list)
+	printf '[]'
+	;;
+*)
+	cat > "$BD_STDIN_RECORD"
+	;;
+esac
+`)
+			f.env = append(f.env,
+				"PATH="+f.binDir+":"+os.Getenv("PATH"),
+				"BD_SHOW_ASKED="+askedLog,
+				"GC_AGENT=agent-x",
+				"GC_TEMPLATE=tmpl-x",
+				"POG_READ_ATTEMPTS=1",
+			)
+			f.git(t, "checkout", "-q", "-b", "builder/ga-stale001")
+
+			code, out := f.run(t, tc.local+" "+f.commitNew+" "+tc.remote+" "+zero+"\n")
+			if code != 1 {
+				t.Fatalf("pre-push exit = %d, want 1 (the bead resolved is closed)\n%s", code, out)
+			}
+			if got, want := f.read(t, askedLog), tc.asked+"\n"; got != want {
+				t.Fatalf("the guard asked bd about %q, want exactly %q\n%s", got, want, out)
+			}
+			if !strings.Contains(out, "push-ownership-guard: BLOCKED") || !strings.Contains(out, tc.asked) {
+				t.Fatalf("the refusal does not name %s\n%s", tc.asked, out)
+			}
+		})
+	}
+}

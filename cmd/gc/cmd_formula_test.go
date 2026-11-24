@@ -12,12 +12,10 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -60,8 +58,9 @@ func TestResolveFormulaScope_RigFlagWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
-	if scope.storeRoot != rigPath {
-		t.Errorf("storeRoot = %q, want %q", scope.storeRoot, rigPath)
+	wantStoreRoot := canonicalTestPath(rigPath)
+	if scope.storeRoot != wantStoreRoot {
+		t.Errorf("storeRoot = %q, want canonical path %q", scope.storeRoot, wantStoreRoot)
 	}
 	want := []string{"/city/formulas", "/rigs/my-project/formulas"}
 	if !reflect.DeepEqual(scope.searchPaths, want) {
@@ -100,8 +99,9 @@ func TestResolveFormulaScope_CwdInsideRig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
-	if scope.storeRoot != rigPath {
-		t.Errorf("storeRoot = %q, want %q", scope.storeRoot, rigPath)
+	wantStoreRoot := canonicalTestPath(rigPath)
+	if scope.storeRoot != wantStoreRoot {
+		t.Errorf("storeRoot = %q, want canonical path %q", scope.storeRoot, wantStoreRoot)
 	}
 	want := []string{"/city/formulas", "/rigs/my-project/formulas"}
 	if !reflect.DeepEqual(scope.searchPaths, want) {
@@ -267,8 +267,9 @@ func TestResolveFormulaScope_RigFallsBackToCityLayers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
-	if scope.storeRoot != rigPath {
-		t.Errorf("storeRoot = %q, want %q", scope.storeRoot, rigPath)
+	wantStoreRoot := canonicalTestPath(rigPath)
+	if scope.storeRoot != wantStoreRoot {
+		t.Errorf("storeRoot = %q, want canonical path %q", scope.storeRoot, wantStoreRoot)
 	}
 	want := []string{"/city/formulas"}
 	if !reflect.DeepEqual(scope.searchPaths, want) {
@@ -1072,13 +1073,19 @@ title = "Do work"
 // --meta flag refuses the cook: before any root, step, synthetic input convoy
 // or blocking dependency exists, on every arm. The --attach arms used to skip
 // the flag entirely (issue #7309), and the standalone path parsed it only
-// after the molecule was already materialized.
+// after the molecule was already materialized. A key the bead store would
+// refuse is refused the same way: bd and native Dolt reject "my-key" only at
+// the stamp, after the cook has written its beads, and the file store under
+// this test accepts it, so only the up-front check refuses it here.
 func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
+	const refusedKeyMeta = "my-key=v"
+	refusedKey := fmt.Sprintf("invalid metadata %q: %v", refusedKeyMeta, beadmeta.ValidateKey("my-key"))
 	rows := []struct {
 		name    string
 		formula string
 		attach  bool
 		badMeta string
+		want    string
 	}{
 		{name: "standalone legacy-work no equals", formula: "legacy-work", badMeta: "novalue"},
 		{name: "standalone legacy-work empty key", formula: "legacy-work", badMeta: "=v"},
@@ -1088,6 +1095,10 @@ func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
 		{name: "attach legacy-work empty key", formula: "legacy-work", attach: true, badMeta: "=v"},
 		{name: "attach graph-work no equals", formula: "graph-work", attach: true, badMeta: "novalue"},
 		{name: "attach graph-work empty key", formula: "graph-work", attach: true, badMeta: "=v"},
+		{name: "standalone legacy-work key the store refuses", formula: "legacy-work", badMeta: refusedKeyMeta, want: refusedKey},
+		{name: "standalone graph-work key the store refuses", formula: "graph-work", badMeta: refusedKeyMeta, want: refusedKey},
+		{name: "attach legacy-work key the store refuses", formula: "legacy-work", attach: true, badMeta: refusedKeyMeta, want: refusedKey},
+		{name: "attach graph-work key the store refuses", formula: "graph-work", attach: true, badMeta: refusedKeyMeta, want: refusedKey},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -1114,6 +1125,9 @@ func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
 			}
 			if !strings.Contains(out, "invalid metadata") {
 				t.Fatalf("output %q does not report the malformed --meta flag", out)
+			}
+			if row.want != "" && !strings.Contains(out, row.want) {
+				t.Fatalf("output %q does not contain %q", out, row.want)
 			}
 
 			// IncludeClosed and TierMode both, so a closed or wisp-tier bead a
@@ -1420,34 +1434,6 @@ func (s *formulaCookMetaStampStore) SetMetadataBatch(id string, kvs map[string]s
 		}
 	}
 	return s.Store.SetMetadataBatch(id, kvs)
-}
-
-// sourceWorkflowLockHeld reports whether the one source-workflow lock under
-// cityPath is held right now. A non-blocking flock through a fresh descriptor
-// of its lock file is refused while any other descriptor holds it, in this
-// process or another: the exclusion the lock gives overlapping cooks.
-func sourceWorkflowLockHeld(t *testing.T, cityPath string) bool {
-	t.Helper()
-	names := sourceWorkflowLockFiles(t, cityPath)
-	if len(names) != 1 {
-		t.Fatalf("source-workflow lock files under %s = %v, want exactly the one the cook takes", cityPath, names)
-	}
-	f, err := os.OpenFile(filepath.Join(citylayout.RuntimeDataDir(cityPath), "sling-source-locks", names[0]), os.O_RDWR, 0)
-	if err != nil {
-		t.Fatalf("opening source-workflow lock %s: %v", names[0], err)
-	}
-	defer f.Close() //nolint:errcheck // test cleanup
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-		return true
-	}
-	if err != nil {
-		t.Fatalf("probing source-workflow lock %s: %v", names[0], err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
-		t.Fatalf("releasing the probe's hold on source-workflow lock %s: %v", names[0], err)
-	}
-	return false
 }
 
 func writeFormulaTestFile(t *testing.T, dir, name, content string) {
@@ -1995,5 +1981,100 @@ func TestFormulaCookAttachHelpDoesNotClaimParentChild(t *testing.T) {
 	}
 	if !strings.Contains(long, "not") || !strings.Contains(long, "parent") {
 		t.Fatalf("gc formula cook --help does not clarify that --attach is not a parent-child relationship; Long=%q", cmd.Long)
+	}
+}
+
+// TestFormulaListRigFlagListsOnlyThatRigsScope pins that `gc formula list
+// --rig` lists the rig's scope (city layers plus the rig's own), the search
+// paths `gc formula show --rig` compiles against, rather than ignoring --rig
+// and listing every rig's formulas. Callers outside the city pass --city
+// and --rig together, so both are set here.
+func TestFormulaListRigFlagListsOnlyThatRigsScope(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+name = "my-city"
+
+[[rigs]]
+name = "alpha"
+path = "alpha"
+formulas_dir = "alpha-formulas"
+
+[[rigs]]
+name = "beta"
+path = "beta"
+formulas_dir = "beta-formulas"
+`)
+	for dir, name := range map[string]string{
+		"formulas":       "city-work",
+		"alpha-formulas": "alpha-work",
+		"beta-formulas":  "beta-work",
+	} {
+		if err := os.MkdirAll(filepath.Join(cityDir, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(cityDir, dir, name+".toml"), fmt.Sprintf("formula = %q\n\n[[steps]]\nid = \"step\"\ntitle = \"Do work\"\n", name))
+	}
+	for _, rig := range []string{"alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(cityDir, rig), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	prevCity, prevRig := cityFlag, rigFlag
+	t.Cleanup(func() { cityFlag, rigFlag = prevCity, prevRig })
+	cityFlag = cityDir
+
+	list := func(rig string) ([]string, error) {
+		t.Helper()
+		rigFlag = rig
+		var stdout, stderr bytes.Buffer
+		cmd := newFormulaListCmd(&stdout, &stderr)
+		cmd.SetArgs([]string{"--json"})
+		if err := cmd.Execute(); err != nil {
+			return nil, err
+		}
+		var out formulaListJSON
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("parse list json %q: %v (stderr=%s)", stdout.String(), err, stderr.String())
+		}
+		names := make([]string, 0, len(out.Formulas))
+		for _, row := range out.Formulas {
+			names = append(names, row.Name)
+		}
+		return names, nil
+	}
+
+	got, err := list("alpha")
+	if err != nil {
+		t.Fatalf("formula list --rig alpha: %v", err)
+	}
+	if want := []string{"alpha-work", "city-work"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("--rig alpha formulas = %v, want %v", got, want)
+	}
+
+	got, err = list("")
+	if err != nil {
+		t.Fatalf("formula list: %v", err)
+	}
+	if want := []string{"alpha-work", "beta-work", "city-work"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("formulas without --rig = %v, want every layer %v", got, want)
+	}
+
+	t.Setenv("GC_RIG", "beta")
+	got, err = list("")
+	if err != nil {
+		t.Fatalf("formula list with GC_RIG=beta: %v", err)
+	}
+	if want := []string{"alpha-work", "beta-work", "city-work"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("GC_RIG must not narrow bare list: got %v, want %v", got, want)
+	}
+
+	if _, err := list("nope"); err == nil || !strings.Contains(err.Error(), `rig "nope" not found`) {
+		t.Errorf("--rig nope error = %v, want rig not found", err)
 	}
 }

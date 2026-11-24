@@ -295,3 +295,50 @@ func TestPackPromptFilesExist(t *testing.T) {
 		}
 	}
 }
+
+// TestSplitCityPackFindsWorkWithGcReady pins the swarm pack to reads its
+// born-split city serves. The example's city.toml relocates the
+// infrastructure classes, and a split city refuses `gc bd ready`, and its
+// `gc bd list --ready` spelling, whatever the arguments, so a pack prompt or
+// nudge naming either sends every agent that follows it to a refused read.
+// The coder finds its work with `gc ready`, routed to its pool.
+func TestSplitCityPackFindsWorkWithGcReady(t *testing.T) {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(exampleDir(), "city.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if !config.RelocatesAnyClass(cfg) {
+		t.Fatal("examples/swarm/city.toml relocates no storage class; this guard covers the born-split example")
+	}
+	const routedReady = "gc ready --metadata-field gc.routed_to="
+	var coderChecked bool
+	for _, a := range discoverPackAgents(t, filepath.Join("packs", "swarm")) {
+		texts := map[string]string{"nudge": a.Nudge}
+		if a.PromptTemplate != "" {
+			data, err := os.ReadFile(a.PromptTemplate)
+			if err != nil {
+				t.Fatalf("reading %s prompt: %v", a.Name, err)
+			}
+			texts["prompt"] = string(data)
+		}
+		for where, text := range texts {
+			for _, refused := range []string{"bd ready", "--ready"} {
+				if strings.Contains(text, refused) {
+					t.Errorf("agent %q %s names %q, which a split city refuses; find work with gc ready", a.Name, where, refused)
+				}
+			}
+		}
+		if a.Name != "coder" {
+			continue
+		}
+		coderChecked = true
+		for where, text := range texts {
+			if !strings.Contains(text, routedReady) {
+				t.Errorf("coder %s does not find work with %q", where, routedReady)
+			}
+		}
+	}
+	if !coderChecked {
+		t.Fatal("the swarm pack declares no coder agent")
+	}
+}

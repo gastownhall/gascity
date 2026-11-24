@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -252,7 +253,7 @@ func compiledRalphWorker(store beads.Store, rootID string, policy ralphWorkerPol
 			if closeMetadata == nil {
 				continue
 			}
-			if err := updateMetadataAndClose(store, b.ID, closeMetadata); err != nil {
+			if err := updateMetadataAndClose(beadstest.Graph(store), b.ID, closeMetadata); err != nil {
 				t.Fatalf("worker close %s: %v", b.ID, err)
 			}
 			return true
@@ -266,7 +267,7 @@ func compiledRalphWorker(store beads.Store, rootID string, policy ralphWorkerPol
 func buildCompiledRalphFixture(t *testing.T, wrap func(beads.Store) beads.Store, city compiledRalphCity, shape ralphFixtureShape, policy ralphWorkerPolicy) compiledRalphFixture {
 	t.Helper()
 	ledger := newBdClosePolicyStore()
-	cooked, err := molecule.Cook(context.Background(), ledger, city.name, []string{city.formulaDir}, molecule.Options{})
+	cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(ledger), city.name, []string{city.formulaDir}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}

@@ -13,11 +13,12 @@
 # closes that gap by re-reading bd's live state at the last possible moment
 # before the push leaves the machine.
 #
-# THE EXPORTED FUNCTION: assert_bead_still_claimed. Re-resolves which bead
-# this push is for (branch name, falling back to this session's in-progress
-# assignment), re-reads its live state from bd, and returns non-zero
-# (blocking the push) unless the bead is still open/in_progress, still
-# assigned to one of this session's identities (any of GC_SESSION_NAME,
+# THE EXPORTED FUNCTION: assert_bead_still_claimed [branch...]. Re-resolves
+# which bead this push is for, once per pushed branch it is given (the
+# checked-out branch when given none): branch name, falling back to this
+# session's in-progress assignment. It re-reads its live state from bd, and
+# returns non-zero (blocking the push) unless the bead is still
+# open/in_progress, still assigned to one of this session's identities (any of GC_SESSION_NAME,
 # GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path — or
 # GC_TEMPLATE, for work routed to the whole pool rather than claimed by one
 # instance; see ga-kzl21p), still routed to this session's config identity,
@@ -116,10 +117,21 @@ _pog_read_with_retry() {
     return 1
 }
 
+# _pog_returned_bead_id <json>: prints the id of the bead an already-fetched
+# `bd show <id> --json` payload describes (.[0].id), or nothing when that id
+# is missing, empty or not a string. `bd show` falls back to substring
+# matching when no bead has the exact id, so a successful read can describe a
+# different bead; callers compare this against the id they asked for before
+# trusting any other field of the payload.
+_pog_returned_bead_id() {
+    jq -r '.[0]?.id? | strings' <<<"$1" 2>/dev/null || true
+}
+
 # _pog_branch_id_bead_inactive <id>: true (rc 0) only if a FRESH bd show
-# confirms <id>'s status is neither in_progress nor open -- i.e. the branch-
-# derived bead is no longer the live claim. Fails safe: any read/parse
-# failure returns 1 (treat as still-active / not confirmed inactive), so an
+# returns <id> itself and confirms its status is neither in_progress nor
+# open -- i.e. the branch-derived bead is no longer the live claim. Fails
+# safe: any read/parse failure, or a response for any other id, returns 1
+# (treat as still-active / not confirmed inactive), so an
 # unreachable bd never triggers the branch-reuse override below -- it just
 # falls through to the existing branch-id-wins path, which itself blocks
 # safely on the same failure via assert_bead_still_claimed's own read.
@@ -129,6 +141,7 @@ _pog_branch_id_bead_inactive() {
     json="$(_pog_read_with_retry bd show "$id" --json)" || return 1
     [[ -n "$json" ]] || return 1
     jq -e '.' <<<"$json" >/dev/null 2>&1 || return 1
+    [[ "$(_pog_returned_bead_id "$json")" == "$id" ]] || return 1
     local st
     st="$(jq -r '.[0].status // empty' <<<"$json" 2>/dev/null || true)"
     [[ "$st" != "in_progress" && "$st" != "open" && -n "$st" ]]
@@ -196,11 +209,16 @@ _pog_ownership_violation() {
     return 0
 }
 
-# _pog_resolve_bead_id: prints the bead id this push should be checked
-# against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6,}(\.[0-9]+)* —
-#      the bead's own id format (six characters for legacy ids, seven for
-#      current ones; {6,} takes the whole run, `-` and `/` end it),
+# _pog_resolve_bead_id <branch>: prints the bead id a push of <branch> should
+# be checked against; prints nothing if none can be resolved. <branch> is a
+# branch being pushed (ga-bugldjz0), or the checked-out one when the caller
+# was told no pushed branch. Resolution order:
+#   1. The branch name, matched against
+#      (^|[^0-9A-Za-z])ga-((mol|wisp)-)?[0-9a-z]{3,}(\.[0-9]+)* with the
+#      leading separator stripped — the bead's own id format (bd mints
+#      base36 hashes of at least three characters by default, and lengths
+#      three through seven all occur in the store; {3,} takes the whole run,
+#      `-` and `/` end it),
 #      extended with zero or more repeated
 #      sub-bead suffixes because this repo's real branch convention is
 #      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
@@ -212,6 +230,12 @@ _pog_ownership_violation() {
 #      grandchild bead the branch is for. The literal 6-char-only pattern
 #      would misresolve to the root bead on any sub-bead's own branch, and
 #      truncate a seven-character id to a nonexistent six-character one.
+#      The id is read only at the start of the name or after a
+#      non-alphanumeric separator (`/`, `-`, `_`, `.`), so a word such as
+#      `omega-checker` is not read as the bead ga-checker. Molecule and wisp
+#      ids keep their bd infix (ga-mol-<hash>, ga-wisp-<hash>): the
+#      leftmost-longest match takes the infixed id whole instead of stopping
+#      at ga-mol or ga-wisp.
 #   2. Falls back to this session's in-progress assignment
 #      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
 #      the branch name doesn't match. Only resolves when that query returns
@@ -275,12 +299,11 @@ _pog_ownership_violation() {
 # that as "nothing to check," which is what lets Layer A wire this in
 # unconditionally without blocking every push in the repo.
 _pog_resolve_bead_id() {
-    local branch=""
-    branch="$(git symbolic-ref --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true)"
+    local branch="${1:-}"
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6,}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        branch_id="$(grep -oE '(^|[^0-9A-Za-z])ga-((mol|wisp)-)?[0-9a-z]{3,}(\.[0-9]+)*' <<<"$branch" | head -1 | sed -E 's/^[^0-9A-Za-z]//' || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
@@ -411,15 +434,11 @@ _pog_resolve_bead_id() {
     fi
 }
 
-# assert_bead_still_claimed: the exported guard. Returns 0 to allow the
-# push, non-zero to block it. See file header for the full contract.
-assert_bead_still_claimed() {
-    if [[ "${POG_DISABLE:-0}" == "1" ]]; then
-        return 0
-    fi
-
+# _pog_assert_branch_claimed <branch>: the whole guard for one pushed branch.
+# Returns 0 to allow its push, non-zero to block it.
+_pog_assert_branch_claimed() {
     local id
-    id="$(_pog_resolve_bead_id)"
+    id="$(_pog_resolve_bead_id "${1:-}")"
     if [[ "$id" == "$POG_AMBIGUOUS_SENTINEL" ]]; then
         echo "push-ownership-guard: BLOCKED — deploy-gate branch: could not read this session's in-progress assignment (bd unreachable or not on PATH), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
         return 1
@@ -435,11 +454,22 @@ assert_bead_still_claimed() {
 
     local json
     if ! json="$(_pog_read_with_retry bd show "$id" --json)" || [[ -z "$json" ]]; then
-        echo "push-ownership-guard: BLOCKED — bd show $id unreachable after $POG_READ_ATTEMPTS attempts; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        echo "push-ownership-guard: BLOCKED — bd show $id failed after $POG_READ_ATTEMPTS attempts (the bead may be absent from this store, or bd/Dolt may be unreachable), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
         return 1
     fi
     if ! jq -e '.' <<<"$json" >/dev/null 2>&1; then
         echo "push-ownership-guard: BLOCKED — bd show $id --json returned unparseable output; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        return 1
+    fi
+
+    local returned_id
+    returned_id="$(_pog_returned_bead_id "$json")"
+    if [[ -z "$returned_id" ]]; then
+        echo "push-ownership-guard: BLOCKED — bd show $id returned no bead id, so ownership of $id cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        return 1
+    fi
+    if [[ "$returned_id" != "$id" ]]; then
+        echo "push-ownership-guard: BLOCKED — bd show $id returned bead $returned_id, not $id (no exact match; bd matched another bead), so ownership of $id cannot be verified. Bypass with: git push --no-verify" >&2
         return 1
     fi
 
@@ -448,5 +478,28 @@ assert_bead_still_claimed() {
         echo "push-ownership-guard: BLOCKED — $id $reason. Bypass with: git push --no-verify" >&2
         return 1
     fi
+    return 0
+}
+
+# assert_bead_still_claimed [branch...]: the exported guard. Returns 0 to allow
+# the push, non-zero to block it. See file header for the full contract.
+# Each <branch> is a branch being pushed (the hook's refs/heads/* stdin refs);
+# every one must pass, so one stale bead blocks the push. With none, the bead
+# is resolved from the checked-out branch, which is right only when that is
+# the branch being pushed (rebase-resolve-lib.sh's own push).
+assert_bead_still_claimed() {
+    if [[ "${POG_DISABLE:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        _pog_assert_branch_claimed "$(git symbolic-ref --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true)"
+        return
+    fi
+
+    local pushed_branch
+    for pushed_branch in "$@"; do
+        _pog_assert_branch_claimed "$pushed_branch" || return 1
+    done
     return 0
 }

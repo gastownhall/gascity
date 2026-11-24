@@ -4,10 +4,43 @@ description: Common installation and setup issues and how to fix them.
 ---
 
 <Note>
-If `gc start` fails after install, use the
+If `gc init` or `gc start` fails after install, use the
 [`gc start` failure walkthrough](/troubleshooting/gc-start-walkthrough) to
 match the final `FATAL:` line to the likely cause and resolution.
 </Note>
+
+## Startup is blocked by Dolt author identity
+
+`gc init` and `gc start` stop with "startup is blocked by Dolt author identity"
+when Dolt's author name or email is missing or empty. The fix copies your git
+identity, so git needs one first: if `git config --global user.name` or
+`git config --global user.email` prints nothing, set it with
+`git config --global user.name "Your Name"` or
+`git config --global user.email "you@example.com"`, using your own name and
+email.
+
+Then copy your git identity into Dolt wherever Dolt's name or email is missing
+or empty, and run `gc start` in the city:
+
+```bash
+[ -n "$(dolt config --global --get user.name)" ]  || dolt config --global --add user.name  "$(git config --global user.name)"
+[ -n "$(dolt config --global --get user.email)" ] || dolt config --global --add user.email "$(git config --global user.email)"
+gc start
+```
+
+## A new city is still setting up
+
+A new city takes a few minutes to finish setting up after `gc init`. Until it
+does, these signals are normal and need no action:
+
+- `gc init`'s output can end at `Adopting sessions...`.
+- `gc status` can list agents as `unknown (partial status)` and print
+  `bead cache unavailable` or `session snapshot timed out`.
+- `gc doctor` can report the store as not running.
+- A dashboard run page can say "run projection is warming"; refresh it after a
+  minute.
+
+If any of these persist after ten minutes, run `gc doctor`.
 
 ## Run the Built-in Doctor
 
@@ -92,7 +125,7 @@ per-city `.gc/system/packs` tree, adds the missing pinned import(s) to
 
 ## `gascity-pack-binding` Doctor Warning
 
-Cities created by gc v1.4.x import the public Gas City pack under the key
+Cities created by older releases import the public Gas City pack under the key
 `gascity`:
 
 ```toml
@@ -102,9 +135,9 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 
 The import key namespaces the pack's commands and skills, and the pack
 ecosystem is written against `gc`: the pack documents skill `gc.mayor`, and
-role prompts in Gas City pack releases after 0.1.6 run `gc gc claim`. Under
+role prompts in current Gas City pack releases run `gc gc claim`. Under
 `[imports.gascity]` that command is `gc gascity claim`, so role workers fail
-their first claim once the pack is bumped past 0.1.6. Current `gc init` writes
+their first claim once the pack is updated. Current `gc init` writes
 `[imports.gc]`.
 
 `gc doctor` reports this as a warning; the city keeps working at the pinned
@@ -252,9 +285,7 @@ durable versioned storage and is recommended for real work.
 Gas City requires a final Dolt 2.6.0 or newer. Older and pre-release builds
 are below the managed bd/Dolt compatibility floor: 2.6.0 is the first Dolt
 built with a Go toolchain that distrusts the compromised eMudhra CA
-intermediates. Releases before 1.86.2 can also miss the upstream GC/writer
-deadlock fix in dolthub/dolt commit `ccf7bde206`, which can hang
-`dolt_backup sync` under heavy write load. Check your version:
+intermediates. Check your version:
 
 ```bash
 dolt version
@@ -285,6 +316,78 @@ bd version
 
 Upgrade via Homebrew (`brew upgrade beads`) or download a newer release from
 [gastownhall/beads/releases](https://github.com/gastownhall/beads/releases).
+
+## `gc init` Created a Single-Store City
+
+A new city is born split unless something keeps it single-store, and `gc init`
+prints the reason on stderr. The HTTP city create follows the same rules.
+
+| Notice names | Why | To get the split |
+|---|---|---|
+| bd older than v1.3.2, or a bd tree that matches no pinned inventory | A split city's `gc bd` runs only a bd whose command tree gc pins | Upgrade bd, put the real binary (not a shim or wrapper script) on `PATH`, then split with `gc storage migrate` |
+| a session runtime that runs sessions on remote hosts | A split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport exists | Keep the city single-store for now |
+| a bead prefix, derived from the city name, in the reserved namespace (`gas-city-ops` derives `gco`) | A split city's infrastructure store mints its ids under `gcg`, `gcm`, `gcs`, `gco`, `gcn` and `gcnq`, so the city's own beads cannot use one | Init the city under another name, or with a non-reserved prefix: `gc init --prefix gops ~/gas-city-ops` |
+
+`gc init --from` applies the bd and session-runtime rules to a source that
+carries the split, as the shipped examples do: the copy leaves the source's
+`[storage]` out and prints the same notice. A copy can leave out only the
+`[storage]` of the source's `city.toml`, so where those rules apply to a source
+that declares part of it in an include fragment, as `examples/storage` does,
+`gc init --from` refuses the copy instead and copies nothing. Run it where a
+split city is served, or copy the source, remove `[storage]` and every
+`[storage.*]` table from its `city.toml` and include fragments, and run
+`gc init --from` on that copy. A reserved name is not judged here:
+`gc init --from` refuses a copy that keeps the split under such a name (next
+section).
+
+`gc init --storage=single` creates a single-store city on purpose and prints
+nothing. `--storage` is refused with `gc init --from`. To keep a copied city
+single-store on purpose, make the copy without starting it, take the whole
+`[storage]` section out of its `city.toml` and of any include fragment that
+declares part of it (`[storage]` and every `[storage.*]` table under it), then
+start it:
+
+```bash
+gc init --from examples/gastown --no-start ~/my-city
+# delete [storage] and every [storage.*] table from ~/my-city/city.toml
+cd ~/my-city && gc start
+```
+
+Without `--no-start`, `gc init --from` starts the city split. Once it has
+served its infrastructure classes from `.gc/store`, a city with the section
+taken out refuses to start until you remove `.gc/storage-served-binding.json`,
+which abandons everything that store holds; read
+[Rolling back](/runbooks/split-storage-classes#rolling-back) first. To split a
+single-store city later, see
+[Move a City's Infrastructure Classes onto Their Own Store](/runbooks/split-storage-classes).
+
+## `gc init` or `gc rig add` Refuses a Reserved Bead Prefix
+
+A split city reserves the bead prefixes `gcg`, `gcm`, `gcs`, `gco`, `gcn` and
+`gcnq` for its infrastructure store, so a split city whose work beads would
+use one is refused before anything is written. A prefix derives from a name's
+initials: the city name `gas-city-ops` derives `gco`, and a rig directory
+named `graphql-code-generator` derives `gcg`.
+
+A plain `gc init` whose city name derives a reserved prefix starts the city
+single-store instead (previous section). These are refused:
+
+| Command | Fix |
+|---|---|
+| `gc init --prefix gcm ~/bright-lights`, a reserved prefix you pass | Pass a non-reserved prefix: `gc init --prefix bl ~/bright-lights` |
+| `gc init --storage=split ~/gas-city-ops` | Pass a non-reserved prefix: `gc init --storage=split --prefix gops ~/gas-city-ops` |
+| `gc init --file` of a split config, or `gc init --from` of a split source whose copy keeps the split, into a name that derives a reserved prefix | `--prefix` is refused with both; give the city another name: `gc init --from examples/gastown --name city-ops ~/gas-city-ops` |
+| `gc rig add` on a split city, for a rig whose prefix is reserved | Give the rig a prefix of its own: `gc rig add --prefix gqlgen ~/src/graphql-code-generator`, or the `prefix` field of an HTTP rig create |
+
+## `gc bd` Refuses a Command on a Split City
+
+On a split city, `gc bd` forwards only the commands and flags it has vetted,
+and only to a bd whose command tree matches a pinned inventory. A refusal
+names the command and the `gc` alternative; nothing is written. `gc bd ready`
+is refused on purpose: use `gc ready`, which also reads the infrastructure
+store. `gc doctor`'s `bd-command-inventory` check shows why a bd binary does
+not match. The full list is in
+[gc bd on split cities](/runbooks/split-storage-classes#gc-bd-on-split-cities).
 
 ## Native Store Falls Back Because Hooks Are Installed
 
@@ -554,13 +657,6 @@ switch the agent to a provider that can receive it.
 A server in an agent's own `agents/<name>/mcp/` directory is meant for that
 agent alone. If the agent's provider cannot receive it, that agent does not
 start, and the warning says `cannot start`; the rest of the city still starts.
-
-## `gc version` Prints Unexpected Output
-
-If `gc version` prints git progress lines (`Enumerating objects...`) instead
-of a clean version string, upgrade to Gas City v0.13.4 or later. This was a
-bug where remote pack fetches wrote git sideband output to the terminal,
-fixed in [PR #141](https://github.com/gastownhall/gascity/pull/141).
 
 ## Provider Credentials Dropped When the Supervisor Starts
 
@@ -1155,7 +1251,7 @@ terminal emulator.
 
 ## Build From Source Fails
 
-Building from source requires `make` and Go 1.27.3 or newer:
+Building from source requires `make` and Go 1.27.4 or newer:
 
 ```bash
 make --version
