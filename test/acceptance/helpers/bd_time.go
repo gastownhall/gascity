@@ -192,6 +192,56 @@ func MarginalOverFloor(gcSide, floor, budget time.Duration) (time.Duration, erro
 	return 0, nil
 }
 
+// FloorMeasurementMinPairs is how many samples of the floor and of the gc side
+// every MeasureMarginalOverFloor call takes.
+const FloorMeasurementMinPairs = 5
+
+// FloorMeasurement is a command's gc-side time read against the process floor
+// measured beside it (MeasureMarginalOverFloor).
+type FloorMeasurement struct {
+	// Floor and GCSide are the best (smallest) sample of each.
+	Floor, GCSide time.Duration
+	// Marginal is MarginalOverFloor's reading of the two. It means nothing
+	// while Inverted is set.
+	Marginal time.Duration
+	// Pairs is how many samples of each were taken.
+	Pairs int
+	// Inverted reports that the best floor exceeds the best gc side by more
+	// than the budget, the reading MarginalOverFloor refuses.
+	Inverted bool
+}
+
+// MeasureMarginalOverFloor takes the best of FloorMeasurementMinPairs floor
+// samples, then the best of as many gc-side samples, and reads the marginal
+// between them.
+//
+// The minimum, not the mean: what is being measured is a fixed cost, and every
+// sample is that cost plus whatever else this shared box was doing during it.
+// The mean of a fixed cost plus one-sided noise is a measure of the noise. The
+// minimum is the closest any sample got to the quantity, and a regression that
+// really did add work to gc's side raises every sample, including the best one.
+func MeasureMarginalOverFloor(budget time.Duration, floor, gcSide func() time.Duration) FloorMeasurement {
+	m := FloorMeasurement{
+		Floor:  bestOf(FloorMeasurementMinPairs, floor),
+		GCSide: bestOf(FloorMeasurementMinPairs, gcSide),
+		Pairs:  FloorMeasurementMinPairs,
+	}
+	marginal, err := MarginalOverFloor(m.GCSide, m.Floor, budget)
+	m.Marginal, m.Inverted = marginal, err != nil
+	return m
+}
+
+// bestOf returns the smallest of n samples.
+func bestOf(n int, sample func() time.Duration) time.Duration {
+	best := time.Duration(-1)
+	for i := 0; i < n; i++ {
+		if d := sample(); best < 0 || d < best {
+			best = d
+		}
+	}
+	return best
+}
+
 // Reset discards the trace so a measurement can be attributed to one step of a
 // test rather than to everything that ran before it — the same contract as
 // RecordingBD.Reset, and for the same reason.
