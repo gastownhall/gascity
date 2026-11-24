@@ -147,9 +147,13 @@ func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedClaims(t *testing.T
 	openHandoff := seedHumanLabelSweepWork(t, workStore, "pool work handed to the operator, not started", "human", "open")
 	paddedHandoff := seedHumanLabelSweepWork(t, workStore, "pool work handed to the operator with a padded assignee", " human ", "in_progress")
 	coordinator := seedHumanLabelSweepWork(t, workStore, "pool work held by an off-roster coordinator", "alice", "in_progress")
+	caseVariant := seedHumanLabelSweepWork(t, workStore, "pool work held under a case variant of the operator identity", "Human", "in_progress")
+	prefixed := seedHumanLabelSweepWork(t, workStore, "pool work held under a prefixed identity", "humanoid", "in_progress")
+	suffixed := seedHumanLabelSweepWork(t, workStore, "pool work held under a suffixed identity", "human-1", "in_progress")
 
 	kept := []beads.Bead{handoff, openHandoff, paddedHandoff}
-	work := append([]beads.Bead{coordinator}, kept...)
+	controls := []beads.Bead{coordinator, caseVariant, prefixed, suffixed}
+	work := append(append([]beads.Bead{}, kept...), controls...)
 	stores := make([]beads.Store, len(work))
 	for i := range stores {
 		stores[i] = workStore
@@ -170,8 +174,8 @@ func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedClaims(t *testing.T
 	for _, r := range released {
 		releasedByID[r.ID] = true
 	}
-	if len(released) != 1 {
-		t.Fatalf("released = %v, want exactly [coordinator] (the dead bare-name control)", released)
+	if len(released) != len(controls) {
+		t.Fatalf("released = %v, want exactly the %d dead bare-name controls", released, len(controls))
 	}
 	for _, k := range kept {
 		got, err := workStore.Get(k.ID)
@@ -185,14 +189,16 @@ func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedClaims(t *testing.T
 			t.Errorf("hand-off %s (%q) must be absent from the released list", k.ID, k.Title)
 		}
 	}
-	got, err := workStore.Get(coordinator.ID)
-	if err != nil {
-		t.Fatalf("get control: %v", err)
-	}
-	if got.Status != "open" || got.Assignee != "" {
-		t.Errorf("control %s = status %q assignee %q, want open/unassigned", coordinator.ID, got.Status, got.Assignee)
-	}
-	if !releasedByID[coordinator.ID] {
-		t.Errorf("control %s (%q) must be present in the released list", coordinator.ID, coordinator.Title)
+	for _, c := range controls {
+		got, err := workStore.Get(c.ID)
+		if err != nil {
+			t.Fatalf("get %s: %v", c.ID, err)
+		}
+		if got.Status != "open" || got.Assignee != "" {
+			t.Errorf("control %s (%q) = status %q assignee %q, want open/unassigned", c.ID, c.Title, got.Status, got.Assignee)
+		}
+		if !releasedByID[c.ID] {
+			t.Errorf("control %s (%q) must be present in the released list", c.ID, c.Title)
+		}
 	}
 }
