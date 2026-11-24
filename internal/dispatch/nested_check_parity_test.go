@@ -164,7 +164,7 @@ func TestNestedCheckCompileIterationMatchesRuntimeRespawn(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		suffix    string // ID below the outer iteration root
-		enclosing string // innermost enclosing iteration root below it; "" = none
+		enclosing string // innermost enclosing iteration root below it; "" = the outer iteration root itself, "-" = none (no gc.scope_ref)
 	}{
 		{suffix: ".inner", enclosing: ""},
 		{suffix: ".inner.iteration.1", enclosing: "-"},
