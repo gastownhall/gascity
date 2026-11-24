@@ -131,6 +131,7 @@ go_test(
         "startup_notready_test.go",
         "stop_unavailable_test.go",
         "testenv_import_test.go",
+        "verb_timeout_bound_test.go",
         "verdict_windows_test.go",
     ],
     data = glob(["*.go"]),  # exec_site_guard_test.go scans the package's own sources
