@@ -243,3 +243,76 @@ func TestRefreshDesiredStateDefersFreshSessionCreationOnSingleStoreCity(t *testi
 		t.Fatalf("city store holds %d bead(s), want only the seeded root until the next full census", len(all))
 	}
 }
+
+// TestFullBuildReadsPoolDemandFromWorkClassOnRelocatedCity guards the split
+// that production hit: passing the relocated sessions store as the build's
+// only city store made every city-scoped pool blind to ordinary routed work.
+// The build must read demand from workStore while creating the pool's session
+// bead only in sessionsStore.
+func TestFullBuildReadsPoolDemandFromWorkClassOnRelocatedCity(t *testing.T) {
+	cityPath := t.TempDir()
+	workStore := beads.NewMemStore()
+	sessionsStore := beads.NewMemStore()
+	if _, err := workStore.Create(beads.Bead{
+		ID:     "gc-work-1",
+		Title:  "routed business work",
+		Status: "open",
+		Type:   "task",
+		Metadata: map[string]string{
+			"gc.routed_to": "accountant",
+		},
+	}); err != nil {
+		t.Fatalf("seed work demand: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents: []config.Agent{{
+			Name:              "accountant",
+			Scope:             "city",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	cr := &CityRuntime{
+		cs: &controllerState{
+			cfg:           cfg,
+			cityBeadStore: workStore,
+			cityName:      "demo",
+			cityPath:      cityPath,
+		},
+		cfg:           cfg,
+		sp:            runtime.NewFake(),
+		cityName:      "demo",
+		cityPath:      cityPath,
+		stderr:        io.Discard,
+		storageRoutes: relocatedSessionRoutes(sessionsStore),
+	}
+	cr.buildFnWithClassStores = supervisorBuildAgentsFnWithClassStores(cityPath, "demo", io.Discard)
+
+	result := cr.buildDesiredState(cr.loadSessionBeadSnapshot(), nil)
+	if got := result.ScaleCheckCounts["accountant"]; got != 1 {
+		t.Fatalf("accountant demand = %d, want 1 from the work-class store", got)
+	}
+
+	sessions, err := sessionsStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("list sessions store: %v", err)
+	}
+	var accountantSessions int
+	for _, row := range sessions {
+		if row.Metadata["template"] == "accountant" && row.Metadata["pool_managed"] == "true" {
+			accountantSessions++
+		}
+	}
+	if accountantSessions != 1 {
+		t.Fatalf("sessions binding accountant rows = %d, want exactly one; rows=%#v", accountantSessions, sessions)
+	}
+	work, err := workStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("list work store: %v", err)
+	}
+	if len(work) != 1 || work[0].Type != "task" || work[0].Metadata["gc.routed_to"] != "accountant" {
+		t.Fatalf("work store was polluted with session rows: %#v", work)
+	}
+}

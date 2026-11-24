@@ -2541,6 +2541,7 @@ func startOneCity(
 			Publication:             publication,
 			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
 			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
+			BuildFnWithClassStores:  supervisorBuildAgentsFnWithClassStores(path, cityName, stderr),
 			Dops:                    dops,
 			Rec:                     rec,
 			PoolSessions:            poolSessions,
@@ -3199,6 +3200,10 @@ func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr i
 			stderr,
 		)
 	}
+}
+
+func supervisorBuildAgentsFnWithClassStores(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+	return standaloneBuildAgentsFnWithClassStores(cityName, cityPath, time.Now(), stderr)
 }
 
 // cityInitProgress tracks the initialization status of a city that is

@@ -1578,6 +1578,10 @@ func runController(
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
 	cityName := loadedCityName(cfg, cityPath)
+	var buildFnWithClassStores func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
+	if buildFnWithSessionBeads != nil {
+		buildFnWithClassStores = standaloneBuildAgentsFnWithClassStores(cityName, cityPath, time.Now(), stderr)
+	}
 	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
@@ -1590,6 +1594,7 @@ func runController(
 		Publication:             supervisor.PublicationConfig{},
 		BuildFn:                 buildFn,
 		BuildFnWithSessionBeads: buildFnWithSessionBeads,
+		BuildFnWithClassStores:  buildFnWithClassStores,
 		Dops:                    dops,
 		Rec:                     rec,
 		PoolSessions:            poolSessions,

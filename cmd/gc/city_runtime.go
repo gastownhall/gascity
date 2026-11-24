@@ -156,6 +156,7 @@ type CityRuntime struct {
 	publication             supervisor.PublicationConfig
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
+	buildFnWithClassStores  func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
 	processScanState
 
@@ -459,6 +460,7 @@ type CityRuntimeParams struct {
 	Publication             supervisor.PublicationConfig
 	BuildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	BuildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
+	BuildFnWithClassStores  func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 	Dops                    drainOps
 
 	Rec events.Recorder
@@ -599,6 +601,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		publication:             p.Publication,
 		buildFn:                 p.BuildFn,
 		buildFnWithSessionBeads: p.BuildFnWithSessionBeads,
+		buildFnWithClassStores:  p.BuildFnWithClassStores,
 		dops:                    p.Dops,
 		ct:                      ct,
 		it:                      it,
@@ -4408,7 +4411,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	tickTime := time.Now()
-	wfcResult := buildDesiredStateWithSessionBeadsAt(
+	wfcResult := buildDesiredStateWithClassStoresAt(
 		cr.cityName,
 		cr.cityPath,
 		tickTime,
@@ -4416,6 +4419,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		filteredCfg,
 		cr.sp,
 		sessionsStore.Store,
+		cr.cityWorkStore().Store,
 		cr.rigBeadStores(), // residency:allow — the open rig frame the demand build and session reconciler plan their census and demand legs over; resolves no bead
 		sessionBeads,
 		nil,
@@ -4812,8 +4816,11 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	// single city store into the class accessors so a future per-class backend
 	// routes each role independently; both collapse to the same store today.
 	sessionsStore := cr.sessionsBeadStore()
+	workStore := cr.cityWorkStore()
 	var result DesiredStateResult
-	if cr.buildFnWithSessionBeads != nil {
+	if cr.buildFnWithClassStores != nil {
+		result = cr.buildFnWithClassStores(cr.cfg, cr.sp, sessionsStore.Store, workStore.Store, cr.rigBeadStores(), sessionBeads, trace) // residency:allow — the open rig frame the demand build and session reconciler plan their census and demand legs over; resolves no bead
+	} else if cr.buildFnWithSessionBeads != nil {
 		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, cr.rigBeadStores(), sessionBeads, trace) // residency:allow — the open rig frame the demand build and session reconciler plan their census and demand legs over; resolves no bead
 	} else {
 		result = cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
