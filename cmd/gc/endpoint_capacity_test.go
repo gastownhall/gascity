@@ -1548,6 +1548,40 @@ func TestCommitStartResult_CapacityRestoresPreWakeLifecycleKeys(t *testing.T) {
 	}
 }
 
+// TestCommitStartResult_CapacityRestoresTheResetItsPreWakeConsumed (#5843):
+// gc session reset recorded both markers past the controller's cache, so
+// the legacy start re-reads a cached row without them while its PreWake's
+// mint reads them and consumes both. A capacity refusal puts back what that
+// PreWake consumed: the row again holds the restart request and the reset.
+func TestCommitStartResult_CapacityRestoresTheResetItsPreWakeConsumed(t *testing.T) {
+	e := newCapacityEnv(t, true, "s")
+	c := asleepSession(t, e, nil)
+	backing := e.store
+	cache := beads.NewCachingStoreForTest(backing, func(string, string, json.RawMessage) {})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	if err := backing.SetMetadataBatch(c.info.ID, map[string]string{"restart_requested": "true", "continuation_reset_pending": "true"}); err != nil {
+		t.Fatalf("writing the reset past the cache: %v", err)
+	}
+	e.store = cache
+	e.sp.StartErrors["s"] = capacityRefusal("s", "")
+
+	e.start(context.Background(), c)
+
+	got, err := backing.Get(c.info.ID)
+	if err != nil {
+		t.Fatalf("backing.Get: %v", err)
+	}
+	if got.Metadata["generation"] == "1" {
+		t.Fatalf("premise: generation = 1, want the PreWake to have minted before the refusal; log %s", e.log.String())
+	}
+	if got.Metadata["restart_requested"] != "true" || got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("after the refusal restart_requested = %q, continuation_reset_pending = %q; want both restored to true; log %s",
+			got.Metadata["restart_requested"], got.Metadata["continuation_reset_pending"], e.log.String())
+	}
+}
+
 func TestEndpointCapacityGuard_StragglerSuccessWhileOpenKeepsOpen(t *testing.T) {
 	e := newCapacityEnv(t, true)
 	straggler, _ := e.guard.Admit(capacityTestEndpoint, "straggler", "straggler")

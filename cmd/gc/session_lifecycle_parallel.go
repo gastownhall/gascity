@@ -3424,11 +3424,13 @@ func commitCapacityRefusal(result startResult, sessFront *sessionpkg.Store, wave
 
 // preWakeRestoredKeys are the lifecycle keys PreWake overwrites that a
 // capacity refusal restores. continuation_epoch is among them so a refused
-// attempt does not invalidate queued nudges. The incarnation identity
-// (instance_token, generation) stays bumped: the token fences the restore.
+// attempt does not invalidate queued nudges, and restart_requested so a reset
+// the PreWake consumed with continuation_reset_pending stays requested. The
+// incarnation identity (instance_token, generation) stays bumped: the token
+// fences the restore.
 var preWakeRestoredKeys = []string{
 	"state", "sleep_reason", "detached_at", "continuation_reset_pending",
-	"continuation_epoch", "wake_request", "wake_requested_at",
+	"restart_requested", "continuation_epoch", "wake_request", "wake_requested_at",
 }
 
 // preWakeRestoreAttempts bounds the restore's re-read when another writer
