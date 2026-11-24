@@ -397,8 +397,12 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 // matches first, then config.FindAgent's rig-stamped copy of a generic
 // scope="rig" agent, which is how session.FindNamedSessionSpec backs each
 // rig's named session. That copy is not an element of cfg.Agents, so
-// callers only read it. The config-drift checks and the v2 template memo's
-// row filter use this helper; other callers keep findAgentByTemplate.
+// callers only read it. The config-drift checks, the v2 template memo's
+// row filter, the wake verdict (sessionWakeResolveAgentInfo), and the
+// controller's answer to an explicit wake (the awake set's
+// ExplicitWakeStartable, v2's honored wake and its drain reason) use this
+// helper, so the verdict and the controller agree on the agent and its rig's
+// suspension; other callers keep findAgentByTemplate.
 func findSessionAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	if a := findAgentByTemplate(cfg, template); a != nil {
 		return a
@@ -921,7 +925,7 @@ func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront
 			if backstop && rec != nil && manual {
 				rec.Record(resumeFailedConversationResetEvent(info, agentIdentity))
 			}
-			patch = sessionpkg.ConversationResetPatch(true)
+			patch = sessionpkg.ConversationResetPatch(true, clk.Now().UTC())
 			maps.Copy(patch, resumeFailuresPatch(info, 0))
 		}
 		if len(patch) > 0 {
@@ -1073,7 +1077,7 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 	// an explicit reset. Best-effort store write (error ignored, as before)
 	// with an unconditional Info fold.
 	if info.SessionKey != "" && !sessionpkg.HasStartedManualConversation(info) {
-		reset := sessionpkg.ConversationResetPatch(false)
+		reset := sessionpkg.ConversationResetPatch(false, clk.Now().UTC())
 		_ = sessFront.ApplyPatch(info.ID, reset)
 		info = info.ApplyPatch(reset)
 	}
@@ -1294,6 +1298,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"
+				batch[sessionpkg.ResetCommittedAtKey] = ""
 				// Priming markers share started_config_hash's lifetime (S19
 				// Stage 2): this asleep continuation reset re-primes.
 				batch[sessionpkg.PrimedAtMetadataKey] = ""

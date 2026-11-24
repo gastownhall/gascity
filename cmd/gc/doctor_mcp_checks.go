@@ -152,7 +152,7 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 	return mcpProjectionHealth{
 		issues:    issues,
 		skips:     skips.lines(),
-		conflicts: mcpTargetConflicts(cfg.Session.Provider, &stage1, &writers),
+		conflicts: mcpTargetConflicts(cityMaterializationRuntime(cfg, cityPath), &stage1, &writers),
 	}
 }
 
@@ -160,7 +160,7 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 // project different payloads, sorted by target and provider. A target that
 // conflicts in more than one set is reported once, naming the claimants of
 // each set it conflicts in and the first agent-local cause.
-func mcpTargetConflicts(sessionProvider string, sets ...*mcpTargetClaims) []mcpTargetConflict {
+func mcpTargetConflicts(rt materializationRuntime, sets ...*mcpTargetClaims) []mcpTargetConflict {
 	byKey := make(map[string]*mcpTargetConflict)
 	for _, set := range sets {
 		for key, claim := range set.byKey {
@@ -175,7 +175,7 @@ func mcpTargetConflicts(sessionProvider string, sets ...*mcpTargetClaims) []mcpT
 			}
 			conflict.Agents = append(conflict.Agents, claim.agents(claim.hashes...)...)
 			if conflict.Cause == "" {
-				conflict.Cause = claim.agentLocalCause(sessionProvider)
+				conflict.Cause = claim.agentLocalCause(rt)
 			}
 		}
 	}

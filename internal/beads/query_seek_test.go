@@ -167,7 +167,7 @@ func runSeekWalk(t *testing.T, store Store) {
 func TestSeekGatesForceClientSideLimit(t *testing.T) {
 	seek := &SeekBoundary{CreatedAt: time.Now(), ID: "gc-1"}
 
-	base := ListQuery{Sort: SortCreatedDesc, Limit: 10, TierMode: TierBoth}
+	base := ListQuery{Sort: SortCreatedDesc, Limit: 10, TierMode: TierBoth, AllowBackingCreatedLimit: true}
 	if bdListRequiresClientLimit(base, base, false) {
 		t.Fatal("baseline TierBoth query should allow bd-side limit (test setup wrong)")
 	}

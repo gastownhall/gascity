@@ -18,8 +18,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func TestWorkflowGetSelectsScopedRootMatch(t *testing.T) {
@@ -959,7 +961,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	if cityInfo.ref != "city:city" || cityInfo.scopeKind != "city" || cityInfo.scopeRef != "city" {
 		t.Fatalf("city info = %+v, want city:city", cityInfo)
 	}
-	if cityInfo.store != state.cityBeadStore {
+	if !beads.SameStore(cityInfo.store, state.cityBeadStore) {
 		t.Fatal("city store mismatch")
 	}
 
@@ -970,7 +972,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	if rigInfo.ref != "rig:alpha" || rigInfo.scopeKind != "rig" || rigInfo.scopeRef != "alpha" {
 		t.Fatalf("rig info = %+v, want rig:alpha", rigInfo)
 	}
-	if rigInfo.store != state.stores["alpha"] {
+	if !beads.SameStore(rigInfo.store, state.stores["alpha"]) {
 		t.Fatal("rig store mismatch")
 	}
 
@@ -981,7 +983,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 		t.Fatal("workflowStoreByRef(rig:missing) = true, want false")
 	}
 
-	// A city that relocates nothing has no orders binding to name: OrdersBeadStore()
+	// A city that relocates nothing has no orders binding to name: Stores().Orders()
 	// is the city store, and an orders: ref there would be a second name for a store
 	// the city: ref already resolves.
 	if _, ok := workflowStoreByRef(state, "orders:city"); ok {
@@ -1008,12 +1010,30 @@ func TestWorkflowStoreByRefResolvesTheOrdersBinding(t *testing.T) {
 	if info.ref != "orders:bright-lights" || info.scopeKind != "city" || info.scopeRef != "bright-lights" {
 		t.Fatalf("orders info = %+v, want orders:bright-lights", info)
 	}
-	if info.store != beads.Store(binding) {
+	if !beads.SameStore(info.store, binding) {
 		t.Fatal("orders store mismatch")
 	}
 
 	if _, ok := workflowStoreByRef(state, "orders:other-city"); ok {
 		t.Fatal("workflowStoreByRef(orders:other-city) = true, want false")
+	}
+}
+
+// TestWorkflowStoreByRefResolvesTheGraphBinding is the graph twin of the
+// orders test above: on a city that relocates graph alone, the graph: ref
+// resolves to the graph binding, not to the orders class's store.
+func TestWorkflowStoreByRefResolvesTheGraphBinding(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityBeadStore = beads.NewMemStore()
+	binding := beads.NewMemStore()
+	state.graphBeadStore = binding
+	state.stores = nil
+	state.cfg.Rigs = nil
+
+	info, ok := workflowStoreByRef(state, "graph:bright-lights")
+	if !ok || !beads.SameStore(info.store, binding) {
+		t.Fatalf("workflowStoreByRef(graph:bright-lights) = %+v, %v; want the graph binding", info, ok)
 	}
 }
 
@@ -1684,5 +1704,283 @@ func TestWorkflowGetSkipsMetadataListSweepWhenIDResolvesDirectly(t *testing.T) {
 	}
 	if listCalls != 0 {
 		t.Fatalf("gc.workflow_id metadata List ran %d time(s); want 0 once Get resolved the id directly", listCalls)
+	}
+}
+
+// createGraphWorkflowRoot creates a graph.v2 workflow root scoped rig:alpha.
+func createGraphWorkflowRoot(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	root, err := store.Create(beads.Bead{
+		Title: "Graph workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                     "workflow",
+			"gc.formula_contract":         "graph.v2",
+			beadmeta.ScopeKindMetadataKey: "rig",
+			beadmeta.ScopeRefMetadataKey:  "alpha",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	return root
+}
+
+// The graph binding is the only store that mints graph-namespace ids, so when
+// it holds the root no other store can, and the snapshot reads no work store:
+// on a city of proxied-local rigs every such Get was a bd call per rig.
+func TestWorkflowGetReadsGraphNamespaceRootFromTheBindingOnly(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	// Each work store counts its point reads; on a proxied-local rig a Get
+	// miss is a bd subprocess that restarts the rig's retired proxy and Dolt.
+	city := &getCountingStore{Store: beads.NewMemStore()}
+	alpha := &getCountingStore{Store: beads.NewMemStore()}
+	beta := &getCountingStore{Store: beads.NewMemStore()}
+	state.cityBeadStore = city
+	graph := &beads.MemStore{IDPrefix: "gcg"}
+	state.graphBeadStore = graph
+	state.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+	root := createGraphWorkflowRoot(t, graph)
+	if !strings.HasPrefix(root.ID, "gcg-") {
+		t.Fatalf("graph root id = %q, want the gcg namespace", root.ID)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", snapshot.RootBeadID, root.ID)
+	}
+	if snapshot.ScopeKind != "rig" || snapshot.ScopeRef != "alpha" {
+		t.Fatalf("scope = %s:%s, want rig:alpha", snapshot.ScopeKind, snapshot.ScopeRef)
+	}
+	if n := city.gets.Load() + alpha.gets.Load() + beta.gets.Load(); n != 0 {
+		t.Fatalf("work stores were read %d time(s) for a root the graph binding holds; want 0", n)
+	}
+}
+
+// When the graph binding does not hold a graph-namespace id (a bead left in a
+// work store by an earlier topology), the snapshot still sweeps every store.
+func TestWorkflowGetSweepsWorkStoresWhenTheBindingMissesAGraphNamespaceID(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	state.cityBeadStore = beads.NewMemStore()
+	state.graphBeadStore = &beads.MemStore{IDPrefix: "gcg"}
+	legacy := &beads.MemStore{IDPrefix: "gcg"}
+	state.stores = map[string]beads.Store{"alpha": legacy}
+	root := createGraphWorkflowRoot(t, legacy)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 from the work store: %s", rec.Code, rec.Body.String())
+	}
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID || snapshot.ResolvedRootStore != "rig:alpha" {
+		t.Fatalf("snapshot root %q in %q, want %q in rig:alpha", snapshot.RootBeadID, snapshot.ResolvedRootStore, root.ID)
+	}
+}
+
+// A migration twin — the same id left in a rig store with a different body —
+// does not compete with the binding's copy: the resolver pins the id to the
+// graph binding, so the snapshot serves the binding's row and reads no work
+// store.
+func TestWorkflowGetServesTheBindingCopyOverAWorkStoreTwin(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	city := &getCountingStore{Store: beads.NewMemStore()}
+	twinStore := &beads.MemStore{IDPrefix: "gcg", HonorExplicitIDs: true}
+	alpha := &getCountingStore{Store: twinStore}
+	state.cityBeadStore = city
+	graph := &beads.MemStore{IDPrefix: "gcg"}
+	state.graphBeadStore = graph
+	state.stores = map[string]beads.Store{"alpha": alpha}
+	root := createGraphWorkflowRoot(t, graph)
+	if _, err := twinStore.Create(beads.Bead{
+		ID:    root.ID,
+		Title: "Frozen twin",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                     "workflow",
+			"gc.formula_contract":         "graph.v2",
+			beadmeta.ScopeKindMetadataKey: "rig",
+			beadmeta.ScopeRefMetadataKey:  "alpha",
+		},
+	}); err != nil {
+		t.Fatalf("Create(twin): %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", snapshot.RootBeadID, root.ID)
+	}
+	if !strings.HasPrefix(snapshot.ResolvedRootStore, workflowGraphStoreRefPrefix+":") {
+		t.Fatalf("resolved_root_store = %q, want the graph binding", snapshot.ResolvedRootStore)
+	}
+	var title string
+	for _, b := range snapshot.Beads {
+		if b.ID == root.ID {
+			title = b.Title
+		}
+	}
+	if title != "Graph workflow" {
+		t.Fatalf("root title = %q, want the binding copy %q", title, "Graph workflow")
+	}
+	if n := city.gets.Load() + alpha.gets.Load(); n != 0 {
+		t.Fatalf("work stores were read %d time(s) with the binding holding the root; want 0", n)
+	}
+}
+
+// A binding root whose scope the request does not match is declined by the
+// shortcut and falls through to the sweep, which reads the work stores and
+// answers as it always has.
+func TestWorkflowGetFallsThroughToTheSweepOnABindingRootScopeMismatch(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	city := &getCountingStore{Store: beads.NewMemStore()}
+	alpha := &getCountingStore{Store: beads.NewMemStore()}
+	beta := &getCountingStore{Store: beads.NewMemStore()}
+	state.cityBeadStore = city
+	graph := &beads.MemStore{IDPrefix: "gcg"}
+	state.graphBeadStore = graph
+	state.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+	root := createGraphWorkflowRoot(t, graph)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=beta"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 from the sweep: %s", rec.Code, rec.Body.String())
+	}
+	if n := city.gets.Load() + alpha.gets.Load() + beta.gets.Load(); n == 0 {
+		t.Fatalf("work stores were not read; want the scope-mismatched binding root to fall through to the sweep")
+	}
+}
+
+// The graph-binding shortcut's cost on a decline is one point read of the
+// binding: for a graph-namespace id the binding does not hold, the residency
+// resolver probes the binding once, and the sweep then reads every store as
+// it always has (the binding included).
+func TestWorkflowGetProbesTheBindingOnceBeforeSweepingOnAMiss(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	city := &getCountingStore{Store: beads.NewMemStore()}
+	alpha := &getCountingStore{Store: &beads.MemStore{IDPrefix: "gcg"}}
+	graph := &getCountingStore{Store: &beads.MemStore{IDPrefix: "gcg"}}
+	state.cityBeadStore = city
+	state.graphBeadStore = graph
+	state.stores = map[string]beads.Store{"alpha": alpha}
+	root := createGraphWorkflowRoot(t, alpha.Store)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 from the work store: %s", rec.Code, rec.Body.String())
+	}
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID || snapshot.ResolvedRootStore != "rig:alpha" {
+		t.Fatalf("snapshot root %q in %q, want %q in rig:alpha", snapshot.RootBeadID, snapshot.ResolvedRootStore, root.ID)
+	}
+	// One probe plus the sweep's own Get on the binding; the sweep's one Get
+	// on each work store, and snapshotFromStore's fresh re-read of the root
+	// in the store that holds it.
+	if got := graph.gets.Load(); got != 2 {
+		t.Errorf("graph binding Gets = %d, want 2 (one resolver probe, one sweep read)", got)
+	}
+	if got := city.gets.Load(); got != 1 {
+		t.Errorf("city store Gets = %d, want 1 (the sweep's)", got)
+	}
+	if got := alpha.gets.Load(); got != 2 {
+		t.Errorf("rig alpha Gets = %d, want 2 (the sweep's and the snapshot's fresh root read)", got)
+	}
+}
+
+// errWorkflowGetRefused is countingRefusingStore's standing refusal.
+var errWorkflowGetRefused = errors.New("refused: this worker site serves no binding")
+
+// countingRefusingStore stands in for cmd/gc's refusedClassStore: every Get
+// refuses, and is counted.
+type countingRefusingStore struct{ *getCountingStore }
+
+func (countingRefusingStore) StorageRefusal() error { return errWorkflowGetRefused }
+
+func (s countingRefusingStore) Get(string) (beads.Bead, error) {
+	s.gets.Add(1)
+	return beads.Bead{}, errWorkflowGetRefused
+}
+
+// A refused graph class (a worker site serving no binding) is never probed by
+// the graph-binding shortcut: the snapshot answers from the sweep, as it did
+// before the shortcut, and the refusing binding sees only the sweep's own
+// read.
+func TestWorkflowGetDoesNotProbeARefusedGraphBinding(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	state.cityBeadStore = beads.NewMemStore()
+	binding := &beads.MemStore{IDPrefix: "gcg"}
+	state.graphBeadStore, state.ordersBeadStore, state.sessionsBeadStore, state.nudgesBeadStore = binding, binding, binding, binding
+	refusal := countingRefusingStore{&getCountingStore{Store: beads.NewMemStore()}}
+	state.classRefusals = map[coordclass.Class]storeref.RefusingClassStore{}
+	for _, c := range coordclass.Classes() {
+		if c.IsInfrastructure() {
+			state.classRefusals[c] = refusal
+		}
+	}
+	alpha := &beads.MemStore{IDPrefix: "gcg"}
+	state.stores = map[string]beads.Store{"alpha": alpha}
+	root := createGraphWorkflowRoot(t, alpha)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 from the sweep: %s", rec.Code, rec.Body.String())
+	}
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID || snapshot.ResolvedRootStore != "rig:alpha" {
+		t.Fatalf("snapshot root %q in %q, want %q in rig:alpha", snapshot.RootBeadID, snapshot.ResolvedRootStore, root.ID)
+	}
+	if got := refusal.gets.Load(); got != 1 {
+		t.Fatalf("refusing graph binding Gets = %d, want 1: the sweep's own read and no probe before it", got)
 	}
 }

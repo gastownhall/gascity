@@ -128,6 +128,40 @@ func TestCrossStoreGateLaneReleasesADrainItemOnceItsWorkBlockerCloses(t *testing
 	}
 }
 
+// TestCrossStoreGateLaneReadsABlockerTheBindingNowHolds: a migration can move
+// a gate's blocker into the binding after the gate was minted (`gc storage
+// migrate --from-rigs` moves a rig's graph rows there). The pass reads the
+// binding too: the gate holds its item while the blocker is open there, is
+// not marked unresolved, and releases once the blocker closes.
+func TestCrossStoreGateLaneReadsABlockerTheBindingNowHolds(t *testing.T) {
+	c := newGateLaneCity(t, "myrig")
+	// The import keeps the row's rig id (rig myrig mints r0-).
+	creator, ok := beads.As[beads.ForeignIDCreator](c.binding)
+	if !ok {
+		t.Fatal("the binding creates no foreign ids")
+	}
+	blocker, err := creator.CreateWithForeignID(beads.Bead{ID: "r0-x1", Title: "a graph row a rig import moved", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "r0-x1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, item := c.gate(t, blocker.ID)
+
+	report := c.cr.releaseCrossStoreGates()
+	if len(report.Released)+len(report.Unresolved) != 0 || c.ready(t, item.ID) {
+		t.Fatalf("report = %+v; want gate %s holding item %s while its blocker %s is open in the binding", report, gate.ID, item.ID, blocker.ID)
+	}
+	if state := mustBeadMeta(t, c.binding, gate.ID, beadmeta.CrossStoreGateStateMetadataKey); state != "" {
+		t.Fatalf("gate %s was marked %q while the binding holds its blocker", gate.ID, state)
+	}
+	if err := c.binding.Close(blocker.ID); err != nil {
+		t.Fatal(err)
+	}
+	report = c.cr.releaseCrossStoreGates()
+	if !slices.Equal(report.Released, []string{gate.ID}) || !c.ready(t, item.ID) {
+		t.Fatalf("report = %+v; want gate %s released and item %s ready once its blocker closed in the binding", report, gate.ID, item.ID)
+	}
+}
+
 // TestCrossStoreGateLaneReadsEachStoreOncePerPass bounds the pass's cost: ten
 // gates over four rigs cost ONE batched read per work store, not one read per
 // gate per store (the review measured 50 serial round trips, ~4.5 min at

@@ -2,6 +2,14 @@
 # fetch.sh [pin|pin-client]   fetch, verify, check out (outputs dir, sha)
 # fetch.sh verify PINFILE     verify only: the pinned commit is in rbe-worker main's history
 #
+# Canary (pool workflows' rbe_worker_sha input, by hand only): with
+# RBE_WORKER_CANARY_SHA set, mode pin checks out that commit instead of the
+# pin's, and only if it is 40-hex, on rbe-worker main's first-parent line
+# (a merged commit, not one inside a merged branch) and a descendant of the
+# pin. The URL, the refs and every tree check are the same. Outputs canary
+# (true or false) and pin (the pin file's commit). The workflow runs h5.sh
+# pin..sha before any fetched code.
+#
 # The repository URL is fixed here; a pin file names a commit, never a
 # repository. Anonymous HTTPS, refs/heads/main only: no token reaches git or
 # the tree, and a commit reachable only from a fork is never fetched, so it
@@ -16,6 +24,13 @@
 # (scripts/rbe_worker_shim_test.go's local file:// fixture only; unset in
 # every real invocation, so a real run can never reach a file:// URL this
 # way).
+#
+# Every git call also runs with maintenance.auto=false and gc.auto=0: git
+# 2.47 and later follow a fetch with a detached `git maintenance run --auto`
+# that keeps writing into $dir/.git after this script exits, and with no
+# global config and no GIT_TEMPLATE_DIR, nothing else turns it off. In
+# scripts/rbe_worker_shim_test.go that process races t.TempDir's cleanup
+# ("unlinkat .../rbe-worker-pin/.git: directory not empty" on macOS).
 #
 # bash-3.2-safe: no mapfile, no timeout. gascity's script tests run this on
 # macOS's /bin/bash (bash 3.2), per scripts/rbe_worker_shim_test.go.
@@ -32,7 +47,7 @@ for v in $(env | grep -oE '^GIT_[A-Z0-9_]+' || true); do
 done
 git_protocol_allow=(-c protocol.allow=never -c protocol.https.allow=always)
 [ "${RBE_WORKER_TEST_ALLOW_FILE:-}" != 1 ] || git_protocol_allow+=(-c protocol.file.allow=always)
-git() { command git -c core.hooksPath=/dev/null "${git_protocol_allow[@]}" "$@"; }
+git() { command git -c maintenance.auto=false -c gc.auto=0 -c core.hooksPath=/dev/null "${git_protocol_allow[@]}" "$@"; }
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 url=https://github.com/gastownhall/rbe-worker.git
@@ -53,6 +68,19 @@ sha=$(grep -E '^[0-9a-f]{40}$' "$here/$pinfile" || true)
 if [ -z "$sha" ] || [ "$(printf '%s\n' "$sha" | wc -l | tr -d ' ')" != 1 ]; then
 	echo "::error title=rbe-worker::$pinfile needs exactly one 40-hex line"
 	exit 2
+fi
+pin_sha=$sha
+canary=${RBE_WORKER_CANARY_SHA:-}
+if [ -n "$canary" ]; then
+	if [ "$mode" != fetch ] || [ "$pinfile" != pin ]; then
+		echo "::error title=rbe-worker::a canary commit is for the pool worker's fetch (pin) alone"
+		exit 2
+	fi
+	if ! printf '%s' "$canary" | grep -qE '^[0-9a-f]{40}$' || [ "$(printf '%s' "$canary" | wc -l | tr -d ' ')" != 0 ]; then
+		echo "::error title=rbe-worker::the canary commit must be one 40-hex sha"
+		exit 2
+	fi
+	sha=$canary
 fi
 
 dir=${RUNNER_TEMP:?}/rbe-worker-$pinfile
@@ -75,6 +103,24 @@ if [ "$(git -C "$dir" cat-file -t "$sha" 2>/dev/null || true)" != commit ] ||
 	! git -C "$dir" merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
 	echo "::error title=rbe-worker::$sha is not in gastownhall/rbe-worker main's history; refused"
 	exit 1
+fi
+
+# A canary: a merge on main's first-parent line, and the pin's descendant
+# (never a rollback, never a commit only reachable through a merged branch).
+# rev-list's output is captured whole, then searched: under pipefail, a pipe
+# into grep -q would kill rev-list with SIGPIPE once grep stops at the
+# canary, and refuse a valid canary.
+if [ -n "$canary" ]; then
+	first_parent=$(git -C "$dir" rev-list --first-parent refs/remotes/origin/main) ||
+		{ echo "::error title=rbe-worker::cannot list rbe-worker main's first-parent line"; exit 1; }
+	if ! grep -qx "$sha" <<<"$first_parent"; then
+		echo "::error title=rbe-worker::canary $sha is not on rbe-worker main's first-parent line; refused"
+		exit 1
+	fi
+	if ! git -C "$dir" merge-base --is-ancestor "$pin_sha" "$sha"; then
+		echo "::error title=rbe-worker::canary $sha does not descend from the pin $pin_sha; refused"
+		exit 1
+	fi
 fi
 
 if [ "$mode" = verify ]; then
@@ -111,8 +157,17 @@ if [ "$(git -C "$dir" rev-parse HEAD)" != "$sha" ] || [ ! -x "$dir/worker/blacks
 	echo "::error title=rbe-worker::$sha did not check out to a runnable worker/"
 	exit 1
 fi
-{ echo "dir=$dir/worker"; echo "sha=$sha"; } >>"$GITHUB_OUTPUT"
+{
+	echo "dir=$dir/worker"
+	echo "sha=$sha"
+	echo "pin=$pin_sha"
+	if [ -n "$canary" ]; then echo "canary=true"; else echo "canary=false"; fi
+} >>"$GITHUB_OUTPUT"
 # Sha and date only: never the commit subject, which could contain the
 # scaler's isolation-phase marker ("isolation: ").
 echo "rbe-worker: $sha ($(git -C "$dir" log -1 --format='%cs' "$sha"))"
-echo "rbe-worker \`$sha\` (gastownhall/rbe-worker main)" >>"$GITHUB_STEP_SUMMARY"
+if [ -n "$canary" ]; then
+	echo "rbe-worker canary \`$sha\` (gastownhall/rbe-worker main; pin \`$pin_sha\`)" >>"$GITHUB_STEP_SUMMARY"
+else
+	echo "rbe-worker \`$sha\` (gastownhall/rbe-worker main)" >>"$GITHUB_STEP_SUMMARY"
+fi

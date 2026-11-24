@@ -264,7 +264,7 @@ var pinnedBdReleaseRE = regexp.MustCompile(`pinned\s+bd\s+release\s+\((v[^)\s]+)
 
 // TestJournalRecoveryRunbookNamesThePinnedBd fails when the JSONL fallback
 // names a bd release other than the one deps.env pins (BD_VERSION). How that
-// step re-creates a database depends on the release: bd through v1.3.2 does
+// step re-creates a database depends on the release: bd through v1.3.4 does
 // it with --reinit-local and has no --recreate-missing, while beads main
 // refuses --reinit-local for a missing database and wants --recreate-missing.
 // The page went on naming v1.3.1 after the pin moved (#1979), so a pin bump

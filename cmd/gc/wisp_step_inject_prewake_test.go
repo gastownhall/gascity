@@ -75,7 +75,7 @@ func TestResolveActiveWispStep_PreClaimBridgeMisses(t *testing.T) {
 
 	// This is the wake: gc nudge --inject calls wispStepInjectionContent, which
 	// resolves against the agent's identities.
-	got, err := resolveActiveWispStep(workStore, graphStore, []string{"beads/deployer", "deployer-gm-wisp-sl677d"})
+	got, err := resolveActiveWispStep(workStore, testStores(workStore, graphStore), []string{"beads/deployer", "deployer-gm-wisp-sl677d"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestResolveActiveWispStep_PostClaimBridgeResolves(t *testing.T) {
 		t.Fatalf("SetMetadata(molecule_id): %v", err)
 	}
 
-	got, err := resolveActiveWispStep(workStore, graphStore, []string{"beads/deployer", "deployer-gm-wisp-sl677d"})
+	got, err := resolveActiveWispStep(workStore, testStores(workStore, graphStore), []string{"beads/deployer", "deployer-gm-wisp-sl677d"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -264,6 +264,7 @@ gc analyze
 | Subcommand | Description |
 |------------|-------------|
 | [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+| [gc analyze work-record](#gc-analyze-work-record) | Report work-record close-gate coverage across closed beads |
 
 ## gc analyze reliability
 
@@ -299,6 +300,35 @@ gc analyze reliability [flags]
 | `--since` | string | `7d` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
 | `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
 
+## gc analyze work-record
+
+Work-record scans closed, worker-claimable beads and reports how
+many carry a valid gc.work_outcome (shipped, no-op, blocked, abandoned)
+versus how many are missing one, per the work-record close gate
+(ADR-0009, cmd/gc/work_record_gate.go). Control/structural beads (gc.kind
+workflow roots, scope/run/check/drain steps, etc.) and non-task beads are
+excluded — they are not subject to the gate.
+
+Scope: scans the city (HQ) bead store only; rig stores are not included.
+"Covered" means the bead carries a valid gc.work_outcome value; it does not
+re-check the rest of the close contract (e.g. commits for "shipped").
+
+--limit caps the newest closed rows read before eligibility filtering, so a
+bounded report covers only the gated beads among them; use --limit 0 for an
+exact report.
+
+Read-only: this command never writes beads.
+
+```
+gc analyze work-record [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--limit` | int | `500` | maximum number of closed beads to read before eligibility filtering (0 = scan every closed bead; use 0 for an exact report) |
+
 ## gc bd
 
 Run a bd command routed to the correct rig directory.
@@ -332,12 +362,21 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
+All arguments after "gc bd" are forwarded to bd unchanged, with two
+exceptions. A "list" that filters on the wisps (ephemeral) tier —
 "--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
 "--include-infra". bd skips that tier on any list without the flag, so those
 filters would otherwise return [] and exit 0 on a ledger full of live
-molecules. Every other list is forwarded as written. "heartbeat
+molecules. Every other list is forwarded as written. A ready frontier —
+"ready", or "list --ready" — also gets "--exclude-type=session" and
+"--exclude-label=order-tracking". gc's per-agent session beads and per-run
+order-tracking beads are open, unassigned and unblocked for their whole
+lifetime, so bd would list them as claimable work; claiming or closing one
+edits the reconciler's own state. Each exclusion is dropped when the argv
+already names what it would hide ("--type session", "--label
+order-tracking") or already excludes it. The label exclusion is also
+dropped when "--skip-labels" is set, which bd will not combine with
+"--exclude-label". "heartbeat
 &lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show &lt;id&gt;
 --watch" (or "show --current --watch", or the "view" alias) is served by gc
@@ -353,7 +392,10 @@ too. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
 conditionally resets an in-progress assignment only when the bead still has
-that assignee.
+that assignee. It is routed by the issue id, as "show" and "update" are; the
+assignee never selects the store. It prints "released" when it cleared the
+assignment and "skipped" when that store holds the bead under another
+assignee or status, and exits 1 when that store does not hold the bead.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. To write a JSONL
@@ -484,6 +526,11 @@ Delegates to the provider's lifecycle health operation. For exec
 providers (including bd/dolt), the script handles multi-tier checking
 and recovery internally. For the file provider, always succeeds (no-op).
 
+For bd (dolt), a server that answers SQL is not enough: the city's
+database must be in the server catalog (and, for a gc-managed server,
+on disk), its default branch head must resolve, and a sample write and
+read against it must succeed. Any failure reports unhealthy.
+
 Also used by the beads-health system order for periodic monitoring.
 
 ```
@@ -509,9 +556,9 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format. --format=json prints a
-JSON array of beads, the same on every route for a local city. For a
-remote city (--context, --city-url/--city-name, GC_CITY_URL,
+Supports --label, --status, --assignee, --all, and --format.
+--format=json prints a JSON array of beads, the same on every route
+for a local city. For a remote city (--context, --city-url/--city-name, GC_CITY_URL,
 GC_CITY_CONTEXT, or the context selected by gc context use) it prints
 &#123;"beads": [...], "_cache_age_s": N&#125;, where _cache_age_s is the age in
 seconds of the remote supervisor's bead cache.
@@ -530,6 +577,16 @@ warns on stderr, lists the remaining stores and exits 0.
 The bare --json flag is reserved by the CLI's JSON-contract layer and is
 not wired for this command; use --format=json.
 
+--assignee is the cross-ledger form of "bd list --assignee". Bare bd
+reads a single ledger, so a bead that lives on a RIG ledger but is
+assigned to a city-scoped agent is invisible to it; this command sweeps
+every rig store plus the city store, so it answers "what is assigned to
+this agent anywhere in town" in one call. Use it when an agent's own
+startup work check comes back empty but work is genuinely assigned to
+it. The match is an exact comparison against the bead's stored assignee
+— no identity resolution happens, so pass the identity form the work is
+actually assigned under.
+
 ```
 gc beads list [flags]
 ```
@@ -540,11 +597,13 @@ gc beads list [flags]
 gc beads list
 gc beads list --label ready-to-build
 gc beads list --status open --format=json
+gc beads list --assignee city.agent-a --status in_progress
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
+| `--assignee` | string |  | filter to beads whose stored assignee matches this string exactly (across every rig and the city) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
@@ -1177,7 +1236,7 @@ gc convoy
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc convoy add](#gc-convoy-add) | Add an issue to a convoy |
+| [gc convoy add](#gc-convoy-add) | Add one or more issues to a convoy |
 | [gc convoy check](#gc-convoy-check) | Auto-close convoys where all issues are closed |
 | [gc convoy close](#gc-convoy-close) | Close a convoy |
 | [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
@@ -1193,13 +1252,13 @@ gc convoy
 
 ## gc convoy add
 
-Link an existing issue bead to a convoy.
+Link one or more existing issue beads to a convoy.
 
-Adds a tracks dependency from the convoy to the issue, making it appear
+Adds a tracks dependency from the convoy to each issue, making it appear
 in the convoy's progress tracking without changing the issue parent.
 
 ```
-gc convoy add <convoy-id> <issue-id> [flags]
+gc convoy add <convoy-id> <bead-ids...> [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -1212,6 +1271,10 @@ Scan open convoys and auto-close any where all child issues are resolved.
 
 Evaluates each open convoy's children. If all children have status
 "closed", the convoy is automatically closed and an event is recorded.
+
+A drain's unit convoy is closed once its drain control has closed,
+whatever the status of the item it tracks, with that item's verdict as
+gc.outcome: a drain never closes the items its unit convoys track.
 
 The check skips a suspended rig's store, naming the rig on stderr, and
 checks its convoys once the rig resumes. A store it cannot open or list,
@@ -1265,7 +1328,13 @@ gc convoy control [bead-id] [flags]
 Create a convoy and optionally link existing issues to it.
 
 Creates a convoy bead and tracks any provided issue IDs. Issues can
-also be added later with "gc convoy add".
+also be added later with "gc convoy add", which finds them in the
+convoy's own store.
+
+The convoy lands in the store of the rig named by --rig (a rig name).
+Every issue's ID prefix must route to that same store. Without --rig it
+lands in the first issue's store, or in the city store when no issues
+are given; GC_RIG and the working directory do not choose the store.
 
 ```
 gc convoy create <name> [issue-ids...] [flags]
@@ -1276,6 +1345,7 @@ gc convoy create <name> [issue-ids...] [flags]
 ```
 gc convoy create sprint-42
 gc convoy create sprint-42 issue-1 issue-2 issue-3
+gc --rig frontend convoy create frontend-batch
 gc convoy create deploy --owner mayor --notify mayor --merge mr
 gc convoy create auth-rewrite --owned --target integration/auth-rewrite
 ```
@@ -1640,7 +1710,7 @@ error is reported on stderr and the command still exits 0, so bead hooks never
 fail on it. JSON summaries report whether submission to the configured provider
 was attempted; the event bus does not acknowledge durable persistence.
 
-Four requests are refused with exit 1 and nothing is recorded. In --json mode
+Five requests are refused with exit 1 and nothing is recorded. In --json mode
 the failure object carries the code.
 
 - reserved_actor: --actor starts with "cache-", or the default actor is one
@@ -1650,6 +1720,9 @@ the failure object carries the code.
   gc reads it from the store.
 - journal_derived_refused: op.changed or fact.recorded, which the
   controller derives from operation-journal rows; no command records one.
+- session_list_derived_refused: session.created or session.closed, which
+  the controller derives from session beads' bead events; no command
+  records one.
 - bead_payload_not_found: --bead-payload names a bead the store it resolves
   to does not hold (bead.deleted excepted: the event is recorded with its
   subject alone). Any other failure to read it is reported on stderr and the
@@ -2237,6 +2310,18 @@ nothing is claimed or served, GC_HOOK_STORE_UNAVAILABLE is printed on stderr
 with the refusal, the hook exits 2, and the event says the fence failed
 closed.
 
+A bead whose gc.exclude_claimants metadata names this session is never
+claimed, adopted or pre-assigned by it, even when the bead is routed to its
+pool. The value is a comma-separated list of fully qualified identities,
+matched exactly against $GC_ALIAS, $GC_AGENT and the session's own
+identities, so an eligible session in the same pool claims the bead instead.
+--claim enforces this on every claim tier and again on the store's canonical
+readback, so a custom work_query cannot bypass it. The default work query
+also drops excluded beads before it picks one to serve, so an excluded bead
+at the head of the queue never hides the work behind it. An exclusion does
+not take back a claim the session already started: with --drain-ack it is
+still the started claim the session must finish.
+
 The agent is determined from $GC_AGENT or a positional argument.
 
 ```
@@ -2249,6 +2334,7 @@ gc hook [agent] [flags]
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
+| `--worktree` | bool |  | with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged) |
 
 | Subcommand | Description |
 |------------|-------------|
@@ -2571,10 +2657,12 @@ gc init --template gascity --default-provider claude \
 | `--json` | bool |  | emit JSON summary |
 | `--name` | string |  | workspace name (default: target directory basename) |
 | `--no-start` | bool |  | initialize files and imports without registering or starting the city |
+| `--prefix` | string |  | bead ID prefix for the new city (default: derived from the city name) |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--remote-stage` | string |  | with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
+| `--storage` | string |  | storage layout for the new city: split (the default: infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd &gt;= 1.3.2 or the pinned Enterprise build, else the city starts single-store with a notice; a remote session runtime, or a city name that derives a reserved bead prefix, starts single-store too, and an explicit split is refused there) or single (every class on the work ledger) |
 | `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
@@ -3849,8 +3937,9 @@ recorded config hash is updated to the hash the freshly reloaded
 config produces for it, the matching hash breakdown is refreshed, and
 any already queued config-drift drain for that session is canceled. The
 immediately-following reconcile tick sees no drift and no config-drift
-drains fire. Useful when editing a running city's .gc/settings.json
-without disrupting in-flight work. Sessions whose template no longer
+drains fire. Useful when editing a running city's .claude/settings.json
+without disrupting in-flight work. The .gc/settings.json file is generated
+from the selected settings source. Sessions whose template no longer
 maps to a configured agent are NOT updated; normal orphan/suspended
 drain handles them on the next tick.
 
@@ -4193,6 +4282,40 @@ One exception: when the argument resolves to a pack-declared runtime whose
 nudge probe is reported as "required: nudge" and an absent or broken nudge
 op fails the run — the declaration is smoke-tested, not trusted.
 
+A runtime whose handshake declares carrier.ops is driven only through its
+nudge, peek, send-keys, interrupt and clear-scrollback operations, so each
+is reported as "capability carrier.ops: &lt;op&gt;" and an absent or broken one
+fails the run; this naming takes precedence over "required: nudge". With
+idle-boundary declared as well, "capability carrier.ops: ready-prompt
+metadata" requires set-meta and get-meta to round-trip a non-default ready
+prompt byte for byte, because gc keeps each session's prompt there.
+
+Every operation runs in a city, as gc's own operations do. With
+GC_EXEC_CITY_PATH set, the check runs in the city GC_EXEC_CITY_NAME and
+GC_EXEC_CITY_PATH name, and never sends that city server-stop. With it
+unset or empty, as in a shell outside any city, the check runs in a
+private city: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh
+temporary directory, removed when the check ends or is interrupted.
+
+A runtime whose handshake declares server-lifecycle is sent server-stop,
+which ends every session of the city it runs in, twice. The check runs
+it, and the session it checks it against, in a private city of their
+own, never the city the rest of the check runs in. Before it removes a
+private city, the check, an interrupted one too, sends that city a final
+server-stop; one that does not exit 0 is reported as a warning, as the
+server it was to end may still be running. A runtime that does not scope
+its server by GC_EXEC_CITY_PATH ends every session the server holds, so
+check it only against a backend that no live city uses.
+
+A runtime whose handshake un-welds start (proc.provision with
+proc.launch, or with proc.exec and without carrier.ops) is sent
+provision, which must leave is-running false, and with proc.launch a
+launch into that box, which must leave is-running true, and a fresh_only
+launch over the running agent, which must exit 73. They run in a private
+city of their own, as server-stop does. Such a runtime must also keep
+metadata, since gc publishes each launch's identity with set-meta: a
+set-meta that exits 2 fails the metadata round-trip instead of skipping it.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
 city's packs, the check runs against that pack's declared command.
@@ -4221,12 +4344,32 @@ Unlike "gc runtime check" (a lighter smoke test), each requirement is
 proven to gate: the suite is kept honest by negative tests in which a
 broken reference fails exactly its requirement's check.
 
+Every operation runs in a city, as gc's own operations do. With
+GC_EXEC_CITY_PATH set, the suite and the --env suite run in the city
+GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name, and never send that city
+server-stop. With it unset or empty, as in a shell outside any city, each
+runs in a private city: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a
+fresh temporary directory, removed when the run ends or is interrupted.
+
+A runtime whose handshake declares server-lifecycle is sent server-stop,
+which ends every session of the city it runs in (the server group). The
+suite runs it, and the sessions it checks it against, in private cities
+of their own, never the city the rest of the suite runs in; the
+city-scope probes use private cities too. Before it removes a private
+city, the run, an interrupted one too, sends that city a final
+server-stop; one that does not exit 0 is reported as a warning, as the
+server it was to end may still be running. A runtime that does not scope
+its server by GC_EXEC_CITY_PATH ends every session the server holds, so
+check it only against a backend that no live city uses.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name from the current city's packs. Path-like or existing-file
 arguments are always the executable itself.
 
-Use --json for a machine-readable report (CI artifacts). Exits non-zero if
-any required requirement fails.
+Use --json for a machine-readable report (CI artifacts): one JSON document
+with ok:true, or ok:false and an error object when a requirement fails; the
+report fields are present either way, and --env adds the capability report
+under "environment". Exits non-zero if any required requirement fails.
 
 ```
 gc runtime conformance <name|executable> [flags]
@@ -4553,8 +4696,21 @@ gc session
 Attach to a running session or resume a suspended one.
 
 If the session is active with a live tmux session, reattaches.
-If the session is suspended or the tmux session died, resumes
-using the provider's resume mechanism (if supported) or restarts.
+If the session is not running while the city's controller runs,
+asks the controller to start it (as "gc session wake" does), waits
+up to --wait-timeout for it to run, then attaches; the runtime is
+never started from this process. When the controller will not
+start it (its agent, rig or city is suspended, for one), attach
+exits non-zero with the reason. A session no configured agent runs
+(a provider session) is one the controller never starts, so it is
+resumed here. With no controller running, a suspended session or
+one whose tmux session died is resumed here using the provider's
+resume mechanism (if supported) or restarted.
+
+With --no-start, attach only to a running session: a session that
+is not running is neither woken nor started, a configured named
+session with no open session is not created, and attach exits
+non-zero.
 
 A session still waiting for the reconciler to start it, in a city
 registered with the supervisor while neither the supervisor nor the
@@ -4564,12 +4720,30 @@ then attach once the session runs.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
-gc session attach <session-id-or-alias>
+gc session attach <session-id-or-alias> [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-start` | bool |  | attach only if the session is running; never create, start or wake it |
+| `--wait-timeout` | duration | `2m0s` | max time to wait for the controller to start a stopped session before attaching |
 
 ## gc session close
 
 End a conversation. Stops the runtime if active and closes the bead.
+
+Open and in-progress work assigned to the closed session (its ID or session
+name) is released: it reopens unassigned on the route it carries, and work
+with no route of its own takes the session's template as its route. Work whose
+route no agent serves stays assigned to the closed session and is reported as
+stranded (session.stranded_claims).
+
+A still-configured named session keeps the work assigned to its configured
+named identity and its runtime name: that work stays assigned, and the
+controller creates the session again to serve it. Once the named session is
+removed from config, a close releases that work too. To restart a named
+session and keep the same session bead and its assignments, use gc session
+kill.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
 with the same --key replays the close only when it names the session by its
@@ -4910,6 +5084,12 @@ Submit a user message to a session without choosing provider transport details.
 The runtime decides whether to wake, inject immediately, or queue the message
 according to the selected semantic intent.
 
+When the conversation lane delivers messages (message listed in [ops]
+authoritative), default already waits for the session's boundary, after the
+running turn, which is what follow_up asks for, so the lane records follow_up
+as the default request. interrupt_now interrupts the running turn and then
+delivers the message.
+
 ```
 gc session submit <id-or-alias> <message...> [flags]
 ```
@@ -5210,14 +5390,22 @@ gc stop reports "City stopped." only when it could confirm that every
 session stopped. If it could not list the runtime's sessions completely,
 or could not check whether a session is still running, it names what it
 could not verify, still stops every session it did see, and exits
-non-zero; a supervisor registration is restored. Resolve the reported
-error and run gc stop again.
+non-zero; a supervisor registration is restored. When a controller
+handled the stop, or gc stop itself stopped a registered city that no
+controller served, gc stop lists the runtime afterwards: a session still
+running, or a runtime that does not answer the listing in time (a wedged
+server), is reported the same way. Resolve the reported error and run gc
+stop again.
 
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan
-cleanup pass. Use --force to skip the interrupt grace period and go
-straight to kill.
+cleanup pass. If the cap fires while gc stop is itself stopping a
+registered city that no controller served, the city is left unregistered
+rather than restored, so the supervisor does not relaunch it under that
+stop, and gc stop prints the command that finishes the stop: it names
+the city by its path, since its name no longer resolves. Use --force to
+skip the interrupt grace period and go straight to kill.
 
 ```
 gc stop [path|name] [flags]
@@ -5249,6 +5437,8 @@ gc storage
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the work store into the converged binding |
 | [gc storage remote-stage](#gc-storage-remote-stage) | Mark or unmark this directory as a remote stage of a controller's city |
 | [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
+| [gc storage snapshot](#gc-storage-snapshot) | Snapshot this city's stores: the binding, the work store, the rigs |
+| [gc storage split](#gc-storage-split) | Split an unsplit city: its infrastructure classes into a binding, its rigs' graph rows with them |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 | [gc storage vouch-bd](#gc-storage-vouch-bd) | Walk a scope's bd and, if it matches a pinned gc bd inventory, vouch for it |
 
@@ -5300,6 +5490,45 @@ The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.
 
+--time-budget bounds the copy and the clear of --from-work and --from-backup;
+the rig import does not check it, so it is refused there. The run checks it
+between batches, never inside one, and when it is spent stops at the next
+boundary and exits 75, naming the phase and how far it got. Running the same
+command again continues: the copy keeps every row an earlier run copied that
+still equals its source (the work store, or the backup), and the clear resumes
+from the rows it had not yet removed. That holds for the re-copy of a binding
+whose database is gone too: before it creates the database it writes a record
+beside the marker (infra.recopying), and until its own marker lands the binding
+stays unconverged, so boot refuses it and the same command resumes it, whether
+the run paused, failed or was killed.
+
+--to-work reverses the split. It takes a snapshot of the binding, the work
+store and the rigs, pinned, then copies the binding's current rows back
+(keeping their ids and edge payloads, and restoring each cross-store edge a
+migration recorded) and proves each copy: a rig's imported rows into its
+store, everything else into the work store. Then it removes [storage] from
+city.toml (or restores the bytes from before the split), renames the split's
+notes and records *.reverted-&lt;run&gt;, and archives the binding root the same
+way. It refuses, naming each bead and the fix, an open cross-store gate, an
+open row the binding minted for a rig's scope, an edge that would join two
+open rows in different stores or hold an open row behind a blocker in another
+store that has not released it (open, or closed with gc.work_outcome=blocked),
+and an edge payload its destination cannot write. An explicit
+session_reconciler = "v2" refuses too, unless --reconciler=legacy rewrites it
+in the same edit. --dry-run prints the plan and every refusal and writes
+nothing; it takes no lock and needs no --fleet-stopped, so it rehearses on a
+live city.
+
+--to-rigs --rig X returns rig X's imported rows to its store and keeps the
+city split: the binding's copies go once the rig's are proven, and the rig
+reads as awaiting import again.
+
+Every row a reverse writes carries gc.infra_reversed_from, and until the
+binding is changed (its archive, or a to-rigs clear) --abort-reverse removes
+exactly those rows and puts back what the reverse changed. A reverse pauses on
+--time-budget and continues on the next run, as the copy does; while one is
+open, boot and the other storage commands refuse the city.
+
 ```
 gc storage migrate [flags]
 ```
@@ -5307,12 +5536,18 @@ gc storage migrate [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--abandon-rig-store` | bool |  | with --from-rigs --rig X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone) |
+| `--abort-reverse` | bool |  | abandon an unfinished --to-work or --to-rigs: remove exactly the rows it wrote and put back what it changed |
+| `--dry-run` | bool |  | with --to-work or --to-rigs, print what would move and every refusal, and write nothing (no lock, no --fleet-stopped: a live rehearsal) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |
 | `--from-rigs` | bool |  | import each rig's graph and infrastructure beads into the city binding |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
-| `--rig` | stringSlice |  | with --from-rigs, import only this rig (repeatable) |
+| `--reconciler` | string |  | with --to-work, rewrite [daemon] session_reconciler to this value (legacy) in the same city.toml edit |
+| `--rig` | stringSlice |  | with --from-rigs, import only this rig; with --to-rigs, return this rig (repeatable) |
+| `--time-budget` | duration | `30m0s` | stop the copy or the clear at the next batch boundary once this much time has passed, exit 75, and continue on the next run (0: no budget) |
+| `--to-rigs` | bool |  | with --rig X, return rig X's imported rows from the binding to its store and keep the city split |
+| `--to-work` | bool |  | reverse the split: copy the binding's current rows back into the work and rig stores, prove them, and retire [storage] and the binding |
 
 ## gc storage preflight
 
@@ -5336,6 +5571,14 @@ It resolves its destination from [storage.classes], so it has nothing to check
 until that section names a binding. On a city with no infrastructure split it
 reports exactly that and exits non-zero — author the split first.
 
+It starts no bead-store provider: on a city whose provider is down, or with
+a proxied server stopped, it says so and what lets a later run read, runs every
+check that reads no store, skips each that reads one, and exits non-zero.
+
+It names every check that would refuse, not only the first: a check that
+blocks does not stop the report, and a check that depends on one that blocked
+is printed as [SKIP] with the check it needs.
+
 It exits non-zero when the migration would refuse for a reason you have to go
 and fix first. That is a different question from gc storage status,
 which exits non-zero whenever the city is not yet serving from its binding — the
@@ -5344,6 +5587,25 @@ ordinary state of every city with a cutover still ahead of it.
 One condition is never checked here, because no process can check it:
 --fleet-stopped attests that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own.
 
+--split rehearses the split itself on a city with no [storage]: it
+evaluates the city as if the default split block were written (work on the
+work store; graph, sessions, messaging, orders and nudges on one sqlite-beads
+binding at .gc/store), writing nothing. It adds the session reconciler the
+city would resolve to, the source lane the migration's window would open,
+the id floor, and ESTIMATES of the time the copy and the clear take, the disk
+they need, and how many times --time-budget would pause the run. The
+estimates come from the row and edge counts read here and from rates measured
+on a loaded host, both printed with them. It starts no bead-store provider: on
+a city whose provider is down, or with a proxied server stopped, it reports
+that and what lets a later run read, runs every check that reads no store,
+and skips each that reads one. A
+suspended rig or city is left stopped; a proxied server that retired on its
+idle timeout while the city's controller runs is read, as gc doctor reads it,
+which restarts it as any bd read would. Reading a binding already there (a
+city with a convergence marker, which it refuses) opens it read-only, which
+may leave the -wal and -shm sidecars SQLite needs for the read beside a
+quiescent binding; nothing else is written.
+
 ```
 gc storage preflight [flags]
 ```
@@ -5351,6 +5613,8 @@ gc storage preflight [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
+| `--split` | bool |  | rehearse the split of a city with no [storage], as if the default split block were written (writes nothing) |
+| `--time-budget` | duration | `30m0s` | with --split: the migration's --time-budget, to estimate how many times it would pause |
 
 ## gc storage recover-stranded
 
@@ -5372,6 +5636,21 @@ what the binding does.
 
 The recovered beads stay in the work store until the migration is run again,
 which clears them exactly as it clears the cutover's own copies.
+
+A stranded row that only its metadata makes infrastructure (typically
+gc.root_bead_id on a task or bug: a work-shaped row) is NOT moved by
+default, --dry-run included: carrying ordinary work into the binding hands
+it to a workflow's ownership, out of every work reader's sight. Such rows
+are listed apart, each with its in-place repair, for example
+`gc bd update &lt;id&gt; --unset-metadata gc.root_bead_id`. If the row is
+ordinary work that names its workflow as a reference, run that on the running
+city; if it really is a workflow step an unfenced writer created, run this
+again with --move &lt;id&gt; (repeatable) to copy it into the binding. A run that
+leaves one behind exits 1: the city is still stranded. --move naming a
+stranded row that is not work-shaped (it moves anyway) or an id that is not
+stranded is refused, and nothing is written. This applies only to rows the
+proven-copy manifest does not list: a row it lists by id alone (below) is
+handled as that paragraph says, whatever its metadata.
 
 A manifest written by an older build may list a work-store row by id alone,
 with nothing that says whether it is the bead the copy carried: no time
@@ -5433,7 +5712,7 @@ gc storage recover-stranded [flags]
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
-| `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
+| `--move` | stringSlice |  | copy this stranded row into the binding: a work-shaped row (only its metadata makes it infrastructure; not moved by default), or a work-store row the manifest lists by id alone and the binding no longer holds (required for one that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
 | `--purge-type` | string |  | instead of copying, back up and then DELETE every stranded work-store row of this type (only "message"): the rows the containment check calls stranded that are also message-class; --dry-run lists them |
 | `--record-carried` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated) |
 | `--replace-binding-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated) |
@@ -5514,6 +5793,23 @@ refuses to mint resumes at its next mint once the floor covers the store.
 The store defaults to this city's SQLite infrastructure binding; --dir names
 any other store directory (the directory holding beads.sqlite).
 
+With --id-floor it raises the city WORK store's bd id floor instead: it sets
+min_hash_length one past the longest hash suffix among the ids the city's
+copy manifest records as carried into the binding (those of the work store's
+own prefix whose suffix bd could have minted: base36, 3 to 8 characters), and
+max_hash_length with it when needed, so bd does not mint a carried id again
+after the clear removed it: every id it mints has a longer suffix than any
+carried one. Neither is set above 8, the longest suffix bd mints, so where a
+carried suffix already has 8 characters a new 8-character id only rarely
+could repeat one. It never lowers either setting, with one exception: one
+above 8 (an earlier import may have set both higher) is brought down to 8,
+since bd mints nothing longer and a hosted bd serve only pads ids to it. A
+second run changes nothing. It holds the controller lock and refuses while
+the city runs, like every writing storage verb. A file store needs no floor
+and a generic exec store cannot take one; both are reported and skipped. On a
+hosted bd store that refuses the write it names the value to set out of
+band. --id-floor takes no --floor, --dir or --prefix.
+
 ```
 gc storage repair-sequence [flags]
 ```
@@ -5522,7 +5818,202 @@ gc storage repair-sequence [flags]
 |------|------|---------|-------------|
 | `--dir` | string |  | store directory holding beads.sqlite (default: this city's SQLite infrastructure binding) |
 | `--floor` | string |  | new floor (int64, may be negative); omit to only report |
+| `--id-floor` | bool |  | raise the city work store's bd min_hash_length past every id the copy carried into the binding (not with --floor, --dir or --prefix) |
 | `--prefix` | string | `gcg` | auto-id prefix whose sequence to inspect or repair |
+
+## gc storage snapshot
+
+Write a snapshot of this city's stores into a new directory &lt;to&gt;/&lt;id&gt;/.
+
+Each store gets an exact copy where its kind has one and, always, a JSONL of
+every row with its edges and their payloads:
+
+  binding (SQLite)   VACUUM INTO, then PRAGMA integrity_check on the copy
+  managed Dolt       the server's data directory, copied with the server
+                     stopped, when this run started the server; else a Dolt
+                     tag of HEAD (wisps, in dolt_ignore'd tables, are not in
+                     a tag; the JSONL holds them)
+  other native Dolt  a Dolt tag of HEAD
+  bd CLI, hosted bd  bd export --all
+  file               a copy of the file
+  generic exec       the JSONL alone
+
+The JSONL is a record, not yet a restore source: no tool imports it.
+
+A managed Dolt's data directory is copied whole, empty directories
+included. The copy is refused before the server stops when it would leave
+less than the managed Dolt's critical floor (GC_DOLT_MIN_FREE_BYTES) free
+where it lands.
+
+--work also records city.toml and the city's storage records (the id-floor
+file, the served-binding and cleared notes), so a snapshot taken before the
+split is a way back to the whole city: gc storage snapshot restore &lt;id&gt;
+--city puts it back.
+
+The copy of a managed Dolt's data directory holds every database the server
+serves. --work refuses, before it starts or stops anything, when a rig keeps
+its store there and --rigs is not passed: the snapshot would record no store
+for that database, and --city would refuse it. A database no store of the city keeps
+(gc's probe database, a removed rig's) is named in a note: --city puts it back
+as the copy holds it, unproven.
+
+manifest.json records the stores, their row and edge counts, each file's
+sha256, the gc version, the work store's identity, and the binding root's
+records. It is written last, after every file is re-read and proven, so a
+directory without one is an interrupted snapshot, never a complete one.
+
+--binding alone runs against a live city: it only reads. --work and --rigs
+need the city stopped and --fleet-stopped, and run in the maintenance window.
+Every snapshot refuses while a migration, a re-copy, a rig import or a restore
+holds the city.
+
+--keep N keeps the newest N of this city's snapshots in &lt;to&gt; (this one always
+among them, and a pinned one never counted or removed) and removes the rest of
+this city's. Snapshots of another city or work store sharing &lt;to&gt; are left
+alone. --verify ID re-reads a snapshot and proves it against its manifest.
+
+```
+gc storage snapshot [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--binding` | bool |  | snapshot the infrastructure binding (live; read-only) |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
+| `--if-bound` | bool |  | with --binding alone: on a city with no binding, do nothing and exit 0 (the binding-snapshot order) |
+| `--keep` | int | `2` | keep the newest N of this city's snapshots in --to, this one included, and remove the rest of this city's (at least 1); other cities' snapshots there are left alone |
+| `--rigs` | bool |  | snapshot every rig's store (needs --fleet-stopped) |
+| `--to` | string |  | directory to write snapshots into (default &lt;city&gt;/.gc/snapshots) |
+| `--verify` | string |  | re-read snapshot ID in --to and prove it against its manifest, writing nothing |
+| `--work` | bool |  | snapshot the city's work store (needs --fleet-stopped) |
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc storage snapshot restore](#gc-storage-snapshot-restore) | Restore the binding, or the whole city, from a snapshot (city stopped) |
+
+## gc storage snapshot restore
+
+Put snapshot &lt;id&gt;'s binding database back in place of the live one.
+
+It refuses a snapshot of another work store, and one taken before the
+binding's records changed (a migration, a recovery or a rig import since; a
+rig marked clean since, or a marker that only gained its identity line, is
+compatible): the database is only half of a binding, and the records beside
+it are not restored. It refuses, too, while the live binding holds rows a rig
+import carried in since the snapshot that neither the snapshot nor that rig's
+own store holds. It reads the rig's store for them, starting the city's
+bead-store provider for the read when it is stopped. A live binding too
+damaged to read is restored over, with a warning that its rig imports went
+unchecked.
+
+The snapshot is proven against its manifest first, then installed under the
+controller lock with the city stopped, in WAL mode, with the id floor raised
+past every id the replaced database held. The database it replaces, with its
+-wal, -shm and -journal, is kept beside it as *.pre-restore-&lt;ts&gt;. The
+installed database is a whole binding, so it also replaces a re-copy that
+never finished, and removes that re-copy's record (infra.recopying).
+
+From the moment it starts copying until it finishes, the binding counts as
+stale (infra.restoring beside it): every gc that boots refuses it and names
+this command. A refusal before the live database moves changes nothing. A
+restore interrupted after that holds the city stale until you run it again.
+
+--city puts the whole city back as a snapshot taken with --work found it:
+every store the snapshot holds from its exact copy (a file store's file, or
+the managed Dolt's data directory, copied with the server stopped), then the
+city's storage records (.gc/min-gc-version, the served-binding and cleared
+notes), then city.toml; and, when the snapshot holds no binding, it moves the
+binding root aside, so the city serves from its work store alone again. Take
+that snapshot before the split: gc storage snapshot --work --rigs
+--fleet-stopped, before [storage] is added (gc storage preflight --split names
+it). It refuses before it moves anything: a snapshot of another work store,
+one that records no city, a store whose copy restores nothing exactly (a Dolt
+tag, a bd export, no copy), a snapshot that holds a binding (restore that
+with --binding), a snapshot of a split city (one that records a
+served-binding or cleared note), a city.toml that, with the city's include
+fragments as they are now, still routes a class off the work store, a copy of
+the managed Dolt's data directory holding a database a rig of this city keeps
+its store in that the snapshot records no store for, a rig imported since the
+snapshot whose store the snapshot does not hold, a store it replaces that
+another registered city also uses (the work store, a rig's, or any other
+database of the managed Dolt's data directory; it replaces a store whole, so
+no --force=shared-store:&lt;identity&gt; lifts this, and it refuses that
+attestation), a live controller, a running managed Dolt, too little disk for
+the data directory's copy, or a reverse migration in progress. Any other
+database the copy holds (gc's probe database, a removed rig's) is put back as
+the copy holds it and named unproven. Every file it replaces is kept beside it
+as *.pre-restore-&lt;ts&gt;; city.toml is copied aside, so it is never missing. Its
+journal, .gc/storage-city-restore.json, holds gc start and every other writing
+storage command until the restore ends, and keeps the snapshot pinned until
+then; run again, it finishes an interrupted restore.
+
+Last, it reads each restored store back and proves its rows equal to the
+snapshot's JSONL. A row the JSONL dates after the store's copy and before
+the JSONL read (each to the second) was written during the snapshot: it is
+reported, with where its later content is kept, and passes. Any other
+difference fails the proof, and the city stays held: resolve it and run the
+restore again, or pass --accept-unproven to end the restore anyway, which
+records what the proof failed on in the journal and, entry by entry, in
+.gc/storage-attestations.log, keeps every file the restore replaced, and
+releases the city.
+
+```
+gc storage snapshot restore <id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--accept-unproven` | bool |  | with --city: end an unfinished city restore whose every file is back and whose proof fails, recording what the proof failed on |
+| `--binding` | bool |  | restore the infrastructure binding |
+| `--city` | bool |  | restore the whole city from a snapshot taken with --work: its stores, storage records and city.toml |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
+| `--to` | string |  | directory the snapshot is in (default &lt;city&gt;/.gc/snapshots) |
+
+## gc storage split
+
+Split this city, in one command, the way the runbook does it by hand.
+
+With the city stopped (gc stop) it takes the controller lock and the
+maintenance window, rehearses the split (gc storage preflight --split) and
+refuses on any block, a gc on the session PATH older than the version floor
+the split leaves among them, then: snapshots the work store and the rigs
+(pinned), runs legacy's demand-migration repairs when the split city runs the
+v2 reconciler, appends the [storage] block to city.toml and writes
+.gc/min-gc-version, migrates the city's infrastructure classes into the
+binding (gc storage migrate --from-work), imports every rig (--from-rigs), and
+checks the result (gc storage status, the storage-split doctor check).
+
+It records each step in .gc/storage-split.journal.json, with city.toml's
+bytes from before the split, which gc storage migrate --to-work restores.
+Run it again, with the --force attestations it was started with, to continue
+a split that stopped: on its time budget (exit 75), on a rig the import
+refused, or killed. A split stopped before it wrote city.toml starts over.
+
+--abandon backs out a split stopped before the city's copy converged: city.toml
+gets its bytes from before the split back (or [storage] removed, if it changed
+since), the half-copied binding rows are deleted, and the version floor is put
+back as it was before the split (removed if there was none). A split stopped
+before it wrote city.toml only has its journal closed and its snapshot
+unpinned. Past the convergence marker the way back is gc storage migrate
+--to-work, which keeps every bead written to the binding since; once it has
+reversed a split that stopped, --abandon only closes the split's journal and
+unpins its snapshot.
+
+--dry-run is gc storage preflight --split.
+
+```
+gc storage split [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--abandon` | bool |  | back out a split stopped before the city's copy converged, or close one a reverse undid |
+| `--dry-run` | bool |  | rehearse the split (gc storage preflight --split): no lock, nothing written |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
+| `--time-budget` | duration | `30m0s` | stop the city's copy or clear at the next batch boundary once this much time has passed, exit 75, and continue on the next run (0: no budget) |
 
 ## gc storage status
 
