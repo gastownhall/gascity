@@ -563,6 +563,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	}
 	command, err := s.resolvedSessionRuntimeCommand(resolved, transport, info.Command, metadata)
 	if err != nil {
+		logSessionResumeCommandFallback(info.ID)
 		command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
 	}
 	resumeCommand := firstNonEmptyString(resolved.ResumeCommand, info.ResumeCommand)

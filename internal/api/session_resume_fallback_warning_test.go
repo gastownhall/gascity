@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -76,6 +77,22 @@ var buildSessionResumeResolver = resumeResolver{
 	},
 }
 
+var workerSessionRuntimeResolver = resumeResolver{
+	name: "resolveWorkerSessionRuntimeWithMetadata",
+	resolve: func(srv *Server, info session.Info) (string, string, error) {
+		rt, err := srv.resolveWorkerSessionRuntimeWithMetadata(info, "", nil)
+		if err != nil {
+			return "", "", err
+		}
+		if rt == nil {
+			return "", "", errNilResolvedRuntime
+		}
+		return rt.Command, rt.WorkDir, nil
+	},
+}
+
+var errNilResolvedRuntime = errors.New("resolver returned nil runtime")
+
 // captureResumeLog runs fn with the standard logger writing, without
 // timestamps, to a buffer and returns what it logged.
 func captureResumeLog(t *testing.T, fn func()) string {
@@ -130,7 +147,7 @@ func TestSessionResumeLaunchCommandFallbackWarning(t *testing.T) {
 			wantCommand:   resumeFallbackProvider,
 		},
 	}
-	for _, resolver := range []resumeResolver{buildSessionResumeResolver} {
+	for _, resolver := range []resumeResolver{buildSessionResumeResolver, workerSessionRuntimeResolver} {
 		for _, tc := range cases {
 			t.Run(resolver.name+"/"+tc.name, func(t *testing.T) {
 				srv, info := newResumeFallbackSession(t, tc.provider, tc.storedCommand, tc.overrides)
