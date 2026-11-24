@@ -1817,6 +1817,7 @@ go_test(
         "hook_claim_assigned_federation_test.go",
         "hook_claim_bead_events_test.go",
         "hook_claim_class_fanout_test.go",
+        "hook_claim_deadline_fence_test.go",
         "hook_claim_done_workflow_split_test.go",
         "hook_claim_drain_reason_schema_test.go",
         "hook_claim_failure_honesty_test.go",

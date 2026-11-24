@@ -659,7 +659,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				}
 			}
 		}
-		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
+		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, deadline, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
@@ -945,13 +945,14 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // city that relocates nothing the route is nil and the ops are the work-store
 // ops alone.
 func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, nil, emitFailure, stdout, stderr)
+	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, nil, time.Time{}, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkProvisioning is claimHookWork with the claimed bead's worktree
 // provisioned before its receipt is delivered (gc hook --claim --worktree).
-// A nil provisionWorktree is the plain claim.
-func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+// A nil provisionWorktree is the plain claim. deadline is the invocation
+// deadline the claim answers by (hookInvocationDeadline), zero for none.
+func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, deadline time.Time, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -964,6 +965,7 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// wrapped before the class route, whose binding writes announce themselves.
 	base := city.claimOps()
 	base.ProvisionWorktree = provisionWorktree
+	base.Deadline = deadline
 	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(base, city.path), opened, err, city.recorder, stderr)
 	if !proceed {
 		return 1
@@ -1021,7 +1023,8 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
 	ops.ClassRoute.observeWorkLegs(stores)
-	ctx := context.Background()
+	ctx, cancelReads := hookReadContext(context.Background(), ops.Deadline, !ops.Deadline.IsZero())
+	defer cancelReads()
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary's error is
 	// surfaced as itself and emitted as this session's work-query failure. Once
