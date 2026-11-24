@@ -183,6 +183,9 @@ func startControllerSocket(
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
 // "identify" (typed process identity and the latched session reconciler),
 // "converge:{json}" (convergence commands routed to event loop),
+// "session-sync:{json}" (a blocking refresh of one session row into the
+// controller's session cache, so the pass the reply's wake runs sees the
+// caller's write; see controller_session_sync.go),
 // "reconciler-mode" (the session reconciler this controller latched, for
 // lane passes outside it), "v2-pass" (the v2 planner's last pass, for
 // doctor), "ledger-feed" (the journal feeds' status, for doctor),
@@ -245,6 +248,8 @@ func handleControllerConn(
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
+		case strings.HasPrefix(line, sessionSyncCommandPrefix):
+			handleSessionSyncSocketCmd(conn, cityPath, line[len(sessionSyncCommandPrefix):], wake)
 		case strings.HasPrefix(line, "converge:"):
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
