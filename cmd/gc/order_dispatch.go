@@ -1070,6 +1070,16 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
 		return false
 	}
+	if a.Trigger == "event" {
+		// An event check that could not read the log never proves that no
+		// event matched: it is reported and moves nothing (no run, no floor,
+		// no suppression streak cleared), and the next pass reads the same
+		// events again.
+		if result.ReadFailed {
+			logDispatchError(m.stderr, "gc: order dispatch: %s %s", a.ScopedName(), result.Reason)
+			return false
+		}
+	}
 	if !result.Due {
 		// The streak counts consecutive refusals of a DUE order, so an
 		// undue tick ends the episode. Without this a condition order that
@@ -1091,15 +1101,9 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		if a.Trigger == "condition" && result.TimedOut {
 			logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
 		}
-		// An event check that could not read the log never proves that no
-		// event matched: it is reported and moves nothing, and the next pass
-		// reads the same events again.
+		// The check read the log through eventHead and matched nothing there.
 		if a.Trigger == "event" {
-			if result.ReadFailed {
-				logDispatchError(m.stderr, "gc: order dispatch: %s %s", a.ScopedName(), result.Reason)
-			} else {
-				m.advanceEventFloor(scoped, eventHead)
-			}
+			m.advanceEventFloor(scoped, eventHead)
 		}
 		return false
 	}
