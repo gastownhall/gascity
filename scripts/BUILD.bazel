@@ -99,6 +99,7 @@ go_test(
         "bazel_key_parity_test.go",
         "bazel_local_runtime_pin_test.go",
         "bazel_multilane_test.go",
+        "bazel_native_dep_budget_test.go",
         "bazel_nightly_fresh_test.go",
         "bazel_no_flaky_retries_test.go",
         "bazel_output_cache_test.go",
