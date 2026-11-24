@@ -49,6 +49,28 @@ func TestCheckTriggerEventFiresAfterTheLogRestartsBelowARunStamp(t *testing.T) {
 	}
 }
 
+// TestCheckTriggerEventRunAfterALogRestartConsumesItsEvents (AC-2): once the
+// order runs on the restarted log (stamped at its head, 2), the retained old
+// stamp 500 no longer replays the consumed events, and the next matching event
+// fires it again.
+func TestCheckTriggerEventRunAfterALogRestartConsumesItsEvents(t *testing.T) {
+	ep := restartedLog(2)
+	a := updatedOrder()
+	quiet := CheckTrigger(a, time.Time{}, neverRan, ep, stampsFn(500, 2))
+	if quiet.Due || quiet.ReadFailed {
+		t.Fatalf("after the post-restart run: result = %+v, want not due", quiet)
+	}
+	if want := (CursorReset{Stamp: 500, Head: 2, Cursor: 2}); quiet.CursorReset == nil || *quiet.CursorReset != want {
+		t.Fatalf("after the post-restart run: CursorReset = %+v, want %+v", quiet.CursorReset, want)
+	}
+
+	ep.Record(events.Event{Type: "bead.updated"}) // seq 3
+	next := CheckTrigger(a, time.Time{}, neverRan, ep, stampsFn(500, 2))
+	if !next.Due || !strings.HasPrefix(next.Reason, "event: 1 bead.updated event(s)") {
+		t.Fatalf("after one new matching event: result = %+v, want due with count 1", next)
+	}
+}
+
 // TestCheckTriggerEventExcludesTrackingBeadsAfterAReset: the reset read still
 // skips the dispatcher's own order-tracking bead events.
 func TestCheckTriggerEventExcludesTrackingBeadsAfterAReset(t *testing.T) {
