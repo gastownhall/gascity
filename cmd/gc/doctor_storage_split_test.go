@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -376,6 +377,13 @@ func writeFakeGC(t *testing.T, dir, v string) string {
 // expanded PATH (here ~/.local/bin, ahead of the process PATH), workspace.env's
 // PATH over it, relative entries skipped, and the first line of the output.
 func TestProbeSessionPathGCVersion(t *testing.T) {
+	// The fakes are scripts, which hold no Go build information; this test
+	// is the PATH search, so each reads as a release build.
+	prevInfo := sessionPathGCBuildInfo
+	t.Cleanup(func() { sessionPathGCBuildInfo = prevInfo })
+	sessionPathGCBuildInfo = func(string) (*debug.BuildInfo, error) {
+		return &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, nil
+	}
 	home, procPath, wsPath := t.TempDir(), t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", procPath)

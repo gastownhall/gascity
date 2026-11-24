@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -321,6 +322,16 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 // RuntimeHandle constructs a runtime-only worker handle using the factory's
 // configured provider and recorder.
 func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, processNames []string) (Handle, error) {
+	return f.SessionRuntimeHandle("", sessionName, providerName, transport, processNames)
+}
+
+// SessionRuntimeHandle is RuntimeHandle for the runtime of session row
+// sessionID: its nudges wait behind a startup turn the session's queue still
+// holds, as the session manager's own sends do
+// (RuntimeHandleConfig.StartupTurnHolds, session.Manager.StartupTurnQueued).
+// An empty sessionID, or a factory without a store, has no row to read: the
+// handle is RuntimeHandle's.
+func (f *Factory) SessionRuntimeHandle(sessionID, sessionName, providerName, transport string, processNames []string) (Handle, error) {
 	if f.provider == nil {
 		return nil, sessionpkg.ErrSessionNotFound
 	}
@@ -335,6 +346,10 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 	if f.manager != nil {
 		if city, err := f.manager.CityDir(); err == nil {
 			cfg.CityPath = city.Path()
+		}
+		if id := strings.TrimSpace(sessionID); id != "" && f.store != nil {
+			manager := f.manager
+			cfg.StartupTurnHolds = func(ctx context.Context) bool { return manager.StartupTurnQueued(ctx, id) }
 		}
 	}
 	return NewRuntimeHandle(cfg)

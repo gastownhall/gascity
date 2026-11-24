@@ -679,6 +679,58 @@ func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
 	}
 }
 
+func TestCatalogBindsHybridCompositionToLocalRoute(t *testing.T) {
+	var proof *ProofRef
+	var wrapper *ContractClaim
+
+	for _, entry := range Catalog() {
+		for i, claim := range entry.Claims {
+			switch claim.Constructor {
+			case repoSymbol("internal/runtime/hybrid", "New"):
+				if entry.ID != "runtime.composition.hybrid" {
+					t.Errorf("hybrid.New is claimed by %q, want runtime.composition.hybrid", entry.ID)
+				}
+				if claim.Disposition != DispositionProved {
+					t.Errorf("hybrid composition disposition = %q, want %q", claim.Disposition, DispositionProved)
+				}
+				proof = claim.Proof
+			case repoSymbol("cmd/gc", "newHybridProvider"):
+				wrapper = &entry.Claims[i]
+			}
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("hybrid.New proof is missing")
+	}
+	if proof.File != "internal/runtime/hybrid/conformance_test.go" || proof.Test != "TestHybridConformance" {
+		t.Errorf("hybrid.New proof = %s#%s, want hybrid conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime.NewFake, sync/atomic.AddInt64"; got != want {
+		t.Errorf("hybrid.New allowed calls = %q, want %q", got, want)
+	}
+	// The conformance factory routes every session to the local backend, so
+	// the shared contract never reaches the remote route; the scope keeps the
+	// rendered ledger from overstating the proof as whole-composition coverage.
+	if got, want := proof.Scope, "local-route conformance via RunProviderTests; remote-route delegation covered separately by internal/runtime/hybrid's fake-backed unit tests"; got != want {
+		t.Errorf("hybrid.New proof scope = %q, want %q", got, want)
+	}
+
+	// cmd/gc.newHybridProvider builds the K8s backend before it consults its
+	// routing predicate, so the contract cannot run against the wrapper
+	// without a Kubernetes client configuration. The proof above must not be
+	// read as covering it: the wrapper stays waived, with its reason on record.
+	if wrapper == nil {
+		t.Fatal("cmd/gc.newHybridProvider claim is missing")
+	}
+	if wrapper.Disposition != DispositionWaived {
+		t.Errorf("cmd/gc.newHybridProvider disposition = %q, want %q", wrapper.Disposition, DispositionWaived)
+	}
+	if wrapper.Waiver == nil || !strings.Contains(wrapper.Waiver.Reason, "K8s backend before") {
+		t.Errorf("cmd/gc.newHybridProvider waiver = %+v, want a reason naming the K8s-before-routing construction order", wrapper.Waiver)
+	}
+}
+
 func TestDiscoverRuntimeProviderDoublesUsesDeclaredPortIdentity(t *testing.T) {
 	dir := writeRuntimeDoubleFixture(t, map[string]string{
 		"runtime.go": `package runtime
@@ -741,6 +793,85 @@ func NewExternalFake() *Fake { return nil }
 	}
 	if gotText, wantText := renderReusableDoubles(got), renderReusableDoubles(want); gotText != wantText {
 		t.Fatalf("doubles = %s, want %s", gotText, wantText)
+	}
+}
+
+func TestDiscoverRuntimeProviderDoublesImportsProcessGroupDeclarations(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "valid aliases",
+			source: `package processgroup
+import ("errors"; "time")
+var ErrProcessNotConfirmedDead = errors.New("not confirmed dead")
+const ManagedProcessReapGrace = 3 * time.Second
+func ignoredBody() { missingBodySymbol() }
+`,
+		},
+		{
+			name: "missing alias target",
+			source: `package processgroup
+const ManagedProcessReapGrace = 3
+`,
+			want: "undefined: processgroup.ErrProcessNotConfirmedDead",
+		},
+		{
+			name: "invalid dependency declaration",
+			source: `package processgroup
+var ErrProcessNotConfirmedDead MissingType
+const ManagedProcessReapGrace = 3
+`,
+			want: "type-check declaration dependency",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "runtime")
+			files := map[string]string{
+				"runtime/runtime.go": `package runtime
+import "github.com/gastownhall/gascity/internal/processgroup"
+type Provider interface { Run() }
+var ErrProcessNotConfirmedDead = processgroup.ErrProcessNotConfirmedDead
+const ManagedProcessReapGrace = processgroup.ManagedProcessReapGrace
+`,
+				"runtime/fake.go": `package runtime
+type Fake struct{}
+func (*Fake) Run() {}
+func NewFake() *Fake { return nil }
+`,
+				"processgroup/ownership.go": tt.source,
+			}
+			for name, source := range files {
+				path := filepath.Join(root, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := DiscoverRuntimeProviderDoubles(dir)
+			if tt.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("DiscoverRuntimeProviderDoubles() error = %v, want containing %q", err, tt.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DiscoverRuntimeProviderDoubles: %v", err)
+			}
+			want := []ReusableDouble{{
+				Type:         repoSymbol("internal/runtime", "Fake"),
+				Constructors: []SymbolRef{repoSymbol("internal/runtime", "NewFake")},
+			}}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("doubles = %v, want %v", got, want)
+			}
+		})
 	}
 }
 
@@ -1681,7 +1812,7 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if second[4].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
 		t.Errorf("Catalog() waiver leaked mutation: %q", second[4].Claims[0].Waiver.Owner)
 	}
-	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
+	if second[len(second)-1].Source.Function != "newHybridProvider" {
 		t.Errorf("Catalog() source leaked mutation: %q", second[len(second)-1].Source.Function)
 	}
 }

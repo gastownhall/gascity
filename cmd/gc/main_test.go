@@ -243,6 +243,8 @@ func exitTestProcess(code int) {
 func TestMain(m *testing.M) {
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
+	maybeRunControllerTokenChildSpy()
+	maybeRunNativeFakeBd()
 	maybeRunFakeDoltSQLServer()
 	maybeRunControlDispatchSigtermChild()
 	// Infrastructure spawns never probe the host's systemd user manager from
@@ -336,6 +338,12 @@ func TestMain(m *testing.M) {
 	// floor would reach for a bd that does not serve it; the tests that pin
 	// the floor install their own surface.
 	cityHashConfigOpener = func(string) (cityHashConfig, error) { return cityHashConfig{}, nil }
+	// The split's rehearsal and the storage-split doctor check run `gc
+	// version` on the gc an agent session would find (B10). A test never runs
+	// a gc from the host's PATH or home: by default it finds none, and the
+	// tests that pin the probe install their own (stubSessionPathGC) or call
+	// probeSessionPathGCVersion.
+	minGCVersionPathProbe = func(*config.City) (string, string, error) { return "", "", nil }
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
@@ -524,8 +532,39 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != dir {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, dir)
+		want := canonicalTestPath(dir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
+		}
+	})
+
+	// This explicit linked fixture protects the cross-platform discovery
+	// invariant. It does not claim a currently reproduced live macOS failure.
+	t.Run("canonical_resolves_symlinked_fixture", func(t *testing.T) {
+		root := t.TempDir()
+		realCity := filepath.Join(root, "real-city")
+		if err := os.MkdirAll(filepath.Join(realCity, "nested"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(realCity, "city.toml"), []byte("[workspace]\nname = \"linked\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		linkedCity := filepath.Join(root, "linked-city")
+		if err := os.Symlink(realCity, linkedCity); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+
+		want := canonicalTestPath(realCity)
+		if linkedCity == want {
+			t.Fatalf("invalid symlink fixture: linked path %q equals resolved target %q", linkedCity, want)
+		}
+		start := filepath.Join(linkedCity, "nested")
+		got, err := findCity(start)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", start, err)
+		}
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want resolved canonical target %q (not raw link %q)", start, got, want, linkedCity)
 		}
 	})
 
@@ -581,8 +620,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", nested, err)
 		}
-		if got != parent {
-			t.Errorf("findCity(%q) = %q, want %q", nested, got, parent)
+		want := canonicalTestPath(parent)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", nested, got, want)
 		}
 	})
 
@@ -620,8 +660,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != homeDir {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, homeDir)
+		want := canonicalTestPath(homeDir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
 		}
 	})
 
@@ -668,8 +709,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != cityDir {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, cityDir)
+		want := canonicalTestPath(cityDir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
 		}
 	})
 
@@ -691,8 +733,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", homeDir, err)
 		}
-		if got != homeDir {
-			t.Errorf("findCity(%q) = %q, want %q", homeDir, got, homeDir)
+		want := canonicalTestPath(homeDir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", homeDir, got, want)
 		}
 	})
 
@@ -735,8 +778,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", ceiling, err)
 		}
-		if got != ceiling {
-			t.Errorf("findCity(%q) = %q, want %q", ceiling, got, ceiling)
+		want := canonicalTestPath(ceiling)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", ceiling, got, want)
 		}
 	})
 
@@ -779,8 +823,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != parent {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, parent)
+		want := canonicalTestPath(parent)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
 		}
 	})
 
@@ -7487,6 +7532,81 @@ max = -1
 	}
 	if !strings.Contains(out, "GUPP") {
 		t.Error("pool-worker prompt missing GUPP")
+	}
+}
+
+// TestDoPrimeImplicitProviderAgentMatchesPromptlessPoolAgent pins that an
+// implicit provider agent ("claude") and an explicit prompt-less pool agent
+// get the same worker prompt, chosen by formula_v2.
+func TestDoPrimeImplicitProviderAgentMatchesPromptlessPoolAgent(t *testing.T) {
+	const closeForm = "--set-metadata gc.outcome=pass --status closed"
+	tests := []struct {
+		name        string
+		daemonTOML  string
+		wantHeading string
+		wantClose   bool
+	}{
+		{name: "formula_v2 default", wantHeading: "# Graph Worker", wantClose: true},
+		{name: "formula_v2 false", daemonTOML: "[daemon]\nformula_v2 = false\n", wantHeading: "# Pool Worker"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := materializeBuiltinPrompts(dir); err != nil {
+				t.Fatalf("materializeBuiltinPrompts: %v", err)
+			}
+			// The test runs inside agent sessions whose environment would
+			// otherwise leak into agent-name resolution.
+			for _, k := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG", "GC_RIG_ROOT", "GC_TEMPLATE", "GC_AGENT", "GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS"} {
+				t.Setenv(k, "")
+			}
+			tomlContent := `[workspace]
+name = "test-city"
+
+[providers.claude]
+base = "builtin:claude"
+
+` + tt.daemonTOML + `
+[[agent]]
+name = "worker"
+start_command = "echo"
+
+[agent.pool]
+min = 0
+max = -1
+`
+			if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent+builtinImportsTOML("core")), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeBuiltinImportsLock(t, dir, "core")
+
+			t.Chdir(dir)
+			t.Setenv("GC_CITY_PATH", dir)
+
+			prime := func(agent string) string {
+				t.Helper()
+				var stdout, stderr bytes.Buffer
+				if code := doPrime([]string{agent}, &stdout, &stderr); code != 0 {
+					t.Fatalf("doPrime(%q) = %d, want 0; stderr: %s", agent, code, stderr.String())
+				}
+				return stdout.String()
+			}
+			implicit, explicit := prime("claude"), prime("worker")
+
+			// (b) catches a regression that moves both agents together.
+			for agent, out := range map[string]string{"claude": implicit, "worker": explicit} {
+				if !strings.Contains(out, tt.wantHeading) {
+					t.Errorf("%s prompt missing heading %q", agent, tt.wantHeading)
+				}
+				if got := strings.Contains(out, closeForm); got != tt.wantClose {
+					t.Errorf("%s prompt contains %q = %v, want %v", agent, closeForm, got, tt.wantClose)
+				}
+			}
+			// (a) the two agents are selected the same way.
+			if implicit != explicit {
+				t.Errorf("implicit agent \"claude\" and prompt-less agent \"worker\" rendered different prompts (%d vs %d bytes)", len(implicit), len(explicit))
+			}
+		})
 	}
 }
 

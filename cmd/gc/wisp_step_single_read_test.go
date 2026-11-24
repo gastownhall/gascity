@@ -47,7 +47,7 @@ func seedStepFixture(beadsIn []stepFixtureBead) *beads.MemStore {
 // TestActiveWispStepSingleReadMatchesPerQuestionReads pins that answering the
 // step reminder's in-progress questions from one listing resolves the same
 // bead as asking each question its own listing, across every resolution
-// branch: molecule, wisp, the newest-updated-of-five rule and its tie,
+// branch: molecule, the newest-updated-of-five rule and its tie,
 // in-progress and entry steps, the claimed and routed bridges, and the
 // description fallback with its ten-bead sample.
 func TestActiveWispStepSingleReadMatchesPerQuestionReads(t *testing.T) {
@@ -123,7 +123,7 @@ func TestActiveWispStepSingleReadMatchesPerQuestionReads(t *testing.T) {
 		"description beyond the sample":               "<none>",
 		"molecule with in-progress step":              "s-1",
 		"molecule entry step":                         "s-1",
-		"wisp root":                                   "s-1",
+		"wisp root":                                   "<none>",
 		"molecule preferred over wisp":                "s-m",
 		"newest updated of the five newest molecules": "s-2",
 		"updated tie keeps the newest created":        "s-0",

@@ -82,6 +82,12 @@ type controllerState struct {
 	// work that passed its quiescence check before the city went quiescent is
 	// still reading, and its next read would restart a pair retired under it.
 	storeWork atomic.Int64
+	// beadEventsApplied is the seq of the last event the bead event watcher
+	// finished with, and beadEventWatcherLive is true while its tail runs
+	// (startBeadEventWatcher). The quiescence retire waits until the watcher
+	// has applied every event the log held (beadEventsPending).
+	beadEventsApplied    atomic.Uint64
+	beadEventWatcherLive atomic.Bool
 	// suspendedRigs is the set of rigs the city runtime last saw suspended,
 	// published every tick. A suspended rig's cache skips its periodic
 	// reconcile from the next tick on, with no reload: any bd read restarts
@@ -320,7 +326,21 @@ func newControllerStateWithRoutes(
 	// A split city's binding gets the CachingStore its work ledger has, before
 	// the class-routed services below are built over it (class_store_cache.go).
 	beadsQuiescent := new(atomic.Bool)
-	routes = routes.withControllerCache(ctx, ep, reconcileGateFor(beadsQuiescent))
+	// The binding's cache is built before the controller state it counts its
+	// background reads on, so it reaches the state through this pointer, set
+	// once the state exists. A read that starts before then (the async full
+	// prime) stays uncounted for its whole duration; the retire's
+	// stop-whenever-running convergence bounds that gap.
+	var owner atomic.Pointer[controllerState]
+	routes = routes.withControllerCache(ctx, ep, beads.JoinCachingStoreOptions(
+		reconcileGateFor(beadsQuiescent),
+		beads.WithStoreWork(func() func() {
+			if cs := owner.Load(); cs != nil {
+				return cs.beginStoreWork()
+			}
+			return func() {}
+		}),
+	))
 	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
 	// (nil cfg or an out-of-enum config value) is warn-and-continue: the zero
 	// Flags is degraded-safe (legacy paths), and this constructor returns no
@@ -351,6 +371,7 @@ func newControllerStateWithRoutes(
 		rolloutFlags:        rolloutFlags,
 		nativeTransport:     nativeTransport,
 	}
+	owner.Store(cs)
 	cs.ledgerFeeds = newLedgerFeedSet(cityPath, ledgerFeedHooks{
 		work: cs.beginStoreWork,
 		deferClose: func(id string) {
@@ -559,7 +580,7 @@ func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) 
 // reconcileGate is the CachingStoreOption every cache this state owns carries:
 // it pauses the cache's periodic reconcile while the city is quiescent.
 func (cs *controllerState) reconcileGate() beads.CachingStoreOption {
-	return beads.WithReconcileGate(cs.cityScopeGate())
+	return beads.JoinCachingStoreOptions(beads.WithReconcileGate(cs.cityScopeGate()), beads.WithStoreWork(cs.beginStoreWork))
 }
 
 // cityScopeGate admits store reads of the city scope: false while the city
@@ -590,7 +611,7 @@ func quiescenceGate(quiescent *atomic.Bool) func() bool {
 // rigReconcileGate is reconcileGate for one rig's cache: it also pauses while
 // that rig is suspended (suspendedRigs).
 func (cs *controllerState) rigReconcileGate(rigName string) beads.CachingStoreOption {
-	return beads.WithReconcileGate(cs.rigScopeGate(rigName))
+	return beads.JoinCachingStoreOptions(beads.WithReconcileGate(cs.rigScopeGate(rigName)), beads.WithStoreWork(cs.beginStoreWork))
 }
 
 // rigSuspended reports whether the city runtime last saw rigName suspended.
@@ -656,6 +677,25 @@ func (cs *controllerState) trackStoreWork(fn func()) func() {
 		defer end()
 		fn()
 	}
+}
+
+// beadEventsPending reports whether the bead event watcher has yet to finish
+// an event the log already holds: applying one can read the stores (the
+// session-list confirmation read, a cache's event check, a close's effects).
+// It is false while no watcher tail runs.
+func (cs *controllerState) beadEventsPending() bool {
+	if cs == nil || !cs.beadEventWatcherLive.Load() {
+		return false
+	}
+	ep := cs.EventProvider()
+	if ep == nil {
+		return false
+	}
+	head, err := ep.LatestSeq()
+	if err != nil {
+		return true
+	}
+	return cs.beadEventsApplied.Load() < head
 }
 
 // storeWorkInFlight reports whether any store work is in flight.
@@ -831,9 +871,12 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 				}
 			}
 			advanced := false // read past the cursor it watched from
+			cs.beadEventsApplied.Store(seq)
+			cs.beadEventWatcherLive.Store(true)
 			for {
 				evt, err := watcher.Next()
 				if err != nil {
+					cs.beadEventWatcherLive.Store(false)
 					_ = watcher.Close()
 					break
 				}
@@ -846,6 +889,7 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 				case events.BeadCreated, events.BeadUpdated, events.BeadClosed, events.BeadDeleted:
 					cs.applyBeadEventToStores(evt)
 				}
+				cs.beadEventsApplied.Store(evt.Seq)
 			}
 			if ctx.Err() != nil {
 				return
@@ -2799,15 +2843,16 @@ func lexicalContainment(cityPath, resolved string) error {
 // first pass accepts; this pass refuses. TestSymlinkAwareContainmentIsLoadBearing
 // pins exactly those inputs.
 func symlinkAwareContainment(cityPath, resolved string) error {
-	realCity, err := filepath.EvalSymlinks(cityPath)
-	if err != nil {
-		realCity = filepath.Clean(cityPath)
-	}
+	realCity := pathutil.NormalizePathForCompare(cityPath)
 	realTarget, err := realPathForContainment(resolved)
 	if err != nil {
 		return fmt.Errorf("%w: resolving rig path %s: %w", configedit.ErrValidation, resolved, err)
 	}
-	return relWithinCity(realCity, realTarget)
+	// Both operands go through one canonicalizer: realCity is already collapsed
+	// by NormalizePathForCompare (darwin /private/var -> /var), so realTarget,
+	// a bare symlink resolution, must be collapsed the same way or every
+	// in-city rig on a /var or /tmp city reads as escaping it.
+	return relWithinCity(realCity, pathutil.NormalizePathForCompare(realTarget))
 }
 
 // relWithinCity reports the containment error if target is not lexically under

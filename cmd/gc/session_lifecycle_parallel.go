@@ -782,7 +782,9 @@ func (t *asyncStartTracker) waitUntil(timeout time.Duration, shouldStop func() b
 }
 
 type asyncPreparedStart struct {
-	item    preparedStart
+	item preparedStart
+	// release gives back the start's async slot. It does no store I/O, so the
+	// start goroutine can run it whatever state the store is in.
 	release func()
 	done    func()
 	tracker *asyncStartTracker // counts the start's goroutine; nil counts nothing
@@ -1455,7 +1457,7 @@ func buildPreparedStartWithTranscript(
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
 	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+		if (tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none") || initialMessageRidesStartupPrompt(tp.IsACP) {
 			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 		} else {
 			existing := ""
@@ -2036,9 +2038,10 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
-	// A startup nudge the session's program held back behind a dialog
-	// (program_status = "on", row A20) is queued, never typed or failed.
-	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), err == nil, time.Now()); qerr != nil {
+	// A startup nudge the runtime handed back (one held behind a dialog
+	// under program_status = "on", row A20, or an un-welded exec launch's
+	// first turn) is queued, never typed or failed.
+	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), item.cfg.Env[runtime.InstanceTokenEnv], err == nil, time.Now()); qerr != nil {
 		log.Printf("gc start: %v", qerr)
 	}
 	// diedDuringStartup starts true when the provider/resume layer already
@@ -2089,8 +2092,19 @@ func runPreparedStartCandidate(
 	// the dead resume's pane for the resume backstop to read that
 	// refusal from, so recordWakeFailure clears the key for the
 	// next attempt.
+	//
+	// A start whose startup prompt rides the agent's first ACP
+	// session/prompt (an ACP session on Windows; see
+	// initialMessageRidesStartupPrompt) is gated the same way: an agent that
+	// exits after session/new leaves the command wrapper that launched it
+	// alive past Start, so the prompt write succeeds into the pipe and the
+	// prompt would be lost behind a successful start. A Start that overran
+	// startupTimeout skips that check: it is a startup timeout whether or not
+	// the session lived.
 	var diedPane string
-	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
+	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" &&
+		(item.candidate.info.SessionKey != "" ||
+			(startCtxErr == nil && item.cfg.Nudge != "" && initialMessageRidesStartupPrompt(item.candidate.tp.IsACP))) {
 		postStartBegin := time.Now()
 		if stabilityWaiter(ctx, item.candidate.name()) {
 			running := false
@@ -2232,12 +2246,11 @@ func startOutcomeDefersCommit(outcome TraceOutcomeCode) bool {
 	return outcome == TraceOutcomeSessionInitializing || outcome == TraceOutcomeDeferred
 }
 
+// appendInitialMessageToStartupNudge composes the startup nudge that carries
+// msg (session.AppendInitialMessage): the session layer owns the composition,
+// so a handed-back nudge is split by the same rule (session.SplitInitialMessage).
 func appendInitialMessageToStartupNudge(nudge, msg string) string {
-	userMessage := "User message:\n" + msg
-	if nudge != "" {
-		return nudge + startupPromptNudgeSeparator + userMessage
-	}
-	return userMessage
+	return sessionpkg.AppendInitialMessage(nudge, msg)
 }
 
 func restartPromptNudge(prompt, nudge string) string {
@@ -2357,15 +2370,34 @@ func enqueuePreparedStartWaveForCity(
 				}
 			}
 			defer releaseStart()
+			// The start holds the item's runtime lease (nil when it holds none)
+			// until the commit phase takes it over; a panic before then
+			// abandons it, a flock-only drop that makes no store call.
+			lease := item.candidate.lease
+			leaseHandedOff := false
+			defer func() {
+				if !leaseHandedOff {
+					lease.Abandon()
+				}
+			}()
 			watched, unwatch := watchStartLease(ctx, item)
 			result := runPreparedStartCandidate(watched, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
-			unwatch()
 			// Resolve before the commit so a stale, refused, or panicking
 			// commit cannot lose the endpoint verdict.
 			result = resolveStartCapacity(result, rec, stderr)
-			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
-			// The commit is done: release the lease and the slot before the
-			// follow-up, so the pass it wakes finds the name free.
+			// Bounded: a commit that wedges on the store or the runtime must not
+			// hold the slot (SESSION-RUNTIME-035). Resolving the endpoint
+			// verdict above stays outside the bound. The lease and the watch
+			// move to the commit: it releases the lease when it returns, and
+			// the wait abandons it only if the commit never claimed it.
+			leaseHandedOff = true
+			commitAsyncStartBounded(ctx, cityPath, result, wave, stderr, lease, unwatch,
+				func() bool {
+					return commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
+				})
+			// The commit is done or abandoned: the lease is released, or its
+			// flock abandoned, or held by the commit that is still running, so
+			// give the slot back before the follow-up.
 			releaseStart()
 			if asyncFollowUp != nil {
 				asyncFollowUp()
@@ -4976,6 +5008,7 @@ func executePlannedStartsTraced(
 					continue
 				}
 				var release func()
+				var slotRelease func()
 				var done func()
 				if startOpts.async {
 					var tracking bool
@@ -4987,6 +5020,7 @@ func executePlannedStartsTraced(
 					var reserved bool
 					var outcome string
 					release, reserved, outcome = reserveAsyncStartSlot(ctx, asyncLimiter)
+					slotRelease = release
 					if !reserved {
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
@@ -5137,7 +5171,7 @@ func executePlannedStartsTraced(
 					probed[endpoint] = true
 				}
 				if startOpts.async {
-					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done, tracker: startOpts.asyncTracker})
+					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: slotRelease, done: done, tracker: startOpts.asyncTracker})
 				} else {
 					prepared = append(prepared, *item)
 				}

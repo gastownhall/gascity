@@ -438,8 +438,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// context, so the default-branch probe — up to three git subprocesses when
 	// the rig records no default_branch — is only worth running when there is a
 	// prompt template to render.
+	promptTemplate := startupPromptTemplate(p.city, cfgAgent)
 	defaultBranch := ""
-	if cfgAgent.PromptTemplate != "" {
+	if promptTemplate != "" {
 		defaultBranch = p.defaultBranch(rigName, workDir)
 	}
 	topo := config.QueryTopology{}
@@ -463,7 +464,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// on a city with configured rigs and asks no storage route. SlingQuery is
 	// not a discovery reader and keeps the raw topology.
 	promptTopo := promptQueryTopology(topo, cfgAgent, p.rigs)
-	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
+	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, promptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
 		TemplateName:            cfgAgent.Name,
@@ -827,6 +828,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
+		NotReadyMarkers:        resolved.NotReadyMarkers,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   acceptStartupDialogs,

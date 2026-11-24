@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"maps"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -68,10 +69,8 @@ func remapControllerPathToPod(val, ctrlCity string) string {
 func projectedPodWorkDir(cfg runtime.Config) string {
 	podWorkDir := podWorkspaceRoot
 	ctrlCity := controllerCityPath(cfg.Env)
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = podWorkspaceRoot + "/" + rel
-		}
+	if rel, ok := relativeCityWorkDir(ctrlCity, cfg.WorkDir); ok {
+		podWorkDir = path.Join(podWorkspaceRoot, filepath.ToSlash(rel))
 	}
 	return podWorkDir
 }

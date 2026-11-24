@@ -1117,6 +1117,10 @@
           "description": "AllowSchemaBehindMigrate opts this city in to letting the linked beads\nlibrary migrate its database forward when the database's own schema\ncursor trails the library's ceiling. Without it, the native-store\npreflight schema check FAILs a behind schema (stays on BdStore) instead\nof risking a native open that would migrate a possibly-shared database;\nthe direct native-open path withholds BD_ALLOW_REMOTE_MIGRATE from the\nlinked library the same way. Default: false (nil). A break-glass\nGC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE env override is registered in\ninternal/rollout (beads.allow_schema_behind_migrate); read the effective\nvalue through internal/rollout.Flags.AllowSchemaBehindMigrate, never\nthis field directly.",
           "default": false
         },
+        "migrate_command": {
+          "type": "string",
+          "description": "MigrateCommand is the command gc's notices name for migrating an existing\nbd database whose schema is behind the beads library linked into gc (gc\nstart, gc reload and gc doctor's bd-schema check). gc never runs it:\nmigrating an existing database is the operator's consent. It is a\none-line Go text/template rendered per database with the fields\n{{.City}}, {{.Rig}}, {{.ScopeDir}}, {{.BeadsDir}}, {{.Database}},\n{{.Host}}, {{.Port}}, {{.Socket}} and {{.Bd}}, and a shq function that\nquotes a value for a POSIX shell. Set it when the city's pinned bd is not\nthe binary to migrate with, so the notice names the migrator the operator\ntrusts. Its bd must migrate to the schema of the bd the city pins and no\nfurther: the pinned bd refuses a database migrated past its own schema.\nEmpty uses gc's default: gc bd ... migrate schema, or the pinned bd with\nBEADS_DIR in a city whose gc bd refuses migrate. A template that does not\nparse, or that does not render a single line for sample databases, fails\nconfig load."
+        },
         "proxied_idle_timeout": {
           "type": "string",
           "description": "ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt\nchild stay up with no connections before bd retires them; the next bd\ncommand restarts them. Go duration; \"0\" means never. A finite value\nmust be at least 1m. Empty uses the default, 30m. It applies to scopes gc\ninitializes (gc init, gc rig add, gc beads city migrate-proxied); bd\ncannot change an existing scope's value, and gc doctor reports drift.\nOverridden per rig by beads_proxied_idle_timeout and by the\nGC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.",
@@ -2690,6 +2694,13 @@
         "ready_prompt_prefix": {
           "type": "string",
           "description": "ReadyPromptPrefix is the string prefix that indicates the provider is ready for input."
+        },
+        "not_ready_markers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "NotReadyMarkers lists text the provider prints when it discards a\nsubmitted prompt because it is not ready for input yet, although its\ninput prompt is already showing (Copilot prints \"Managed account policy\nis still loading\" until its policy loads). A runtime that sees one\nappear after delivering the startup prompt delivers the prompt again."
         },
         "process_names": {
           "items": {
