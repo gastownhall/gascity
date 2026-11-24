@@ -3424,3 +3424,53 @@ func TestComputePoolDesiredStatesAssignedWorkEvidenceFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// unmanagedWorkDirShapes are assigned work that publishes no managed-worktree
+// evidence: no work dir, a work dir with no ownership keys (recipe steps), and
+// a work dir with only the hook claim's ambient gc.work_branch.
+func unmanagedWorkDirShapes(path string) []struct {
+	name string
+	meta map[string]string
+} {
+	return []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "no work dir", meta: map[string]string{}},
+		{name: "work dir with no ownership keys", meta: map[string]string{beadmeta.WorkDirMetadataKey: path}},
+		{name: "work dir with only work_branch", meta: map[string]string{
+			beadmeta.WorkDirMetadataKey: path, beadmeta.WorkBranchMetadataKey: "work/branch",
+		}},
+	}
+}
+
+// TestComputePoolDesiredStatesUnmanagedAssignedWorkUnchanged guards
+// gastownhall/gascity#5753's fix: assigned work that never published
+// managed-worktree evidence plans its session exactly as before, with no spec
+// and no error, so it binds poolTriggerWorkDir's directory, and demand counts
+// match the same work without metadata.
+func TestComputePoolDesiredStatesUnmanagedAssignedWorkUnchanged(t *testing.T) {
+	for _, tc := range assignedWorkTierCases() {
+		for _, shape := range unmanagedWorkDirShapes("/tmp/wt/w-1") {
+			t.Run(tc.name+"/"+shape.name, func(t *testing.T) {
+				plain := workBead("w-1", "worker", tc.assignee, "in_progress", 2)
+				wb := withMetadata(plain, shape.meta)
+				refs := []string{"r1"}
+				req := assignedWorkRequest(t, tc.cfg, wb, tc.ready, refs, tc.sessions)
+				if req.WorktreeSpec != nil || req.WorktreeError != "" {
+					t.Fatalf("(WorktreeSpec, WorktreeError) = (%+v, %q), want (nil, \"\")", req.WorktreeSpec, req.WorktreeError)
+				}
+				bp := newAgentBuildParams("test-city", t.TempDir(), tc.cfg, runtime.NewFake(), time.Now().UTC(), beads.NewMemStore(), io.Discard)
+				agent := &tc.cfg.Agents[0]
+				got, err := verifiedPoolTriggerWorkDir(bp, agent, "worker-1", req)
+				want := poolTriggerWorkDir(bp, agent, "worker-1", req)
+				if err != nil || got != want || want == "" {
+					t.Fatalf("work dir = %q err %v, want poolTriggerWorkDir's %q", got, err, want)
+				}
+				if got, want := assignedWorkCounts(tc, wb, refs), assignedWorkCounts(tc, plain, refs); !reflect.DeepEqual(got, want) {
+					t.Fatalf("PoolDesiredCounts = %v, want %v, the counts of the same work without metadata", got, want)
+				}
+			})
+		}
+	}
+}
