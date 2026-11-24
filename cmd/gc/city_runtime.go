@@ -2358,8 +2358,9 @@ func bulkDeleteMaxAge(_ *config.City) time.Duration {
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
 // orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The
 // retention lane (order_tracking_retention_lane.go) runs it with its pass's
-// config snapshot.
-func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now time.Time) {
+// config snapshot. Canceling ctx stops the sweep at its next store-call
+// boundary; the watchdog then logs how many beads it deleted before the cancel.
+func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(ctx context.Context, cfg *config.City, now time.Time) {
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
 		return
@@ -2388,11 +2389,18 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now t
 
 	policy := orderTrackingRetentionPolicyForConfig(cfg)
 	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+		ctx, stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
-	if deleted > 0 && cr.stderr != nil {
+	if cr.stderr == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: canceled after %d delete(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if deleted > 0 {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
 	}
 }

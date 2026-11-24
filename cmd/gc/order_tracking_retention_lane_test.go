@@ -450,3 +450,100 @@ func TestOrderTrackingRetentionLanePassSkipsSuspendedCity(t *testing.T) {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want zero: a suspended pass is not a sweep", cr.orderTrackingRetentionWatchdogLast)
 	}
 }
+
+// Stopping the lane mid-sweep cancels the sweep at its next store-call
+// boundary: stop waits for the in-flight listing and the lane goroutine, no
+// store call starts after the listing returns, nothing is deleted, and the
+// watchdog logs the cancel instead of an error.
+func TestOrderTrackingRetentionLaneStopCancelsSweepAfterInFlightCall(t *testing.T) {
+	now := time.Now()
+	seed := retentionEligibleSeed("cancel", minClosedOrderTrackingRetained+2, now)
+	inner := beads.NewMemStoreFrom(100, seed, nil)
+	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	store := newRetentionListingStore(inner, gate)
+	cr, stderr := retentionLaneRuntime(t, now, time.Hour, store, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := cr.startOrderTrackingRetentionLane(ctx)
+	awaitClose(t, store.entered, "the retention lane reaching its listing")
+	callsAtListing := store.calls.Load()
+
+	// Cancel the lane's parent first, so the sweep is canceled before the
+	// listing returns, then stop the lane as run()'s deferred cleanup does.
+	cancel()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	// A short window: stop cannot return while the lane goroutine is parked.
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while the lane goroutine was parked in the listing")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	awaitClose(t, stopped, "stop returning once the in-flight listing returned")
+	if got := store.calls.Load(); got != callsAtListing {
+		t.Fatalf("store calls = %d after the canceled listing returned, want %d: the sweep kept calling the store", got, callsAtListing)
+	}
+	assertBeadsKept(t, inner, seedIDs(seed)...)
+	out := stderr.String()
+	if !strings.Contains(out, "canceled after 0 delete(s)") {
+		t.Fatalf("stderr = %q, want the canceled line", out)
+	}
+	if strings.Contains(out, context.Canceled.Error()) {
+		t.Fatalf("stderr = %q, want the cancel reported as a cancel, not an error", out)
+	}
+}
+
+// guardFailingStore cancels the sweep's context and fails on the first call of
+// the per-candidate strand guard: a real store error that precedes a cancel.
+type guardFailingStore struct {
+	beads.Store
+	cancel context.CancelFunc
+}
+
+func (s guardFailingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if isRetentionListing(q) {
+		return s.Store.List(q)
+	}
+	s.cancel()
+	return nil, errors.New("guard read failed")
+}
+
+// A cross-store sweep canceled part-way lists no further store and keeps the
+// real error that preceded the cancel, without reporting the cancel itself.
+func TestSweepClosedOrderTrackingRetentionAcrossStoresBoundedStopsOnCancel(t *testing.T) {
+	now := time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := guardFailingStore{
+		Store:  beads.NewMemStoreFrom(100, retentionEligibleSeed("first", minClosedOrderTrackingRetained+2, now), nil),
+		cancel: cancel,
+	}
+	secondSeed := retentionEligibleSeed("second", minClosedOrderTrackingRetained+2, now)
+	secondInner := beads.NewMemStoreFrom(100, secondSeed, nil)
+	second := newRetentionListingStore(secondInner, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx, []beads.Store{first, second}, now,
+		orderTrackingRetentionPolicyForConfig(&config.City{}), nil, orderTrackingRetentionWatchdogDeleteBudget)
+
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0", deleted)
+	}
+	if err == nil || !strings.Contains(err.Error(), "guard read failed") {
+		t.Fatalf("err = %v, want the first store's guard error", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the cancel itself not reported as an error", err)
+	}
+	if n := second.calls.Load(); n != 0 {
+		t.Fatalf("second store calls = %d, want 0 after the cancel", n)
+	}
+	assertBeadsKept(t, secondInner, seedIDs(secondSeed)...)
+}
