@@ -332,7 +332,9 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
-		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+		// One-shot: there is no previous sweep, so no pending refusal is a
+		// repeat.
+		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, nil, stderr)
 		return err
 	}
 	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
@@ -425,16 +427,35 @@ func warnLegacyWorkflowTracePath(cityPath string, rigs []config.Rig, stderr io.W
 	}
 }
 
+// workflowServePendingRefusals maps each control bead that answered
+// dispatch.ErrControlPending on a serve pass to the refusal text it gave.
+type workflowServePendingRefusals map[string]string
+
+// repeats reports whether beadID answered exactly reason on the sweep this
+// baseline was taken from. A nil baseline repeats nothing.
+func (r workflowServePendingRefusals) repeats(beadID, reason string) bool {
+	prev, ok := r[beadID]
+	return ok && prev == reason
+}
+
 type workflowServeDrainResult struct {
 	processedAny bool
 	pendingAny   bool
+	// pending holds every pending refusal of the drain's final pass, keyed
+	// by control bead: the baseline the --follow caller passes as the next
+	// drain's previous sweep.
+	pending workflowServePendingRefusals
 }
 
 // drainWorkflowServeWork runs the control-dispatcher drain loop to completion
 // for a single invocation. Returns whether it advanced a control bead and
 // whether the queue still contains only pending work so the --follow caller
-// can distinguish blocked work from genuine idle.
-func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
+// can distinguish blocked work from genuine idle. previous is the pending set
+// of the caller's previous completed sweep; a pending refusal that verbatim
+// repeats it is still retried on every pass but does not set pendingAny, so
+// one long-blocked control bead cannot pin the --follow backoff at its 1s
+// floor.
+func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, previous workflowServePendingRefusals, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	emits := newExecutionEmitDeferral(cityPath, storePath, stderr)
@@ -459,6 +480,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		processedThisCycle := false
 		pendingCount := 0
 		skippedCount := 0
+		pending := workflowServePendingRefusals{}
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
@@ -479,17 +501,25 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				}
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
-					// Same rule as the transient arm below: a pending bead
-					// repeating its previous refusal verbatim is still retried
-					// every sweep, but it must not count as activity. Pending
-					// waits on config/state drift a human heals, so it can last
-					// days — and a bead that resets idleSweeps on every one of
-					// them holds the whole serve loop at its 1s floor for the
-					// duration, re-running a full dispatch (config load, store
-					// open, outcome read, source-chain preflight) five times per
-					// idle-cap interval to re-learn the same answer.
+					reason := err.Error()
+					pending[beadID] = reason
+					// Drift pending arrives marked, from its persisted repeat
+					// record. Ordinary pending (a finalize waiting on an open
+					// blocker) is zero-write by contract, so it arrives
+					// unmarked; this loop recognizes its verbatim repeats
+					// against the previous completed sweep instead. Either
+					// way a repeat is still retried every sweep but must not
+					// count as activity: pendingAny resets idleSweeps, and a
+					// bead that resets the backoff on every sweep holds the
+					// whole loop at its 1s floor for as long as its gate stays
+					// open (one blocked finalize did so for 34 hours,
+					// consuming 95% of its city's control dispatches).
 					if dispatch.IsQuietControllerRetry(err) {
 						workflowTracef("serve pending-quiet bead=%s kind=%s", beadID, kind)
+						continue
+					}
+					if previous.repeats(beadID, reason) {
+						workflowTracef("serve pending-repeat bead=%s kind=%s", beadID, kind)
 						continue
 					}
 					result.pendingAny = true
@@ -532,6 +562,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		}
 		if pendingCount > 0 {
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
+			result.pending = pending
 			return result, nil
 		}
 		// Nothing advanced and nothing is pending: the queue was empty or
@@ -546,6 +577,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			continue
 		}
 		workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
+		result.pending = pending
 		return result, nil
 	}
 }
@@ -573,9 +605,12 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	go pumpWorkflowEvents(done, watcher, eventCh)
 
 	idleSweeps := 0
+	// previousPending is the pending set of the last completed sweep: the
+	// baseline the next drain recognizes verbatim repeats against.
+	var previousPending workflowServePendingRefusals
 	var pendingWakeErr error
 	for {
-		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
+		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, previousPending, stderr)
 		if err != nil {
 			// A transient work-query/store failure — most commonly the
 			// work-query timeout (hookWorkQueryTimeout) when the bead store is
@@ -585,12 +620,17 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 			// kills the dispatcher process (pane exits non-zero) and leaves the
 			// rig un-dispatched while its session bead still reports "active".
 			// Downgrade to a no-progress sweep so the idle backoff retries it;
-			// only genuinely fatal errors end the loop.
+			// only genuinely fatal errors end the loop. The baseline keeps the
+			// last completed sweep's pending set: a failed drain observed no
+			// complete one, and clearing it would put a dispatcher behind a
+			// saturated store back on the 1s floor after every failed sweep.
 			if !dispatch.IsTransientControllerError(err) {
 				return err
 			}
 			workflowTracef("serve drain-transient-retry agent=%s err=%v", agentCfg.QualifiedName(), err)
 			drainResult = workflowServeDrainResult{}
+		} else {
+			previousPending = drainResult.pending
 		}
 		if pendingWakeErr != nil {
 			// The previous wait observed a relevant event and then a fatal

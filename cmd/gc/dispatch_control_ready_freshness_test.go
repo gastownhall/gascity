@@ -152,7 +152,7 @@ func TestDrainWorkflowServeWorkProcessesEachControlOnceAndSeesItsSuccessors(t *t
 		return store.Close(beadID)
 	}
 
-	result, err := drainWorkflowServeWork(freshnessControlAgent(), cityDir, cityDir, workflowServeControlReadyQuery(freshnessControlAgent()), nil, io.Discard)
+	result, err := drainWorkflowServeWork(freshnessControlAgent(), cityDir, cityDir, workflowServeControlReadyQuery(freshnessControlAgent()), nil, nil, io.Discard)
 	if err != nil {
 		t.Fatalf("drainWorkflowServeWork: %v", err)
 	}
