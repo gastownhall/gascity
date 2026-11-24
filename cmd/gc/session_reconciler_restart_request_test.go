@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -1017,4 +1018,82 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 			t.Fatal("last_woke_at empty, want same-tick wake commit")
 		}
 	})
+}
+
+// TestRestartRequestConsumedByTheFreshStartItAsked (#5843): gc session
+// reset writes both markers past the controller's cache, so the start the
+// controller decides on its cached row (neither marker) mints from a row
+// that carries them. That PreWake starts a new conversation, which answers
+// the restart request, so its CAS clears restart_requested with
+// continuation_reset_pending and no later pass stops the replacement.
+func TestRestartRequestConsumedByTheFreshStartItAsked(t *testing.T) {
+	env, session, sessionName := newLiveRestartRequestScenario(t)
+	if err := env.sp.Stop(sessionName); err != nil {
+		t.Fatalf("killing the runtime: %v", err)
+	}
+	env.setSessionMetadata(&session, map[string]string{"state": "asleep"})
+	cached := fieldInfo(t, env.store, session.ID)
+	if err := env.store.SetMetadataBatch(session.ID, map[string]string{"restart_requested": "true", "continuation_reset_pending": "true"}); err != nil {
+		t.Fatalf("writing the reset: %v", err)
+	}
+
+	if _, _, err := preWakeCommitUnder(cached, sessionFrontDoor(env.store), env.clk, nil); err != nil {
+		t.Fatalf("PreWake: %v", err)
+	}
+	meta := mustGetBead(t, env.store, session.ID).Metadata
+	if meta["restart_requested"] != "" || meta["continuation_reset_pending"] != "" {
+		t.Fatalf("markers after the fresh PreWake = restart_requested %q, continuation_reset_pending %q; want both consumed",
+			meta["restart_requested"], meta["continuation_reset_pending"])
+	}
+	if meta["session_key"] == "original-key" {
+		t.Fatalf("session_key = %q, want the PreWake to start a new conversation", meta["session_key"])
+	}
+
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("starting the replacement: %v", err)
+	}
+	env.setSessionMetadata(&session, map[string]string{"state": "awake"})
+	stops := env.sp.CountCalls("Stop", sessionName)
+	env.reconcile([]beads.Bead{mustGetBead(t, env.store, session.ID)})
+	if got := env.sp.CountCalls("Stop", sessionName) - stops; got != 0 || !env.sp.IsRunning(sessionName) {
+		t.Fatalf("stops of the replacement = %d (running %v), want 0; stdout=%s", got, env.sp.IsRunning(sessionName), env.stdout.String())
+	}
+}
+
+// TestPreWakePatchConsumesTheRestartRequestItAnswers: the PreWake patch the
+// legacy mint and the v2 start's PreWake CAS share clears restart_requested
+// only when the wake answers it, a new conversation for a pending
+// continuation reset. A request without a reset, or a wake that resumes the
+// row's conversation, leaves it for the reconciler's restart.
+func TestPreWakePatchConsumesTheRestartRequestItAnswers(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name        string
+		meta        map[string]string
+		wantConsume bool
+	}{
+		{name: "fresh start for a reset", wantConsume: true, meta: map[string]string{
+			"state": "asleep", "restart_requested": "true", "continuation_reset_pending": "true",
+			"started_config_hash": "h", "session_key": "k",
+		}},
+		{name: "new conversation without a key", wantConsume: true, meta: map[string]string{
+			"state": "creating", "restart_requested": "true", "continuation_reset_pending": "true",
+		}},
+		{name: "restart without a reset", meta: map[string]string{
+			"state": "asleep", "restart_requested": "true", "started_config_hash": "h", "session_key": "k",
+		}},
+		{name: "resume of the row's conversation", meta: map[string]string{
+			"state": "creating", "restart_requested": "true", "continuation_reset_pending": "true", "session_key": "k",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := map[string]string{"session_name": "worker", "template": "worker", "generation": "1", "instance_token": "tok-1"}
+			maps.Copy(meta, tc.meta)
+			_, _, batch, _ := preWakePatch(sessionInfoFromBead(beads.Bead{ID: "gc-1", Metadata: meta}), now, "tok-2")
+			got, set := batch["restart_requested"]
+			if tc.wantConsume != (set && got == "") {
+				t.Fatalf("patch restart_requested = %q (set %v), want consumed %v; patch %v", got, set, tc.wantConsume, batch)
+			}
+		})
+	}
 }

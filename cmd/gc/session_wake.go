@@ -163,13 +163,15 @@ func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, 
 		sleepReason = string(sessions.SleepReasonIdleTimeout)
 	}
 
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
 	batch = sessions.PreWakePatch(sessions.PreWakePatchInput{
-		Generation:        newGen,
-		InstanceToken:     token,
-		ContinuationEpoch: continuationEpoch,
-		Now:               now,
-		SleepReason:       sleepReason,
-		FreshWake:         info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info),
+		Generation:            newGen,
+		InstanceToken:         token,
+		ContinuationEpoch:     continuationEpoch,
+		Now:                   now,
+		SleepReason:           sleepReason,
+		FreshWake:             freshWake,
+		ConsumeRestartRequest: preWakeAnswersRestartRequest(info, freshWake),
 		// A retry of a claimed pending create continues its episode, so the
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
@@ -248,6 +250,18 @@ func shouldBumpContinuationEpoch(info sessions.Info) bool {
 		return true
 	}
 	return info.WakeMode == "fresh" && info.LastWokeAt != ""
+}
+
+// preWakeAnswersRestartRequest reports whether a wake of info answers its
+// restart request: gc session reset pairs restart_requested with
+// continuation_reset_pending, and a wake that starts a new conversation (a
+// fresh wake, or a row with no conversation to resume) is the fresh restart
+// the pair asks for. The PreWake consumes both markers in one write, so a
+// reset the controller's cached row did not show is not answered twice.
+func preWakeAnswersRestartRequest(info sessions.Info, freshWake bool) bool {
+	return strings.TrimSpace(info.RestartRequested) == "true" &&
+		strings.TrimSpace(info.ContinuationResetPending) != "" &&
+		(freshWake || strings.TrimSpace(info.SessionKey) == "")
 }
 
 func pendingContinuationResetNeedsFreshStart(info sessions.Info) bool {
