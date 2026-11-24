@@ -1358,3 +1358,43 @@ func TestListInputConvoyRootsReturnsListError(t *testing.T) {
 		t.Fatalf("ListInputConvoyRoots error = %v, want it to wrap %v", err, boom)
 	}
 }
+
+func TestOpenWorkflowTreeMembersKeepsOpenItemWorkflowsUnderAClosedRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	mk := func(title, status string, meta map[string]string) beads.Bead {
+		return createWorkflowTestBead(t, store, beads.Bead{Title: title, Status: status, Metadata: meta})
+	}
+	r := mk("r", "closed", map[string]string{"gc.kind": "workflow"})
+	mk("r-step", "closed", map[string]string{"gc.root_bead_id": r.ID})
+	mk("r-tail", "open", map[string]string{"gc.root_bead_id": r.ID})
+	rDrain := mk("r-drain", "closed", map[string]string{"gc.root_bead_id": r.ID, "gc.kind": "drain"})
+	i1 := mk("i1", "open", map[string]string{"gc.kind": "workflow", "gc.drain_control_id": rDrain.ID})
+	mk("i1-step", "open", map[string]string{"gc.root_bead_id": i1.ID})
+	i1Drain := mk("i1-drain", "open", map[string]string{"gc.root_bead_id": i1.ID, "gc.kind": "drain"})
+	i2 := mk("i2", "closed", map[string]string{"gc.kind": "workflow", "gc.drain_control_id": rDrain.ID})
+	mk("i2-tail", "open", map[string]string{"gc.root_bead_id": i2.ID})
+	n1 := mk("n1", "open", map[string]string{"gc.kind": "workflow", "gc.drain_control_id": i1Drain.ID})
+	mk("n1-step", "open", map[string]string{"gc.root_bead_id": n1.ID})
+
+	got, err := OpenWorkflowTreeMembers(beadstest.GraphMolecule(store), r.ID)
+	if err != nil {
+		t.Fatalf("OpenWorkflowTreeMembers: %v", err)
+	}
+	want := []string{"n1", "n1-step", "i1", "i1-step", "i1-drain"}
+	if titles := workflowTitlesOf(got); fmt.Sprint(titles) != fmt.Sprint(want) {
+		t.Fatalf("OpenWorkflowTreeMembers = %v, want %v: open item workflows deepest first, closed workflows' members (r-tail, i2-tail) left alone", titles, want)
+	}
+
+	for _, id := range []string{i1.ID, n1.ID} {
+		if err := store.Close(id); err != nil {
+			t.Fatalf("Close(%s): %v", id, err)
+		}
+	}
+	got, err = OpenWorkflowTreeMembers(beadstest.GraphMolecule(store), r.ID)
+	if err != nil {
+		t.Fatalf("OpenWorkflowTreeMembers after closing items: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("OpenWorkflowTreeMembers = %v, want nothing once every workflow root is closed", workflowTitlesOf(got))
+	}
+}

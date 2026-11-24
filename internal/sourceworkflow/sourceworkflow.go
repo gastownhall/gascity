@@ -647,6 +647,26 @@ func ListInputConvoyRoots(store beads.MoleculeTarget, convoyID string) ([]beads.
 	return roots, nil
 }
 
+// OpenWorkflowTreeMembers returns the members of every still-open workflow in
+// the WorkflowTree rooted at rootID, in the tree's deepest-first order: an open
+// drain item workflow is included even when its parent is closed, while the
+// members of a closed workflow (its finished steps, or a teardown tail a cancel
+// spared) are not. An empty result means nothing of the run is still open.
+func OpenWorkflowTreeMembers(store beads.MoleculeTarget, rootID string) ([]beads.Bead, error) {
+	tree, err := WorkflowTree(store, rootID)
+	if err != nil {
+		return nil, err
+	}
+	var out []beads.Bead
+	for _, node := range tree {
+		if node.Root.ID == "" || node.Root.Status == "closed" {
+			continue
+		}
+		out = append(out, node.Members...)
+	}
+	return out, nil
+}
+
 // CloseWorkflowSubtree closes the root and every open descendant of a
 // workflow, marking each gc.outcome=skipped. It closes descendants before the
 // root and honors in-batch "blocks" dependencies so strict stores can close

@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
@@ -2176,6 +2177,17 @@ func closeWorkflowMatches(matches []workflowStoreMatch) (int, error) {
 // steps (#6332). With two calls, "root closed" implies "every step closed".
 func closeOpenWorkflowBeads(store beads.Store, matched []beads.Bead) (int, error) {
 	stepIDs, rootIDs := splitOpenWorkflowBeadIDs(matched)
+	// A match can span nested drain item workflows, whose steps block one
+	// another across the batch: close blockers first, keeping the deepest-first
+	// match order among beads with no "blocks" edge between them.
+	stepIDs, err := closeorder.Order(store, stepIDs)
+	if err != nil {
+		return 0, err
+	}
+	rootIDs, err = closeorder.Order(store, rootIDs)
+	if err != nil {
+		return 0, err
+	}
 	meta := map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
@@ -3359,7 +3371,7 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 		if err != nil {
 			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflows", err)
 		}
-		if err := c.mergeRootMatches(info, listed.roots); err != nil {
+		if err := c.mergeRootMatches(info, graph, listed.roots); err != nil {
 			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
 		}
 	}
@@ -3406,26 +3418,32 @@ func (c *sourceWorkflowMatchCollector) listSourceRoots(graph beads.MoleculeTarge
 	return listing, nil
 }
 
-// mergeRootMatches gathers every workflow bead under the given roots in one
-// store and merges them into the match set. It returns the first bead-scan
-// error (leaving the match set unmerged) so the caller can classify it as a
-// tolerated or strict scan failure.
-func (c *sourceWorkflowMatchCollector) mergeRootMatches(info convoyStoreView, roots []beads.Bead) error {
-	if len(roots) == 0 {
-		return nil
-	}
+// mergeRootMatches gathers the still-open workflows of each root's tree in one
+// store, nested drain item workflows included, and merges them into the match
+// set. A root with nothing open under it is history and is not a match. It
+// returns the first bead-scan error (leaving the match set unmerged) so the
+// caller can classify it as a tolerated or strict scan failure.
+func (c *sourceWorkflowMatchCollector) mergeRootMatches(info convoyStoreView, graph beads.MoleculeTarget, roots []beads.Bead) error {
+	matched := make([]beads.Bead, 0, len(roots))
 	beadSet := make([]beads.Bead, 0, len(roots))
 	for _, root := range roots {
-		workflowBeads, err := findWorkflowBeadsFromRoot(info.store, root)
+		open, err := sourceworkflow.OpenWorkflowTreeMembers(graph, root.ID)
 		if err != nil {
 			return err
 		}
-		beadSet = append(beadSet, workflowBeads...)
+		if len(open) == 0 {
+			continue
+		}
+		matched = append(matched, root)
+		beadSet = append(beadSet, open...)
+	}
+	if len(matched) == 0 {
+		return nil
 	}
 	mergeSourceWorkflowMatch(c.matchesByLabel, sourceWorkflowStoreMatch{
 		label:     workflowDeleteStoreLabelForView(c.cfg, c.cityPath, info),
 		store:     info.store,
-		roots:     roots,
+		roots:     matched,
 		beads:     uniqueBeads(beadSet),
 		path:      info.path,
 		scopePath: info.scopePath(c.cityPath),
@@ -4075,24 +4093,6 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 		addBead(root)
 	}
 	return result, nil
-}
-
-// findWorkflowBeadsFromRoot returns root and its descendants, with root
-// ordered last — see findWorkflowBeads for why a caller that closes this
-// slice in order needs the root closed after every descendant.
-func findWorkflowBeadsFromRoot(store beads.Store, root beads.Bead) ([]beads.Bead, error) {
-	if store == nil || root.ID == "" {
-		return nil, nil
-	}
-	descendants, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
-		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing descendants of workflow %s: %w", root.ID, err)
-	}
-	return uniqueBeads(append(descendants, root)), nil
 }
 
 func workflowBeadIDs(bb []beads.Bead) []string {

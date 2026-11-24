@@ -2188,49 +2188,6 @@ func TestCloseWorkflowMatchesKeepsRootOpenWhenAStepFailsUnderContinueOnErrorStor
 	}
 }
 
-func TestFindWorkflowBeadsFromRootOrdersRootLast(t *testing.T) {
-	store := beads.NewMemStore()
-	root, err := store.Create(beads.Bead{
-		Title:    "Workflow",
-		Type:     "task",
-		Status:   "open",
-		Metadata: map[string]string{"gc.kind": "workflow"},
-	})
-	if err != nil {
-		t.Fatalf("Create(root): %v", err)
-	}
-	for i := 0; i < 2; i++ {
-		if _, err := store.Create(beads.Bead{
-			Title:    fmt.Sprintf("Step %d", i),
-			Type:     "task",
-			Status:   "open",
-			Metadata: map[string]string{"gc.root_bead_id": root.ID},
-		}); err != nil {
-			t.Fatalf("Create(step %d): %v", i, err)
-		}
-	}
-
-	found, err := findWorkflowBeadsFromRoot(store, root)
-	if err != nil {
-		t.Fatalf("findWorkflowBeadsFromRoot: %v", err)
-	}
-	if len(found) != 3 {
-		t.Fatalf("findWorkflowBeadsFromRoot(...) = %v, want root and 2 descendants", workflowBeadIDs(found))
-	}
-	if found[len(found)-1].ID != root.ID {
-		t.Fatalf("findWorkflowBeadsFromRoot(...) = %v, want root %q last", workflowBeadIDs(found), root.ID)
-	}
-	rootCount := 0
-	for _, b := range found {
-		if b.ID == root.ID {
-			rootCount++
-		}
-	}
-	if rootCount != 1 {
-		t.Fatalf("root %q appears %d times in %v, want once", root.ID, rootCount, workflowBeadIDs(found))
-	}
-}
-
 func TestDeleteWorkflowMatchesUsesCascadeWithoutPreClose(t *testing.T) {
 	store := beads.NewMemStore()
 	root, err := store.Create(beads.Bead{
@@ -10370,12 +10327,11 @@ func mintEphemeralInBinding(t *testing.T, binding beads.Store, b beads.Bead) bea
 	return minted
 }
 
-// TestFindWorkflowBeadsFromRootReadsTheEphemeralTierOfTheRelocatedTree is the
-// delete-source sibling of the #6129 regression: findWorkflowBeadsFromRoot's
-// descendants query left ListQuery.TierMode at TierIssues, so on a split city
-// the wisp-tier steps under a source workflow root in the class binding were
-// dropped from the set `gc convoy delete-source` closes.
-func TestFindWorkflowBeadsFromRootReadsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
+// TestOpenWorkflowTreeMembersReadsTheEphemeralTierOfTheRelocatedTree is the
+// delete-source sibling of the #6129 regression: on a split city the
+// wisp-tier steps under a source workflow root in the class binding must stay
+// in the set `gc convoy delete-source` closes.
+func TestOpenWorkflowTreeMembersReadsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 	binding := soleClassBindingStore(t, cityPath)
 
@@ -10395,16 +10351,16 @@ func TestFindWorkflowBeadsFromRootReadsTheEphemeralTierOfTheRelocatedTree(t *tes
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 	})
 
-	found, err := findWorkflowBeadsFromRoot(binding, root)
+	found, err := sourceworkflow.OpenWorkflowTreeMembers(beads.GraphMolecule(beads.GraphStore{Store: binding}), root.ID)
 	if err != nil {
-		t.Fatalf("findWorkflowBeadsFromRoot: %v", err)
+		t.Fatalf("OpenWorkflowTreeMembers: %v", err)
 	}
 	for _, b := range found {
 		if b.ID == wisp.ID {
 			return
 		}
 	}
-	t.Fatalf("findWorkflowBeadsFromRoot missed ephemeral descendant %s; got %d beads: the descendants query must read TierMode: TierBoth through the live handle", wisp.ID, len(found))
+	t.Fatalf("OpenWorkflowTreeMembers missed ephemeral descendant %s; got %v: the tree read must include the wisp tier of the live handle", wisp.ID, workflowBeadIDs(found))
 }
 
 // TestSourceWorkflowChildSourcesReadsTheEphemeralTierOfTheRelocatedTree pins
@@ -12140,5 +12096,127 @@ func TestCmdWorkflowDeleteSourceDeleteRemovesExactlyTheSweptConvoyFirstRun(t *te
 		if _, err := reloaded.Get(id); err != nil {
 			t.Errorf("Get(%s) after --delete = %v, want it kept", id, err)
 		}
+	}
+}
+
+// blockerFirstCloseStore is a store that, like a strict backend, rejects
+// closing a bead while one of its "blocks" blockers is still open. It closes a
+// CloseAll batch one id at a time in the order it was handed.
+type blockerFirstCloseStore struct {
+	beads.Store
+}
+
+func (s blockerFirstCloseStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	closed := 0
+	for _, id := range ids {
+		deps, err := s.DepList(id, "down")
+		if err != nil {
+			return closed, err
+		}
+		for _, dep := range deps {
+			if dep.Type != "blocks" {
+				continue
+			}
+			blocker, err := s.Get(dep.DependsOnID)
+			if err != nil {
+				return closed, err
+			}
+			if blocker.Status != "closed" {
+				return closed, fmt.Errorf("cannot close %s: blocked by open %s", id, blocker.ID)
+			}
+		}
+		n, err := s.Store.CloseAll([]string{id}, metadata)
+		closed += n
+		if err != nil {
+			return closed, err
+		}
+	}
+	return closed, nil
+}
+
+// createDrainItemWorkflow creates a drain item workflow under the drain control
+// controlID the way a drain expands one: a unit convoy and an item root linked
+// to its parent only by gc.drain_control_id, with `steps` open steps.
+func createDrainItemWorkflow(t *testing.T, store beads.Store, controlID, status string, steps int) (beads.Bead, []beads.Bead) {
+	t.Helper()
+	unit := createDeleteSourceTestBead(t, store, beads.Bead{
+		Title:  "drain unit",
+		Type:   "convoy",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.SyntheticMetadataKey:      "true",
+			beadmeta.SyntheticKindMetadataKey:  beadmeta.SyntheticKindDrainUnitConvoy,
+			beadmeta.DrainControlIDMetadataKey: controlID,
+		},
+	})
+	return createGraphWorkflowRun(t, store, status, map[string]string{
+		beadmeta.InputConvoyIDMetadataKey:  unit.ID,
+		beadmeta.DrainControlIDMetadataKey: controlID,
+	}, steps)
+}
+
+// createDrainControl creates an open drain control member of rootID.
+func createDrainControl(t *testing.T, store beads.Store, rootID, status string) beads.Bead {
+	t.Helper()
+	return createDeleteSourceTestBead(t, store, beads.Bead{
+		Title:  "drain",
+		Type:   "task",
+		Status: status,
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindDrain,
+			beadmeta.RootBeadIDMetadataKey: rootID,
+		},
+	})
+}
+
+func TestCmdWorkflowDeleteSourceClosesNestedDrainItemWorkflows(t *testing.T) {
+	cityDir, store := newDeleteSourceTestCity(t)
+	source := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+	root, rootSteps := createGraphWorkflowRun(t, store, "in_progress", map[string]string{beadmeta.SourceBeadIDMetadataKey: source.ID}, 1)
+	drain := createDrainControl(t, store, root.ID, "in_progress")
+	item, itemSteps := createDrainItemWorkflow(t, store, drain.ID, "in_progress", 1)
+	sibling, siblingSteps := createDrainItemWorkflow(t, store, drain.ID, "open", 1)
+	nestedDrain := createDrainControl(t, store, item.ID, "in_progress")
+	nested, nestedSteps := createDrainItemWorkflow(t, store, nestedDrain.ID, "in_progress", 2)
+	// The blocked step sorts first, so a sweep that keeps its read order closes
+	// it ahead of its open blocker and the strict store rejects the batch.
+	blocked, blocker := nestedSteps[0], nestedSteps[1]
+	if blocked.ID > blocker.ID {
+		blocked, blocker = blocker, blocked
+	}
+	if err := store.DepAdd(blocked.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(blocks): %v", err)
+	}
+
+	prevOpen := openSourceWorkflowStoresForCollect
+	t.Cleanup(func() { openSourceWorkflowStoresForCollect = prevOpen })
+	openSourceWorkflowStoresForCollect = func(cfg *config.City, cityPath, beadID string) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+		views, skips, err := prevOpen(cfg, cityPath, beadID)
+		for i := range views {
+			if views[i].store != nil {
+				views[i].store = blockerFirstCloseStore{Store: views[i].store}
+			}
+		}
+		return views, skips, err
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowDeleteSource = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned source_bead_id="+source.ID+" matched_roots=1 ") {
+		t.Fatalf("stdout = %q, want every level cleaned in one sweep", stdout.String())
+	}
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	every := []beads.Bead{root, drain, item, sibling, nestedDrain, nested}
+	every = append(every, rootSteps...)
+	every = append(every, itemSteps...)
+	every = append(every, siblingSteps...)
+	every = append(every, nestedSteps...)
+	for _, b := range every {
+		assertWorkflowBeadClosedWith(t, reloaded, b.ID, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
 	}
 }
