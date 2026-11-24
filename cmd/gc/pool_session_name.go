@@ -207,6 +207,14 @@ func protectedWakeWorkKeys(wakeCandidates []beads.Bead, wakeCandidateStoreRefs [
 	return keys
 }
 
+// beadHeldByPerson reports whether wb waits on or is held by a person rather
+// than a session: it carries beadmeta.HumanLabel, or its assignee is
+// beadmeta.OperatorIdentity. No session answers to a person, so a missing
+// session is no evidence that such a claim is dead.
+func beadHeldByPerson(wb beads.Bead) bool {
+	return beadmeta.HasHumanLabel(wb.Labels) || beadmeta.IsOperatorIdentity(wb.Assignee)
+}
+
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
 // assignee no longer maps to any open session bead. This also recovers
 // pool-routed work left in_progress with no assignee, which cannot be claimed
@@ -292,12 +300,16 @@ func releaseOrphanedPoolAssignments(
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
 		}
-		// A bead carrying bd's human label waits on a person. Route-scoped
+		// A bead waiting on or held by a person is no dead-worker claim. A
+		// bead carrying bd's human label waits on a person: route-scoped
 		// dispatch serves it to no worker (config.PoolDemandServeRulesForQuery),
-		// so no pool lane takes it back, and its holder may be a person, whom
-		// no session answers to: a missing session is no evidence that the
-		// claim is dead. Releasing it would only wipe the claim.
-		if beadmeta.HasHumanLabel(wb.Labels) {
+		// so no pool lane takes it back. A bead assigned to the operator
+		// identity is held by a person (#6945): `bd update --assignee human`
+		// is a hand-off, the core orphan-sweep order keeps it by the same
+		// exact match (#3440), and no session answers to a person, so a
+		// missing session is no evidence that the claim is dead. Releasing
+		// either would only wipe the claim.
+		if beadHeldByPerson(wb) {
 			continue
 		}
 		workStoreRef := ""

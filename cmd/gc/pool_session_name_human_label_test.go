@@ -95,3 +95,39 @@ func TestReleaseOrphanedPoolAssignments_KeepsHumanLabeledClaims(t *testing.T) {
 		t.Fatalf("a human-labeled claim must not reach the foreign-claim gate; log:\n%s", logged)
 	}
 }
+
+// Issue #6945: work handed to the operator (assignee "human") after a pool
+// claim is a deliberate hand-off, not a dead worker. The core orphan-sweep
+// order exempts the exact "human" assignee (#3440); the Go dead-assignee sweep
+// must agree and leave the hand-off assigned. An unlabeled dead pool holder is
+// the control, so a disabled sweep cannot pass.
+func TestReleaseOrphanedPoolAssignments_KeepsWorkHandedToHumanAssignee(t *testing.T) {
+	sessionStore := beads.NewMemStore()
+	workStore := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+
+	handoff := seedHumanLabelSweepWork(t, workStore, "pool work handed to the operator", "human", "in_progress")
+	control := seedHumanLabelSweepWork(t, workStore, "pool work held by a dead holder", "worker-1", "in_progress")
+
+	released := releaseOrphanedPoolAssignments(
+		workStore,
+		beads.SessionStore{Store: sessionStore},
+		cfg,
+		"",
+		nil,
+		[]beads.Bead{handoff, control},
+		[]beads.Store{workStore, workStore},
+		nil, nil, nil, nil, nil,
+	)
+
+	got, err := workStore.Get(handoff.ID)
+	if err != nil {
+		t.Fatalf("get hand-off: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "human" {
+		t.Errorf("hand-off %s = status %q assignee %q, want in_progress/human untouched (released=%v)", handoff.ID, got.Status, got.Assignee, released)
+	}
+	if len(released) != 1 || released[0].ID != control.ID {
+		t.Fatalf("released = %v, want exactly [%s] (the dead pool holder control)", released, control.ID)
+	}
+}

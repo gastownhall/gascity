@@ -75,6 +75,28 @@ func HasHumanLabel(labels []string) bool {
 	return false
 }
 
+// OperatorIdentity is the reserved identity of the person operating the city.
+// gc already treats it as a person rather than a session in several places:
+// mail resolves it as a recipient (mail.ResolveRecipient), session.ValidateAlias
+// refuses to mint it as a session alias, and the mail command defaults its
+// sender and recipient to it. No [[agent]] defines it, every city has one, and
+// the core orphan-sweep order exempts it by the same exact match (#3440).
+//
+// It is spelled like HumanLabel but is a different bead field with a different
+// meaning: HumanLabel says a bead WAITS ON a person; OperatorIdentity says a
+// person HOLDS it. They stay separate constants so a change to one cannot
+// silently change the other.
+const OperatorIdentity = "human"
+
+// IsOperatorIdentity reports whether identity is the reserved operator
+// identity. The comparison is exact and case-sensitive, like the shell
+// orphan-sweep's is_known_agent and like HasHumanLabel, and it trims because
+// the dead-assignee sweep trims every assignee before testing it. "Human",
+// "humanoid", "human-1" and "human/alice" stay ordinary identities.
+func IsOperatorIdentity(identity string) bool {
+	return strings.TrimSpace(identity) == OperatorIdentity
+}
+
 // HasDispatchHold reports whether labels carry one of DispatchHoldLabels. It is
 // the label comparison the hold-aware WORK-SERVING decisions answer with: the
 // hook's serve filter (isHeldHookCandidate), continuation-group pre-assignment
