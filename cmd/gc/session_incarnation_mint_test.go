@@ -126,7 +126,7 @@ func TestLegacyPreWakeMintsFromTheFreshRow(t *testing.T) {
 	front := sessionFrontDoor(store)
 	clk := &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
 	info := fieldInfo(t, store, id)
-	inc, fold, err := preWakeCommitUnder(info, front, clk, nil)
+	inc, fold, _, err := preWakeCommitUnder(info, front, clk, nil)
 	if err != nil {
 		t.Fatalf("PreWake: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestLegacyPreWakeMintsFromTheFreshRow(t *testing.T) {
 		t.Fatalf("folded snapshot generation %s token %q, want the row's", got.Generation, got.InstanceToken)
 	}
 	// A tick snapshot from before that mint is superseded.
-	if _, _, err := preWakeCommitUnder(info, front, clk, nil); !errors.Is(err, errPreWakeSuperseded) {
+	if _, _, _, err := preWakeCommitUnder(info, front, clk, nil); !errors.Is(err, errPreWakeSuperseded) {
 		t.Fatalf("PreWake over a row minted since = %v, want errPreWakeSuperseded", err)
 	}
 	if after := mustGetBead(t, store, id).Metadata; after["generation"] != "2" || after["instance_token"] != meta["instance_token"] {
@@ -196,7 +196,7 @@ func TestLegacyPreWakeDecidesTheResetOnTheRowItMints(t *testing.T) {
 				t.Fatal(err)
 			}
 			clk := &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
-			inc, fold, err := preWakeCommitUnder(info, sessionFrontDoor(store), clk, nil)
+			inc, fold, _, err := preWakeCommitUnder(info, sessionFrontDoor(store), clk, nil)
 			if err != nil {
 				t.Fatalf("PreWake: %v", err)
 			}

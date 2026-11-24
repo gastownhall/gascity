@@ -1364,7 +1364,7 @@ func TestComposedUndoMatchesLegacyRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	undo := newPreWakeUndo(sessionInfoFromBead(row), row.Metadata, wake)
+	undo := newPreWakeUndo(sessionInfoFromBead(row), row.Metadata, row.Metadata, wake)
 	undo.token = "tok-new"
 	if err := m.SetMetadataBatch(row.ID, wake); err != nil {
 		t.Fatal(err)

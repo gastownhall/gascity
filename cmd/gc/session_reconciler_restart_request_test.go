@@ -1251,3 +1251,87 @@ func TestRestartRequestAfterReplacementStopsOnce(t *testing.T) {
 		t.Fatalf("starts of %s = %d after the restart, want still two", sessionName, starts)
 	}
 }
+
+// lateCLIResetStore makes the #5843 race deterministic: the CLI's one-shot
+// reset write lands on the backing in the window between the start's runtime
+// lease record — whose write-completion read installs the row into the
+// controller's cache (refreshBeadAfterWrite's single read) — and the PreWake
+// mint's own live read of it. The mint sees the request pair; the cache the
+// start's undo restores from does not. The wrapper arms when it sees the
+// lease record's metadata batch for the row, lets that write's one
+// completion read pass, and applies the marker batch just before the next
+// read of the row — the mint's.
+type lateCLIResetStore struct {
+	beads.Store
+	id      string
+	markers map[string]string
+	armed   bool
+	reads   int
+	applied bool
+}
+
+// SetMetadataBatch arms the wrapper when the runtime lease record lands for
+// the watched row: that write is the last one before the PreWake mint, and
+// its completion read is the read the wrapper must let pass.
+func (s *lateCLIResetStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id == s.id && !s.armed {
+		for key := range kvs {
+			if strings.HasPrefix(key, "runtime_lease_") {
+				s.armed = true
+				break
+			}
+		}
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// Get applies the CLI's marker batch before the first read of the watched
+// row that follows the lease record's completion read — the PreWake mint's
+// live read — so the mint alone sees the pair.
+func (s *lateCLIResetStore) Get(id string) (beads.Bead, error) {
+	if s.armed && !s.applied && id == s.id {
+		s.reads++
+		if s.reads > 1 {
+			s.applied = true
+			if err := s.Store.SetMetadataBatch(id, s.markers); err != nil {
+				return beads.Bead{}, fmt.Errorf("late cli reset write: %w", err)
+			}
+		}
+	}
+	return s.Store.Get(id)
+}
+
+// TestCapacityRefusedStartRestoresResetMarkersFromTheMintRead (ga-45119r
+// AC-5, #5843): a legacy start whose PreWake consumed both markers from a
+// backing read its cache did not reflect — the CLI's reset landing between
+// the lease record's cache-installing write and the mint's live read — must
+// restore the pair from the mint's own read, not the cache pre-read, when
+// the start is refused for capacity: the row again holds the request for the
+// next attempt.
+func TestCapacityRefusedStartRestoresResetMarkersFromTheMintRead(t *testing.T) {
+	late := &lateCLIResetStore{Store: beads.NewMemStore()}
+	env, backing := newRestartRequestSplitStoreEnvOverBacking(t, late)
+	session, sessionName := newRestartRequestWakeFixture(t, env)
+	env.primeCache(t)
+	late.id = session.ID
+	late.markers = map[string]string{
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+	}
+
+	// The start's endpoint refuses for capacity: the launch never happened,
+	// so the row must keep the request the PreWake consumed.
+	env.sp.StartErrors = map[string]error{sessionName: fmt.Errorf("starting %q: %w", sessionName, runtime.ErrProviderCapacity)}
+	env.reconcile([]beads.Bead{session})
+
+	if !late.applied {
+		t.Fatalf("the late reset write never landed; the fixture lost the #5843 window between the lease record and the PreWake mint")
+	}
+	got, err := backing.Get(session.ID)
+	if err != nil {
+		t.Fatalf("backing get after the refused start: %v", err)
+	}
+	if got.Metadata["restart_requested"] != "true" || got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("row after the capacity refusal: restart_requested=%q continuation_reset_pending=%q, want the request pair restored from the mint's read", got.Metadata["restart_requested"], got.Metadata["continuation_reset_pending"])
+	}
+}
