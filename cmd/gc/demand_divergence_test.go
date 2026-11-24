@@ -598,3 +598,72 @@ func TestDivergenceReadsTheTriggerInTheCountingStoreNotOnlyTheWorkers(t *testing
 			payload.Classification, payload.TriggerStatusAtDrain, readDirs, events.DemandClaimDivergence)
 	}
 }
+
+// AC-2 for gastownhall/gascity#5858: the counting store's copy is closed or
+// claimed by a sibling while the seat's own leg holds an OPEN copy. The verdict
+// follows the counting store (benign), and no classification read is issued
+// against the seat's own leg.
+func TestDivergenceBenignFollowsTheCountingStoreAndNeverReadsTheSeatsOwnLeg(t *testing.T) {
+	for _, counting := range []struct {
+		name string
+		bead beads.Bead
+	}{
+		{"closed in the counting store", beads.Bead{
+			ID: "canary-8a1", Status: "closed", Type: "task",
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+		}},
+		{"claimed by a sibling in the counting store", beads.Bead{
+			ID: "canary-8a1", Status: "in_progress", Type: "task", Assignee: "gc__worker-2",
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+		}},
+	} {
+		t.Run(counting.name, func(t *testing.T) {
+			rec := events.NewFake()
+			prev := demandDivergenceRecorder
+			demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+			t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+			// The seat's own leg would call the row OPEN: reading it is the
+			// old bug, and this row is the bait that catches it.
+			openInRig := beads.Bead{
+				ID: "canary-8a1", Status: "open", Type: "task",
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+			}
+			ops := demandDivergenceOpsForBlockedBead(openInRig, nil, false, nil)
+			var readDirs []string
+			ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, beadID, _ string) (beads.Bead, error) {
+				readDirs = append(readDirs, dir)
+				if beadID != counting.bead.ID {
+					return beads.Bead{}, fmt.Errorf("read %s: not the trigger", beadID)
+				}
+				if dir == demandDivergenceTestCityDir {
+					return counting.bead, nil
+				}
+				return openInRig, nil
+			}
+
+			var stderr bytes.Buffer
+			recordDemandClaimDivergence(hookClaimReasonNoWork, demandDivergenceTestRigDir, divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+
+			if len(rec.Events) != 1 {
+				t.Fatalf("events = %+v, want exactly 1", rec.Events)
+			}
+			var payload events.SessionDemandClaimDivergencePayload
+			if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+				t.Fatalf("decoding payload: %v", err)
+			}
+			if payload.Classification != events.DemandClaimBenign {
+				t.Fatalf("classification = %q, want benign: the counting store says the row moved on (status %q), reads in dirs %v",
+					payload.Classification, payload.TriggerStatusAtDrain, readDirs)
+			}
+			if payload.TriggerStatusAtDrain != counting.bead.Status {
+				t.Fatalf("trigger_status_at_drain = %q, want the counting store's %q", payload.TriggerStatusAtDrain, counting.bead.Status)
+			}
+			for _, dir := range readDirs {
+				if dir == demandDivergenceTestRigDir {
+					t.Fatalf("classification read the seat's own leg %q; reads = %v", dir, readDirs)
+				}
+			}
+		})
+	}
+}
