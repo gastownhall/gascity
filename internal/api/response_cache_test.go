@@ -25,6 +25,24 @@ type countingStore struct {
 	listByAssigneeCalls int
 }
 
+func TestResponseCacheInvalidationRejectsInFlightOlderBuild(t *testing.T) {
+	s := &Server{}
+	epoch := s.responseCacheEpoch("status")
+	s.invalidateResponseCache("status")
+
+	if stored := s.storeResponseAtEpoch("status", 1, StatusBody{Name: "before"}, epoch); stored {
+		t.Fatal("pre-invalidation build was stored after invalidation")
+	}
+	if _, ok := s.cachedResponse("status", 1); ok {
+		t.Fatal("pre-invalidation body remained visible")
+	}
+
+	current := s.responseCacheEpoch("status")
+	if stored := s.storeResponseAtEpoch("status", 2, StatusBody{Name: "after"}, current); !stored {
+		t.Fatal("current-generation build was rejected")
+	}
+}
+
 func (s *countingStore) ListOpen(status ...string) ([]beads.Bead, error) {
 	s.listCalls++
 	return s.Store.ListOpen(status...)

@@ -48,6 +48,12 @@ func (s *Server) humaHandleCityPatch(_ context.Context, input *CityPatchInput) (
 		return nil, mutationError(err)
 	}
 
+	// /status is deliberately cached across ordinary event-index churn, but a
+	// lifecycle control command is a linearization point: the very next read
+	// must show the state that PATCH /city just committed. Invalidate both
+	// variants and fence any refresh that began before the mutation.
+	s.invalidateResponseCache("status", "status?lite")
+
 	resp := &OKResponse{}
 	resp.Body.Status = "ok"
 	return resp, nil

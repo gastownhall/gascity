@@ -112,6 +112,15 @@ type Server struct {
 	// nothing material has changed.
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
+	// responseCacheEpochs fences cache builds that started before a control
+	// mutation invalidated their key. Without the fence, an in-flight
+	// stale-while-revalidate build can repopulate the cache with the state the
+	// mutation just replaced.
+	responseCacheEpochs map[string]uint64
+	// responseCacheVersions tracks external source generations for cache keys
+	// whose state can be mutated outside this Server process. It is guarded by
+	// responseCacheMu and lets a read invalidate stale entries before lookup.
+	responseCacheVersions map[string]string
 
 	// responseCacheCfg and responseCacheCfgGen (guarded by responseCacheMu)
 	// track the config snapshot config-derived cache entries were built

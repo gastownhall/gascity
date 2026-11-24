@@ -13,6 +13,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestHandleAgentCreate(t *testing.T) {
@@ -345,6 +347,128 @@ func TestHandleCityPatch_Suspend(t *testing.T) {
 	}
 	if !fs.cfg.Workspace.Suspended {
 		t.Error("expected workspace to be suspended")
+	}
+}
+
+// A successful city lifecycle mutation must be visible to the very next
+// status read. /status deliberately survives ordinary event-index churn, but
+// serving its pre-mutation body after PATCH /city makes operators and
+// automation believe suspend/resume did not take effect.
+func TestHandleCityPatchInvalidatesStatusCache(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+	})
+
+	fs := newFakeMutatorState(t)
+	h := newTestCityHandler(t, fs)
+
+	statusReq := httptest.NewRequest(http.MethodGet, cityURL(fs, "/status"), nil)
+	statusRec := httptest.NewRecorder()
+	h.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("initial status = %d, want %d; body = %s", statusRec.Code, http.StatusOK, statusRec.Body.String())
+	}
+	var before statusResponse
+	if err := json.NewDecoder(statusRec.Body).Decode(&before); err != nil {
+		t.Fatalf("decode initial status: %v", err)
+	}
+	if before.Suspended {
+		t.Fatal("initial status is suspended, want false")
+	}
+
+	patchReq := httptest.NewRequest(http.MethodPatch, cityURL(fs, ""), strings.NewReader(`{"suspended":true}`))
+	patchReq.Header.Set("X-GC-Request", "true")
+	patchRec := httptest.NewRecorder()
+	h.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d, want %d; body = %s", patchRec.Code, http.StatusOK, patchRec.Body.String())
+	}
+
+	statusReq = httptest.NewRequest(http.MethodGet, cityURL(fs, "/status"), nil)
+	statusRec = httptest.NewRecorder()
+	h.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status after suspend = %d, want %d; body = %s", statusRec.Code, http.StatusOK, statusRec.Body.String())
+	}
+	var after statusResponse
+	if err := json.NewDecoder(statusRec.Body).Decode(&after); err != nil {
+		t.Fatalf("decode status after suspend: %v", err)
+	}
+	if !after.Suspended {
+		t.Fatal("status immediately after successful suspend is stale: suspended=false, want true")
+	}
+
+	patchReq = httptest.NewRequest(http.MethodPatch, cityURL(fs, ""), strings.NewReader(`{"suspended":false}`))
+	patchReq.Header.Set("X-GC-Request", "true")
+	patchRec = httptest.NewRecorder()
+	h.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("resume patch status = %d, want %d; body = %s", patchRec.Code, http.StatusOK, patchRec.Body.String())
+	}
+
+	statusReq = httptest.NewRequest(http.MethodGet, cityURL(fs, "/status"), nil)
+	statusRec = httptest.NewRecorder()
+	h.ServeHTTP(statusRec, statusReq)
+	if err := json.NewDecoder(statusRec.Body).Decode(&after); err != nil {
+		t.Fatalf("decode status after resume: %v", err)
+	}
+	if after.Suspended {
+		t.Fatal("status immediately after successful resume is stale: suspended=true, want false")
+	}
+}
+
+// A CLI whose API discovery fails writes suspension-state.json directly.
+// The running supervisor must observe that out-of-process write before serving
+// its cached /status body, including when the state returns to an older value.
+func TestHandleStatusInvalidatesCacheAfterExternalSuspensionStateChange(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+	})
+
+	fs := newFakeMutatorState(t)
+	h := newTestCityHandler(t, fs)
+	readSuspended := func() bool {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/status"), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var got statusResponse
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode status: %v", err)
+		}
+		return got.Suspended
+	}
+
+	if readSuspended() {
+		t.Fatal("initial status is suspended, want false")
+	}
+	suspended := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, fs.cityPath, &suspended); err != nil {
+		t.Fatalf("external suspend: %v", err)
+	}
+	if !readSuspended() {
+		t.Fatal("status after external suspend is stale: suspended=false, want true")
+	}
+
+	suspended = false
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, fs.cityPath, &suspended); err != nil {
+		t.Fatalf("external resume: %v", err)
+	}
+	if readSuspended() {
+		t.Fatal("status after external resume is stale: suspended=true, want false")
 	}
 }
 

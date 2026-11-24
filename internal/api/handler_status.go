@@ -106,6 +106,18 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
+	// gc suspend/resume normally reaches the API, whose PATCH handler
+	// invalidates this cache directly. If API discovery fails, however, the CLI
+	// deliberately falls back to updating suspension-state.json itself. Observe
+	// that file's write generation before any cache lookup so the next status
+	// read reflects the completed out-of-process mutation immediately.
+	if suspension, err := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath()); err == nil {
+		s.alignResponseCacheVersion(
+			suspension.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			"status",
+			"status?lite",
+		)
+	}
 	bp := input.toBlockingParams()
 	blocking := bp.isBlocking()
 	if blocking {
@@ -129,6 +141,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	if input.Lite {
 		cacheKey = "status?lite"
 	}
+	cacheEpoch := s.responseCacheEpoch(cacheKey)
 	if input.Fresh && !blocking {
 		return s.freshStatusOutput(ctx, cacheKey, input.Lite)
 	}
@@ -164,7 +177,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 
 	resp := s.buildStatusBody(ctx, input.Lite)
 	if !blocking {
-		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
+		s.storeResponseAtEpoch(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp}, cacheEpoch)
 	}
 
 	f := statusCacheFreshness(resp, cacheAgeSeconds(work))
@@ -323,6 +336,7 @@ func (s *Server) statusBuildSlotLocked(cacheKey string) *statusBuildSlot {
 // it builds the body, saves it under the time bucket current at completion
 // and ends b (endStatusBuild) on every exit path.
 func (s *Server) runStatusBuild(cacheKey string, lite bool, b *statusBuild) {
+	cacheEpoch := s.responseCacheEpoch(cacheKey)
 	s.runBackground(func(ctx context.Context) {
 		defer s.endStatusBuild(cacheKey, lite, b)
 		defer func() {
@@ -336,7 +350,7 @@ func (s *Server) runStatusBuild(cacheKey string, lite bool, b *statusBuild) {
 		}()
 		index := s.latestIndex()
 		built := indexedResponse[StatusBody]{Index: index, Body: s.buildStatusBody(ctx, lite)}
-		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), built)
+		s.storeResponseAtEpoch(cacheKey, responseCacheTimeBucket(time.Now()), built, cacheEpoch)
 		b.built = &built
 	})
 }
