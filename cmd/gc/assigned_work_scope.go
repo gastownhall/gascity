@@ -190,6 +190,37 @@ func filterAssignedWorkBeadsForPoolDemand(
 	return filterAssignedWorkBeadsForPoolDemandAt(cfg, cityPath, claimRefs, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, time.Now().UTC())
 }
 
+// filterReadyAssignedWorkBeadsForPoolDemand keeps the orphan-release census
+// intact, but only lets genuinely ready OPEN rows enter pool resume demand.
+// The verdict is keyed by the ORIGINAL store ref before any scope filtering.
+// IN_PROGRESS remains actionable without an OPEN readiness verdict.
+// The kept refs stay index-aligned with the kept beads.
+func filterReadyAssignedWorkBeadsForPoolDemand(
+	cfg *config.City,
+	cityPath string,
+	leading beads.Store,
+	sessionInfos []sessionpkg.Info,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) ([]beads.Bead, []string) {
+	work := make([]beads.Bead, 0, len(assignedWorkBeads))
+	refs := make([]string, 0, len(assignedWorkBeads))
+	for i, wb := range assignedWorkBeads {
+		ref := ""
+		if i < len(assignedWorkStoreRefs) {
+			ref = assignedWorkStoreRefs[i]
+		}
+		if wb.Status == "open" && (i >= len(assignedWorkStoreRefs) ||
+			!readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}]) {
+			continue
+		}
+		work = append(work, wb)
+		refs = append(refs, ref)
+	}
+	return filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, leading, sessionInfos, work, refs)
+}
+
 // filterAssignedWorkBeadsForPoolDemandAt is filterAssignedWorkBeadsForPoolDemand
 // with the claim refs (assignedWorkRelocatedClaimRefs) resolved and the clock
 // read by the caller, so it does no I/O: the v2 allocator calls it inside its

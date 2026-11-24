@@ -801,7 +801,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q trigger bead %s: %v (naming no seat for it)\n", refused.Template, refused.WorkBeadID, refused.err()) //nolint:errcheck
 		}
 		subPhaseStart = trace.demandNow()
-		poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads, poolWorkRefs := filterReadyAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, readyAssigned)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)

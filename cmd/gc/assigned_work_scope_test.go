@@ -1204,3 +1204,65 @@ func TestFreshWakeDemandUsesEachRowsOwnStoreReadiness(t *testing.T) {
 		})
 	}
 }
+
+// The census contains folded OPEN rows for the orphan reaper. That is not a
+// Ready verdict and must not create pool work, even with an asleep fresh owner.
+func TestPoolDemandRequiresStoreScopedReadyAssigned(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+		refs   []string
+		ready  map[storeScopedBeadKey]bool
+		want   int
+	}{
+		{"folded blocked is not demand", "open", []string{""}, map[storeScopedBeadKey]bool{}, 0},
+		{"nil readiness fails closed for open", "open", []string{""}, nil, 0},
+		{"same ID ready in OTHER store is not demand", "open", []string{""}, map[storeScopedBeadKey]bool{{StoreRef: "class:gmnos", ID: "w1"}: true}, 0},
+		{"ready open work remains demand", "open", []string{""}, map[storeScopedBeadKey]bool{{StoreRef: "", ID: "w1"}: true}, 1},
+		{"missing aligned ref fails closed for open", "open", nil, map[storeScopedBeadKey]bool{{StoreRef: "", ID: "w1"}: true}, 0},
+		{"in progress survives without ready map", "in_progress", []string{""}, nil, 1},
+	}
+	for _, state := range []string{"asleep", "awake"} {
+		for _, tc := range cases {
+			t.Run(state+"/"+tc.name, func(t *testing.T) {
+				agent := poolAgent("claude", "", intPtr(5), 0)
+				agent.WakeMode = "fresh"
+				cfg := &config.City{Agents: []config.Agent{agent}}
+				infos := sessionInfosFromBeads([]beads.Bead{poolSessionBeadWithState("owner", state, "")})
+				work := []beads.Bead{workBead("w1", "claude", "owner", tc.status, 2)}
+				kept, _ := filterReadyAssignedWorkBeadsForPoolDemand(cfg, "", nil, infos, work, tc.refs, tc.ready)
+				if len(kept) != tc.want {
+					t.Fatalf("pool candidates=%d, want %d", len(kept), tc.want)
+				}
+				states := computePoolDesiredStatesAt(cfg, kept, infos, nil, nil, time.Time{}, nil)
+				requests := 0
+				for _, s := range states {
+					requests += len(s.Requests)
+				}
+				if requests != tc.want {
+					t.Fatalf("pool requests=%d, want %d: %#v", requests, tc.want, states)
+				}
+				if len(work) != 1 || work[0].Status != tc.status || work[0].Assignee != "owner" {
+					t.Fatal("census mutated")
+				}
+			})
+		}
+	}
+}
+
+func TestPoolDemandReadinessPreservesOriginalRefAlignment(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	work := []beads.Bead{
+		workBead("not-ready", "worker", "worker-dead", "open", 2),
+		workBead("ready", "worker", "worker-dead", "open", 2),
+	}
+	refs := []string{"other-store", ""}
+	ready := map[storeScopedBeadKey]bool{{StoreRef: "", ID: "ready"}: true}
+	kept, keptRefs := filterReadyAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, refs, ready)
+	if len(kept) != 1 || kept[0].ID != "ready" || len(keptRefs) != 1 || keptRefs[0] != "" {
+		t.Fatalf("kept=%#v refs=%#v, want ready with aligned empty ref", kept, keptRefs)
+	}
+	if work[0].ID != "not-ready" || refs[0] != "other-store" {
+		t.Fatal("original census/ref mutated")
+	}
+}
