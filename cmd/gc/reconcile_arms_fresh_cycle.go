@@ -13,9 +13,11 @@ import (
 // has not claimed that bead itself, is stopped and handed off as a restart
 // onto the new bead, so its next start is a fresh conversation. The stop
 // defers, in the effect, while the previous bead is still open, or when this
-// incarnation woke after that bead closed (it is already fresh); the
-// lookup's failure defers too, as a failed read proves nothing (legacy
-// fails toward the cycle). A defer refuses on the cycle's own backoff key
+// incarnation woke after that bead closed (it is already fresh), or when the
+// anchor's live row is not the session's open work under its ReleaseScope
+// (released, handed to another identity, or finished since the allocation's
+// snapshot, #9320); a failed lookup defers too, as a failed read proves
+// nothing (legacy fails toward the cycle). A defer refuses on the cycle's own backoff key
 // (freshCycleBackoffKey), which holds no other intent of the row, and
 // writes nothing (reconcile_effect_fresh_cycle.go).
 

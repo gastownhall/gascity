@@ -1388,7 +1388,6 @@ cmd/gc/session_affinity_metadata.go	clearSessionAffinityMetadataOnBead	raw-param
 cmd/gc/session_affinity_metadata.go	clearSessionCurrentClaim	raw-param	1
 cmd/gc/session_async_start_drift.go	rescuePendingCreateForReset	raw-param	1
 cmd/gc/session_bead_cycle.go	cycleAliveSessionForFreshReassign	raw-param	1
-cmd/gc/session_bead_cycle.go	freshAnchorBeadTerminal	raw-param	1
 cmd/gc/session_bead_cycle.go	prevAssignedBeadStatus	raw-param	1
 cmd/gc/session_bead_snapshot.go	loadSessionBeadSnapshot	raw-param	1
 cmd/gc/session_bead_snapshot.go	loadSessionBeadSnapshotLive	raw-param	1

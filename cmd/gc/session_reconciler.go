@@ -4995,9 +4995,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// deferral keys on closed_at alone, whoever the bead was
 					// assigned to.
 					topo := residencyTopologyForCity(cityPath, cfg, store, rigStores)
+					ids := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 					if prev := strings.TrimSpace(info.CurrentlyProcessingBeadID); prev != "" {
 						prevOpen, prevAssignee, prevClosedAt, err := prevAssignedBeadStatus(topo, prev)
-						if err == nil && prevOpen && slices.Contains(sessionAssignmentIdentifiersForConfigInfo(info, cfg), prevAssignee) {
+						if err == nil && prevOpen && slices.Contains(ids, prevAssignee) {
 							continue
 						}
 						if err == nil && !prevOpen {
@@ -5025,13 +5026,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if hasClaim {
 						continue
 					}
-					// ga-pvjbx3 Q2: the anchor itself may have closed since the
-					// stale tick-start snapshot was taken. Cycling onto an anchor
-					// that is already closed on a live read is pure loss, so
-					// re-check it before killing. Failing to read it falls through
-					// to the cycle: Q1 just established a complete scan with no
-					// claim, so the cycle costs no in-flight work.
-					if terminal, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil && terminal {
+					// ga-pvjbx3 Q2 (#9320): the stale tick-start snapshot decided
+					// that the anchor is this session's open work, but since then
+					// the anchor may have closed, or the session may have released
+					// it (or handed it to another session) and be about to sling it
+					// back. One live row of the anchor answers both: it must be
+					// non-terminal and still assigned to this session under its
+					// ReleaseScope (freshAnchorOwned), or the cycle is skipped and
+					// the session left alone this tick. Failing to read it falls
+					// through to the cycle: Q1 just established a complete scan
+					// with no claim, so the cycle costs no in-flight work.
+					if anchor, err := freshAnchorLiveRow(sw.Legs(), decision.AssignedWorkBeadID); err == nil && !freshAnchorOwned(anchor, ids) {
 						continue
 					}
 					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, rec, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
