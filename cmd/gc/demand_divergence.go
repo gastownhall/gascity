@@ -64,7 +64,8 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	if sessionID == "" {
 		return
 	}
-	triggerID, readErr := demandSessionTrigger(sessionID, ops)
+	trigger, readErr := demandSessionTrigger(sessionID, ops)
+	triggerID := trigger.ID
 	status, classification := demandTriggerUnreadable, events.DemandClaimUnknown
 	if readErr == nil {
 		status, classification = classifyDemandTrigger(triggerID, dir, opts, ops)
@@ -100,20 +101,21 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	}
 }
 
-// demandSessionTrigger is the trigger stamp on sessionID's row: "" when the
-// row carries none, an error when it cannot be read. The caller records a
-// failed read as demandTriggerUnreadable and unknown, never as the "no stamp"
-// an empty id means, so a failed read neither manufactures a verdict nor
-// passes for an unstamped seat.
-func demandSessionTrigger(sessionID string, ops hookClaimOps) (string, error) {
+// demandSessionTrigger is the trigger stamp on sessionID's row and the store
+// ref it was counted in: an empty id when the row carries none, an error when
+// it cannot be read. The caller records a failed read as
+// demandTriggerUnreadable and unknown, never as the "no stamp" an empty id
+// means, so a failed read neither manufactures a verdict nor passes for an
+// unstamped seat.
+func demandSessionTrigger(sessionID string, ops hookClaimOps) (demandTrigger, error) {
 	if ops.ReadSessionTrigger == nil {
-		return "", nil
+		return demandTrigger{}, nil
 	}
-	triggerID, err := ops.ReadSessionTrigger(sessionID)
+	trigger, err := ops.ReadSessionTrigger(sessionID)
 	if err != nil {
-		return "", err
+		return demandTrigger{}, err
 	}
-	return strings.TrimSpace(triggerID), nil
+	return demandTrigger{ID: strings.TrimSpace(trigger.ID), StoreRef: strings.TrimSpace(trigger.StoreRef)}, nil
 }
 
 // classifyDemandTrigger reads the trigger row and reports (status, verdict).
@@ -217,8 +219,8 @@ func demandDivergenceOpsForBead(bead beads.Bead, err error) hookClaimOps {
 // bead's id.
 func demandDivergenceOpsForBlockedBead(bead beads.Bead, readErr error, blocked bool, confirmErr error) hookClaimOps {
 	return hookClaimOps{
-		ReadSessionTrigger: func(string) (string, error) {
-			return bead.ID, nil
+		ReadSessionTrigger: func(string) (demandTrigger, error) {
+			return demandTrigger{ID: bead.ID}, nil
 		},
 		ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
 			return bead, readErr

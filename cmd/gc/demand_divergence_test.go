@@ -406,9 +406,9 @@ func TestDivergenceClassifiesTheSessionRowStampNotTheEnv(t *testing.T) {
 				return stillThere, nil
 			}
 			var asked []string
-			ops.ReadSessionTrigger = func(sessionID string) (string, error) {
+			ops.ReadSessionTrigger = func(sessionID string) (demandTrigger, error) {
 				asked = append(asked, sessionID)
-				return stillThere.ID, nil
+				return demandTrigger{ID: stillThere.ID}, nil
 			}
 
 			var stderr bytes.Buffer
@@ -451,7 +451,9 @@ func TestDivergenceWithAnUnreadableSessionRowIsUnknownAndLeavesTheDrainAlone(t *
 	ops := demandDivergenceOpsForBlockedBead(stillThere, nil, false, nil)
 	ops.DrainAck = func(io.Writer) error { return nil }
 	ops.ReadWorkStarted = noStartedClaims
-	ops.ReadSessionTrigger = func(string) (string, error) { return "", errors.New("session row read failed") }
+	ops.ReadSessionTrigger = func(string) (demandTrigger, error) {
+		return demandTrigger{}, errors.New("session row read failed")
+	}
 
 	var baseOut, baseErr bytes.Buffer
 	baseCode := writeHookClaimNoWork(divergenceOptions(), ops, false, "/rig", &baseOut, &baseErr)

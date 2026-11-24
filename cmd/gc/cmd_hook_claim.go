@@ -383,8 +383,9 @@ type hookClaimOps struct {
 	// ReadWorkStarted reads the session row's raw work_started cell: the
 	// drain-ack fence's input.
 	ReadWorkStarted hookReadWorkStartedFunc
-	// ReadSessionTrigger reads the session row's gc.trigger_bead_id stamp: the
-	// row the controller counted when it spawned the seat, read only by the
+	// ReadSessionTrigger reads the session row's gc.trigger_bead_id and
+	// gc.trigger_bead_store_ref stamps: the row the controller counted when it
+	// spawned the seat and the store it counted it in, read only by the
 	// demand/claim divergence diagnostics after the drain result is written.
 	ReadSessionTrigger hookReadSessionTriggerFunc
 	// StoreRef names the work leg at dir as the work cells key a claim that
@@ -439,11 +440,22 @@ type (
 	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
-	hookReadSessionTriggerFunc       func(sessionID string) (string, error)
+	hookReadSessionTriggerFunc       func(sessionID string) (demandTrigger, error)
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
 	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
 )
+
+// demandTrigger is the demand bookkeeping a seat's session row carries: the
+// row the controller counted when it spawned the seat (gc.trigger_bead_id) and
+// the store it counted that row in (gc.trigger_bead_store_ref, "" when the row
+// records none). It is diagnostic-only, under the same contract as the
+// divergence payload's TriggerBeadID: nothing on the claim path may consult it
+// to decide what to claim.
+type demandTrigger struct {
+	ID       string
+	StoreRef string
+}
 
 type hookClaimJSONResult struct {
 	SchemaVersion        string   `json:"schema_version"`

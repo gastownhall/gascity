@@ -207,10 +207,44 @@ func TestHookCitySessionTriggerReadsTheRowStamp(t *testing.T) {
 	t.Chdir(t.TempDir()) // nothing to resolve from here
 	ops := newHookCity(cityDir, cfg).claimOps()
 
-	if got, err := ops.ReadSessionTrigger(sessionID); err != nil || got != "wb-1" {
-		t.Fatalf("ReadSessionTrigger = %q, %v; want the row stamp wb-1", got, err)
+	if got, err := ops.ReadSessionTrigger(sessionID); err != nil || got != (demandTrigger{ID: "wb-1"}) {
+		t.Fatalf("ReadSessionTrigger = %+v, %v; want the row stamp wb-1 and no store ref", got, err)
 	}
 	if got, err := ops.ReadSessionTrigger("gc-no-such-session"); err == nil {
-		t.Fatalf("ReadSessionTrigger of a missing row = %q, nil; want an error", got)
+		t.Fatalf("ReadSessionTrigger of a missing row = %+v, nil; want an error", got)
+	}
+}
+
+// Kills a session-trigger seam that drops the store the controller counted the
+// trigger in: a row stamped with both gc.trigger_bead_id and
+// gc.trigger_bead_store_ref hands back both, from that one row read
+// (gastownhall/gascity#5858).
+func TestHookCitySessionTriggerCarriesTheCountingStoreRef(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
+	sessions := openCitySessionStoreForTest(t, cityDir)
+	if err := sessions.SetMetadata(sessionID, beadmeta.TriggerBeadIDMetadataKey, "canary-8a1"); err != nil {
+		t.Fatalf("stamp trigger id: %v", err)
+	}
+	if err := sessions.SetMetadata(sessionID, beadmeta.TriggerBeadStoreRefMetadataKey, " city "); err != nil {
+		t.Fatalf("stamp trigger store ref: %v", err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	t.Chdir(t.TempDir()) // nothing to resolve from here
+	opens := countHookCityStoreOpens(t)
+	ops := newHookCity(cityDir, cfg).claimOps()
+
+	got, err := ops.ReadSessionTrigger(sessionID)
+	if err != nil || got != (demandTrigger{ID: "canary-8a1", StoreRef: "city"}) {
+		t.Fatalf("ReadSessionTrigger = %+v, %v; want canary-8a1 counted in city", got, err)
+	}
+	if n := opens.Load(); n != 1 {
+		t.Fatalf("the trigger read opened the city store %d times, want 1", n)
 	}
 }
