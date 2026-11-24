@@ -111,7 +111,7 @@ func newEmitDrainHarness(t *testing.T) *emitDrainHarness {
 func (h *emitDrainHarness) drain() []string {
 	h.t.Helper()
 	start := len(h.log)
-	if _, err := drainWorkflowServeWork(testControlDispatcherAgent(""), h.cityPath, h.cityPath, "", nil, io.Discard); err != nil {
+	if _, err := drainWorkflowServeWork(testControlDispatcherAgent(""), h.cityPath, h.cityPath, "", nil, nil, io.Discard); err != nil {
 		h.t.Fatalf("drainWorkflowServeWork: %v", err)
 	}
 	return slices.Clone(h.log[start:])

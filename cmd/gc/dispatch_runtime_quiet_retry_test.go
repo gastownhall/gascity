@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending is the backoff-pin
@@ -103,7 +106,7 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 
 			cityPath := t.TempDir()
 			result, err := drainWorkflowServeWork(
-				config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, io.Discard)
+				config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, nil, io.Discard)
 			if err != nil {
 				t.Fatalf("drainWorkflowServeWork: %v", err)
 			}
@@ -130,5 +133,147 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 					grew, followSleepDuration(idleSweeps), tt.wantSweepGrowth)
 			}
 		})
+	}
+}
+
+// pendingFollowWait is one workflowServeWaitForWake call the --follow loop made.
+type pendingFollowWait struct {
+	idleSweeps int
+	sleepDur   time.Duration
+}
+
+// pendingFollowRow is one control bead in a scripted sweep's ready queue and
+// the answer controlDispatcherServe gives for it on that sweep.
+type pendingFollowRow struct {
+	id  string
+	err error
+}
+
+// pendingFollowSweep scripts one --follow sweep: the queue the drain lists, or
+// the error its work query fails with.
+type pendingFollowSweep struct {
+	rows    []pendingFollowRow
+	listErr error
+}
+
+// runPendingFollowScript runs runWorkflowServeFollow over the scripted sweeps
+// with no event wakes and stops it on the wait after the last sweep. A bead
+// whose script answer is nil advanced, so it leaves the queue for the rest of
+// its sweep, as a closed control bead does. It returns every wait the loop
+// made and how many times each bead was dispatched.
+func runPendingFollowScript(t *testing.T, sweeps []pendingFollowSweep) ([]pendingFollowWait, map[string]int) {
+	t.Helper()
+
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	prevPollInterval := workflowServeIdlePollInterval
+	prevPollAttempts := workflowServeIdlePollAttempts
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+		workflowServeIdlePollInterval = prevPollInterval
+		workflowServeIdlePollAttempts = prevPollAttempts
+	})
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+
+	ep := newTestProvider(t, t.TempDir())
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+
+	var waits []pendingFollowWait
+	stopErr := errors.New("stop after the scripted sweeps")
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+		waits = append(waits, pendingFollowWait{idleSweeps: idleSweeps, sleepDur: sleepDur})
+		if len(waits) == len(sweeps) {
+			return false, stopErr
+		}
+		return false, nil
+	}
+
+	advanced := map[int]map[string]bool{}
+	currentSweep := func() pendingFollowSweep {
+		if len(waits) >= len(sweeps) {
+			t.Fatalf("drain ran past the %d scripted sweeps", len(sweeps))
+		}
+		return sweeps[len(waits)]
+	}
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		sweep := currentSweep()
+		if sweep.listErr != nil {
+			return nil, sweep.listErr
+		}
+		var queue []hookBead
+		for _, row := range sweep.rows {
+			if advanced[len(waits)][row.id] {
+				continue
+			}
+			queue = append(queue, hookBead{ID: row.id, Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}})
+		}
+		return queue, nil
+	}
+	dispatches := map[string]int{}
+	controlDispatcherServe = func(_, _, beadID string, _, _ io.Writer, _ *executionEmitDeferral) error {
+		dispatches[beadID]++
+		for _, row := range currentSweep().rows {
+			if row.id != beadID {
+				continue
+			}
+			if row.err == nil {
+				if advanced[len(waits)] == nil {
+					advanced[len(waits)] = map[string]bool{}
+				}
+				advanced[len(waits)][beadID] = true
+			}
+			return row.err
+		}
+		t.Fatalf("bead %s dispatched on sweep %d, which does not list it", beadID, len(waits)+1)
+		return nil
+	}
+
+	cityPath := t.TempDir()
+	err := runWorkflowServeFollow(config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, io.Discard)
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
+	}
+	return waits, dispatches
+}
+
+// repeatSweeps scripts n sweeps whose queue is the given rows.
+func repeatSweeps(n int, rows ...pendingFollowRow) []pendingFollowSweep {
+	sweeps := make([]pendingFollowSweep, n)
+	for i := range sweeps {
+		sweeps[i] = pendingFollowSweep{rows: rows}
+	}
+	return sweeps
+}
+
+// TestRunWorkflowServeFollowBacksOffOnRepeatedPending is gastownhall/gascity#6025:
+// a workflow-finalize waiting on an open blocker answers the same bare
+// ErrControlPending on every sweep for as long as the blocker stays open. It is
+// still dispatched every sweep, but only its first refusal counts as pending,
+// so the idle backoff grows to its cap instead of pinning the loop at 1s.
+func TestRunWorkflowServeFollowBacksOffOnRepeatedPending(t *testing.T) {
+	clearGCEnv(t)
+
+	waits, dispatches := runPendingFollowScript(t,
+		repeatSweeps(6, pendingFollowRow{id: "gc-blocked", err: dispatch.ErrControlPending}))
+
+	want := []pendingFollowWait{
+		{0, 1 * time.Second},
+		{0, 1 * time.Second},
+		{1, 2 * time.Second},
+		{2, 4 * time.Second},
+		{3, 5 * time.Second},
+		{4, 5 * time.Second},
+	}
+	if !slices.Equal(waits, want) {
+		t.Fatalf("waits = %+v, want %+v", waits, want)
+	}
+	if got := dispatches["gc-blocked"]; got != 6 {
+		t.Fatalf("gc-blocked dispatched %d times, want 6 (a repeat is still retried every sweep)", got)
 	}
 }
