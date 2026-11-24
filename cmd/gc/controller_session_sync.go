@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The session-sync socket verb (ga-45119r, #5843). `gc session reset` writes
@@ -138,11 +139,15 @@ func handleSessionSyncSocketCmd(conn net.Conn, cityPath, payload string, wake *c
 //
 // The session-class store is resolved by the router's own rule over the same
 // topology scopeStores mints the session handle from (placeClass). The cache
-// the census serves from lives under that store, below the strict-seam
-// projection and any policy layer, so laneSessionsCache — the conversation
-// lane host's own baselined peel — reaches it; resolving the store directly
-// keeps the handle out of the picture (storeclass: the raw-store debt of a
-// peel belongs to laneSessionsCache's baseline, not to a new unwrap).
+// the census serves from lives under that store, below any policy layer, so
+// laneSessionsCache — the conversation lane host's own baselined peel —
+// reaches it; resolving the store directly keeps the handle out of the
+// picture (storeclass: the raw-store debt of a peel belongs to
+// laneSessionsCache's baseline, not to a new unwrap). Under the split-strict
+// test gate placeClass returns one of the gate's views, whose resolve target
+// ends that walk, so the view is peeled first (storeref.Unview, as
+// liveCloseOwner and scopedStoreLike do); splitStrictSeam is nil in
+// production, where the peel is the identity.
 func refreshSessionRowIntoControllerCache(cityPath, sessionID string) (sessionSyncRefresh, error) {
 	entry, ok := registeredResidencyEntry(cityPath)
 	if !ok {
@@ -156,7 +161,8 @@ func refreshSessionRowIntoControllerCache(cityPath, sessionID string) (sessionSy
 	if beads.IsNilStore(sessionsStore) {
 		return sessionSyncRefresh{}, fmt.Errorf("the runtime serving city %s has no session store: its city work store did not open (see the controller log); restart the controller once the store is reachable", cityPath)
 	}
-	cache := laneSessionsCache(sessionsStore)
+	front, _ := storeref.Unview(splitStrictSeam, sessionsStore)
+	cache := laneSessionsCache(front)
 	if cache == nil {
 		// An uncached session store reads live: the caller's write is
 		// already visible, and the barrier is the wake alone.

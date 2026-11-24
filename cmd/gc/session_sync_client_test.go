@@ -170,7 +170,10 @@ func TestSyncSessionOnControllerRefusesOnAWorkerSiteWithoutDialing(t *testing.T)
 }
 
 // newResetSyncCity writes a city with one unnamed, awake session row and
-// returns the city directory and the row's ID.
+// returns the city directory and the row's ID. The row is seeded through the
+// session-class store, as the CLI's session commands reach it: under the
+// split-strict gate the work store openCityStoreAt returns hides session
+// rows.
 func newResetSyncCity(t *testing.T) (string, string) {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
@@ -181,11 +184,7 @@ func newResetSyncCity(t *testing.T) (string, string) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	bead, err := store.Create(beads.Bead{
+	bead, err := openCitySessionStoreForTest(t, cityDir).Create(beads.Bead{
 		Title:  "manual session",
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession, "template:worker"},
@@ -285,11 +284,7 @@ func TestCmdSessionResetReportsAnUnacknowledgedReset(t *testing.T) {
 				t.Fatalf("keyed pokes = %d, want %d; seen %v", keyed, wantKeyed, sock.seen())
 			}
 
-			reloaded, err := openCityStoreAt(cityDir)
-			if err != nil {
-				t.Fatalf("openCityStoreAt(reload): %v", err)
-			}
-			got, err := reloaded.Get(id)
+			got, err := openCitySessionStoreForTest(t, cityDir).Get(id)
 			if err != nil {
 				t.Fatalf("Get(%s): %v", id, err)
 			}
