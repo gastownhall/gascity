@@ -288,22 +288,33 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 
 // ClearWakeBlockersPatch is the lifecycle of clearing a dormant session's
 // blockers so the normal wake path may select it; the holds themselves are
-// the Wake (or Retire) cell's.
+// the Wake (or Retire) cell's. A city-stop park is a wake blocker too, released
+// only on a row this patch leaves asleep (asleep, suspended or drained). A row
+// gc stop marked while it still read active or awake, its runtime already
+// gone, keeps the mark: the runtime-missing heal then keeps its conversation
+// as it moves the row asleep, the explicit wake starts it, and PreWake drops
+// the mark. Non-blocking reasons such as idle stay.
 func ClearWakeBlockersPatch(state State, sleepReason string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"wake_attempts":         "0",
 		"wake_refused_event_at": "",
 		"churn_count":           "0",
 	}
+	leavesAsleep := state == StateAsleep
 	switch state {
 	case StateSuspended, StateDrained:
 		patch["state"] = string(StateAsleep)
 		patch["slept_at"] = now.UTC().Format(time.RFC3339)
+		leavesAsleep = true
 	}
 	switch SleepReason(sleepReason) {
 	case SleepReasonUserHold, SleepReasonWaitHold, SleepReasonQuarantine,
 		SleepReasonContextChurn, SleepReasonRateLimit, SleepReasonDrained:
 		patch["sleep_reason"] = ""
+	case SleepReasonCityStop:
+		if leavesAsleep {
+			patch["sleep_reason"] = ""
+		}
 	}
 	return patch
 }
@@ -630,6 +641,20 @@ func RestartRequestPatchAt(sessionKey string, now time.Time) MetadataPatch {
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
 	}
+	return patch
+}
+
+// RestartHandoffWakePatch is what a restart handoff adds for a row whose
+// runtime is already gone: a city-stop park is released and a durable
+// explicit wake recorded, so the fresh restart the operator asked for
+// starts the row. Every other sleep reason gets nil: that reset waits for
+// demand (#2345). It writes no state; the wake path owns the start.
+func RestartHandoffWakePatch(sleepReason string, now time.Time) MetadataPatch {
+	if SleepReason(strings.TrimSpace(sleepReason)) != SleepReasonCityStop {
+		return nil
+	}
+	patch := RequestExplicitWakePatch(string(WakeCauseExplicit), now)
+	patch["sleep_reason"] = ""
 	return patch
 }
 

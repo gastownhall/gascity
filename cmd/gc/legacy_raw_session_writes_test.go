@@ -36,6 +36,7 @@ var rawSessionWriteVerbs = map[string]rawWriteVerb{
 	"setMetaBatch": {2, true}, "writeSessionMetadata": {2, true},
 	"setMeta": {2, true}, "setMetadataValue": {1, true},
 	"SetMetadataBatch": {1, false}, "SetMetadata": {1, false}, "setWaitTerminalState": {1, false},
+	"recordRestartHandoff": {2, true}, // legacy's restart handoff; fenced only for its city-stop release
 }
 
 // rawWriteKeyVerbs take one key, not a patch.

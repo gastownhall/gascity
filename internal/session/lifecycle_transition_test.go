@@ -798,6 +798,52 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 				"sleep_reason":          "",
 			},
 		},
+		{
+			name:        "city-stop reason is cleared",
+			state:       StateAsleep,
+			sleepReason: string(SleepReasonCityStop),
+			want: MetadataPatch{
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"sleep_reason":          "",
+			},
+		},
+		{
+			name:        "city-stop on a suspended row is cleared as it goes asleep",
+			state:       StateSuspended,
+			sleepReason: string(SleepReasonCityStop),
+			want: MetadataPatch{
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"state":                 string(StateAsleep),
+				"sleep_reason":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			// gc stop marks a row whose runtime already died while it still
+			// reads active; the mark keeps its conversation through the heal.
+			name:        "city-stop on a still-active row is kept",
+			state:       StateActive,
+			sleepReason: string(SleepReasonCityStop),
+			want: MetadataPatch{
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+			},
+		},
+		{
+			name:        "city-stop on a still-awake row is kept",
+			state:       StateAwake,
+			sleepReason: string(SleepReasonCityStop),
+			want: MetadataPatch{
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1054,5 +1100,44 @@ func TestUsageClosedIntervalSurvivesTheReopen(t *testing.T) {
 	}
 	if len(UsageCloseClearPatch()) != 4 {
 		t.Fatalf("UsageCloseClearPatch = %v, want the marker and the kept start and key", UsageCloseClearPatch())
+	}
+}
+
+func TestRestartHandoffWakePatch(t *testing.T) {
+	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
+	release := MetadataPatch{
+		"sleep_reason":      "",
+		"wake_request":      string(WakeCauseExplicit),
+		"wake_requested_at": now.Format(time.RFC3339),
+	}
+	tests := []struct {
+		name        string
+		sleepReason string
+		want        MetadataPatch
+	}{
+		{name: "city-stop releases the park and records an explicit wake", sleepReason: string(SleepReasonCityStop), want: release},
+		{name: "padded city-stop releases the park", sleepReason: "  " + string(SleepReasonCityStop) + "\n", want: release},
+		{name: "idle waits for demand", sleepReason: string(SleepReasonIdle)},
+		{name: "idle-timeout waits for demand", sleepReason: string(SleepReasonIdleTimeout)},
+		{name: "no reason waits for demand", sleepReason: ""},
+		{name: "user hold is not released", sleepReason: string(SleepReasonUserHold)},
+		{name: "drained is not released", sleepReason: string(SleepReasonDrained)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RestartHandoffWakePatch(tt.sleepReason, now)
+			if tt.want == nil {
+				if got != nil {
+					t.Fatalf("patch = %#v, want nil", got)
+				}
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("patch = %#v, want %#v", got, tt.want)
+			}
+			if _, ok := got["state"]; ok {
+				t.Fatalf("patch writes state %q; the handoff wake must leave state to the wake path", got["state"])
+			}
+		})
 	}
 }

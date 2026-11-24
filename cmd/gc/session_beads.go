@@ -3361,6 +3361,12 @@ func reapPreBootSessionBeads(
 		if strings.TrimSpace(info.SleepReason) == string(session.SleepReasonCityStop) {
 			continue
 		}
+		// An operator wake releases that city-stop park and records an explicit
+		// wake; this sweep runs before the reconcile tick, so a pending wake
+		// keeps the row for the reconciler to start instead of closing it.
+		if explicitWakePendingInfo(info) {
+			continue
+		}
 		// Local boot time only speaks for a local runtime. A remote or ACP
 		// transport is proved dead by nothing we know here.
 		if t := strings.TrimSpace(info.Transport); t != "" && t != config.SessionTransportTmux {

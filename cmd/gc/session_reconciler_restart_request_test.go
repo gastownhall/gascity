@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type restartRequestTestEnv struct {
@@ -1017,4 +1018,231 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 			t.Fatal("last_woke_at empty, want same-tick wake commit")
 		}
 	})
+}
+
+// newCityStopResetScenario builds the row `gc stop` leaves behind and a later
+// `gc session reset` marks: a named on_demand seat asleep with sleepReason,
+// restart_requested and continuation_reset_pending set (newCityStopSeat).
+func newCityStopResetScenario(t *testing.T, sleepReason string) (*restartRequestTestEnv, beads.Bead, string) {
+	t.Helper()
+
+	env, session, sessionName := newCityStopSeat(t, map[string]string{
+		"state":                      "asleep",
+		"sleep_reason":               sleepReason,
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	env.setSessionMetadata(&session, map[string]string{
+		"slept_at": env.clk.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+	return env, session, sessionName
+}
+
+// newCityStopSeat builds a named on_demand seat carrying metadata, under an
+// interactive resume sleep policy of "0s", which suppresses its config wake.
+// The runtime is not running and there is no pool demand.
+func newCityStopSeat(t *testing.T, metadata map[string]string) (*restartRequestTestEnv, beads.Bead, string) {
+	t.Helper()
+
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		SessionSleep:  config.SessionSleepConfig{InteractiveResume: "0s"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	if class := config.ClassifySessionSleepAgent(&env.cfg.Agents[0]); class != config.SessionSleepInteractiveResume {
+		t.Fatalf("test fixture wrong: sleep class = %q, want %q", class, config.SessionSleepInteractiveResume)
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	row := map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+	}
+	for key, value := range metadata {
+		row[key] = value
+	}
+	env.setSessionMetadata(&session, row)
+	return env, session, sessionName
+}
+
+// TestReconcileSessionBeads_ResetOfAsleepCityStopStartsSession pins
+// SESSION-RECON-024: `gc session reset` of a city-stop row whose runtime is
+// already gone releases the park and records an explicit wake in the handoff
+// write, so the row starts on that same tick even though its sleep policy
+// suppresses the config wake.
+func TestReconcileSessionBeads_ResetOfAsleepCityStopStartsSession(t *testing.T) {
+	env, session, sessionName := newCityStopResetScenario(t, string(sessionpkg.SleepReasonCityStop))
+	if env.sp.IsRunning(sessionName) {
+		t.Fatal("test fixture wrong: session should not be running")
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not start on the reset tick; stdout=%q stderr=%q", sessionName, env.stdout.String(), env.stderr.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["sleep_reason"] == string(sessionpkg.SleepReasonCityStop) {
+		t.Fatalf("sleep_reason = %q, want the city-stop park released", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
+	}
+}
+
+// TestReconcileSessionBeads_ResetOfIdleAsleepWaitsForDemand pins #2345 next to
+// SESSION-RECON-024: a fresh restart of a row parked for any reason other than
+// city-stop consumes restart_requested, records no wake and leaves the row
+// asleep until demand arrives.
+func TestReconcileSessionBeads_ResetOfIdleAsleepWaitsForDemand(t *testing.T) {
+	env, session, sessionName := newCityStopResetScenario(t, string(sessionpkg.SleepReasonIdle))
+
+	env.reconcile([]beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q started on the reset tick; an idle-asleep reset must wait for demand (#2345)", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["wake_request"] != "" || got.Metadata["wake_requested_at"] != "" {
+		t.Fatalf("wake_request = %q, wake_requested_at = %q; want no wake recorded for an idle row",
+			got.Metadata["wake_request"], got.Metadata["wake_requested_at"])
+	}
+
+	// A later tick finds the same dormant row: still no demand, still asleep.
+	// This pins the wait for demand beyond the one-tick reset deferral.
+	env.reconcile([]beads.Bead{got})
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q started on a later tick; an idle-asleep reset must wait for demand (#2345)", sessionName)
+	}
+}
+
+// TestReconcileSessionBeads_ResetOfLiveCityStopYieldsTick pins the live-runtime
+// half of the restart handoff next to SESSION-RECON-024: a city-stop row whose
+// runtime still runs is killed, marked asleep and the tick yields, with no
+// wake recorded, so the new start does not race the alias release.
+func TestReconcileSessionBeads_ResetOfLiveCityStopYieldsTick(t *testing.T) {
+	env, session, sessionName := newCityStopResetScenario(t, string(sessionpkg.SleepReasonCityStop))
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; the handoff must kill the live runtime and yield the tick", sessionName)
+	}
+	if !strings.Contains(env.stdout.String(), "Stopped restart-requested session") {
+		t.Fatalf("stdout = %q, want the handoff's stop report", env.stdout.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateAsleep) {
+		t.Fatalf("state = %q, want asleep after the handoff kill", got.Metadata["state"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["wake_request"] != "" || got.Metadata["wake_requested_at"] != "" {
+		t.Fatalf("wake_request = %q, wake_requested_at = %q; want no wake recorded on the live branch",
+			got.Metadata["wake_request"], got.Metadata["wake_requested_at"])
+	}
+}
+
+// TestReconcileSessionBeads_ResetOfCityStopKeepsAKillThatLandedAfterTheSnapshot
+// pins SESSION-RECON-024's fence: the handoff decides the city-stop release on
+// a fresh read of the row, not on the tick snapshot. A `gc session kill` that
+// lands after the snapshot was taken (sleep_reason=killed, the kill-pending
+// state reason, its wake request cleared) is kept: the handoff still consumes
+// restart_requested, records no wake over the kill and starts nothing.
+func TestReconcileSessionBeads_ResetOfCityStopKeepsAKillThatLandedAfterTheSnapshot(t *testing.T) {
+	env, snapshot, sessionName := newCityStopResetScenario(t, string(sessionpkg.SleepReasonCityStop))
+	if err := env.store.SetMetadataBatch(snapshot.ID, sessionpkg.KillPendingPatch(env.clk.Now())); err != nil {
+		t.Fatalf("recording the kill fence: %v", err)
+	}
+
+	env.reconcile([]beads.Bead{snapshot})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q started over a kill fence; stdout=%q stderr=%q", sessionName, env.stdout.String(), env.stderr.String())
+	}
+	got, err := env.store.Get(snapshot.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", snapshot.ID, err)
+	}
+	if got.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonKilled) || got.Metadata["state_reason"] != sessionpkg.KillPendingReason {
+		t.Fatalf("sleep_reason = %q, state_reason = %q; want the kill fence (%q, %q) kept",
+			got.Metadata["sleep_reason"], got.Metadata["state_reason"], sessionpkg.SleepReasonKilled, sessionpkg.KillPendingReason)
+	}
+	if got.Metadata["wake_request"] != "" || got.Metadata["wake_requested_at"] != "" {
+		t.Fatalf("wake_request = %q, wake_requested_at = %q; want no wake written over the kill",
+			got.Metadata["wake_request"], got.Metadata["wake_requested_at"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
+	}
+}
+
+// TestReconcileSessionBeads_WokenActiveCityStopRowResumesItsConversation pins
+// SESSION-START-003 for the row `gc stop` marks while it still reads active:
+// its runtime died before the stop could sleep it. An operator wake keeps the
+// city-stop mark on that row, so the runtime-missing heal keeps the row's
+// conversation as it moves it asleep, and the pending explicit wake starts it
+// on that conversation instead of a fresh one.
+func TestReconcileSessionBeads_WokenActiveCityStopRowResumesItsConversation(t *testing.T) {
+	env, session, sessionName := newCityStopSeat(t, map[string]string{
+		"state":               "active",
+		"sleep_reason":        string(sessionpkg.SleepReasonCityStop),
+		"session_key":         "original-key",
+		"started_config_hash": "hash-before-stop",
+	})
+	if _, err := sessionpkg.NewStore(beads.SessionStore{Store: env.store}).WakeSession(session.ID, env.clk.Now(), sessionpkg.WakeOpts{}); err != nil {
+		t.Fatalf("WakeSession: %v", err)
+	}
+
+	for tick := 0; tick < 3 && !env.sp.IsRunning(sessionName); tick++ {
+		current, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", session.ID, err)
+		}
+		env.reconcile([]beads.Bead{current})
+	}
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not start after the wake; stdout=%q stderr=%q", sessionName, env.stdout.String(), env.stderr.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["session_key"] != "original-key" {
+		t.Fatalf("session_key = %q, want the conversation the city-stop mark kept (original-key); stderr=%q", got.Metadata["session_key"], env.stderr.String())
+	}
 }
