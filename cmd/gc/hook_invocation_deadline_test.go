@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -216,4 +217,75 @@ func TestHookDiscoveryAnswersBeforeDeadline(t *testing.T) {
 		}
 		assertSlowLegsKilled(t, pidLog)
 	})
+}
+
+// TestHookWithoutDeadlineKeepsDefaultBudgets guards AC-6 of #5533: with
+// neither --timeout nor GC_HOOK_DEADLINE, gc hook keeps today's budgets. Each
+// store read is bounded only by hookWorkQueryTimeout (150s), the claim window
+// is hookClaimWindowDefault (or GC_HOOK_CLAIM_WINDOW when set), and the claim
+// reserve is hookClaimMutationTimeout (10s).
+func TestHookWithoutDeadlineKeepsDefaultBudgets(t *testing.T) {
+	t.Setenv(hookDeadlineEnv, "")
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "")
+	if hookWorkQueryTimeout != 150*time.Second || hookClaimMutationTimeout != 10*time.Second || hookClaimWindowDefault != 160*time.Second {
+		t.Fatalf("default budgets = read %s, reserve %s, window %s; want 150s, 10s, 160s",
+			hookWorkQueryTimeout, hookClaimMutationTimeout, hookClaimWindowDefault)
+	}
+
+	t.Run("discovery reads are bounded only by the per-query timeout", func(t *testing.T) {
+		var stderr bytes.Buffer
+		deadline, ok := hookInvocationDeadline(0, &stderr)
+		if ok || stderr.Len() != 0 {
+			t.Fatalf("invocation deadline = %s, %t (stderr %q); want none", deadline, ok, stderr.String())
+		}
+		ctx, cancel := hookReadContext(context.Background(), deadline, ok)
+		defer cancel()
+		if d, has := ctx.Deadline(); has {
+			t.Fatalf("read context deadline = %s, want none", d)
+		}
+		if margin, has := hookAnswerMargin(ctx); has {
+			t.Fatalf("read context answer margin = %s, want none", margin)
+		}
+		prev := hookWorkQueryTimeout
+		hookWorkQueryTimeout = 300 * time.Millisecond
+		t.Cleanup(func() { hookWorkQueryTimeout = prev })
+		start := time.Now()
+		_, err := shellWorkQueryWithEnvContext(ctx, "exec sleep 30", t.TempDir(), nil)
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Fatalf("the read ran %s, want it stopped at the %s per-query timeout", elapsed.Round(time.Millisecond), hookWorkQueryTimeout)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(fmt.Sprint(err), "timed out after 300ms") || strings.Contains(fmt.Sprint(err), "hook deadline") {
+			t.Fatalf("read error = %v, want the per-query timeout named, not a hook deadline", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name, env  string
+		wantWindow time.Duration
+	}{
+		{name: "the claim window and reserve are the defaults", wantWindow: 160 * time.Second},
+		{name: "GC_HOOK_CLAIM_WINDOW still sets the claim window", env: "45s", wantWindow: 45 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_HOOK_CLAIM_WINDOW", tc.env)
+			c := newDeadlineClaim(t, 0, 0)
+			if window, reserve := resolvedClaimBudgets(c.ops); window != tc.wantWindow || reserve != 10*time.Second {
+				t.Fatalf("claim window, reserve = %s, %s; want %s, 10s", window, reserve, tc.wantWindow)
+			}
+			code, stdout, stderr := c.run(c.reader(time.Second, turnBoundRoutedWork))
+			if code != 0 || len(c.rec.claims) != 1 {
+				t.Fatalf("exit = %d, claims = %v; want one claim; stdout=%q stderr=%s", code, c.rec.claims, stdout, stderr)
+			}
+			if len(c.readCtx) != 1 {
+				t.Fatalf("reads = %d, want 1", len(c.readCtx))
+			}
+			if d, has := c.readCtx[0].Deadline(); has {
+				t.Fatalf("claim read context deadline = %s, want none beyond the per-query timeout", d)
+			}
+			d, has := c.rec.claimCtx[0].Deadline()
+			if left := time.Until(d); !has || left < 8*time.Second || left > 10*time.Second {
+				t.Fatalf("claim mutation deadline = %s away (set %t), want the full 10s reserve", left.Round(time.Millisecond), has)
+			}
+		})
+	}
 }

@@ -26,6 +26,8 @@ type deadlineClaim struct {
 	t0    time.Time
 	clock time.Time
 	reads []time.Duration
+	// readCtx holds the context each store read ran under.
+	readCtx []context.Context
 }
 
 // newDeadlineClaim starts a claim invocation that began realAge ago on the wall
@@ -57,8 +59,9 @@ func newDeadlineClaim(t *testing.T, realAge, budget time.Duration) *deadlineClai
 
 // reader is a store runner whose read ends readEnd past t0 and answers out.
 func (c *deadlineClaim) reader(readEnd time.Duration, out string) hookStoreRunner {
-	return func(context.Context, string, string, []string) (string, error) {
+	return func(ctx context.Context, _, _ string, _ []string) (string, error) {
 		c.reads = append(c.reads, c.clock.Sub(c.t0))
+		c.readCtx = append(c.readCtx, ctx)
 		c.clock = c.t0.Add(readEnd)
 		return out, nil
 	}
