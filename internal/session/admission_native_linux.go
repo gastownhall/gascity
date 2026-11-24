@@ -64,7 +64,7 @@ func (linuxNativeCapacityHost) Identity() (nativeKernelIdentity, error) {
 	if err := syscall.Stat(nativeCgroupRoot, &stat); err != nil {
 		return identity, err
 	}
-	identity.CgroupMountDevice, identity.CgroupMountInode = uint64(stat.Dev), stat.Ino
+	identity.CgroupMountDevice, identity.CgroupMountInode = stat.Dev, stat.Ino
 	return identity, nil
 }
 
@@ -249,7 +249,7 @@ func (linuxNativeCapacityHost) observeGroup(seat nativeCapacitySeat, group strin
 		}
 		return observed, fmt.Errorf("native scope kernel evidence unavailable")
 	}
-	if seat.CgroupPath != "" && (uint64(stat.Dev) != seat.CgroupDevice || stat.Ino != seat.CgroupInode) {
+	if seat.CgroupPath != "" && (stat.Dev != seat.CgroupDevice || stat.Ino != seat.CgroupInode) {
 		return observed, fmt.Errorf("native scope incarnation mismatch")
 	}
 	data, err := nativeBoundedRead(filepath.Join(dir, "cgroup.events"))
@@ -270,6 +270,6 @@ func (linuxNativeCapacityHost) observeGroup(seat nativeCapacitySeat, group strin
 	if !seen {
 		return observed, fmt.Errorf("native scope populated evidence unavailable")
 	}
-	observed.CgroupPath, observed.Device, observed.Inode = group, uint64(stat.Dev), stat.Ino
+	observed.CgroupPath, observed.Device, observed.Inode = group, stat.Dev, stat.Ino
 	return observed, nil
 }
