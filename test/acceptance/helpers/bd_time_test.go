@@ -305,3 +305,24 @@ func TestMeasureMarginalOverFloorNeverRemeasuresAnOverBudgetReading(t *testing.T
 		t.Errorf("marginal = %s, want 340ms, over the 100ms budget for the caller to fail", m.Marginal)
 	}
 }
+
+// TestMeasureMarginalOverFloorKeepsTheBestSampleOfEach pins "the minimum": the
+// best floor and the best gc side are neither the first nor the last sample
+// taken, and every other sample is slower. The best of each is the closest any
+// sample got to the fixed cost; the last sample, or the largest, would read the
+// noise around it.
+func TestMeasureMarginalOverFloorKeepsTheBestSampleOfEach(t *testing.T) {
+	floors := []time.Duration{90, 60, 120, 75, 110}
+	gcSides := []time.Duration{200, 150, 220, 180, 210}
+	box := &floorScript{
+		floorAt:  func(_, n int) time.Duration { return floors[n%len(floors)] * time.Millisecond },
+		gcSideAt: func(_, n int) time.Duration { return gcSides[n%len(gcSides)] * time.Millisecond },
+	}
+	m := MeasureMarginalOverFloor(100*time.Millisecond, box.floor, box.gcSide)
+	if m.Inverted {
+		t.Fatalf("a floor 90ms below the gc side read as inverted (floor %s, gc side %s)", m.Floor, m.GCSide)
+	}
+	if m.Floor != 60*time.Millisecond || m.GCSide != 150*time.Millisecond || m.Marginal != 90*time.Millisecond {
+		t.Errorf("reading = floor %s, gc side %s, marginal %s; want 60ms, 150ms and 90ms, the best sample of each kind", m.Floor, m.GCSide, m.Marginal)
+	}
+}
