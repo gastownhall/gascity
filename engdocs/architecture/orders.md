@@ -330,6 +330,16 @@ Violations indicate bugs.
   dispatcher rebuilds; a check that cannot read the log is logged and moves
   nothing.
 
+- **The event cursor is bounded by the log head**: a check reads the run
+  stamps first, then the log head, then the events. A stamp above the head
+  names an event the log cannot contain (the log was lost or replaced and
+  restarted below it), so the check discards it and reads after the highest
+  stamp at or below the head, or from seq 0 when none is. The result is due
+  on the new log's matching events, and its reason states the reset: the
+  discarded stamp, the head and the cursor read after. The dispatcher warns
+  once per order and discarded stamp. A head that cannot be read fails the
+  check closed, with no event read and nothing moved.
+
 - **Dispatch goroutines are drained on controller exit**: Each due
   order launches a goroutine whose completion is tracked by an
   in-flight counter and channel signal on the dispatcher. Controller
@@ -465,8 +475,8 @@ boundaries.
   command blocks evaluation of subsequent orders on that lane pass.
 
 - **Event trigger cursor is per-run, not per-dispatch**: The cursor
-  position is computed from `seq:<N>` labels on existing order-run beads via
-  `MaxSeqFromLabels()`. The controller and `gc order run` fail closed when the
+  position is computed from `seq:<N>` labels on existing order-run beads
+  (`SeqsFromLabels()`), bounded by the event head. The controller and `gc order run` fail closed when the
   current event head cannot be read. For side-effecting exec orders, the cursor
   is persisted before the command runs so a crash after execution does not
   replay the same event. Trade-off: a controller crash after the cursor stamp

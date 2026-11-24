@@ -1,9 +1,13 @@
 package main
 
 import (
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 type captureListStore struct {
@@ -32,8 +36,8 @@ func TestBdCursorBoundsItsTrackingRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bdCursor: %v", err)
 	}
-	if got != 42 {
-		t.Fatalf("bdCursor() = %d, want 42", got)
+	if !slices.Equal(got, []uint64{42}) {
+		t.Fatalf("bdCursor() = %v, want [42]", got)
 	}
 	if store.got.Limit <= 0 {
 		t.Fatalf("bdCursor list Limit = %d, want a bounded newest-first read", store.got.Limit)
@@ -41,7 +45,7 @@ func TestBdCursorBoundsItsTrackingRead(t *testing.T) {
 	if store.got.Sort != beads.SortCreatedDesc {
 		t.Fatalf("bdCursor list Sort = %q, want SortCreatedDesc", store.got.Sort)
 	}
-	// bdCursor reduces the rows to MaxSeqFromLabels — a max over seq, NOT over the
+	// The event check reduces bdCursor's stamps to a max over seq, NOT over the
 	// created_at sort key — so it must NOT opt into the backing's bounded
 	// created-desc read. The backing breaks created_at ties by id ASC, so a bounded
 	// backing read would drop the newest largest-id row that carries the max seq
@@ -65,8 +69,8 @@ func TestBdCursorIgnoresAForgedSeq(t *testing.T) {
 	if _, err := mem.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order-run:digest", "order:digest", "seq:999999"}}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := bdCursor(mem, "digest"); err != nil || got != 5 {
-		t.Fatalf("bdCursor = %d (%v), want the run record's 5", got, err)
+	if got, err := bdCursor(mem, "digest"); err != nil || !slices.Equal(got, []uint64{5}) {
+		t.Fatalf("bdCursor = %v (%v), want the run record's [5]", got, err)
 	}
 }
 
@@ -83,7 +87,33 @@ func TestBdCursorSurvivesAnOrderLabelFlood(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, err := bdCursor(mem, "digest"); err != nil || got != 5 {
-		t.Fatalf("bdCursor = %d (%v), want the run record's 5", got, err)
+	if got, err := bdCursor(mem, "digest"); err != nil || !slices.Equal(got, []uint64{5}) {
+		t.Fatalf("bdCursor = %v (%v), want the run record's [5]", got, err)
+	}
+}
+
+// TestEventOrderFiresAfterEventLogRestartsBelowStoredCursor (#8567): when the
+// event log restarts at seq 1 while the bead store keeps a run record stamped
+// with an old, higher seq, the order must still fire on the new log's
+// matching events instead of staying silent until the log passes the old seq.
+func TestEventOrderFiresAfterEventLogRestartsBelowStoredCursor(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{Title: "run", Labels: []string{"order-run:digest", "order:digest", "seq:500", "order-tracking"}}); err != nil {
+		t.Fatal(err)
+	}
+	ep := events.NewFake()
+	ep.Record(events.Event{Type: "bead.updated"})
+	ep.Record(events.Event{Type: "bead.updated"})
+
+	a := orders.Order{Name: "digest", Trigger: "event", On: "bead.updated"}
+	stamps, err := bdCursorAcrossStores(a.ScopedName(), mem)
+	if err != nil {
+		t.Fatalf("bdCursorAcrossStores: %v", err)
+	}
+	neverRan := func(string) (time.Time, error) { return time.Time{}, nil }
+	check := orders.CheckTrigger(a, time.Now(), neverRan, ep, func(string) []uint64 { return stamps })
+	if !check.Due {
+		head, _ := ep.LatestSeq()
+		t.Fatalf("order not due after event log restart: stamps=%v log head=%d reason=%q; want due on the 2 new bead.updated events", stamps, head, check.Reason)
 	}
 }

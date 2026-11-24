@@ -34,14 +34,15 @@ func LatestOpenRunOn(leg beads.FederatedReader, scoped string) (OrderRun, bool, 
 
 // CursorAcrossLegs is CursorAcross over read-only legs: each leg is read once,
 // LIVE (beads.LiveFor, in the leg's role), for the named order's newest run
-// records, as Store.Cursor reads each of its stores; the max seq wins, and a
-// failed leg is logged and contributes its partial rows, or nothing. A zero
-// leg is skipped. Its name keeps the bd trace attribution CursorAcross has
-// (internal/beads/bdtrace.go matches "orders.CursorAcross").
+// records, as Store.CursorStamps reads each of its stores; the stamps of every
+// leg are returned together, and a failed leg is logged and contributes its
+// partial rows, or nothing. A zero leg is skipped. Its name keeps the bd trace
+// attribution CursorAcross has (internal/beads/bdtrace.go matches
+// "orders.CursorAcross").
 func CursorAcrossLegs(legs []beads.FederatedReader) CursorFunc {
-	return func(name string) uint64 {
+	return func(name string) []uint64 {
 		label := labelOrderRunPrefix + name
-		var latest uint64
+		var stamps []uint64
 		for _, leg := range legs {
 			if beads.IsNilStore(leg) {
 				continue
@@ -49,10 +50,8 @@ func CursorAcrossLegs(legs []beads.FederatedReader) CursorFunc {
 			results, err := NewestRunRecords(func(limit int) ([]beads.Bead, error) {
 				return beads.LiveFor(leg).List(runRecordQuery(label, limit, cursorRunRecords))
 			}, cursorRunRecords)
-			if seq := cursorSeq(name, results, err); seq > latest {
-				latest = seq
-			}
+			stamps = append(stamps, cursorStamps(name, results, err)...)
 		}
-		return latest
+		return stamps
 	}
 }

@@ -98,7 +98,7 @@ func frozenCursor(s *Store, name string) EventCursor {
 	return EventCursor(latest)
 }
 
-func frozenCursorAcross(stores []*Store) CursorFunc {
+func frozenCursorAcross(stores []*Store) func(name string) uint64 {
 	return func(name string) uint64 {
 		var latest uint64
 		for _, s := range stores {

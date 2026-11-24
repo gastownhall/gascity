@@ -91,6 +91,7 @@ go_test(
         "condition_windows_test.go",
         "discovery_test.go",
         "env_test.go",
+        "event_cursor_bound_test.go",
         "exec_outcome_test.go",
         "filenames_test.go",
         "filter_test.go",

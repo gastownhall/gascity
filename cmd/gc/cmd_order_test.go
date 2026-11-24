@@ -3793,8 +3793,8 @@ func TestBdCursorUsesRowsFromPartialTierError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bdCursor: %v", err)
 	}
-	if got != 42 {
-		t.Fatalf("bdCursor() = %d, want 42 from surviving rows", got)
+	if !slices.Equal(got, []uint64{42}) {
+		t.Fatalf("bdCursor() = %v, want [42] from surviving rows", got)
 	}
 }
 

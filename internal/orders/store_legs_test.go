@@ -205,9 +205,9 @@ func legsOps() []legsOp {
 				for _, store := range s {
 					doors = append(doors, NewStoreWithGraph(beads.OrdersStore{Store: store}, beads.GraphStore{Store: store}))
 				}
-				return fmt.Sprint(CursorAcross(doors)(scoped))
+				return fmt.Sprint(MaxStamp(CursorAcross(doors)(scoped)))
 			},
-			legs: func(l []beads.FederatedReader) string { return fmt.Sprint(CursorAcrossLegs(l)(scoped)) },
+			legs: func(l []beads.FederatedReader) string { return fmt.Sprint(MaxStamp(CursorAcrossLegs(l)(scoped))) },
 		})
 	}
 	return ops
@@ -312,8 +312,8 @@ func TestOrderReadsOverAZeroLegReadNothing(t *testing.T) {
 	if _, found, err := LatestOpenRunOn(beads.FederatedReader{}, "o1"); found || err != nil {
 		t.Errorf("LatestOpenRunOn(zero) = %v, %v", found, err)
 	}
-	if got := CursorAcrossLegs([]beads.FederatedReader{{}})("o1"); got != 0 {
-		t.Errorf("CursorAcrossLegs(zero) = %d", got)
+	if got := CursorAcrossLegs([]beads.FederatedReader{{}})("o1"); got != nil {
+		t.Errorf("CursorAcrossLegs(zero) = %v", got)
 	}
 }
 

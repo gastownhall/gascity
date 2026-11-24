@@ -1392,17 +1392,17 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			}
 			cursorFn := orders.CursorAcross(frontDoors)
 			if a.Trigger == "event" {
-				cursor, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
+				stamps, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 					return 1
 				}
-				start, err := orders.CheckEventStart(ep, cursor)
+				start, err := orders.CheckEventStart(ep, stamps)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 					return 1
 				}
-				cursorFn = func(string) uint64 {
+				cursorFn = func(string) []uint64 {
 					return start
 				}
 			}
@@ -1488,17 +1488,17 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		}
 		cursorFn := orders.CursorAcross(frontDoors)
 		if a.Trigger == "event" {
-			cursor, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
+			stamps, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			start, err := orders.CheckEventStart(ep, cursor)
+			start, err := orders.CheckEventStart(ep, stamps)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			cursorFn = func(string) uint64 {
+			cursorFn = func(string) []uint64 {
 				return start
 			}
 		}
@@ -2152,7 +2152,11 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 // when a same-second burst exceeds the cap.
 const bdCursorRecentRunsLimit = 256
 
-func bdCursor(store beads.Store, orderName string) (uint64, error) {
+// bdCursor is the event seq stamps of the named order's newest run records in
+// store: up to bdCursorRecentRunsLimit of its order-run beads, run records
+// only. A failed read that returned no rows is an error; a partially failed
+// one is logged and its rows count.
+func bdCursor(store beads.Store, orderName string) ([]uint64, error) {
 	// One leg of bdCursorAcrossStores: run records live in the orders binding
 	// and, for v1 poured order-run roots (work class), on the work legs, so a
 	// leg that holds none of them is expected to miss.
@@ -2167,8 +2171,8 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 			Limit:         bdCursorRecentRunsLimit,
 			Sort:          beads.SortCreatedDesc,
 			TierMode:      beads.TierBoth,
-			// Deliberately NOT an AllowBackingCreatedLimit caller. This read reduces to
-			// MaxSeqFromLabels — a max over seq, a DIFFERENT column than the created_at
+			// Deliberately NOT an AllowBackingCreatedLimit caller. The event check reduces
+			// these stamps to a max over seq, a DIFFERENT column than the created_at
 			// sort key — so the backing's id-ASC created-desc limit could drop the newest
 			// largest-id row carrying the max seq when a same-second burst exceeds the
 			// cap, regressing the event cursor into replaying consumed events. Fetch the
@@ -2179,37 +2183,38 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 	})
 	if err != nil {
 		if len(beadList) == 0 {
-			return 0, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
+			return nil, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
 		}
 		orderLogf("gc order: event cursor lookup partially failed for %s: %v", orderName, err)
 	}
-	// Only a run record's seq is the order's cursor (orders.IsRunRecord): a
-	// plain bead carrying the order:<name> and seq:<n> labels moves nothing
-	// (architecture B v2, the #7766 review).
+	// Only a run record's seq is a stamp of the order's cursor
+	// (orders.IsRunRecord): a plain bead carrying the order:<name> and
+	// seq:<n> labels moves nothing (architecture B v2, the #7766 review).
 	labelSets := make([][]string, 0, len(beadList))
 	for _, b := range beadList {
 		if orders.IsRunRecord(b) {
 			labelSets = append(labelSets, b.Labels)
 		}
 	}
-	return orders.MaxSeqFromLabels(labelSets), nil
+	return orders.SeqsFromLabels(labelSets), nil
 }
 
-func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, error) {
-	var maxSeq uint64
+// bdCursorAcrossStores is the event seq stamps of the named order's newest
+// run records across stores (bdCursor per store, nil stores skipped). The
+// event check bounds them by the event log's head.
+func bdCursorAcrossStores(orderName string, stores ...beads.Store) ([]uint64, error) {
+	var stamps []uint64
 	for i, store := range stores {
 		if store == nil {
 			continue
 		}
-		seq, err := bdCursor(store, orderName)
+		seqs, err := bdCursor(store, orderName)
 		if err != nil {
-			return 0, fmt.Errorf("store %d: %w", i, err)
+			return nil, fmt.Errorf("store %d: %w", i, err)
 		}
-		if seq > maxSeq {
-			maxSeq = seq
-		}
+		stamps = append(stamps, seqs...)
 	}
-	return maxSeq, nil
+	return stamps, nil
 }
 
 // --- gc order sweep-nudge-mail ---

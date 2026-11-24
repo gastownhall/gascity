@@ -576,60 +576,63 @@ func NewestRunRecords(list func(limit int) ([]beads.Bead, error), n int) ([]bead
 }
 
 // Cursor reports the max event seq (the order's event-bus high-water mark) for
-// the named order, unioning across the orders leg and the graph leg. Like
-// LastRun it is a MIXED orders+graph read (the seq labels ride both tracking
-// beads and wisp roots) and preserves the dispatcher's original bare-List tier
-// and partial-tier-error tolerance.
+// the named order, unioning across the orders leg and the graph leg: the
+// unbounded maximum of CursorStamps.
 func (s *Store) Cursor(name string) EventCursor {
+	return EventCursor(MaxStamp(s.CursorStamps(name)))
+}
+
+// CursorStamps reports the event seq stamps of the named order's newest run
+// records, unioning across the orders leg and the graph leg. Like LastRun it
+// is a MIXED orders+graph read (the seq labels ride both tracking beads and
+// wisp roots) and preserves the dispatcher's original bare-List tier and
+// partial-tier-error tolerance. The event check bounds the stamps by the event
+// log's head (checkEvent).
+func (s *Store) CursorStamps(name string) []uint64 {
 	label := labelOrderRunPrefix + name
-	var latest uint64
+	var stamps []uint64
 	for _, store := range s.mixedLegStores() {
 		// Live, for LastRun's reason: a cached partial answer would regress the
 		// cursor to the open rows' seqs and replay consumed events. Only run
 		// records count (IsRunRecord).
 		//
 		// Deliberately NOT an AllowBackingCreatedLimit caller (lastRunRecords
-		// sets it only for a one-row read). This read reduces to
-		// MaxSeqFromLabels — a max over seq, a DIFFERENT column than the
-		// created_at sort key. The backing breaks created_at ties by id ASC, so a
-		// bounded backing created-desc read keeps the smaller-id members of the
-		// newest second and drops the larger ids; because seq is forward-only the
-		// max-seq run is exactly that newest largest-id row, so a bounded backing
-		// read could omit it and regress the event cursor into replaying consumed
-		// events. Fetch the full candidate set so ApplyListQuery cuts the canonical
-		// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the
-		// front (the Limit is an exact client-side cap).
+		// sets it only for a one-row read). This read reduces to a max over
+		// seq, a DIFFERENT column than the created_at sort key. The backing
+		// breaks created_at ties by id ASC, so a bounded backing created-desc
+		// read keeps the smaller-id members of the newest second and drops the
+		// larger ids; because seq is forward-only the max-seq run is exactly
+		// that newest largest-id row, so a bounded backing read could omit it
+		// and regress the event cursor into replaying consumed events. Fetch the
+		// full candidate set so ApplyListQuery cuts the canonical (created_at
+		// DESC, id DESC) prefix, which keeps the max-seq run at the front (the
+		// Limit is an exact client-side cap).
 		results, err := lastRunRecords(store, label, cursorRunRecords)
-		if seq := cursorSeq(name, results, err); seq > latest {
-			latest = seq
-		}
+		stamps = append(stamps, cursorStamps(name, results, err)...)
 	}
-	return EventCursor(latest)
+	return stamps
 }
 
 // cursorRunRecords is how many of an order's newest run records a cursor read
 // takes from one leg.
 const cursorRunRecords = 10
 
-// cursorSeq is one leg's cursor: the max seq across the run records it
+// cursorStamps is one leg's run stamps: the seqs of the run records it
 // returned. A failed read is logged; its partial rows still count, and with
-// none the leg contributes 0.
-func cursorSeq(name string, results []beads.Bead, err error) uint64 {
+// none the leg contributes nothing.
+func cursorStamps(name string, results []beads.Bead, err error) []uint64 {
 	if err != nil {
 		if len(results) == 0 {
 			runtimeHelpersLogf("orders: cursor lookup failed for %s: %v", name, err)
-			return 0
+			return nil
 		}
 		runtimeHelpersLogf("orders: cursor lookup partially failed for %s: %v", name, err)
-	}
-	if len(results) == 0 {
-		return 0
 	}
 	labelSets := make([][]string, 0, len(results))
 	for _, b := range results {
 		labelSets = append(labelSets, b.Labels)
 	}
-	return MaxSeqFromLabels(labelSets)
+	return SeqsFromLabels(labelSets)
 }
 
 // HasOpenWork reports whether any in-flight work exists for the scoped order:
