@@ -3328,7 +3328,11 @@ func commitStartResultTraced(
 
 func sessionWokeProviderPayload(tp TemplateParams) json.RawMessage {
 	if rp := tp.ResolvedProvider; rp != nil {
-		return api.SessionWokePayloadJSON(rp.Name, resolvedProviderLaunchFamily(rp), rp.EffectiveDefaults["model"])
+		family, model := resolvedProviderLaunchFamily(rp), rp.EffectiveDefaults["model"]
+		if rp.Name == "" && family == "" && model == "" {
+			return nil
+		}
+		return api.SessionWokePayloadJSON(rp.Name, family, model)
 	}
 	return nil
 }
