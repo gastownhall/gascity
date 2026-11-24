@@ -812,6 +812,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			cfg,
 			poolWorkBeads,
 			readyAssignedFlagsForBeads(readyAssigned, poolWorkBeads, poolWorkRefs),
+			poolWorkRefs,
 			sessionBeads.OpenInfos(),
 			scaleCheckCounts,
 			scaleCheckDemandByTemplate,

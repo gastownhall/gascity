@@ -63,6 +63,9 @@ func liveSeatAgent(t *testing.T, minSessions, maxSessions int) *config.City {
 // sessions unless occupied or canonical says otherwise.
 type liveSeatReuse struct {
 	seatDir string
+	// poolDir records the pool's own directory as the seat's work dir,
+	// in place of seatDir.
+	poolDir bool
 	running bool
 	// zombie leaves the seat's pane running with its agent process dead.
 	zombie bool
@@ -105,7 +108,9 @@ type liveSeatReuseResult struct {
 	// retired is the pool seats realization retired to free a slot
 	// (agentBuildParams.retiredPoolSeats).
 	retired map[string]bool
-	stderr  string
+	// probe counts realization's worktree verifies and binding writes.
+	probe  *poolRealizeProbe
+	stderr string
 }
 
 func (r liveSeatReuse) run(t *testing.T) liveSeatReuseResult {
@@ -131,9 +136,14 @@ func (r liveSeatReuse) run(t *testing.T) liveSeatReuseResult {
 	case r.occupied:
 		maxSessions = 2
 	}
-	if r.seatDir != "" {
-		meta[beadmeta.WorkDirMetadataKey] = r.seatDir
-		meta[beadmeta.LegacyWorkDirMetadataKey] = r.seatDir
+	cfg := liveSeatAgent(t, 0, maxSessions)
+	seatDir := r.seatDir
+	if r.poolDir {
+		seatDir = cfg.Agents[0].WorkDir
+	}
+	if seatDir != "" {
+		meta[beadmeta.WorkDirMetadataKey] = seatDir
+		meta[beadmeta.LegacyWorkDirMetadataKey] = seatDir
 	}
 	for k, v := range r.extra {
 		meta[k] = v
@@ -149,7 +159,7 @@ func (r liveSeatReuse) run(t *testing.T) liveSeatReuseResult {
 	}
 	res := liveSeatReuseResult{
 		store: store, sp: runtime.NewFake(), cityPath: t.TempDir(), id: seat.ID, seatName: seatName,
-		cfg: liveSeatAgent(t, 0, maxSessions), request: r.request(seat.ID), partial: r.partial,
+		cfg: cfg, request: r.request(seat.ID), partial: r.partial,
 	}
 	if r.oneShot {
 		res.cfg.Agents[0].Lifecycle = config.AgentLifecycleOneShot
@@ -159,7 +169,7 @@ func (r liveSeatReuse) run(t *testing.T) liveSeatReuseResult {
 	}
 	res.request.Template = "worker"
 	if r.running {
-		if err := res.sp.Start(context.Background(), seatName, runtime.Config{WorkDir: r.seatDir}); err != nil {
+		if err := res.sp.Start(context.Background(), seatName, runtime.Config{WorkDir: seatDir}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -214,6 +224,8 @@ func (res *liveSeatReuseResult) realize(t *testing.T) {
 	bp := newAgentBuildParams("test-city", res.cityPath, res.cfg, res.sp, time.Now().UTC(), res.store, &stderr)
 	bp.sessionBeads = snapshot
 	bp.assignedWorkBeads = res.assigned
+	res.probe = &poolRealizeProbe{}
+	bp.realizeProbe = res.probe
 	if res.partial {
 		bp.sessionSnapshotCompletenessKnown, bp.sessionSnapshotComplete = true, false
 	}
@@ -1218,4 +1230,53 @@ func TestPoolSeatLeaving(t *testing.T) {
 			t.Fatal("a draining seat holding assigned work is leaving; want it kept")
 		}
 	})
+}
+
+// assignedWorkResume is the resume request computePoolDesiredStatesParkedAt
+// builds for spec's bead, in progress, assigned to the seat and read under
+// census ref r1: the request the resume tier hands realization, evidence
+// included.
+func assignedWorkResume(t *testing.T, spec worktree.Spec) func(string) SessionRequest {
+	return func(id string) SessionRequest {
+		t.Helper()
+		cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(3)}}}
+		req := assignedWorkRequest(t, cfg, managedAssignedWork(spec, id), nil, []string{"r1"}, []beads.Bead{sessionBead(id, "open")})
+		if req.Tier != "resume" || req.SessionBeadID != id {
+			t.Fatalf("computed request = %+v, want a resume of %s", req, id)
+		}
+		return req
+	}
+}
+
+// managedAssignedWork is spec's bead in progress, routed to worker, assigned
+// to the session assignee, carrying spec's published evidence.
+func managedAssignedWork(spec worktree.Spec, assignee string) beads.Bead {
+	return withMetadata(workBead(spec.BeadID, "worker", assignee, "in_progress", 1), worktreeEvidenceMetadata(spec))
+}
+
+// A seat that is not alive, re-pointed by the resume tier at in-progress work
+// naming a verified managed worktree, starts in that worktree: the computed
+// request carries the work's evidence, which realization verifies, instead of
+// binding the pool's own directory (gastownhall/gascity#5753).
+func TestLegacyResumeRequestFromAssignedWorkBindsVerifiedWorktree(t *testing.T) {
+	_, pathA := liveSeatManagedSpec(t, "gc-a")
+	specB, pathB := liveSeatManagedSpec(t, "gc-b")
+	res := liveSeatReuse{
+		seatDir: pathA, extra: map[string]string{"state": "asleep"},
+		request: assignedWorkResume(t, specB),
+		assigned: func(id string) []beads.Bead {
+			return []beads.Bead{managedAssignedWork(specB, id)}
+		},
+	}.reused(t)
+	row := res.row(t)
+	if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gc-b" {
+		t.Fatalf("trigger = %q, want gc-b", got)
+	}
+	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != pathB {
+		t.Fatalf("resumed seat's gc.work_dir = %q; want the verified worktree %q, not the pool directory %q",
+			got, pathB, res.cfg.Agents[0].WorkDir)
+	}
+	if got := res.probe.worktreeVerifies.Load(); got != 1 {
+		t.Fatalf("worktree verifies = %d, want 1", got)
+	}
 }
