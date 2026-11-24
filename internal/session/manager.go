@@ -1826,7 +1826,12 @@ func (m *Manager) updateWakeStamp(id string, next func(current string) (string, 
 //
 // A Stop failure is suppressed ONLY when the runtime did not report a live
 // process beforehand (historical Suspend semantics: cleanup of an already-dead
-// session is best-effort). A failure to tear down a runtime that WAS live is
+// session is best-effort) AND the failure is an answer from the runtime rather
+// than a failure to reach it. A Stop wrapping runtime.ErrRuntimeUnavailable
+// says the provider could not reach the runtime at all; a liveness read that
+// hit the same wall (a bounded read that timed out) reads false exactly like a
+// dead session, so it cannot excuse that failure. A failure to tear down a
+// runtime that WAS live is
 // reported: callers treat a nil return as "the seat stopped" — stopTargetsBounded
 // prints "Stopped agent", counts it, and records SessionStopped — so swallowing
 // it would make `gc stop` claim success over a pane that is still alive holding
@@ -1838,7 +1843,7 @@ func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
 	}
 	running := m.sp.IsRunning(sessName)
 	err := runtime.StopForCleanup(m.sp, sessName)
-	if err != nil && !running {
+	if err != nil && !running && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 		err = nil
 	}
 	if err != nil {

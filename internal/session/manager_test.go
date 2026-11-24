@@ -6632,3 +6632,64 @@ func TestManagerCloseStampsUsageCloseMarker(t *testing.T) {
 		t.Errorf("usage_closed_at = %q, want %q", got, closeAt.Format(time.RFC3339Nano))
 	}
 }
+
+// TestSuspendFailsClosedWhenTeardownCannotReachRuntime pins the one case the
+// non-running best-effort teardown does not excuse: a Stop that could not
+// reach the runtime. A bounded liveness read that timed out reads false just
+// like a dead session, so a Stop failure wrapping runtime.ErrRuntimeUnavailable
+// must still fail the suspend and leave the row unsuspended, or `gc stop`
+// would report success over a runtime it never reached.
+func TestSuspendFailsClosedWhenTeardownCannotReachRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		suspend   func(*Manager, string) error
+		wakeStamp bool // the intent clears last_woke_at before the stop and must restore it
+	}{
+		{name: "operator", suspend: operatorSuspend},
+		{name: "idle", suspend: idleSuspend, wakeStamp: true},
+		{name: "shutdown sweep", suspend: sweepSuspend, wakeStamp: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := &nonRunningStopRecorder{Fake: runtime.NewFake()}
+			sp.stopErr = fmt.Errorf("k8s stop %q: %w: %w", "sky", runtime.ErrRuntimeUnavailable, context.DeadlineExceeded)
+			mgr := newTestManager(t, store, sp)
+
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			wake := time.Now().UTC().Format(time.RFC3339)
+			if err := store.SetMetadata(info.ID, "last_woke_at", wake); err != nil {
+				t.Fatalf("SetMetadata(last_woke_at): %v", err)
+			}
+
+			err = tc.suspend(mgr, info.ID)
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("Suspend = %v, want an error wrapping runtime.ErrRuntimeUnavailable", err)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Suspend = %v, want the cause (context.DeadlineExceeded) kept", err)
+			}
+			if sp.stopCalls != 1 {
+				t.Fatalf("Stop calls = %d, want 1", sp.stopCalls)
+			}
+			got, err := mgr.Get(info.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.State == StateSuspended {
+				t.Fatalf("State = %q after a teardown that could not reach the runtime, want not suspended", got.State)
+			}
+			if tc.wakeStamp {
+				b, err := store.Get(info.ID)
+				if err != nil {
+					t.Fatalf("store.Get: %v", err)
+				}
+				if b.Metadata["last_woke_at"] != wake {
+					t.Fatalf("last_woke_at = %q, want the cleared stamp %q restored", b.Metadata["last_woke_at"], wake)
+				}
+			}
+		})
+	}
+}
