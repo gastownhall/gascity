@@ -260,8 +260,10 @@ func TestDemandReadTrace_RecordsEveryLegOpTierRows(t *testing.T) {
 	wants := map[demandReadKey]want{
 		{demandReadPointSessionCensus, city, "list_sessions", demandReadTierCached}: {0, -1},
 		{demandReadPointSessionCensus, rig, "list_sessions", demandReadTierCached}:  {0, 0},
-		{demandReadPointAssigned, city, "list_in_progress", demandReadTierCached}:   {0, -1},
-		{demandReadPointAssigned, rig, "list_in_progress", demandReadTierCached}:    {0, 0},
+		// listFreshBothTiersForControllerDemand reads the live tier first so an
+		// agent's out-of-band claim is never missed.
+		{demandReadPointAssigned, city, "list_in_progress", demandReadTierLive}:     {0, -1},
+		{demandReadPointAssigned, rig, "list_in_progress", demandReadTierLive}:      {0, advanceListInProgress},
 		{demandReadPointAssigned, city, "list_open", demandReadTierLive}:            {0, -1},
 		{demandReadPointAssigned, rig, "list_open", demandReadTierLive}:             {2, advanceListOpenLive},
 		{demandReadPointAssigned, city, "list_open", demandReadTierCached}:          {0, -1},

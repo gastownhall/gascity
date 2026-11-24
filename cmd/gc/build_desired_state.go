@@ -1929,8 +1929,8 @@ func collectAssignedWorkBeadsWithStores(
 			// across every store before any ready handoff probes, so already
 			// active work never waits behind unrelated ready scans.
 			start := pass.now()
-			inProgress, err := reads.Cached(source.store, beads.ListQuery{Status: "in_progress"})
-			pass.read(read("list_in_progress", demandReadTierCached), start, len(inProgress), err)
+			inProgress, err := reads.Fresh(source.store, beads.ListQuery{Status: "in_progress"})
+			pass.read(read("list_in_progress", demandReadTierLive), start, len(inProgress), err)
 			if err == nil {
 				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 			} else {
@@ -3120,6 +3120,31 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 		return handles.Live.List(query)
 	}
 	return rows, err
+}
+
+func listFreshBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+	handles := beads.HandlesFor(store)
+	// Claims are written by agent processes, outside the controller's cache
+	// coordinator. A cached-first read can miss the exact open -> in_progress
+	// transition that keeps the claimant alive: the ready row disappears, no
+	// assigned-work row replaces it, and the reconciler drains the live worker.
+	liveRows, liveErr := handles.Live.List(query)
+	if liveErr == nil {
+		return liveRows, nil
+	}
+	if !beads.IsPartialResult(liveErr) {
+		liveRows = nil
+	}
+	cachedRows, cachedErr := handles.Cached.List(query)
+	if cachedErr != nil && !beads.IsPartialResult(cachedErr) {
+		cachedRows = nil
+	}
+	rows := mergeReadyRowsByID(cachedRows, liveRows)
+	joined := errors.Join(liveErr, cachedErr)
+	if joined != nil && len(rows) > 0 && !beads.IsPartialResult(joined) {
+		joined = &beads.PartialResultError{Op: "controller assigned-work demand", Err: joined}
+	}
+	return rows, joined
 }
 
 // listOpenForControllerDemandLive reads open work for the controller-demand and
