@@ -144,6 +144,47 @@ func TestReserveDrainMemberCASContention(t *testing.T) {
 	}
 }
 
+// TestReserveDrainMemberTakesOverMissingOwner covers a reservation whose
+// owner no longer resolves anywhere in the drain's residency frame — a drain
+// control purged or deleted without releasing it. The slot is dead and the
+// reserving drain takes it, through the legacy write and through the CAS.
+func TestReserveDrainMemberTakesOverMissingOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		store      func(t *testing.T) *beads.MemStore
+		wantWriter bool
+	}{
+		{name: "legacy write", store: func(*testing.T) *beads.MemStore { return beads.NewMemStore() }},
+		{name: "conditional writer", store: func(t *testing.T) *beads.MemStore { return newStampedDrainStore(t, gate.Auto) }, wantWriter: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := tc.store(t)
+			writer, _, err := beads.ResolveConditionalWriter(store)
+			if err != nil {
+				t.Fatalf("ResolveConditionalWriter: %v", err)
+			}
+			if got := writer != nil; got != tc.wantWriter {
+				t.Fatalf("conditional writer resolved = %v, want %v", got, tc.wantWriter)
+			}
+			control, member := newDrainReservationFixtures(t, store)
+			const purged = "gc-purged-drain"
+			if _, err := store.Get(purged); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("Get(%s) error = %v, want not found", purged, err)
+			}
+			if err := store.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, purged); err != nil {
+				t.Fatalf("stamp stale reservation: %v", err)
+			}
+
+			if err := reserveDrainMember(beadstest.Graph(store), control, member, ProcessOptions{Work: beadstest.Work(store)}); err != nil {
+				t.Fatalf("reserveDrainMember over a missing owner: %v", err)
+			}
+			if owner := reservationOwner(t, store, member.ID); owner != control.ID {
+				t.Fatalf("owner = %q, want taken over by %s", owner, control.ID)
+			}
+		})
+	}
+}
+
 func TestReserveDrainMemberCASReentryIsIdempotent(t *testing.T) {
 	store := newStampedDrainStore(t, gate.Auto)
 	control, member := newDrainReservationFixtures(t, store)
