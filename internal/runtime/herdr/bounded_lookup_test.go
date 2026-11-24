@@ -67,6 +67,86 @@ func lookupProvider(t *testing.T) (*Provider, string) {
 	return p, dir
 }
 
+// A timed-out existence check is an error, not "absent". Each lookup tier
+// (agent get, the agent list fallback, the bound pane's process-info) hung:
+// Start fails with ErrRuntimeUnavailable and the deadline, so the launch path
+// defers instead of reading the session as absent, and nothing past the check ran: no
+// workspace/tab/pane verb, no agent start, no pre_start.
+func TestStartExistenceCheckTimeoutIsNotAbsence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, p *Provider, dir string)
+	}{
+		{"hung agent get", func(t *testing.T, _ *Provider, dir string) { touchFile(t, dir, "hang_agent_get") }},
+		{"hung agent list", func(t *testing.T, _ *Provider, dir string) { touchFile(t, dir, "hang_agent_list") }},
+		{"hung pane process-info", func(t *testing.T, p *Provider, dir string) {
+			touchFile(t, dir, "hang_pane_process-info")
+			if err := p.SetMeta("gastown__worker", metaBoundPane, "%9"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, dir := lookupProvider(t)
+			tc.setup(t, p, dir)
+			marker := filepath.Join(t.TempDir(), "prestart-ran")
+			cfg := runtime.Config{Command: "claude", PreStart: []string{fixtureTouch(marker)}}
+
+			err := p.start(context.Background(), "gastown__worker", cfg)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("start = %v; want it to wrap context.DeadlineExceeded", err)
+			}
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("start = %v; want it to wrap runtime.ErrRuntimeUnavailable", err)
+			}
+			if errors.Is(err, runtime.ErrSessionExists) || runtime.IsSessionGone(err) {
+				t.Fatalf("start = %v; a timeout must read as neither exists nor gone", err)
+			}
+			b, _ := os.ReadFile(filepath.Join(dir, "calls.log"))
+			for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				if strings.HasPrefix(line, "workspace") || strings.HasPrefix(line, "tab") ||
+					strings.HasPrefix(line, "agent start") ||
+					(strings.HasPrefix(line, "pane") && !strings.HasPrefix(line, "pane process-info")) {
+					t.Fatalf("start ran %q after an unanswered existence check:\n%s", line, b)
+				}
+			}
+			if _, statErr := os.Stat(marker); statErr == nil {
+				t.Fatal("pre_start ran after an unanswered existence check")
+			}
+		})
+	}
+}
+
+// A lookup error that is not a timeout still reads
+// as "not running", so start proceeds exactly as before.
+func TestStartExistenceCheckOtherErrorProceeds(t *testing.T) {
+	p, dir := lookupProvider(t)
+	touchFile(t, dir, "get_fails")
+	marker := filepath.Join(t.TempDir(), "prestart-ran")
+	cfg := runtime.Config{Command: "claude", PreStart: []string{fixtureTouch(marker)}}
+
+	if err := p.start(context.Background(), "gastown__worker", cfg); err != nil {
+		t.Fatalf("start = %v; a non-timeout lookup error must still proceed", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "calls.log"))
+	if !strings.Contains(string(b), "agent start") {
+		t.Fatalf("start never launched the agent:\n%s", b)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("pre_start did not run: %v", err)
+	}
+}
+
+// A live session still reports ErrSessionExists.
+func TestStartExistenceCheckRunningStillExists(t *testing.T) {
+	p, dir := lookupProvider(t)
+	touchFile(t, dir, "get_running")
+	err := p.start(context.Background(), "gastown__worker", runtime.Config{Command: "claude"})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("start = %v; want ErrSessionExists", err)
+	}
+}
+
 // walkProvider has three bound sessions s1..s3, all running, and one registry-only
 // agent. hang is the session whose `agent get` stalls ("" = none).
 func walkProvider(t *testing.T, hang string) *Provider {

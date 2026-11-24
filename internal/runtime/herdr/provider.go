@@ -101,7 +101,17 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // separated so tests can drive it against a fake herdr CLI without booting a
 // real session-server socket (mirroring tmux's Start/doStartSession split).
 func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) error {
-	if p.IsRunning(name) {
+	// The existence check runs on Start's ctx and tells a lookup that never
+	// answered from one that answered "absent": treating a timeout as absence
+	// would stage, pre_start and place a second copy of a live session. A lookup
+	// that ran out of time wraps ErrRuntimeUnavailable so the launch path
+	// defers. Any other lookup error is still read as not running, as IsRunning
+	// does.
+	_, running, err := resolveBinding(p.lookupOps(ctx, name))
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("herdr: check existing session %q: %w: %w", name, runtime.ErrRuntimeUnavailable, err)
+	}
+	if err == nil && running {
 		return runtime.ErrSessionExists
 	}
 	if err := startCommandRefusal(cfg); err != nil {
