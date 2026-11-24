@@ -65,6 +65,19 @@ func TestEnsureClaudeProjectStateMergesExistingState(t *testing.T) {
 	}, nil)
 }
 
+// With a writable config dir, an unwritable HOME does not prevent seeding the
+// project's trust state in the config dir.
+func TestEnsureClaudeProjectStateSeedsOnlyTheConfigDirWhenHomeIsUnwritable(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), "claude")
+	projectPath := filepath.Join(t.TempDir(), "city")
+	env := &Env{vars: map[string]string{"HOME": unwritableHomeForTest(t), "CLAUDE_CONFIG_DIR": configDir}}
+
+	if err := EnsureClaudeProjectState(env, projectPath); err != nil {
+		t.Fatalf("EnsureClaudeProjectState with an unwritable HOME and a writable CLAUDE_CONFIG_DIR: %v", err)
+	}
+	assertClaudeProjectTrustedForTest(t, filepath.Join(configDir, ".claude.json"), projectPath, nil, nil)
+}
+
 // With no CLAUDE_CONFIG_DIR, HOME is the only place Claude reads its state from,
 // so an unwritable one is an error to report, not something to route around.
 func TestEnsureClaudeProjectStateFailsWhenHomeIsTheOnlyStateLocation(t *testing.T) {
