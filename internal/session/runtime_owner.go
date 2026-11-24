@@ -4,14 +4,18 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // runtimeOwnerKey is the session metadata key holding the runtime-owner
@@ -55,10 +59,13 @@ func parseRuntimeOwner(raw string) (runtimeOwner, error) {
 // runtime, and a start would run a second one beside it. A record under this
 // uid, from another boot, or whose roots are all gone lets the start proceed;
 // an unreadable or malformed record is logged and lets it proceed too, since
-// the gate refuses only on identity it verified. A failed row read is
-// returned, wrapped.
+// the gate refuses only on identity it verified. A session with no row has
+// no record and proceeds; any other failed row read is returned, wrapped.
 func (m *Manager) checkRuntimeOwner(sessionID string) error {
 	b, err := m.store.Get(sessionID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("checking runtime owner of session %q: %w", sessionID, err)
 	}
@@ -92,4 +99,61 @@ func (m *Manager) checkRuntimeOwner(sessionID string) error {
 		"stop it as uid %d (gc stop or gc supervisor stop as that user) or run the supervisor as uid %d, then clear any leftover record with "+
 		"bd update %s --unset-metadata %s: %w",
 		sessionID, owner.UID, pids, owner.UID, owner.UID, sessionID, runtimeOwnerKey, runtime.ErrRuntimeUnavailable)
+}
+
+// recordRuntimeOwner writes sessionID's runtime-owner record after a start
+// whose provider Start succeeded: this process's euid, the boot id, and the
+// pid and start time of each root the scan reports for the session in this
+// city, tracked or not, that is not city infrastructure (which outlives
+// sessions and would hold the fence shut). A provider that cannot scan the
+// process table records nothing. Recording is best effort: the runtime is
+// already up, so a scan error, a root whose start time or classification is
+// unreadable, an empty root set or a failed write is logged with the
+// session and never fails the start. A failed scan still records the roots
+// it did report, and an empty root set still writes the record, which
+// retires one an earlier owner left.
+func (m *Manager) recordRuntimeOwner(sessionID string) {
+	scanner, ok := runtime.AsProcessTableScanner(m.sp)
+	if !ok || sessionID == "" {
+		return
+	}
+	found, scanErr := scanner.FindRuntimesBySessionID(sessionID)
+	if scanErr != nil {
+		log.Printf("session: recording runtime owner of %s: scanning for its runtime roots: %s", sessionID, proctable.SummarizeScanError(scanErr))
+	}
+	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	owner := runtimeOwner{UID: currentEUID(), Boot: runtimeLeaseBootID(), Roots: []runtimeOwnerRoot{}}
+	for _, live := range found {
+		if live.SessionID != sessionID {
+			continue
+		}
+		if cityPath != "" && pathutil.NormalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
+			continue
+		}
+		infrastructure, err := rootIsCityInfrastructure(live)
+		if err != nil {
+			log.Printf("session: recording runtime owner of %s: leaving root pid=%d out: %v", sessionID, live.PID, err)
+			continue
+		}
+		if infrastructure {
+			continue
+		}
+		start, err := pidutil.StartTime(live.PID)
+		if err != nil {
+			log.Printf("session: recording runtime owner of %s: leaving root pid=%d out: reading its start time: %v", sessionID, live.PID, err)
+			continue
+		}
+		owner.Roots = append(owner.Roots, runtimeOwnerRoot{PID: live.PID, Start: start})
+	}
+	if len(owner.Roots) == 0 {
+		log.Printf("session: recording runtime owner of %s: no runtime root found for it; a start under another uid will not be fenced", sessionID)
+	}
+	raw, err := json.Marshal(owner)
+	if err != nil {
+		log.Printf("session: recording runtime owner of %s: encoding the record: %v", sessionID, err)
+		return
+	}
+	if err := m.store.SetMetadata(sessionID, runtimeOwnerKey, string(raw)); err != nil {
+		log.Printf("session: recording runtime owner of %s: writing %s: %v", sessionID, runtimeOwnerKey, err)
+	}
 }

@@ -1251,6 +1251,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		}
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, inc.token) {
+				m.recordRuntimeOwner(b.ID)
 				if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 					return metaErr
 				}
@@ -1268,6 +1269,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
+		m.recordRuntimeOwner(b.ID)
 		turn := m.takeStartupTurn(sessName, inc.Fence().Token)
 		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 			if errors.Is(metaErr, ErrMintSuperseded) {

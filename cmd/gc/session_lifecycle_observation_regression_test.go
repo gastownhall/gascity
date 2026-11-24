@@ -184,6 +184,12 @@ func assertUnavailableStartRecoveryDeferred(
 	}
 	wantMetadata := maps.Clone(before)
 	wantMetadata["last_woke_at"] = ""
+	// The runtime-owner record (SESSION-START-029) is the start's own write
+	// after its provider Start; its content is the session package's
+	// contract, so its presence rides along here.
+	if v, ok := got.Metadata["runtime_owner"]; ok {
+		wantMetadata["runtime_owner"] = v
+	}
 	if got.Status != "open" || !maps.Equal(got.Metadata, wantMetadata) {
 		t.Fatalf("session after deferred recovery: status=%q metadata=%#v, want open %#v", got.Status, got.Metadata, wantMetadata)
 	}

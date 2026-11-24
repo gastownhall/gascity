@@ -194,6 +194,10 @@ var parityFindings = map[string]parityEntry{
 		"CONTRACT v5 A5; ORCH-NOTES C2c1 (sync SESS-045/046)", "legacy stamps the unknown_state_* markers and emits session.unknown_state (escalating at 30 minutes); v2 writes no marker and records reconciler.alert instead. Not a §12.2 item, and against the plan's event-parity rule (§2.3)",
 		[]string{"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at"},
 	},
+	"runtime-owner-record": {
+		"SESSION-START-029 (#5870 runtime-owner fence)", "legacy's start runs through the session Manager, which records the runtime-owner fence (the starting euid, boot id and runtime roots) on the row after its provider Start; v2's starts are the allocator's arms and effects, which write no record yet",
+		[]string{"runtime_owner"},
+	},
 	"named-trigger-clear": {"POOL-056 follow-up (ORCH-NOTES C5d ruling)", "legacy clears a preserved named row's stale trigger stamp; v2's A6 does not yet", []string{"gc.trigger_bead_id", "gc.trigger_bead_store_ref", "brain_parent_sid"}},
 	"drain-cancel-on-probe-error": {
 		"CONTRACT v5 O3, BEHAVIORS DRAIN-042", "legacy skips a drain whose running probe errors; v2's inventory still classifies the row, so A19's wake lens cancels the drain. No completion either way, but §12.2 does not list the cancel",
@@ -1013,6 +1017,62 @@ func stopPendingMeta(at string) []string {
 	return []string{"state", "draining", "state_reason", session.DrainAckStopPendingReason, "drain_at", at}
 }
 
+// runtimeOwnerRows names, per session-differential fixture, each row whose
+// legacy start records the runtime-owner fence (SESSION-START-029): legacy's
+// start runs through the session Manager, which writes the record after its
+// provider Start, while v2's starts are the allocator's arms and effects,
+// which write none yet. The runtime-owner-record finding accounts the row.
+var runtimeOwnerRows = map[string][]string{
+	"a parked seat whose pin is ready wakes in place":                                     {"gc-1"},
+	"a parked seat whose ready pin loses a full city cap to its own template still wakes": {"gc-1"},
+	"a stop-pending pool seat with work sleeps idle":                                      {"gc-1"},
+	"a resume voids a suspended drain (R16)":                                              {"gc-1"},
+	"a heartbeat-held seat whose runtime died respawns for its work":                      {"gc-1"},
+	"a seat whose user hold expired resumes for its work":                                 {"gc-1"},
+	"a wanted row whose provider health is unknown starts":                                {"gc-1"},
+	"a wanted seat's own crashed zombie is recycled once":                                 {"gc-1"},
+	"a wanted seat whose zombie shows a terminal provider error is parked":                {"gc-1"},
+	"a reset-pending seat whose agent stalled past its startup timeout is replaced":       {"gc-1"},
+	"no second create beside an unconfirmed create":                                       {"gc-1"},
+	"routed demand creates a pool row":                                                    {"gc-1"},
+	"a kill fence holds its row while demand creates another":                             {"gc-2"},
+	"a desired floor seat asleep with no wake reason stays open":                          {"gc-2"},
+	"a desired floor seat asleep on config drift stays open":                              {"gc-2"},
+	"a desired pending create past its deadline rolls back":                               {"gc-2"},
+	"a pending create whose start fails rolls back":                                       {"gc-3"},
+	"an always named session is created":                                                  {"gc-1"},
+	"a failed-create always named row is never started":                                   {"gc-1"},
+	"a configured named row's failed create closes":                                       {"gc-1"},
+	"a dead phantom of a configured name closes and keeps the identity's work":            {"gc-1"},
+	"a named row's drift restarts it in place":                                            {"gc-c"},
+	"a wanted asleep named row's drift is repaired and started":                           {"gc-c"},
+	"a wanted asleep named row's v5 hash is rebaselined and started":                      {"gc-c"},
+	"an explicit wake starts a parked named row":                                          {"gc-c"},
+	"a stale terminal mark does not park a named row":                                     {"gc-c"},
+	"a stale terminal mark does not hold a named row's crashed zombie":                    {"gc-c"},
+	"a stop-pending named row ends drained":                                               {"gc-c"},
+	"a closed named row is reopened":                                                      {"gc-c"},
+}
+
+// withRuntimeOwnerExplains adds each listed fixture's runtime-owner
+// accounting to its Explain. The map is copied, since several fixtures
+// share one.
+func withRuntimeOwnerExplains(fixtures []parityFixture, rows map[string][]string) []parityFixture {
+	for i := range fixtures {
+		ids, ok := rows[fixtures[i].Name]
+		if !ok {
+			continue
+		}
+		explain := make(map[string]string, len(fixtures[i].Explain)+len(ids))
+		maps.Copy(explain, fixtures[i].Explain)
+		for _, id := range ids {
+			explain["row:"+id+":*owner"] = "runtime-owner-record"
+		}
+		fixtures[i].Explain = explain
+	}
+	return fixtures
+}
+
 // parityFixtures are the fixtures, one or more per KEPT row of a registered
 // arm or effect kind.
 func parityFixtures() []parityFixture {
@@ -1149,7 +1209,7 @@ func parityFixtures() []parityFixture {
 		maps.Copy(out, more)
 		return out
 	}
-	return []parityFixture{
+	return withRuntimeOwnerExplains([]parityFixture{
 		{
 			// INC-024: a heal never reverts a durable suspend; the row write
 			// re-decides in its CAS (R2). (Legacy's own state heal turns the
@@ -1946,7 +2006,7 @@ func parityFixtures() []parityFixture {
 				"event:session.woke worker-1 []": "rollback-replacement-slot", "event:session.woke worker-2 []": "rollback-replacement-slot",
 			}),
 		},
-	}
+	}, runtimeOwnerRows)
 }
 
 // Kills drift between v2's merged arms and effects and legacy's tick on the

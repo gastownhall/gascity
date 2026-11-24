@@ -6,11 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -79,6 +83,169 @@ func TestStartUnderAnotherUIDRefusesWhileRecordedRuntimeLives(t *testing.T) {
 			}
 			if hasEventPrefix(sp.events, "start:") || hasEventPrefix(sp.events, "terminate:") {
 				t.Fatalf("events = %v, want no start and no terminate", sp.events)
+			}
+		})
+	}
+}
+
+// staleKeyScanProvider is an orphanScanProvider whose first failStarts
+// Starts die during startup, so a resume takes the stale-key relaunch.
+type staleKeyScanProvider struct {
+	*orphanScanProvider
+	failStarts int
+}
+
+func (p *staleKeyScanProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.failStarts > 0 {
+		p.failStarts--
+		p.events = append(p.events, "start-died:"+cfg.Env["GC_SESSION_ID"])
+		return fmt.Errorf("pane exited: %w", runtime.ErrSessionDiedDuringStartup)
+	}
+	return p.orphanScanProvider.Start(ctx, name, cfg)
+}
+
+// setCurrentEUID points the euid seam at uid for the test.
+func setCurrentEUID(t *testing.T, uid int) {
+	t.Helper()
+	prev := currentEUID
+	currentEUID = func() int { return uid }
+	t.Cleanup(func() { currentEUID = prev })
+}
+
+// classifyInfrastructure makes rootIsCityInfrastructure report the pids in
+// infra as city infrastructure, and every other root as not.
+func classifyInfrastructure(t *testing.T, infra ...int) {
+	t.Helper()
+	prev := rootIsCityInfrastructure
+	rootIsCityInfrastructure = func(live runtime.LiveRuntime) (bool, error) { return slices.Contains(infra, live.PID), nil }
+	t.Cleanup(func() { rootIsCityInfrastructure = prev })
+}
+
+// readRuntimeOwner decodes the row's runtime_owner record.
+func readRuntimeOwner(t *testing.T, mgr *Manager, id string) (runtimeOwner, bool) {
+	t.Helper()
+	b, err := mgr.store.Get(id)
+	if err != nil {
+		t.Fatalf("reading row %s: %v", id, err)
+	}
+	raw := b.Metadata["runtime_owner"]
+	if raw == "" {
+		return runtimeOwner{}, false
+	}
+	owner, err := parseRuntimeOwner(raw)
+	if err != nil {
+		t.Fatalf("runtime_owner %q: %v", raw, err)
+	}
+	return owner, true
+}
+
+// ownerScanResults are what the scan reports right after a start: the
+// session's own (tracked) runtime root, the same session's root in another
+// city, another session's root, and a city-infrastructure root carrying the
+// session's identity. Only the first is the session's runtime.
+func ownerScanResults(city string) []runtime.LiveRuntime {
+	return []runtime.LiveRuntime{
+		{PID: os.Getpid(), PPID: os.Getppid(), IsTracked: true},
+		{PID: os.Getpid() + 100001, IsTracked: true, City: city + "-elsewhere"},
+		{PID: os.Getpid() + 100002, IsTracked: true, SessionID: "other-session"},
+		{PID: os.Getpid() + 100003, IsTracked: true},
+	}
+}
+
+// AC-2: every gated start path whose provider Start succeeds (CreateSession,
+// Start, StartRuntimeOnly, and the stale-key relaunch) records the Manager's
+// euid, the current boot id, and the pid and start time of each root the
+// scan reports for that session and city that is not city infrastructure.
+func TestStartRecordsRuntimeOwnerAfterStart(t *testing.T) {
+	const euid = 4242
+	setCurrentEUID(t, euid)
+	classifyInfrastructure(t, os.Getpid()+100003)
+	selfStart, err := pidutil.StartTime(os.Getpid())
+	if err != nil {
+		t.Skipf("start time of the test process is unreadable here: %v", err)
+	}
+	want := runtimeOwner{UID: euid, Boot: runtimeLeaseBootID(), Roots: []runtimeOwnerRoot{{PID: os.Getpid(), Start: selfStart}}}
+
+	newTarget := func(t *testing.T) (*Manager, *staleKeyScanProvider) {
+		store := beads.NewMemStore()
+		sp := &staleKeyScanProvider{orphanScanProvider: &orphanScanProvider{Fake: runtime.NewFake(), city: t.TempDir()}}
+		sp.results = ownerScanResults(sp.city)
+		return newTestManager(t, store, sp, WithCityPath(sp.city), WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter)), sp
+	}
+	create := func(t *testing.T, mgr *Manager) Info {
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		return info
+	}
+	// suspended creates a session, suspends it and clears its record, so the
+	// resume under test is the only writer of the record it reads.
+	suspended := func(t *testing.T, mgr *Manager, meta map[string]string) Info {
+		info := create(t, mgr)
+		for k, v := range meta {
+			if err := mgr.store.SetMetadata(info.ID, k, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+			t.Fatalf("Suspend: %v", err)
+		}
+		if err := mgr.store.SetMetadata(info.ID, "runtime_owner", ""); err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	staleKey := map[string]string{"session_key": "k-stale", "resume_flag": "--resume"}
+
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, mgr *Manager) string
+	}{
+		{"CreateSession", func(t *testing.T, mgr *Manager) string { return create(t, mgr).ID }},
+		{"Start", func(t *testing.T, mgr *Manager) string {
+			info := suspended(t, mgr, nil)
+			if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			return info.ID
+		}},
+		{"StartRuntimeOnly", func(t *testing.T, mgr *Manager) string {
+			info := suspended(t, mgr, nil)
+			if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+				t.Fatalf("StartRuntimeOnly: %v", err)
+			}
+			return info.ID
+		}},
+		{"Start stale-key relaunch", func(t *testing.T, mgr *Manager) string {
+			info := suspended(t, mgr, staleKey)
+			mgr.sp.(*staleKeyScanProvider).failStarts = 1
+			if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, "claude --resume k-stale", runtime.Config{WorkDir: info.WorkDir}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			return info.ID
+		}},
+		{"StartRuntimeOnly stale-key relaunch", func(t *testing.T, mgr *Manager) string {
+			info := suspended(t, mgr, staleKey)
+			mgr.sp.(*staleKeyScanProvider).failStarts = 1
+			if err := startRuntimeOnly(t, mgr, info.ID, "claude --resume k-stale", runtime.Config{WorkDir: info.WorkDir}); err != nil {
+				t.Fatalf("StartRuntimeOnly: %v", err)
+			}
+			return info.ID
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp := newTarget(t)
+			id := tc.run(t, mgr)
+			if strings.Contains(tc.name, "stale-key") && !hasEventPrefix(sp.events, "start-died:") {
+				t.Fatalf("events = %v, want the resume to die and relaunch", sp.events)
+			}
+			got, ok := readRuntimeOwner(t, mgr, id)
+			if !ok {
+				t.Fatalf("row %s has no runtime_owner after a successful start", id)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("runtime_owner = %+v, want %+v", got, want)
 			}
 		})
 	}

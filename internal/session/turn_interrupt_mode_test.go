@@ -124,7 +124,7 @@ func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 		},
 		"pi": {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
-			now:  "IsRunning IsRunning IsRunning Pending IsRunning Stop IsRunning IsRunning IsRunning FindRuntimesBySessionID Start IsRunning NudgeNow(msg)",
+			now:  "IsRunning IsRunning IsRunning Pending IsRunning Stop IsRunning IsRunning IsRunning FindRuntimesBySessionID Start FindRuntimesBySessionID IsRunning NudgeNow(msg)",
 		},
 		"opencode": {
 			stop: "IsRunning IsRunning IsRunning Interrupt",

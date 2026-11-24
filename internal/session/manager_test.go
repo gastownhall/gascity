@@ -459,7 +459,7 @@ func TestCreateKillsUntrackedOrphanBeforeStart(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID, "find:"+info.ID)
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -488,7 +488,7 @@ func TestCreateLeavesAnInfrastructureRootAloneAndStarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	want := []string{"find:" + info.ID, "start:" + info.ID}
+	want := []string{"find:" + info.ID, "start:" + info.ID, "find:" + info.ID}
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -548,7 +548,7 @@ func TestCreateLeavesAnUnclassifiableRootRunningAndStarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	want := []string{"find:" + info.ID, "start:" + info.ID}
+	want := []string{"find:" + info.ID, "start:" + info.ID, "find:" + info.ID}
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -575,7 +575,7 @@ func TestCreateStartsAfterAPartialOrphanScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID, "find:"+info.ID)
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -680,7 +680,7 @@ func TestCreateSkipsTrackedRuntimeBeforeStart(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	want := []string{"find:" + info.ID, "start:" + info.ID}
+	want := []string{"find:" + info.ID, "start:" + info.ID, "find:" + info.ID}
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -703,7 +703,7 @@ func TestCreateSkipsUntrackedRuntimeFromOtherCityBeforeStart(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	want := []string{"find:" + info.ID, "start:" + info.ID}
+	want := []string{"find:" + info.ID, "start:" + info.ID, "find:" + info.ID}
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -731,7 +731,7 @@ func TestCreateKillsUntrackedOrphanFromSameCityBeforeStartWithNormalizedPath(t *
 		t.Fatalf("Create: %v", err)
 	}
 
-	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID, "find:"+info.ID)
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -900,7 +900,7 @@ func TestStartProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID, "find:"+info.ID)
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -918,7 +918,7 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("StartRuntimeOnly: %v", err)
 	}
-	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID, "find:"+info.ID)
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -1061,7 +1061,7 @@ func TestStartRuntimeOnlyTerminatesRootsTheProviderDoesNotClaim(t *testing.T) {
 			if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 				t.Fatalf("StartRuntimeOnly: %v", err)
 			}
-			want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+			want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID, "find:" + info.ID}
 			if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 				t.Fatalf("events = %v, want %v", sp.events, want)
 			}

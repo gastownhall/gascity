@@ -18,6 +18,7 @@ row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
 ## 1 crash (+1m19s)
 @ +39s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 @ +49s
 provider:RemoveMeta s-gc-1 resolved
@@ -54,6 +55,7 @@ row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
 ## 1 crash (+5m50s)
 @ +5m0s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 @ +5m10s
 provider:RemoveMeta s-gc-1 resolved
@@ -82,6 +84,7 @@ provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
 row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bead-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
@@ -161,6 +164,7 @@ provider:SetMeta s-gc-1 resolved
 ## 3 wake (+8m30s)
 @ +8m10s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 @ +8m20s
 provider:RemoveMeta s-gc-1 resolved
@@ -191,6 +195,7 @@ row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
@@ -227,6 +232,7 @@ provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 @ +30s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 @ +40s
 provider:RemoveMeta s-gc-1 resolved
@@ -249,6 +255,7 @@ row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bea
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:quarantined_until resolved
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
@@ -376,6 +383,7 @@ row:gc-1:stranded_event_emitted_at legacy="T+20s" v2="T+1m0s" [wait-sleep-lag]
 event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]} resolved
 @ +1m10s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:state legacy="active" v2="awake" [wait-sleep-lag]
 @ +1m20s
 provider:RemoveMeta s-gc-1 resolved
@@ -435,6 +443,7 @@ row:gc-c:last_woke_at legacy="T+6m0s" v2="" [idle-rewake-lag]
 row:gc-c:live_hash legacy="<changed>" v2="" [idle-rewake-lag]
 row:gc-c:primed_at legacy="T+6m0s" v2="" [idle-rewake-lag]
 row:gc-c:prompt_hash legacy="<changed>" v2="" [idle-rewake-lag]
+row:gc-c:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-c:sleep_reason legacy="" v2="assigned-work-exhausted" [idle-rewake-lag]
 row:gc-c:started_config_hash legacy="<changed>" v2="" [idle-rewake-lag]
 row:gc-c:started_launch_hash legacy="<changed>" v2="" [idle-rewake-lag]
@@ -756,6 +765,7 @@ provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
 row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bead-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
@@ -829,6 +839,7 @@ row:gc-c:live_hash legacy="<changed>" v2="" [idle-sleep-lag]
 row:gc-c:primed_at legacy="T+9m0s" v2="" [idle-sleep-lag]
 row:gc-c:prompt_hash legacy="<changed>" v2="" [idle-sleep-lag]
 row:gc-c:requested_sleep_after_idle legacy="10m" v2="" [sleep-policy-keys]
+row:gc-c:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-c:sleep_reason resolved
 row:gc-c:started_config_hash legacy="<changed>" v2="" [idle-sleep-lag]
 row:gc-c:started_launch_hash legacy="<changed>" v2="" [idle-sleep-lag]
@@ -896,6 +907,7 @@ provider:SetMeta s-gc-1 resolved
 ## 2 past the kill grace (+7m10s)
 @ +5m20s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 @ +5m30s
 provider:RemoveMeta s-gc-1 resolved
@@ -931,6 +943,7 @@ row:gc-1:state legacy="asleep" v2="suspended" [suspended-row-heal]
 ## 2 wake (+1m20s)
 @ +1m0s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:runtime_owner legacy="<changed>" v2="" [runtime-owner-record]
 row:gc-1:slept_at legacy="" v2="T+1m0s" [suspended-row-heal]
 row:gc-1:state legacy="active" v2="awake" [suspended-row-heal]
 @ +1m10s

@@ -265,8 +265,8 @@ func TestEnsureRunning_StaleKeyCheckOnUnconfirmedLivenessKeepsResumeState(t *tes
 			if got := callCount(sp.Fake, "Start"); got != 1 {
 				t.Errorf("Start called %d times, want 1 (no fresh retry)", got)
 			}
-			if got := callCount(sp.Fake, "FindRuntimesBySessionID"); got != 1 {
-				t.Errorf("orphan scans = %d, want only the one before the first Start", got)
+			if got := callCount(sp.Fake, "FindRuntimesBySessionID"); got != 2 {
+				t.Errorf("process-table scans = %d, want 2 (the orphan scan before the first Start and the runtime-owner record after it), none for a relaunch", got)
 			}
 			after := metadataOf(t, store, id)
 			for _, k := range []string{"session_key", "started_config_hash", "continuation_reset_pending"} {
