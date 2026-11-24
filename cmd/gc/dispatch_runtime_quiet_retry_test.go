@@ -20,6 +20,11 @@ import (
 // 1s floor forever. MEASURED on platform: two such beads consumed 13,419 of
 // 14,125 control dispatches (95%) in a 19-hour window while the other ~700
 // control beads waited behind them.
+//
+// The previous column is the pending baseline of the caller's previous
+// completed sweep (nil = no previous sweep, the one-shot and first --follow
+// case); a verbatim repeat of it stays quiet even without the source-side
+// MarkQuietControllerRetry mark.
 func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 	clearGCEnv(t)
 
@@ -29,9 +34,14 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 	tests := []struct {
 		name            string
 		serveErr        error
+		previous        workflowServePendingRefusals
 		wantPendingAny  bool
 		wantProcessed   bool
 		wantSweepGrowth bool
+		// wantPendingReason is the refusal text the drain must record for
+		// bead pl-mmneh in result.pending; empty means the drain must record
+		// no pending refusal at all.
+		wantPendingReason string
 	}{
 		{
 			name:     "quiet repeat does not pin the backoff",
@@ -63,12 +73,16 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			serveErr:        dispatch.MarkQuietControllerRetry(pending),
 			wantPendingAny:  false,
 			wantSweepGrowth: true,
+			// The mark wraps the same refusal text an unmarked repeat of this
+			// pending would give, so the recorded baseline compares equal.
+			wantPendingReason: pending.Error(),
 		},
 		{
-			name:            "first pending refusal still wakes the loop",
-			serveErr:        pending,
-			wantPendingAny:  true,
-			wantSweepGrowth: false,
+			name:              "first pending refusal still wakes the loop",
+			serveErr:          pending,
+			wantPendingAny:    true,
+			wantSweepGrowth:   false,
+			wantPendingReason: pending.Error(),
 		},
 		{
 			// A no-op dispatch (the bead is no longer open, a spawned fanout
@@ -78,6 +92,43 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			wantPendingAny:  false,
 			wantProcessed:   false,
 			wantSweepGrowth: true,
+		},
+		{
+			// A verbatim repeat of the previous completed sweep's refusal is
+			// quiet without any mark: ordinary pending is zero-write by contract
+			// (the ErrControlDriftPending doc), so the loop, not the source,
+			// recognizes the repeat (gastownhall/gascity#6025).
+			name:              "verbatim repeat of the previous sweep stays quiet",
+			serveErr:          pending,
+			previous:          workflowServePendingRefusals{"pl-mmneh": pending.Error()},
+			wantPendingAny:    false,
+			wantSweepGrowth:   true,
+			wantPendingReason: pending.Error(),
+		},
+		{
+			name:              "changed refusal text reports pending",
+			serveErr:          pending,
+			previous:          workflowServePendingRefusals{"pl-mmneh": fmt.Errorf("%w: rig %q not found in city config", dispatch.ErrControlPending, "oldrig").Error()},
+			wantPendingAny:    true,
+			wantSweepGrowth:   false,
+			wantPendingReason: pending.Error(),
+		},
+		{
+			name:              "another bead's baseline does not quiet this bead",
+			serveErr:          pending,
+			previous:          workflowServePendingRefusals{"pl-other": pending.Error()},
+			wantPendingAny:    true,
+			wantSweepGrowth:   false,
+			wantPendingReason: pending.Error(),
+		},
+		{
+			// A pending baseline never quiets a transient refusal: those keep
+			// their own (persisted) repeat story.
+			name:            "pending baseline does not quiet a transient refusal",
+			serveErr:        blocked,
+			previous:        workflowServePendingRefusals{"pl-mmneh": pending.Error()},
+			wantPendingAny:  true,
+			wantSweepGrowth: false,
 		},
 	}
 
@@ -106,7 +157,7 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 
 			cityPath := t.TempDir()
 			result, err := drainWorkflowServeWork(
-				config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, nil, io.Discard)
+				config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, tt.previous, io.Discard)
 			if err != nil {
 				t.Fatalf("drainWorkflowServeWork: %v", err)
 			}
@@ -118,6 +169,15 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			}
 			if result.pendingAny != tt.wantPendingAny {
 				t.Fatalf("pendingAny = %v, want %v", result.pendingAny, tt.wantPendingAny)
+			}
+			if got := result.pending["pl-mmneh"]; got != tt.wantPendingReason {
+				t.Fatalf("result.pending[pl-mmneh] = %q, want %q", got, tt.wantPendingReason)
+			}
+			if tt.wantPendingReason == "" && len(result.pending) != 0 {
+				t.Fatalf("result.pending = %v, want no recorded refusal for this outcome", result.pending)
+			}
+			if tt.wantPendingReason != "" && len(result.pending) != 1 {
+				t.Fatalf("result.pending = %v, want exactly the one recorded refusal", result.pending)
 			}
 
 			// runWorkflowServeFollow's own arithmetic: pendingAny resets
@@ -373,5 +433,62 @@ func TestRunWorkflowServeFollowNewPendingResetsBackoff(t *testing.T) {
 				t.Fatalf("waits = %+v, want %+v", *waits, tt.want)
 			}
 		})
+	}
+}
+
+// TestDrainWorkflowServeWorkRepeatedPendingDoesNotPinBackoff is the
+// ErrControlPending twin of the quiet-retry fix above (gastownhall/gascity#6025).
+// A workflow-finalize whose `blocks` dependency is still open returns a bare
+// ErrControlPending (internal/dispatch processWorkflowFinalize) on every sweep
+// for as long as the blocker stays open, which can be days. The first sweep
+// must still report pending, but a verbatim repeat of the same bead's pending
+// refusal on the next sweep must not, or runWorkflowServeFollow resets
+// idleSweeps on every sweep and followSleepDuration never leaves its 1s floor.
+func TestDrainWorkflowServeWorkRepeatedPendingDoesNotPinBackoff(t *testing.T) {
+	clearGCEnv(t)
+
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+	})
+
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return []hookBead{{ID: "gc-blockedfin", Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}}}, nil
+	}
+	controlDispatcherServe = func(_, _, _ string, _, _ io.Writer, _ *executionEmitDeferral) error {
+		return dispatch.ErrControlPending
+	}
+
+	cityPath := t.TempDir()
+	idleSweeps := 0
+	// The --follow loop feeds each completed sweep's pending set to the next
+	// drain as its baseline; the sweeps here do the same.
+	var previous workflowServePendingRefusals
+	for sweep := 1; sweep <= 3; sweep++ {
+		result, err := drainWorkflowServeWork(
+			config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, previous, io.Discard)
+		if err != nil {
+			t.Fatalf("sweep %d: drainWorkflowServeWork: %v", sweep, err)
+		}
+		previous = result.pending
+		if sweep == 1 {
+			if !result.pendingAny {
+				t.Fatalf("sweep 1: pendingAny = false, want true for the first pending refusal")
+			}
+			continue
+		}
+		if result.pendingAny {
+			t.Fatalf("sweep %d: pendingAny = true for a verbatim repeat of the same bead's ErrControlPending; "+
+				"runWorkflowServeFollow resets idleSweeps on it, pinning followSleepDuration at %s forever",
+				sweep, followSleepDuration(0))
+		}
+		if !result.processedAny {
+			idleSweeps++
+		}
+	}
+	if followSleepDuration(idleSweeps) <= followSleepDuration(0) {
+		t.Fatalf("idle backoff stayed at %s after repeated identical pending sweeps, want it to grow", followSleepDuration(idleSweeps))
 	}
 }
