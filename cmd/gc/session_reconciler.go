@@ -4838,6 +4838,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
+			if worktreeHoldsWake(trace, target.tp, name) {
+				continue
+			}
 			if isFailedCreateSessionInfo(info) {
 				if trace != nil {
 					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeFailedCreate, target.tp.TemplateName, name, traceRecordPayload{
@@ -5374,6 +5377,28 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	snapshot.WriteBackReconcileInfos(infoByID)
 
 	return plannedWakes
+}
+
+// worktreeHoldsWake reports whether the reconciler must not start the pool
+// seat tp names this tick for its own work's managed worktree, and traces
+// why. Realization refused that work's evidence (TemplateParams.
+// WorktreeRefusal): the seat stays desired, holding its claim, and never
+// starts into the work dir its row still records (poolSeatKeptForRefusedWork).
+// Or the build observed the seat running and did not verify the worktree
+// (TemplateParams.WorktreeUnverified): a runtime gone since starts only once
+// the next build verifies it.
+func worktreeHoldsWake(trace *sessionReconcilerTraceCycle, tp TemplateParams, name string) bool {
+	switch {
+	case tp.WorktreeRefusal != "":
+		trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWorktreeRefused, TraceOutcomeHeld, tp.TemplateName, name, traceRecordPayload{
+			"refusal": tp.WorktreeRefusal,
+		})
+		return true
+	case tp.WorktreeUnverified:
+		trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWorktreeUnverified, TraceOutcomeDeferred, tp.TemplateName, name, nil)
+		return true
+	}
+	return false
 }
 
 func cachedSessionPeek(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) func(lines int) (string, error) {

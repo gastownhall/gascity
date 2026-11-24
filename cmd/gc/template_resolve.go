@@ -131,6 +131,23 @@ type TemplateParams struct {
 	// it when its fresh read finds that bead gone: an operator close won
 	// the race (mc-58gr9).
 	NamedCanonicalOnly bool
+	// WorktreeRefusal is why a pool seat resuming its own assigned work is
+	// desired but must not start: realization refused that work's
+	// managed-worktree evidence, or failed to write the binding that places
+	// the seat in it (poolSeatKeptForRefusedWork). The seat keeps its row
+	// unbound, and the reconciler starts it once a later build binds it.
+	// Until then a seat that would wake, a heartbeat's crash recovery
+	// included, is held with its claim, and one that would not is freed as
+	// any asleep seat. Empty for every other row.
+	WorktreeRefusal string
+	// WorktreeUnverified marks a pool seat resuming the trigger its row
+	// records, for work with a managed-worktree spec, that realization bound
+	// without verifying that worktree because the seat was running
+	// (poolTriggerBindWorkDir). A seat whose runtime is gone by the time the
+	// reconciler reads it is not started that tick: the next build verifies
+	// the worktree and binds the seat, or refuses it (WorktreeRefusal). False
+	// for every other row.
+	WorktreeUnverified bool
 	// ManualSession marks a discovered root created outside pool scale logic
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.

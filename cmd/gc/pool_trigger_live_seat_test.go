@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -25,11 +26,18 @@ import (
 // `gc worktree ensure` does, and returns its spec and verified path.
 func liveSeatManagedSpec(t *testing.T, beadID string) (worktree.Spec, string) {
 	t.Helper()
+	return liveSeatManagedSpecFor(t, beadID, "rig:r1")
+}
+
+// liveSeatManagedSpecFor is liveSeatManagedSpec for a bead whose owning store
+// is storeRef.
+func liveSeatManagedSpecFor(t *testing.T, beadID, storeRef string) (worktree.Spec, string) {
+	t.Helper()
 	repo, base := worktreeTestRepo(t)
 	root := t.TempDir()
 	spec := worktree.Spec{
 		RepoDir: repo, Root: root, Path: filepath.Join(root, beadID), Branch: "work/" + beadID, Base: base,
-		BeadID: beadID, StoreRef: "rig:r1", Creator: "provisioner",
+		BeadID: beadID, StoreRef: storeRef, Creator: "provisioner",
 		Owner: "provisioner", Generation: "1", Lifecycle: worktree.LifecycleActive,
 	}
 	report, err := worktree.Ensure(spec)
@@ -1305,11 +1313,13 @@ func TestLegacySameTriggerStaleResumeSeatMovesToItsWorktree(t *testing.T) {
 	}
 }
 
-// A seat the resume tier re-points at work whose worktree evidence is
-// incomplete is skipped: realization reports it and writes no binding, so the
-// row keeps its trigger and work dir instead of being pointed at the pool's
-// own directory (gastownhall/gascity#5753).
-func TestLegacyResumeIncompleteWorktreeEvidenceSkipsSeat(t *testing.T) {
+// A seat the resume tier re-points at its own assigned work whose worktree
+// evidence is incomplete is kept, unbound: realization reports it and writes
+// no binding, so the row keeps its trigger and work dir instead of being
+// pointed at the pool's own directory (gastownhall/gascity#5753), and the
+// seat stays desired, marked so that the reconciler does not start it
+// (poolSeatKeptForRefusedWork).
+func TestLegacyResumeIncompleteWorktreeEvidenceKeepsSeatUnbound(t *testing.T) {
 	_, pathA := liveSeatManagedSpec(t, "gc-a")
 	specB, _ := liveSeatManagedSpec(t, "gc-b")
 	incomplete := func(id string) beads.Bead {
@@ -1332,8 +1342,77 @@ func TestLegacyResumeIncompleteWorktreeEvidenceSkipsSeat(t *testing.T) {
 	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != pathA {
 		t.Fatalf("gc.work_dir = %q, want %q, unchanged (the pool directory is %q); stderr=%s", got, pathA, res.cfg.Agents[0].WorkDir, res.stderr)
 	}
-	if !strings.Contains(res.stderr, "(skipping)") {
-		t.Fatalf("stderr = %q, want the item reported skipped", res.stderr)
+	if got := res.probe.bindWrites.Load(); got != 0 {
+		t.Fatalf("binding writes = %d, want 0 for unusable evidence", got)
+	}
+	tp, ok := res.base[res.seatName]
+	if !ok {
+		t.Fatalf("realization dropped the seat holding the refused work; desired=%v stderr=%s", mapKeys(res.base), res.stderr)
+	}
+	if !strings.Contains(tp.WorktreeRefusal, beadmeta.WorktreeLifecycleMetadataKey) {
+		t.Fatalf("WorktreeRefusal = %q, want the refusal naming the missing %s", tp.WorktreeRefusal, beadmeta.WorktreeLifecycleMetadataKey)
+	}
+	if !strings.Contains(res.stderr, "(keeping the seat, not started") || strings.Contains(res.stderr, "(skipping)") {
+		t.Fatalf("stderr = %q, want the seat reported kept, not skipped", res.stderr)
+	}
+}
+
+// A live seat the resume tier resumes for the trigger its row records keeps
+// the work dir it runs in, and realization does not verify its worktree: the
+// verified path would go unused (poolSeatResumesOwnTrigger). It records the
+// skip instead (TemplateParams.WorktreeUnverified), so the reconciler does
+// not start the seat should its runtime die before the next build verifies
+// it. Evidence the request already refuses costs no probe and is refused,
+// live seat or not (TemplateParams.WorktreeRefusal). A seat that is not
+// running is verified, and starts verified.
+func TestLegacyLiveSeatResumingItsTriggerSkipsVerify(t *testing.T) {
+	specB, pathB := liveSeatManagedSpec(t, "gc-b")
+	usable := func(id string) beads.Bead { return managedAssignedWork(specB, id) }
+	for _, tc := range []struct {
+		name    string
+		work    func(id string) beads.Bead
+		running bool
+		// verifies is realization's worktree probes; refusal what the
+		// seat's WorktreeRefusal names ("" for none); unverified whether its
+		// template records the skipped verification.
+		verifies   int64
+		refusal    string
+		unverified bool
+	}{
+		{name: "usable evidence", work: usable, running: true, unverified: true},
+		{name: "incomplete evidence", work: func(id string) beads.Bead {
+			wb := managedAssignedWork(specB, id)
+			delete(wb.Metadata, beadmeta.WorktreeLifecycleMetadataKey)
+			return wb
+		}, running: true, refusal: beadmeta.WorktreeLifecycleMetadataKey},
+		{name: "usable evidence, seat not running", work: usable, verifies: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := liveSeatReuse{
+				seatDir: pathB, running: tc.running, extra: map[string]string{beadmeta.TriggerBeadIDMetadataKey: "gc-b"},
+				request: func(id string) SessionRequest {
+					cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(3)}}}
+					return assignedWorkRequest(t, cfg, tc.work(id), nil, []string{"r1"}, []beads.Bead{sessionBead(id, "open")})
+				},
+				assigned: func(id string) []beads.Bead { return []beads.Bead{tc.work(id)} },
+			}.reused(t)
+			if got := res.probe.worktreeVerifies.Load(); got != tc.verifies {
+				t.Fatalf("worktree verifies = %d, want %d", got, tc.verifies)
+			}
+			tp := res.base[res.seatName]
+			switch {
+			case tc.refusal == "" && tp.WorktreeRefusal != "":
+				t.Fatalf("WorktreeRefusal = %q, want none; stderr=%s", tp.WorktreeRefusal, res.stderr)
+			case !strings.Contains(tp.WorktreeRefusal, tc.refusal):
+				t.Fatalf("WorktreeRefusal = %q, want one naming %q; stderr=%s", tp.WorktreeRefusal, tc.refusal, res.stderr)
+			}
+			if tp.WorktreeUnverified != tc.unverified {
+				t.Fatalf("WorktreeUnverified = %v, want %v", tp.WorktreeUnverified, tc.unverified)
+			}
+			if got := res.row(t).Metadata[beadmeta.WorkDirMetadataKey]; got != pathB {
+				t.Fatalf("gc.work_dir = %q, want %q, where the seat runs", got, pathB)
+			}
+		})
 	}
 }
 
@@ -1388,6 +1467,412 @@ func TestLegacyResumeUnmanagedAssignedWorkBindsPoolDirectory(t *testing.T) {
 			}
 			if got := res.probe.worktreeVerifies.Load(); got != 0 {
 				t.Fatalf("worktree verifies = %d, want 0", got)
+			}
+		})
+	}
+}
+
+// ownWorkResumeTick is a legacy controller over a pool whose seat worker-1
+// is not running and holds its trigger, work in progress whose worktree
+// evidence and the seat's recorded work dir evidence returns for the work's
+// ID; the work also records that dir under the legacy work_dir key, as a
+// provisioner publishes it (hookWorktreeMetadataPatch). With sibling, the
+// running seat worker-2 holds work of its own, so the pool's template is
+// desired whatever becomes of worker-1. Each prepare hook then adjusts the
+// store before the first tick: the seat's and the work's IDs name them. A
+// tick is desired state then the reconciler
+// (buildDesiredStateWithSessionBeads, beadReconcileTick); result, trace and
+// stderr are the last tick's.
+type ownWorkResumeTick struct {
+	store    beads.Store
+	sp       *runtime.Fake
+	cfg      *config.City
+	cityPath string
+	cr       *CityRuntime
+	seatID   string
+	workID   string
+	seatDir  string
+	result   DesiredStateResult
+	trace    *sessionReconcilerTraceCycle
+	stderr   string
+}
+
+// runOwnWorkResumeTick runs one tick of a new ownWorkResumeTick.
+func runOwnWorkResumeTick(t *testing.T, evidence func(t *testing.T, workID string) (map[string]string, string), sibling bool, prepare ...func(t *testing.T, store beads.Store, seatID, workID string)) ownWorkResumeTick {
+	t.Helper()
+	r := newOwnWorkResumeTick(t, evidence, sibling, prepare...)
+	r.tick(t, nil)
+	return *r
+}
+
+func newOwnWorkResumeTick(t *testing.T, evidence func(t *testing.T, workID string) (map[string]string, string), sibling bool, prepare ...func(t *testing.T, store beads.Store, seatID, workID string)) *ownWorkResumeTick {
+	t.Helper()
+	cityPath := t.TempDir()
+	cfg := liveSeatAgent(t, 0, 2)
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	work := createTickWork(t, store)
+	meta, seatDir := evidence(t, work.ID)
+	meta[beadmeta.LegacyWorkDirMetadataKey] = seatDir
+	seat := createTickPoolSeat(t, store, "worker-1", "1", "asleep", work.ID, seatDir)
+	assignTickWork(t, store, work.ID, seat.ID, meta)
+	if sibling {
+		poolDir := cfg.Agents[0].WorkDir
+		otherWork := createTickWork(t, store)
+		other := createTickPoolSeat(t, store, "worker-2", "2", "active", otherWork.ID, poolDir)
+		assignTickWork(t, store, otherWork.ID, other.ID, nil)
+		if err := sp.Start(context.Background(), "worker-2", runtime.Config{WorkDir: poolDir}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, adjust := range prepare {
+		adjust(t, store, seat.ID, work.ID)
+	}
+	return &ownWorkResumeTick{
+		store: store, sp: sp, cfg: cfg, cityPath: cityPath, seatID: seat.ID, workID: work.ID, seatDir: seatDir,
+		cr: &CityRuntime{
+			cityPath: cityPath, cityName: "test-city", cfg: cfg, sp: sp, standaloneCityStore: store,
+			sessionDrains: newDrainTracker(), rec: events.Discard, stdout: io.Discard,
+		},
+	}
+}
+
+// tick runs one controller tick. afterBuild, when set, runs between the
+// build and the reconciler.
+func (r *ownWorkResumeTick) tick(t *testing.T, afterBuild func()) {
+	t.Helper()
+	snapshot, err := loadSessionBeadSnapshot(r.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	r.result = buildDesiredStateWithSessionBeads("test-city", r.cityPath, time.Now().UTC(), r.cfg, r.sp, r.store, nil, snapshot, nil, &stderr)
+	if afterBuild != nil {
+		afterBuild()
+	}
+	// The reconciler reads the rows the build bound, as the controller's tick
+	// reloads its snapshot after the build.
+	if snapshot, err = loadSessionBeadSnapshot(r.store); err != nil {
+		t.Fatal(err)
+	}
+	r.trace = newPoolDesiredStateTestTrace("worker")
+	reconcilerStderr := newSyncBuffer()
+	r.cr.stderr = reconcilerStderr
+	// The last tick's wait stopped the tracker, as a shutdown stops it; a
+	// running controller's next tick admits starts again.
+	r.cr.asyncStarts = asyncStartTracker{}
+	r.cr.beadReconcileTick(context.Background(), newSeatWork(r.cr.workLegs()), r.result, snapshot, r.trace, false)
+	if !r.cr.asyncStarts.wait(30 * time.Second) {
+		t.Fatal("the tick's async starts did not finish")
+	}
+	r.stderr = stderr.String() + reconcilerStderr.String()
+}
+
+// createTickWork creates open work routed to worker.
+func createTickWork(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	work, err := store.Create(beads.Bead{
+		Title: "work", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return work
+}
+
+// assignTickWork stamps meta on work id and puts it in progress, assigned to
+// assignee.
+func assignTickWork(t *testing.T, store beads.Store, id, assignee string, meta map[string]string) {
+	t.Helper()
+	if len(meta) > 0 {
+		if err := store.SetMetadataBatch(id, meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := "in_progress"
+	if err := store.Update(id, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// createTickPoolSeat creates pool seat name of worker in slot, in state,
+// bound to trigger in work dir dir.
+func createTickPoolSeat(t *testing.T, store beads.Store, name, slot, state, trigger, dir string) beads.Bead {
+	t.Helper()
+	seat, err := store.Create(beads.Bead{
+		Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template": "worker", "agent_name": name, "session_name": name, "session_origin": "ephemeral",
+			"state": state, "instance_token": "tok-" + slot, poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot": slot, "generation": "1", beadmeta.TriggerBeadIDMetadataKey: trigger,
+			beadmeta.WorkDirMetadataKey: dir, beadmeta.LegacyWorkDirMetadataKey: dir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seat
+}
+
+// decisions are the tick's wake decisions for session name.
+func (r ownWorkResumeTick) decisions(name string) []SessionReconcilerTraceRecord {
+	var out []SessionReconcilerTraceRecord
+	for _, rec := range r.trace.records {
+		if rec.RecordType == TraceRecordDecision && rec.SiteCode == TraceSiteReconcilerWakeDecision && rec.SessionName == name {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// decided reports whether the tick traced a wake decision on session name
+// with reason and outcome.
+func (r ownWorkResumeTick) decided(name string, reason TraceReasonCode, outcome TraceOutcomeCode) bool {
+	for _, rec := range r.decisions(name) {
+		if rec.ReasonCode == reason && rec.OutcomeCode == outcome {
+			return true
+		}
+	}
+	return false
+}
+
+// ownWorkEvidence is worktree evidence of the work an ownWorkResumeTick's
+// seat holds: the work's metadata and the seat's recorded work dir.
+type ownWorkEvidence struct {
+	name     string
+	evidence func(t *testing.T, workID string) (map[string]string, string)
+	// refusal is what the seat's WorktreeRefusal names; "" for usable
+	// evidence, which starts the seat.
+	refusal string
+	// requestRefused marks evidence the resume request itself refuses
+	// (SessionRequest.WorktreeError), which needs no probe of the worktree.
+	requestRefused bool
+}
+
+// ownWorkEvidences are usable evidence, incomplete evidence, a removed
+// worktree, and a detached HEAD in the worktree the row records.
+func ownWorkEvidences() []ownWorkEvidence {
+	return []ownWorkEvidence{
+		{name: "usable evidence", evidence: func(t *testing.T, workID string) (map[string]string, string) {
+			spec, path := liveSeatManagedSpecFor(t, workID, "city")
+			return worktreeEvidenceMetadata(spec), path
+		}},
+		{name: "incomplete evidence", evidence: func(t *testing.T, workID string) (map[string]string, string) {
+			spec, path := liveSeatManagedSpecFor(t, workID, "city")
+			meta := worktreeEvidenceMetadata(spec)
+			delete(meta, beadmeta.WorktreeLifecycleMetadataKey)
+			return meta, path
+		}, refusal: beadmeta.WorktreeLifecycleMetadataKey, requestRefused: true},
+		{name: "a worktree that no longer verifies", evidence: func(t *testing.T, workID string) (map[string]string, string) {
+			spec, path := liveSeatManagedSpecFor(t, workID, "city")
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			return worktreeEvidenceMetadata(spec), path
+		}, refusal: worktree.ErrWorktreeMissing.Error()},
+		// The agent stopped mid-rebase in its own worktree, which the row
+		// records: the worktree is there, but HEAD is off its branch.
+		{name: "a detached HEAD", evidence: func(t *testing.T, workID string) (map[string]string, string) {
+			spec, path := liveSeatManagedSpecFor(t, workID, "city")
+			mustGit(t, path, "checkout", "--detach")
+			return worktreeEvidenceMetadata(spec), path
+		}, refusal: "HEAD is detached"},
+	}
+}
+
+// requireResumed requires the last tick's outcome for worker-1, resuming
+// its own work with evidence ev: the seat is open and desired and its work
+// stays in progress on it. Usable evidence starts it. Refused evidence keeps
+// it unbound, its refusal naming the cause, held and never started into the
+// work dir its row records.
+func (r ownWorkResumeTick) requireResumed(t *testing.T, ev ownWorkEvidence) {
+	t.Helper()
+	seat, err := r.store.Get(r.seatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seat.Status == "closed" {
+		t.Fatalf("the seat was closed (%q); stderr=%s", seat.Metadata["close_reason"], r.stderr)
+	}
+	work, err := r.store.Get(r.workID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Status != "in_progress" || work.Assignee != r.seatID {
+		t.Fatalf("work %s = %s assigned to %q, want in_progress on the seat %s; stderr=%s", r.workID, work.Status, work.Assignee, r.seatID, r.stderr)
+	}
+	tp, desired := r.result.State["worker-1"]
+	if !desired {
+		t.Fatalf("worker-1 is not desired; desired=%v stderr=%s", mapKeys(r.result.State), r.stderr)
+	}
+	if ev.refusal == "" {
+		if tp.WorktreeRefusal != "" || tp.WorktreeUnverified || !r.sp.IsRunning("worker-1") {
+			t.Fatalf("usable evidence: refusal %q, unverified %v, running %v; want the seat started; stderr=%s", tp.WorktreeRefusal, tp.WorktreeUnverified, r.sp.IsRunning("worker-1"), r.stderr)
+		}
+		return
+	}
+	if !strings.Contains(tp.WorktreeRefusal, ev.refusal) {
+		t.Fatalf("worker-1 WorktreeRefusal = %q, want one naming %q; stderr=%s", tp.WorktreeRefusal, ev.refusal, r.stderr)
+	}
+	if r.sp.IsRunning("worker-1") {
+		t.Fatalf("the seat was started into %s, its row's unverified work dir; decisions=%+v", r.seatDir, r.decisions("worker-1"))
+	}
+	if !r.decided("worker-1", TraceReasonWorktreeRefused, TraceOutcomeHeld) {
+		t.Fatalf("no held decision traced for worker-1; decisions=%+v", r.decisions("worker-1"))
+	}
+	if got := seat.Metadata[beadmeta.WorkDirMetadataKey]; got != r.seatDir {
+		t.Fatalf("seat gc.work_dir = %q, want %q unchanged: no binding for refused evidence", got, r.seatDir)
+	}
+}
+
+// A seat that is not running and resumes its own in-progress work, whose
+// worktree evidence the bind refuses, stays in desired state with its claim
+// and is not started: one tick neither closes it as orphaned nor releases
+// its work (which no other seat could take while the evidence stays
+// refused), nor starts it in the work dir its row still records, alone in
+// its pool or beside a desired sibling, whose desired template once let the
+// session overlay re-add the seat and wake it unverified. Each refusal names
+// its cause: incomplete evidence, a removed worktree, or a detached HEAD in
+// the worktree the row records. Usable evidence still starts it
+// (gastownhall/gascity#5753).
+func TestLegacyTickKeepsOwnWorkResumeSeatWithRefusedWorktree(t *testing.T) {
+	for _, sibling := range []bool{false, true} {
+		for _, ev := range ownWorkEvidences() {
+			t.Run(ev.name+"/sibling="+strconv.FormatBool(sibling), func(t *testing.T) {
+				runOwnWorkResumeTick(t, ev.evidence, sibling).requireResumed(t, ev)
+			})
+		}
+	}
+}
+
+// A live seat resuming the trigger its row records is bound without its own
+// work's worktree being verified (poolTriggerBindWorkDir). Should its runtime
+// die after the build observed it alive and before the reconciler reads it,
+// that tick does not start it, unverified, in the work dir its row records.
+// Evidence the request already refuses is refused though the seat ran, and
+// held; otherwise the start is deferred for the verification the build
+// skipped (TemplateParams.WorktreeUnverified). The next tick's build sees the
+// seat gone and verifies its worktree: usable evidence starts the seat, and a
+// removed worktree or a detached HEAD is refused and held, alone in its pool
+// or beside a desired sibling (gastownhall/gascity#5753).
+func TestLegacyTickHoldsAnOwnWorkSeatThatDiedAfterTheBuild(t *testing.T) {
+	for _, sibling := range []bool{false, true} {
+		for _, ev := range ownWorkEvidences() {
+			t.Run(ev.name+"/sibling="+strconv.FormatBool(sibling), func(t *testing.T) {
+				r := newOwnWorkResumeTick(t, ev.evidence, sibling)
+				if err := r.sp.Start(context.Background(), "worker-1", runtime.Config{WorkDir: r.seatDir}); err != nil {
+					t.Fatal(err)
+				}
+				r.tick(t, func() {
+					if err := r.sp.Stop("worker-1"); err != nil {
+						t.Fatal(err)
+					}
+				})
+				tp := r.result.State["worker-1"]
+				if r.sp.IsRunning("worker-1") {
+					t.Fatalf("the seat the build saw alive was started into %s after its runtime died: refusal %q, unverified %v; decisions=%+v",
+						r.seatDir, tp.WorktreeRefusal, tp.WorktreeUnverified, r.decisions("worker-1"))
+				}
+				reason, outcome := TraceReasonWorktreeUnverified, TraceOutcomeDeferred
+				if ev.requestRefused {
+					reason, outcome = TraceReasonWorktreeRefused, TraceOutcomeHeld
+				}
+				if !r.decided("worker-1", reason, outcome) {
+					t.Fatalf("no %s/%s decision traced for worker-1: refusal %q, unverified %v; decisions=%+v", reason, outcome, tp.WorktreeRefusal, tp.WorktreeUnverified, r.decisions("worker-1"))
+				}
+				r.tick(t, nil)
+				r.requireResumed(t, ev)
+			})
+		}
+	}
+}
+
+// A seat whose runtime is gone under an agent heartbeat's hold, holding its
+// own work, would wake: legacy's heartbeat crash recovery wakes it through
+// the hold (#3994). Kept for that work's refused worktree evidence, it is
+// held with its claim and never started, as v2 keeps it
+// (TestAllocator_OwnWorkResumeWithRefusedWorktreeKeepsSeat); usable evidence
+// starts it (gastownhall/gascity#5753).
+func TestLegacyTickHoldsAHeartbeatHeldOwnWorkSeatWithRefusedWorktree(t *testing.T) {
+	heartbeat := func(t *testing.T, store beads.Store, seatID, _ string) {
+		t.Helper()
+		if err := store.SetMetadataBatch(seatID, map[string]string{
+			"held_until": time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, ev := range ownWorkEvidences() {
+		t.Run(ev.name, func(t *testing.T) {
+			runOwnWorkResumeTick(t, ev.evidence, false, heartbeat).requireResumed(t, ev)
+		})
+	}
+}
+
+// A seat kept for its own work's refused worktree evidence is held only
+// where it would wake (TemplateParams.WorktreeRefusal). Killed, holding only
+// a pin that is not ready, it is freed in the same tick as with usable
+// evidence: its pin goes back open and unassigned, and the seat closes
+// (owner ruling B1), never started. v2 sleeps the same seat, so A21 frees it
+// too (TestAllocator_OwnWorkResumeWithRefusedWorktreeKeepsSeat; gastownhall/gascity#5753).
+func TestLegacyTickFreesAKilledOwnWorkSeatWithRefusedWorktree(t *testing.T) {
+	// killedWithABlockedPin makes the seat one gc session kill stopped and
+	// its work a pin, open on the seat and blocked by an open bead.
+	killedWithABlockedPin := func(t *testing.T, store beads.Store, seatID, workID string) {
+		t.Helper()
+		if err := store.SetMetadataBatch(seatID, map[string]string{
+			"sleep_reason": string(session.SleepReasonKilled), "slept_at": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		open := "open"
+		if err := store.Update(workID, beads.UpdateOpts{Status: &open}); err != nil {
+			t.Fatal(err)
+		}
+		blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(workID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		evidence func(t *testing.T, workID string) (map[string]string, string)
+		refused  bool
+	}{
+		{"usable evidence", func(t *testing.T, workID string) (map[string]string, string) {
+			spec, path := liveSeatManagedSpecFor(t, workID, "city")
+			return worktreeEvidenceMetadata(spec), path
+		}, false},
+		{"incomplete evidence", func(t *testing.T, workID string) (map[string]string, string) {
+			spec, path := liveSeatManagedSpecFor(t, workID, "city")
+			meta := worktreeEvidenceMetadata(spec)
+			delete(meta, beadmeta.WorktreeLifecycleMetadataKey)
+			return meta, path
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runOwnWorkResumeTick(t, tc.evidence, false, killedWithABlockedPin)
+			if kept := strings.Contains(r.stderr, "(keeping the seat, not started"); kept != tc.refused {
+				t.Fatalf("seat reported kept for refused evidence = %v, want %v; stderr=%s", kept, tc.refused, r.stderr)
+			}
+			work, err := r.store.Get(r.workID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if work.Status != "open" || work.Assignee != "" {
+				t.Fatalf("pin %s = %s assigned to %q, want given back open and unassigned; stderr=%s", r.workID, work.Status, work.Assignee, r.stderr)
+			}
+			seat, err := r.store.Get(r.seatID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if seat.Status != "closed" || r.sp.IsRunning("worker-1") {
+				t.Fatalf("seat %s (close_reason %q), running %v; want closed, never started; stderr=%s",
+					seat.Status, seat.Metadata["close_reason"], r.sp.IsRunning("worker-1"), r.stderr)
 			}
 		})
 	}

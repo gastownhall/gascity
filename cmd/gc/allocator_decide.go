@@ -217,6 +217,11 @@ type selection struct {
 	// normalize marks a pool-selected canonical singleton whose stored
 	// identity is a phantom slot spelling (POOL-046).
 	normalize bool
+	// worktreeRefused marks a start candidate kept for its own assigned work
+	// whose worktree evidence is unusable (decidePass.keepRefusedSeat): it is
+	// never started, and Keep while its awake decision wakes it
+	// (selectionEntry.WorktreeRefused).
+	worktreeRefused bool
 }
 
 // decideAllocation is the allocator's whole decision for one pass. It is
@@ -626,7 +631,14 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,
 // InDesired ∧ ¬ShouldWake is Sleep, ¬InDesired is Drain, and the set-aside
 // rows None; then a partial read or an uncertain observation turns a Sleep
-// or a Drain into Keep (POOL-035, P-3, C2.9).
+// or a Drain into Keep (POOL-035, P-3, C2.9). A selection kept for refused
+// worktree evidence (selection.worktreeRefused) that would wake is Keep, as
+// legacy's reconciler holds only the wake of a seat kept for refused
+// evidence (TemplateParams.WorktreeRefusal). It would wake when its awake
+// decision wakes it, or when A17 would respawn it through a heartbeat's hold
+// (heartbeatRespawnDue), as legacy's heartbeat crash recovery wakes it before
+// that hold. One that would not wake sleeps, so A21 parks, closes or repairs
+// it as legacy frees an asleep seat.
 func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 	for k, e := range p.snap.Entries {
 		if reason, ok := p.none[k]; ok {
@@ -640,6 +652,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			ref := sel.ref
 			e.Config = &ref
 			e.Normalize = sel.normalize
+			e.WorktreeRefused = sel.worktreeRefused
 		}
 		e.Park = p.parked[info.ID]
 		d := decisions[info.ID]
@@ -650,6 +663,10 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 		e.WakeReasons = eval.Reasons
 		switch {
+		case e.WorktreeRefused && (d.ShouldWake || heartbeatRespawnDue(e, info, p.in.Now)):
+			// Its own work's worktree evidence is unusable: the row keeps
+			// its claim and is never started into the dir it records.
+			e.Desired, e.Reason = desireKeep, reasonWorktreeRefused
 		case e.InDesired && d.ShouldWake:
 			e.Desired, e.Reason = desireWake, d.Reason
 			// A wake that rests only on an uncertain attach keeps the row

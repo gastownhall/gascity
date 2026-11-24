@@ -4404,16 +4404,22 @@ func realizePoolDesiredSessionsAt(
 			bound, err = bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedInstance, sbInfo, unnamed)
 		}
 		stats.bind += bp.realizeNow().Sub(segmentStart)
+		worktreeRefusal := ""
 		if err != nil {
 			stats.bindErrors++
-			if errors.Is(err, errPoolTriggerWorktreeEvidence) {
+			switch {
+			case item.plan == nil && poolSeatKeptForRefusedWork(bp, sbInfo, item.request, err):
+				worktreeRefusal = err.Error()
+				fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (keeping the seat, not started until a build binds it)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+			case errors.Is(err, errPoolTriggerWorktreeEvidence):
 				// Unusable ownership evidence is not a partial bind: a reused
 				// session left in desired would restart against its previous
 				// binding's work dir.
 				fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (skipping)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
 				continue
+			default:
+				fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
 			}
-			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
 		} else {
 			sbInfo = bound
 		}
@@ -4442,13 +4448,45 @@ func realizePoolDesiredSessionsAt(
 			applyPoolInstanceIdentity(&tp, cfgAgent, qualifiedInstance, poolSlot, sbInfo)
 		}
 		applyClientProviderChatStartupPrompt(bp, cfgAgent, resolveAgent, qualifiedInstance, sbInfo.Alias, &tp)
-		segmentStart = bp.realizeNow()
-		installAgentSideEffects(bp, resolveAgent, tp, stderr)
-		stats.sideEffects += bp.realizeNow().Sub(segmentStart)
+		tp.WorktreeRefusal = worktreeRefusal
+		tp.WorktreeUnverified = worktreeRefusal == "" && bp.unverifiedLiveSeats[sbInfo.ID]
+		if worktreeRefusal == "" {
+			// A kept seat does not start, so nothing is installed into the
+			// work dir its row still records.
+			segmentStart = bp.realizeNow()
+			installAgentSideEffects(bp, resolveAgent, tp, stderr)
+			stats.sideEffects += bp.realizeNow().Sub(segmentStart)
+		}
 		desired[tp.SessionName] = tp
 		stats.realized++
 	}
 	return stats
+}
+
+// poolSeatKeptForRefusedWork reports whether realization keeps the reused pool
+// seat info in desired state, unbound and not started (TemplateParams.
+// WorktreeRefusal), after binding it to request failed with err: request is
+// the resume tier's for work assigned to the seat
+// (poolRequestResumesAssignedWorkInfo), and err refused that work's worktree
+// evidence or failed the binding write that places the seat in it
+// (errPoolTriggerWorktreeEvidence). Skipped, the seat would leave desired
+// state, and the reconciler would close it as orphaned and release a claim
+// no other seat can take while the evidence stays refused. The seat keeps
+// its row and starts once a later build binds it: every build checks the
+// evidence again. Until then the reconciler holds it with its claim while
+// it would wake, a heartbeat's crash recovery included, and otherwise frees
+// it as any asleep seat (a killed seat's release, the parked bound, the
+// stranded repair). v2 keeps the same seat (decidePass.selectPoolRow):
+// selected, unbound and never started while the plan refuses the evidence or
+// a failed verification's backoff is live, and Keep while it would wake, A17's
+// heartbeat respawn included (decidePass.classify). Its PreWake verifies the
+// worktree before any start, so neither mode starts the seat into a worktree
+// that fails verification.
+func poolSeatKeptForRefusedWork(bp *agentBuildParams, info session.Info, request SessionRequest, err error) bool {
+	if bp == nil || !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+		return false
+	}
+	return poolRequestResumesAssignedWorkInfo(request, bp.assignedWorkBeads, info)
 }
 
 // applyPoolInstanceIdentity gives tp, a non-manual pool row's template, its

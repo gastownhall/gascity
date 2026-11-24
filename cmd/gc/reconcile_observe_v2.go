@@ -266,6 +266,11 @@ func (p *planner) observeWorld(w *World, duplicates []string, c *passCounts) {
 // refused for unusable worktree evidence (allocTraceRecord.WorkBeadID), for
 // as long as the refusal lasts: a changed pool or cause alerts again, and an
 // item the pass no longer refuses is forgotten, so a relapse alerts again.
+// An item whose last verification failed is forgotten only once one
+// succeeds and drops its work backoff record (backoffTable.Succeed): a seat
+// kept for it (decidePass.keepRefusedSeat) is bound again whenever the
+// backoff lapses, and the pass whose PreWake verifies it again refuses
+// nothing.
 func (p *planner) observeWorktreeRefusals(trace []allocTraceRecord) {
 	refused := make(map[string]string)
 	for _, r := range trace {
@@ -279,6 +284,11 @@ func (p *planner) observeWorktreeRefusals(trace []allocTraceRecord) {
 		refused[r.WorkBeadID] = msg
 		if p.obs.worktreeRefused[r.WorkBeadID] != msg {
 			p.alert(alertWorktreeRefused, r.WorkBeadID, msg)
+		}
+	}
+	for id, msg := range p.obs.worktreeRefused {
+		if _, ok := refused[id]; !ok && p.backoff.Record(workBackoffKey(id)).Consecutive > 0 {
+			refused[id] = msg
 		}
 	}
 	p.obs.worktreeRefused = refused

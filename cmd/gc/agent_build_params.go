@@ -93,6 +93,13 @@ type agentBuildParams struct {
 	// refresh, whose build params set it from there.
 	retiredPoolSeats map[string]bool
 
+	// unverifiedLiveSeats holds, by session bead ID, the live pool seats
+	// legacy realization bound this build without verifying their own work's
+	// managed worktree (poolTriggerBindWorkDir). Realization marks each one's
+	// template (TemplateParams.WorktreeUnverified), so the reconciler does not
+	// start a seat whose runtime died after this build observed it alive.
+	unverifiedLiveSeats map[string]bool
+
 	// poolScaleCheckPartialTemplates holds pool templates whose scale_check
 	// returned a partial result this build cycle. selectOrPlanPoolSessionBead
 	// refuses new creates for these templates; existing-session reuse is

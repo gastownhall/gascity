@@ -215,6 +215,14 @@ const (
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
 	TraceReasonInterruptedClose      TraceReasonCode = "interrupted_close"
+	// TraceReasonWorktreeRefused marks a start held because the pool seat's
+	// own work's managed-worktree evidence was refused
+	// (TemplateParams.WorktreeRefusal).
+	TraceReasonWorktreeRefused TraceReasonCode = "worktree_refused"
+	// TraceReasonWorktreeUnverified marks a start deferred to the next build
+	// because this build observed the pool seat running and did not verify
+	// its own work's managed worktree (TemplateParams.WorktreeUnverified).
+	TraceReasonWorktreeUnverified TraceReasonCode = "worktree_unverified"
 )
 
 type TraceOutcomeCode string

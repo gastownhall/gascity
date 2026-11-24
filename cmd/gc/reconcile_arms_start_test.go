@@ -152,6 +152,22 @@ func TestDecideRowHeartbeatRespawn(t *testing.T) {
 	if it := drain.decide(); it.Reason == decideHeartbeatRespawn {
 		t.Fatalf("decideRow = (%q, %q), want no respawn of a row AL1 drains", it.Kind, it.Reason)
 	}
+	// A row selected for its own work's refused worktree evidence is never
+	// started, through a heartbeat hold included (selectionEntry.
+	// WorktreeRefused): Keep while it would wake, and asleep when its work
+	// gives no wake, which the hold would otherwise respawn unbound.
+	for _, desired := range []desire{desireKeep, desireSleep} {
+		kept := newHealCase(t, livenessGone, desired, "state", "active", "held_until", soon)
+		e := kept.a.Snapshot.Entries[kept.k]
+		e.WorktreeRefused = true
+		if desired == desireKeep {
+			e.Reason = reasonWorktreeRefused
+		}
+		e.AssignedWork = &assignedWorkView{BeadID: "gw-1", Claimed: true}
+		if it := kept.decide(); it.Kind == intentStart {
+			t.Fatalf("%s: decideRow = (%q, %q), want no start of a row kept for refused worktree evidence", desired, it.Kind, it.Reason)
+		}
+	}
 }
 
 // Kills a dead seat's death accrual lost, miscounted, or restarting the

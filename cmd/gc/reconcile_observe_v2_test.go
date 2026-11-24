@@ -294,6 +294,31 @@ func TestV2AlertsOncePerEpisode(t *testing.T) {
 			t.Errorf("alert kinds = %v, want four %s", got, alertWorktreeRefused)
 		}
 	})
+	t.Run("kept seat's failed verification", func(t *testing.T) {
+		// A seat kept for its work's failed verification is bound again once
+		// the backoff lapses, so that pass refuses nothing; the failure stands
+		// until a verification succeeds, so the item alerts once per failure,
+		// not once per backoff.
+		f := newObserveFixture(t)
+		key := workBackoffKey("w-1")
+		kept := []allocTraceRecord{{Template: "worker", Reason: "ineligible:" + gateWorktreeRefusedKeep, WorkBeadID: "w-1", Detail: "worktree verification failed"}}
+		failed := func(at time.Time) { f.p.backoff.Refuse(key, at, time.Time{}, createStageWorktree, "evidence") }
+		failed(gatherNow)
+		f.p.observeWorktreeRefusals(kept) // held: alerts w-1
+		f.p.observeWorktreeRefusals(nil)  // the backoff lapsed: bound again, its PreWake verifying
+		failed(gatherNow.Add(time.Minute))
+		f.p.observeWorktreeRefusals(kept) // failed again, held again
+		if got := f.alerts(t); len(got) != 1 {
+			t.Fatalf("alerts = %v, want one: the seat is held for the same failure", got)
+		}
+		f.p.backoff.Succeed(key)
+		f.p.observeWorktreeRefusals(nil) // verified, started: forgotten
+		failed(gatherNow.Add(time.Hour))
+		f.p.observeWorktreeRefusals(kept) // a relapse: alerts w-1 again
+		if got := f.alerts(t); len(got) != 2 {
+			t.Fatalf("alerts = %v, want a second alert for the relapse", got)
+		}
+	})
 }
 
 // TestDoctorReportsNoFloorAndThePassAge: a floor is no longer a v2
