@@ -2584,6 +2584,233 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 	}
 }
 
+// TestProcessScopeCheckStaleNestedAbortSparesNextOuterIteration: a check
+// "outer" whose body holds a check-with-children "inner". The inner loop of one
+// outer iteration exhausted, the outer control already seeded the next outer
+// iteration, and only then does the scope-check of the exhausted inner control
+// run. Its abort sweeps that control's open descendants; the next iteration's
+// seeded inner loop carries the same gc.ralph_step_id and must stay open for
+// the worker. The compiled row aborts outer iteration 1, whose refs the
+// compile mints short, before runtime iteration 2; the runtime row aborts
+// iteration 2 before iteration 3.
+func TestProcessScopeCheckStaleNestedAbortSparesNextOuterIteration(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		stale      string // the exhausted outer iteration's step ref
+		staleIter  string
+		next       string // the seeded outer iteration's step ref
+		nextIter   string
+		staleCheck string // the stale scope-check's step ref
+	}{
+		{"compiled_iteration_1", "outer.iteration.1", "1", "wf.outer.iteration.2", "2", "wf.outer.iteration.1.inner-scope-check"},
+		{"runtime_iteration_2", "wf.outer.iteration.2", "2", "wf.outer.iteration.3", "3", "wf.outer.iteration.2.inner-scope-check"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := newBdClosePolicyStore()
+			root := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "workflow",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+			})
+			create := func(status string, meta map[string]string) beads.Bead {
+				meta["gc.root_bead_id"] = root.ID
+				return mustCreateWorkflowBead(t, store, beads.Bead{Title: meta["gc.step_ref"], Type: "task", Status: status, Metadata: meta})
+			}
+			create("closed", map[string]string{
+				"gc.kind": "scope", "gc.scope_role": "body", "gc.step_ref": tc.stale, "gc.step_id": "outer",
+				"gc.ralph_step_id": "outer", "gc.attempt": tc.staleIter, "gc.outcome": "fail",
+			})
+			exhausted := create("closed", map[string]string{
+				"gc.kind": "ralph", "gc.step_ref": tc.stale + ".inner", "gc.step_id": "inner", "gc.scope_ref": tc.stale,
+				"gc.scope_role": "member", "gc.ralph_step_id": "outer", "gc.attempt": tc.staleIter, "gc.on_fail": "abort_scope",
+				"gc.outcome": "fail",
+			})
+			staleCheck := create("open", map[string]string{
+				"gc.kind": "scope-check", "gc.step_ref": tc.staleCheck, "gc.step_id": "inner", "gc.scope_ref": tc.stale,
+				"gc.scope_role": "control", "gc.control_for": tc.stale + ".inner", "gc.ralph_step_id": "outer",
+				"gc.attempt": tc.staleIter, "gc.on_fail": "abort_scope",
+			})
+			mustDepAdd(t, store, staleCheck.ID, exhausted.ID, "blocks")
+			nextBody := create("open", map[string]string{
+				"gc.kind": "scope", "gc.scope_role": "body", "gc.step_ref": tc.next, "gc.step_id": "outer",
+				"gc.ralph_step_id": "outer", "gc.attempt": tc.nextIter,
+			})
+			nextInner := create("open", map[string]string{
+				"gc.kind": "ralph", "gc.step_ref": tc.next + ".inner", "gc.step_id": "inner", "gc.scope_ref": tc.next,
+				"gc.scope_role": "member", "gc.ralph_step_id": "outer", "gc.attempt": tc.nextIter, "gc.on_fail": "abort_scope",
+			})
+			seededScope := create("open", map[string]string{
+				"gc.kind": "scope", "gc.scope_role": "body", "gc.step_ref": tc.next + ".inner.iteration.1", "gc.step_id": "inner",
+				"gc.ralph_step_id": "inner", "gc.attempt": "1", "gc.control_for": tc.next + ".inner", "gc.logical_bead_id": nextInner.ID,
+			})
+			seededMember := create("open", map[string]string{
+				"gc.step_ref": tc.next + ".inner.iteration.1.i1", "gc.step_id": "i1", "gc.scope_ref": tc.next + ".inner.iteration.1",
+				"gc.scope_role": "member", "gc.ralph_step_id": "inner", "gc.attempt": "1", "gc.on_fail": "abort_scope",
+			})
+			seededCheck := create("open", map[string]string{
+				"gc.kind": "scope-check", "gc.step_ref": tc.next + ".inner.iteration.1.i1-scope-check", "gc.step_id": "i1",
+				"gc.scope_ref": tc.next + ".inner.iteration.1", "gc.scope_role": "control", "gc.ralph_step_id": "inner",
+				"gc.attempt": "1", "gc.on_fail": "abort_scope",
+			})
+			mustDepAdd(t, store, seededCheck.ID, seededMember.ID, "blocks")
+
+			result, err := ProcessControl(beadstest.Graph(store), staleCheck, ProcessOptions{Work: beadstest.Work(store)})
+			if err != nil {
+				t.Fatalf("ProcessControl(stale inner scope-check): %v", err)
+			}
+			if !result.Processed || result.Action != "scope-fail" {
+				t.Fatalf("result = %+v, want processed scope-fail", result)
+			}
+			for _, b := range []beads.Bead{nextBody, nextInner, seededScope, seededMember, seededCheck} {
+				got := mustGetBead(t, store, b.ID)
+				if got.Status == "closed" || got.Metadata["gc.outcome"] != "" {
+					t.Errorf("%s status = %q gc.outcome = %q (close_reason %q), want open with no outcome",
+						b.Metadata["gc.step_ref"], got.Status, got.Metadata["gc.outcome"], got.Metadata["close_reason"])
+				}
+			}
+		})
+	}
+}
+
+// TestIsLogicalDescendantKeepsRalphMembersInTheirLoopInstance pins the
+// gc.ralph_step_id clause: a body member descends from the ralph control of
+// its own loop instance, matched across the short refs the compile mints for
+// outer iteration 1 and the full refs of a top-level control and of every
+// runtime-minted bead, and from no other control carrying the same step id.
+func TestIsLogicalDescendantKeepsRalphMembersInTheirLoopInstance(t *testing.T) {
+	t.Parallel()
+
+	control := func(id, stepRef, stepID string) beads.Bead {
+		return beads.Bead{ID: id, Metadata: map[string]string{"gc.kind": "ralph", "gc.step_ref": stepRef, "gc.step_id": stepID}}
+	}
+	member := func(stepRef, scopeRef, loopID string) beads.Bead {
+		meta := map[string]string{"gc.step_ref": stepRef, "gc.ralph_step_id": loopID, "gc.attempt": "1"}
+		if scopeRef != "" {
+			meta["gc.scope_ref"] = scopeRef
+		}
+		return beads.Bead{ID: "gc-member", Metadata: meta}
+	}
+	topLevel := control("gc-1", "wf.loop", "loop")
+	compiledInner := control("gc-2", "outer.iteration.1.inner", "inner")
+	runtimeInner := control("gc-3", "wf.outer.iteration.2.inner", "inner")
+
+	for _, tc := range []struct {
+		name      string
+		logical   beads.Bead
+		candidate beads.Bead
+		want      bool
+	}{
+		{
+			"compiled member, short ref, of a top-level loop", topLevel,
+			member("loop.iteration.1.m1", "loop.iteration.1", "loop"), true,
+		},
+		{
+			"runtime member of a top-level loop", topLevel,
+			member("wf.loop.iteration.2.m1", "wf.loop.iteration.2", "loop"), true,
+		},
+		{
+			"fragment step named outside the loop, scoped to its iteration", topLevel,
+			member("wf-fragment.draft", "loop.iteration.1", "loop"), true,
+		},
+		{
+			"compiled inner member, short ref", compiledInner,
+			member("outer.iteration.1.inner.iteration.1.i1", "outer.iteration.1.inner.iteration.1", "inner"), true,
+		},
+		{
+			"full step ref below a short loop ref", compiledInner,
+			member("wf.outer.iteration.1.inner.iteration.1.i1-scope-check", "", "inner"), true,
+		},
+		{
+			"runtime inner member", runtimeInner,
+			member("wf.outer.iteration.2.inner.iteration.1.i1", "wf.outer.iteration.2.inner.iteration.1", "inner"), true,
+		},
+		{
+			"next outer iteration's seeded inner member, from the compiled inner", compiledInner,
+			member("wf.outer.iteration.2.inner.iteration.1.i1", "wf.outer.iteration.2.inner.iteration.1", "inner"), false,
+		},
+		{
+			"next outer iteration's seeded inner scope, from the runtime inner", runtimeInner,
+			member("wf.outer.iteration.3.inner.iteration.1", "", "inner"), false,
+		},
+		{
+			"previous outer iteration's compiled inner member, from the runtime inner", runtimeInner,
+			member("outer.iteration.1.inner.iteration.1.i1", "outer.iteration.1.inner.iteration.1", "inner"), false,
+		},
+		{
+			"same step id, a loop nested in another loop", topLevel,
+			member("wf.review.iteration.2.loop.iteration.1.m1", "wf.review.iteration.2.loop.iteration.1", "loop"), false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := isLogicalDescendant(tc.logical, tc.candidate); got != tc.want {
+				t.Errorf("isLogicalDescendant(%s, %s) = %t, want %t",
+					tc.logical.Metadata["gc.step_ref"], tc.candidate.Metadata["gc.step_ref"], got, tc.want)
+			}
+		})
+	}
+}
+
+// TestScopeUnsettledMembersWalksNestedLoopControls: the scope's member is the
+// top-level loop "outer" (full ref), whose compiled iteration 1 holds the loop
+// "mid", whose iteration holds the loop "inner". A nested loop's iteration
+// scope and members name that loop, not the one enclosing it, and carry the
+// compile's short refs, so only the nested loop's own control reaches them.
+// The selection walks every loop control it reaches, closed ones included,
+// down to the innermost member, and stays out of a sibling loop whose nested
+// loop shares the step id "inner".
+func TestScopeUnsettledMembersWalksNestedLoopControls(t *testing.T) {
+	t.Parallel()
+
+	bead := func(id, status string, meta map[string]string) beads.Bead {
+		return beads.Bead{ID: id, Status: status, Metadata: meta}
+	}
+	loop := func(id, status, stepID, stepRef, scopeRef, enclosingLoop string) beads.Bead {
+		meta := map[string]string{"gc.kind": "ralph", "gc.step_id": stepID, "gc.step_ref": stepRef}
+		if scopeRef != "" {
+			meta["gc.scope_ref"], meta["gc.scope_role"] = scopeRef, "member"
+		}
+		if enclosingLoop != "" {
+			meta["gc.ralph_step_id"], meta["gc.attempt"] = enclosingLoop, "1"
+		}
+		return bead(id, status, meta)
+	}
+	iterationScope := func(id, stepRef, loopID string) beads.Bead {
+		return bead(id, "open", map[string]string{"gc.kind": "scope", "gc.scope_role": "body", "gc.step_ref": stepRef, "gc.step_id": loopID, "gc.ralph_step_id": loopID, "gc.attempt": "1"})
+	}
+	member := func(id, stepRef, scopeRef, loopID string) beads.Bead {
+		return bead(id, "open", map[string]string{"gc.step_ref": stepRef, "gc.scope_ref": scopeRef, "gc.scope_role": "member", "gc.ralph_step_id": loopID, "gc.attempt": "1"})
+	}
+
+	outer := loop("gc-outer", "open", "outer", "wf.outer", "body", "")
+	all := []beads.Bead{
+		outer,
+		iterationScope("gc-outer-1", "outer.iteration.1", "outer"),
+		loop("gc-mid", "closed", "mid", "outer.iteration.1.mid", "outer.iteration.1", "outer"),
+		iterationScope("gc-mid-1", "outer.iteration.1.mid.iteration.1", "mid"),
+		loop("gc-inner", "open", "inner", "outer.iteration.1.mid.iteration.1.inner", "outer.iteration.1.mid.iteration.1", "mid"),
+		iterationScope("gc-inner-1", "outer.iteration.1.mid.iteration.1.inner.iteration.1", "inner"),
+		member("gc-i1", "outer.iteration.1.mid.iteration.1.inner.iteration.1.i1", "outer.iteration.1.mid.iteration.1.inner.iteration.1", "inner"),
+		loop("gc-other", "open", "other", "wf.other", "", ""),
+		iterationScope("gc-other-1", "other.iteration.1", "other"),
+		loop("gc-other-inner", "open", "inner", "other.iteration.1.inner", "other.iteration.1", "other"),
+		iterationScope("gc-other-inner-1", "other.iteration.1.inner.iteration.1", "inner"),
+		member("gc-other-i1", "other.iteration.1.inner.iteration.1.i1", "other.iteration.1.inner.iteration.1", "inner"),
+	}
+
+	pending := scopeUnsettledMembers([]beads.Bead{outer}, all, "", func(b beads.Bead) bool { return b.Status == "open" })
+	got := sortedPendingIDs(pending)
+	want := []string{"gc-i1", "gc-inner", "gc-inner-1", "gc-mid-1", "gc-outer", "gc-outer-1"}
+	if !slices.Equal(got, want) {
+		t.Errorf("scopeUnsettledMembers = %v, want %v", got, want)
+	}
+}
+
 // writeRequiredRetryArtifact creates a non-empty artifact file inside worktree
 // and returns its basename for use as a gc.required_artifact template.
 func writeRequiredRetryArtifact(t *testing.T, worktree, name string) string {

@@ -266,11 +266,11 @@ func TestTerminalAbortScopeFailureMemberRalphKeyChains(t *testing.T) {
 		ralphAssertTerminal(t, s, beads.Bead{}, false)
 	})
 
-	// Hand-built: a compiled nested ralph does not run today. The inner loop's
-	// compile walk overwrites the scope_ref of its own scope body with the outer
-	// iteration id (formula/ralph.go:259-263), and the inner body is created
-	// before the outer one, so a first-match scope lookup would resolve the
-	// outer member to the failed inner control.
+	// Hand-built in the shape the compile minted before #9412, which molecules
+	// compiled then still carry: the inner loop's own scope body holds the
+	// outer iteration id as its scope_ref, and the inner body is created before
+	// the outer one, so a first-match scope lookup would resolve the outer
+	// member to the failed inner control.
 	t.Run("nested list outer member outer control passed", func(t *testing.T) {
 		t.Parallel()
 
@@ -293,9 +293,12 @@ func TestTerminalAbortScopeFailureMemberRalphKeyChains(t *testing.T) {
 
 // A control that does not enclose the member, or two candidate controls, keep
 // the member terminal: the owner must be unambiguous. Each row replaces the
-// baseline member, control and body entirely. Every row is hand-built: a
-// compiled nested ralph does not run today, and no compile produces two
-// controls with one step ref or two bodies matching one scope_ref.
+// baseline member, control and body entirely. Every row is hand-built: no
+// compile produces two controls with one step ref or two bodies matching one
+// scope_ref, and the nested rows give the inner control no gc.ralph_step_id or
+// gc.attempt, so no enclosing loop can supersede its member
+// (TestTerminalAbortScopeFailureMemberNestedLoopEnclosingPassSupersedes covers
+// the compiled shape).
 func TestTerminalAbortScopeFailureMemberRalphNotEnclosedFailsClosed(t *testing.T) {
 	t.Parallel()
 
@@ -409,6 +412,102 @@ func TestTerminalAbortScopeFailureMemberRalphOwnerNotPassKeepsTerminal(t *testin
 			s := newRalphScan(t)
 			_, m := s.baseline(ralphBaselineSpec{control: tc.control})
 			ralphAssertTerminal(t, s, m, true)
+		})
+	}
+}
+
+// ralphNestedControlMeta is a ralph control that is itself a body member of
+// iteration attempt of the enclosing loop loopID, as the compile and the
+// runtime stamp a nested check-with-children's control.
+func ralphNestedControlMeta(stepRef, stepID, loopID, attempt, outcome string) map[string]string {
+	meta := ralphControlMeta(stepRef, stepID, outcome)
+	meta["gc.ralph_step_id"] = loopID
+	meta["gc.attempt"] = attempt
+	meta["gc.on_fail"] = "abort_scope"
+	return meta
+}
+
+// ralphInnerMemberMeta is a failed body member of iteration 1 of the loop
+// "inner".
+func ralphInnerMemberMeta(stepRef string) map[string]string {
+	return map[string]string{
+		"gc.on_fail":       "abort_scope",
+		"gc.outcome":       "fail",
+		"gc.step_ref":      stepRef,
+		"gc.ralph_step_id": "inner",
+		"gc.attempt":       "1",
+	}
+}
+
+// A failed member of a nested loop that did not pass is superseded when an
+// enclosing loop passed: the nested control failed or was skipped inside an
+// iteration of that loop, which aborted and was replaced. With no passing
+// enclosing loop, or a nested control in any other state, the member stays
+// terminal. i1 is created before the nested control, so a scan that wrongly
+// exempted it would name the control instead.
+func TestTerminalAbortScopeFailureMemberNestedLoopEnclosingPassSupersedes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		build    func(s *ralphScan) beads.Bead // returns i1
+		terminal bool
+	}{
+		{"compiled refs, inner exhausted in outer iteration 1, outer passed", func(s *ralphScan) beads.Bead {
+			s.add(true, ralphControlMeta("wf.outer", "outer", beadmeta.OutcomePass))
+			i1 := s.add(true, ralphInnerMemberMeta("outer.iteration.1.inner.iteration.1.i1"))
+			s.add(true, ralphNestedControlMeta("outer.iteration.1.inner", "inner", "outer", "1", beadmeta.OutcomeFail))
+			return i1
+		}, false},
+		{"runtime refs, inner exhausted in outer iteration 2, outer passed", func(s *ralphScan) beads.Bead {
+			s.add(true, ralphControlMeta("wf.outer", "outer", beadmeta.OutcomePass))
+			i1 := s.add(true, ralphInnerMemberMeta("wf.outer.iteration.2.inner.iteration.1.i1"))
+			s.add(true, ralphNestedControlMeta("wf.outer.iteration.2.inner", "inner", "outer", "2", beadmeta.OutcomeFail))
+			return i1
+		}, false},
+		{"inner skipped by its outer iteration's abort, outer passed", func(s *ralphScan) beads.Bead {
+			s.add(true, ralphControlMeta("wf.outer", "outer", beadmeta.OutcomePass))
+			i1 := s.add(true, ralphInnerMemberMeta("wf.outer.iteration.2.inner.iteration.1.i1"))
+			s.add(true, ralphNestedControlMeta("wf.outer.iteration.2.inner", "inner", "outer", "2", beadmeta.OutcomeSkipped))
+			return i1
+		}, false},
+		{"three levels, mid and inner exhausted, outer passed", func(s *ralphScan) beads.Bead {
+			s.add(true, ralphControlMeta("wf.outer", "outer", beadmeta.OutcomePass))
+			i1 := s.add(true, ralphInnerMemberMeta("outer.iteration.1.mid.iteration.1.inner.iteration.1.i1"))
+			s.add(true, ralphNestedControlMeta("outer.iteration.1.mid.iteration.1.inner", "inner", "mid", "1", beadmeta.OutcomeFail))
+			s.add(true, ralphNestedControlMeta("outer.iteration.1.mid", "mid", "outer", "1", beadmeta.OutcomeFail))
+			return i1
+		}, false},
+		{"outer failed", func(s *ralphScan) beads.Bead {
+			s.add(true, ralphControlMeta("wf.outer", "outer", beadmeta.OutcomeFail))
+			i1 := s.add(true, ralphInnerMemberMeta("wf.outer.iteration.2.inner.iteration.1.i1"))
+			s.add(true, ralphNestedControlMeta("wf.outer.iteration.2.inner", "inner", "outer", "2", beadmeta.OutcomeFail))
+			return i1
+		}, true},
+		{"outer still open", func(s *ralphScan) beads.Bead {
+			s.add(false, ralphControlMeta("wf.outer", "outer", ""))
+			i1 := s.add(true, ralphInnerMemberMeta("wf.outer.iteration.2.inner.iteration.1.i1"))
+			s.add(true, ralphNestedControlMeta("wf.outer.iteration.2.inner", "inner", "outer", "2", beadmeta.OutcomeFail))
+			return i1
+		}, true},
+		{"inner canceled, outer passed", func(s *ralphScan) beads.Bead {
+			s.add(true, ralphControlMeta("wf.outer", "outer", beadmeta.OutcomePass))
+			i1 := s.add(true, ralphInnerMemberMeta("wf.outer.iteration.2.inner.iteration.1.i1"))
+			s.add(true, ralphNestedControlMeta("wf.outer.iteration.2.inner", "inner", "outer", "2", beadmeta.OutcomeCanceled))
+			return i1
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newRalphScan(t)
+			i1 := tc.build(s)
+			want := beads.Bead{}
+			if tc.terminal {
+				want = i1
+			}
+			ralphAssertTerminal(t, s, want, tc.terminal)
 		})
 	}
 }

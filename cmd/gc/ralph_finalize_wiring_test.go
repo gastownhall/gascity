@@ -118,13 +118,17 @@ func wiringTopologyFormula(topology string, maxAttempts int) string {
 }
 
 // wiringScenario is one run. failMembers maps "<loop>.<member>@<iteration>" to a
-// failure class ("" = none). checkPassIter maps a loop id to the first
+// failure class ("" = none). failRefs does the same for one worker bead named by
+// its step ref below the formula ("outer.iteration.2.inner.iteration.1.i1"): a
+// nested loop's member key is the same in every outer iteration, so only the ref
+// can fail it in one of them. checkPassIter maps a loop id to the first
 // GC_ITERATION on which its check script exits 0 (0 = never); every ralph loop of
 // the formula needs an entry.
 type wiringScenario struct {
 	formula       string
 	checkPassIter map[string]int
 	failMembers   map[string]string
+	failRefs      map[string]string
 }
 
 // wiringControl is one ProcessControl result that did work, in call order.
@@ -293,6 +297,9 @@ func runWiringWorkflow(t *testing.T, sc wiringScenario) *wiringResult {
 				break
 			}
 			class, fail := sc.failMembers[wiringFailKey(beadRef(bead))]
+			if !fail {
+				class, fail = sc.failRefs[strings.TrimPrefix(beadRef(bead), wiringFormula+".")]
+			}
 			if fail {
 				md := map[string]string{"gc.outcome": "fail", "gc.failure_reason": "wiring-test"}
 				if class != "" {
@@ -888,11 +895,19 @@ func TestRalphFinalizeOuterExhaustsInnerPasses(t *testing.T) {
 	}
 }
 
-// wiringNestedCheckFormula is a check "outer" whose body is a check-with-children
-// "inner" (body: i1) and a plain step o1; o1 needs inner when o1NeedsInner.
+// wiringNestedCheckFormula is a formula of one step, wiringNestedCheckStepTOML.
 func wiringNestedCheckFormula(outerMax, innerMax int, o1NeedsInner bool) string {
+	return wiringFormulaTOML(wiringNestedCheckStepTOML(outerMax, innerMax, o1NeedsInner, ""))
+}
+
+// wiringNestedCheckStepTOML is a check "outer" whose body is a check-with-children
+// "inner" (body: i1) and a plain step o1; o1 needs inner when o1NeedsInner. header
+// holds raw TOML keys of the outer step itself, such as needs ("" = none).
+func wiringNestedCheckStepTOML(outerMax, innerMax int, o1NeedsInner bool, header string) string {
 	var b strings.Builder
-	b.WriteString("[[steps]]\nid = \"outer\"\ntitle = \"outer\"\n\n")
+	b.WriteString("[[steps]]\nid = \"outer\"\ntitle = \"outer\"\n")
+	b.WriteString(header)
+	b.WriteString("\n")
 	b.WriteString(wiringCheckTOML("outer", outerMax))
 	b.WriteString("[[steps.children]]\nid = \"inner\"\ntitle = \"inner\"\n\n")
 	b.WriteString(strings.ReplaceAll(wiringCheckTOML("inner", innerMax), "[steps.check", "[steps.children.check"))
@@ -901,7 +916,7 @@ func wiringNestedCheckFormula(outerMax, innerMax int, o1NeedsInner bool) string 
 	if o1NeedsInner {
 		b.WriteString("needs = [\"inner\"]\n")
 	}
-	return wiringFormulaTOML(b.String())
+	return b.String()
 }
 
 // assertWorkerAfterControlPass checks that the control's final result is "pass"
@@ -1027,4 +1042,82 @@ func TestRalphFinalizeNestedInnerCheckRejectsThenPasses(t *testing.T) {
 			t.Errorf("%s (kind=%q) status = %q, want closed", beadRef(b), b.Metadata["gc.kind"], b.Status)
 		}
 	}
+}
+
+// TestRalphFinalizeNestedOuterRecoversFromExhaustedInner: the inner loop (max
+// 1) exhausts on a failed i1 in one outer iteration, and the outer loop (max 3)
+// passes the next one. Aborting the failed outer iteration must leave the next
+// iteration's seeded inner loop alone: its i1 is run by the worker and passes.
+// The failure inside the superseded outer iteration must not fail the
+// workflow: the root passes and the source bead carries no failure keys. Each
+// row fails i1 in one outer iteration, with no failure class and with a
+// transient one.
+func TestRalphFinalizeNestedOuterRecoversFromExhaustedInner(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		failed int // the outer iteration whose inner i1 fails
+	}{{"outer_iteration_1", 1}, {"outer_iteration_2", 2}} {
+		for _, class := range []struct{ name, value string }{{"no_class", ""}, {"transient", beadmeta.FailureClassTransient}} {
+			t.Run(row.name+"/"+class.name, func(t *testing.T) {
+				failed := fmt.Sprintf("outer.iteration.%d.inner", row.failed)
+				next := fmt.Sprintf("outer.iteration.%d.inner", row.failed+1)
+				res := runWiringWorkflow(t, wiringScenario{
+					formula:       wiringNestedCheckFormula(3, 1, true),
+					checkPassIter: map[string]int{"outer": row.failed + 1, "inner": 1},
+					failRefs:      map[string]string{failed + ".iteration.1.i1": class.value},
+				})
+				ralphAssertOutcome(t, "failed i1", res.get(t, failed+".iteration.1.i1"), "fail")
+				ralphAssertOutcome(t, "exhausted inner control", res.get(t, failed), "fail")
+				i1 := res.get(t, next+".iteration.1.i1")
+				if _, ran := res.workerAt[i1.ID]; !ran {
+					t.Errorf("%s was never run by the worker (close_reason %q)", beadRef(i1), i1.Metadata["close_reason"])
+				}
+				ralphAssertOutcome(t, "next outer iteration's i1", i1, "pass")
+				ralphAssertOutcome(t, "next outer iteration's inner control", res.get(t, next), "pass")
+				outer := res.get(t, "outer")
+				ralphAssertOutcome(t, "outer control", outer, "pass")
+				res.assertControlPassedBeforeFinalizer(t, outer)
+				ralphAssertOutcome(t, "workflow root", res.root(t), "pass")
+				res.assertSourceFailureKeysEmpty(t)
+			})
+		}
+	}
+}
+
+// TestRalphFinalizeEnclosingAbortSkipsNestedLoop: the nested check "outer" is a
+// member of a plain scope "body" with a teardown, and needs body's other
+// member s1, which fails. The abort of body must skip every open bead below
+// outer, the nested loop of outer's compiled iteration 1 included: its
+// iteration scope and i1 name the inner loop, not the outer one, and carry
+// the compile's short refs, so only the inner control reaches them. The worker
+// runs s1 and the teardown and nothing else, and the root fails.
+func TestRalphFinalizeEnclosingAbortSkipsNestedLoop(t *testing.T) {
+	res := runWiringWorkflow(t, wiringScenario{
+		formula: wiringFormulaTOML(
+			wiringPlainStepTOML("s1", nil, wiringScopeMetadata),
+			wiringNestedCheckStepTOML(3, 1, false, "needs = [\"s1\"]\nmetadata = "+wiringScopeMetadata+"\n"),
+			wiringPlainStepTOML("body", []string{"outer", "s1"}, `{ "gc.kind" = "scope", "gc.scope_name" = "worktree", "gc.scope_role" = "body" }`),
+			wiringPlainStepTOML("teardown", []string{"body"}, `{ "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }`),
+		),
+		checkPassIter: map[string]int{"outer": 1, "inner": 1},
+		failRefs:      map[string]string{"s1": ""},
+	})
+	ran := make([]string, 0, len(res.workerAt))
+	for id := range res.workerAt {
+		ran = append(ran, strings.TrimPrefix(res.refOfID(t, id), wiringFormula+"."))
+	}
+	sort.Strings(ran)
+	if want := []string{"s1", "teardown"}; !reflect.DeepEqual(ran, want) {
+		t.Errorf("worker ran %v, want only %v", ran, want)
+	}
+	const skipReason = "scope member skipped: an earlier member of the same scope failed"
+	for _, suffix := range []string{"outer.iteration.1.inner.iteration.1", "outer.iteration.1.inner.iteration.1.i1"} {
+		b := res.get(t, suffix)
+		ralphAssertOutcome(t, suffix, b, "skipped")
+		if got := b.Metadata["close_reason"]; got != skipReason {
+			t.Errorf("%s close_reason = %q, want %q", suffix, got, skipReason)
+		}
+	}
+	ralphAssertOutcome(t, "enclosing scope body", res.get(t, "body"), "fail")
+	ralphAssertOutcome(t, "workflow root", res.root(t), "fail")
 }
