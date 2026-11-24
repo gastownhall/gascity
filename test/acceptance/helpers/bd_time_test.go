@@ -261,3 +261,47 @@ func TestMeasureMarginalOverFloorRemeasuresAnInvertedReading(t *testing.T) {
 		t.Errorf("reading = floor %s, marginal %s; want 60ms and 20ms", m.Floor, m.Marginal)
 	}
 }
+
+// TestMeasureMarginalOverFloorReportsAPersistentInversion pins the end of the
+// re-measurement: a floor that never reads as one is still not a verdict on
+// the gc side. After every pair FloorMeasurementMaxPairs allows, the reading
+// comes back Inverted with no marginal, for the caller to report as
+// inconclusive, never as a pass.
+func TestMeasureMarginalOverFloorReportsAPersistentInversion(t *testing.T) {
+	box := &floorScript{
+		floorAt:  func(int, int) time.Duration { return 300 * time.Millisecond },
+		gcSideAt: func(int, int) time.Duration { return 80 * time.Millisecond },
+	}
+	m := MeasureMarginalOverFloor(100*time.Millisecond, box.floor, box.gcSide)
+	if !m.Inverted {
+		t.Fatalf("a floor 220ms above the gc side on every sample read as a floor (marginal %s after %d pairs)", m.Marginal, m.Pairs)
+	}
+	if m.Pairs != FloorMeasurementMaxPairs {
+		t.Errorf("took %d pairs, want all %d before giving up on the reading", m.Pairs, FloorMeasurementMaxPairs)
+	}
+	if m.Marginal != 0 {
+		t.Errorf("an inverted reading carried marginal %s; it has none", m.Marginal)
+	}
+}
+
+// TestMeasureMarginalOverFloorNeverRemeasuresAnOverBudgetReading is the other
+// half of not weakening the gate: only an inverted reading is measured again.
+// A gc side that really is over budget is a verdict, returned after the first
+// FloorMeasurementMinPairs pairs for the caller to fail, not sampled until a
+// quiet moment lets it through.
+func TestMeasureMarginalOverFloorNeverRemeasuresAnOverBudgetReading(t *testing.T) {
+	box := &floorScript{
+		floorAt:  func(int, int) time.Duration { return 60 * time.Millisecond },
+		gcSideAt: func(int, int) time.Duration { return 400 * time.Millisecond },
+	}
+	m := MeasureMarginalOverFloor(100*time.Millisecond, box.floor, box.gcSide)
+	if m.Inverted {
+		t.Fatalf("a gc side 340ms above the floor read as inverted")
+	}
+	if m.Pairs != FloorMeasurementMinPairs {
+		t.Errorf("took %d pairs, want %d: an over-budget reading must not be re-measured", m.Pairs, FloorMeasurementMinPairs)
+	}
+	if m.Marginal != 340*time.Millisecond {
+		t.Errorf("marginal = %s, want 340ms, over the 100ms budget for the caller to fail", m.Marginal)
+	}
+}

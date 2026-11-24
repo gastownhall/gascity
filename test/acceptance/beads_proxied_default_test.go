@@ -1628,18 +1628,19 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	})
 
 	t.Run("bd-list-gc-side-budget", func(t *testing.T) {
-		// The floor first: what one gc process costs on THIS box before it has
-		// done anything at all.
+		// The floor beside the command: what one gc process costs on THIS box
+		// before it has done anything at all.
 		//
-		// Without it this row is not a gate, it is a thermometer. `gc --help`
-		// loads no city, opens no store and forks no bd; on the machine this was
-		// written on it takes 80-120ms of wall clock, which is already the whole
-		// budget. A raw "wall minus child <= 0.1s" assertion would therefore fail
-		// for a gc that did literally nothing, and pass on a faster box for a gc
-		// that had bolted a store open onto the passthrough. What PR2 owes is the
-		// MARGINAL cost: the config load, the scope resolution and the
-		// environment build gc performs for this command, over and above starting
-		// at all.
+		// Without it this row is not a gate, it is a thermometer. The floor
+		// (test/processfloor.Args, `gc ready --help`) starts gc exactly as
+		// `gc bd` starts it, loads no city, opens no store and forks no bd, and
+		// starting a gc process can already take the whole budget of wall clock
+		// on a loaded box. A raw "wall minus child <= 0.1s" assertion would
+		// therefore fail for a gc that did literally nothing, and pass on a
+		// faster box for a gc that had bolted a store open onto the passthrough.
+		// What PR2 owes is the MARGINAL cost: the config load, the scope
+		// resolution and the environment build gc performs for this command,
+		// over and above starting at all.
 		//
 		// Both numbers are reported. The raw one is the artifact the plan asks
 		// for; the marginal one is the gate. That is a deliberate departure from
@@ -1647,8 +1648,18 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 		// 0.1s`, for the reason above, and it has a cost the raw line does not:
 		// two subtractions, each of which can go vacuous. Neither is allowed to
 		// (round3 review, completeness): a sample whose children cannot be
-		// attributed fails, and so does a floor that stopped being one — see
-		// helpers.PassthroughGCSide and helpers.MarginalOverFloor.
+		// attributed fails, and a floor that stopped being one never passes —
+		// see helpers.PassthroughGCSide and helpers.MarginalOverFloor.
+		//
+		// The two are sampled in interleaved pairs, by a floor that starts like
+		// `gc bd`. A floor that runs the eager pack-command discovery `gc bd`
+		// skips (`gc --help` does), or that is sampled in a block of its own,
+		// reads above the gc side on a loaded box (gate tracker ga-97b2v9wd). A
+		// reading still inverted after helpers.FloorMeasurementMaxPairs pairs is
+		// reported inconclusive: helpers.MissingPrecondition skips it locally and
+		// fails it under GC_REQUIRE_ACCEPTANCE_TOOLING, so this host's failure to
+		// produce a floor is never counted as a pass, nor as a verdict on gc's
+		// side.
 		trace := helpers.NewBDTrace(t)
 		traced := lane.Clone().With(helpers.BDTraceEnv, trace.Path)
 		var (
@@ -1694,7 +1705,8 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 		m := helpers.MeasureMarginalOverFloor(proxiedNativeGCSideBudget, floorSample, gcSideSample)
 		if m.Inverted {
 			_, err := helpers.MarginalOverFloor(m.GCSide, m.Floor, proxiedNativeGCSideBudget)
-			t.Fatalf("gc bd list --json, best of %d: %v", m.Pairs, err)
+			helpers.MissingPrecondition(t, "INCONCLUSIVE, no verdict on gc's side of `gc bd list --json`: after %d interleaved pairs of gc %q and the traced command, %v",
+				m.Pairs, processfloor.Args(), err)
 		}
 		// The artifact: bd-bound and machine-bound, recorded so the delta is
 		// reproducible, never asserted. The 0.4s figure in the bead is a
