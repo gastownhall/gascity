@@ -928,7 +928,7 @@ func affinityStoreRunner(t *testing.T, rows map[string][]beads.Bead) hookStoreRu
 		}
 		answers[dir] = string(raw)
 	}
-	return func(_, dir string, _ []string) (string, error) {
+	return func(_ context.Context, _, dir string, _ []string) (string, error) {
 		answer, ok := answers[dir]
 		if !ok {
 			t.Fatalf("unexpected store dir %q", dir)
@@ -1008,7 +1008,7 @@ func TestHookDoorsAgreeAcrossStoresWhenAStoreHoldsOnlyWorkLeftToAnotherSession(t
 
 			visibility := affinitySeatVisibility(hookPoolSeat{WorkDir: seatDir}, false)
 			var listOut, listErr bytes.Buffer
-			listCode := doHook("query", "/rigs/r1", false, hookDiscoveryRunner(stores, run, visibility, func(string, error) {}, &listErr), &listOut, &listErr, visibility)
+			listCode := doHook("query", "/rigs/r1", false, hookDiscoveryRunner(context.Background(), stores, run, visibility, func(string, error) {}, &listErr), &listOut, &listErr, visibility)
 			wantCode := 1
 			if tc.wantListing != "" {
 				wantCode = 0
