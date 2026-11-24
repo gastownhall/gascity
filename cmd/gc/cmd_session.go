@@ -1552,6 +1552,11 @@ func (p *attachmentCachingProvider) Relaunch(ctx context.Context, name string, c
 	return runtime.ErrRelaunchUnsupported
 }
 
+func (p *attachmentCachingProvider) SupportsCommandScope(name string) bool {
+	sp, ok := p.Provider.(runtime.CommandScopeProvider)
+	return ok && sp.SupportsCommandScope(name)
+}
+
 func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {
 	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
 		return ip.Pending(name)

@@ -34,6 +34,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"BackgroundWorkStopper":           reflect.TypeFor[runtime.BackgroundWorkStopper](),
 	"BackendListingProvider":          reflect.TypeFor[runtime.BackendListingProvider](),
 	"BackendsProvider":                reflect.TypeFor[runtime.BackendsProvider](),
+	"CommandScopeProvider":            reflect.TypeFor[runtime.CommandScopeProvider](),
 	"ConditionalProcessTableScanner":  reflect.TypeFor[runtime.ConditionalProcessTableScanner](),
 	"DeadRuntimeSessionChecker":       reflect.TypeFor[runtime.DeadRuntimeSessionChecker](),
 	"DialogProvider":                  reflect.TypeFor[runtime.DialogProvider](),

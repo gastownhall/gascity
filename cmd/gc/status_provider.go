@@ -250,6 +250,11 @@ func (p *statusProvider) Relaunch(ctx context.Context, name string, cfg runtime.
 	return runtime.ErrRelaunchUnsupported
 }
 
+func (p *statusProvider) SupportsCommandScope(name string) bool {
+	sp, ok := p.base.(runtime.CommandScopeProvider)
+	return ok && sp.SupportsCommandScope(name)
+}
+
 func (p *statusProvider) Capabilities() runtime.ProviderCapabilities {
 	return p.base.Capabilities()
 }

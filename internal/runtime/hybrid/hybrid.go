@@ -46,6 +46,7 @@ var (
 	_ runtime.SessionObjectKiller             = (*Provider)(nil)
 	_ runtime.TurnEventProvider               = (*Provider)(nil)
 	_ runtime.TurnFenceProvider               = (*Provider)(nil)
+	_ runtime.CommandScopeProvider            = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -255,6 +256,14 @@ func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow ti
 		return cp.ClearInput(ctx, name, restoreWindow)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// SupportsCommandScope reports whether the backend routed for name launches
+// the actual model command locally, so native admission is not masked by the
+// hybrid router.
+func (p *Provider) SupportsCommandScope(name string) bool {
+	sp, ok := p.route(name).(runtime.CommandScopeProvider)
+	return ok && sp.SupportsCommandScope(name)
 }
 
 // Relaunch forwards a warm-box agent relaunch to the routed backend when it

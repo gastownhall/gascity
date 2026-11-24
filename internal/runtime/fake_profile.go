@@ -138,6 +138,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			sleepTrait:                    sleepTrait{SessionSleepCapabilityFull},
 			localTranscriptTrait:          localTranscriptTrait{},
 			steerTrait:                    steerTrait{SteerKeystroke},
+			commandScopeTrait:             commandScopeTrait{},
 		}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
@@ -170,6 +171,9 @@ type (
 	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
 	// agent runs on this host.
 	localTranscriptTrait struct{}
+	// commandScopeTrait is tmux's: it launches the actual model command
+	// locally, so native admission may contain it in a named OS scope.
+	commandScopeTrait struct{}
 	// execHostFSTrait is exec's local-transcript answer and its
 	// process-table scanner, both of which its pack's handshake decides
 	// (fs.host with locality local): the profiled pack declares neither, so
@@ -188,6 +192,8 @@ func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 func (freshTrait) LivenessReadsFresh() bool { return true }
 
 func (localTranscriptTrait) LocalTranscripts() bool { return true }
+
+func (commandScopeTrait) SupportsCommandScope(string) bool { return true }
 
 func (execHostFSTrait) LocalTranscripts() bool { return false }
 
@@ -281,6 +287,7 @@ type (
 		sleepTrait
 		localTranscriptTrait
 		steerTrait
+		commandScopeTrait
 	}
 	acpProfile struct {
 		Provider
