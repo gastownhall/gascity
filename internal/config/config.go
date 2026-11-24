@@ -835,6 +835,8 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// WorkQueryFederated overrides the custom work-query coverage declaration.
+	WorkQueryFederated *bool `toml:"work_query_federated,omitempty"`
 	// ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the
 	// last word on new demand, its zeros included. See Agent.
 	ScaleCheckAuthoritative *bool `toml:"scale_check_authoritative,omitempty"`
@@ -3904,6 +3906,11 @@ type Agent struct {
 	// $GC_ALIAS set to that identity, while $GC_AGENT keeps the session's
 	// runtime value.
 	WorkQuery string `toml:"work_query,omitempty"`
+	// WorkQueryFederated declares that a custom WorkQuery reads every reachable
+	// work store, including relocated classes and ephemeral work. gc hook runs it
+	// once in the primary query environment instead of once per store. False
+	// preserves legacy custom-query fan-out. Ignored without WorkQuery.
+	WorkQueryFederated bool `toml:"work_query_federated,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,

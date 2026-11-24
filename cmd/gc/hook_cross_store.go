@@ -137,6 +137,11 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // (conformanceClaimRouting); closing the gap makes the claim stop being a bd
 // subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
 func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
+	// An explicitly federated custom query already reads every store in one
+	// invocation; fanning it out per store would re-ask the same question R+1.
+	if a != nil && a.HasFederatedWorkQuery() {
+		return []hookStore{{dir: workDir, env: queryEnv}}
+	}
 	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs, false)
 }
 

@@ -1605,12 +1605,18 @@ const (
 //
 // So the fact is returned instead of guessed at. Callers that hold a real city
 // print it; a single-store city returns nil and nothing is printed anywhere.
+// HasFederatedWorkQuery reports whether a custom query explicitly owns
+// discovery across all reachable stores. Generated queries keep topology scope.
+func (a *Agent) HasFederatedWorkQuery() bool {
+	return a.WorkQueryFederated && strings.TrimSpace(a.WorkQuery) != ""
+}
+
 func (a *Agent) FederationBlindOverrides(topo QueryTopology) []string {
 	if !topo.FederatedReady {
 		return nil
 	}
 	var keys []string
-	if strings.TrimSpace(a.WorkQuery) != "" {
+	if strings.TrimSpace(a.WorkQuery) != "" && !a.HasFederatedWorkQuery() {
 		keys = append(keys, workQueryOverrideKey)
 	}
 	if strings.TrimSpace(a.ScaleCheck) != "" {
