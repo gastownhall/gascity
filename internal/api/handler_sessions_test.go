@@ -9114,6 +9114,9 @@ func TestHandleSessionListActiveBeadSkipsSuspendedRig(t *testing.T) {
 		if item.ActiveBead != betaWork {
 			t.Errorf("active_bead = %q, want beta's %q", item.ActiveBead, betaWork)
 		}
+		if item.ActiveBeadUnknown {
+			t.Errorf("active_bead_unknown = true for a lookup that answered %q", item.ActiveBead)
+		}
 	}
 	if !found {
 		t.Fatalf("session %s not listed in %+v", info.ID, resp.Items)
@@ -9132,11 +9135,15 @@ func (s blockedActiveWorkStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 
 // A stalled work-store lookup must not hold either list endpoint until bd's
 // own 30-second timeout, or make a missing active bead look authoritative.
+// The agent list reports the unread lookup as partial, because agent state is
+// derived from the active bead. The session list marks the row's active bead
+// unknown and stays complete: active work is optional enrichment there, and a
+// partial session list fails `gc session list` (ga-ix489).
 func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
 	for _, endpoint := range []string{"sessions", "agents"} {
 		t.Run(endpoint, func(t *testing.T) {
 			fs := newSessionFakeState(t)
-			createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
 			release := make(chan struct{})
 			defer close(release)
 			fs.stores["myrig"] = blockedActiveWorkStore{Store: beads.NewMemStore(), release: release}
@@ -9144,9 +9151,10 @@ func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 			defer cancel()
 			type result struct {
-				partial bool
-				errors  []string
-				err     error
+				partial  bool
+				errors   []string
+				sessions []sessionResponse
+				err      error
 			}
 			done := make(chan result, 1)
 			go func() {
@@ -9156,7 +9164,7 @@ func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
 						done <- result{err: err}
 						return
 					}
-					done <- result{partial: out.Body.Partial, errors: out.Body.PartialErrors}
+					done <- result{partial: out.Body.Partial, errors: out.Body.PartialErrors, sessions: out.Body.Items}
 				} else {
 					out, err := srv.humaHandleAgentList(ctx, &AgentListInput{})
 					if err != nil {
@@ -9166,13 +9174,35 @@ func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
 					done <- result{partial: out.Body.Partial, errors: out.Body.PartialErrors}
 				}
 			}()
+			var got result
 			select {
-			case got := <-done:
-				if got.err != nil || !got.partial || len(got.errors) == 0 {
-					t.Fatalf("list = %+v, want a partial result identifying the unavailable work lookup", got)
-				}
+			case got = <-done:
 			case <-time.After(time.Second):
 				t.Fatal("list did not return after the request deadline")
+			}
+			if got.err != nil {
+				t.Fatalf("list error = %v", got.err)
+			}
+			if endpoint == "agents" {
+				if !got.partial || len(got.errors) == 0 {
+					t.Fatalf("agent list = %+v, want a partial result identifying the unavailable work lookup", got)
+				}
+				return
+			}
+			if got.partial || len(got.errors) != 0 {
+				t.Fatalf("session list partial = %v, errors = %v; want a complete list", got.partial, got.errors)
+			}
+			var row *sessionResponse
+			for i := range got.sessions {
+				if got.sessions[i].ID == info.ID {
+					row = &got.sessions[i]
+				}
+			}
+			if row == nil {
+				t.Fatalf("session %s not listed in %+v", info.ID, got.sessions)
+			}
+			if !row.ActiveBeadUnknown || row.ActiveBead != "" {
+				t.Fatalf("row active_bead = %q, active_bead_unknown = %v; want unknown", row.ActiveBead, row.ActiveBeadUnknown)
 			}
 		})
 	}

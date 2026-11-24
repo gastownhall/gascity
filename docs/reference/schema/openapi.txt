@@ -9847,6 +9847,10 @@
           "active_bead": {
             "type": "string"
           },
+          "active_bead_unknown": {
+            "description": "True when the list's bounded active-work lookup could not answer for this session (a store read timed out or failed under load), so active_bead is unknown rather than absent. Omitted when active_bead was looked up.",
+            "type": "boolean"
+          },
           "activity": {
             "type": "string"
           },

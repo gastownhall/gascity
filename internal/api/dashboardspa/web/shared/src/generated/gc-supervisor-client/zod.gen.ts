@@ -3766,6 +3766,7 @@ export const zSubmissionCapabilities = z.object({
 
 export const zSessionResponse = z.object({
     active_bead: z.string().optional(),
+    active_bead_unknown: z.boolean().optional(),
     activity: z.string().optional(),
     activity_source: z.enum(['program', 'transcript']).optional(),
     agent_kind: z.string().optional(),

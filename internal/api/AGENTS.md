@@ -101,7 +101,10 @@ store, or nothing, and never falls back to the other rigs' stores
 (`activeBeadSearchScope`). Session and agent list enrichment share one
 request-wide budget for uncached active-work reads. Use a context-bound scoped
 store for bd-backed reads, stop on an unreadable higher-priority lookup, and
-mark the response partial instead of claiming that the missing work is absent.
+never claim that the missing work is absent: the agent list marks the response
+partial (agent state derives from the active bead), while the session list
+marks each unanswered row `active_bead_unknown` and stays complete, because a
+partial session list fails `gc session list`.
 A clean cache remains usable after the budget expires until a lookup fails.
 
 ## Deferred creation baseline

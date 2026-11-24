@@ -63,12 +63,16 @@ type sessionResponse struct {
 	// pane reads true, a remain-on-exit corpse reads false. A session in a
 	// transitional state (creating, start-pending, draining) can start or stop
 	// its process right after that.
-	Running       bool   `json:"running" doc:"Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles."`
-	ActiveBead    string `json:"active_bead,omitempty"`
-	LastOutput    string `json:"last_output,omitempty"`
-	Model         string `json:"model,omitempty"`
-	ContextPct    *int   `json:"context_pct,omitempty"`
-	ContextWindow *int   `json:"context_window,omitempty"`
+	Running    bool   `json:"running" doc:"Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles."`
+	ActiveBead string `json:"active_bead,omitempty"`
+	// ActiveBeadUnknown is true when a list's bounded active-work lookup could
+	// not answer for this row, so an empty ActiveBead is not a claim that the
+	// session has no work.
+	ActiveBeadUnknown bool   `json:"active_bead_unknown,omitempty" doc:"True when the list's bounded active-work lookup could not answer for this session (a store read timed out or failed under load), so active_bead is unknown rather than absent. Omitted when active_bead was looked up."`
+	LastOutput        string `json:"last_output,omitempty"`
+	Model             string `json:"model,omitempty"`
+	ContextPct        *int   `json:"context_pct,omitempty"`
+	ContextWindow     *int   `json:"context_window,omitempty"`
 
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
@@ -699,6 +703,7 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 		resp.ActiveBead = s.findLiveActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 	case activeWork != nil:
 		resp.ActiveBead = activeWork.find("", info.ID, info.SessionName, info.Alias, info.Template)
+		resp.ActiveBeadUnknown = activeWork.err != nil
 	default:
 		resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 	}

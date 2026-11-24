@@ -403,7 +403,10 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 }
 
 // activeWorkLookup bounds optional active-bead enrichment for an entire list
-// request. A failed higher-priority lookup cannot be treated as a miss.
+// request. A failed higher-priority lookup cannot be treated as a miss: once
+// err is set, find answers "" for every later row, and the caller reports
+// those rows as unknown (session list) or the response as partial (agent
+// list).
 type activeWorkLookup struct {
 	ctx    context.Context
 	server *Server

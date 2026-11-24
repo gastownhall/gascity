@@ -89,9 +89,11 @@ func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListIn
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths, activeWork)
 	}
-	if activeWork.err != nil {
-		partialErrors = append(partialErrors, activeWork.err.Error())
-	}
+	// Active work is optional enrichment here: a lookup the request budget
+	// cut short marks each unanswered row's active_bead_unknown instead of
+	// making the list partial, which `gc session list` reports as a failed
+	// read (ga-ix489). The agent list keeps reporting it as partial, because
+	// it derives agent state from the active bead.
 	if input.WakeReasons {
 		s.setSessionListWakeReasons(page, pageSessions, listings)
 	}
