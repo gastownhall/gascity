@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"os"
 	"os/exec"
@@ -426,6 +427,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	if command, err := s.resolvedSessionRuntimeCommand(resolved, transport, info.Command, metadata); err == nil {
 		resolvedInfo.Command = command
 	} else {
+		logSessionResumeCommandFallback(info.ID)
 		resolvedInfo.Command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
 	}
 	resumeCommand := resolved.ResumeCommand
@@ -442,6 +444,17 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
 	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata), programStatusArm), nil
+}
+
+// logSessionResumeCommandFallback warns that a resume resolver could not build
+// the provider launch command and selected its fallback command. It takes only
+// the session ID: the resolution error can embed submitted option keys and
+// values, and commands and environment can carry private data, so none of them
+// reach the log. The resume resolvers call it from their fallback branches;
+// the ACP transport probe, which compares candidate commands without selecting
+// one, stays quiet.
+func logSessionResumeCommandFallback(sessionID string) {
+	log.Printf("gc api: warning: session %q: provider launch command resolution failed; using fallback launch command", sessionID)
 }
 
 func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string) (string, error) {

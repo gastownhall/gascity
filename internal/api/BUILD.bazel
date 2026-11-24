@@ -545,6 +545,7 @@ go_test(
         "session_resolved_config_test.go",
         "session_response_list_fields_test.go",
         "session_response_wire_test.go",
+        "session_resume_fallback_warning_test.go",
         "session_running_state_test.go",
         "session_starting_error_test.go",
         "session_startup_prompt_test.go",
