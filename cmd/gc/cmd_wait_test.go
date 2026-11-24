@@ -4753,6 +4753,7 @@ func TestClearOrphanedWaitHoldsRederivesEachPass(t *testing.T) {
 // passes over the in-memory store.
 type resetWindowFixture struct {
 	t         *testing.T
+	dir       string
 	store     beads.Store
 	sf        *sessionpkg.Store
 	sessionID string
@@ -4761,29 +4762,54 @@ type resetWindowFixture struct {
 	now       time.Time
 }
 
-func newResetWindowFixture(t *testing.T) *resetWindowFixture {
+// resetWindowSessionOpt adjusts the fixture session's metadata before the
+// session bead is created.
+type resetWindowSessionOpt func(meta map[string]string)
+
+// namedResetWindowSession makes the fixture session a configured named
+// session that resumes its conversation.
+func namedResetWindowSession(meta map[string]string) {
+	meta["configured_named_session"] = "true"
+	meta["configured_named_identity"] = "desk"
+	meta["configured_named_mode"] = "always"
+	meta["wake_mode"] = "resume"
+}
+
+// freshResetWindowSession makes the fixture session start a fresh
+// conversation on every wake after its first.
+func freshResetWindowSession(meta map[string]string) {
+	meta["wake_mode"] = "fresh"
+	meta["last_woke_at"] = "2026-10-24T16:00:00Z"
+}
+
+func newResetWindowFixture(t *testing.T, opts ...resetWindowSessionOpt) *resetWindowFixture {
 	t.Helper()
 	store := beads.NewMemStore()
 	dep, err := store.Create(beads.Bead{Title: "upstream step", Type: "task"})
 	if err != nil {
 		t.Fatalf("create dep: %v", err)
 	}
+	meta := map[string]string{
+		"session_name":       "worker",
+		"agent_name":         "worker",
+		"continuation_epoch": "2",
+		"state":              string(sessionpkg.StateActive),
+	}
+	for _, o := range opts {
+		o(meta)
+	}
 	sess, err := store.Create(beads.Bead{
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name":       "worker",
-			"agent_name":         "worker",
-			"continuation_epoch": "2",
-			"state":              string(sessionpkg.StateActive),
-		},
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: meta,
 	})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 	return &resetWindowFixture{
 		t:         t,
+		dir:       t.TempDir(),
 		store:     store,
 		sf:        sessionFrontDoor(store),
 		sessionID: sess.ID,
@@ -4864,6 +4890,63 @@ func (fx *resetWindowFixture) wakePass() {
 	}
 }
 
+// dispatch runs a ready-wait dispatch pass over the fixture's city and store.
+func (fx *resetWindowFixture) dispatch(stage string) {
+	fx.t.Helper()
+	setWaitTestFileBeads(fx.t)
+	if err := dispatchReadyWaitNudges(fx.dir, fx.store, runtime.NewFake(), fx.tick()); err != nil {
+		fx.t.Fatalf("%s: dispatchReadyWaitNudges: %v", stage, err)
+	}
+}
+
+// queued lists every nudge the queue holds for the fixture session's agent.
+func (fx *resetWindowFixture) queued(stage string) []queuedNudge {
+	fx.t.Helper()
+	pending, inFlight, dead, err := listQueuedNudges(fx.dir, "worker", fx.now)
+	if err != nil {
+		fx.t.Fatalf("%s: listQueuedNudges: %v", stage, err)
+	}
+	return append(append(pending, inFlight...), dead...)
+}
+
+// requireOneQueued requires the queue to hold exactly the wait's first
+// attempt nudge, fenced on epoch, and returns it.
+func (fx *resetWindowFixture) requireOneQueued(stage, epoch string) queuedNudge {
+	fx.t.Helper()
+	got := fx.queued(stage)
+	if len(got) != 1 {
+		fx.t.Fatalf("%s: queued %d nudges (%+v), want 1", stage, len(got), got)
+	}
+	if want := "wait-" + fx.waitID + "-2-1"; got[0].ID != want {
+		fx.t.Fatalf("%s: queued nudge id = %q, want %q", stage, got[0].ID, want)
+	}
+	if got[0].ContinuationEpoch != epoch {
+		fx.t.Fatalf("%s: queued nudge epoch = %q, want %q", stage, got[0].ContinuationEpoch, epoch)
+	}
+	return got[0]
+}
+
+// markDelivered records the shadow of queue nudge nudgeID as injected, the
+// ack of a delivered reminder.
+func (fx *resetWindowFixture) markDelivered(nudgeID string) {
+	fx.t.Helper()
+	shadows, err := fx.store.List(beads.ListQuery{Label: "nudge:" + nudgeID, IncludeClosed: true})
+	if err != nil || len(shadows) != 1 {
+		fx.t.Fatalf("shadows of %s = %d, %v; want 1", nudgeID, len(shadows), err)
+	}
+	if err := fx.store.SetMetadata(shadows[0].ID, "state", "injected"); err != nil {
+		fx.t.Fatalf("marking %s delivered: %v", nudgeID, err)
+	}
+}
+
+func (fx *resetWindowFixture) requireClosed(stage string) {
+	fx.t.Helper()
+	if b := fx.wait(); b.Status != "closed" || b.Metadata["state"] != waitStateClosed {
+		fx.t.Fatalf("%s: wait status=%q state=%q last_error=%q, want closed %q",
+			stage, b.Status, b.Metadata["state"], b.Metadata["last_error"], waitStateClosed)
+	}
+}
+
 func (fx *resetWindowFixture) wait() beads.Bead {
 	fx.t.Helper()
 	b, err := fx.store.Get(fx.waitID)
@@ -4896,6 +4979,275 @@ func (fx *resetWindowFixture) requireCanceled(stage, reason string) {
 		fx.t.Fatalf("%s: wait status=%q state=%q last_error=%q, want closed canceled %q",
 			stage, b.Status, b.Metadata["state"], b.Metadata["last_error"], reason)
 	}
+}
+
+func (fx *resetWindowFixture) requireKeptAt(stage, state string) {
+	fx.t.Helper()
+	b := fx.wait()
+	if b.Status == "closed" || b.Metadata["state"] != state || b.Metadata["registered_epoch"] != "2" || b.Metadata["last_error"] != "" {
+		fx.t.Fatalf("%s: wait status=%q state=%q registered_epoch=%q last_error=%q, want it open %s at registered_epoch 2 with no last_error",
+			stage, b.Status, b.Metadata["state"], b.Metadata["registered_epoch"], b.Metadata["last_error"], state)
+	}
+}
+
+// TestPrepareWaitWakeState_KeepsNamedSessionWaitAcrossReset covers the waits
+// of a configured named session: the session stays the same bead across
+// every continuation reset, so its waits belong to the session rather than to
+// one conversation, and an epoch move does not cancel them continuation-stale.
+// registered_epoch keeps its value from registration.
+func TestPrepareWaitWakeState_KeepsNamedSessionWaitAcrossReset(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []resetWindowSessionOpt
+		run  func(fx *resetWindowFixture)
+	}{
+		{
+			name: "restart-request",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.wakePass()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the restart", waitStatePending)
+			},
+		},
+		{
+			name: "churn-reset",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.patch(sessionpkg.ConversationResetPatch(false, fx.tick()))
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the churn reset", waitStatePending)
+			},
+		},
+		{
+			name: "stale-key-marker-reset",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.patch(sessionpkg.MetadataPatch{"session_key": "", "continuation_reset_pending": "true"})
+				fx.wakePass()
+				fx.requireKeptAt("with the marker set", waitStatePending)
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the start consumed the marker", waitStatePending)
+			},
+		},
+		{
+			name: "two-successive-resets",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the first restart", waitStatePending)
+				fx.requestReset()
+				fx.start(4)
+				fx.wakePass()
+				fx.requireKeptAt("after the second restart", waitStatePending)
+			},
+		},
+		{
+			name: "dep-closes-before-reset",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.closeDep()
+				fx.wakePass()
+				fx.requireKeptAt("before the restart", waitStateReady)
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the restart", waitStateReady)
+			},
+		},
+		{
+			name: "dep-closes-after-reset",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.closeDep()
+				fx.wakePass()
+				fx.requireKeptAt("after the dependency closed", waitStateReady)
+			},
+		},
+		{
+			name: "control/unnamed-is-stale",
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireCanceled("after the restart", "continuation-stale")
+			},
+		},
+		{
+			name: "control/named-config-gone-is-stale",
+			opts: []resetWindowSessionOpt{func(meta map[string]string) {
+				meta["configured_named_identity"] = "desk"
+			}},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireCanceled("after the restart", "continuation-stale")
+			},
+		},
+		{
+			name: "control/closed-named-is-stale",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				if err := fx.store.Close(fx.sessionID); err != nil {
+					fx.t.Fatalf("close session: %v", err)
+				}
+				fx.wakePass()
+				fx.requireCanceled("after the session closed", "continuation-stale")
+			},
+		},
+		{
+			name: "control/closed-named-at-its-epoch-is-session-closed",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				if err := fx.store.Close(fx.sessionID); err != nil {
+					fx.t.Fatalf("close session: %v", err)
+				}
+				fx.wakePass()
+				fx.requireCanceled("after the session closed", "session-closed")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.run(newResetWindowFixture(t, tc.opts...))
+		})
+	}
+}
+
+// TestDispatchReadyWaitNudges_DeliversKeptNamedSessionWaitAtCurrentEpoch
+// covers the reminder of a configured named session's wait that a reset kept:
+// it goes to the conversation that is current at dispatch, under the
+// attempt's id, which still names the registered epoch, and its delivery
+// closes the wait once.
+func TestDispatchReadyWaitNudges_DeliversKeptNamedSessionWaitAtCurrentEpoch(t *testing.T) {
+	t.Run("dep-closes-after-reset", func(t *testing.T) {
+		fx := newResetWindowFixture(t, namedResetWindowSession)
+		fx.register()
+		fx.requestReset()
+		fx.start(3)
+		fx.wakePass()
+		fx.closeDep()
+		fx.wakePass()
+		fx.requireKeptAt("after the dependency closed", waitStateReady)
+		fx.dispatch("first dispatch")
+		fx.dispatch("second dispatch")
+		item := fx.requireOneQueued("after dispatch", "3")
+		fx.markDelivered(item.ID)
+		fx.wakePass()
+		fx.requireClosed("after delivery")
+	})
+	t.Run("nudge-queued-before-reset", func(t *testing.T) {
+		fx := newResetWindowFixture(t, namedResetWindowSession)
+		fx.register()
+		fx.closeDep()
+		fx.wakePass()
+		fx.dispatch("before the restart")
+		fx.requireOneQueued("before the restart", "2")
+		fx.requestReset()
+		fx.start(3)
+		fx.wakePass()
+		fx.requireKeptAt("after the restart", waitStateReady)
+		fx.dispatch("first dispatch after the restart")
+		fx.dispatch("second dispatch after the restart")
+		item := fx.requireOneQueued("after the restart", "2")
+		target := nudgeTarget{agent: config.Agent{Name: "worker"}, sessionID: fx.sessionID, continuationEpoch: "3", sessionName: "worker"}
+		if !queuedNudgeClaimableForTarget(target, item, nil) {
+			t.Fatalf("queued nudge %+v is not claimable by the epoch-3 target", item)
+		}
+		if reason, blocked, err := blockedQueuedWaitNudgeReason(fx.sf, item); err != nil || blocked {
+			t.Fatalf("blockedQueuedWaitNudgeReason = %q, %v, %v; want the reminder deliverable", reason, blocked, err)
+		}
+		fx.markDelivered(item.ID)
+		fx.wakePass()
+		fx.requireClosed("after delivery")
+		fx.dispatch("dispatch after the close")
+		if n := waitNudgeShadowCount(t, fx.store, item.ID); n != 1 {
+			t.Fatalf("nudge shadows of %s = %d, want 1: one reminder in total", item.ID, n)
+		}
+		if got := fx.queued("after the close"); len(got) > 1 {
+			t.Fatalf("queued %d nudges after the close, want no second reminder", len(got))
+		}
+	})
+}
+
+// sleepOnWait puts the session to sleep on its wait, as gc session wait
+// --sleep leaves it.
+func (fx *resetWindowFixture) sleepOnWait() {
+	fx.t.Helper()
+	if err := setSessionWaitHold(fx.sf, fx.sessionID); err != nil {
+		fx.t.Fatalf("setting the wait hold: %v", err)
+	}
+	fx.patch(sessionpkg.MetadataPatch{"state": string(sessionpkg.StateAsleep)})
+}
+
+// productionWake runs the controller's pre-wake patch (preWakePatch) over the
+// session as stored, requires it to publish epoch, and completes the start.
+func (fx *resetWindowFixture) productionWake(epoch string) {
+	fx.t.Helper()
+	b, err := fx.store.Get(fx.sessionID)
+	if err != nil {
+		fx.t.Fatalf("Get session: %v", err)
+	}
+	_, _, batch, _ := preWakePatch(sessionInfoFromBead(b), fx.tick(), "tok-"+epoch)
+	if got := batch["continuation_epoch"]; got != epoch {
+		fx.t.Fatalf("preWakePatch continuation_epoch = %q, want %q", got, epoch)
+	}
+	fx.patch(batch)
+	fx.patch(sessionpkg.MetadataPatch{"state": string(sessionpkg.StateActive)})
+}
+
+// TestPrepareWaitWakeState_KeepsFreshNamedSessionSleepWaitThroughItsWake
+// covers a configured named session with wake_mode=fresh asleep on its wait:
+// the wake its ready wait asks for opens a new conversation, and the wait the
+// session went to sleep on must still reach it, once, in that conversation.
+// The control row documents the conversation-scoped cancel an unnamed fresh
+// session keeps.
+func TestPrepareWaitWakeState_KeepsFreshNamedSessionSleepWaitThroughItsWake(t *testing.T) {
+	t.Run("named", func(t *testing.T) {
+		fx := newResetWindowFixture(t, namedResetWindowSession, freshResetWindowSession)
+		fx.register()
+		fx.sleepOnWait()
+		fx.closeDep()
+		fx.wakePass()
+		fx.requireKeptAt("after the dependency closed", waitStateReady)
+		fx.productionWake("3")
+		fx.wakePass()
+		fx.requireKeptAt("after the wake", waitStateReady)
+		fx.dispatch("first dispatch after the wake")
+		fx.dispatch("second dispatch after the wake")
+		fx.requireOneQueued("after the wake", "3")
+	})
+	t.Run("control/unnamed", func(t *testing.T) {
+		fx := newResetWindowFixture(t, freshResetWindowSession)
+		fx.register()
+		fx.sleepOnWait()
+		fx.closeDep()
+		fx.wakePass()
+		fx.productionWake("3")
+		fx.wakePass()
+		fx.requireCanceled("after the wake", "continuation-stale")
+	})
 }
 
 // TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset covers a wait
@@ -5027,6 +5379,7 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 		name            string
 		reset           map[string]string
 		flagged         bool
+		named           bool
 		withdraw        bool
 		wantBeforeStart int
 	}{
@@ -5035,6 +5388,10 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 		{name: "flagged-released-when-reset-withdrawn", reset: requested, flagged: true, withdraw: true, wantBeforeStart: 1},
 		{name: "flagged-nudged-when-no-restart-is-in-flight", reset: markerOnly, flagged: true, wantBeforeStart: 1},
 		{name: "unflagged-nudged-as-before", reset: requested, wantBeforeStart: 1},
+		{name: "named-held-until-start", reset: requested, named: true},
+		{name: "named-held-after-handoff-until-start", reset: committed, named: true},
+		{name: "named-released-when-reset-withdrawn", reset: requested, named: true, withdraw: true, wantBeforeStart: 1},
+		{name: "named-nudged-when-no-restart-is-in-flight", reset: markerOnly, named: true, wantBeforeStart: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setWaitTestFileBeads(t)
@@ -5047,6 +5404,9 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 				"state":              string(sessionpkg.StateActive),
 			}
 			maps.Copy(sessionMeta, tc.reset)
+			if tc.named {
+				namedResetWindowSession(sessionMeta)
+			}
 			sessionBead, err := store.Create(beads.Bead{
 				Type:     sessionBeadType,
 				Labels:   []string{sessionBeadLabel},

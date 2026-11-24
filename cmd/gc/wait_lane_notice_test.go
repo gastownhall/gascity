@@ -180,7 +180,7 @@ func TestWaitFinalizesFromItsNoticeOutcome(t *testing.T) {
 				}
 			}
 			sessFront := sessionFrontDoor(f.store)
-			done, err := finalizeReadyWaitFromNudge(sessFront, beads.NudgesStore{Store: f.store}, waitNow(t, f, wait), time.Now().UTC())
+			done, err := finalizeReadyWaitFromNudge(sessFront, beads.NudgesStore{Store: f.store}, f.rowInfo(t), waitNow(t, f, wait), time.Now().UTC())
 			if err != nil || done != tc.done {
 				t.Fatalf("finalize = %v, %v; want %v", done, err, tc.done)
 			}
@@ -834,7 +834,7 @@ func TestWaitWithdrawnNoticeMovesOnlyAWaitStillOnIt(t *testing.T) {
 		if got := f.get(t, st, read.NudgeID); got.Status != opjournal.StatusClosed || got.Cancel.By != waitNoticePrincipal {
 			t.Fatalf("notice after the withdrawal = %+v, want it closed canceled by gc:wait", got)
 		}
-		done, err := finalizeReadyWaitFromNudge(sessFront, beads.NudgesStore{Store: f.store}, read, time.Now().UTC())
+		done, err := finalizeReadyWaitFromNudge(sessFront, beads.NudgesStore{Store: f.store}, f.rowInfo(t), read, time.Now().UTC())
 		if err != nil || !done {
 			t.Fatalf("finalize = %v, %v; want done", done, err)
 		}
@@ -853,7 +853,7 @@ func TestWaitWithdrawnNoticeMovesOnlyAWaitStillOnIt(t *testing.T) {
 		read := waitNow(t, f, wait)
 		sessFront := sessionFrontDoor(f.store)
 		for pass := range 2 {
-			done, err := finalizeReadyWaitFromNudge(sessFront, beads.NudgesStore{Store: f.store}, read, time.Now().UTC())
+			done, err := finalizeReadyWaitFromNudge(sessFront, beads.NudgesStore{Store: f.store}, f.rowInfo(t), read, time.Now().UTC())
 			if err != nil || done {
 				t.Fatalf("finalize %d = %v, %v; want the wait kept ready", pass, done, err)
 			}
@@ -1225,6 +1225,153 @@ func TestWaitRegisteredDuringPendingResetNoticesTheConversationTheResetOpens(t *
 			}
 			if got := waitLastError(t, f, wait); got != tc.lastError {
 				t.Fatalf("wait last_error = %q, want %q", got, tc.lastError)
+			}
+		})
+	}
+}
+
+// namedLaneSession makes f's session a configured named session.
+func namedLaneSession(meta map[string]string) {
+	meta["configured_named_session"] = "true"
+	meta["configured_named_identity"] = "desk"
+	meta["configured_named_mode"] = "always"
+}
+
+// A configured named session keeps its waits across a continuation reset
+// (KeepsWaitsAcrossResets). When the session moves from epoch 1 to epoch 2
+// while the notice of its ready wait, scoped to epoch 1, is open, the lane
+// fences the notice off unrun. That voids the attempt rather than the wait:
+// the next prepare moves the wait to attempt 2 with nudge_id cleared, the next
+// dispatch proposes that attempt's notice scoped to epoch 2, and its delivery
+// closes the wait. A named session's notice that the lane skipped for any
+// other reason, or skipped stale without fencing it, still cancels the wait,
+// and a notice gc:wait withdrew still advances it.
+func TestWaitOfNamedSessionReachesTheConversationAfterItsReset(t *testing.T) {
+	t.Run("fenced off by the reset", func(t *testing.T) {
+		f := newLaneFixture(t, namedLaneSession)
+		newNoticeLaneHost(t, f, "message")
+		st := f.laneStore(t)
+		wait := readyWait(t, f, "Pick up the next step.")
+		dispatchWaits(t, f)
+		first := waitNotice(t, f, st, wait)
+		if first.Scope != (opjournal.Scope{Kind: opjournal.ScopeContext, Epoch: 1}) {
+			t.Fatalf("first notice scope = %+v, want context epoch 1", first.Scope)
+		}
+
+		startConsumingTheReset(t, f, 2, "tok-2")
+		if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
+			t.Fatalf("lane pass: %v", err)
+		}
+		if got := f.get(t, st, first.ID); !opjournal.FencedOff(got) {
+			t.Fatalf("first notice = %s %+v, want it fenced off by the reset", got.Status, got.Outcome)
+		}
+		if n := len(f.nudges()); n != 0 {
+			t.Fatalf("runtime received %d nudges from the fenced notice, want 0", n)
+		}
+
+		if ready := prepareWaits(t, f); !ready[f.id] {
+			t.Fatalf("after the fence: ready-wait set = %v, want the session in it", ready)
+		}
+		moved := waitNow(t, f, wait)
+		if moved.State != waitStateReady || moved.DeliveryAttempt != "2" || moved.NudgeID != "" || moved.RegisteredEpoch != "1" {
+			t.Fatalf("after the fence: wait = state %s attempt %s nudge_id %q registered_epoch %s, want ready on attempt 2 with nudge_id cleared at registered_epoch 1",
+				moved.State, moved.DeliveryAttempt, moved.NudgeID, moved.RegisteredEpoch)
+		}
+		if got := waitLastError(t, f, wait); got != "" {
+			t.Fatalf("after the fence: wait last_error = %q, want none", got)
+		}
+
+		dispatchWaits(t, f)
+		second := waitNotice(t, f, st, moved)
+		if want := waitNoticeKey("wait-" + wait.ID + "-1-2"); second.ClientKey != want {
+			t.Fatalf("second notice key = %q, want %q", second.ClientKey, want)
+		}
+		if second.Scope != (opjournal.Scope{Kind: opjournal.ScopeContext, Epoch: 2}) {
+			t.Fatalf("second notice scope = %+v, want the current context epoch 2", second.Scope)
+		}
+		if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
+			t.Fatalf("second lane pass: %v", err)
+		}
+		if got := f.get(t, st, second.ID); got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmSucceeded {
+			t.Fatalf("second notice = %s %+v, want closed succeeded", got.Status, got.Outcome)
+		}
+		if n := len(f.nudges()); n != 1 {
+			t.Fatalf("runtime received %d nudges, want 1", n)
+		}
+		if ready := prepareWaits(t, f); ready[f.id] {
+			t.Fatalf("after delivery: ready-wait set = %v, want the session out of it", ready)
+		}
+		if got := waitNow(t, f, wait); got.State != waitStateClosed {
+			t.Fatalf("after delivery: wait state = %s, want %s", got.State, waitStateClosed)
+		}
+	})
+
+	for _, tc := range []struct {
+		name      string
+		opts      []laneFixtureOpt
+		close     func(t *testing.T, f *laneFixture, st *opjournal.Store, op opjournal.Op)
+		state     string
+		attempt   string
+		lastError string
+	}{
+		{
+			name: "control/named skipped conversation closed",
+			opts: []laneFixtureOpt{namedLaneSession},
+			close: func(t *testing.T, _ *laneFixture, st *opjournal.Store, op opjournal.Op) {
+				if _, err := st.Close(op.ID, opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonConversationClosed}, "lane:ctl"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			state: waitStateCanceled, attempt: "1", lastError: "notice skipped: conversation_closed",
+		},
+		{
+			name: "control/named skipped stale without a fence",
+			opts: []laneFixtureOpt{namedLaneSession},
+			close: func(t *testing.T, _ *laneFixture, st *opjournal.Store, op opjournal.Op) {
+				if _, err := st.Close(op.ID, opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}, "lane:ctl"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			state: waitStateCanceled, attempt: "1", lastError: "notice skipped: stale",
+		},
+		{
+			name: "control/named withdrawn by gc:wait",
+			opts: []laneFixtureOpt{namedLaneSession},
+			close: func(t *testing.T, _ *laneFixture, st *opjournal.Store, op opjournal.Op) {
+				if _, _, err := st.Cancel(op.ID, waitNoticePrincipal, waitNoticeWithdrawReason); err != nil {
+					t.Fatal(err)
+				}
+			},
+			state: waitStateReady, attempt: "2",
+		},
+		{
+			name: "control/unnamed fenced off by the reset",
+			close: func(t *testing.T, f *laneFixture, st *opjournal.Store, op opjournal.Op) {
+				startConsumingTheReset(t, f, 2, "tok-2")
+				if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
+					t.Fatalf("lane pass: %v", err)
+				}
+				if got := f.get(t, st, op.ID); !opjournal.FencedOff(got) {
+					t.Fatalf("notice = %s %+v, want it fenced off by the reset", got.Status, got.Outcome)
+				}
+			},
+			state: waitStateCanceled, attempt: "1", lastError: "continuation-stale",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t, tc.opts...)
+			newNoticeLaneHost(t, f, "message")
+			st := f.laneStore(t)
+			wait := readyWait(t, f, "Pick up the next step.")
+			dispatchWaits(t, f)
+			tc.close(t, f, st, waitNotice(t, f, st, wait))
+			prepareWaits(t, f)
+			got := waitNow(t, f, wait)
+			if got.State != tc.state || got.DeliveryAttempt != tc.attempt {
+				t.Fatalf("wait = state %s attempt %s, want state %s attempt %s", got.State, got.DeliveryAttempt, tc.state, tc.attempt)
+			}
+			if le := waitLastError(t, f, wait); le != tc.lastError {
+				t.Fatalf("wait last_error = %q, want %q", le, tc.lastError)
 			}
 		})
 	}

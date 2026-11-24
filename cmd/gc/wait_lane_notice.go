@@ -9,9 +9,14 @@ package main
 // wake), and scoped to the continuation epoch the wait belongs to when it
 // names one. The wait's nudge_id then holds the op id, recorded before the
 // op is proposed, which its finalize, withdraw and re-arm read
-// (opjournal.IsOpID) in place of a queue shadow's. The notice's outcome ends
-// the wait, but for the withdrawal of a wait re-armed since, which moves it
-// to its next attempt. While the notice is open, a re-arm of the same wait
+// (opjournal.IsOpID) in place of a queue shadow's. A wait belongs to the
+// conversation it was registered in, so a notice the lane fences off past
+// that conversation ends it; a configured named session's waits belong to
+// the session instead (sessionpkg.KeepsWaitsAcrossResets), so their notices
+// are scoped to the conversation current at dispatch, and a fenced-off one
+// moves the wait to its next attempt. The notice's outcome ends the wait,
+// but for that fence and the withdrawal of a wait re-armed since, which
+// move it to its next attempt. While the notice is open, a re-arm of the same wait
 // keeps its attempt, and a retry of a closed wait is refused until the
 // notice closes. One path serves both reconcilers:
 // dispatchReadyWaitNudgesWithSnapshot and finalizeReadyWaitFromNudge are
@@ -54,7 +59,8 @@ func waitNoticeKey(nudgeID string) string { return "wait:" + nudgeID }
 // session info's conversation, carrying message, scoped to the epoch the
 // wait belongs to on info (WaitInfo.DeliveryEpoch): the notice of a wait
 // registered while a fresh restart was pending goes to the conversation the
-// reset opened, under the attempt's key all the same.
+// reset opened, and a configured named session's to its current
+// conversation, under the attempt's key all the same.
 func waitNoticeRequest(info sessionpkg.Info, wait sessionpkg.WaitInfo, nudgeID, message string) opjournal.Request {
 	req := cliLaneNotice(waitNoticePrincipal, wait.ID, message, opjournal.WakeLiveOnly)
 	req.ClientKey = waitNoticeKey(nudgeID)
@@ -183,20 +189,24 @@ func waitNoticeOp(sessFront *sessionpkg.Store, opID string) (op opjournal.Op, fo
 	}
 }
 
-// finalizeWaitFromNotice ends ready wait from its lane notice opID once the
-// notice closes. A closed notice is its attempt's last word, since no pass
-// proposes its key again: one that succeeded closes the wait, one that
-// failed fails it with the failure's reason, and one a principal canceled,
-// or the lane skipped (its conversation closed, as an archived session
-// reads, or its context epoch moved on), cancels it, recording why. A
-// cancel by gc:wait, the withdrawal of a wait re-armed since, moves the
-// wait to its next attempt instead (advancePastWithdrawnNotice). A notice
-// this build cannot read (corrupt, or written by a newer build) fails the
-// wait as unreadable: the lane quarantines such a row and never delivers
-// it, so nothing else would end the wait. A notice still open keeps the
-// wait ready. found is false, and nothing is written, when no op has the
-// id: the notice was never proposed.
-func finalizeWaitFromNotice(sessFront *sessionpkg.Store, wait sessionpkg.WaitInfo, opID string, now time.Time) (done, found bool, err error) {
+// finalizeWaitFromNotice ends ready wait of session info from its lane notice
+// opID once the notice closes. A closed notice is its attempt's last word,
+// since no pass proposes its key again: one that succeeded closes the wait,
+// one that failed fails it with the failure's reason, and one a principal
+// canceled, or the lane skipped (its conversation closed, as an archived
+// session reads, or its context epoch moved on), cancels it, recording why.
+// Two closes void the attempt rather than the wait and move the wait to its
+// next attempt instead (advancePastVoidNotice): a cancel by gc:wait, the
+// withdrawal of a wait re-armed since, and the lane's fence of a notice
+// whose context epoch the session moved past (opjournal.FencedOff) when the
+// session keeps its waits across resets (KeepsWaitsAcrossResets), so the
+// next attempt's notice is scoped to the conversation current then. A
+// notice this build cannot read (corrupt, or written by a newer build)
+// fails the wait as unreadable: the lane quarantines such a row and never
+// delivers it, so nothing else would end the wait. A notice still open
+// keeps the wait ready. found is false, and nothing is written, when no op
+// has the id: the notice was never proposed.
+func finalizeWaitFromNotice(sessFront *sessionpkg.Store, info sessionpkg.Info, wait sessionpkg.WaitInfo, opID string, now time.Time) (done, found bool, err error) {
 	op, found, err := waitNoticeOp(sessFront, opID)
 	switch {
 	case opjournal.Undecodable(err):
@@ -216,7 +226,7 @@ func finalizeWaitFromNotice(sessFront *sessionpkg.Store, wait sessionpkg.WaitInf
 		return true, true, sessFront.FailWaitFromNudge(wait.ID, now, opID, reason, "")
 	case opjournal.ArmCanceled:
 		if op.Cancel.By == waitNoticePrincipal {
-			done, err := advancePastWithdrawnNotice(sessFront, wait, opID, now)
+			done, err := advancePastVoidNotice(sessFront, wait, opID, now)
 			return done, true, err
 		}
 		why := "notice canceled by " + op.Cancel.By
@@ -225,30 +235,38 @@ func finalizeWaitFromNotice(sessFront *sessionpkg.Store, wait sessionpkg.WaitInf
 		}
 		return true, true, sessFront.CancelWait(wait.ID, now, why)
 	default: // opjournal.ArmSkipped: a decoded op's arm is one of the four.
+		if opjournal.FencedOff(op) && sessionpkg.KeepsWaitsAcrossResets(info) {
+			done, err := advancePastVoidNotice(sessFront, wait, opID, now)
+			return done, true, err
+		}
 		return true, true, sessFront.CancelWait(wait.ID, now, "notice skipped: "+reason)
 	}
 }
 
-// advancePastWithdrawnNotice moves ready wait to its next attempt once its
-// lane notice opID closed canceled by gc:wait. gc:wait withdraws a notice
-// only from a wait it has ended, so a wait still ready on that notice was
-// re-armed while the notice was being delivered, keeping the attempt
-// (nextWaitDeliveryAttempt). The delivery did not land, so the attempt is
-// void, and the next dispatch proposes the next one. The wait is read again
-// first: one that has ended since the pass read it is done, and one already
-// on another attempt is left as it is.
-func advancePastWithdrawnNotice(sessFront *sessionpkg.Store, wait sessionpkg.WaitInfo, opID string, now time.Time) (done bool, err error) {
+// advancePastVoidNotice moves ready wait to its next attempt once its lane
+// notice opID closed without delivering an attempt that still stands. That
+// is so in two cases. gc:wait withdraws a notice only from a wait it has
+// ended, so a wait still ready on a notice gc:wait canceled was re-armed
+// while the notice was being delivered, keeping the attempt
+// (nextWaitDeliveryAttempt). And the lane fences off unrun a notice scoped to
+// a context epoch its session has moved past, which for a session that keeps
+// its waits across resets voids the attempt, not the wait. Either way the
+// delivery did not land, so the next dispatch proposes the next attempt,
+// scoped to the conversation current then. The wait is read again first: one
+// that has ended since the pass read it is done, and one already on another
+// attempt is left as it is.
+func advancePastVoidNotice(sessFront *sessionpkg.Store, wait sessionpkg.WaitInfo, opID string, now time.Time) (done bool, err error) {
 	cur, err := sessFront.GetWait(wait.ID)
 	switch {
 	case err != nil:
-		return false, fmt.Errorf("re-reading wait %s past its withdrawn notice %s: %w", wait.ID, opID, err)
+		return false, fmt.Errorf("re-reading wait %s past its void notice %s: %w", wait.ID, opID, err)
 	case cur.Status == "closed" || cur.State != waitStateReady:
 		return true, nil
 	case cur.NudgeID != opID:
 		return false, nil
 	}
 	if err := sessFront.MarkWaitReadyForRedelivery(wait.ID, waitAttemptAfter(cur), now); err != nil {
-		return false, fmt.Errorf("moving wait %s past its withdrawn notice %s: %w", wait.ID, opID, err)
+		return false, fmt.Errorf("moving wait %s past its void notice %s: %w", wait.ID, opID, err)
 	}
 	return false, nil
 }
