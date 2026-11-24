@@ -886,7 +886,9 @@ func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
 // the invoking turn: past the claim window PLUS the reserved claim budget. The
 // window fences when a claim may START (claimWindowSpent); a claim started
 // inside it owns a separate, full mutation budget (claimMutationContext), so
-// only a CAS that overran that reserved budget is a straddle.
+// only a CAS that overran that reserved budget is a straddle. Under an
+// invocation deadline the window plus the reserve ends at the deadline less
+// the answer margin, so a claim landing after the hook must answer is released.
 //
 // landedAt is the instant the claim CAS returned, stamped by the tier that ran
 // it, and the landing age is taken there rather than now. The question is
@@ -895,7 +897,16 @@ func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
 // adoption re-stamp) are not the claim landing, and on a slow store they would
 // otherwise turn a claim that landed in time into a straddle unwind.
 func (ops *hookClaimOps) claimLandingWindowSpent(landedAt time.Time) bool {
-	return ops.claimLandingAge(landedAt) > ops.claimWindowOrDefault()+hookClaimMutationTimeout
+	return ops.claimLandingAge(landedAt) > ops.claimWindowOrDefault()+ops.claimReserveOrDefault()
+}
+
+// claimReserveOrDefault is ops.ClaimReserve with its default applied inline,
+// for the same reason nowOrWallClock exists.
+func (ops *hookClaimOps) claimReserveOrDefault() time.Duration {
+	if ops.ClaimReserve > 0 {
+		return ops.ClaimReserve
+	}
+	return hookClaimMutationTimeout
 }
 
 // claimLandingAge is the invocation age at landedAt, the instant a claim CAS
@@ -914,7 +925,8 @@ func (ops *hookClaimOps) claimLandingAge(landedAt time.Time) time.Duration {
 }
 
 // claimMutationContext bounds a claim-write child by the reserved mutation
-// budget, hookClaimMutationTimeout, measured from when the claim tier starts.
+// budget, ClaimReserve (hookClaimMutationTimeout without an invocation
+// deadline), measured from when the claim tier starts.
 //
 // The claim budget is deliberately SEPARATE from the read budget. It used to be
 // min(mutation timeout, what remains of the claim window), which let a slow
@@ -929,7 +941,7 @@ func (ops *hookClaimOps) claimLandingAge(landedAt time.Time) time.Duration {
 // and the straddle unwind (claimLandingWindowSpent) releases one that lands
 // after window + reserve.
 func (ops *hookClaimOps) claimMutationContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	return context.WithTimeout(context.Background(), ops.claimReserveOrDefault())
 }
 
 // refuseExpiredHookClaimWindow reports the spent-window refusal and returns the
@@ -1651,7 +1663,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	// now: the reads the tier made after the CAS are not the claim landing.
 	if minted && ops.claimLandingWindowSpent(landedAt) {
 		cause := fmt.Sprintf("claim of %s landed after the %s claim window and its %s claim reserve closed (invocation age %s at landing); releasing it rather than parking it",
-			bead.ID, ops.claimWindowOrDefault(), hookClaimMutationTimeout, ops.claimLandingAge(landedAt).Round(time.Millisecond))
+			bead.ID, ops.claimWindowOrDefault(), ops.claimReserveOrDefault(), ops.claimLandingAge(landedAt).Round(time.Millisecond))
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, hookStartedKeyFor(ops, dir, bead.ID, verdict), stderr)
 	}
 	// F-D, post-claim. The pre-claim fence read the session row before the
