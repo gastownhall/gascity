@@ -207,6 +207,14 @@ func protectedWakeWorkKeys(wakeCandidates []beads.Bead, wakeCandidateStoreRefs [
 	return keys
 }
 
+// beadHeldByPerson reports whether wb waits on a person rather than a session:
+// it carries beadmeta.HumanLabel, or its assignee is beadmeta.OperatorIdentity.
+// No session answers to a person, so a missing session is no evidence that
+// such a claim is dead.
+func beadHeldByPerson(wb beads.Bead) bool {
+	return beadmeta.HasHumanLabel(wb.Labels) || beadmeta.IsOperatorIdentity(wb.Assignee)
+}
+
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
 // assignee no longer maps to any open session bead. This also recovers
 // pool-routed work left in_progress with no assignee, which cannot be claimed
@@ -296,8 +304,11 @@ func releaseOrphanedPoolAssignments(
 		// dispatch serves it to no worker (config.PoolDemandServeRulesForQuery),
 		// so no pool lane takes it back, and its holder may be a person, whom
 		// no session answers to: a missing session is no evidence that the
-		// claim is dead. Releasing it would only wipe the claim.
-		if beadmeta.HasHumanLabel(wb.Labels) {
+		// claim is dead. Releasing it would only wipe the claim. A bead
+		// assigned to the operator is held by a person the same way, whether
+		// or not it carries the label: it is a hand-off, not a dead worker
+		// (#6945), as the core orphan-sweep order already treats it (#3440).
+		if beadHeldByPerson(wb) {
 			continue
 		}
 		workStoreRef := ""
