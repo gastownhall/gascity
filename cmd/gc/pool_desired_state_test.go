@@ -3312,6 +3312,13 @@ func poolEvidenceWorkBead(id, routedTo, assignee, rootStoreRef string) beads.Bea
 	return wb
 }
 
+// poolEvidenceBeadWithout drops one metadata key from an evidence bead.
+func poolEvidenceBeadWithout(id, routedTo, assignee, rootStoreRef string, drop string) beads.Bead {
+	wb := poolEvidenceWorkBead(id, routedTo, assignee, rootStoreRef)
+	delete(wb.Metadata, drop)
+	return wb
+}
+
 // singleRequest returns the only request of the only desired state.
 func singleRequest(t *testing.T, states []PoolDesiredState) SessionRequest {
 	t.Helper()
@@ -3419,4 +3426,43 @@ func TestComputePoolDesiredStatesWakeKnownTiersCarryWorktreeEvidence(t *testing.
 			t.Errorf("wake-known provenance = store %q error %q, want rig:r1 and no error", request.WorkStoreRef, request.WorktreeError)
 		}
 	})
+}
+
+// TestComputePoolDesiredStatesAssignedWorkEvidenceFailsClosed pins the
+// fail-closed half of gastownhall/gascity#5753: a bead whose work_dir evidence
+// is incomplete or conflicting still gets its request (the demand count must
+// not drop), but the request carries a nil spec and the reconstruction error,
+// so verifiedPoolTriggerWorkDir refuses instead of binding the pool directory.
+func TestComputePoolDesiredStatesAssignedWorkEvidenceFailsClosed(t *testing.T) {
+	conflicting := poolEvidenceWorkBead("w-conflict", "rig/claude", "sess-1", "rig:r1")
+	conflicting.Metadata[beadmeta.LegacyWorkDirMetadataKey] = "/tmp/wt/elsewhere"
+	noStoreRef := poolEvidenceWorkBead("w-noref", "rig/claude", "sess-1", "")
+	cases := []struct {
+		name      string
+		bead      beads.Bead
+		storeRefs []string
+	}{
+		{name: "missing ownership key", bead: poolEvidenceBeadWithout("w-missing", "rig/claude", "sess-1", "rig:r1", beadmeta.WorktreeLifecycleMetadataKey), storeRefs: []string{"r1"}},
+		{name: "conflicting work_dir spellings", bead: conflicting, storeRefs: []string{"r1"}},
+		{name: "no store reference and unknown leg", bead: noStoreRef, storeRefs: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(4), 0)}}
+			sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+			states := computePoolDesiredStatesParkedAt(cfg, []beads.Bead{tc.bead}, nil, tc.storeRefs,
+				sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil, nil)
+			request := singleRequest(t, states)
+			if request.Tier != "resume" || request.WorkBeadID != tc.bead.ID {
+				t.Fatalf("request = %#v, want the resume for %s still emitted", request, tc.bead.ID)
+			}
+			if request.WorktreeSpec != nil {
+				t.Errorf("WorktreeSpec = %+v, want nil (fail closed)", request.WorktreeSpec)
+			}
+			if request.WorktreeError == "" {
+				t.Errorf("WorktreeError empty, want the reconstruction failure carried")
+			}
+		})
+	}
 }
