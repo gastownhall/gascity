@@ -873,3 +873,89 @@ func TestDivergenceCountingStoreFailuresAreUnknown(t *testing.T) {
 		})
 	}
 }
+
+// gastownhall/gascity#5858, the no-regression guard: a seat whose trigger was
+// counted in its own store — a rig-pool seat stamped with its rig, a
+// city-scoped seat stamped with the city — resolves the stamp, through the
+// production resolver, to the leg it already queries, and every verdict is
+// what it was before the counting store existed. The trigger read and the
+// dependency settlement both land in that one leg.
+func TestDivergenceSeatsOwnStampKeepsEveryVerdict(t *testing.T) {
+	cityPath, cfg := demandStampCity(t)
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}
+	for _, seat := range []struct {
+		name    string
+		stamp   string
+		wantDir string
+	}{
+		{name: "rig-pool seat", stamp: "rig:riga", wantDir: filepath.Join(cityPath, "rigs", "riga")},
+		{name: "city-scoped seat", stamp: "city", wantDir: cityPath},
+	} {
+		for _, tt := range []struct {
+			name       string
+			bead       beads.Bead
+			readErr    error
+			blocked    bool
+			confirmErr error
+			wantClass  string
+			wantStat   string
+			wantDeps   int
+		}{
+			{
+				name:      "open and claimable",
+				bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+				wantClass: events.DemandClaimDivergence, wantStat: "open", wantDeps: 1,
+			},
+			{
+				name:      "open but dep-confirmed blocked",
+				bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+				blocked:   true,
+				wantClass: events.DemandClaimBlocked, wantStat: "open", wantDeps: 1,
+			},
+			{
+				name:       "settlement read fails",
+				bead:       beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+				confirmErr: errors.New("dependency read failed"),
+				wantClass:  events.DemandClaimUnknown, wantStat: "open", wantDeps: 1,
+			},
+			{
+				name:      "claimed by a sibling",
+				bead:      beads.Bead{ID: "wb-1", Status: "in_progress", Type: "task", Assignee: "gc__worker-2", Metadata: routed},
+				wantClass: events.DemandClaimBenign, wantStat: "in_progress",
+			},
+			{
+				name:      "unreadable",
+				readErr:   errors.New("store read failed"),
+				wantClass: events.DemandClaimUnknown, wantStat: "unreadable",
+			},
+		} {
+			t.Run(seat.name+"/"+tt.name, func(t *testing.T) {
+				ops := demandDivergenceOpsForBlockedBead(tt.bead, tt.readErr, tt.blocked, tt.confirmErr)
+				ops.DemandTriggerStore = func(ref string) (hookStore, error) {
+					return demandTriggerStoreAt(cityPath, cfg, ref)
+				}
+				var reads, deps []string
+				ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, _, _ string) (beads.Bead, error) {
+					reads = append(reads, filepath.Clean(dir))
+					return tt.bead, tt.readErr
+				}
+				ops.ConfirmBlocked = func(_ context.Context, dir string, _ []string, _, _ string) (bool, error) {
+					deps = append(deps, filepath.Clean(dir))
+					return tt.blocked, tt.confirmErr
+				}
+
+				status, class := classifyDemandTrigger(demandTrigger{ID: "wb-1", StoreRef: seat.stamp}, divergenceOptions(), ops)
+
+				if class != tt.wantClass || status != tt.wantStat {
+					t.Fatalf("classification = %q (status %q), want %q (status %q)", class, status, tt.wantClass, tt.wantStat)
+				}
+				if len(reads) != 1 || reads[0] != seat.wantDir {
+					t.Fatalf("trigger reads = %v, want one, in the seat's own leg %s", reads, seat.wantDir)
+				}
+				if len(deps) != tt.wantDeps || (len(deps) == 1 && deps[0] != seat.wantDir) {
+					t.Fatalf("dependency reads = %v, want %d in the seat's own leg %s", deps, tt.wantDeps, seat.wantDir)
+				}
+			})
+		}
+	}
+}
