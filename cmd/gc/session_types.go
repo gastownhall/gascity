@@ -83,6 +83,7 @@ type drainTracker struct {
 	suspendDeferrals map[string]int                  // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
 	liveClaimVetoes  map[string]string               // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
 	drainSkips       map[drainSkipKey]*drainSkipMark // session bead ID + condition kind -> last printed line (log-on-transition dedupe; session_drain_skip_log.go)
+	uncommittedSeen  map[string]uncommittedLiveSight // session bead ID -> first tick that saw the row's incarnation live and uncommitted (#6417: the age basis when the provider reports no creation time)
 	idleProbeCursor  int
 }
 
@@ -94,6 +95,7 @@ func newDrainTracker() *drainTracker {
 		zombieCrashes:    make(map[string]bool),
 		suspendDeferrals: make(map[string]int),
 		liveClaimVetoes:  make(map[string]string),
+		uncommittedSeen:  make(map[string]uncommittedLiveSight),
 	}
 }
 
@@ -114,6 +116,48 @@ func (dt *drainTracker) remove(beadID string) {
 	defer dt.mu.Unlock()
 	delete(dt.drains, beadID)
 	delete(dt.suspendDeferrals, beadID)
+	delete(dt.uncommittedSeen, beadID)
+}
+
+// uncommittedLiveSight is the first tick that saw one incarnation of a row
+// live with an empty started_config_hash.
+type uncommittedLiveSight struct {
+	incarnation string
+	at          time.Time
+}
+
+// firstUncommittedLiveSight records and returns the first tick that saw
+// beadID's row live with an empty started_config_hash under incarnation
+// (#6417 F2): it is the runtime's creation-time stand-in, so the eviction's
+// startup window is measured from the oldest tick that could have started
+// the occupant. A new incarnation of the row, or a new episode via
+// clearUncommittedLiveSight, restarts it.
+func (dt *drainTracker) firstUncommittedLiveSight(beadID, incarnation string, now time.Time) time.Time {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return now
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.uncommittedSeen == nil {
+		dt.uncommittedSeen = make(map[string]uncommittedLiveSight)
+	}
+	if first, ok := dt.uncommittedSeen[beadID]; ok && first.incarnation == incarnation {
+		return first.at
+	}
+	dt.uncommittedSeen[beadID] = uncommittedLiveSight{incarnation: incarnation, at: now}
+	return now
+}
+
+// clearUncommittedLiveSight ends an uncommitted-start episode's age basis:
+// the next sighting of the row live and uncommitted starts the startup
+// window over.
+func (dt *drainTracker) clearUncommittedLiveSight(beadID string) {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.uncommittedSeen, beadID)
 }
 
 // bumpSuspendDeferral increments and returns the consecutive-tick count for a

@@ -948,6 +948,16 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		releaseRoute(unroute)
 		return err
 	}
+	// The restart handoff's hold is decided again on this row (#6417):
+	// legacy writes the handoff after its kill has released the lease, so it
+	// can land after the read queueForRunning decided on. Minting on this row
+	// would consume the handoff's markers and launch the resume command
+	// without the startup prompt. A handoff that lands after this read fails
+	// the mint's premise (ErrMintSuperseded).
+	if !replacing && restartHandoffHolds(b.Metadata, upAndAlive, by) {
+		releaseRoute(unroute)
+		return fmt.Errorf("%w: %s", ErrResumeHeld, id)
+	}
 
 	cfg := hints
 	cfg.Command = resumeCommand
@@ -1289,9 +1299,10 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		return err
 	}
 	// It starts under the incarnation its caller's PreWake minted, while the
-	// row still records it. A runtime already up starts nothing and is left
-	// to the caller's start commit, which refuses a row that no longer
-	// records inc (CommitStartedIfCurrentUnder).
+	// row still records it. A runtime already up starts nothing and reports
+	// the collision (runtime.ErrSessionExists), as a Start that found it
+	// would: this start launched nothing, so its caller decides from the
+	// runtime's identity whether the start converged on it.
 	if !inc.Valid() || inc.ID != id {
 		return fmt.Errorf("%w: session %q (%s)", ErrIncarnationNotMinted, id, inc)
 	}
@@ -1302,7 +1313,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		return runErr
 	}
 	if running {
-		return nil
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, sessName)
 	}
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)

@@ -3976,6 +3976,34 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// written (during the startup window), skip the drift check
 			// to avoid false-positive drains. Fixes #127.
 			storedHash := infoByID[id].StartedConfigHash
+			if storedHash == "" {
+				// The #6417 gap: a live, desired row whose start never
+				// committed. The drift gate above skips it for the whole
+				// startup window, and with an empty hash nothing that
+				// watches the row can tell whether the runtime under its
+				// name ever received the start's prompt. Once the window
+				// has passed with no commit, replace that runtime.
+				evictUncommittedLiveStartIfDue(evictUncommittedStart{
+					ctx:      ctx,
+					cityPath: cityPath,
+					info:     infoByID[id],
+					name:     name,
+					tp:       tp,
+					cfg:      cfg,
+					sp:       sp,
+					dt:       dt,
+					clk:      clk,
+					startup:  startupTimeout,
+					stderr:   stderr,
+					trace:    trace,
+					attached: func() (bool, error) {
+						return sessionAttachedForConfigDrift(infoByID[id].ID, sp, cityPath, store, cfg, name)
+					},
+					stop: func(d sessionpkg.Decided) error {
+						return legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}.Stop(d)
+					},
+				})
+			}
 			if template != "" && storedHash != "" {
 				cfgAgent := findSessionAgentByTemplate(cfg, template)
 				if cfgAgent != nil {

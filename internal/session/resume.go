@@ -10,7 +10,9 @@ import (
 
 var (
 	// ErrResumeHeld reports that the actor may not resume a held session
-	// (CONTRACT v5.9 D8 rule 1). Nothing was started or written.
+	// (CONTRACT v5.9 D8 rule 1). Nothing was started or minted, and nothing
+	// was written but the runtime lease's own record when the hold was
+	// decided under that lease (restartHandoffHolds).
 	ErrResumeHeld = errors.New("session is held; not resumed")
 	// ErrAgentDead reports a runtime whose pane is up but whose agent is
 	// dead, on a fresh read: a crash the controller has not healed yet. Text
@@ -43,7 +45,8 @@ const (
 // running (the API never starts a runtime in the controller's process) or
 // that is held (a managed suspend whose runtime the controller has not
 // stopped yet must not take a send that flips it active); any other actor
-// may not on a held one (HoldVerdict).
+// may not on a held one (HoldVerdict), nor start a row whose restart handoff
+// awaits the controller's start (restartHandoffHolds).
 func (m *Manager) queueFor(meta map[string]string, sessName string, by Actor) bool {
 	return m.queueForRunning(meta, m.sp.IsRunning(sessName), by)
 }
@@ -57,7 +60,36 @@ func (m *Manager) queueForRunning(meta map[string]string, running bool, by Actor
 	case ActorBackground:
 		return !running || HoldVerdict(meta, running, m.now())
 	}
-	return HoldVerdict(meta, running, m.now())
+	return restartHandoffHolds(meta, running, by) || HoldVerdict(meta, running, m.now())
+}
+
+// restartHandoffHolds reports whether by may not start a row with meta
+// because its restart handoff awaits the controller's start
+// (restartHandoffAwaitsStart) while its runtime does not run: no actor but
+// an operator may. ensureRunningOn decides it on the row it read before the
+// runtime lease (queueForRunning), then again on the row it reads under the
+// lease, since legacy writes the handoff after its kill released the lease.
+func restartHandoffHolds(meta map[string]string, running bool, by Actor) bool {
+	return by.Kind != ActorOperator && !running && restartHandoffAwaitsStart(meta)
+}
+
+// restartHandoffAwaitsStart reports whether meta records a controller restart
+// handoff no start has served yet (gastownhall/gascity#6417): its continuation
+// reset is pending and committed (continuation_reset_pending with
+// reset_committed_at, which the awake set reads as a reset to wake the row
+// for), and the handoff's clear of started_config_hash still stands. The
+// controller's start owes that row its startup prompt; a start by anyone
+// else would launch the stored resume command without it, and its mint would
+// consume the handoff's markers, leaving nothing that tells the row's runtime
+// never received the prompt. Such a caller queues its text instead: a submit
+// queued while the reset is pending is fenced by its session alone
+// (deferredSubmitEpoch), so it reaches the conversation the controller's
+// start opens. A restart only requested, before its handoff, keeps the hash
+// it last committed and is not held.
+func restartHandoffAwaitsStart(meta map[string]string) bool {
+	return strings.TrimSpace(meta["continuation_reset_pending"]) == "true" &&
+		strings.TrimSpace(meta[ResetCommittedAtKey]) != "" &&
+		strings.TrimSpace(meta["started_config_hash"]) == ""
 }
 
 // ExplicitWakeUnserved reports whether a row's explicit wake request is still

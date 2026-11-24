@@ -47,6 +47,14 @@ type policyEnv struct {
 
 func newPolicyEnv(t *testing.T, meta map[string]string, live bool) *policyEnv {
 	t.Helper()
+	return newPolicyEnvOver(t, meta, live, func(store beads.Store) beads.Store { return store })
+}
+
+// newPolicyEnvOver is newPolicyEnv with the Manager reaching the row's store
+// through over(store), a seam the test puts in front of it; e.store is the
+// store behind the seam.
+func newPolicyEnvOver(t *testing.T, meta map[string]string, live bool, over func(beads.Store) beads.Store) *policyEnv {
+	t.Helper()
 	store := beads.NewMemStore()
 	b, err := store.Create(beads.Bead{Title: "worker", Type: BeadType, Labels: []string{LabelSession}, Metadata: meta})
 	if err != nil {
@@ -59,7 +67,7 @@ func newPolicyEnv(t *testing.T, meta map[string]string, live bool) *policyEnv {
 		}
 	}
 	cityPath := t.TempDir()
-	mgr := newTestManager(t, store, sp, WithClock(&clock.Fake{Time: resumeNow}), WithCityPath(cityPath))
+	mgr := newTestManager(t, over(store), sp, WithClock(&clock.Fake{Time: resumeNow}), WithCityPath(cityPath))
 	return &policyEnv{store: store, sp: sp, mgr: mgr, id: b.ID, cityPath: cityPath}
 }
 
@@ -94,9 +102,20 @@ func (e *policyEnv) row(t *testing.T) map[string]string {
 // starts nothing and writes nothing. A row nothing holds, an expired hold,
 // and legacy's own idle-stop-pending intent on a live row are delivered
 // (the last live, without a restart). An operator's send resumes a held
-// row. Kills a background send that resumes a held row, a hold read from
-// legacy's own sleep intent, and an operator policy that queues.
+// row. A restart handoff the controller's start has not served yet (#6417)
+// holds every start but an operator's own resume the same way, and a row
+// whose restart is only requested, or whose reset is re-armed passively,
+// still resumes. Kills a background send that resumes a held row, a hold
+// read from legacy's own sleep intent, an operator policy that queues, and a
+// non-operator start launched into a restart handoff's gap.
 func TestBackgroundSendToHeldRowQueues(t *testing.T) {
+	// The row a controller's restart handoff leaves (RestartRequestPatch): its
+	// reset pending and committed, its start witness cleared.
+	handoff := func(extra map[string]string) map[string]string {
+		meta := map[string]string{"continuation_reset_pending": "true", ResetCommittedAtKey: "2026-10-08T11:00:00Z"}
+		maps.Copy(meta, extra)
+		return meta
+	}
 	for _, tc := range []struct {
 		name   string
 		meta   map[string]string
@@ -119,6 +138,13 @@ func TestBackgroundSendToHeldRowQueues(t *testing.T) {
 		{name: "unparseable timer on a live row is delivered live", meta: map[string]string{"state": string(StateActive), "slept_at": "", "held_until": "soon"}, live: true},
 		{name: "creating, quarantined, runtime dead", meta: map[string]string{"state": string(StateCreating), "quarantined_until": "2099-01-01T00:00:00Z"}, queued: true},
 		{name: "operator resumes a held row", meta: map[string]string{"state": string(StateSuspended)}, kind: ActorOperator},
+		{name: "restart handoff awaiting the controller's start", meta: handoff(nil), queued: true},
+		{name: "restart handoff awaiting the controller's start, as the controller", meta: handoff(nil), kind: ActorController, queued: true},
+		{name: "restart handoff on a live row is delivered live", meta: handoff(map[string]string{"state": string(StateActive), "slept_at": ""}), live: true},
+		{name: "operator resumes a restart handoff awaiting its start", meta: handoff(nil), kind: ActorOperator},
+		{name: "restart requested before its handoff resumes", meta: handoff(map[string]string{"restart_requested": "true", "started_config_hash": "h-1"})},
+		{name: "served restart handoff resumes", meta: map[string]string{"started_config_hash": "h-2"}},
+		{name: "passively re-armed reset resumes", meta: map[string]string{"continuation_reset_pending": "true"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newPolicyEnv(t, policyRow(tc.meta), tc.live)
@@ -167,6 +193,181 @@ func TestWaitIdleNudgeToHeldRowIsUndelivered(t *testing.T) {
 	delivered, err := e.mgr.TryWaitIdleNudge(context.Background(), testActor(e.mgr, ActorAgent), e.id, "mail", "hello", "claude --resume k", runtime.Config{})
 	if !errors.Is(err, ErrResumeHeld) || delivered || e.sp.CountCalls("Start", resumeName) != 0 || len(e.queued(t)) != 0 {
 		t.Fatalf("TryWaitIdleNudge = %v, %v (starts %d, queue %q); want ErrResumeHeld, no start, nothing queued", delivered, err, e.sp.CountCalls("Start", resumeName), e.queued(t))
+	}
+}
+
+// TestAgentStartAwaitingRestartHandoffIsHeld (#6417): on a row whose restart
+// handoff the controller's start has not served yet, an agent's start
+// returns ErrResumeHeld, launching, minting and writing nothing, so the
+// handoff's reset_committed_at stays for the controller's start to consume;
+// a send's text queued meanwhile is fenced by its session alone, so the epoch
+// that start advances does not fence it off. Once a start commit has served
+// the handoff (its hash written, reset_committed_at cleared), the same start
+// resumes the row. Kills a hold that mints or writes before it refuses, one
+// whose queued text is fenced to the discarded conversation, and one that
+// outlives the start that served it.
+func TestAgentStartAwaitingRestartHandoffIsHeld(t *testing.T) {
+	e := newPolicyEnv(t, policyRow(map[string]string{
+		"continuation_reset_pending": "true",
+		ResetCommittedAtKey:          "2026-10-08T11:00:00Z",
+		"continuation_epoch":         "4",
+	}), false)
+	ctx := context.Background()
+	before := e.row(t)
+	if err := e.mgr.Start(ctx, testActor(e.mgr, ActorAgent), e.id, "claude --resume k", runtime.Config{}); !errors.Is(err, ErrResumeHeld) {
+		t.Fatalf("Start = %v, want ErrResumeHeld", err)
+	}
+	if got := e.sp.CountCalls("Start", resumeName); got != 0 {
+		t.Fatalf("Start calls = %d, want none", got)
+	}
+	if got := e.row(t); !maps.Equal(got, before) {
+		t.Fatalf("held row written:\n got %v\nwant %v", got, before)
+	}
+
+	out, err := e.mgr.Send(ctx, testActor(e.mgr, ActorAgent), e.id, "hello", "claude --resume k", runtime.Config{})
+	if err != nil || !out.Queued {
+		t.Fatalf("Send = %+v, %v; want queued", out, err)
+	}
+	state, err := nudgequeue.LoadState(e.cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queued []nudgequeue.Item
+	for _, item := range state.Pending {
+		if item.SessionID == e.id {
+			queued = append(queued, item)
+		}
+	}
+	if len(queued) != 1 || queued[0].Message != "hello" || queued[0].ContinuationEpoch != "" {
+		t.Fatalf("queued = %+v, want the text with no epoch fence", queued)
+	}
+
+	if err := e.store.SetMetadataBatch(e.id, map[string]string{
+		"started_config_hash":        "h-1",
+		"continuation_reset_pending": "",
+		ResetCommittedAtKey:          "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.mgr.Start(ctx, testActor(e.mgr, ActorAgent), e.id, "claude --resume k", runtime.Config{}); err != nil {
+		t.Fatalf("Start after the handoff was served = %v, want the row resumed", err)
+	}
+	if got := e.sp.CountCalls("Start", resumeName); got != 1 {
+		t.Fatalf("Start calls = %d after the handoff was served, want 1", got)
+	}
+}
+
+// handoffAtLeaseStore writes handoff onto the row right after the first
+// runtime lease record a start writes there: after the read the start first
+// decided its hold on, before its read under the lease. Legacy's restart
+// handoff can land there, since legacy writes it after its kill released the
+// lease (#6417). The policy env's store has no conditional writes, so the
+// lease record is a batch write the seam sees.
+type handoffAtLeaseStore struct {
+	beads.Store
+	handoff MetadataPatch
+	landed  bool
+}
+
+func (s *handoffAtLeaseStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.Store.SetMetadataBatch(id, kvs); err != nil || s.landed || kvs[RuntimeLeaseHolderKey] == "" {
+		return err
+	}
+	s.landed = true
+	return s.Store.SetMetadataBatch(id, map[string]string(s.handoff))
+}
+
+// TestRestartHandoffLandingBeforeTheLeaseHoldsTheStart (#6417): legacy
+// writes a restart handoff after its kill released the runtime lease, so the
+// handoff can land after a start read the row and before the start reads it
+// under its lease. The first read shows the restart only requested (its hash
+// kept), which holds nothing. An agent's Start, Send and wait-idle nudge are
+// still held, as when the first read shows the handoff: nothing is launched
+// or minted, and the handoff's markers stay for the controller's start.
+// Start and the wait-idle nudge return ErrResumeHeld, and Send queues its
+// text. An operator's own resume still starts the row. Kills a hold decided
+// only on the read before the lease, whose mint consumes the handoff's
+// reset_committed_at and launches the resume command without the startup
+// prompt, and a hold under the lease that refuses an operator too.
+func TestRestartHandoffLandingBeforeTheLeaseHoldsTheStart(t *testing.T) {
+	ctx := context.Background()
+	const resume = "claude --resume k"
+	handoffAt := resumeNow.Add(-time.Minute)
+	for _, tc := range []struct {
+		name   string
+		kind   ActorKind
+		starts int
+		// verb runs the call and fails t unless it returned what it should.
+		verb func(t *testing.T, e *policyEnv, by Actor)
+	}{
+		{name: "Start", kind: ActorAgent, verb: func(t *testing.T, e *policyEnv, by Actor) {
+			if err := e.mgr.Start(ctx, by, e.id, resume, runtime.Config{}); !errors.Is(err, ErrResumeHeld) {
+				t.Fatalf("Start = %v, want ErrResumeHeld", err)
+			}
+		}},
+		{name: "Send", kind: ActorAgent, verb: func(t *testing.T, e *policyEnv, by Actor) {
+			out, err := e.mgr.Send(ctx, by, e.id, "hello", resume, runtime.Config{})
+			if err != nil || !out.Queued {
+				t.Fatalf("Send = %+v, %v; want queued", out, err)
+			}
+			if got := e.queued(t); len(got) != 1 || got[0] != "hello" {
+				t.Fatalf("queue = %q, want the message", got)
+			}
+		}},
+		{name: "TryWaitIdleNudge", kind: ActorAgent, verb: func(t *testing.T, e *policyEnv, by Actor) {
+			delivered, err := e.mgr.TryWaitIdleNudge(ctx, by, e.id, "mail", "hello", resume, runtime.Config{})
+			if !errors.Is(err, ErrResumeHeld) || delivered || len(e.queued(t)) != 0 {
+				t.Fatalf("TryWaitIdleNudge = %v, %v (queue %q); want ErrResumeHeld, nothing queued", delivered, err, e.queued(t))
+			}
+		}},
+		{name: "operator Start", kind: ActorOperator, starts: 1, verb: func(t *testing.T, e *policyEnv, by Actor) {
+			if err := e.mgr.Start(ctx, by, e.id, resume, runtime.Config{}); err != nil {
+				t.Fatalf("Start = %v, want the row started", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The row as legacy's kill leaves it, its restart requested
+			// (RequestFreshRestart) and its runtime gone, and the handoff
+			// legacy then writes (RestartRequestPatch, asleep once it killed).
+			handoff := RestartRequestPatchAt("", handoffAt)
+			handoff["state"] = string(StateAsleep)
+			seam := &handoffAtLeaseStore{handoff: handoff}
+			e := newPolicyEnvOver(t, policyRow(map[string]string{
+				"state":                      string(StateActive),
+				"slept_at":                   "",
+				"restart_requested":          "true",
+				"continuation_reset_pending": "true",
+				ResetCommittedAtKey:          "2026-10-08T11:00:00Z",
+				"started_config_hash":        "h-1",
+			}), false, func(store beads.Store) beads.Store {
+				seam.Store = store
+				return seam
+			})
+			tc.verb(t, e, testActor(e.mgr, tc.kind))
+			if !seam.landed {
+				t.Fatal("the handoff never landed: the call took no runtime lease")
+			}
+			if got := e.sp.CountCalls("Start", resumeName); got != tc.starts {
+				t.Fatalf("Start calls = %d, want %d", got, tc.starts)
+			}
+			if tc.starts != 0 {
+				return
+			}
+			want := map[string]string{
+				ResetCommittedAtKey:          handoffAt.Format(time.RFC3339),
+				"continuation_reset_pending": "true",
+				"started_config_hash":        "",
+				"generation":                 "3",
+				"instance_token":             "tok-3",
+			}
+			row := e.row(t)
+			for k, v := range want {
+				if row[k] != v {
+					t.Fatalf("row[%s] = %q, want %q: the held call consumed the handoff or minted (row %v)", k, row[k], v, row)
+				}
+			}
+		})
 	}
 }
 
