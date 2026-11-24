@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -189,8 +192,9 @@ func TestHookCityWorkStartedSeamsShareTheFrontDoor(t *testing.T) {
 }
 
 // Kills a session-trigger seam that reads anything but the invocation's own
-// session row: it returns the row's gc.trigger_bead_id stamp, and a row it
-// cannot read is an error, never an empty stamp (gastownhall/gascity#5738).
+// session row: it returns the row's gc.trigger_bead_id and
+// gc.trigger_bead_store_ref stamps, and a row it cannot read is an error,
+// never an empty stamp (gastownhall/gascity#5738).
 func TestHookCitySessionTriggerReadsTheRowStamp(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
@@ -207,10 +211,117 @@ func TestHookCitySessionTriggerReadsTheRowStamp(t *testing.T) {
 	t.Chdir(t.TempDir()) // nothing to resolve from here
 	ops := newHookCity(cityDir, cfg).claimOps()
 
-	if got, err := ops.ReadSessionTrigger(sessionID); err != nil || got != "wb-1" {
-		t.Fatalf("ReadSessionTrigger = %q, %v; want the row stamp wb-1", got, err)
+	got, err := ops.ReadSessionTrigger(sessionID)
+	if err != nil || got.ID != "wb-1" {
+		t.Fatalf("ReadSessionTrigger = %+v, %v; want the row stamp wb-1", got, err)
+	}
+	if got.StoreRef != "" {
+		t.Fatalf("ReadSessionTrigger StoreRef = %q; want empty: the row carries no store stamp", got.StoreRef)
 	}
 	if got, err := ops.ReadSessionTrigger("gc-no-such-session"); err == nil {
-		t.Fatalf("ReadSessionTrigger of a missing row = %q, nil; want an error", got)
+		t.Fatalf("ReadSessionTrigger of a missing row = %+v, nil; want an error", got)
+	}
+}
+
+// gastownhall/gascity#5858, through the production hookCity wiring: a
+// demand-spawned rig-scoped seat whose session row stamps the trigger in the
+// city store, where the row is still open and claimable while the seat's own
+// leg would call it closed. The drain result is the plain no_work one, the
+// event names the counting store's open copy, and the worker's stderr names the
+// row and the store.
+func TestHookCityDivergenceReadsTheTriggerInTheStoreTheControllerCountedIt(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCityAgents(t, `
+[[rigs]]
+name = "fed-canary"
+path = "rigs/fed-canary"
+
+[[agent]]
+name = "worker"
+dir = "fed-canary"
+`)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
+	store := openCitySessionStoreForTest(t, cityDir)
+	if err := store.SetMetadata(sessionID, beadmeta.TriggerBeadIDMetadataKey, "canary-8a1"); err != nil {
+		t.Fatalf("stamp trigger id: %v", err)
+	}
+	if err := store.SetMetadata(sessionID, beadmeta.TriggerBeadStoreRefMetadataKey, "city"); err != nil {
+		t.Fatalf("stamp trigger store ref: %v", err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	t.Chdir(t.TempDir()) // nothing to resolve from here
+
+	// The demand-trigger resolver builds its leg through the fan-out's env
+	// seam; the classification reads by id, so the env contents are not under
+	// test here — pin the leg's dir, not a real bd context.
+	prevQueryEnv := hookStoreQueryEnv
+	hookStoreQueryEnv = func(_ string, _ *config.City, a *config.Agent) (map[string]string, error) {
+		return map[string]string{"GC_STORE": "leg-" + a.Dir}, nil
+	}
+	t.Cleanup(func() { hookStoreQueryEnv = prevQueryEnv })
+
+	rec := events.NewFake()
+	prevRecorder := demandDivergenceRecorder
+	demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+	t.Cleanup(func() { demandDivergenceRecorder = prevRecorder })
+
+	countedInCity := beads.Bead{
+		ID: "canary-8a1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "fed-canary/worker"},
+	}
+	closedElsewhere := countedInCity
+	closedElsewhere.Status = "closed"
+	ops := newHookCity(cityDir, cfg).claimOps()
+	ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, beadID, _ string) (beads.Bead, error) {
+		if beadID != countedInCity.ID {
+			return beads.Bead{}, fmt.Errorf("read %s: not the trigger", beadID)
+		}
+		if dir == cityDir {
+			return countedInCity, nil
+		}
+		return closedElsewhere, nil
+	}
+	ops.ConfirmBlocked = func(context.Context, string, []string, string, string) (bool, error) {
+		return false, nil
+	}
+
+	opts := hookClaimOptions{
+		Assignee:     "gc__worker-1",
+		RouteTargets: []string{"fed-canary/worker"},
+		Env: []string{
+			"GC_SESSION_ID=" + sessionID,
+			"GC_SESSION_NAME=gc__worker-1",
+			"GC_TEMPLATE=fed-canary/worker",
+			"GC_SPAWN_ORIGIN=demand",
+		},
+		DrainAck: false,
+		JSON:     true,
+	}
+	var stdout, stderr bytes.Buffer
+	code := writeHookClaimNoWork(opts, ops, false, filepath.Join(cityDir, "rigs", "fed-canary"), &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("drain exit = %d, want 1 (an unacknowledged drain); stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"action":"drain"`) || !strings.Contains(stdout.String(), `"reason":"no_work"`) {
+		t.Fatalf("stdout = %q, want the plain no_work drain result", stdout.String())
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("events = %+v, want exactly 1", rec.Events)
+	}
+	var payload events.SessionDemandClaimDivergencePayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	if payload.TriggerBeadID != "canary-8a1" || payload.TriggerStatusAtDrain != "open" || payload.Classification != events.DemandClaimDivergence {
+		t.Fatalf("payload = %+v, want divergence over the open counting-store copy of canary-8a1", payload)
+	}
+	if !strings.Contains(stderr.String(), "canary-8a1") || !strings.Contains(stderr.String(), "city") {
+		t.Fatalf("stderr = %q, want the row and the counting store named", stderr.String())
 	}
 }

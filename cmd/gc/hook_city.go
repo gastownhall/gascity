@@ -77,6 +77,8 @@ func (h *hookCity) recorder() events.Recorder {
 // session work-dir lookup, the current-claim stamp and its clear, and the
 // work_started write, removal and read) answer through the invocation's one
 // session front door, whose claim store refs are read off its loaded config, whose
+// demand-trigger store resolver opens the counted store a session row's
+// gc.trigger_bead_store_ref stamp names (demandTriggerStoreAt), whose
 // workflow input absence proof reads the stores of its city that could hold the
 // input (proveInputAbsentAcrossCity), and whose events
 // and continuation nudge reach the invocation's city without resolving it again. Every other
@@ -122,11 +124,14 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.ReadWorkStarted = func(sessionID string) (string, error) {
 		return sessionWorkStartedVia(h.sessionFront, sessionID)
 	}
-	ops.ReadSessionTrigger = func(sessionID string) (string, error) {
+	ops.ReadSessionTrigger = func(sessionID string) (demandTrigger, error) {
 		return sessionTriggerBeadVia(h.sessionFront, sessionID)
 	}
 	ops.StoreRef = func(dir string) string {
 		return claimStoreRefAt(h.path, h.cfg, dir)
+	}
+	ops.DemandTriggerStore = func(storeRef string) (hookStore, error) {
+		return demandTriggerStoreAt(h.path, h.cfg, storeRef)
 	}
 	ops.EmitWorkStartedUnrecorded = func(sessionID, template, beadID string, cause error) {
 		emitWorkStartedUnrecordedTo(h.recorder(), sessionID, template, beadID, cause)

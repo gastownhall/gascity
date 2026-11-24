@@ -383,8 +383,9 @@ type hookClaimOps struct {
 	// ReadWorkStarted reads the session row's raw work_started cell: the
 	// drain-ack fence's input.
 	ReadWorkStarted hookReadWorkStartedFunc
-	// ReadSessionTrigger reads the session row's gc.trigger_bead_id stamp: the
-	// row the controller counted when it spawned the seat, read only by the
+	// ReadSessionTrigger reads the session row's demand stamps — the trigger
+	// bead the controller counted (gc.trigger_bead_id) and the store it
+	// counted it in (gc.trigger_bead_store_ref) — read only by the
 	// demand/claim divergence diagnostics after the drain result is written.
 	ReadSessionTrigger hookReadSessionTriggerFunc
 	// StoreRef names the work leg at dir as the work cells key a claim that
@@ -392,6 +393,16 @@ type hookClaimOps struct {
 	// the class route took resides in the binding instead: the cells' key for
 	// a claim is hookStartedKeyFor's, never this alone.
 	StoreRef func(dir string) string
+	// DemandTriggerStore resolves the store a session row's
+	// gc.trigger_bead_store_ref stamp names to the leg that reads it, or an
+	// error when the seat cannot place the ref: another city, an unknown or
+	// suspended rig, an unrecognized scheme. It is StoreRef's inverse as a
+	// seam (StoreRef maps dir → ref; this maps ref → leg), is wired only by a
+	// caller holding the city (hookCity.claimOps), and has no applyDefaults
+	// default because there is no city to resolve against there. Consulted
+	// only by the post-drain divergence classification; a nil or failing
+	// resolution classifies unknown, never divergence.
+	DemandTriggerStore func(storeRef string) (hookStore, error)
 	// EmitWorkStartedUnrecorded publishes work.started_unrecorded when a
 	// claim is delivered without its work_started record. Best-effort.
 	EmitWorkStartedUnrecorded func(sessionID, template, beadID string, cause error)
@@ -405,6 +416,17 @@ type hookClaimOps struct {
 	// its result is written. Nil — the default — announces nothing; only
 	// claimHookWork installs it. Best-effort.
 	AnnounceBeadEvents func()
+}
+
+// demandTrigger is the session row's demand bookkeeping, read by the
+// demand/claim divergence diagnostics and nothing else: the trigger bead the
+// controller counted (gc.trigger_bead_id) and the store it counted it in
+// (gc.trigger_bead_store_ref). "Diagnostic-only" is the same contract the
+// event payload's TriggerBeadID carries: nothing on the claim path may read
+// either field to decide what to claim.
+type demandTrigger struct {
+	ID       string
+	StoreRef string
 }
 
 type (
@@ -439,7 +461,7 @@ type (
 	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
-	hookReadSessionTriggerFunc       func(sessionID string) (string, error)
+	hookReadSessionTriggerFunc       func(sessionID string) (demandTrigger, error)
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
 	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
@@ -1962,10 +1984,14 @@ func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, verdict hookAdoptio
 // eligible claim mutation errored — so an operational write failure stays
 // distinguishable from idle even though both still drain and reclaim next tick.
 //
-// dir is the store context the diagnostics classification reads through; it is
-// used ONLY after the drain has been written. See recordDemandClaimDivergence:
-// a demand-spawned seat draining empty is either correct pull or a broken
-// agreement invariant, and the drain itself cannot tell an operator which.
+// dir is the drain's own store context: it feeds the drain-ack fence ahead of
+// the result and is kept by the divergence emitter's seam shape, but the
+// classification does NOT read through it — it resolves the store the
+// trigger's gc.trigger_bead_store_ref stamp names (recordDemandClaimDivergence),
+// which is the counting store even when it is not this one. See
+// recordDemandClaimDivergence: a demand-spawned seat draining empty is either
+// correct pull or a broken agreement invariant, and the drain itself cannot
+// tell an operator which.
 func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, dir string, stdout, stderr io.Writer) int {
 	reason := hookClaimReasonNoWork
 	if claimsErrored {

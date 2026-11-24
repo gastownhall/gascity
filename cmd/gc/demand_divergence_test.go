@@ -198,7 +198,7 @@ func TestDivergenceClassification(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := divergenceOptions()
 			ops := demandDivergenceOpsForBlockedBead(tt.bead, tt.readErr, tt.blocked, tt.confirmErr)
-			status, class := classifyDemandTrigger(tt.triggerID, "/rig", opts, ops)
+			status, class := classifyDemandTrigger(demandTrigger{ID: tt.triggerID, StoreRef: demandDivergenceTestRigRef}, opts, ops)
 			if class != tt.wantClass {
 				t.Errorf("classification = %q, want %q", class, tt.wantClass)
 			}
@@ -345,7 +345,7 @@ func TestDivergenceStatusBlockedRowIsBlockedWithoutSettlement(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, class := classifyDemandTrigger(tt.bead.ID, "/rig", divergenceOptions(), demandDivergenceOpsForBlockedBead(tt.bead, nil, false, nil))
+			_, class := classifyDemandTrigger(demandTrigger{ID: tt.bead.ID, StoreRef: demandDivergenceTestRigRef}, divergenceOptions(), demandDivergenceOpsForBlockedBead(tt.bead, nil, false, nil))
 			if class != tt.want {
 				t.Errorf("classification = %q, want %q", class, tt.want)
 			}
@@ -406,9 +406,9 @@ func TestDivergenceClassifiesTheSessionRowStampNotTheEnv(t *testing.T) {
 				return stillThere, nil
 			}
 			var asked []string
-			ops.ReadSessionTrigger = func(sessionID string) (string, error) {
+			ops.ReadSessionTrigger = func(sessionID string) (demandTrigger, error) {
 				asked = append(asked, sessionID)
-				return stillThere.ID, nil
+				return demandTrigger{ID: stillThere.ID, StoreRef: demandDivergenceTestCityRef}, nil
 			}
 
 			var stderr bytes.Buffer
@@ -451,7 +451,7 @@ func TestDivergenceWithAnUnreadableSessionRowIsUnknownAndLeavesTheDrainAlone(t *
 	ops := demandDivergenceOpsForBlockedBead(stillThere, nil, false, nil)
 	ops.DrainAck = func(io.Writer) error { return nil }
 	ops.ReadWorkStarted = noStartedClaims
-	ops.ReadSessionTrigger = func(string) (string, error) { return "", errors.New("session row read failed") }
+	ops.ReadSessionTrigger = func(string) (demandTrigger, error) { return demandTrigger{}, errors.New("session row read failed") }
 
 	var baseOut, baseErr bytes.Buffer
 	baseCode := writeHookClaimNoWork(divergenceOptions(), ops, false, "/rig", &baseOut, &baseErr)
@@ -484,5 +484,117 @@ func TestDivergenceWithAnUnreadableSessionRowIsUnknownAndLeavesTheDrainAlone(t *
 func TestDemandClaimDivergenceStaysOffTheExportAllowlist(t *testing.T) {
 	if eventexport.IsAllowed(events.SessionDemandClaimDivergence) {
 		t.Fatal("session.demand_claim_divergence is on the redacted-export allowlist; that is an egress-surface change and needs its own review")
+	}
+}
+
+// gastownhall/gascity#5858: the controller counted the trigger in the CITY
+// store (open, unassigned, route-matching), but the seat drained in a rig store
+// where a same-id row is closed. The classifier must read the trigger in the
+// store its demand was counted in — re-reading the seat's own store is
+// structurally blind to the cross-store disagreement, and classified all 2,658
+// drains of the production loop benign.
+func TestDivergenceReadsTheTriggerInTheStoreTheControllerCountedItFrom(t *testing.T) {
+	rec := events.NewFake()
+	prev := demandDivergenceRecorder
+	demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+	t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+	const workerDir = demandDivergenceTestRigDir
+	countedInCity := beads.Bead{
+		ID: "canary-8a1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+	closedInWorkerStore := countedInCity
+	closedInWorkerStore.Status = "closed"
+
+	// The session row (demandDivergenceOpsForBlockedBead's stamp) names the
+	// city store; the seat's own leg holds only the closed copy.
+	ops := demandDivergenceOpsForBlockedBead(countedInCity, nil, false, nil)
+	var readDirs []string
+	ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, beadID, _ string) (beads.Bead, error) {
+		readDirs = append(readDirs, dir)
+		if beadID != countedInCity.ID {
+			return beads.Bead{}, fmt.Errorf("read %s: not the trigger", beadID)
+		}
+		if dir == workerDir {
+			return closedInWorkerStore, nil
+		}
+		return countedInCity, nil
+	}
+
+	var stderr bytes.Buffer
+	recordDemandClaimDivergence(hookClaimReasonNoWork, workerDir, divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+
+	if len(rec.Events) != 1 {
+		t.Fatalf("events = %+v, want exactly 1", rec.Events)
+	}
+	var payload events.SessionDemandClaimDivergencePayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	if payload.Classification != events.DemandClaimDivergence {
+		t.Fatalf("classification = %q (status %q, trigger reads in dirs %v); want %q: the trigger is still open and claimable in the city store the controller counted from, only the seat's own store says closed",
+			payload.Classification, payload.TriggerStatusAtDrain, readDirs, events.DemandClaimDivergence)
+	}
+	if payload.TriggerStatusAtDrain != "open" {
+		t.Fatalf("trigger_status_at_drain = %q, want open: the counting store's copy is the status that matters", payload.TriggerStatusAtDrain)
+	}
+	if payload.TriggerBeadID != "canary-8a1" {
+		t.Fatalf("trigger_bead_id = %q, want canary-8a1", payload.TriggerBeadID)
+	}
+	if !strings.Contains(stderr.String(), "canary-8a1") || !strings.Contains(stderr.String(), "city") {
+		t.Fatalf("stderr = %q, want the row and the counting store named", stderr.String())
+	}
+}
+
+// The judge's triage repro for gastownhall/gascity#5858, adopted verbatim:
+// the trigger is closed in the seat's own store and open, unassigned and
+// route-matching in the city store the demand was counted in.
+func TestDivergenceReadsTheTriggerInTheCountingStoreNotOnlyTheWorkers(t *testing.T) {
+	rec := events.NewFake()
+	prev := demandDivergenceRecorder
+	demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+	t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+	const workerDir = "/rig"
+	countedInCity := beads.Bead{
+		ID: "canary-8a1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+	closedInWorkerStore := countedInCity
+	closedInWorkerStore.Status = "closed"
+
+	ops := demandDivergenceOpsForBlockedBead(countedInCity, nil, false, nil)
+	ops.StoreRef = func(dir string) string {
+		if dir == workerDir {
+			return "rig:fed-canary"
+		}
+		return "city"
+	}
+	var readDirs []string
+	ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, beadID, _ string) (beads.Bead, error) {
+		readDirs = append(readDirs, dir)
+		if beadID != countedInCity.ID {
+			return beads.Bead{}, fmt.Errorf("read %s: not the trigger", beadID)
+		}
+		if dir == workerDir {
+			return closedInWorkerStore, nil
+		}
+		return countedInCity, nil
+	}
+
+	var stderr bytes.Buffer
+	recordDemandClaimDivergence(hookClaimReasonNoWork, workerDir, divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+
+	if len(rec.Events) != 1 {
+		t.Fatalf("events = %+v, want exactly 1", rec.Events)
+	}
+	var payload events.SessionDemandClaimDivergencePayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	if payload.Classification != events.DemandClaimDivergence {
+		t.Fatalf("classification = %q (status %q, trigger reads in dirs %v); want %q: the trigger is still open and claimable in the city store the controller counted from, only the worker's own store says closed",
+			payload.Classification, payload.TriggerStatusAtDrain, readDirs, events.DemandClaimDivergence)
 	}
 }

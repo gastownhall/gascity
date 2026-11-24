@@ -232,7 +232,8 @@ const (
 	// is worth seeing on its own.
 	DemandClaimBlocked = "blocked"
 	// DemandClaimUnknown: the classification read could not be made (no trigger
-	// recorded, or the row could not be read). Never counted as either.
+	// recorded, the row could not be read, or the store it was counted in could
+	// not be resolved from the seat's stamp). Never counted as either.
 	DemandClaimUnknown = "unknown"
 )
 
@@ -253,9 +254,12 @@ type SessionDemandClaimDivergencePayload struct {
 	// TriggerBeadID is the row the controller counted, or empty when the seat
 	// carried no trigger record.
 	TriggerBeadID string `json:"trigger_bead_id,omitempty"`
-	// TriggerStatusAtDrain is the row's observed status at drain time
-	// ("open"/"in_progress"/"closed"), "unreadable" when the classification read
-	// failed, or empty when there was no row to read.
+	// TriggerStatusAtDrain is the row's observed status at drain time, read in
+	// the store the controller counted the row in (gc.trigger_bead_store_ref),
+	// not the seat's own: ("open"/"in_progress"/"closed"), "unreadable" when the
+	// classification read failed, "store_unresolved" when the counting store
+	// could not be resolved from the seat's stamp, or empty when there was no
+	// row to read.
 	TriggerStatusAtDrain string `json:"trigger_status_at_drain,omitempty"`
 	// Classification is the verdict: benign, divergence, blocked, or unknown. It
 	// is carried rather than left to be re-derived, because the divergence count

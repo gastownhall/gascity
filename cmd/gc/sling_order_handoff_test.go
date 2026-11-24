@@ -242,7 +242,9 @@ func (h *handoffFixture) ops() hookClaimOps {
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
 			return h.store.Get(beadID)
 		},
-		ReadSessionTrigger: func(string) (string, error) { return h.triggerID, nil },
+		ReadSessionTrigger: func(string) (demandTrigger, error) {
+			return demandTrigger{ID: h.triggerID, StoreRef: demandDivergenceTestRigRef}, nil
+		},
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 			return hookClaimThroughStore(beadID, assignee,
 				func() (beads.Bead, bool, error) {
