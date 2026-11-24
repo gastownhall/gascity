@@ -3229,3 +3229,77 @@ func TestMergeCollectedDemandKeepsBindingResident(t *testing.T) {
 		t.Errorf("merged BindingResident = %v, want %v", got.BindingResident, want)
 	}
 }
+
+// fakeManagedSpec is complete single-owner evidence for beadID owned by
+// rig:r1, as worktreeSpecForBead rebuilds it from worktreeEvidenceMetadata.
+// Compute never touches the disk, so the paths need not exist.
+func fakeManagedSpec(beadID string) worktree.Spec {
+	return worktree.Spec{
+		RepoDir: "/tmp/repo", Root: "/tmp/wt", Path: "/tmp/wt/" + beadID, Branch: "work/" + beadID,
+		Base: "main", BaseSHA: "0123456789abcdef0123456789abcdef01234567", BeadID: beadID, StoreRef: "rig:r1",
+		Creator: "provisioner", Owner: "provisioner", Generation: "1", Lifecycle: worktree.LifecycleActive,
+	}
+}
+
+// withMetadata returns wb with meta merged over its own metadata.
+func withMetadata(wb beads.Bead, meta map[string]string) beads.Bead {
+	merged := maps.Clone(wb.Metadata)
+	maps.Copy(merged, meta)
+	wb.Metadata = merged
+	return wb
+}
+
+// assignedWorkRequest computes the pool's desired states for one assigned
+// work bead read under census ref ref and returns its only request.
+func assignedWorkRequest(t *testing.T, cfg *config.City, wb beads.Bead, ready []bool, refs []string, sessions []beads.Bead) SessionRequest {
+	t.Helper()
+	states := computePoolDesiredStatesParkedAt(cfg, []beads.Bead{wb}, ready, refs, sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil, nil)
+	var reqs []SessionRequest
+	for _, ds := range states {
+		reqs = append(reqs, ds.Requests...)
+	}
+	if len(reqs) != 1 || reqs[0].WorkBeadID != wb.ID {
+		t.Fatalf("requests = %+v, want one request for %s", reqs, wb.ID)
+	}
+	return reqs[0]
+}
+
+// TestComputePoolDesiredStatesResumeTierCarriesWorktreeEvidence pins
+// gastownhall/gascity#5753 for the resume tier: in-progress work naming a
+// managed worktree, assigned to an open session, carries its spec and the
+// census leg's store guard, like a scale-demand request, so
+// verifiedPoolTriggerWorkDir verifies it instead of falling back to the pool's
+// own directory.
+func TestComputePoolDesiredStatesResumeTierCarriesWorktreeEvidence(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(4), 0)}}
+	spec := fakeManagedSpec("w-1")
+	wb := withMetadata(workBead("w-1", "rig/claude", "sess-1", "in_progress", 2), worktreeEvidenceMetadata(spec))
+	for _, tc := range []struct {
+		name         string
+		refs         []string
+		wantRef      string
+		wantResident bool
+	}{
+		{name: "city leg", refs: []string{""}, wantRef: "city"},
+		{name: "rig leg", refs: []string{"r1"}, wantRef: "rig:r1"},
+		{name: "class binding leg", refs: []string{"class:graph"}, wantRef: "city", wantResident: true},
+		{name: "unknown leg", refs: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := assignedWorkRequest(t, cfg, wb, nil, tc.refs, []beads.Bead{sessionBead("sess-1", "open")})
+			if req.Tier != "resume" || req.SessionBeadID != "sess-1" {
+				t.Fatalf("request = %+v, want a resume of sess-1", req)
+			}
+			if req.WorktreeSpec == nil || !reflect.DeepEqual(*req.WorktreeSpec, spec) {
+				t.Fatalf("WorktreeSpec = %+v, want %+v (a nil spec binds the pool directory)", req.WorktreeSpec, spec)
+			}
+			if req.WorktreeError != "" {
+				t.Fatalf("WorktreeError = %q, want none", req.WorktreeError)
+			}
+			if req.WorkStoreRef != tc.wantRef || req.WorkBindingResident != tc.wantResident {
+				t.Fatalf("(WorkStoreRef, WorkBindingResident) = (%q, %v), want (%q, %v)",
+					req.WorkStoreRef, req.WorkBindingResident, tc.wantRef, tc.wantResident)
+			}
+		})
+	}
+}

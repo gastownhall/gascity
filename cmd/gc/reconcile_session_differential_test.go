@@ -644,7 +644,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	poolDesired := result.PoolDesiredCounts
 	if poolDesired == nil {
 		work, workRefs := filterAssignedWorkBeadsForPoolDemand(cfg, w.cityPath, w.store, open, assigned, refs)
-		poolDesired = retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(computePoolDesiredStatesParkedAt(cfg, work, readyAssignedFlagsForBeads(result.ReadyAssigned, work, workRefs), open, result.ScaleCheckCounts, nil, now,
+		poolDesired = retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(computePoolDesiredStatesParkedAt(cfg, work, readyAssignedFlagsForBeads(result.ReadyAssigned, work, workRefs), workRefs, open, result.ScaleCheckCounts, nil, now,
 			parkSeatsForResult(cfg, open, result, now.UTC()), nil)),
 			updated, effectivePoolPartialRetentionTemplates(result))
 	}

@@ -42,21 +42,34 @@ func seedEvidenceStep(t *testing.T, store beads.Store, target, ownerRef string) 
 	if err != nil {
 		t.Fatalf("worktree.Ensure: %v", err)
 	}
-	if err := store.SetMetadataBatch(step.ID, map[string]string{
-		beadmeta.WorkDirMetadataKey:            path,
-		beadmeta.WorktreeRepoMetadataKey:       repo,
-		beadmeta.WorktreeRootMetadataKey:       root,
+	spec.BaseSHA = report.Provenance.BaseSHA
+	if err := store.SetMetadataBatch(step.ID, worktreeEvidenceMetadata(spec)); err != nil {
+		t.Fatalf("stamp evidence: %v", err)
+	}
+	return step, path
+}
+
+// worktreeEvidenceMetadata is the metadata a provisioner publishes on a work
+// bead for spec: gc.work_dir plus the nine ownership keys, and the bead's
+// gc.root_store_ref when spec names a store. worktreeSpecForBead rebuilds
+// spec from it.
+func worktreeEvidenceMetadata(spec worktree.Spec) map[string]string {
+	meta := map[string]string{
+		beadmeta.WorkDirMetadataKey:            spec.Path,
+		beadmeta.WorktreeRepoMetadataKey:       spec.RepoDir,
+		beadmeta.WorktreeRootMetadataKey:       spec.Root,
 		beadmeta.WorkBranchMetadataKey:         spec.Branch,
-		beadmeta.WorktreeBaseRefMetadataKey:    base,
-		beadmeta.WorktreeBaseSHAMetadataKey:    report.Provenance.BaseSHA,
+		beadmeta.WorktreeBaseRefMetadataKey:    spec.Base,
+		beadmeta.WorktreeBaseSHAMetadataKey:    spec.BaseSHA,
 		beadmeta.WorktreeCreatorMetadataKey:    spec.Creator,
 		beadmeta.WorktreeOwnerMetadataKey:      spec.Owner,
 		beadmeta.WorktreeGenerationMetadataKey: spec.Generation,
 		beadmeta.WorktreeLifecycleMetadataKey:  spec.Lifecycle,
-	}); err != nil {
-		t.Fatalf("stamp evidence: %v", err)
 	}
-	return step, path
+	if spec.StoreRef != "" {
+		meta[beadmeta.RootStoreRefMetadataKey] = spec.StoreRef
+	}
+	return meta
 }
 
 // bindStepFromDemand is what a cold pool does with one demanded step: the
