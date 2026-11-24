@@ -47,6 +47,12 @@ type client struct {
 	// unixListening is serverConfirmedDead's kernel listener check, a test
 	// override; nil selects runtime.UnixPathListening.
 	unixListening func(path string) (bool, error)
+
+	// Test overrides for the bounded CLI runner; zero selects the package
+	// default.
+	cliTimeout   time.Duration // herdrCLIDefaultTimeout
+	cliMargin    time.Duration // herdrCLITimeoutMargin
+	cliWaitDelay time.Duration // herdrCLIWaitDelay
 }
 
 func newClient(session, cityRoot string) *client {
@@ -240,21 +246,49 @@ type envelope struct {
 	Error  *herdrError     `json:"error"`
 }
 
-// run executes `herdr --session <session> <args…>` and returns the result
-// payload, or an error (transport failure or herdr-reported error).
-//
-// Its errors are scrubbed of anything this client's flag grammar can identify;
-// see redaction.go. An argv carrying a credential anywhere else needs
-// [client.runWithSecrets].
-func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, error) {
-	return c.runWithSecrets(ctx, nil, args...)
+// Bounds on one herdr CLI invocation. A herdr that never answers must not
+// hold a caller forever: every exec is cut at a deadline, and a child that
+// leaves stdout open past its death is abandoned after herdrCLIWaitDelay.
+const (
+	// herdrCLIDefaultTimeout bounds a verb that has no timeout of its own.
+	herdrCLIDefaultTimeout = 30 * time.Second
+	// herdrCLIWaitDelay bounds Output() after the process is killed or exits
+	// while a grandchild still holds stdout.
+	herdrCLIWaitDelay = 2 * time.Second
+)
+
+// cliBounds returns the default bound and the WaitDelay, honoring the client's
+// test overrides.
+func (c *client) cliBounds() (bound, waitDelay time.Duration) {
+	bound, waitDelay = c.cliTimeout, c.cliWaitDelay
+	if bound <= 0 {
+		bound = herdrCLIDefaultTimeout
+	}
+	if waitDelay <= 0 {
+		waitDelay = herdrCLIWaitDelay
+	}
+	return bound, waitDelay
 }
 
-// runWithSecrets is run for an argv carrying a credential the grammar cannot
-// find. declared comes from whoever built the argv; see redaction.go.
-func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
-	full := append([]string{"--session", c.session}, args...)
-	cmd := exec.CommandContext(ctx, c.bin, full...)
+// runWithin is the one place a herdr CLI process is run and waited on: lead then
+// args form the argv (lead is the `--session <name>` pair, or nil for a verb
+// that takes none), bound is the deadline (non-positive selects the default),
+// and the result is herdr's stdout. Its errors are scrubbed of anything the
+// flag grammar identifies plus declared (see redaction.go).
+//
+// A deadline that ended the call, the bound's or the parent's, is reported as
+// that context error and never as the killed process's exit status or stderr:
+// a timeout is never read as absence. The derived context is checked before
+// anything the process wrote.
+func (c *client) runWithin(ctx context.Context, bound time.Duration, lead, declared, args []string) ([]byte, error) {
+	if bound <= 0 {
+		bound, _ = c.cliBounds()
+	}
+	_, waitDelay := c.cliBounds()
+	cctx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, c.bin, append(append([]string(nil), lead...), args...)...)
+	cmd.WaitDelay = waitDelay
 	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
 		safe, _ := redactedArgv(args, declared)
 		return nil, fmt.Errorf("herdr %v: %w", safe, err)
@@ -262,9 +296,9 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	out, err := cmd.Output()
 	if err != nil {
 		safe, secrets := redactedArgv(args, declared)
-		if cerr := ctx.Err(); cerr != nil {
-			// exec killed herdr when ctx ended, and a killed process's exit
-			// status says nothing about why.
+		if cerr := cctx.Err(); cerr != nil {
+			// exec killed herdr (or abandoned its pipes) when the context ended,
+			// and a killed process's exit status says nothing about why.
 			return nil, fmt.Errorf("herdr %v: %w", safe, cerr)
 		}
 		var ee *exec.ExitError
@@ -274,6 +308,34 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 		// err here is exec's own (*exec.Error, *exec.ExitError): it carries the
 		// binary name and a status, never anything from args.
 		return nil, fmt.Errorf("herdr %v: %w", safe, err)
+	}
+	return out, nil
+}
+
+// sessionLead is the argv prefix naming this client's herdr session.
+func (c *client) sessionLead() []string { return []string{"--session", c.session} }
+
+// run executes `herdr --session <session> <args…>` and returns the result
+// payload, or an error (transport failure or herdr-reported error).
+//
+// Its errors are scrubbed of anything this client's flag grammar can identify;
+// see redaction.go. An argv carrying a credential anywhere else needs
+// [client.runWithSecrets].
+func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, error) {
+	return c.runDecoded(ctx, 0, nil, args)
+}
+
+// runWithSecrets is run for an argv carrying a credential the grammar cannot
+// find. declared comes from whoever built the argv; see redaction.go.
+func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
+	return c.runDecoded(ctx, 0, declared, args)
+}
+
+// runDecoded runs args within bound and decodes herdr's JSON envelope.
+func (c *client) runDecoded(ctx context.Context, bound time.Duration, declared, args []string) (json.RawMessage, error) {
+	out, err := c.runWithin(ctx, bound, c.sessionLead(), declared, args)
+	if err != nil {
+		return nil, err
 	}
 	if len(strings.TrimSpace(string(out))) == 0 {
 		return nil, nil // success with no payload (e.g. pane send-keys / pane run)
@@ -411,25 +473,9 @@ func (c *client) paneRead(ctx context.Context, paneID, source string, lines int)
 // pair, which redaction.go finds on its own. Give it one and this needs the
 // [client.runWithSecrets] treatment.
 func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
-	full := append([]string{"--session", c.session}, args...)
-	cmd := exec.CommandContext(ctx, c.bin, full...)
-	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
-		safe, _ := redactedArgv(args, nil)
-		return "", fmt.Errorf("herdr %v: %w", safe, err)
-	}
-	out, err := cmd.Output()
+	out, err := c.runWithin(ctx, 0, c.sessionLead(), nil, args)
 	if err != nil {
-		safe, secrets := redactedArgv(args, nil)
-		if cerr := ctx.Err(); cerr != nil {
-			// See run: a ctx that ended killed herdr.
-			return "", fmt.Errorf("herdr %v: %w", safe, cerr)
-		}
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("herdr %v: %w", safe, &herdrStderr{Text: redactText(string(ee.Stderr), secrets)})
-		}
-		// See run: exec's own error carries the binary name and a status only.
-		return "", fmt.Errorf("herdr %v: %w", safe, err)
+		return "", err
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if strings.HasPrefix(trimmed, "{") {
@@ -1469,9 +1515,14 @@ func (c *client) relativeSocketError(sock string) error {
 }
 
 // stopServer stops this session's server (best-effort; tolerates not-running).
-// `session stop` targets the session by name and must bypass run() (which
-// prepends --session).
+// `session stop` targets the session by name and takes no --session, so it goes
+// through runWithin directly rather than run(). It is bounded like every other
+// herdr call: a stop that outlives the bound returns the wrapped deadline error,
+// and any other failure, a non-zero exit included, stays nil.
 func (c *client) stopServer() error {
-	_ = exec.Command(c.bin, "session", "stop", c.session).Run()
+	_, err := c.runWithin(context.Background(), 0, nil, nil, []string{"session", "stop", c.session})
+	if errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	return nil
 }
