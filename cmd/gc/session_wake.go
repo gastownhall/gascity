@@ -163,18 +163,34 @@ func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, 
 		sleepReason = string(sessions.SleepReasonIdleTimeout)
 	}
 
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
 	batch = sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
 		Now:               now,
 		SleepReason:       sleepReason,
-		FreshWake:         info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info),
+		FreshWake:         freshWake,
 		// A retry of a claimed pending create continues its episode, so the
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
+		ConsumeRestartRequest:         preWakeAnswersRestartRequest(info, freshWake),
 	})
 	return newGen, token, batch, sessions.CellInfo(info, sessions.ActorController, sessions.DispEvent{Kind: sessions.EvPreWake}, now)
+}
+
+// preWakeAnswersRestartRequest reports whether this wake answers the row's
+// recorded restart request (#5843): the request pair is present, and this
+// start is the fresh conversation it asks for — a fresh wake, or a resume
+// with no session key left to resume. The mint's caller decides it on its
+// own fresh read, so a request the CLI wrote past the controller's cache is
+// still answered; a lone request without its reset is the restart block's to
+// consume, not the wake's.
+func preWakeAnswersRestartRequest(info sessions.Info, freshWake bool) bool {
+	if strings.TrimSpace(info.RestartRequested) != "true" || strings.TrimSpace(info.ContinuationResetPending) == "" {
+		return false
+	}
+	return freshWake || strings.TrimSpace(info.SessionKey) == ""
 }
 
 // pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake

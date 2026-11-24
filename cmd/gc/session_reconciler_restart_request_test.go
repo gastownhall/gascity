@@ -28,13 +28,49 @@ type restartRequestTestEnv struct {
 	stdout       bytes.Buffer
 	stderr       bytes.Buffer
 	startOptions []startExecutionOption
-	city         string             // the reconcile helpers' city path; only a test of the no-city refusal sets ""
-	stops        *asyncStartTracker // the drain-ack's async stops the reconcile helpers queue
+	city         string              // the reconcile helpers' city path; only a test of the no-city refusal sets ""
+	stops        *asyncStartTracker  // the drain-ack's async stops the reconcile helpers queue
+	cache        *beads.CachingStore // the reconciler's session cache, nil in the single-store envs
 }
 
 func newRestartRequestTestEnv(t testing.TB) *restartRequestTestEnv {
+	return newRestartRequestEnvWithStore(t, beads.NewMemStore())
+}
+
+// newRestartRequestSplitStoreEnv is the restart-request harness over the
+// #5843 store shape: the reconciler reads and writes through a session
+// CachingStore, and the returned handle is the shared backing alone — the
+// CLI's one-shot store, whose writes land on the backing around that cache
+// with no event, feed or re-scan delivering them.
+func newRestartRequestSplitStoreEnv(t testing.TB) (*restartRequestTestEnv, beads.Store) {
+	return newRestartRequestSplitStoreEnvOverBacking(t, beads.NewMemStore())
+}
+
+// newRestartRequestSplitStoreEnvOverBacking is the split-store harness over a
+// caller-supplied backing: a test that needs to observe or interpose on the
+// backing's own operations (the #5843 race windows) wraps the memory store and
+// passes the wrapper here.
+func newRestartRequestSplitStoreEnvOverBacking(t testing.TB, backing beads.Store) (*restartRequestTestEnv, beads.Store) {
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	env := newRestartRequestEnvWithStore(t, cache)
+	env.cache = cache
+	return env, backing
+}
+
+// primeCache primes the reconciler's session cache: its snapshot reads are
+// served from the primed rows, so a backing write that follows stays
+// invisible to it until a refresh installs the row.
+func (e *restartRequestTestEnv) primeCache(t testing.TB) {
+	t.Helper()
+	if err := e.cache.Prime(context.Background()); err != nil {
+		t.Fatalf("priming the session cache: %v", err)
+	}
+}
+
+func newRestartRequestEnvWithStore(t testing.TB, store beads.Store) *restartRequestTestEnv {
+	setSessionCircuitBreakerForTest(t, newSessionCircuitBreaker(sessionCircuitBreakerConfig{}))
 	env := &restartRequestTestEnv{
-		store:        beads.NewMemStore(),
+		store:        store,
 		sp:           runtime.NewFake(),
 		dt:           newDrainTracker(),
 		clk:          &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)},
@@ -776,7 +812,6 @@ func TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSe
 		"restart_requested":          "true",
 		"continuation_reset_pending": "true",
 		"session_key":                "original-key",
-		"started_config_hash":        "hash-before-restart",
 	})
 	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
 		t.Fatalf("start session: %v", err)
@@ -1017,4 +1052,140 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 			t.Fatal("last_woke_at empty, want same-tick wake commit")
 		}
 	})
+}
+
+// newRestartRequestWakeFixture seeds a configured named worker session in
+// mode always, the #5843 reporter's shape: a long-lived, pinned, configured
+// session the reconciler keeps awake, whose wake a reset's handoff or a
+// poked pass would run.
+func newRestartRequestWakeFixture(t *testing.T, env *restartRequestTestEnv) (beads.Bead, string) {
+	t.Helper()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+	}
+	// The row carries no reset markers and no session key of its own: a
+	// request pair arrives only from the backing writes the tests make, and
+	// the fresh wake has no key left to resume, so the PreWake must answer
+	// it (a started_config_hash here makes the fixture's first pass repair
+	// config drift instead of waking, so it stays off the fixture row too —
+	// the start itself stamps the current hash).
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "asleep",
+		"sleep_reason":               "drained",
+		// The reconciler stamps the sleep policy a row has not yet recorded,
+		// and that local write's completion read installs the backing row into
+		// the cache mid-pass. Pre-stamping the exact policy this fixture
+		// resolves to keeps the pass from writing anything before its start,
+		// so the backing sees no read of the row between the prime and the
+		// start's own lease record.
+		"requested_sleep_after_idle": "off",
+		"effective_sleep_after_idle": "off",
+		"sleep_policy_source":        "legacy_off",
+		"sleep_capability":           "full",
+		"sleep_policy_fingerprint":   "value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker",
+	})
+	return session, sessionName
+}
+
+// rebaseFixtureConfigBaseline aligns the row's started-config baseline with
+// the config-drift check's own current hash. The wake path resolves its
+// launch template — its env and the startup prompt's fingerprint extras —
+// far past what this file's hand-set desired state carries, so the start's
+// own baseline never equals the hash the drift check computes from the
+// desired state, and the pass after a start would read that gap as config
+// drift and restart the replacement, drowning the restart request these
+// tests isolate. The reconciler rebaselines the same fields itself when the
+// stored hash is a version artifact; the fixture does the same for its
+// baseline gap, so a later pass decides on the request alone.
+func rebaseFixtureConfigBaseline(t *testing.T, env *restartRequestTestEnv, id, sessionName string) {
+	t.Helper()
+	row, err := env.store.Get(id)
+	if err != nil {
+		t.Fatalf("store get before rebasing the baseline: %v", err)
+	}
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState[sessionName], sessionInfoFromBead(row))
+	if _, err := silentRebaselineSessionHashes(id, sessionFrontDoor(env.store), agentCfg, false); err != nil {
+		t.Fatalf("rebasing the fixture baseline: %v", err)
+	}
+}
+
+// TestRestartRequestSplitStoreSingleWave (ga-45119r AC-3, #5843): a start
+// decided on the controller's stale cached row, whose backing row carries
+// both reset markers, must consume the pair in its PreWake CAS — the mint's
+// fenced read past the cache is the only read that sees the request — so no
+// later pass stops the brand-new replacement (the report's two-wave
+// restart).
+func TestRestartRequestSplitStoreSingleWave(t *testing.T) {
+	env, backing := newRestartRequestSplitStoreEnv(t)
+	session, sessionName := newRestartRequestWakeFixture(t, env)
+	env.primeCache(t)
+
+	// The CLI's one-shot reset write: both markers straight to the backing,
+	// around the controller's cache, with no event, feed or re-scan
+	// delivering them.
+	if err := backing.SetMetadataBatch(session.ID, map[string]string{
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+	}); err != nil {
+		t.Fatalf("cli reset write: %v", err)
+	}
+	cached, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("cache get before the wake: %v", err)
+	}
+	if cached.Metadata["restart_requested"] == "true" {
+		t.Fatalf("the cache already holds the reset marker; the fixture does not reproduce the stale row")
+	}
+
+	// The woken pass decides on the cached row — the restart block skips the
+	// request — and its start runs the PreWake CAS, whose fresh read sees
+	// the pair and must consume it whole.
+	env.reconcile([]beads.Bead{session})
+
+	got, err := backing.Get(session.ID)
+	if err != nil {
+		t.Fatalf("backing get after the wake: %v", err)
+	}
+	if got.Metadata["restart_requested"] != "" || got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("row after the PreWake CAS: restart_requested=%q continuation_reset_pending=%q, want both consumed", got.Metadata["restart_requested"], got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["generation"] != "2" {
+		t.Fatalf("generation after the wake = %q, want the replacement's 2", got.Metadata["generation"])
+	}
+	if starts := env.sp.CountCalls("Start", sessionName); starts != 1 {
+		t.Fatalf("starts of %s = %d, want the one fresh wake", sessionName, starts)
+	}
+
+	rebaseFixtureConfigBaseline(t, env, session.ID, sessionName)
+
+	// A later pass must not stop the replacement: the request it answered is
+	// gone, so the row's own incarnation never trips the restart block.
+	later, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store get before the later pass: %v", err)
+	}
+	env.reconcile([]beads.Bead{later})
+	if stops := env.sp.CountCalls("Stop", sessionName); stops != 0 {
+		t.Fatalf("stops of %s = %d after a later pass, want none (the marker killed the replacement)", sessionName, stops)
+	}
+	if starts := env.sp.CountCalls("Start", sessionName); starts != 1 {
+		t.Fatalf("starts of %s = %d after a later pass, want still the one", sessionName, starts)
+	}
+	if got.Metadata["generation"] != "2" {
+		t.Fatalf("generation = %q after a later pass, want still the replacement's 2", got.Metadata["generation"])
+	}
 }
