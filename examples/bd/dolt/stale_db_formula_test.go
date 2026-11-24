@@ -1883,6 +1883,44 @@ func TestStaleDBFormulaHungNotificationsAreBounded(t *testing.T) {
 	}
 }
 
+// staleDBUnboundedWarning is the line the step prints when it has no timeout
+// binary to bound its store calls with.
+const staleDBUnboundedWarning = "mol-dog-stale-db: no timeout or gtimeout; bead-store calls run unbounded"
+
+// TestStaleDBFormulaRunsUnboundedWithoutTimeout: on a host with neither
+// timeout nor gtimeout the step warns once and calls gc directly, as it did
+// before the bound, rather than failing with command-not-found and skipping
+// the close.
+func TestStaleDBFormulaRunsUnboundedWithoutTimeout(t *testing.T) {
+	tools := t.TempDir()
+	for _, tool := range []string{"bash", "cat", "date", "jq", "mktemp", "rm"} {
+		target, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("%s not found: %v", tool, err)
+		}
+		if err := os.Symlink(target, filepath.Join(tools, tool)); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+	}
+
+	run := runStaleDBFormulaHungStoreCase(t, staleDBHungStoreCase{scanJSON: staleDBCleanScan, beadID: "wisp-unbounded", path: tools})
+	if run.timedOut {
+		t.Fatalf("step still running after %s\n%s", staleDBHungStoreDeadline, run)
+	}
+	if run.err != nil {
+		t.Fatalf("step failed without a timeout binary; it must run its calls unbounded\n%s", run)
+	}
+	if got := strings.Count(run.out, staleDBUnboundedWarning); got != 1 {
+		t.Fatalf("%d unbounded warnings, want 1\n%s", got, run)
+	}
+	requireStaleDBLogInOrder(t, run,
+		"gc bd update wisp-unbounded --set-metadata gc.dolt_cleanup.scan_report=",
+		staleDBOutcomeWrite("wisp-unbounded")+"\n",
+		"gc bd close wisp-unbounded --reason Stale DB scan complete (orphans=0, applied=0, escalated=0)\n",
+		"gc runtime drain-ack\n",
+	)
+}
+
 func runStaleDBFormulaFailureCase(t *testing.T, tc staleDBFailureCase) (string, []byte, error) {
 	t.Helper()
 	script := renderStaleDBFormulaShell(t)

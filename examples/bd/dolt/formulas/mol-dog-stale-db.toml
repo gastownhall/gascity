@@ -101,9 +101,11 @@ REPORTS_OMITTED=""
 # DOG_BD_TIMEOUT seconds, so a hung store fails the call (exit 124, or 137 once
 # killed) into the failure path it already has instead of blocking the step.
 # Without --foreground, timeout signals its whole process group, so the bd a
-# passthrough `gc bd` spawned dies with it.
+# passthrough `gc bd` spawned dies with it. A host with neither timeout nor
+# gtimeout runs the calls unbounded, as before, rather than failing them.
 STORE_TIMEOUT="${DOG_BD_TIMEOUT:-60}"
 TIMEOUT_BIN=$(command -v gtimeout || command -v timeout || true)
+[ -n "$TIMEOUT_BIN" ] || echo "mol-dog-stale-db: no timeout or gtimeout; bead-store calls run unbounded" >&2
 store_bounded() {
   if [ -n "$TIMEOUT_BIN" ]; then
     "$TIMEOUT_BIN" --kill-after=5 "$STORE_TIMEOUT" "$@"
