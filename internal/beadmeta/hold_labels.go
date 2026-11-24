@@ -62,6 +62,29 @@ var DispatchHoldLabels = []string{HoldMayorLabel, HoldExternalLabel}
 // answers to.
 const HumanLabel = "human"
 
+// OperatorIdentity is the reserved identity of the person operating the city.
+// gc already treats it as a person rather than a session: mail resolves it as
+// the operator's inbox (mail.ResolveRecipient), session.ValidateAlias refuses
+// to mint it, and gc mail defaults sender and recipient to it. No [[agent]]
+// defines it and every city has one, so no session ever answers to it. The
+// core orphan-sweep order exempts an assignee of exactly this value (#3440),
+// and the controller's dead-assignee sweep (releaseOrphanedPoolAssignments)
+// does the same (#6945).
+//
+// It is spelled like HumanLabel but is a different bead field with a different
+// meaning: HumanLabel says a bead waits on a person, OperatorIdentity in the
+// assignee says a person holds it. They stay separate constants so a change
+// to one cannot silently change the other.
+const OperatorIdentity = "human"
+
+// IsOperatorIdentity reports whether identity names OperatorIdentity. The match
+// is trimmed, because the dead-assignee sweep trims every assignee, and exact
+// and case-sensitive, like the shell sweep's `[ "$name" = "human" ]`: "Human",
+// "humanoid" and "rig/human" are ordinary identities.
+func IsOperatorIdentity(identity string) bool {
+	return strings.TrimSpace(identity) == OperatorIdentity
+}
+
 // HasHumanLabel reports whether labels carry HumanLabel. It compares the way
 // the route-scoped serve filter does (bd's --exclude-label, mirrored by the
 // controller's demand predicate): trimmed and exact, so a "Human" bead is

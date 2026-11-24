@@ -64,3 +64,26 @@ func TestHasHumanLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestIsOperatorIdentity(t *testing.T) {
+	cases := []struct {
+		identity string
+		want     bool
+	}{
+		{"human", true},
+		{" human ", true},
+		{"\thuman\n", true},
+		{"", false},
+		{"Human", false},
+		{"HUMAN", false},
+		{"humanoid", false},
+		{"human-1", false},
+		{"rig/human", false},
+		{"human/alice", false},
+	}
+	for _, tc := range cases {
+		if got := IsOperatorIdentity(tc.identity); got != tc.want {
+			t.Errorf("IsOperatorIdentity(%q) = %v, want %v", tc.identity, got, tc.want)
+		}
+	}
+}

@@ -95,3 +95,84 @@ func TestReleaseOrphanedPoolAssignments_KeepsHumanLabeledClaims(t *testing.T) {
 		t.Fatalf("a human-labeled claim must not reach the foreign-claim gate; log:\n%s", logged)
 	}
 }
+
+// runOperatorSweep runs one dead-assignee sweep over work, which lives in
+// workStore and is routed to the pool agent "worker", with no session
+// anywhere. It returns the released bead IDs.
+func runOperatorSweep(t *testing.T, workStore beads.Store, work ...beads.Bead) map[string]bool {
+	t.Helper()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+	stores := make([]beads.Store, len(work))
+	for i := range stores {
+		stores[i] = workStore
+	}
+	released := releaseOrphanedPoolAssignments(
+		workStore,
+		beads.SessionStore{Store: beads.NewMemStore()},
+		cfg,
+		"",
+		nil,
+		work,
+		stores,
+		nil, nil, nil, nil, nil,
+	)
+	ids := make(map[string]bool, len(released))
+	for _, r := range released {
+		ids[r.ID] = true
+	}
+	return ids
+}
+
+// assertSweepKept fails unless each bead is absent from released and still
+// has the status and assignee it was seeded with.
+func assertSweepKept(t *testing.T, store beads.Store, released map[string]bool, kept ...beads.Bead) {
+	t.Helper()
+	for _, want := range kept {
+		got, err := store.Get(want.ID)
+		if err != nil {
+			t.Fatalf("get %s: %v", want.ID, err)
+		}
+		if released[want.ID] {
+			t.Errorf("%s (assignee %q) is in the released list, want it kept", want.ID, want.Assignee)
+		}
+		if got.Status != want.Status || got.Assignee != want.Assignee {
+			t.Errorf("%s = status %q assignee %q, want %q/%q untouched", want.ID, got.Status, got.Assignee, want.Status, want.Assignee)
+		}
+	}
+}
+
+// assertSweepReleased fails unless each bead is in released and is now open
+// with no assignee.
+func assertSweepReleased(t *testing.T, store beads.Store, released map[string]bool, gone ...beads.Bead) {
+	t.Helper()
+	for _, want := range gone {
+		got, err := store.Get(want.ID)
+		if err != nil {
+			t.Fatalf("get %s: %v", want.ID, err)
+		}
+		if !released[want.ID] {
+			t.Errorf("%s (assignee %q) is missing from the released list", want.ID, want.Assignee)
+		}
+		if got.Status != "open" || got.Assignee != "" {
+			t.Errorf("%s (was %q) = status %q assignee %q, want open/unassigned", want.ID, want.Assignee, got.Status, got.Assignee)
+		}
+	}
+}
+
+// Issue #6945: `bd update <id> --assignee human` hands claimed pool work to the
+// operator without setting the human label. No session answers to the
+// operator, so the sweep must not read the missing session as a dead claim;
+// the core orphan-sweep order keeps the same bead (#3440). The sweep trims
+// assignees, so a padded operator name is the operator too. A dead pool holder
+// is the control, so a disabled sweep cannot pass.
+func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedClaims(t *testing.T) {
+	workStore := beads.NewMemStore()
+	handoff := seedHumanLabelSweepWork(t, workStore, "pool work handed to the operator", "human", "in_progress")
+	padded := seedHumanLabelSweepWork(t, workStore, "pool work handed to a padded operator name", " human ", "in_progress")
+	control := seedHumanLabelSweepWork(t, workStore, "pool work held by a dead holder", "worker-1", "in_progress")
+
+	released := runOperatorSweep(t, workStore, handoff, padded, control)
+
+	assertSweepKept(t, workStore, released, handoff, padded)
+	assertSweepReleased(t, workStore, released, control)
+}
