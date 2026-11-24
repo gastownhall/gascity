@@ -1336,3 +1336,27 @@ func TestLegacyResumeIncompleteWorktreeEvidenceSkipsSeat(t *testing.T) {
 		t.Fatalf("stderr = %q, want the item reported skipped", res.stderr)
 	}
 }
+
+// A seat stamped with its trigger's canonical store, re-pointed by the
+// resume tier at other work read from the same rig leg, keeps that stamp: the
+// computed request carries the leg's store, so the re-point does not clear it
+// (gastownhall/gascity#5753).
+func TestLegacyResumeReRepointKeepsCanonicalTriggerStoreRef(t *testing.T) {
+	_, pathA := liveSeatManagedSpec(t, "gc-a")
+	specB, _ := liveSeatManagedSpec(t, "gc-b")
+	res := liveSeatReuse{
+		seatDir: pathA,
+		extra:   map[string]string{"state": "asleep", beadmeta.TriggerBeadStoreRefMetadataKey: "rig:r1"},
+		request: assignedWorkResume(t, specB),
+		assigned: func(id string) []beads.Bead {
+			return []beads.Bead{managedAssignedWork(specB, id)}
+		},
+	}.reused(t)
+	row := res.row(t)
+	if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gc-b" {
+		t.Fatalf("trigger = %q, want gc-b; stderr=%s", got, res.stderr)
+	}
+	if got := row.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; got != "rig:r1" {
+		t.Fatalf("%s = %q, want rig:r1, the store the new trigger was read from", beadmeta.TriggerBeadStoreRefMetadataKey, got)
+	}
+}
