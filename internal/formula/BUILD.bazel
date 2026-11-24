@@ -52,6 +52,7 @@ go_test(
         "graphv2_validation_test.go",
         "parser_test.go",
         "ralph_iteration_test.go",
+        "ralph_shapes_test.go",
         "ralph_test.go",
         "range_test.go",
         "requirements_test.go",
