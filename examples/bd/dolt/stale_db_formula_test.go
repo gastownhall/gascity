@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -22,6 +24,8 @@ func staleDBFilteredEnv(keys ...string) []string {
 		"GC_ESCALATION_RECIPIENT",
 		"GC_SYSTEM_PACKS_DIR",
 		"GC_MAINTENANCE_DONE_TARGET",
+		// The store-call bound; never let a host value change a run's timing.
+		"DOG_BD_TIMEOUT",
 		// The close actor chain leads with BEADS_ACTOR; never let the host
 		// session's own actor leak into a rendered-script run.
 		"BEADS_ACTOR",
@@ -1539,6 +1543,254 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 	}
 }
 
+// staleDBCleanScan is a dry-run report with nothing to clean.
+const staleDBCleanScan = `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[],"skipped":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`
+
+// staleDBHungStoreDeadline is how long a hung-store run may take before the
+// test kills it: well past a 2s bound on every call the step makes, and well
+// short of the fakes' 120s hang.
+const staleDBHungStoreDeadline = 30 * time.Second
+
+// staleDBHungStoreCase is one rendered-script run against a fake gc whose
+// matching command blocks, so the bound on that call can be observed.
+type staleDBHungStoreCase struct {
+	scanJSON string
+	// beadID is the work bead the run claims; empty means bead-1.
+	beadID string
+	// hang is a substring of the logged gc command that blocks for 120s;
+	// empty blocks nothing.
+	hang string
+	// path follows the fake gc's directory on PATH; empty means the host PATH.
+	path string
+	// bins are extra executables written next to the fake gc, by name.
+	bins map[string]string
+	// env is appended to the run's environment.
+	env []string
+}
+
+// staleDBHungStoreRun is what a hung-store run left behind.
+type staleDBHungStoreRun struct {
+	log      string
+	out      string
+	timeouts string
+	err      error
+	timedOut bool
+}
+
+func (r staleDBHungStoreRun) String() string {
+	return fmt.Sprintf("exit: %v\nlog:\n%s\noutput:\n%s\ntimeout log:\n%s", r.err, r.log, r.out, r.timeouts)
+}
+
+// staleDBRequireHungStoreTools skips a test that needs the rendered script to
+// bound its store calls with a real timeout binary.
+func staleDBRequireHungStoreTools(t *testing.T) {
+	t.Helper()
+	for _, tool := range []string{"bash", "jq", "sleep"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not found: %v", tool, err)
+		}
+	}
+	if _, err := exec.LookPath("timeout"); err != nil {
+		if _, gerr := exec.LookPath("gtimeout"); gerr != nil {
+			t.Skipf("neither timeout nor gtimeout found: %v", err)
+		}
+	}
+}
+
+// runStaleDBFormulaHungStoreCase runs the rendered step in its own process
+// group, kills the group if it is still running at staleDBHungStoreDeadline,
+// and returns the command log, the output and the exit.
+func runStaleDBFormulaHungStoreCase(t *testing.T, tc staleDBHungStoreCase) staleDBHungStoreRun {
+	t.Helper()
+	script := renderStaleDBFormulaShell(t)
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	logPath := filepath.Join(dir, "commands.log")
+	timeoutLogPath := filepath.Join(dir, "timeouts.log")
+	scanPath := filepath.Join(dir, "scan.json")
+	applyPath := filepath.Join(dir, "apply.json")
+	writeTestFile(t, scanPath, tc.scanJSON)
+	writeTestFile(t, applyPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`)
+	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
+set -euo pipefail
+rendered="gc $*"
+echo "$rendered" >> "$GC_TEST_LOG"
+case "${1:-} ${2:-}" in
+  "dolt-cleanup "*)
+    case " $* " in
+      *" --force "*) cat "$GC_TEST_APPLY_JSON" ;;
+      *) cat "$GC_TEST_SCAN_JSON" ;;
+    esac
+    ;;
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+    if [ -n "${GC_TEST_HANG_CONTAINS:-}" ] && [[ "$rendered" == *"$GC_TEST_HANG_CONTAINS"* ]]; then
+      sleep 120
+    fi
+    ;;
+  *)
+    echo "unexpected gc command: $*" >&2
+    exit 64
+    ;;
+esac
+`, 0o755)
+	for name, body := range tc.bins {
+		writeTestFile(t, filepath.Join(binDir, name), body, 0o755)
+	}
+	if tc.beadID == "" {
+		tc.beadID = "bead-1"
+	}
+	path := tc.path
+	if path == "" {
+		path = os.Getenv("PATH")
+	}
+	outFile, err := os.Create(filepath.Join(dir, "output"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-s")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdin = strings.NewReader(script)
+	// A file, not a pipe: Wait returns when bash exits, not when the last
+	// process that inherited the output closes it.
+	cmd.Stdout = outFile
+	cmd.Stderr = outFile
+	cmd.Env = append(staleDBFilteredEnv("PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_TIMEOUT_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON", "GC_TEST_HANG_CONTAINS"),
+		"GC_BEAD_ID="+tc.beadID,
+		"PATH="+binDir+string(os.PathListSeparator)+path,
+		"TMPDIR="+dir,
+		"GC_TEST_LOG="+logPath,
+		"GC_TEST_TIMEOUT_LOG="+timeoutLogPath,
+		"GC_TEST_SCAN_JSON="+scanPath,
+		"GC_TEST_APPLY_JSON="+applyPath,
+		"GC_TEST_HANG_CONTAINS="+tc.hang,
+	)
+	cmd.Env = append(cmd.Env, tc.env...)
+	if err := cmd.Start(); err != nil {
+		_ = outFile.Close()
+		t.Fatalf("Start: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	var run staleDBHungStoreRun
+	select {
+	case run.err = <-done:
+	case <-time.After(staleDBHungStoreDeadline):
+		run.timedOut = true
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		run.err = <-done
+	}
+	// Reap anything the step left behind in its group.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	if err := outFile.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	run.log = readStaleDBTestFile(t, logPath)
+	run.out = readStaleDBTestFile(t, filepath.Join(dir, "output"))
+	run.timeouts = readStaleDBTestFile(t, timeoutLogPath)
+	return run
+}
+
+// readStaleDBTestFile returns a file's contents, or "" when it was never written.
+func readStaleDBTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	return string(data)
+}
+
+// requireStaleDBLogInOrder fails unless the command log holds every want, each
+// after the one before it.
+func requireStaleDBLogInOrder(t *testing.T, run staleDBHungStoreRun, wants ...string) {
+	t.Helper()
+	at := 0
+	for _, want := range wants {
+		i := strings.Index(run.log[at:], want)
+		if i < 0 {
+			t.Fatalf("command log missing %q after offset %d\n%s", want, at, run)
+		}
+		at += i + len(want)
+	}
+}
+
+// TestStaleDBFormulaHungReportIsRecordedAsOmitted: a scan-report write that
+// hangs is bounded, the step still writes the outcome, closes and drain-acks,
+// and the close reason and an escalate event say the report was omitted.
+func TestStaleDBFormulaHungReportIsRecordedAsOmitted(t *testing.T) {
+	staleDBRequireHungStoreTools(t)
+
+	run := runStaleDBFormulaHungStoreCase(t, staleDBHungStoreCase{
+		scanJSON: staleDBCleanScan,
+		hang:     staleDBReportWrite,
+		env:      []string{"DOG_BD_TIMEOUT=2"},
+	})
+	if run.timedOut {
+		t.Fatalf("step still blocked on the hung report write after %s\n%s", staleDBHungStoreDeadline, run)
+	}
+	if run.err != nil {
+		t.Fatalf("step failed; a skipped report must not fail the scan\n%s", run)
+	}
+	requireStaleDBLogInOrder(t, run,
+		staleDBReportWrite,
+		staleDBOutcomeWrite("bead-1")+"\n",
+		"gc bd close bead-1 --reason Stale DB scan complete (orphans=0, applied=0, escalated=0, reports_omitted=scan)\n",
+		"gc runtime drain-ack\n",
+	)
+	if want := "gc event emit mol-dog-stale-db.escalate --message scan (dry-run) report was not recorded on bead-1"; !strings.Contains(run.log, want) {
+		t.Fatalf("command log missing %q\n%s", want, run)
+	}
+}
+
+// TestStaleDBFormulaFailedReportsAreRecordedAsOmitted: a report write that
+// fails fast is recorded as omitted the same way, one stage per skipped
+// report.
+func TestStaleDBFormulaFailedReportsAreRecordedAsOmitted(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		bead      string
+		scanJSON  string
+		wantClose string
+	}{
+		{"the scan report", "bead-1", staleDBCleanScan, "(orphans=0, applied=0, escalated=0, reports_omitted=scan)\n"},
+		{"the scan and apply reports", "wisp-applied", `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`, "(orphans=1, applied=1, escalated=0, reports_omitted=scan+apply)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+				scanJSON:     tc.scanJSON,
+				beadID:       tc.bead,
+				failContains: "gc bd update " + tc.bead + " --set-metadata gc.dolt_cleanup.",
+			})
+			if err != nil {
+				t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
+			}
+			if !strings.Contains(log, staleDBOutcomeWrite(tc.bead)+"\n") {
+				t.Fatalf("a skipped report must not skip the outcome write\nlog:\n%s\noutput:\n%s", log, out)
+			}
+			if want := staleDBCloseWrite(tc.bead) + " " + tc.wantClose; !strings.Contains(log, want) {
+				t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+			}
+			if !strings.Contains(log, "gc runtime drain-ack") {
+				t.Fatalf("step never drain-acked\nlog:\n%s\noutput:\n%s", log, out)
+			}
+		})
+	}
+}
+
 func runStaleDBFormulaFailureCase(t *testing.T, tc staleDBFailureCase) (string, []byte, error) {
 	t.Helper()
 	script := renderStaleDBFormulaShell(t)
@@ -1725,5 +1977,84 @@ func TestStaleDBOrderUsesParsedFieldsOnly(t *testing.T) {
 	}
 	if order.Schedule != "0 */4 * * *" {
 		t.Fatalf("Schedule = %q, want 0 */4 * * *", order.Schedule)
+	}
+}
+
+// TestStaleDBFormulaHungReportWriteStillClosesAndDrainAcks pins that a slow
+// or unresponsive store degrades the dog's report, not its bookkeeping: when
+// the scan-report `gc bd update` blocks, the step bounds it, still closes the
+// work bead and drain-acks instead of hanging until its own deadline.
+func TestStaleDBFormulaHungReportWriteStillClosesAndDrainAcks(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+	script := renderStaleDBFormulaShell(t)
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	logPath := filepath.Join(dir, "commands.log")
+	scanPath := filepath.Join(dir, "scan.json")
+	writeTestFile(t, scanPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[],"skipped":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`)
+	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
+set -euo pipefail
+rendered="gc $*"
+echo "$rendered" >> "$GC_TEST_LOG"
+case "${1:-} ${2:-}" in
+  "dolt-cleanup "*) cat "$GC_TEST_SCAN_JSON" ;;
+  "bd update")
+    if [[ "$rendered" == *"--set-metadata gc.dolt_cleanup."* ]]; then
+      sleep 120
+    fi
+    ;;
+  *) ;;
+esac
+`, 0o755)
+
+	cmd := exec.Command("bash", "-s")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = append(staleDBFilteredEnv("PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "DOG_BD_TIMEOUT"),
+		"GC_BEAD_ID=bead-1",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"TMPDIR="+dir,
+		"GC_TEST_LOG="+logPath,
+		"GC_TEST_SCAN_JSON="+scanPath,
+		"DOG_BD_TIMEOUT=2",
+	)
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	const deadline = 30 * time.Second
+	timedOut := false
+	select {
+	case <-done:
+	case <-time.After(deadline):
+		timedOut = true
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v\noutput:\n%s", logPath, err, out.String())
+	}
+	log := string(logData)
+	if timedOut {
+		t.Errorf("step still blocked on the hung report write after %s; a stalled store call must be bounded", deadline)
+	}
+	if !strings.Contains(log, staleDBCloseWrite("bead-1")) {
+		t.Errorf("work bead was never closed after the report write hung\nlog:\n%s\noutput:\n%s", log, out.String())
+	}
+	if !strings.Contains(log, "gc runtime drain-ack") {
+		t.Errorf("step never drain-acked after the report write hung\nlog:\n%s\noutput:\n%s", log, out.String())
 	}
 }

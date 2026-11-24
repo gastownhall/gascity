@@ -95,6 +95,22 @@ WORK_BEAD="${GC_BEAD_ID:-$(gc hook current --id-only)}"
 [ -n "$WORK_BEAD" ] || { echo "cannot resolve work bead id: GC_BEAD_ID unset and gc hook current returned nothing; aborting" >&2; exit 1; }
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dolt-cleanup.XXXXXX")
 DRAIN_ACKED=0
+REPORTS_OMITTED=""
+
+# store_bounded CMD... runs one bead-store call under a deadline of
+# DOG_BD_TIMEOUT seconds, so a hung store fails the call (exit 124, or 137 once
+# killed) into the failure path it already has instead of blocking the step.
+# Without --foreground, timeout signals its whole process group, so the bd a
+# passthrough `gc bd` spawned dies with it.
+STORE_TIMEOUT="${DOG_BD_TIMEOUT:-60}"
+TIMEOUT_BIN=$(command -v gtimeout || command -v timeout || true)
+store_bounded() {
+  if [ -n "$TIMEOUT_BIN" ]; then
+    "$TIMEOUT_BIN" --kill-after=5 "$STORE_TIMEOUT" "$@"
+  else
+    "$@"
+  fi
+}
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -115,11 +131,22 @@ record_report() {
   # written with `gc bd update --set-metadata`: on a city whose coordination
   # classes live in a separate store this wisp is served in process by gc,
   # which has no notes field to append to (`--append-notes` is refused there),
-  # and bare `bd` cannot see the wisp at all.
+  # and bare `bd` cannot see the wisp at all. A report the store did not take
+  # in time is named in the close reason (reports_omitted=) and an escalate
+  # event, not in another write to the store that just failed.
   local stage="${title%% *}"
+  local rc=0
   if [ -s "$file" ]; then
-    if ! gc bd update "$WORK_BEAD" --set-metadata "gc.dolt_cleanup.${stage}_report=$(printf '%s %s\\n%s' "$title" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$(cat "$file")")"; then
+    store_bounded gc bd update "$WORK_BEAD" --set-metadata "gc.dolt_cleanup.${stage}_report=$(printf '%s %s\\n%s' "$title" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$(cat "$file")")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
       echo "failed to record ${title} report; continuing to drain-ack" >&2
+      if [ -z "$REPORTS_OMITTED" ]; then
+        REPORTS_OMITTED="$stage"
+      else
+        REPORTS_OMITTED="${REPORTS_OMITTED}+${stage}"
+      fi
+      run_or_warn "emit ${stage} report omission" gc event emit mol-dog-stale-db.escalate \
+        --message "${title} report was not recorded on ${WORK_BEAD} (exit ${rc}); continuing"
     fi
   fi
 }
@@ -421,8 +448,10 @@ fi
 # gc closes a session's own claim under the identity that claimed it. A failed
 # close withdraws the outcome, so the wisp it leaves open carries none, as on
 # every other fail-open path.
+OMITTED_SUFFIX=""
+[ -z "$REPORTS_OMITTED" ] || OMITTED_SUFFIX=", reports_omitted=${REPORTS_OMITTED}"
 gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass
-if ! gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"; then
+if ! gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED}${OMITTED_SUFFIX})"; then
   run_or_warn "withdraw pass outcome" gc bd update "$WORK_BEAD" --unset-metadata gc.outcome
   fail_open_after_drain "gc bd close failed; leaving work bead open"
 fi
