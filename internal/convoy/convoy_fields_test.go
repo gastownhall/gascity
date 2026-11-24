@@ -127,3 +127,25 @@ func TestIsSynthetic(t *testing.T) {
 		})
 	}
 }
+
+func TestIsAutomaticInputConvoy(t *testing.T) {
+	tests := []struct {
+		name string
+		bead beads.Bead
+		want bool
+	}{
+		{name: "launch-minted synthetic convoy", bead: beads.Bead{Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"}}, want: true},
+		{name: "synthetic convoy with another kind", bead: beads.Bead{Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true", beadmeta.SyntheticKindMetadataKey: "other"}}, want: true},
+		{name: "drain unit convoy", bead: beads.Bead{Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true", beadmeta.SyntheticKindMetadataKey: beadmeta.SyntheticKindDrainUnitConvoy}}, want: false},
+		{name: "drain unit convoy with padding", bead: beads.Bead{Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true", beadmeta.SyntheticKindMetadataKey: " " + beadmeta.SyntheticKindDrainUnitConvoy + " "}}, want: false},
+		{name: "user-created convoy", bead: beads.Bead{Type: "convoy"}, want: false},
+		{name: "synthetic non-convoy", bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"}}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsAutomaticInputConvoy(tc.bead); got != tc.want {
+				t.Errorf("IsAutomaticInputConvoy(%+v) = %v, want %v", tc.bead, got, tc.want)
+			}
+		})
+	}
+}

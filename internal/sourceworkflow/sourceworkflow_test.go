@@ -1290,3 +1290,71 @@ func TestCloseSpecSidecarsNeverClosesASessionRow(t *testing.T) {
 		t.Fatal("the startup-health episode was closed as a spec sidecar")
 	}
 }
+
+// createWorkflowTestBead creates b in store, closing it afterwards when b asks
+// for a closed status, and returns the stored bead.
+func createWorkflowTestBead(t *testing.T, store *beads.MemStore, b beads.Bead) beads.Bead {
+	t.Helper()
+	if b.Type == "" {
+		b.Type = "task"
+	}
+	created, err := store.Create(b)
+	if err != nil {
+		t.Fatalf("Create(%s): %v", b.Title, err)
+	}
+	if b.Status == "closed" && created.Status != "closed" {
+		if err := store.Close(created.ID); err != nil {
+			t.Fatalf("Close(%s): %v", b.Title, err)
+		}
+		created.Status = "closed"
+	}
+	return created
+}
+
+func workflowTitlesOf(bs []beads.Bead) []string {
+	out := make([]string, len(bs))
+	for i, b := range bs {
+		out[i] = b.Title
+	}
+	return out
+}
+
+func TestListInputConvoyRootsKeepsClosedRootsAndSkipsDrainItems(t *testing.T) {
+	store := beads.NewMemStore()
+	closedRoot := createWorkflowTestBead(t, store, beads.Bead{Title: "wf-closed", Status: "closed", Metadata: map[string]string{"gc.kind": "workflow", "gc.input_convoy_id": "cv-1"}})
+	openRoot := createWorkflowTestBead(t, store, beads.Bead{Title: "wf-open", Status: "open", Metadata: map[string]string{"gc.formula_contract": "graph.v2", "gc.input_convoy_id": "cv-1"}})
+	createWorkflowTestBead(t, store, beads.Bead{Title: "wf-item", Status: "open", Metadata: map[string]string{"gc.kind": "workflow", "gc.input_convoy_id": "cv-1", "gc.drain_control_id": "drain-1"}})
+	createWorkflowTestBead(t, store, beads.Bead{Title: "note", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "cv-1"}})
+	createWorkflowTestBead(t, store, beads.Bead{Title: "wf-other", Status: "open", Metadata: map[string]string{"gc.kind": "workflow", "gc.input_convoy_id": "cv-2"}})
+
+	roots, err := ListInputConvoyRoots(beadstest.GraphMolecule(store), " cv-1 ")
+	if err != nil {
+		t.Fatalf("ListInputConvoyRoots: %v", err)
+	}
+	if ids := workflowIDsOf(roots); len(ids) != 2 || ids[0] != closedRoot.ID || ids[1] != openRoot.ID {
+		t.Fatalf("ListInputConvoyRoots = %v, want [wf-closed wf-open]: closed roots kept, drain items and non-roots dropped, sorted by ID", workflowTitlesOf(roots))
+	}
+	if roots, err := ListInputConvoyRoots(beadstest.GraphMolecule(store), " "); err != nil || len(roots) != 0 {
+		t.Fatalf("ListInputConvoyRoots(blank) = %v, %v; want nothing", workflowTitlesOf(roots), err)
+	}
+}
+
+type inputConvoyListFailStore struct {
+	*beads.MemStore
+	err error
+}
+
+func (s inputConvoyListFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if _, ok := query.Metadata["gc.input_convoy_id"]; ok {
+		return nil, s.err
+	}
+	return s.MemStore.List(query)
+}
+
+func TestListInputConvoyRootsReturnsListError(t *testing.T) {
+	boom := errors.New("store unreadable")
+	_, err := ListInputConvoyRoots(beadstest.GraphMolecule(inputConvoyListFailStore{MemStore: beads.NewMemStore(), err: boom}), "cv-1")
+	if !errors.Is(err, boom) {
+		t.Fatalf("ListInputConvoyRoots error = %v, want it to wrap %v", err, boom)
+	}
+}

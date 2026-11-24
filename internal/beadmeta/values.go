@@ -173,3 +173,8 @@ const (
 	ScopeKindCity = "city"
 	ScopeKindRig  = "rig"
 )
+
+// SyntheticKindDrainUnitConvoy is the value of SyntheticKindMetadataKey
+// ("gc.synthetic_kind") on the unit convoys a drain mints, one per manifest
+// row. graph.v2's single-item input convoy carries no synthetic kind.
+const SyntheticKindDrainUnitConvoy = "drain-unit-convoy"

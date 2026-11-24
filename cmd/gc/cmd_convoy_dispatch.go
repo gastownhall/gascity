@@ -3240,8 +3240,12 @@ func (c *sourceWorkflowMatchCollector) collect(currentSourceID, currentSourceSto
 	if currentSourceID == "" {
 		return nil
 	}
+	launches, err := c.launchConvoys(currentSourceID, currentSourceStoreRef)
+	if err != nil {
+		return err
+	}
 	for i, info := range c.stores {
-		children, err := c.scanStore(i, info, currentSourceID, currentSourceStoreRef)
+		children, err := c.scanStore(i, info, currentSourceID, currentSourceStoreRef, launches)
 		if err != nil {
 			return err
 		}
@@ -3255,13 +3259,67 @@ func (c *sourceWorkflowMatchCollector) collect(currentSourceID, currentSourceSto
 	return nil
 }
 
+// sourceLaunchConvoy is an input convoy a run launched on the current source
+// would name in gc.input_convoy_id: the source itself when it is a convoy, or an
+// automatic input convoy tracking it. owned is false for an automatic convoy
+// that tracks other beads too, whose runs are not the source's alone.
+type sourceLaunchConvoy struct {
+	id     string
+	holder int
+	owned  bool
+}
+
+// launchConvoys resolves the current source's launch convoys in every view that
+// holds the source (within currentSourceStoreRef when one is set), before any
+// view is scanned for roots. A read failure is classified by recordScanFailure.
+func (c *sourceWorkflowMatchCollector) launchConvoys(currentSourceID, currentSourceStoreRef string) ([]sourceLaunchConvoy, error) {
+	var launches []sourceLaunchConvoy
+	for i, info := range c.stores {
+		if info.store == nil {
+			continue
+		}
+		if _, failed := c.failedStores[i]; failed {
+			continue
+		}
+		if currentSourceStoreRef != "" && !sourceStoreRefSelectsDir(currentSourceStoreRef, info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg) {
+			continue
+		}
+		source, err := info.store.Get(currentSourceID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			c.attemptedStores[i] = struct{}{}
+			if err := c.recordScanFailure(i, info, currentSourceStoreRef, "reading source bead", err); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if source.Type == "convoy" {
+			launches = append(launches, sourceLaunchConvoy{id: source.ID, holder: i, owned: true})
+		}
+		automatic, err := convoycore.AutomaticInputConvoysFor(info.store, currentSourceID)
+		if err != nil {
+			c.attemptedStores[i] = struct{}{}
+			if err := c.recordScanFailure(i, info, currentSourceStoreRef, "listing source launch convoys", err); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		for _, input := range automatic {
+			launches = append(launches, sourceLaunchConvoy{id: input.Convoy.ID, holder: i, owned: input.Owned})
+		}
+	}
+	return launches, nil
+}
+
 // scanStore walks a single candidate store for one source identity and returns
 // the child source beads to recurse into. Nil, already-failed, or
 // already-visited stores yield no children. A ListLiveRoots, bead, or child
 // scan failure is classified by recordScanFailure: a tolerated failure returns
 // (nil, nil) so the caller skips the store; a selected-store failure returns the
 // wrapped error to abort.
-func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView, currentSourceID, currentSourceStoreRef string) ([]beads.Bead, error) {
+func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView, currentSourceID, currentSourceStoreRef string, launches []sourceLaunchConvoy) ([]beads.Bead, error) {
 	if info.store == nil {
 		return nil, nil
 	}
@@ -3290,17 +3348,18 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 		// stores and the binding), and a scope store holds graph roots only as
 		// rows written before the split; beads.RelicRead counts it as debt. The
 		// child-source listing below is not covered: it is ratcheted as it is.
-		var roots []beads.Bead
+		// info.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+		graph := beads.GraphMolecule(beads.GraphStore{Store: info.store})
+		var listed sourceRootListing
 		err := beads.RelicRead(func() error {
 			var listErr error
-			// info.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-			roots, listErr = sourceworkflow.ListLiveRootsInCity(beads.GraphMolecule(beads.GraphStore{Store: info.store}), currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+			listed, listErr = c.listSourceRoots(graph, index, info, currentSourceID, currentSourceStoreRef, rootStoreRef, launches)
 			return listErr
 		})
 		if err != nil {
-			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
+			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflows", err)
 		}
-		if err := c.mergeRootMatches(info, roots); err != nil {
+		if err := c.mergeRootMatches(info, listed.roots); err != nil {
 			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
 		}
 	}
@@ -3310,6 +3369,41 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	}
 	c.anyStoreScanned = true
 	return children, nil
+}
+
+// sourceRootListing is what one view holds for the current source: the roots
+// attributed to it.
+type sourceRootListing struct {
+	roots []beads.Bead
+}
+
+// listSourceRoots lists the roots in one view attributed to the current
+// source: the live ones keyed by gc.source_bead_id and the live ones launched
+// on one of its owned launch convoys. A launch convoy's roots are read
+// only from the view holding the convoy or from the class binding, so a
+// same-ID convoy in another store never attributes its runs to this source.
+func (c *sourceWorkflowMatchCollector) listSourceRoots(graph beads.MoleculeTarget, index int, info convoyStoreView, currentSourceID, currentSourceStoreRef, rootStoreRef string, launches []sourceLaunchConvoy) (sourceRootListing, error) {
+	roots, err := sourceworkflow.ListLiveRootsInCity(graph, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+	if err != nil {
+		return sourceRootListing{}, err
+	}
+	listing := sourceRootListing{roots: roots}
+	for _, launch := range launches {
+		if !launch.owned || (launch.holder != index && !info.isClassBinding()) {
+			continue
+		}
+		convoyRoots, err := sourceworkflow.ListInputConvoyRoots(graph, launch.id)
+		if err != nil {
+			return sourceRootListing{}, err
+		}
+		for _, root := range convoyRoots {
+			if root.Status != "closed" {
+				listing.roots = append(listing.roots, root)
+			}
+		}
+	}
+	listing.roots = uniqueBeads(listing.roots)
+	return listing, nil
 }
 
 // mergeRootMatches gathers every workflow bead under the given roots in one

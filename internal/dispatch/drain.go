@@ -33,9 +33,6 @@ const (
 	// scopeAbortSkippedCloseReason: bd rejects close reasons shorter than 20
 	// characters.
 	drainPredecessorFailedCloseReason = "drain failed: a blocking predecessor closed with a failed outcome"
-	// drainUnitConvoySyntheticKind is the gc.synthetic_kind of the unit
-	// convoys a drain mints, one per manifest row.
-	drainUnitConvoySyntheticKind = "drain-unit-convoy"
 )
 
 // DrainUnitRetiredCloseReason is stamped as close_reason on each unit convoy
@@ -1270,7 +1267,7 @@ func drainUnitRetiredMetadata(outcome string) map[string]string {
 // DrainUnitConvoyControlID returns the id of the drain control that minted
 // bead when bead is a drain unit convoy, and "" for any other bead.
 func DrainUnitConvoyControlID(bead beads.Bead) string {
-	if bead.Type != "convoy" || strings.TrimSpace(bead.Metadata[beadmeta.SyntheticKindMetadataKey]) != drainUnitConvoySyntheticKind {
+	if bead.Type != "convoy" || strings.TrimSpace(bead.Metadata[beadmeta.SyntheticKindMetadataKey]) != beadmeta.SyntheticKindDrainUnitConvoy {
 		return ""
 	}
 	return strings.TrimSpace(bead.Metadata[beadmeta.DrainControlIDMetadataKey])
@@ -1611,7 +1608,7 @@ func ensureDrainUnitConvoy(store beads.GraphStore, control beads.Bead, parentCon
 	}
 	metadata := map[string]string{
 		beadmeta.SyntheticMetadataKey:         "true",
-		beadmeta.SyntheticKindMetadataKey:     drainUnitConvoySyntheticKind,
+		beadmeta.SyntheticKindMetadataKey:     beadmeta.SyntheticKindDrainUnitConvoy,
 		beadmeta.ParentConvoyIDMetadataKey:    parentConvoyID,
 		beadmeta.DrainControlIDMetadataKey:    control.ID,
 		beadmeta.DrainIndexMetadataKey:        strconv.Itoa(row.Index),

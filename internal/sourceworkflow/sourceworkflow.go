@@ -623,6 +623,30 @@ func WorkflowTree(store beads.MoleculeTarget, rootID string) ([]WorkflowTreeNode
 	return out, nil
 }
 
+// ListInputConvoyRoots returns the workflow roots in store launched on the
+// input convoy convoyID (gc.input_convoy_id), closed ones included, sorted by
+// ID. A drain item root also names its unit convoy there, but it is a nested
+// run reached through its parent's WorkflowTree, so a root carrying
+// gc.drain_control_id is left out.
+func ListInputConvoyRoots(store beads.MoleculeTarget, convoyID string) ([]beads.Bead, error) {
+	convoyID = strings.TrimSpace(convoyID)
+	if store.Absent() || convoyID == "" {
+		return nil, nil
+	}
+	roots, err := beads.LiveFor(store).List(beads.ListQuery{
+		IncludeClosed: true,
+		Metadata:      map[string]string{beadmeta.InputConvoyIDMetadataKey: convoyID},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing workflow roots on input convoy %s: %w", convoyID, err)
+	}
+	roots = slices.DeleteFunc(roots, func(root beads.Bead) bool {
+		return !IsWorkflowRoot(root) || strings.TrimSpace(root.Metadata[beadmeta.DrainControlIDMetadataKey]) != ""
+	})
+	slices.SortFunc(roots, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	return roots, nil
+}
+
 // CloseWorkflowSubtree closes the root and every open descendant of a
 // workflow, marking each gc.outcome=skipped. It closes descendants before the
 // root and honors in-batch "blocks" dependencies so strict stores can close
