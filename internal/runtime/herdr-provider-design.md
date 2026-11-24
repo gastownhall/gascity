@@ -126,15 +126,21 @@ exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten 
 - **Every herdr CLI call is bounded, and a timeout is never read as absence.** All
   invocations go through one runner (`runWithin`) with a deadline (30s by default; a verb
   that carries its own `--timeout` gets that timeout plus a 10s margin), and `cmd.WaitDelay`
-  so a grandchild holding stdout cannot hold the call past its kill. An exec that ended on
-  its deadline or its caller's cancel reports `context.DeadlineExceeded` / `context.Canceled`
-  and never the killed process's stderr or exit status, which would otherwise read as
-  "session gone". `Start`'s existence check surfaces such an error instead of treating the
-  session as absent, so a stalled herdr cannot make a live session look new (a second
-  pre_start, placement and agent launch); `ListRunning` has its own 25s walk deadline and,
-  on expiry, returns the names it verified plus an unwrapped `*runtime.PartialListError`.
+  so a grandchild holding stdout cannot hold the call past herdr's exit or its kill. An exec
+  that ended on its deadline or its caller's cancel reports `context.DeadlineExceeded` /
+  `context.Canceled` and never the killed process's stderr or exit status, which would
+  otherwise read as "session gone". A herdr that exits 0 while a grandchild still holds its
+  stdout reports `exec.ErrWaitDelay`, its answer abandoned with the pipes; `unanswered`
+  classifies all three as an unknown answer. `Start`'s existence check surfaces such an
+  error instead of treating the session as absent, so a stalled herdr cannot make a live
+  session look new (a second pre_start, placement and agent launch). Its `agent_name_taken`
+  recovery reads the name's holder the same way: a holder it cannot look up or probe is
+  never reaped or replaced, and an unanswered lookup or probe defers the start as the
+  existence check does, since that holder may be a live agent. `ListRunning` has its
+  own 25s walk deadline, and on expiry, or when a session's lookup goes unanswered, it
+  returns the names it verified plus an unwrapped `*runtime.PartialListError`.
   The bool-only methods (`IsRunning`, `ProcessAlive`,
-  `ObserveLiveness`) still collapse a timeout to false, so a caller that acts destructively
+  `ObserveLiveness`) still collapse an unanswered call to false, so a caller that acts destructively
   on false must sit behind the fence in `cmd/gc/reconcile_session_fence.go` or use a
   three-valued read; several session-bead and doctor paths do not yet (tracked separately). A test (`TestExecSitesAreAllowListed`) fails
   on any new `exec.Command` in the package outside the runner, the detached server launch

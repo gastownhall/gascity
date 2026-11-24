@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -32,6 +33,8 @@ import (
 //	close_fails         the bound pane exists, but `pane close` fails at the transport
 //	exited_close_fails  close_fails, with the pane back at its bare shell prompt
 //	close_gone          the bound pane exists, but `pane close` answers pane_not_found
+//	close_pipe          the bound pane exists, and `pane close` exits 0 but leaves a
+//	                    descendant holding its stdout (exec.ErrWaitDelay)
 //
 // Whether the server is alive is not the CLI's to say: the provider's socket
 // decides (newContractProvider leaves none, listenHerdrSocket plants one).
@@ -74,6 +77,8 @@ pane_close)
     exit 1 ;;
   close_gone)
     printf '%s' '{"error":{"code":"pane_not_found","message":"pane not found"}}' ;;
+  close_pipe)
+    sleep 3 & ;;
   esac ;;
 esac
 exit 0
@@ -340,6 +345,30 @@ func TestHerdrStopReportsUnreachableWhenTheCloseCannotAnswer(t *testing.T) {
 	}
 	if err := runtime.StopForCleanup(p, name); err == nil {
 		t.Fatal("StopForCleanup with an unanswered lookup = nil, want the failure propagated")
+	}
+	if pane, _ := p.GetMeta(name, metaBoundPane); pane != "%5" {
+		t.Errorf("bound pane after a failed Stop = %q, want %%5 kept for the retry", pane)
+	}
+}
+
+// TestHerdrStopReportsUnreachableWhenTheCloseAnswerIsLost is the same arm
+// for an answer lost rather than late: herdr exits 0 from `pane close`, but a
+// descendant holds its stdout past the WaitDelay (exec.ErrWaitDelay), so
+// whether the pane closed is unknown. Stop wraps
+// runtime.ErrRuntimeUnavailable, exactly as for a close cut at its bound, and
+// keeps the sidecar binding so a retried Stop still finds the pane.
+func TestHerdrStopReportsUnreachableWhenTheCloseAnswerIsLost(t *testing.T) {
+	p := newLiveContractProvider(t, "close_pipe")
+	p.c.cliTimeout, p.c.cliWaitDelay = time.Minute, testWaitDlay // only the WaitDelay can end the close
+	const name = "gastown__worker"
+	bindTestPane(t, p, name, bindModeShell)
+
+	err := p.Stop(name)
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("Stop = %v; want the abandoned close's exec.ErrWaitDelay as the cause", err)
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("Stop = %v; want runtime.ErrRuntimeUnavailable wrapped: a close whose answer was lost is not a stopped session", err)
 	}
 	if pane, _ := p.GetMeta(name, metaBoundPane); pane != "%5" {
 		t.Errorf("bound pane after a failed Stop = %q, want %%5 kept for the retry", pane)

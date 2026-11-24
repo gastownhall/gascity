@@ -292,7 +292,10 @@ func (c *client) verbBound(timeoutMS int) time.Duration {
 // A deadline that ended the call, the bound's or the parent's, is reported as
 // that context error and never as the killed process's exit status or stderr:
 // a timeout is never read as absence. The derived context is checked before
-// anything the process wrote.
+// anything the process wrote. A herdr that exits 0 while a descendant still
+// holds its stdout is reported as exec.ErrWaitDelay once the WaitDelay
+// abandons the pipes, and what it wrote is discarded. [unanswered]
+// classifies both cases.
 func (c *client) runWithin(ctx context.Context, bound time.Duration, lead, declared, args []string) ([]byte, error) {
 	if bound <= 0 {
 		bound, _, _ = c.cliBounds()
@@ -318,11 +321,23 @@ func (c *client) runWithin(ctx context.Context, bound time.Duration, lead, decla
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
 			return nil, fmt.Errorf("herdr %v: %w", safe, &herdrStderr{Text: redactText(string(ee.Stderr), secrets)})
 		}
-		// err here is exec's own (*exec.Error, *exec.ExitError): it carries the
-		// binary name and a status, never anything from args.
+		// err here is exec's own (*exec.Error, *exec.ExitError,
+		// exec.ErrWaitDelay): it carries the binary name and a status at
+		// most, never anything from args.
 		return nil, fmt.Errorf("herdr %v: %w", safe, err)
 	}
 	return out, nil
+}
+
+// unanswered reports whether err leaves herdr's answer unknown. That is the
+// case when the call ended on a deadline or a cancel, or when herdr exited
+// while a descendant still held its stdout, so the WaitDelay abandoned the
+// pipes and runWithin discarded the answer (exec.ErrWaitDelay). Such a call
+// proves nothing about the session either way: a caller reports it as
+// unknown and never reads it as absence.
+func unanswered(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, exec.ErrWaitDelay)
 }
 
 // sessionLead is the argv prefix naming this client's herdr session.

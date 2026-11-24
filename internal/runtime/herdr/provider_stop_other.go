@@ -4,9 +4,7 @@ package herdr
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os/exec"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -24,15 +22,16 @@ import (
 // Otherwise a herdr that cannot answer (the pane lookup, an exited agent's
 // reap or the close fails) is an error, and the sidecar is kept so a retried
 // Stop still finds the pane (RUNTIME-CONTRACT-003: runtime.StopForCleanup
-// propagates it rather than certify the session gone). A close that never got
-// an answer at all — it ended on a deadline, a cancel, or the WaitDelay
-// abandoning a dead herdr's pipes — is wrapped in runtime.ErrRuntimeUnavailable:
-// the pane's state is unknown, not stopped, so callers that defer on an
-// unreachable runtime do instead of certifying the session gone (#6055).
+// propagates it rather than certify the session gone). A lookup or close whose
+// answer is unknown (unanswered: it ended on a deadline or a cancel, or herdr
+// exited while a descendant still held its stdout and the WaitDelay abandoned
+// the pipes) is wrapped in runtime.ErrRuntimeUnavailable: the pane's state is
+// unknown, not stopped, so callers that defer on an unreachable runtime do
+// instead of certifying the session gone (#6055).
 func (p *Provider) Stop(name string) error {
 	ctx := context.Background()
 	if err := p.closeSessionPane(ctx, name); err != nil && !p.c.serverConfirmedDead(ctx) {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, exec.ErrWaitDelay) {
+		if unanswered(err) {
 			return fmt.Errorf("herdr: stopping %q: %w: %w", name, runtime.ErrRuntimeUnavailable, err)
 		}
 		return fmt.Errorf("herdr: stopping %q: %w", name, err)

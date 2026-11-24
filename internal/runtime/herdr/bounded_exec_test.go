@@ -5,7 +5,9 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,7 +43,9 @@ func newBoundedClient(t *testing.T, script string) *client {
 // invocation that exits while a grandchild still holds its stdout must return
 // within the WaitDelay, not wait for the grandchild's EOF. At the base the
 // plain cmd.Output() waits out the grandchild (~10s here); the bound is that
-// the call comes back within 5s.
+// the call comes back within 5s. The answer herdr printed is abandoned with
+// the pipes, so the lookup reports exec.ErrWaitDelay, which unanswered reads
+// as unknown: never as an agent that is absent.
 func TestHerdrCallReturnsWhenGrandchildHoldsStdout(t *testing.T) {
 	script := `#!/bin/sh
 printf '{"result":{"agent":{"name":"x","pane_id":"%%5","agent_status":"idle"}}}\n'
@@ -52,9 +56,36 @@ exit 0
 	p.c.bin = writeFakeHerdr(t, script)
 
 	start := time.Now()
-	p.IsRunning("x")
+	_, found, err := p.c.getAgent(context.Background(), "x")
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("IsRunning returned after %v; a grandchild holding stdout must not hold the call (want within 5s)", elapsed)
+		t.Fatalf("the lookup returned after %v; a grandchild holding stdout must not hold the call (want within 5s)", elapsed)
+	}
+	if !errors.Is(err, exec.ErrWaitDelay) || !unanswered(err) {
+		t.Fatalf("lookup = found %v, err %v; want exec.ErrWaitDelay, read as unanswered", found, err)
+	}
+}
+
+// TestUnansweredClassifiesUnknownAnswers pins the one classification Start,
+// ListRunning and Stop share: a deadline, a cancel and an answer abandoned
+// with the pipes are unknown, however deeply wrapped; nil, herdr's own error
+// answers and every other failure are not.
+func TestUnansweredClassifiesUnknownAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{context.DeadlineExceeded, true},
+		{context.Canceled, true},
+		{exec.ErrWaitDelay, true},
+		{fmt.Errorf("herdr [agent get x]: %w", exec.ErrWaitDelay), true},
+		{fmt.Errorf("reaping exited agent pane %%5: %w", fmt.Errorf("herdr [pane close %%5]: %w", context.DeadlineExceeded)), true},
+		{nil, false},
+		{fmt.Errorf("herdr [agent get x]: %w", &herdrStderr{Text: "boom"}), false},
+		{errors.New("herdr agent get: decode: unexpected end of JSON input"), false},
+	} {
+		if got := unanswered(tc.err); got != tc.want {
+			t.Errorf("unanswered(%v) = %v; want %v", tc.err, got, tc.want)
+		}
 	}
 }
 

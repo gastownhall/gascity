@@ -25,10 +25,12 @@ func TestVerbTimeoutLongerThanDefaultGetsItsOwnBound(t *testing.T) {
 		}
 	})
 	t.Run("answer past the default is kept", func(t *testing.T) {
+		// --timeout 3000 leaves seconds of slack for the stub's fork/exec on a
+		// busy executor; the call still returns with the 300ms answer.
 		c := newBoundedClient(t, "#!/bin/sh\nsleep 0.3\nprintf '{\"result\":{}}'\n")
 		c.cliTimeout = 100 * time.Millisecond
-		if _, err := c.runVerbTimeout(context.Background(), 400, "agent", "wait", "x"); err != nil {
-			t.Fatalf("a call answering after 300ms with --timeout 400ms (default %v) failed: %v", c.cliTimeout, err)
+		if _, err := c.runVerbTimeout(context.Background(), 3000, "agent", "wait", "x"); err != nil {
+			t.Fatalf("a call answering after 300ms with --timeout 3000ms (default %v) failed: %v", c.cliTimeout, err)
 		}
 	})
 	t.Run("no answer is killed at T plus margin", func(t *testing.T) {

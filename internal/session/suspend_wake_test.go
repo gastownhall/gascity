@@ -576,21 +576,28 @@ func TestCloseClearsTheHolds(t *testing.T) {
 // cannot report the session running either, so the failure is not the
 // historical "cleanup of an already-dead session is best-effort" case: the
 // row is left not suspended — an unknown state never certifies a session
-// stopped — and the wake stamp is restored, as every failed stop is. A
-// plain Stop failure on a runtime that simply is not running keeps the
+// stopped — and the wake stamp is restored, as every failed stop is. The
+// guard is provider-agnostic: besides a k8s or herdr Stop that got no
+// answer, it holds for t3bridge's Stop while the bridge is soft-unavailable
+// (and for ssh's on a box it cannot reach), whose suspends used to succeed.
+// A plain Stop failure on a runtime that simply is not running keeps the
 // historical best-effort suspend.
 func TestSuspendFailsClosedWhenTeardownCannotReachRuntime(t *testing.T) {
 	const woke = "2026-10-08T11:59:50Z"
 	unreachable := fmt.Errorf("k8s stop %q: %w: %w", "s-wake", runtime.ErrRuntimeUnavailable, context.DeadlineExceeded)
+	bridgeDown := errors.New("t3 code is not answering")
+	softUnavailable := fmt.Errorf("%w: t3bridge snapshot unavailable stopping %q: %w", runtime.ErrRuntimeUnavailable, "s-wake", bridgeDown)
 	for name, tc := range map[string]struct {
-		kind ActorKind
-		soft bool
-		stop error
-		want bool // want the suspend to succeed
+		kind  ActorKind
+		soft  bool
+		stop  error
+		cause error // the Stop failure's own cause, kept on the suspend error
+		want  bool  // want the suspend to succeed
 	}{
-		"operator":                               {kind: ActorOperator, stop: unreachable},
-		"chat idle":                              {kind: ActorOperator, soft: true, stop: unreachable},
-		"shutdown sweep":                         {kind: ActorSweep, stop: unreachable},
+		"operator":                               {kind: ActorOperator, stop: unreachable, cause: context.DeadlineExceeded},
+		"chat idle":                              {kind: ActorOperator, soft: true, stop: unreachable, cause: context.DeadlineExceeded},
+		"shutdown sweep":                         {kind: ActorSweep, stop: unreachable, cause: context.DeadlineExceeded},
+		"t3bridge soft-unavailable idle":         {kind: ActorOperator, soft: true, stop: softUnavailable, cause: bridgeDown},
 		"plain not-running error still suspends": {kind: ActorOperator, stop: errors.New("stop failed"), want: true},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -619,8 +626,8 @@ func TestSuspendFailsClosedWhenTeardownCannotReachRuntime(t *testing.T) {
 			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 				t.Fatalf("Suspend = %v; want the unreachable runtime to fail the suspend closed", err)
 			}
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("Suspend = %v; want the cause (context.DeadlineExceeded) kept", err)
+			if !errors.Is(err, tc.cause) {
+				t.Fatalf("Suspend = %v; want the cause (%v) kept", err, tc.cause)
 			}
 			if sp.stopCalls != 1 {
 				t.Fatalf("Stop calls = %d; want exactly 1", sp.stopCalls)

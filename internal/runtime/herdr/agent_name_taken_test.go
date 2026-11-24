@@ -1,9 +1,13 @@
 package herdr
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // wrapTaken builds an error shaped exactly like client.run's output for a
@@ -70,7 +74,7 @@ func TestResolveAgentNameTakenAdoptsLiveHolder(t *testing.T) {
 	reaped, retried := false, false
 	got, adopted, err := resolveAgentNameTaken(agentInfo{}, wrapTaken(), agentStartOps{
 		getAgent:   func() (agentInfo, bool, error) { return existing, true, nil },
-		paneAlive:  func(paneID string) bool { return paneID == "w3F:pW" },
+		paneAlive:  func(paneID string) (bool, error) { return paneID == "w3F:pW", nil },
 		closePane:  func(string) error { reaped = true; return nil },
 		retryStart: func() (agentInfo, error) { retried = true; return agentInfo{}, nil },
 	})
@@ -101,7 +105,7 @@ func TestResolveAgentNameTakenReapsStaleThenRetries(t *testing.T) {
 	retries := 0
 	got, adopted, err := resolveAgentNameTaken(agentInfo{}, wrapTaken(), agentStartOps{
 		getAgent:   func() (agentInfo, bool, error) { return stale, true, nil },
-		paneAlive:  func(string) bool { return false },
+		paneAlive:  func(string) (bool, error) { return false, nil },
 		closePane:  func(paneID string) error { reapedPane = paneID; return nil },
 		retryStart: func() (agentInfo, error) { retries++; return fresh, nil },
 	})
@@ -134,5 +138,72 @@ func TestResolveAgentNameTakenUninspectableHolderSurfacesOriginal(t *testing.T) 
 	}
 	if adopted {
 		t.Error("adopted=true when the holder is uninspectable; want false")
+	}
+}
+
+// agent_name_taken whose holder cannot be found or probed reaps nothing and
+// retries nothing: the holder may well be live, so its pane is left alone and
+// the original error surfaces, carrying the inspection's own error. A lookup
+// or probe that went unanswered (a deadline, a cancel, or an answer lost to a
+// descendant holding herdr's stdout) also wraps runtime.ErrRuntimeUnavailable,
+// so Start defers rather than failing; one that herdr answered with a failure
+// does not.
+func TestResolveAgentNameTakenUninspectableHolderReapsNothing(t *testing.T) {
+	holder := agentInfo{Name: "x", PaneID: "w3F:pW"}
+	refused := errors.New("connection refused")
+	for _, tc := range []struct {
+		name        string
+		lookupErr   error // fails the holder lookup
+		probeErr    error // fails the holder's liveness probe
+		unavailable bool  // want runtime.ErrRuntimeUnavailable
+	}{
+		{name: "lookup deadline", lookupErr: context.DeadlineExceeded, unavailable: true},
+		{name: "lookup lost answer", lookupErr: exec.ErrWaitDelay, unavailable: true},
+		{name: "lookup failure", lookupErr: refused},
+		{name: "probe deadline", probeErr: context.DeadlineExceeded, unavailable: true},
+		{name: "probe cancel", probeErr: context.Canceled, unavailable: true},
+		{name: "probe lost answer", probeErr: exec.ErrWaitDelay, unavailable: true},
+		{name: "probe failure", probeErr: refused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := wrapTaken()
+			probed, reaped, retried := false, false, false
+			_, adopted, err := resolveAgentNameTaken(agentInfo{}, orig, agentStartOps{
+				getAgent: func() (agentInfo, bool, error) {
+					if tc.lookupErr != nil {
+						return agentInfo{}, false, fmt.Errorf("herdr [agent get x]: %w", tc.lookupErr)
+					}
+					return holder, true, nil
+				},
+				paneAlive: func(string) (bool, error) {
+					probed = true
+					return false, fmt.Errorf("herdr [pane process-info w3F:pW]: %w", tc.probeErr)
+				},
+				closePane:  func(string) error { reaped = true; return nil },
+				retryStart: func() (agentInfo, error) { retried = true; return agentInfo{}, nil },
+			})
+			if reaped || retried {
+				t.Fatalf("reaped=%v retried=%v; a holder that cannot be inspected must be neither reaped nor replaced", reaped, retried)
+			}
+			if adopted {
+				t.Fatal("adopted=true for a holder that cannot be inspected; want false")
+			}
+			if tc.lookupErr != nil && probed {
+				t.Fatal("probed a holder whose lookup failed")
+			}
+			if !errors.Is(err, orig) {
+				t.Fatalf("err = %v; want the original agent_name_taken error", err)
+			}
+			cause := tc.lookupErr
+			if cause == nil {
+				cause = tc.probeErr
+			}
+			if !errors.Is(err, cause) {
+				t.Fatalf("err = %v; want it to carry the inspection's error %v", err, cause)
+			}
+			if got := errors.Is(err, runtime.ErrRuntimeUnavailable); got != tc.unavailable {
+				t.Fatalf("err = %v; wraps runtime.ErrRuntimeUnavailable = %v, want %v", err, got, tc.unavailable)
+			}
+		})
 	}
 }
