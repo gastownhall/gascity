@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 219,
+  "next_id": 220,
   "permanent_ids": [
     {
       "name": "help",
@@ -187,6 +187,21 @@
       "classification": "analyze-reliability",
       "owner": "immediate",
       "id": 10
+    },
+    {
+      "path": "gc analyze work-record",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "analyze-work-record",
+      "owner": "immediate",
+      "id": 218
     },
     {
       "path": "gc bd",
@@ -521,7 +536,7 @@
       "notice_policy": "eligible",
       "classification": "config-agent-patch",
       "owner": "immediate",
-      "id": 218
+      "id": 219
     },
     {
       "path": "gc config explain",

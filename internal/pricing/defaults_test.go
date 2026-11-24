@@ -32,6 +32,7 @@ func TestDefaultPricingsCoverKnownClaudeModels(t *testing.T) {
 		"claude-haiku-4-5-20251001",
 		"claude-opus-5",
 		"claude-sonnet-5",
+		"claude-sonnet-5-5",
 		"claude-fable-5",
 		"claude-fable-5-1",
 	}
@@ -105,6 +106,13 @@ func TestDefaultPricingsCurrentClaudeRates(t *testing.T) {
 			prompt:        2.00,
 			completion:    10.00,
 			cacheRead:     0.20,
+			cacheCreation: 2.50,
+		},
+		{
+			model:         "claude-sonnet-5-5",
+			prompt:        2.00,
+			completion:    10.00,
+			cacheRead:     0.10,
 			cacheCreation: 2.50,
 		},
 		{

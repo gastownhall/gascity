@@ -1206,6 +1206,15 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			lastFreeOS = now
 		}
 
+		// A suspended city is quiescent: once the suspension has drained this
+		// session, every store read below (the due gate's census, the
+		// observation, the delivery) would restart the bd and Dolt servers the
+		// controller retired (ga-5uties7y).
+		if nudgePollCitySuspendedDrained(target, sp) {
+			fmt.Fprintf(stderr, "gc nudge poll: city is suspended and session %q is not running; exiting and leaving queued nudges for the resume\n", target.sessionName) //nolint:errcheck
+			return 0
+		}
+
 		// Cheap gate, read before paying for the expensive observe/deliver
 		// pair: this target's queue state alone (no tmux/session probe) tells
 		// us whether there is anything to deliver this tick. When nothing is
@@ -1919,6 +1928,16 @@ func requestWorkerSiteNudgeWake(target nudgeTarget, store beads.Store) (session.
 	return outcome, nil
 }
 
+// nudgeTargetRuntimeHandle is the runtime handle factory builds for target's
+// session runtime, by its session name. A target with a session row gets the
+// session's startup-turn barrier (worker.Factory.SessionRuntimeHandle): its
+// nudges wait behind a first turn the session's queue still holds, the
+// queue's own delivery of that turn aside, as the session manager's sends do.
+func nudgeTargetRuntimeHandle(factory *worker.Factory, target nudgeTarget) (worker.Handle, error) {
+	return factory.SessionRuntimeHandle(target.sessionID, target.sessionName,
+		strings.TrimSpace(target.providerFamily()), strings.TrimSpace(target.sessionTransport()), target.processNames())
+}
+
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
 	programShadowDecideForTarget(target)
 	if target.sessionName != "" {
@@ -1940,16 +1959,11 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 				return nil, err
 			}
 		}
-		handle, err := runtimeWorkerHandleWithConfig(
-			target.cityPath,
-			store,
-			sp,
-			target.cfg,
-			target.sessionName,
-			strings.TrimSpace(target.providerFamily()),
-			strings.TrimSpace(target.sessionTransport()),
-			target.processNames(),
-		)
+		factory, err := workerFactoryWithConfig(target.cityPath, store, sp, target.cfg)
+		var handle worker.Handle
+		if err == nil {
+			handle, err = nudgeTargetRuntimeHandle(factory, target)
+		}
 		if err == nil {
 			return handle, nil
 		}
@@ -3882,22 +3896,25 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 // again. A vanished session and a seat holding a pending interaction are
 // refusals, not delivery failures: nothing was typed, and charging them would
 // dead-letter a good nudge for arriving at the wrong moment. A session that
-// went away may be back at once. The ACP provider refuses a nudge while it
-// holds a permission request, and the next pass tries again. A permission
-// prompt the runtime refused to type into (#2892) stays up until someone
-// answers it, so claiming the nudges again on the very next pass would only
-// be refused again. A session still running a turn the runtime would not
-// interrupt (runtime.ErrSessionBusy) is deferred the same way: nothing was
-// typed, and the turn needs time to end.
+// went away may be back at once. A pending interaction (a prompt or question
+// the runtime would not type into, #2892, or the runtime's own
+// pending_interaction refusal, runtime.ErrNudgeRefusedPendingInteraction)
+// stays up until someone answers it: claiming the nudges again on the very
+// next pass would only be refused again, each time at the cost of a runtime
+// op, so they wait out the retry delay. Answering the interaction does not by
+// itself wake the queue: delivery resumes after the retry delay plus one
+// delivery pass, about 15s plus a 2s poll tick for the per-session poller, and
+// for the supervisor dispatcher the first patrol tick (30s by default) or
+// enqueue wake after deliver_after. The backoff is per batch: a nudge that
+// arrives while the interaction stays up is claimed into its own batch, costs
+// one refused runtime op, and then retries on its own clock. A session still
+// running a turn the runtime would not interrupt (runtime.ErrSessionBusy) is
+// deferred the same way: nothing was typed, and the turn needs time to end.
 func queuedNudgeReleaseAfter(err error, now time.Time) (time.Time, bool) {
 	switch {
 	case errors.Is(err, runtime.ErrSessionBusy):
 		return now.Add(defaultQueuedNudgeRetryDelay), true
-	// Before ErrPendingInteraction: the session layer wraps this refusal in
-	// session.ErrPendingInteraction, which is that sentinel.
-	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
-		return time.Time{}, true
-	case errors.Is(err, runtime.ErrPendingInteraction):
+	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction), errors.Is(err, runtime.ErrPendingInteraction):
 		return now.Add(defaultQueuedNudgeRetryDelay), true
 	// The runtime could not be observed, so nothing was delivered: back off
 	// without spending an attempt, so an outage cannot dead-letter the queue.

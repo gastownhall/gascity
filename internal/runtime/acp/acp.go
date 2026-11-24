@@ -75,9 +75,11 @@ func (c *Config) stopGrace() time.Duration {
 }
 
 // stopSocketTimeout bounds a cross-process stop request: the owner replies
-// only after its stop grace and the post-SIGKILL reap grace have both run out.
+// only after its stop grace and the post-SIGKILL reap grace have both run out,
+// plus however long its SIGTERM and SIGKILL spend retrying an EPERM from a
+// member that is still exiting.
 func (c *Config) stopSocketTimeout() time.Duration {
-	return c.stopGrace() + runtime.ManagedProcessReapGrace + stopSocketReplyMargin
+	return c.stopGrace() + runtime.ManagedProcessReapGrace + processgroup.ManagedStopSignalRetryBudget + stopSocketReplyMargin
 }
 
 func (c *Config) outputBufferLines() int {

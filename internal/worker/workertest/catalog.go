@@ -19,6 +19,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementRPPVanishedNudgeNotDelivered        RequirementCode = "WC-RPP-001"
 	RequirementRPPTypedOutcomeReachesHandle        RequirementCode = "WC-RPP-002"
 	RequirementRPPUnobservedIsDelivered            RequirementCode = "WC-RPP-003"
+	RequirementRPPFirstTurnQueued                  RequirementCode = "WC-RPP-004"
 	RequirementRPPHostFSTranscriptTurns            RequirementCode = "WC-RPP-005"
 	RequirementRPPHostFSLeftoverReaped             RequirementCode = "WC-RPP-006"
 	RequirementRPPHeldNudgeTypedOnce               RequirementCode = "WC-RPP-012"
@@ -233,6 +234,11 @@ func RPPHandleCatalog() []Requirement {
 			Code:        RequirementRPPUnobservedIsDelivered,
 			Group:       "rpp",
 			Description: "A nudge a pack declaring input-outcome answers delivered_unobserved reaches the handle as runtime.ErrNudgeDeliveredUnobserved, which runtime.NudgeDelivered counts as delivered (never retried); one it answers unconfirmed reaches it as runtime.ErrNudgeDeliveryUnconfirmed, possibly delivered and not counted as delivered.",
+		},
+		{
+			Code:        RequirementRPPFirstTurnQueued,
+			Group:       "rpp",
+			Description: "On the un-welded launch path (a pack declaring proc.provision and proc.launch), Start never types the first turn: the start succeeds and the turn waits in the session's queue once as the user's submit (nudgequeue.SourceSubmit), not due before ready_delay_ms past the start for a pack without an idle boundary, and bound to the launch runtime.ReadLaunchID reads (nudgequeue.StartupTurnReference), so a claim whose LiveLaunch reads the runtime takes it alone. Sent as the queue sends it, under the delivery key of the batch the claim pinned it to and fenced by runtime.ReadInputFence, it is typed once; a pack refusing it (busy, pending_interaction, rejected or not_sent) types nothing and answers the typed refusal, so the queue retries it.",
 		},
 		{
 			Code:        RequirementRPPHostFSTranscriptTurns,

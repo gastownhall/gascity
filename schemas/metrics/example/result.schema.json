@@ -228,6 +228,7 @@
               "storage-snapshot",
               "storage-snapshot-restore",
               "storage-split",
+              "analyze-work-record",
               "config-agent-patch"
             ]
           },

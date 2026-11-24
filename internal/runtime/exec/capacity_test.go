@@ -80,3 +80,23 @@ func TestStart_Exit75TearsDownBoxAndReturnsCapacity(t *testing.T) {
 		t.Fatalf("stop log = %q, want the box torn down after a capacity refusal", got)
 	}
 }
+
+// A provision refused because the name is taken is a session-exists, as such
+// a start is, so gc's non-fresh start paths read it as a collision; any other
+// provision failure, and a refused launch (a start failure whose cleanup
+// runs), stays the plain adapter error.
+func TestClassifyExecExit_ProvisionCollisionIsSessionExists(t *testing.T) {
+	base := errors.New("exec provider /pack provision worker: refused")
+	for _, msg := range []string{`session "worker" already exists`, `session "worker" already running`} {
+		err := classifyExecExit("provision", 1, msg, false, base)
+		if !errors.Is(err, runtime.ErrSessionExists) || !errors.Is(err, base) {
+			t.Errorf("provision %q = %v, want ErrSessionExists wrapping the adapter error", msg, err)
+		}
+	}
+	if err := classifyExecExit("provision", 1, "disk full", false, base); errors.Is(err, runtime.ErrSessionExists) || !errors.Is(err, base) {
+		t.Errorf("provision disk full = %v, want the plain adapter error", err)
+	}
+	if err := classifyExecExit(launchOp, 1, `session "worker" already exists`, false, base); errors.Is(err, runtime.ErrSessionExists) || !errors.Is(err, base) {
+		t.Errorf("launch collision = %v, want the plain adapter error", err)
+	}
+}

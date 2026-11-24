@@ -414,6 +414,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	if initNeedsBdTooling(cityPath) {
 		register(&doctor.BeadsRoleCheck{})
 	}
+	if bdBatchFileCheckApplies(cityPath) {
+		register(newBdBatchFileCheck(cityPath))
+	}
 
 	// Controller check + supervisor HTTP check + session checks. Session
 	// checks are read-only reporting and register regardless of controller
@@ -445,9 +448,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				register(doctor.ErrorCheck("session-provider", err.Error()))
 				sessionSPErr = err
 			} else {
-				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
+				registry := doctorSessionRegistry(cityPath, cfg)
+				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp, registry))
 				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp, registry))
 				sessionSP = sp
 			}
 		}

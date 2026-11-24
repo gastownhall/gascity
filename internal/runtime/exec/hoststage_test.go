@@ -29,10 +29,12 @@ const (
 	hostStageSession       = "s1"
 )
 
-// hostStageFixture is a pack that records the start config each `start` or
-// `provision` op received ($S/<op>.<name>.json) and whether, when it ran,
-// the work dir already held the pre_start marker and the session_setup
-// marker. A session is running while $S/<name>.running exists, and
+// hostStageFixture is a pack that records the start config each `start`,
+// `provision` or `launch` op received ($S/<op>.<name>.json) and whether,
+// when a `start` or `provision` ran, the work dir already held the pre_start
+// marker and the session_setup marker. `start`, `provision` and `launch`
+// each mark the session running. A session is running while
+// $S/<name>.running exists, and
 // `is-running` fails while $S/is-running.fails exists. Its `exec` answers
 // `tmux has-session` with 1 (no agent session yet) and every other command
 // with 0, so a separable launch succeeds without a tmux.
@@ -68,6 +70,7 @@ case "$op" in
     if [ -f "$S/is-running.fails" ]; then exit 1; fi
     if [ -f "$S/$name.running" ]; then echo true; else echo false; fi ;;
   exec) cmd=$(cat); case "$cmd" in *has-session*) exit 1 ;; *) exit 0 ;; esac ;;
+  launch) cat > "$S/$op.$name.json"; : > "$S/$name.running" ;;
   *) exit 2 ;;
 esac
 `
@@ -584,10 +587,10 @@ func TestHostStagingIntoADeadBox(t *testing.T) {
 }
 
 // TestSeparableRelaunchRunsHostSessionSetup pins the separable relaunch:
-// the agent is respawned in the warm box over the exec op, and for a pack
-// sharing the host filesystem gc then runs session_setup on the host again,
-// as the launch after provision does (the tmux provider re-runs it on a
-// relaunch too). Without fs.host the pack owns session_setup and gc runs
+// the agent is relaunched in the warm box, over exec or through the launch
+// op, and for a pack sharing the host filesystem gc then runs session_setup
+// on the host again, as the launch after provision does (the tmux provider
+// re-runs it on a relaunch too). Without fs.host the pack owns session_setup and gc runs
 // nothing on the host.
 func TestSeparableRelaunchRunsHostSessionSetup(t *testing.T) {
 	for _, tc := range []struct {
@@ -596,6 +599,7 @@ func TestSeparableRelaunchRunsHostSessionSetup(t *testing.T) {
 	}{
 		{"fs.host", hostFSSeparableLaunch, true},
 		{"without fs.host", `{"version":0,"capabilities":["proc.provision","proc.exec"],"locality":"local"}`, false},
+		{"fs.host, proc.launch", `{"version":0,"capabilities":["fs.host","proc.provision","proc.launch"],"locality":"local"}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHostStageFixture(t, tc.handshake)

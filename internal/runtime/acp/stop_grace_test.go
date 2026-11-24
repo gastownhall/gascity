@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -115,9 +116,9 @@ func TestConfigStopGraceDefaultsToManagedProcessStopGrace(t *testing.T) {
 
 func TestConfigStopSocketTimeoutOutlastsStopGraceAndReapGrace(t *testing.T) {
 	for _, c := range []Config{{}, {StopGrace: testStopGrace}, {StopGrace: 30 * time.Second}} {
-		floor := c.stopGrace() + runtime.ManagedProcessReapGrace
+		floor := c.stopGrace() + runtime.ManagedProcessReapGrace + processgroup.ManagedStopSignalRetryBudget
 		if got := c.stopSocketTimeout(); got <= floor {
-			t.Errorf("Config{StopGrace: %v}.stopSocketTimeout() = %v, want longer than stop grace + reap grace = %v", c.StopGrace, got, floor)
+			t.Errorf("Config{StopGrace: %v}.stopSocketTimeout() = %v, want longer than stop grace + reap grace + signal retry budget = %v", c.StopGrace, got, floor)
 		}
 	}
 }
