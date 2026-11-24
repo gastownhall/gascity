@@ -44,6 +44,12 @@ type sessionTimingReloadFixture struct {
 
 func newSessionTimingReloadFixture(t *testing.T, provider, session string) *sessionTimingReloadFixture {
 	t.Helper()
+	// A reload that carries a validation warning (the invalid-duration case)
+	// is refused under strict mode, and other tests leave the package-level
+	// switch on.
+	oldStrict := strictMode
+	strictMode = false
+	t.Cleanup(func() { strictMode = oldStrict })
 	f := &sessionTimingReloadFixture{t: t, cityPath: t.TempDir(), provider: runtime.NewFake(), lastProviderName: provider}
 	f.write(provider, session, "")
 	f.cr, _, _ = newPublicationTestRuntime(t, f.cityPath, f.provider, io.Discard, &f.stderr)
